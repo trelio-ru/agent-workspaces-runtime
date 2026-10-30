@@ -64,6 +64,18 @@ const provisionReview=value=>{
   if(Object.keys(value).length!==4||typeof value.started!=='boolean')inputError();
   return {turnId:uuid(value.turnId),markerId:uuid(value.markerId),reviewId:uuid(value.reviewId),started:value.started};
 };
+/** Closed host-only metadata. No history, query/body hash, provider ID or
+ * caller-authored safety boolean enters this one-use recovery certificate. */
+export const assistantReadOnlyRecoveryMetadata=(value,{local=false,response=false}={})=>{
+  const fields=['parentIntakeId','receiptId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey',
+    ...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
+  if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==fields.sort().join(',')
+    ||['parentIntakeId','receiptId','terminalTurnId'].some(key=>!UUID.test(value[key]??''))
+    ||['previousPrerequisiteKey','prerequisiteKey'].some(key=>typeof value[key]!=='string'||!/^[0-9a-f]{64}$/u.test(value[key]))
+    ||value.previousPrerequisiteKey===value.prerequisiteKey||local&&typeof value.beginAttempted!=='boolean'
+    ||response&&value.replyOnly!==true)return null;
+  return Object.freeze({...Object.fromEntries(fields.map(key=>[key,['parentIntakeId','receiptId','terminalTurnId'].includes(key)?value[key].toLowerCase():value[key]]))});
+};
 const ownerProvisionCandidate=row=>row.kind==='owner_command'&&row.state==='provisioning'&&row.native_started===1
   &&UUID.test(row.thread_id??'')&&row.settled===0&&row.source_state==='active'&&row.source_revision===row.configuration_revision
   &&row.reply_receipt_id===null&&row.reply_message_id===null&&row.reply_abandon_receipt_id===null
@@ -155,7 +167,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -245,7 +257,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -473,8 +485,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // Add a nullable witness only. No original event, start bit, chat, lease,
     // provider fence or historical receipt is rewritten during migration.
     if(!provisionColumns.includes('provision_review_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN provision_review_json TEXT');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=22');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (22)');
+    const readonlyColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    for(const name of ['readonly_recovery_json','intake_prerequisite']){
+      if(versions[0]?.version>=23&&!readonlyColumns.includes(name))fail('ASSISTANT_INBOX_CONFLICT');
+      // Additive structural witnesses only. Never rewrite the original attempt,
+      // provider fence, model-read/ACK basis, lease or negative receipt.
+      if(!readonlyColumns.includes(name))db.exec(`ALTER TABLE assistant_owner_intakes ADD COLUMN ${name} TEXT`);
+    }
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=23');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (23)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -925,7 +944,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       WHERE i.kind='owner_command' AND i.state='complete' AND i.outcome_state='cancelled'
         AND i.settled=1 AND i.native_started=1 AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL
         AND i.outcome_task_id IS NULL AND i.source_revision=s.configuration_revision AND s.state='active'
-        AND i.next_check_at<=? AND i.retry_ordinal<20 AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+        AND i.readonly_recovery_json IS NULL AND i.next_check_at<=? AND i.retry_ordinal<20 AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
     retryUnreadOwnerIntake(id,{receiptId,terminalTurnId,prerequisiteKey,capacity=false}){return transaction(()=>{
       const old=this.ownerIntake(id);receiptId=uuid(receiptId);terminalTurnId=uuid(terminalTurnId);
@@ -933,7 +952,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(typeof capacity!=='boolean'||capacity&&(!episode||episode.waiting||episode.markerId!==old.delivery_id
           ||episode.turnId!==terminalTurnId||episode.nextAt>time())
         ||typeof prerequisiteKey!=='string'||!/^[a-f0-9]{64}$/u.test(prerequisiteKey)
-        ||old.kind!=='owner_command'||old.state!=='complete'||old.outcome_state!=='cancelled'||old.settled!==1
+        ||old.readonly_recovery_json!==null||old.kind!=='owner_command'||old.state!=='complete'||old.outcome_state!=='cancelled'||old.settled!==1
         ||old.outcome_receipt!==receiptId||old.native_started!==1||!old.thread_id||old.reply_receipt_id!==null
         ||old.reply_message_id!==null||old.outcome_task_id!==null||old.source_state!=='active'
         ||old.source_revision!==old.configuration_revision||old.retry_ordinal>=20)fail('ASSISTANT_INBOX_CONFLICT');
@@ -958,6 +977,53 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(capacity)run("UPDATE assistant_owner_intakes SET state='ready',thread_id=?,model_capacity_json=? WHERE id=?",
         old.thread_id,JSON.stringify(episode),next);
       return this.ownerIntake(next);
+    });},
+    readonlyFailedIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='reply_abandoned'
+        AND i.native_started=1 AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL
+        AND i.reply_abandon_receipt_id=i.outcome_receipt AND i.outcome_task_id IS NULL
+        AND i.readonly_recovery_json IS NULL AND i.source_revision=s.configuration_revision AND s.state='active'
+        AND i.retry_ordinal<20 AND i.next_check_at<=? AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+      ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    rememberIntakePrerequisite(id,key){return transaction(()=>{
+      const row=this.ownerIntake(id);
+      if(typeof key!=='string'||!/^[0-9a-f]{64}$/u.test(key)||row.state!=='ready'||row.native_started
+        ||row.source_state!=='active'||row.source_revision!==row.configuration_revision)fail('ASSISTANT_INBOX_CONFLICT');
+      const recovery=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
+      if(row.readonly_recovery_json&&(!recovery||recovery.prerequisiteKey!==key))fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET intake_prerequisite=? WHERE id=?',key,row.id);
+    });},
+    retryReadonlyOwnerIntake(id,witness){return transaction(()=>{
+      const old=this.ownerIntake(id),metadata=assistantReadOnlyRecoveryMetadata({...witness,parentIntakeId:id,beginAttempted:false},{local:true});
+      if(!metadata||old.kind!=='owner_command'||old.state!=='complete'||old.settled!==1||old.outcome_state!=='reply_abandoned'
+        ||old.readonly_recovery_json!==null||old.native_started!==1||!old.thread_id||old.reply_receipt_id!==null||old.reply_message_id!==null
+        ||old.reply_abandon_receipt_id!==metadata.receiptId||old.outcome_receipt!==metadata.receiptId||old.outcome_task_id!==null
+        ||old.source_state!=='active'||old.source_revision!==old.configuration_revision||old.retry_ordinal>=20
+        ||(old.intake_prerequisite??old.retry_prerequisite)!==metadata.previousPrerequisiteKey)fail('ASSISTANT_INBOX_CONFLICT');
+      const previous=get('SELECT id,readonly_recovery_json FROM assistant_owner_intakes WHERE retry_of_id=?',old.id);
+      if(previous){const existing=JSON.parse(previous.readonly_recovery_json??'null');
+        if(!existing||JSON.stringify({...existing,beginAttempted:false})!==JSON.stringify(metadata))fail('ASSISTANT_INBOX_CONFLICT');
+        return this.ownerIntake(previous.id);}
+      if(get("SELECT 1 FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND state!='complete'",old.account_key,old.native_event_id))fail('ASSISTANT_INBOX_CONFLICT');
+      const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
+      assertIntakeRoom(originals.length);const next=randomUUID();
+      run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
+        owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at,kind,conversation_key,
+        retry_of_id,retry_ordinal,retry_prerequisite,retry_terminal_turn_id,state,thread_id,readonly_recovery_json,intake_prerequisite)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?)`,
+        next,old.original_event_id,old.event_key,old.account_key,old.native_event_id,old.native_revision,old.owner_identity_id,
+        old.source_key,old.source_revision,randomUUID(),randomUUID(),time(),old.kind,old.conversation_key,
+        old.id,old.retry_ordinal+1,metadata.prerequisiteKey,metadata.terminalTurnId,old.thread_id,JSON.stringify(metadata),metadata.prerequisiteKey);
+      for(const original of originals)run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,?)',
+        next,original.original_event_id,original.event_key,original.account_key,original.native_event_id,original.native_revision,original.ordinal);
+      return this.ownerIntake(next);
+    });},
+    startReadonlyIntakeBegin(id){return transaction(()=>{
+      const row=this.ownerIntake(id),metadata=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
+      if(!metadata||metadata.beginAttempted||row.state!=='ready'||row.native_started||row.source_state!=='active'
+        ||row.source_revision!==row.configuration_revision)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET readonly_recovery_json=? WHERE id=?',JSON.stringify({...metadata,beginAttempted:true}),row.id);
     });},
     ownerIntakes(){return all(`SELECT i.*,s.scope_json FROM assistant_owner_intakes i
       JOIN assistant_inbox_sources s ON s.source_key=i.source_key WHERE (i.state!='complete' OR i.settled=0)

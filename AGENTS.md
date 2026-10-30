@@ -1088,3 +1088,5 @@ Public plugin shell для этого клиента не меняется.
   hard blocks/recovery stay mandatory. Never infer recovery from reset clocks
   or percentages, purchase credits/reset limits, or replay unknown work.
   See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).
+
+- Read-only owner recovery: one negative parent → one reply-only child, whole terminal native witness and durable begin fence; no Task/dialogue or old lease renewal. See [scheduler](docs/assistant-scheduler.md#readonly-owner-question-recovery).

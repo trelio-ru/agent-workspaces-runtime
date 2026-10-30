@@ -3387,3 +3387,50 @@ marker remains solely a delivery locator, not the user-facing title. This
 cosmetic RPC adds no model turn, second chat or queue replay; a naming failure
 cannot invalidate positive execution evidence. Existing human-renamed chats are
 not overwritten on continuation.
+
+
+<a id="readonly-owner-question-recovery"></a>
+### One post-fix reply-only owner-question recovery
+
+The owning native source engine may restore one private owner question only
+from the SAME immutable `reply_abandoned` receipt, expired old lease, absent
+local provider-attempt/message fences and a complete exact terminal native turn.
+Its bounded full-history reader accepts only own context plus unchanged company
+search preparation ending in the structured hard timeout, optionally followed
+by a positively refused `reply_owner`. A native `read` label or prose is not
+proof: the sole shell exception is the exact literal public assistant bootstrap
+SKILL read through a system PowerShell executable or a freshly verified
+Microsoft-signed PowerShell file. Portable/WinGet paths are never guessed: only
+the fixed profile-free system reader inspects Authenticode and product identity,
+with the candidate path on private stdin, a 5-second bound and closed output.
+The candidate is never executed by recovery. Native waiting/reasoning is inert;
+an arbitrary shell, extra command or non-public target still refuses before
+inspection. Other tools/actions, unknown
+items, a later/duplicate turn, missing full coverage, a result without the exact
+structured code, or an attempted/unknown provider send remain closed. No history,
+query/body/native command or content hash is persisted or sent to the backend.
+
+Only a changed trusted native/runtime prerequisite and native protocol version1
+permit a new child. Schema23 adds nullable structural witness/prerequisite cells
+without rewriting an original. The old terminal receipt/start bits/model-read and
+ACK basis stay intact. The existing total owner chain bound remains20; unique
+parent binding permits just ONE post-fix reply-only child, not another recovery
+chain or a reset of the old preparation's 600s+one600s budgets. This child is a
+new ordinary native lease under the same original event/source/owner/account/
+conversation/thread. Native SQL (deployed first) permits only a reply, no task,
+route, dialogue, ignore, Workspace or Run. Runtime never changes model or effort.
+
+SQLite saves the new begin-attempt fence BEFORE HTTP. An unknown response allows
+only exact child read-back, never another POST or child ID. Native positive
+admission is still unread; the normal signed exact-original reader, current
+company ACL/authority, fresh hook proof and provider one-send/receipt engine
+remain mandatory. A missing capability or uncertain witness cannot manufacture
+progress, ACK, delivery or recovered business health.
+The recovery invocation receives a narrow reply-only instruction while keeping
+the original intake marker/JSON ABI; source text never supplies this authority.
+
+Every NEW source invocation samples one observation budget from its original
+native lease, bounded by30 minutes, with an independent nonrenewing timer. This
+fixes a15-minute observer that expired before the unchanged600s+one600s search
+preparation; polling does not renew a lease, restart old work or change the
+preparation deadline. Old failed attempts keep their original deadlines.

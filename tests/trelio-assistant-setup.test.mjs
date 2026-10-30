@@ -3123,3 +3123,114 @@ test(`production host reconciles the exact absent-send reply across restart: ${s
   }finally{check.close();}
  }finally{await host?.close();}
 });
+
+// Recovery composition uses the actual worker dispatcher, production host,
+// native history decoder, device HTTP codec and a file SQLite reopened between
+// attempts. Only the native peer and server responses are synthetic; no provider
+// send, real model, owner state or company plaintext enters this fixture.
+for(const scenario of ['complete','mutating_history','missing_capability','unchanged_prerequisite','attempted_send','lost_begin','unknown_begin'])
+test(`production worker restores one reply-only original with no blind begin replay: ${scenario}`,async t=>{
+ const {EventEmitter}=await import('node:events');
+ const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+ const {readAssistantCodexDelivery}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+ const {createAssistantHttp}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-readonly-recovery-')),file=path.join(directory,'inbox.sqlite');
+ t.after(()=>fs.rm(directory,{recursive:true,force:true}));const clock=Date.now();
+ const identity={origin:'https://synthetic.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ const companyId=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),receiptId=randomUUID(),threadId=randomUUID();
+ const source={id:sourceId,companyId,localAccountId:accountId,projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ const scope={...identity,companyId,provider:'telegram',accountId,bindingId:sourceId};delete scope.deviceId;
+ const seed=new DatabaseSync(file),inbox=createAssistantInbox({database:seed,now:()=>clock});inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+ inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'initial',hasMore:false,events:[{id:'message:123:4',revision:'a'.repeat(64),
+  taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'c'.repeat(64)}`}]});
+ const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);inbox.bindOwnerIntakeThread(original.id,threadId);
+ inbox.readyOwnerIntake(original.id);inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);
+ inbox.confirmIntakeModelRead(original.id);inbox.uncertainOwnerIntake(original.id);inbox.startOwnerReplyAbandonment(original.id,receiptId);
+ inbox.finishOwnerIntake(original.id,{state:'reply_abandoned',receiptId});inbox.settleOwnerIntake(original.id);
+ if(scenario==='attempted_send')seed.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(randomUUID(),original.id);
+ createAssistantInbox({database:seed}); // Finish existing conversation-key hydration before the immutable snapshot.
+ const parentBefore={...seed.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)};seed.close();
+ const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+ const parent={schemaVersion:1,id:original.id,companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
+  state:'reply_abandoned',taskId:null,receiptId,ownerPrivateRead:true,readConfirmed:true,execution,
+  leaseExpiresAt:new Date(clock-60000).toISOString(),...(scenario==='missing_capability'?{}:{readOnlyRecoveryProtocolVersion:1})};
+ const intakePass={companyId,sourceId,intakeId:original.id},queries=['SYNTHETIC_PRIVATE_QUERY'];
+ const call=(tool,args,code,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,arguments:{intakePass,runtimeSessionProof:{},...args},result:{structuredContent:code}});
+ const turn={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',text:`TRELIO_ASSISTANT_DELIVERY ${original.delivery_id}\nSYNTHETIC_PRIVATE_BODY`}]},
+  call('get_assistant_intake_context',{},{}),call('search',{companySlugs:['synthetic'],queries},
+   {schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:{companySlugs:['synthetic'],queries}}}),
+  call('search',{companySlugs:['synthetic'],queries},{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'},'failed')]};
+ if(scenario==='mutating_history')turn.items.splice(2,0,call('create_task',{},{}));
+ const nativeRpc=()=>{
+  const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};let buffer='';
+  child.stdin.on('data',chunk=>{buffer+=chunk.toString();let boundary;while((boundary=buffer.indexOf('\n'))!==-1){
+   const request=JSON.parse(buffer.slice(0,boundary));buffer=buffer.slice(boundary+1);if(!request.id)continue;
+   let result;if(request.method==='initialize')result={};else if(request.method==='thread/read')result={thread:{id:threadId,cwd:directory}};
+   else{assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');result={data:[turn],nextCursor:null};}
+   queueMicrotask(()=>child.stdout.write(JSON.stringify({id:request.id,result})+'\n'));
+  }});return child;
+ };
+ let childReceipt=null,posts=0,runs=0,active=null,host=null,childReads=0;
+ const credential=`tda_${'s'.repeat(43)}`;
+ const client=createAssistantDeviceClient({...identity,store:{get:async()=>({...identity,credential,expiresAt:1})},http:createAssistantHttp({origin:identity.origin,
+  fetchImpl:async(url,options)=>{
+   const body=JSON.parse(options.body);assert.equal(options.headers.authorization,`Bearer ${credential}`);
+   if(url.endsWith('/intake/read')){
+    if(body.intakeId===original.id)return new Response(JSON.stringify(parent),{headers:{'content-type':'application/json'}});
+    childReads++;if(!childReceipt)throw Error('synthetic unknown outcome');
+    assert.equal(body.intakeId,childReceipt.id);return new Response(JSON.stringify(childReceipt),{headers:{'content-type':'application/json'}});
+   }
+   assert.equal(url,identity.origin+'/api/digital-assistants/runtime/source-skills/intake/begin');posts++;
+   const check=new DatabaseSync(file,{readOnly:true});try{
+    const saved=check.prepare('SELECT readonly_recovery_json FROM assistant_owner_intakes WHERE id=?').get(body.intakeId);
+    assert.equal(JSON.parse(saved.readonly_recovery_json).beginAttempted,true,'one-use fence is durable BEFORE HTTP');
+   }finally{check.close();}
+   assert.equal(body.eventId,original.original_event_id);assert.equal(body.threadId,threadId);assert.equal(body.readOnlyRecovery.parentIntakeId,original.id);
+   assert.equal(body.readOnlyRecovery.receiptId,receiptId);assert.equal(Object.hasOwn(body.readOnlyRecovery,'beginAttempted'),false);
+   if(scenario==='unknown_begin')throw Error('synthetic uncommitted outcome');
+   childReceipt={schemaVersion:1,id:body.intakeId,companyId,sourceId,sourceRevision:0,eventId:body.eventId,threadId,
+    state:'leased',taskId:null,receiptId:null,readConfirmed:false,ownerPrivateRead:false,execution,
+    leaseExpiresAt:new Date(clock+1800000).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyRecovery:{...body.readOnlyRecovery,replyOnly:true}};
+   if(scenario==='lost_begin')throw Error('synthetic lost committed result');
+   return new Response(JSON.stringify(childReceipt),{headers:{'content-type':'application/json'}});
+  }})});
+ const create=()=>createAssistantRuntimeHost({context:async action=>action({...client,identity,
+  heartbeat:async()=>({}),companies:async()=>[{companyId,memberId:ownerId,execution:{state:'ready',configuration:execution}}],
+  tasks:async()=>({bindings:[],nextCursor:null}),sourceAccounts:async()=>[source],sourceRoutes:async()=>[],
+  ownerIdentities:async()=>({identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]}),
+  readHealth:async()=>assert.fail('technical recovery never clears business health')},{
+   readIdentity:async()=>identity,readActivation:async()=>null,readActivePass:async()=>active,withSetupLock:action=>action(),
+   activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async()=>assert.fail('a started unknown child retains its pass')
+  }),dependencies:{directory,ensureDirectory:async()=>{},now:()=>clock,timeZone:'UTC',
+   openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
+   readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:ownerId,businessReady:true,
+    availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
+   readHookReadiness:async()=>({fingerprint:(scenario==='unchanged_prerequisite'?'a':'b').repeat(64)}),
+   native:{provision:async()=>assert.fail('same original chat must not be reprovisioned'),
+    readDelivery:(thread,marker,options)=>{assert.equal(thread,threadId);return readAssistantCodexDelivery(thread,marker,{...options,executable:process.execPath,environment:{},spawnProcess:nativeRpc});},
+    run:async(input,options)=>{runs++;assert.equal(input.intakeContext.eventId,original.original_event_id);assert.equal(input.threadId,threadId);
+     assert.equal(options.passTimeoutMs,1800000,'new observer is bounded by the SAME original native lease, not the shorter15m default');
+     assert.equal(options.replyOnlyRecovery,true,'the certified child queues the narrow reply-only prompt');
+     options.startInvocation();throw Object.assign(Error('synthetic pending original response'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});}}
+  }});
+ try{
+  host=await create();
+  await executeAssistantRuntimeRequest({operation:'background_tick'},{context:async action=>action({identity},{readActivation:async()=>null}),
+   backgroundTick:()=>runAssistantBackgroundTick({createHost:async()=>({...host,codexUsage:async()=>({blocked:false})}),
+    pluginMaintenance:async()=>({state:'ready'}),codexMaintenance:async()=>({state:'ready'})})}).catch(()=>{});
+  const refused=['mutating_history','missing_capability','unchanged_prerequisite','attempted_send'].includes(scenario);
+  if(refused){assert.equal(posts,0);assert.equal(runs,0);assert.equal(active,null);}
+  else if(scenario==='lost_begin'||scenario==='unknown_begin'){
+   assert.equal(posts,1);assert.equal(runs,0);assert.equal(active,null);await host.close();host=await create();
+   await host.coordinator.workOnce().catch(()=>{});assert.equal(posts,1,'after reopen only exact child GET may reconcile the unknown POST');assert.ok(childReads>=1);
+   assert.equal(runs,scenario==='lost_begin'?1:0);
+  }else{assert.equal(posts,1);assert.equal(runs,1);assert.ok(active);}
+  const inspect=new DatabaseSync(file,{readOnly:true});try{
+   const {next_check_at,...parentAfter}=inspect.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id);
+   const {next_check_at:oldCheck,...preserved}=parentBefore;assert.deepEqual(parentAfter,preserved,'old receipt/lease/model-read/start bits remain immutable');
+   assert.equal(inspect.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,refused?1:2);
+   assert.equal(inspect.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+   assert.equal(inspect.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+  }finally{inspect.close();}
+ }finally{await host?.close();}
+});

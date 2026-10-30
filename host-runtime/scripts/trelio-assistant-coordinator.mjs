@@ -1,6 +1,6 @@
 /** Model-free coordinator. Provider authority and native execution stay behind
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
-import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure } from './trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -826,6 +826,36 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }finally{inbox.deferOwnerIntake(row.id);}
     }
   };
+  const recoverReadonlyOwnerIntake=async signal=>{
+    if(typeof native.readPrerequisites!=='function'||await native.ready(identity,signal)!==true)return;lease();
+    for(const row of inbox.readonlyFailedIntakes()){
+      try{
+        await intakeSource(row,signal);
+        const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
+        if(outcome.readOnlyRecoveryProtocolVersion!==1||outcome.readOnlyRecovery!==undefined
+          ||outcome.id!==row.id||outcome.companyId!==row.scope.companyId||outcome.sourceId!==row.scope.bindingId
+          ||outcome.sourceRevision!==row.source_revision||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id
+          ||outcome.state!=='reply_abandoned'||outcome.receiptId!==row.outcome_receipt||outcome.readConfirmed!==true
+          ||outcome.ownerPrivateRead!==true||outcome.taskId!==null||Date.parse(outcome.leaseExpiresAt)>now())continue;
+        const previous=row.intake_prerequisite??row.retry_prerequisite;
+        if(!/^[0-9a-f]{64}$/u.test(previous??''))continue;
+        const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+        const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
+        if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||prerequisite.fingerprint===previous)continue;
+        const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row)});lease();
+        if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??'')
+          ||terminal.readOnlyFailure!=='company_context_preparation_timeout')continue;
+        await intakeSource(row,signal);
+        // The child is appended only after a positive immutable native outcome,
+        // complete read-only history and fresh changed trusted prerequisite.
+        // The old row/pass/lease and its provider fence are never reset.
+        inbox.retryReadonlyOwnerIntake(row.id,{receiptId:outcome.receiptId,terminalTurnId:terminal.turnId,
+          previousPrerequisiteKey:previous,prerequisiteKey:prerequisite.fingerprint});
+        return;
+      }catch{/* Unknown native/history/ACL/prerequisite stays closed, no write replay. */}
+      finally{inbox.deferOwnerIntake(row.id);}
+    }
+  };
   const recoverOwnerCapacity=async(row,outcome,terminal,signal)=>{
     if(terminal.state!=='failed'||terminal.failure!=='model_capacity'||!uuid.test(terminal.turnId??''))return false;
     // Native capacity alone never proves no business action. Only an original
@@ -886,7 +916,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
     if(saved&&saved.kind!=='source_intake')return null;
-    if(!saved)await recoverUnreadCancelledIntake(signal);
+    if(!saved){await recoverUnreadCancelledIntake(signal);await recoverReadonlyOwnerIntake(signal);}
     const candidates=inbox.ownerIntakes(),rowSaved=saved?inbox.ownerIntake(saved.passId):null;
     // Preserve a closed receipt's read-only ACL/transport backoff across ticks.
     // Otherwise its previously accepted task could immediately re-enter normal
@@ -1029,11 +1059,33 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       owner=(await client.ownerIdentities(signal)).identities.find(value=>value.provider===row.scope.provider);lease();
       if(!owner||owner.bindingId!==row.owner_identity_id)fail('ASSISTANT_INTAKE_OWNER_UNVERIFIED');
     }
-    const admitted=await client.beginSourceIntake({...intakeLocator(row),sourceRevision:row.source_revision,eventId:row.original_event_id,
+    const recovery=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
+    if(row.readonly_recovery_json&&!recovery)fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    if(typeof native.readPrerequisites==='function'){
+      const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
+      inbox.rememberIntakePrerequisite(row.id,prerequisite.fingerprint);
+    }
+    const input={...intakeLocator(row),sourceRevision:row.source_revision,eventId:row.original_event_id,
       threadId:row.thread_id,conversationKey:row.conversation_key,...(row.kind==='route_existing'
         ?{kind:'route_existing',eventIds:row.eventIds,...(row.redirect_from_intake_id?{redirectFromIntakeId:row.redirect_from_intake_id}:{})}
-        :{ownerIdentityId:owner.bindingId,senderExternalUserId:owner.externalUserId})},signal);lease();
+        :{ownerIdentityId:owner.bindingId,senderExternalUserId:owner.externalUserId}),
+      ...(recovery?{readOnlyRecovery:Object.fromEntries(Object.entries(recovery).filter(([key])=>key!=='beginAttempted'))}:{})};
+    // The one new native begin has its own durable pre-HTTP attempt fence.
+    // After a lost response, only exact child GET is allowed across restart;
+    // even an idempotent endpoint is not blindly replayed or allocated another ID.
+    let admitted;
+    if(recovery?.beginAttempted)admitted=await client.readSourceIntake(intakeLocator(row),signal);
+    else{
+      if(recovery)inbox.startReadonlyIntakeBegin(row.id);
+      admitted=await client.beginSourceIntake(input,signal);
+    }
+    lease();
+    if(recovery&&(!admitted.readOnlyRecovery||Object.keys(input.readOnlyRecovery).some(key=>admitted.readOnlyRecovery[key]!==input.readOnlyRecovery[key])
+      ||admitted.readOnlyRecovery.replyOnly!==true))fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
     if(admitted.state!=='leased'||admitted.threadId!==row.thread_id||Date.parse(admitted.leaseExpiresAt)<=now())fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    if(recovery&&admitted.readConfirmed!==false)fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    const remaining=Math.min(30*60_000,Date.parse(admitted.leaseExpiresAt)-now());
+    if(!Number.isSafeInteger(remaining)||remaining<100)fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
     execution=assistantExecutionConfiguration(admitted.execution);
     const pass=validateAssistantActivePass({schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,
       companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,passId:row.id,deliveryId:row.delivery_id,
@@ -1054,6 +1106,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return {state:'cancelled',kind:'source_intake'};
     };
     const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+    // Sample ONE budget from this NEW native lease. The old attempt is never
+    // renewed. Fifteen minutes was shorter than the unchanged 600s+600s company
+    // preparation and masked its later terminal result. An absolute timer and
+    // the original native lease bound this observer; polling never extends it.
+    const leaseTimer=setTimeout(()=>controller.abort(),Math.max(0,Math.min(remaining,Date.parse(admitted.leaseExpiresAt)-now())));leaseTimer.unref?.();
     const watch=setInterval(()=>{if(watching)return;watching=true;
       void client.readSourceIntake(intakeLocator(row),combined).then(value=>{
         // Explicit native cancellation is the one closed outcome that stops a
@@ -1068,7 +1125,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     try{
       const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
-          intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
+          intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,passTimeoutMs:remaining,...(recovery?{replyOnlyRecovery:true}:{}),startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
       if(cancelledOutcome)return settleOwnedCancellation();
       let outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
       if(await recoverOwnerCapacity(inbox.ownerIntake(row.id),outcome,result,combined))return await passHost.readActivePass()?{state:'blocked',kind:'source_intake'}:deferredIntake(row);
@@ -1079,7 +1136,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(cancelledOutcome)return settleOwnedCancellation();
       if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);
       throw error;
-    }finally{clearInterval(watch);controller.abort();}
+    }finally{clearInterval(watch);clearTimeout(leaseTimer);controller.abort();}
   };
   const continueTerminalPass = async (job,result,signal,terminalMarkerId) => {
     const capacity=result.state==='failed'&&result.failure==='model_capacity';

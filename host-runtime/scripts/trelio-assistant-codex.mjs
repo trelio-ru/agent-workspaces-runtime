@@ -425,10 +425,133 @@ const toolFreeReady=(turn,prompt)=>turn?.status==='completed'&&turn.error==null&
   &&turn.items[0]?.type==='userMessage'&&Array.isArray(turn.items[0].content)&&turn.items[0].content.length===1
   &&turn.items[0].content[0]?.type==='text'&&turn.items[0].content[0].text===prompt
   &&turn.items[1]?.type==='agentMessage'&&turn.items[1].text==='READY';
+/** A portable/WinGet PowerShell need not live in ProgramFiles. Check the
+ * actual file with Windows' Authenticode reader instead of widening admission
+ * to arbitrary pwsh basenames or guessed package paths. This launches ONLY the
+ * fixed system reader, profile-free; the candidate is data on private stdin,
+ * never an executed command, argv/log value or cached permission decision. */
+export const verifyAssistantPowerShellReadExecutable=async(executable,{environment=process.env,signal,
+  platform=process.platform,spawnProcess=spawn,statFile=fs.stat}={})=>{
+  if(platform!=='win32'||typeof executable!=='string'||!path.win32.isAbsolute(executable)||/[\0\r\n]/u.test(executable)
+    ||typeof environment.WINDIR!=='string'||!path.win32.isAbsolute(environment.WINDIR)||signal?.aborted)return false;
+  try{const info=await statFile(executable);if(!info.isFile()||info.size<1||info.size>64*1024*1024)return false;}catch{return false;}
+  if(signal?.aborted)return false;
+  const systemReader=path.win32.join(environment.WINDIR,'System32','WindowsPowerShell','v1.0','powershell.exe');
+  const encoded=Buffer.from(executable,'utf8').toString('base64');
+  const script="$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"')); "
+    +"$s=Get-AuthenticodeSignature -LiteralPath $p; $v=[Diagnostics.FileVersionInfo]::GetVersionInfo($p); "
+    +"if($s.Status -eq 'Valid' -and $s.SignerCertificate -and "
+    +"$s.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -eq 'Microsoft Corporation' "
+    +"-and $v.ProductName -eq 'PowerShell' -and $v.OriginalFilename -in @('pwsh.exe','pwsh.dll','powershell.exe')){[Console]::Write('VALID')}\n";
+  return new Promise(resolve=>{
+    let child,done=false,out='',timer;
+    const finish=value=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);
+      child?.stdin.destroy();child?.stdout.destroy();try{child?.kill();}catch{}resolve(value);};
+    const abort=()=>finish(false);
+    try{
+      child=spawnProcess(systemReader,['-NoLogo','-NoProfile','-NonInteractive','-Command','-'],
+        {shell:false,windowsHide:true,stdio:['pipe','pipe','ignore']});
+      timer=setTimeout(abort,5000);signal?.addEventListener('abort',abort,{once:true});
+      child.on('error',abort);child.stdin.on('error',abort);child.stdout.on('error',abort);
+      child.stdout.on('data',data=>{out+=data.toString();if(out.length>32)abort();});
+      child.once('close',code=>finish(code===0&&out.trim()==='VALID'));
+      if(signal?.aborted)return abort();child.stdin.end(script);
+    }catch{finish(false);}
+  });
+};
+const publicBootstrapRead=async(item,environment,verifyShell,signal)=>{
+  // The sole accepted shell item is the bootstrap's literal public SKILL read.
+  // Native `read` labels and a valid interpreter signature cannot bless an
+  // extra command, substitution or company file. Validate the entire command
+  // and target BEFORE any executable metadata inspection; retain no history.
+  if(item.status!=='completed'||item.exitCode!==0||!Array.isArray(item.commandActions)||item.commandActions.length!==1
+    ||item.commandActions[0]?.type!=='read'||typeof item.command!=='string'||item.command.length>4096
+    ||/[;|&$`<>\r\n\0]/u.test(item.command)||typeof environment.TRELIO_PLUGIN_ROOT!=='string'
+    ||!path.win32.isAbsolute(environment.TRELIO_PLUGIN_ROOT))return false;
+  const match=item.command.match(/^"([^"\r\n]+\\(?:powershell|pwsh)\.exe)" -Command "Get-Content -LiteralPath '([^'\r\n]+)'(?: -Raw)?"$/iu);
+  if(!match)return false;
+  const normalized=value=>typeof value==='string'?path.win32.normalize(value).toLowerCase():null;
+  // An x64 Codex writer and a redirected x86 SSH/helper environment can expose
+  // different ProgramFiles. Keep only known system-installed stable/preview7
+  // locations; every other location needs a fresh Microsoft signature check.
+  const roots=[environment.ProgramFiles,environment.ProgramW6432,environment['ProgramFiles(x86)']].filter(Boolean);
+  const shells=[...roots.flatMap(root=>['7','7-preview'].map(edition=>path.win32.join(root,'PowerShell',edition,'pwsh.exe'))),
+    environment.WINDIR&&path.win32.join(environment.WINDIR,'System32','WindowsPowerShell','v1.0','powershell.exe')].filter(Boolean).map(normalized);
+  const instruction=normalized(path.win32.join(environment.TRELIO_PLUGIN_ROOT,'skills','assistant-task-worker','SKILL.md'));
+  if(normalized(match[2])!==instruction||normalized(item.commandActions[0].path)!==instruction)return false;
+  return shells.includes(normalized(match[1]))||await verifyShell(match[1],{environment,signal})===true;
+};
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable}={})=>{
+  if(!UUID.test(deliveryId??'')||!intakePass||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
+    ||!['completed','failed'].includes(turn.status)||turn.error!=null||!Array.isArray(turn.items)
+    ||turn.items.length<3||turn.items.length>512||turn.items[0]?.type!=='userMessage')return false;
+  let user=0,contextCalls=0,searches=0,timeout=false,resolved=false,commands=0,business=null;
+  const passMatches=args=>args&&Object.getPrototypeOf(args)===Object.prototype&&args.intakePass
+    &&Object.keys(args.intakePass).sort().join(',')==='companyId,intakeId,sourceId'
+    &&Object.keys(intakePass).every(key=>args.intakePass[key]===intakePass[key]);
+  for(const item of turn.items){
+    if(item.type==='userMessage'){
+      if(++user!==1||!Array.isArray(item.content)||item.content.length!==1||item.content[0]?.type!=='text'
+        ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return false;
+    }else if(item.type==='agentMessage'||item.type==='reasoning'||item.type==='sleep')continue;
+    else if(item.type==='commandExecution'){
+      if(++commands>1||searches||!await publicBootstrapRead(item,environment,verifyShell,signal))return false;
+    }else if(item.type==='mcpToolCall'){
+      if(item.server!=='trelio-assistant'||!passMatches(item.arguments)||!item.result||typeof item.result!=='object')return false;
+      const args=item.arguments,keys=Object.keys(args).sort().join(','),result=item.result.structuredContent;
+      if(item.tool==='get_assistant_intake_context'){
+        if(contextCalls++||searches||keys!=='intakePass,runtimeSessionProof'||item.status!=='completed'||item.result.isError===true)return false;
+      }else if(item.tool==='search'){
+        if(contextCalls!==1||timeout||++searches>100||keys!=='companySlugs,intakePass,queries,runtimeSessionProof'
+          ||!Array.isArray(args.companySlugs)||args.companySlugs.length!==1||!Array.isArray(args.queries)||!args.queries.length||args.queries.length>5)return false;
+        const selected=JSON.stringify({companySlugs:args.companySlugs,queries:args.queries});
+        if(business!==null&&selected!==business)return false;business=selected;
+        if(item.status==='failed'&&result?.code==='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT')timeout=true;
+        else if(item.status!=='completed'||item.result.isError===true||result?.schemaVersion!==1||result.state!=='preparing'
+          ||result.readOnly!==true||result.nextCall?.tool!=='search'
+          ||!result.nextCall.arguments||Object.keys(result.nextCall.arguments).sort().join(',')!=='companySlugs,queries'
+          ||JSON.stringify(result.nextCall.arguments.companySlugs)!==JSON.stringify(args.companySlugs)
+          ||JSON.stringify(result.nextCall.arguments.queries)!==JSON.stringify(args.queries))return false;
+      }else if(item.tool==='resolve_assistant_intake'){
+        if(!timeout||resolved||keys!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
+          ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'||typeof args.replyText!=='string'
+          ||item.status!=='failed'||result?.code!=='ASSISTANT_INTAKE_CHANGED')return false;
+        resolved=true;
+      }else return false;
+    }else return false;
+  }
+  return user===1&&contextCalls===1&&searches>0&&timeout;
+};
 export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.readOnlyPreparation!==undefined){
+      // Recovery needs COMPLETE bounded coverage and the latest exact turn,
+      // not a summary, truncated page, duplicate marker or older safe prefix.
+      // This host-only option exposes only a closed witness; no raw history or
+      // shell command enters the coordinator, journal, HTTP or model context.
+      let cursor=null,selected=null,matches=0;const seen=new Set();
+      for(let page=0;page<10;page++){
+        const response=await request('thread/turns/list',{threadId,limit:20,sortDirection:'desc',itemsView:'full',...(cursor?{cursor}:{})});
+        if(!Array.isArray(response?.data)||response.data.length>20)return {state:'uncertain'};
+        for(let index=0;index<response.data.length;index++){
+          const turn=response.data[index];if(!UUID.test(turn?.id??'')||!Array.isArray(turn.items))return {state:'uncertain'};
+          const count=turn.items.filter(item=>item.type==='userMessage'&&Array.isArray(item.content)
+            &&item.content.some(input=>input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(marker+'\n'))).length;
+          if(count){matches+=count;if(page!==0||index!==0||matches!==1)return {state:'uncertain'};selected=turn;}
+        }
+        if(response.nextCursor===null){
+          if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
+            environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:'company_context_preparation_timeout'};
+        }
+        if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};
+        cursor=response.nextCursor;seen.add(cursor);
+      }
+      return {state:'uncertain'};
+    }
     if(options.requireAbsentMarker===true){
       // A generic uncertain result conflates missing, duplicate and invalid
       // markers. Only this host-only recovery read walks complete bounded
@@ -539,7 +662,8 @@ export const readAssistantCodexOwnerReply=(threadId,deliveryId,intakePass,option
  */
 export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskContext, intakeContext, execution }, options = {}) => {
   threadId = id(threadId); deliveryId = id(deliveryId);
-  if((taskContext!==undefined)===(intakeContext!==undefined))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  if((taskContext!==undefined)===(intakeContext!==undefined)
+    ||options.replyOnlyRecovery!==undefined&&(options.replyOnlyRecovery!==true||intakeContext===undefined))fail('ASSISTANT_CODEX_INVALID_INPUT');
   if(options.continuationReview!==undefined){
     const value=options.continuationReview;
     if(intakeContext!==undefined||!value||Object.keys(value).sort().join(',')!=='priorTurnId,reviewId'
@@ -777,5 +901,7 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
   // conversation to the task's next scheduled review.
   const conversationTracking=options.readinessProbe!==true&&workStateContext?.workStatePath
     ? 'When a Telegram/MAX conversation is established as relevant to this task through an actually read routed original or your authorized task work, retain its exact provider/account/chat/topic selectors in accepted WORK.md for scheduled review, even when no reply is pending. Keep its review bookmark separate from the individual routed-original receipt. Reading one mentioned message does not prove that earlier or neighbouring history was reviewed: retain the old bookmark, or an explicit bounded initial-review starting point, until that history has actually been covered and accepted.\n' : '';
-  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${instruction}\n${conversationTracking}${scheduled}`;
+  const replyOnly=options.replyOnlyRecovery===true
+    ? 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only preparation failure. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
+  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${replyOnly}${instruction}\n${conversationTracking}${scheduled}`;
 };

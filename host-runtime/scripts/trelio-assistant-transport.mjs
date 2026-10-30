@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
-import { assistantSourceProcessingReferences, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
+import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -2469,10 +2469,18 @@ const intakeProjection=(value,expected)=>{
       ||new Set(routes.map(route=>route.id)).size!==routes.length||new Set(routes.map(route=>route.taskId)).size!==routes.length
       ||selected.length!==value.eventIds.length||new Set(selected).size!==selected.length||selected.some(id=>!value.eventIds.includes(id)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   }
+  const recovery=value.readOnlyRecovery===undefined?null:assistantReadOnlyRecoveryMetadata(value.readOnlyRecovery,{response:true});
+  if(value.readOnlyRecovery!==undefined&&(!recovery||routing||value.taskId!==null
+    ||!['leased','cancelled','reply_pending','replied','reply_abandoned'].includes(value.state))
+    ||value.readOnlyRecoveryProtocolVersion!==undefined&&value.readOnlyRecoveryProtocolVersion!==1)
+    fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if(expected.readOnlyRecovery&&(!recovery||Object.keys(expected.readOnlyRecovery).some(key=>recovery[key]!==expected.readOnlyRecovery[key])))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {schemaVersion:1,id:id(value.id),companyId:id(value.companyId),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
     ...(routing?{kind:'route_existing',eventIds:value.eventIds.map(id),...(value.companySelectionRequired===true?{companySelectionRequired:true}:{})}:{}),
     eventId:id(value.eventId),threadId:value.threadId===null?null:id(value.threadId),state:value.state,leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
     taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
+    ...(value.readOnlyRecoveryProtocolVersion===1?{readOnlyRecoveryProtocolVersion:1}:{}),
+    ...(recovery?{readOnlyRecovery:recovery}:{}),
     readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
     ...(value.redirect?{redirect:{sourceId:id(value.redirect.sourceId),companyId:id(value.redirect.companyId),sourceRevision:revision(value.redirect.sourceRevision)}}:{}),
@@ -2747,6 +2755,10 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const body={...intakeLocator(input),sourceRevision:revision(input.sourceRevision),eventId:id(input.eventId),threadId:id(input.threadId),
         ownerIdentityId:id(input.ownerIdentityId),senderExternalUserId:text(input.senderExternalUserId,19),conversationKey:text(input.conversationKey,96)};
       if(!/^[1-9]\d{0,18}$/u.test(body.senderExternalUserId)||!(/^(telegram|max)-conversation\/v1\.[0-9a-f]{64}$/u).test(body.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      if(input.readOnlyRecovery!==undefined){
+        const recovery=assistantReadOnlyRecoveryMetadata(input.readOnlyRecovery);
+        if(!recovery)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');body.readOnlyRecovery=recovery;
+      }
       return intakeProjection(await call('intakeBegin',body,signal),body);
     },
     async cancelSourceIntake(input,signal){const body=intakeLocator(input);return intakeProjection(await call('intakeCancel',body,signal),body);},

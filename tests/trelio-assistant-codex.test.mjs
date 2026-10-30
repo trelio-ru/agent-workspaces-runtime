@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantCodexOwnerReply, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantCodexOwnerReply, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
@@ -778,4 +778,132 @@ test('a PREPARE witness is visible only for failed capacity, never a successful 
   assert.equal((await read('failed',true,{codexErrorInfo:'other',message:'PRIVATE'})).state,'uncertain');
   assert.equal((await read('failed',false,{codexErrorInfo:'serverOverloaded'})).state,'uncertain');
   assert.equal((await read('failed',true,{codexErrorInfo:'serverOverloaded'})).failure,'model_capacity');
+});
+
+
+const readonlyPreparationFixture=()=>{
+ const deliveryId=randomUUID(),threadId=randomUUID(),intakePass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()};
+ const environment={TRELIO_PLUGIN_ROOT:'C:\\public\\assistant',ProgramFiles:'C:\\Program Files',WINDIR:'C:\\Windows'};
+ const args={companySlugs:['synthetic'],queries:['SYNTHETIC_PRIVATE_QUERY'],intakePass,runtimeSessionProof:{}};
+ const call=(tool,arguments_,structuredContent,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+  arguments:arguments_,result:{structuredContent,content:[]}});
+ const turn={id:randomUUID(),status:'completed',error:null,items:[
+  {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nSYNTHETIC_PRIVATE_BODY'}]},
+  {type:'commandExecution',status:'completed',exitCode:0,
+   command:'"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command "Get-Content -LiteralPath \'C:\\public\\assistant\\skills\\assistant-task-worker\\SKILL.md\'"',
+   commandActions:[{type:'read',name:'SKILL.md',path:'C:/public/assistant/skills/assistant-task-worker/SKILL.md'}]},
+  call('get_assistant_intake_context',{intakePass,runtimeSessionProof:{}},{schemaVersion:1}),
+  call('search',args,{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:{queries:args.queries,companySlugs:args.companySlugs}}}),
+  call('search',structuredClone(args),{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'},'failed'),
+  call('resolve_assistant_intake',{intakePass,runtimeSessionProof:{},clientRequestId:intakePass.intakeId,decision:'reply_owner',replyText:'SYNTHETIC_PRIVATE_REPLY'},
+   {code:'ASSISTANT_INTAKE_CHANGED'},'failed')]};
+ return {turn,deliveryId,threadId,intakePass,environment};
+};
+test('portable PowerShell recovery verifies a signature with the fixed reader, never executes the candidate',async()=>{
+ const candidate='C:\\portable\\pwsh.exe',environment={WINDIR:'C:\\Windows'};
+ let spawned=0,stdin='',killed=0;
+ const statFile=async file=>{assert.equal(file,candidate);return {isFile:()=>true,size:1024};};
+ const run=async(output,code=0,signal)=>verifyAssistantPowerShellReadExecutable(candidate,{platform:'win32',environment,signal,statFile,
+  spawnProcess:(executable,args,options)=>{
+   spawned++;assert.equal(executable,'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+   assert.deepEqual(args,['-NoLogo','-NoProfile','-NonInteractive','-Command','-']);
+   assert.deepEqual(options,{shell:false,windowsHide:true,stdio:['pipe','pipe','ignore']});
+   const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();
+   child.kill=()=>{killed++;};
+   child.stdin.on('data',data=>{stdin+=data.toString();});
+   child.stdin.on('finish',()=>queueMicrotask(()=>{
+    if(output===null){signal?.dispatchEvent(new Event('abort'));return;}
+    child.stdout.write(output);child.emit('close',code);
+   }));return child;
+  }});
+ assert.equal(await run('VALID'),true);
+ assert.match(stdin,/Get-AuthenticodeSignature -LiteralPath \$p/);
+ assert.match(stdin,/Microsoft Corporation/);assert.match(stdin,/ProductName -eq 'PowerShell'/);
+ assert.ok(stdin.includes(Buffer.from(candidate).toString('base64')));
+ assert.ok(!stdin.includes(candidate),'candidate is encoded data, never shell syntax');
+ for(const [output,code] of [['',0],['INVALID',0],['VALID',1],['VALID PRIVATE',0],['x'.repeat(33),0]])
+  assert.equal(await run(output,code),false);
+ assert.equal(await run(null,0,new AbortController().signal),false);
+ assert.equal(spawned,7);assert.equal(killed,7);
+ // Reject unsupported platforms, already-cancelled reads and oversized/non-files
+ // before a subprocess. A basename or successful process exit alone never grants it.
+ for(const options of [{platform:'linux'},{signal:AbortSignal.abort()},
+  {statFile:async()=>({isFile:()=>false,size:1024})},
+  {statFile:async()=>({isFile:()=>true,size:64*1024*1024+1})}])
+  assert.equal(await verifyAssistantPowerShellReadExecutable(candidate,{platform:'win32',environment,statFile,
+   spawnProcess:()=>assert.fail('invalid candidate cannot start a reader'),...options}),false);
+});
+test('portable bootstrap signature is consulted only after exact public command and target validation',async()=>{
+ const f=readonlyPreparationFixture();f.turn.items[1].command=f.turn.items[1].command.replace('C:\\Program Files\\PowerShell\\7','C:\\portable');
+ let calls=0;const verifyShell=async(executable,options)=>{calls++;assert.equal(executable,'C:\\portable\\pwsh.exe');
+  assert.equal(options.environment,f.environment);return true;};
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,verifyShell}),true);assert.equal(calls,1);
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,verifyShell:async()=>false}),false);
+ for(const change of [t=>{t.items[1].command+='; side_effect';},t=>{t.items[1].commandActions[0].path='C:/private/SKILL.md';},
+  t=>{t.items[1].command=t.items[1].command.replace('SKILL.md','private.md');}]){
+  const turn=structuredClone(f.turn);change(turn);
+  assert.equal(await assistantReadOnlyPreparationFailure(turn,{...f,verifyShell:()=>assert.fail('invalid command never checks signature')}),false);
+ }
+});
+test('read-only owner recovery requires the whole terminal native chain and exact public bootstrap read',async()=>{
+ const f=readonlyPreparationFixture();assert.equal(await assistantReadOnlyPreparationFailure(f.turn,f),true);
+ const changes=[
+  t=>{t.status='running';},t=>{t.error={message:'unknown'};},
+  t=>{t.items.push({type:'webSearch'});},t=>{t.items[1].command+='; Write-Output side_effect';},
+  t=>{t.items[1].command=t.items[1].command.replace('pwsh.exe','untrusted.exe');},
+  t=>{t.items[1].command=t.items[1].command.replace('SKILL.md','other.md');},
+  t=>{t.items[1].commandActions[0].path='C:/private/other/SKILL.md';},
+  t=>{t.items[3].server='untrusted';},t=>{t.items[3].tool='create_task';},
+  t=>{t.items[3].arguments.intakePass={...f.intakePass,intakeId:randomUUID()};},
+  t=>{t.items[3].result.structuredContent.state='ready';},
+  t=>{t.items[4].result.structuredContent={code:'OTHER'};t.items[4].error={message:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'};},
+  t=>{t.items[4].arguments.queries=['another formulation'];},
+  t=>{t.items[5].result.structuredContent={state:'reply_pending'};},
+  t=>{t.items.splice(3,0,structuredClone(t.items[2]));},
+ ];
+ for(const change of changes){const turn=structuredClone(f.turn);change(turn);assert.equal(await assistantReadOnlyPreparationFailure(turn,f),false,String(change));}
+ const afterContext=structuredClone(f.turn);[afterContext.items[1],afterContext.items[2]]=[afterContext.items[2],afterContext.items[1]];
+ afterContext.items.splice(4,0,{type:'sleep',durationMs:10000});
+ assert.equal(await assistantReadOnlyPreparationFailure(afterContext,f),true,'public bootstrap after context and native waiting are read-only too');
+ const preview=structuredClone(f.turn);preview.items[1].command=preview.items[1].command.replace('PowerShell\\7\\','PowerShell\\7-preview\\');
+ assert.equal(await assistantReadOnlyPreparationFailure(preview,f),true);
+ const redirected={...f.environment,ProgramFiles:'C:\\Program Files (x86)',ProgramW6432:f.environment.ProgramFiles};
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,environment:redirected}),true);
+ const withoutResolve=structuredClone(f.turn);withoutResolve.items.pop();assert.equal(await assistantReadOnlyPreparationFailure(withoutResolve,f),true);
+});
+test('reply-only native recovery retains the structural intake ABI and queues one scoped original',async()=>{
+ const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),cwd=await fs.realpath(process.cwd());
+ const intakeContext={assistantId:randomUUID(),companyId:randomUUID(),sourceId:randomUUID(),sourceRevision:1,intakeId:randomUUID(),eventId:randomUUID()};
+ let reads=0,starts=0,input='';
+ await runAssistantCodexPass({threadId,deliveryId,cwd,intakeContext,execution},{replyOnlyRecovery:true,
+  readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+  readMetadata:async()=>({threadId,cwd}),startInvocation:()=>{starts++;},
+  readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
+  openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,cwd,onInput:text=>{input=text;}})});
+ assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
+ const scope=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_INTAKE '));
+ assert.deepEqual(JSON.parse(scope.slice('TRELIO_ASSISTANT_INTAKE '.length)),{kind:'source_intake',...intakeContext});
+ assert.match(input,/Only reply_owner is permitted/);assert.match(input,/fresh current company sources again/);
+ assert.doesNotMatch(scope,/taskId|recovery|workStatePath/,'hook ABI stays structural and unchanged');
+ await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{replyOnlyRecovery:true}),/INVALID_INPUT/);
+});
+test('native recovery reader requires complete latest unique marker coverage and returns only a closed witness',async()=>{
+ const f=readonlyPreparationFixture();let reads=0;
+ const read=(pages,extra={})=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{executable:process.execPath,environment:f.environment,...extra,
+  readOnlyPreparation:f.intakePass,spawnProcess:nativeRpc(request=>{
+   if(request.method==='thread/read')return {result:{thread:{id:f.threadId,cwd:process.cwd()}}};
+   assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');reads++;
+   return {result:pages(request.params)};
+  })});
+ const result=await read(()=>({data:[f.turn],nextCursor:null}));
+ assert.deepEqual(result,{state:'completed',turnId:f.turn.id,receipt:`codex:${f.threadId}:${f.turn.id}`,readOnlyFailure:'company_context_preparation_timeout'});
+ assert.equal(JSON.stringify(result).includes('SYNTHETIC_PRIVATE'),false);
+ assert.deepEqual(await read(params=>params.cursor?{data:[f.turn],nextCursor:null}:{data:[f.turn],nextCursor:'second'}),{state:'uncertain'});
+ assert.deepEqual(await read(()=>({data:[{id:randomUUID(),status:'completed',items:[]},f.turn],nextCursor:null})),{state:'uncertain'});
+ assert.deepEqual(await read(()=>({data:[f.turn],nextCursor:'repeating'})),{state:'uncertain'});
+ f.turn.items[1].command=f.turn.items[1].command.replace('C:\\Program Files\\PowerShell\\7','C:\\portable');
+ let verified=0;
+ assert.equal((await read(()=>({data:[f.turn],nextCursor:null}),{verifyReadOnlyShell:async()=>{verified++;return true;}})).readOnlyFailure,
+  'company_context_preparation_timeout');assert.equal(verified,1);
+ assert.ok(reads>=5);
 });
