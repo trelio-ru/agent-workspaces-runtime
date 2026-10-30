@@ -21,7 +21,8 @@ test('protected Telegram setup retains only a reviewed code and bounded wait acr
   assert.equal(buildAgentDiagnosticEvent('continue_trelio_workspace_action',{operation:'skill_run'},error.diagnosticCode).code,'TRELIO_SKILL_RUNTIME_EXIT_2');
   for(const code of ['TELEGRAM_CODE_INVALID','TELEGRAM_CODE_EXPIRED','TELEGRAM_PHONE_BANNED',
     'TELEGRAM_PHONE_INVALID','TELEGRAM_QR_EXPIRED','TELEGRAM_RATE_LIMITED','TELEGRAM_PASSWORD_CHECK_EXPIRED',
-    'TELEGRAM_APP_INVALID','TELEGRAM_SERVICE_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_LOGIN_CANCELLED']){
+    'TELEGRAM_APP_INVALID','TELEGRAM_SERVICE_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_LOGIN_CANCELLED',
+    'TELEGRAM_CODE_UNAVAILABLE','TELEGRAM_LOGIN_METHOD_UNAVAILABLE','TELEGRAM_APP_UPDATE_REQUIRED']){
     assert.equal(project({...payload,code}).details.providerCode,code);
   }
   for(const value of [{...payload,code:['TELEGRAM_PASSWORD_INVALID']},{...payload,code:'TELEGRAM_PASSWORD_INVALID_PRIVATE'},
