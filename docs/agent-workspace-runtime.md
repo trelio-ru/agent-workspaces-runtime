@@ -2355,6 +2355,26 @@ projection остаётся основным путём с отдельной з
 публикуется как готовый mirror. Retention – семь дней; предел – 512 MiB и менее
 20 000 записей на schema-root компании, с удалением старых записей под writer lock.
 
+В том же scratchpad и общей квоте сохраняется контрольная точка полностью
+прочитанного Workspace. Она шифруется тем же codec с отдельным AAD/domain
+`agent_context.search_workspace`, привязана к origin/company/scope/epoch/device
+и exact Workspace/head и не содержит новых credentials или plaintext-файлов.
+Незавершённый Workspace не получает такую запись: все file workers должны
+завершиться, а исходный signal оставаться действующим. Предел размера записи
+ограничивает только reuse; большие Workspace по-прежнему индексируются полностью
+и используют прежний per-file cache.
+
+Возобновлённая сборка сначала получает свежий ACL-filtered company manifest.
+Только его актуальные Workspace/head могут переиспользовать эти checkpoints,
+как неизменные Workspace предыдущего полного поколения. Metadata берутся из
+нового manifest, отсутствующие/revoked Workspace исключаются, смена head/scope/
+устройства/origin запрещает reuse. Так второй исходный first-sync budget не
+расходуется повторно на последовательные HTTP overview/manifest и чтение всех
+файлов уже завершённого префикса. Checkpoint никогда не читается как готовое
+зеркало и не используется для выдачи оригинала; финальный свежий generation/ACL
+fence и единственная атомарная публикация остаются обязательными. Тайм-ауты,
+число разрешённых подготовок, native pass и proof не меняются.
+
 `WORKSPACE_OUTDATED` и `LOCAL_CONTEXT_GENERATION_CHANGED` при начальном чтении
 manifest, сборке candidate либо контрольном чтении manifest запускают следующую
 из максимум трёх общих попыток с новым manifest. Полностью собранный, но

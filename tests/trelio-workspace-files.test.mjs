@@ -8,9 +8,9 @@ import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator } from "../host-runtime/scripts/trelio-workspace-files.mjs";
 import { matchWorkspaceTextChunks } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
-import { createEncryptedSearchFileCache, handleNativeLocalContextRead } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { createEncryptedSearchFileCache, handleNativeLocalContextRead, syncCompanyContextMirror, resolveMirrorPaths } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory, resolveCompanyContextMirrorDirectory,
-  runGit, withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob } from "../host-runtime/scripts/trelio-workspace.mjs";
+  runGit, withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 test("unified search reads cutover bundles without browser projections and keeps assigned guidance", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trelio-cutover-search-"));
@@ -353,4 +353,115 @@ test("file locators reject traversal and foreign path syntax before transport", 
   for (const filePath of ["../secret", "/etc/passwd", "x/../secret", "x\\secret", "x//secret", "x\0secret"]) {
     assert.throws(() => validateWorkspaceFileLocator({ workspaceId: "11111111-1111-4111-8111-111111111111", workspaceHead: "a".repeat(40), filePath }), { code: "WORKSPACE_FILE_INVALID_LOCATOR" });
   }
+});
+
+// The first-sync child has a fixed deadline. A resumed child must reuse the
+// fully verified Workspace prefix, not spend that second deadline fetching
+// every old overview/manifest again. Exercise the real HTTP/file/HPKE/mirror
+// path with a disposable profile, then reopen it like a fresh request process.
+for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revoked_final"]) test(`cold mirror resumes completed Workspaces after cancellation [${recovery}]`, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-workspace-resume-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const companyId = randomUUID(), scopeId = randomUUID(), deviceId = randomUUID();
+  const scope = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const publicJwk = await webcrypto.subtle.exportKey("jwk", scope.publicKey);
+  const device = await createAgentEncryptionDevice();
+  const companyEncryption = { runtime: { company: { id: companyId, slug: "synthetic" },
+    scope: { id: scopeId, epoch: 1, publicEncryptionJwk: publicJwk }, device: { id: deviceId } },
+    scopePrivateEncryptionKey: { privateKey: scope.privateKey,
+      privateJwk: await webcrypto.subtle.exportKey("jwk", scope.privateKey) } };
+  const workspaces = Array.from({ length: 18 }, () => ({ id: randomUUID(), acceptedHead: "a".repeat(40),
+    projectionId: randomUUID(), manifestId: randomUUID(), fileId: randomUUID() }));
+  const ciphertexts = new Map(), ownerByFile = new Map(), overviewReads = new Map();
+  for (const workspace of workspaces) {
+    const text = Buffer.from("SYNTHETIC_COMPLETE_WORKSPACE_ONLY " + workspace.id);
+    const files = [{ id: workspace.fileId, path: "synthetic.md", sizeBytes: text.length, contentType: "text/plain" }];
+    for (const [id, kind, bytes] of [[workspace.fileId, "file", text], [workspace.manifestId, "manifest",
+      Buffer.from(JSON.stringify({ schemaVersion: 1, kind: "agent-workspace-browser-manifest",
+        projectionId: workspace.projectionId, workspaceId: workspace.id, workspaceHead: workspace.acceptedHead, files }))]]) {
+      const sourcePath = path.join(root, "source"), destinationPath = path.join(root, `${id}.container`);
+      await writeFile(sourcePath, bytes, { mode: 0o600 });
+      await encryptFileToCompanyContainer({ sourcePath, destinationPath, scopePublicEncryptionJwk: publicJwk,
+        aad: { companyId, scopeId, scopeEpoch: 1, entityType: `agent_workspace_browser_${kind}`,
+          entityId: id, entityRevision: 1, purpose: "file" }, originalName: "synthetic", mimeType: "application/octet-stream",
+        writerDeviceId: deviceId, signingPrivateKey: device.privateKeys.signingPrivateKey });
+      ciphertexts.set(id, await readFile(destinationPath)); ownerByFile.set(id, workspace);
+    }
+  }
+  const manifest = { schemaVersion: 2, provider: "local_company_context", generation: "a".repeat(64),
+    company: companyEncryption.runtime.company, viewer: { memberId: randomUUID() }, projects: [], tasks: [],
+    acceptedWorkspaces: workspaces.map(({ id, acceptedHead }) => ({ id, acceptedHead })), workspaces: [],
+    contextDocuments: [], searchDocuments: [], instructions: {}, agentSkills: null, agentProcedures: [] };
+  const controller = new AbortController();
+  let cancelAtBoundary = true, manifestReads = 0, denyManifest = false;
+  const server = createServer((request, response) => {
+    const json = value => { response.setHeader("content-type", "application/json"); response.end(JSON.stringify(value)); };
+    if (request.url === "/api/agent-workspaces/company-context/synthetic/manifest") {
+      manifestReads++;
+      if (denyManifest) { response.statusCode = 403; json({ code: "ACCESS_DENIED" }); return; }
+      if (recovery === "revoked_final" && manifestReads === 3) {
+        manifest.acceptedWorkspaces.shift(); manifest.generation = "b".repeat(64);
+      }
+      json(manifest); return;
+    }
+    const workspace = workspaces.find(item => request.url === `/api/agent-workspaces/workspaces/${item.id}`);
+    if (workspace) {
+      overviewReads.set(workspace.id, (overviewReads.get(workspace.id) ?? 0) + 1);
+      if (workspace === workspaces.at(-2) && cancelAtBoundary) { cancelAtBoundary = false; controller.abort(); return; }
+      json({ company: { id: companyId }, workspace: { acceptedHead: workspace.acceptedHead },
+        encryption: { browserProjection: { id: workspace.projectionId, workspaceHead: workspace.acceptedHead,
+          manifestFileId: workspace.manifestId, fileCount: 1 } } }); return;
+    }
+    const id = /\/files\/([^/]+)\/encrypted-content$/u.exec(request.url)?.[1], bytes = ciphertexts.get(id);
+    if (!bytes) { response.statusCode = 404; response.end(); return; }
+    const owner = ownerByFile.get(id);
+    response.setHeader("x-trelio-workspace-id", owner.id); response.setHeader("x-trelio-workspace-head", owner.acceptedHead);
+    response.setHeader("x-trelio-ciphertext-sha256", createHash("sha256").update(bytes).digest("hex")); response.end(bytes);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  // No operator profile/cache/token participates. This uses ordinary HTTP and
+  // the common mirror algorithm; the fixture merely selects its own directory.
+  const profile = { kind: "synthetic", requireToken: async () => "synthetic-token",
+    prepareRequest: ({ origin, pathname }) => ({ url: new URL(pathname, origin), headers: {}, options: {} }),
+    resolveCompanyContextMirrorDirectory: () => path.join(root, "mirrors") };
+  await withWorkspaceExecutionProfile(profile, async () => {
+    const input = { origin, token: "synthetic-token", companyEncryption };
+    const paths = resolveMirrorPaths({ origin, companyId });
+    await assert.rejects(syncCompanyContextMirror({ ...input, signal: controller.signal }), { name: "AbortError" });
+    await assert.rejects(readFile(paths.pointer), { code: "ENOENT" }, "a completed prefix is never a published mirror");
+    if (recovery === "denied") {
+      denyManifest = true;
+      await assert.rejects(syncCompanyContextMirror(input), { code: "ACCESS_DENIED" });
+      await assert.rejects(readFile(paths.pointer), { code: "ENOENT" }, "cached prefix never overrides current access denial");
+      assert.equal(overviewReads.get(workspaces[0].id), 1);
+      return;
+    }
+    if (recovery === "removed") {
+      manifest.acceptedWorkspaces.shift();
+      manifest.generation = "b".repeat(64);
+    }
+    if (recovery === "head_changed") {
+      manifest.acceptedWorkspaces[0].acceptedHead = "b".repeat(40);
+      workspaces[0].acceptedHead = "b".repeat(40);
+      // Deliberately retain the old encrypted file manifest. A stale checkpoint
+      // must not bypass the ordinary reader's exact accepted-head refusal.
+      await assert.rejects(syncCompanyContextMirror(input), { code: "WORKSPACE_FILE_MANIFEST_INVALID" });
+      assert.equal(overviewReads.get(workspaces[0].id), 2);
+      await assert.rejects(readFile(paths.pointer), { code: "ENOENT" });
+      return;
+    }
+    const resumed = await syncCompanyContextMirror({ ...input, signal: AbortSignal.timeout(15000) });
+    const removed = ["removed", "revoked_final"].includes(recovery);
+    assert.equal(resumed.mirror.workspaces.length, workspaces.length - Number(removed));
+    assert.equal(resumed.mirror.workspaces.some(item => item.id === workspaces[0].id), !removed,
+      "a revoked/deleted Workspace cannot be restored from a complete encrypted checkpoint");
+    assert.ok(resumed.mirror.workspaces.every(item => item.documents[0].searchCoverage.status === "complete"));
+    assert.equal(manifestReads, recovery === "revoked_final" ? 5 : 3, "resumption retains both fresh company ACL/generation fences");
+    for (const workspace of workspaces.slice(0, -2)) assert.equal(overviewReads.get(workspace.id), 1,
+      "a fresh resumed process must not spend its budget downloading an already complete Workspace prefix again");
+    assert.equal(overviewReads.get(workspaces.at(-2).id), 2, "an interrupted Workspace must be read again normally");
+    assert.equal(overviewReads.get(workspaces.at(-1).id), 1);
+  });
 });

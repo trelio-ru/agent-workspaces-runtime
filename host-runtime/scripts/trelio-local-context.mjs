@@ -798,43 +798,106 @@ export const createEncryptedSearchFileCache = async ({
       entityRevision: 1, purpose: "content",
     } };
   };
+  // A completed Workspace is an independently resumable *candidate*, not a
+  // readable generation. Separate domain/AAD prevents a file entry from ever
+  // being mistaken for this checkpoint. Keep both in the SAME quota, writer
+  // lock and encrypted store; no second cache/credential/profile is created.
+  const workspaceIdentity = ({ workspaceId, acceptedHead }) => {
+    const key = sha256(JSON.stringify([
+      "completed-workspace-v1", origin, company.id, scope.id, scope.epoch,
+      device?.id ?? null, workspaceId, acceptedHead,
+    ]));
+    return { key, name: `${key}.json`, aad: {
+      companyId: company.id, scopeId: scope.id, scopeEpoch: scope.epoch,
+      entityType: "agent_context.search_workspace", entityId: workspaceId,
+      entityRevision: 1, purpose: "content",
+    } };
+  };
+  const readEntry = async ({ key, name, aad }) => {
+    if (!entries.has(name)) return null;
+    const record = await readPrivateJsonFile(path.join(root, name), { maximumBytes: 8 * 1024 * 1024 });
+    if (Object.keys(record).length === 0) return null;
+    // Encryption authenticates both the exact revision binding and text.
+    // A hit never supplies ACL authority. File reuse follows a fresh exact
+    // Workspace manifest; whole-Workspace reuse follows the fresh company's
+    // ACL-filtered accepted-head manifest and its final generation fence.
+    const actualAad = record.encryptedPayload?.aad;
+    if (record.schemaVersion !== 1 || Object.entries(aad).some(([k, v]) => actualAad?.[k] !== v)) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted search cache binding is invalid.");
+    }
+    const payload = await decryptCompanyPayload({
+      encryptedPayload: record.encryptedPayload,
+      scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
+      scopePrivateJwk: companyEncryption.scopePrivateEncryptionKey.privateJwk,
+    });
+    if (payload?.key !== key || typeof payload.text !== "string"
+      || Buffer.byteLength(payload.text, "utf8") > 3 * 1024 * 1024) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted search cache content is invalid.");
+    }
+    entries.get(name).time = Date.now();
+    return payload.text;
+  };
+  const writeEntry = async ({ key, name, aad }, text) => {
+    if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 3 * 1024 * 1024) return;
+    const record = { schemaVersion: 1, encryptedPayload: await encryptCompanyPayload({
+      payload: { key, text }, scopePublicEncryptionJwk: scope.publicEncryptionJwk, aad,
+    }) };
+    const size = Buffer.byteLength(`${JSON.stringify(record, null, 2)}\n`, "utf8");
+    if (size > maximumBytes || size > 8 * 1024 * 1024) return;
+    await trim(size);
+    await writePrivateJsonFile(path.join(root, name), record);
+    totalBytes += size - (entries.get(name)?.size ?? 0);
+    entries.set(name, { size, time: Date.now() });
+  };
+  const parseWorkspace = (workspace, text) => {
+    let documents;
+    try { documents = JSON.parse(text); } catch { /* Fixed closed error below. */ }
+    if (!Array.isArray(documents) || documents.some(document => (
+      document?.kind !== "workspace_file" || document.workspaceId !== workspace.workspaceId
+      || document.workspaceHead !== workspace.acceptedHead || typeof document.path !== "string"
+      || !Number.isSafeInteger(document.sizeBytes) || document.sizeBytes < 0
+      || !Array.isArray(document.chunks)
+      || !["complete", "unsupported"].includes(document.searchCoverage?.status)
+      || document.searchCoverage.totalBytes !== document.sizeBytes
+      || document.searchCoverage.indexedBytes !== (document.searchCoverage.status === "complete" ? document.sizeBytes : 0)
+      || document.chunks.some((chunk, index) => chunk?.index !== index
+        || typeof chunk.text !== "string" || chunk.isLast !== (index === document.chunks.length - 1))
+      || (document.searchCoverage.status === "complete" ? document.chunks.length === 0 : document.chunks.length !== 0)
+    ))) throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted Workspace checkpoint is invalid.");
+    const paths = new Set();
+    for (const document of documents) {
+      validateWorkspaceFileLocator({ ...workspace, workspaceHead: workspace.acceptedHead, filePath: document.path });
+      if (paths.has(document.path)) throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted Workspace checkpoint is invalid.");
+      paths.add(document.path);
+    }
+    return documents;
+  };
   return {
-    read: (workspace, file) => serialized(async () => {
-      const { key, name, aad } = identity(workspace, file);
-      if (!entries.has(name)) return null;
-      const record = await readPrivateJsonFile(path.join(root, name), { maximumBytes: 8 * 1024 * 1024 });
-      if (Object.keys(record).length === 0) return null;
-      // Encryption authenticates both the exact revision binding and text.
-      // A cache hit cannot authorize an object: the caller must first fetch a
-      // fresh ACL-filtered Workspace overview and its exact signed manifest.
-      const actualAad = record.encryptedPayload?.aad;
-      if (record.schemaVersion !== 1 || Object.entries(aad).some(([k, v]) => actualAad?.[k] !== v)) {
-        throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted search cache binding is invalid.");
-      }
-      const payload = await decryptCompanyPayload({
-        encryptedPayload: record.encryptedPayload,
-        scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
-        scopePrivateJwk: companyEncryption.scopePrivateEncryptionKey.privateJwk,
-      });
-      if (payload?.key !== key || typeof payload.text !== "string"
-        || Buffer.byteLength(payload.text, "utf8") > 3 * 1024 * 1024) {
-        throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted search cache content is invalid.");
-      }
-      entries.get(name).time = Date.now();
-      return payload.text;
+    read: (workspace, file) => serialized(() => readEntry(identity(workspace, file))),
+    write: (workspace, file, text) => serialized(() => writeEntry(identity(workspace, file), text)),
+    readWorkspace: workspace => serialized(async () => {
+      const text = await readEntry(workspaceIdentity(workspace));
+      return text === null ? null : parseWorkspace(workspace, text);
     }),
-    write: (workspace, file, text) => serialized(async () => {
-      if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 3 * 1024 * 1024) return;
-      const { key, name, aad } = identity(workspace, file);
-      const record = { schemaVersion: 1, encryptedPayload: await encryptCompanyPayload({
-        payload: { key, text }, scopePublicEncryptionJwk: scope.publicEncryptionJwk, aad,
-      }) };
-      const size = Buffer.byteLength(`${JSON.stringify(record, null, 2)}\n`, "utf8");
-      if (size > maximumBytes || size > 8 * 1024 * 1024) return;
-      await trim(size);
-      await writePrivateJsonFile(path.join(root, name), record);
-      totalBytes += size - (entries.get(name)?.size ?? 0);
-      entries.set(name, { size, time: Date.now() });
+    writeWorkspace: (workspace, documents) => serialized(async () => {
+      // Do not serialize a whole 150-MiB Workspace just to learn it exceeds
+      // the optional 3-MiB cache entry. Stop traversal at a conservative node/
+      // string budget; escaping is checked by the original exact byte guard.
+      // The private sentinel is not a runtime failure or retry classification.
+      const oversized = {};
+      let remaining = 3 * 1024 * 1024, text;
+      try {
+        text = JSON.stringify(documents, (_key, value) => {
+          remaining -= 32 + (typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0);
+          if (remaining < 0) throw oversized;
+          return value;
+        });
+      } catch (error) { if (error === oversized) return; throw error; }
+      if (Buffer.byteLength(text, "utf8") > 3 * 1024 * 1024) return;
+      parseWorkspace(workspace, text);
+      // The existing entry limit bounds reuse only, never searchable text or
+      // completeness. Oversized Workspaces still use their verified file cache.
+      await writeEntry(workspaceIdentity(workspace), text);
     }),
   };
 };
@@ -3825,9 +3888,11 @@ const buildWorkspaceRecord = async ({
   workspace,
   signal,
   searchCache,
-}) => ({
-  ...workspace,
-  documents: await readEncryptedWorkspaceSearchDocuments({
+}) => {
+  const binding = { workspaceId: workspace.id, acceptedHead: workspace.acceptedHead };
+  const cached = await searchCache?.readWorkspace?.(binding);
+  if (cached !== null && cached !== undefined) return { ...workspace, documents: cached };
+  const documents = await readEncryptedWorkspaceSearchDocuments({
     origin,
     token,
     companyEncryption,
@@ -3835,8 +3900,16 @@ const buildWorkspaceRecord = async ({
     acceptedHead: workspace.acceptedHead,
     signal,
     searchCache,
-  }),
-});
+  });
+  signal?.throwIfAborted();
+  // Persist only after ALL started readers settled and the entire accepted
+  // head passed its normal ACL/manifest/AAD/digest checks. A cancelled or failed
+  // Workspace cannot leave a completion marker. A later process must first
+  // obtain a fresh company manifest; final publication still validates its
+  // generation, including revocation/deletion/head changes during this read.
+  await searchCache?.writeWorkspace?.(binding, documents);
+  return { ...workspace, documents };
+};
 
 const buildMirror = async ({
   origin,

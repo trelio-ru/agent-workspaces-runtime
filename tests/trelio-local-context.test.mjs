@@ -4934,3 +4934,48 @@ test("local file formulations share bounded normalization and skip negative Unic
   assert.equal(normalizations, chunks.length, "Normalize file parts once across formulations");
   assert.equal(scans, 0, "Absent necessary literals must not trigger Unicode boundary scans");
 });
+
+test("complete Workspace checkpoints share encrypted quota and refuse changed bindings or damaged records", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-workspace-checkpoint-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const keys = await crypto.webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const companyEncryption = { runtime: { company: { id: actionWorkspaceId }, device: { id: actionRunId }, scope: {
+    id: actionSecretId, epoch: 1, publicEncryptionJwk: await crypto.webcrypto.subtle.exportKey("jwk", keys.publicKey) } },
+    scopePrivateEncryptionKey: { privateKey: keys.privateKey, privateJwk: await crypto.webcrypto.subtle.exportKey("jwk", keys.privateKey) } };
+  const options = { paths: { root }, origin: "https://synthetic.invalid", companyEncryption };
+  const workspace = { workspaceId: actionWorkspaceId, acceptedHead: "a".repeat(40) };
+  const documents = [{ kind: "workspace_file", workspaceId: workspace.workspaceId, workspaceHead: workspace.acceptedHead,
+    path: "PRIVATE_SYNTHETIC_PATH.md", sizeBytes: 42, contentType: "text/plain", text: "",
+    chunks: [{ index: 0, text: "x".repeat(42), isLast: true }],
+    searchCoverage: { status: "complete", indexedBytes: 42, totalBytes: 42 } }];
+  await (await createEncryptedSearchFileCache(options)).writeWorkspace(workspace, documents);
+  const directory = path.join(root, "search-files-v1"), names = await fs.readdir(directory);
+  assert.equal(names.length, 1);
+  const stored = await fs.readFile(path.join(directory, names[0]), "utf8");
+  assert.equal(stored.includes(documents[0].path), false, "paths stay encrypted, including whole-Workspace checkpoints");
+  const reopened = await createEncryptedSearchFileCache(options);
+  assert.deepEqual(await reopened.readWorkspace(workspace), documents);
+  assert.equal(await reopened.readWorkspace({ ...workspace, acceptedHead: "b".repeat(40) }), null);
+  assert.equal(await reopened.readWorkspace({ ...workspace, workspaceId: actionReleaseId }), null);
+  assert.equal(await (await createEncryptedSearchFileCache({ ...options, origin: "https://foreign.invalid" })).readWorkspace(workspace), null);
+  for (const runtime of [
+    { ...companyEncryption.runtime, company: { id: actionGrantId } },
+    { ...companyEncryption.runtime, scope: { ...companyEncryption.runtime.scope, epoch: 2 } },
+    { ...companyEncryption.runtime, device: { id: actionReleaseId } },
+  ]) assert.equal(await (await createEncryptedSearchFileCache({ ...options,
+    companyEncryption: { ...companyEncryption, runtime } })).readWorkspace(workspace), null);
+  const damaged = JSON.parse(stored);
+  damaged.encryptedPayload.aad.entityType = "agent_context.search_file";
+  await fs.writeFile(path.join(directory, names[0]), JSON.stringify(damaged), { mode: 0o600 });
+  await assert.rejects(reopened.readWorkspace(workspace), { code: "LOCAL_CONTEXT_CACHE_INVALID" });
+  await fs.writeFile(path.join(directory, names[0]), stored, { mode: 0o600 });
+  await assert.rejects(reopened.writeWorkspace(workspace, [{ ...documents[0], workspaceHead: "b".repeat(40) }]),
+    { code: "LOCAL_CONTEXT_CACHE_INVALID" });
+  const tiny = await createEncryptedSearchFileCache({ ...options, maximumBytes: 1 });
+  assert.equal(await tiny.readWorkspace(workspace), null);
+  await tiny.writeWorkspace(workspace, documents);
+  assert.deepEqual(await fs.readdir(directory), [], "the shared quota never creates an oversized Workspace entry");
+  const oversized = [{ ...documents[0], chunks: [{ index: 0, text: "x".repeat(4 * 1024 * 1024), isLast: true }] }];
+  await (await createEncryptedSearchFileCache(options)).writeWorkspace(workspace, oversized);
+  assert.deepEqual(await fs.readdir(directory), [], "large accepted text stays searchable without duplicating a whole Workspace into scratch");
+});

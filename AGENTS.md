@@ -549,6 +549,13 @@ publication tooling также остаются вне этого публичн
   обработка read-conflicts всех этапов чтения обязательны по
   [runtime contract](docs/agent-workspace-runtime.md). Публикация не повторяется;
   HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` сохраняет code без backend payload/details.
+  Completed Workspace prefixes share that SAME encrypted scratchpad/quota and
+  exact origin/company/scope/epoch/device/head binding. Persist only after every
+  file reader settles; reuse only entries in a freshly ACL-filtered company
+  manifest, with the ordinary final generation fence before publication.
+  Cancellation never earns a complete pointer or a checkpoint for an unfinished
+  Workspace. Test real HTTP + HPKE + reopened-cache resume across many Workspaces,
+  including deletion, revocation, changed heads and final-manifest conflicts.
 - Пакетное чтение больших task rules сохраняет immutable части/revision и
   legacy single-part формат. Бюджет полного MCP envelope генерируется из
   backend `shared/task-read-budget.ts`; его копию вручную не менять.
