@@ -308,6 +308,7 @@ jobs:
           node tests/trelio-company-encryption.test.mjs
           node tests/trelio-context-search-matching.test.mjs
           node tests/trelio-context-search-ranking.test.mjs
+          node tests/trelio-search-provider-parity.test.mjs
           node tests/trelio-encrypted-workspace-storage.test.mjs
           node tests/trelio-folder-onboarding.test.mjs
           node tests/trelio-git.test.mjs

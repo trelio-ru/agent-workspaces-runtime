@@ -163,3 +163,6 @@ assertions remain mandatory. A chooser response is not a site-completion signal.
 Before its sole chooser click it resolves the unique synthetic button from the
 fresh native rendered-controls frame, rather than assuming fixed screen pixels.
 Missing controls fail before input; no failed chooser is automatically retried.
+
+Full Linux/macOS runs `trelio-search-provider-parity.test.mjs` directly alongside
+matching/ranking suites; adapter parity is mandatory, not just generated-vector tests.

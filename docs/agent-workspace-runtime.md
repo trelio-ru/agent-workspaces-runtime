@@ -909,6 +909,27 @@ Workspace files с exact metadata, а также доступные наборы
 документы, проверяет одну вероятную задачу через `get_task`, а 2-20 уже известных exact-задач –
 одним `get_tasks`; повторять `get_task` для такого набора нельзя. Агент не
 выбирает цель по одному похожему заголовку.
+Backend owns `trelio-context-search-matching.mjs` (portable discovery plus ordinary
+list predicates) and `trelio-context-search-ranking.mjs`. Generate both from the
+exact companion backend; do not independently patch generated policy. Rank every
+semantic leaf before choosing child evidence, score its raw value before decorating
+preview, and use the exact discussion URL for stable equal-child ties. Shared
+ranking never treats the display wrapper of a meeting as title evidence.
+
+Ordinary lists preserve their native corpus and server catalog order: task lists
+include workflow/people but not checklist/control discovery fields; contact lists
+exclude channels/history; registry lists distinguish company/project scope.
+Registry row query searches published document labels/filenames, never internal
+Workspace coordinates. Typed NULL ordering matches PostgreSQL before pagination.
+Meeting archives remain in the mirror; unified search hides them by default,
+`includeArchived` admits them explicitly, and date bounds compare parsed instants.
+`upcoming` includes today, as in the native task filter.
+
+`tests/trelio-search-provider-parity.test.mjs` exercises the real dispatcher. The
+companion backend integration fixture pins an exact runtime commit and compares
+actual native services, browser policy and this provider. A developer may supply
+the companion task checkout for that test; CI fetches only the public pinned commit.
+
 `search_tasks` и `search_agent_workspace_files` нужны только для task-only или
 Workspace-only уточнения, а не как обязательная последовательность.
 

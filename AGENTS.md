@@ -872,6 +872,10 @@ publication tooling также остаются вне этого публичн
 - Cross-repository tests используют реальный plugin checkout через
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
   не попадает в package.
+- Search discovery и ordinary list/refinement имеют разные корпуса. Matching,
+  list predicates и ranking генерируются из backend; parity проверяется реальным
+  local provider, включая raw-leaf score, child locator, archives и pagination.
+  Контракт – [поиск](docs/agent-workspace-runtime.md#поиск-и-отдельный-файл).
 - Production runtime source меняется только вместе с targeted tests и актуальным
   контрактом. Generated package вручную не редактируется и не коммитится.
 - Optional proposal `preparationRef` подставляет только structural CAS fields:

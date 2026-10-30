@@ -1,3 +1,4 @@
+// Generated context discovery and ordinary list policies. Do not edit by hand.
 /**
  * Portable agent-search policy. The same patterns run in PostgreSQL and in the
  * encrypted local mirror; neither provider may substitute its own dictionary,
@@ -123,4 +124,112 @@ export const matchContextSearchField = (value, query, { allowQueryContainsField 
     // even there, whole words and complete coverage remain mandatory.
     return allowQueryContainsField && !query.reference && Boolean(text)
         && compileContextSearchQuery(text).expressions.every((expression) => expression.test(query.normalized));
+};
+
+const listRecord = (value) => value && typeof value === "object" && !Array.isArray(value)
+    ? value : {};
+const listArray = (value) => Array.isArray(value) ? value : [];
+const listLower = (value) => String(value ?? "").toLocaleLowerCase("ru");
+/** PostgreSQL LIKE wildcard/escape semantics, including one Unicode code point. */
+export const compileContextListPattern = (rawQuery) => {
+    let pattern = "";
+    const characters = [...`%${listLower(rawQuery)}%`];
+    const literal = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    for (let index = 0; index < characters.length; index++) {
+        const character = characters[index];
+        if (character === "\\" && index + 1 < characters.length)
+            pattern += literal(characters[++index]);
+        else
+            pattern += character === "%" ? "[\\s\\S]*" : character === "_" ? "[\\s\\S]" : literal(character);
+    }
+    return new RegExp(`^(?:${pattern})$`, "u");
+};
+export const matchesContextListDocument = (type, payload, rawQuery) => {
+    const query = rawQuery.trim();
+    if (!query)
+        return true;
+    const detail = listRecord(payload);
+    const entity = listRecord(detail[type === "knowledge_page" ? "page" : type]);
+    const pattern = compileContextListPattern(query);
+    const like = (value) => pattern.test(listLower(value));
+    if (type === "contact") {
+        const organization = listRecord(entity.organization);
+        return [entity.displayName, organization.legalName ?? entity.legalName, entity.descriptionPlainText].some(like)
+            || listArray(entity.aliases).some((alias) => alias === query);
+    }
+    if (type === "knowledge_page") {
+        // Native list pages filters the compact index preview, never full body,
+        // discussion, sidebar pages, audit actors or rich-text editor metadata.
+        const body = String(entity.bodyPlainText ?? "").trim().replace(/\s+/gu, " ");
+        const preview = entity.previewText ?? (body.length <= 180 ? body : `${body.slice(0, 177).trimEnd()}...`);
+        return [entity.title, entity.slug, preview].some((value) => listLower(value).includes(listLower(query)));
+    }
+    if (type === "registry") {
+        return [entity.title, entity.description,
+            ...listArray(entity.columns).filter((column) => column?.isTechnical !== true).map((column) => column?.label)]
+            .some(like)
+            || listArray(entity.searchTerms).some((term) => like(term) || compileContextListPattern(String(term)).test(listLower(query)));
+    }
+    return false;
+};
+/** Ordinary task list query: one contiguous substring in the native haystack. */
+export const buildContextTaskListSearchText = (number, task, project) => {
+    const name = (value) => {
+        const person = listRecord(value);
+        return String(person.displayName || person.name || person.username || "").trim();
+    };
+    return [number, task.title, task.descriptionPlainText, task.status?.code, task.status?.name,
+        project.name, project.slug, name(task.createdBy),
+        ...listArray(task.assignees ?? (task.assignee ? [task.assignee] : [])).map(name),
+        ...listArray(task.participants).map(name)]
+        .map((value) => String(value || "").toLowerCase()).join(" ");
+};
+export const matchesContextTaskDueState = ({ dueDate, dueState, statusKind, todayDate }) => {
+    if (dueState === "without_due_date")
+        return dueDate === null;
+    if (dueState === "with_due_date")
+        return dueDate !== null;
+    if (dueState === "overdue")
+        return statusKind !== "done" && dueDate !== null && dueDate < todayDate;
+    if (dueState === "today")
+        return dueDate === todayDate;
+    if (dueState === "upcoming")
+        return dueDate !== null && dueDate >= todayDate;
+    return true;
+};
+export const matchesContextRegistryRowQuery = (row, columns, rawQuery) => {
+    if (!rawQuery.trim())
+        return true;
+    const pattern = compileContextListPattern(rawQuery.trim());
+    const values = listRecord(row.values);
+    const candidates = [row.rowKey, row.note, ...columns.flatMap((column) => column.type === "document"
+            ? listArray(values[column.key]).flatMap((document) => [document?.label, document?.fileName])
+            : [typeof values[column.key] === "object" && values[column.key] !== null
+                    ? JSON.stringify(values[column.key]) : values[column.key]])];
+    return candidates.some((value) => value !== null && value !== undefined && pattern.test(listLower(value)));
+};
+/** UTF-8/C ordering compares Unicode code points, independently of OS locale. */
+export const compareContextListText = (left, right) => {
+    const a = String(left ?? ""), b = String(right ?? "");
+    let ai = 0, bi = 0;
+    while (ai < a.length && bi < b.length) {
+        const ac = a.codePointAt(ai), bc = b.codePointAt(bi);
+        if (ac !== bc)
+            return ac < bc ? -1 : 1;
+        ai += ac > 0xffff ? 2 : 1;
+        bi += bc > 0xffff ? 2 : 1;
+    }
+    return Number(ai < a.length) - Number(bi < b.length);
+};
+export const compareContextRegistryRows = (left, right, column, descending) => {
+    const a = column ? left.values?.[column.key] : left.rowKey;
+    const b = column ? right.values?.[column.key] : right.rowKey;
+    const nullish = (value) => value === null || value === undefined || ((column?.type === "number" || column?.type === "boolean") && value === "");
+    // PostgreSQL ASC defaults NULLS LAST; DESC defaults NULLS FIRST. NULL is not
+    // zero/false/empty text, and the row-key tie breaker always stays ascending.
+    let result = nullish(a) || nullish(b) ? Number(nullish(a)) - Number(nullish(b))
+        : column?.type === "number" ? Number(a) - Number(b)
+            : column?.type === "boolean" ? Number(a === true || a === "true") - Number(b === true || b === "true")
+                : compareContextListText(a, b);
+    return (descending ? -result : result) || compareContextListText(left.rowKey, right.rowKey);
 };

@@ -119,7 +119,7 @@ export const calculateLexicalQuality = (match) => {
     }, 0);
     return Math.round(bestCoverage * 100);
 };
-const calculateFieldQuality = (candidate, match) => {
+const calculateFieldQuality = (_candidate, match) => {
     if (PRIMARY_FIELD_SOURCES.has(match.source))
         return 4;
     if (STRUCTURED_FIELD_SOURCES.has(match.source))
@@ -128,14 +128,10 @@ const calculateFieldQuality = (candidate, match) => {
         return 2;
     if (DERIVED_FIELD_SOURCES.has(match.source))
         return 1;
-    if (match.source === "meeting") {
-        const normalizedQuery = normalizeContextSearchText(match.query);
-        const normalizedTitle = normalizeContextSearchText(candidate.title);
-        // Meeting search exposes one source name for both the title and body. The
-        // snippet equals the title for title hits, so detect that case without
-        // making the native API and the local mirror invent different source enums.
-        return normalizedQuery && normalizedTitle.includes(normalizedQuery) ? 4 : 2;
-    }
+    // Providers now distinguish title evidence explicitly. Presentation prefixes,
+    // company names and incidental title text cannot promote a body/source hit.
+    if (match.source === "meeting")
+        return 2;
     return 1;
 };
 const isExactReferenceMatch = (candidate, match) => {

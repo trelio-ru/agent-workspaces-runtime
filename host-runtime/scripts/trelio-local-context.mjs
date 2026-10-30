@@ -27,6 +27,11 @@ import {
 } from "./trelio-workspace-directory.mjs";
 import {
   buildContextSearchPreview,
+  matchesContextListDocument,
+  buildContextTaskListSearchText,
+  matchesContextTaskDueState,
+  matchesContextRegistryRowQuery,
+  compareContextRegistryRows,
   compileContextSearchQuery,
   normalizeContextSearchQueries,
   normalizeContextSearchReference,
@@ -93,6 +98,7 @@ import {
 } from "./trelio-company-encryption.mjs";
 import {
   CONTEXT_SEARCH_RANKING_POLICY_VERSION,
+  calculateLexicalQuality,
   rankContextSearchCandidates,
   normalizeContextSearchText,
 } from "./trelio-context-search-ranking.mjs";
@@ -4702,16 +4708,17 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery,
       query: originalQuery,
       source: field.source,
       previewText: chunkMatch?.previewText ?? field.previewText,
-      ...(chunkMatch ? { lexicalQuality: chunkMatch.lexicalQuality } : {}),
+      // Rank the matched semantic leaf, never its decorated human preview.
+      lexicalQuality: chunkMatch?.lexicalQuality ?? calculateLexicalQuality({ query: originalQuery, source: field.source, previewText: field.text }),
       ...(field.publicPath ? { publicPath: field.publicPath } : {}),
     };
     matches.push(match);
   }
 
   // Each field gets one rank; comparisons reuse it instead of repeatedly
-  // normalizing the best-so-far field. Stable ties keep the first field.
+  // normalizing the best-so-far field. Equal evidence uses the exact locator.
   return rankContextSearchCandidates(matches,
-    (match) => buildLocalRankingCandidate(document, [match]))[0] ?? null;
+    (match) => ({ ...buildLocalRankingCandidate(document, [match]), stableKey: `${document.stableKey}/${match.publicPath ?? ""}` }))[0] ?? null;
 };
 
 const findLocalSearchMatches = (document, queries) => {
@@ -4743,6 +4750,7 @@ export const searchCompanyContextMirror = (
     documentPredicate = null,
     includeScopeMetadata = false,
     includeMatchDetails = false,
+    includeArchivedMeetings = false,
   } = {},
 ) => {
   const queries = normalizeContextSearchQueries((Array.isArray(rawQueries) ? rawQueries : [])
@@ -4769,6 +4777,10 @@ export const searchCompanyContextMirror = (
     // corpus. Keeping the original mirror also preserves Workspace archive
     // metadata needed for an explicit historical-result marker.
     if (allowedDocumentTypes && !allowedDocumentTypes.has(document.type)) continue;
+    // The mirror retains archives for explicit historical reads. Unified
+    // discovery keeps the native active-meeting default, independently of ACL.
+    if (document.type === "meeting" && !includeArchivedMeetings
+        && (document.metadata?.meetingState === "archived" || document.metadata?.archivedAt)) continue;
     if (documentPredicate && !documentPredicate(document)) continue;
     const searchedDocument = includeScopeMetadata && document.scopePrefix ? {
       ...document, fields: [{ source: "workspace-file", text: `${document.scopePrefix}\n${document.text}`,
@@ -5782,7 +5794,7 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
     : null;
   const matchesProjectScope = buildMirrorProjectScopeMatcher(mirror, projectSlug);
   const viewerMemberId = String(mirror.viewer?.memberId || "").toLowerCase();
-  const query = normalizeSearchText(rawInput?.query || "");
+  const query = String(rawInput?.query || "").trim().toLowerCase();
   const today = new Date().toISOString().slice(0, 10);
   const archiveState = String(rawInput?.archiveState || "active");
   const relation = String(rawInput?.relation || "all");
@@ -5831,11 +5843,7 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
     if (rawInput?.dueDateFrom && (!dueDate || dueDate < rawInput.dueDateFrom)) return false;
     if (rawInput?.dueDateTo && (!dueDate || dueDate > rawInput.dueDateTo)) return false;
     const dueState = String(rawInput?.dueState || "any");
-    if (dueState === "without_due_date" && dueDate) return false;
-    if (dueState === "with_due_date" && !dueDate) return false;
-    if (dueState === "today" && dueDate !== today) return false;
-    if (dueState === "upcoming" && (!dueDate || dueDate <= today)) return false;
-    if (dueState === "overdue" && (!dueDate || dueDate >= today || task.status?.kind === "done")) return false;
+    if (!matchesContextTaskDueState({ dueDate, dueState, statusKind: task.status?.kind ?? "", todayDate: today })) return false;
 
     const controls = Array.isArray(task.controls) ? task.controls : [];
     if ((rawInput?.controlDateFrom || rawInput?.controlDateTo) && !controls.some((control) => {
@@ -5846,9 +5854,9 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
     })) return false;
 
     if (query) {
-      const text = normalizeSearchText(`${projectNameById.get(record.projectId) || ""}\n${buildTaskSearchText(record.payload)}`);
-      const tokens = query.split(" ").filter(Boolean);
-      if (!tokens.every((token) => text.includes(token))) return false;
+      const project = (mirror.projects ?? []).find(candidate => candidate.id === record.projectId)
+        ?? { name: projectNameById.get(record.projectId), slug: record.projectSlug };
+      if (!buildContextTaskListSearchText(record.number, task, project).includes(query)) return false;
     }
     return true;
   }).map((record) => buildLocalListedTask(mirror, record, rawInput));
@@ -6172,13 +6180,16 @@ const searchUnifiedGuidanceFromMirror = (mirror, rawInput) => {
 };
 
 const listDomainDocumentsFromMirror = (mirror, type, rawInput) => {
-  const query = normalizeSearchText(rawInput?.query || "");
+  const query = String(rawInput?.query || "").trim();
   const projectSlug = rawInput?.projectSlug ? String(rawInput.projectSlug).trim() : null;
   const matchesProjectScope = buildMirrorProjectScopeMatcher(mirror, projectSlug);
   const offset = Math.max(0, Math.trunc(Number(rawInput?.offset) || 0));
   const limit = Math.max(1, Math.min(500, Math.trunc(Number(rawInput?.limit) || 100)));
   const items = (mirror.contextDocuments ?? []).filter((document) => {
     if (document.type !== type || !matchesProjectScope(document)) return false;
+    // Unlike aggregate contacts, an omitted registry project means company
+    // ownership; it must not pick an identically named project registry.
+    if (type === "registry" && !projectSlug && (document.projectId || document.projectSlug)) return false;
     const payload = document.payload ?? {};
     if (rawInput?.includeArchived !== true) {
       const archived = Boolean(
@@ -6195,10 +6206,9 @@ const listDomainDocumentsFromMirror = (mirror, type, rawInput) => {
       if (rawInput?.occurredFrom && occurredAt < rawInput.occurredFrom) return false;
       if (rawInput?.occurredTo && occurredAt > rawInput.occurredTo) return false;
     }
-    if (!query) return true;
-    return query.split(" ").filter(Boolean).every((token) => (
-      normalizeSearchText(collectText(payload).join("\n")).includes(token)
-    ));
+    // Keep the query-free native catalog order supplied by the manifest. A
+    // local Intl collation must not reorder server pages after filtering.
+    return matchesContextListDocument(type, payload, query);
   }).map((document) => ({
     id: document.id,
     resultId: `context:${document.type}:${document.id}`,
@@ -6225,15 +6235,26 @@ const listDomainDocumentsFromMirror = (mirror, type, rawInput) => {
 
 const searchMeetingsFromMirror = (mirror, rawInput) => {
   const query = normalizeBoundedString(rawInput?.query, "query", 500);
-  const limit = Math.max(1, Math.min(500, Math.trunc(Number(rawInput?.limit) || 100)));
+  if (query.length < 2) throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Meeting query must contain at least two characters.");
+  const limit = Math.max(1, Math.min(50, Math.trunc(Number(rawInput?.limit) || 5)));
+  const timestamp = (value, field) => {
+    if (value === undefined || value === null) return null;
+    const instant = Date.parse(value);
+    if (!Number.isFinite(instant)) throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", `${field} must be a valid timestamp.`);
+    return instant;
+  };
+  const from = timestamp(rawInput?.occurredFrom, "occurredFrom"), to = timestamp(rawInput?.occurredTo, "occurredTo");
+  if (from !== null && to !== null && from > to) throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "occurredFrom must not be later than occurredTo.");
   const search = searchCompanyContextMirror(mirror, [query], limit, {
-    maximumResults: 500,
+    maximumResults: 50,
+    includeArchivedMeetings: rawInput?.includeArchived === true,
     documentTypes: ["meeting"],
-    documentPredicate: (document) => (
-      (!rawInput?.includeArchived || !document.metadata?.archivedAt)
-      && (!rawInput?.occurredFrom || String(document.metadata?.occurredAt || "") >= rawInput.occurredFrom)
-      && (!rawInput?.occurredTo || String(document.metadata?.occurredAt || "") <= rawInput.occurredTo)
-    ),
+    // ISO strings with offsets or optional milliseconds are not lexically
+    // ordered instants. Parse request bounds once, then compare canonical time.
+    documentPredicate: (document) => {
+      const occurred = Date.parse(document.metadata?.occurredAt);
+      return (from === null || occurred >= from) && (to === null || occurred <= to);
+    },
   });
   return {
     schemaVersion: 1,
@@ -6255,6 +6276,7 @@ const searchMeetingsFromMirror = (mirror, rawInput) => {
         id: result.contextDocumentId,
         title: result.title,
         occurredAt: result.occurredAt ?? null,
+        state: result.meetingState ?? "draft",
         archivedAt: result.archivedAt ?? null,
       },
       preview: result.preview,
@@ -6386,6 +6408,7 @@ const getRegistryFromMirror = (mirror, rawInput) => {
     "registry",
     (document) => (
       matchesProjectScope(document)
+      && (input.projectSlug || (!document.projectId && !document.projectSlug))
       && (
         document.payload?.registry?.slug === input.registrySlug
         || document.payload?.registry?.slugAliases?.includes?.(input.registrySlug)
@@ -6424,14 +6447,10 @@ const getRegistryFromMirror = (mirror, rawInput) => {
     );
   }
 
-  const query = normalizeSearchText(input.query || "");
+  const query = String(input.query || "").trim();
   const rows = (payload.rows ?? []).filter((row) => {
     if (input.includeArchivedRows !== true && row?.isArchived) return false;
-    if (query && !normalizeSearchText(collectText({
-      rowKey: row?.rowKey,
-      note: row?.note,
-      values: row?.values,
-    }).join("\n")).includes(query)) return false;
+    if (!matchesContextRegistryRowQuery(row, columns, query)) return false;
     return Object.entries(filters).every(([key, expected]) => {
       const actual = row?.values?.[key];
       return expected === null ? actual === null || actual === undefined : String(actual) === String(expected);
@@ -6439,22 +6458,8 @@ const getRegistryFromMirror = (mirror, rawInput) => {
   });
 
   const sortKey = input.sortKey ? String(input.sortKey) : null;
-  const sortType = sortKey ? columnsByKey.get(sortKey)?.type : null;
-  const direction = input.sortDirection === "desc" ? -1 : 1;
-  rows.sort((left, right) => {
-    const leftValue = sortKey ? left?.values?.[sortKey] : left?.rowKey;
-    const rightValue = sortKey ? right?.values?.[sortKey] : right?.rowKey;
-    let comparison;
-    if (sortType === "number") {
-      comparison = Number(leftValue ?? 0) - Number(rightValue ?? 0);
-    } else if (sortType === "boolean") {
-      comparison = Number(Boolean(leftValue)) - Number(Boolean(rightValue));
-    } else {
-      comparison = String(leftValue ?? "").localeCompare(String(rightValue ?? ""), "ru");
-    }
-    return comparison * direction
-      || String(left?.rowKey ?? "").localeCompare(String(right?.rowKey ?? ""), "ru");
-  });
+  const sortColumn = sortKey ? columnsByKey.get(sortKey) : null;
+  rows.sort((left, right) => compareContextRegistryRows(left, right, sortColumn, input.sortDirection === "desc"));
 
   const offset = Math.max(0, Math.trunc(Number(input.offset) || 0));
   const limit = Math.max(1, Math.min(500, Math.trunc(Number(input.limit) || 100)));

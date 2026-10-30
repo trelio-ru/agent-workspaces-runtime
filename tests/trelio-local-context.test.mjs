@@ -1493,7 +1493,7 @@ test("exact local procedure read returns only immutable published authority", ()
 test("native personal task reads keep the ordinary MCP list shape and local query", () => {
   const result = handleNativeLocalContextRead(mirror, "list_my_tasks", {
     companySlug: "acme",
-    query: "офлайн контекст",
+    query: "релевантного контекста",
     relation: "created",
     archiveState: "active",
     limit: 50,
@@ -1503,7 +1503,10 @@ test("native personal task reads keep the ordinary MCP list shape and local quer
   assert.equal(result.tasks[0].project.slug, "mobile");
   assert.equal(result.tasks[0].descriptionPreview.includes("релевантного контекста"), true);
   assert.deepEqual(result.pagination, { limit: 50, offset: 0, total: 1, hasMore: false });
-  assert.equal(result.filters.query, "офлайн контекст");
+  assert.equal(result.filters.query, "релевантного контекста");
+  assert.equal(handleNativeLocalContextRead(mirror, "list_my_tasks", {
+    query: "офлайн контекст", relation: "created", archiveState: "active",
+  }).tasks.length, 0, "ordinary lists use contiguous native haystack, not discovery token coverage");
   assert.equal(Object.hasOwn(result, "provider"), false);
 });
 
