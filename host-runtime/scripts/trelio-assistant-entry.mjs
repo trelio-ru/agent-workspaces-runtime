@@ -1101,9 +1101,13 @@ const productionContext = async (action, options = {}) => {
   },signal);
 };
 
+// Host-only recovery must cross the SAME fresh identity/private-context
+// boundary as every other coordinator request. Keep its fixed device method
+// here: a transport/coordinator implementation alone is unreachable from the
+// production factory. This does not add it to the model-visible MCP catalogue.
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
-  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply'];
+  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
 /** Reuse the host setup mutex at the final NEW-work HTTP boundary. This is a
  * denial/CAS check, never domain admission: native owner/device/task guards

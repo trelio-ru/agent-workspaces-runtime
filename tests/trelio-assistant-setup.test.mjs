@@ -2831,3 +2831,118 @@ test('quota pause keeps model-free polling and resumes only after a fresh positi
   assert.equal(polls,1);assert.equal(works,0);assert.equal(closed,1);
   blocked=false;await runAssistantBackgroundTick(options);assert.equal(works,1);assert.equal(closed,2);
 });
+
+// Compose the production host's closed method forwarding, coordinator, durable
+// inbox and real device-client HTTP codec. Supplying a method directly to the
+// coordinator would miss a host adapter omission, even when both components
+// pass their own tests. Only native/server outcomes are synthetic here.
+for(const scenario of ['completed','failed','active','unexpired','attempted','lost_settlement','unknown_not_committed','rebound'])
+test(`production host reconciles the exact absent-send reply across restart: ${scenario}`,async t=>{
+ const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+ const {createAssistantHttp}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-host-no-send-'));
+ t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+ const file=path.join(directory,'inbox.sqlite'),clock=Date.now();
+ const identity={origin:'https://synthetic.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ const companyId=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),memberId=randomUUID(),receiptId=randomUUID();
+ const source={id:sourceId,companyId,localAccountId:accountId,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ const scope={...identity,companyId,provider:'telegram',accountId,bindingId:sourceId};delete scope.deviceId;
+ const seed=new DatabaseSync(file),inbox=createAssistantInbox({database:seed,now:()=>clock});
+ inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+ const poll=inbox.claimPoll(scope);
+ inbox.commitPage(scope,{...poll,nextCursor:'synthetic-current',hasMore:false,events:[{id:'message:123:4',revision:'a'.repeat(64),
+  taskId:null,wake:false,providerWake:true,ownerIdentityId:randomUUID(),conversationKey:`telegram-conversation/v1.${'c'.repeat(64)}`}]});
+ const original=inbox.ownerIntakes()[0],threadId=randomUUID(),turnId=randomUUID();
+ inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);inbox.bindOwnerIntakeThread(original.id,threadId);
+ inbox.readyOwnerIntake(original.id);inbox.startOwnerIntake(original.id);
+ if(scenario==='attempted')inbox.startOwnerReply(original.id,receiptId);
+ inbox.uncertainOwnerIntake(original.id);seed.close();
+ const pass={schemaVersion:1,kind:'source_intake',...identity,companyId,sourceId,sourceRevision:0,passId:original.id,
+  deliveryId:original.delivery_id,eventId:original.original_event_id,threadId};delete pass.origin;
+ let active=structuredClone(pass),currentIdentity=identity,posts=0,releases=0,reads=0,healthReads=0,host=null;
+ const nativeOutcome={schemaVersion:1,id:original.id,companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
+  state:'reply_pending',taskId:null,receiptId,ownerPrivateRead:true,readConfirmed:true,
+  leaseExpiresAt:new Date(clock+(scenario==='unexpired'?60000:-60000)).toISOString(),
+  execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
+ const credential=`tda_${'s'.repeat(43)}`;
+ const client=createAssistantDeviceClient({...identity,store:{get:async()=>({...identity,credential,expiresAt:1})},
+  http:createAssistantHttp({origin:identity.origin,fetchImpl:async(url,options)=>{
+   assert.equal(options.method,'POST');assert.equal(options.headers.authorization,`Bearer ${credential}`);
+   const body=JSON.parse(options.body),locator={companyId,sourceId,intakeId:original.id};
+   if(url===identity.origin+'/api/digital-assistants/runtime/source-skills/intake/read'){
+    reads++;assert.deepEqual(body,locator);
+   }else{
+    assert.equal(url,identity.origin+'/api/digital-assistants/runtime/source-skills/intake/reply-not-attempted');
+    posts++;assert.deepEqual(body,{intakePass:locator,receiptId});
+    // Inspect an independent SQLite reader at the actual HTTP dispatch: the
+    // SAME durable no-send fence must already exclude a late provider spawn.
+    const check=new DatabaseSync(file);try{
+     const live=createAssistantInbox({database:check,now:()=>clock}).ownerIntake(original.id);
+     assert.equal(live.state,'uncertain');assert.equal(live.reply_abandon_receipt_id,receiptId);
+     assert.equal(live.reply_receipt_id,null);assert.equal(live.reply_message_id,null);
+     assert.throws(()=>createAssistantInbox({database:check}).startOwnerReply(original.id,receiptId),{code:'ASSISTANT_INBOX_CONFLICT'});
+    }finally{check.close();}
+    if(scenario==='unknown_not_committed')throw Error('synthetic unavailable result');
+    nativeOutcome.state='reply_abandoned';
+    if(scenario==='lost_settlement')throw Error('synthetic lost result');
+   }
+   return new Response(JSON.stringify(nativeOutcome),{headers:{'content-type':'application/json'}});
+  }})});
+ const create=()=>createAssistantRuntimeHost({context:async action=>action({...client,identity:currentIdentity,
+  heartbeat:async()=>({}),companies:async()=>[],sourceAccounts:async()=>[source],
+  readHealth:async()=>{healthReads++;assert.fail('negative technical settlement cannot clear business health');}},{
+   readIdentity:async()=>currentIdentity,readActivation:async()=>null,readActivePass:async()=>active,
+   activatePass:async()=>assert.fail('recovery cannot create a pass'),withSetupLock:action=>action(),
+   releasePass:async outcome=>{releases++;assert.equal(outcome.state,'reply_abandoned');assert.equal(outcome.id,original.id);
+    assert.equal(outcome.receiptId,receiptId);assert.deepEqual(active,pass);active=null;}
+  }),dependencies:{directory,ensureDirectory:async()=>{},now:()=>clock,timeZone:'UTC',
+   openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
+   readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+    authorizedByUserId:memberId,businessReady:true,
+    availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
+   native:{provision:async()=>assert.fail('no new native chat'),run:async()=>assert.fail('no model/provider retry'),
+    readDelivery:async(thread,delivery)=>{assert.equal(thread,threadId);assert.equal(delivery,original.delivery_id);
+     if(scenario==='rebound')currentIdentity={...identity,deviceId:randomUUID()};
+     return {state:scenario==='active'?'running':scenario==='failed'?'failed':'completed',turnId};}}
+  }});
+ const inspect=()=>{const database=new DatabaseSync(file);try{return {...database.prepare('SELECT state,settled,outcome_state,reply_receipt_id,reply_message_id,reply_abandon_receipt_id FROM assistant_owner_intakes WHERE id=?').get(original.id)};}finally{database.close();}};
+ try{
+  host=await create();
+  if(['active','unexpired','attempted'].includes(scenario)){
+   if(scenario==='active')assert.deepEqual(await host.coordinator.workOnce(),{state:'blocked',kind:'source_intake'});
+   else await assert.rejects(host.coordinator.workOnce(),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});
+   assert.equal(posts,0);assert.deepEqual(active,pass);assert.equal(inspect().reply_abandon_receipt_id,null);
+  }else if(scenario==='rebound'){
+   await assert.rejects(host.coordinator.workOnce(),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+   assert.equal(posts,0);assert.equal(releases,0);assert.deepEqual(active,pass);
+   assert.equal(inspect().reply_abandon_receipt_id,null,'identity refusal precedes any durable settlement attempt');
+  }else if(['lost_settlement','unknown_not_committed'].includes(scenario)){
+   await assert.rejects(host.coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+   assert.equal(inspect().reply_abandon_receipt_id,receiptId);assert.deepEqual(active,pass);
+   await host.close();host=null;currentIdentity=identity;host=await create();
+   if(scenario==='lost_settlement')await host.coordinator.workOnce();
+   else await assert.rejects(host.coordinator.workOnce(),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});
+   assert.equal(posts,1,'lost outcomes never repeat the negative POST');
+  }else {
+   // Enter through the actual worker dispatcher and background tick too.
+   // The isolated device has no other company work; maintenance/usage are
+   // synthetic read-only prerequisites, never a second business executor.
+   await executeAssistantRuntimeRequest({operation:'background_tick'},{
+    context:async action=>action({identity},{readActivation:async()=>null}),
+    backgroundTick:()=>runAssistantBackgroundTick({createHost:async()=>({...host,codexUsage:async()=>({blocked:false})}),
+     pluginMaintenance:async()=>({state:'ready'}),codexMaintenance:async()=>({state:'ready'})})});
+  }
+  if(['completed','failed','lost_settlement'].includes(scenario)){
+   assert.equal(posts,1);assert.equal(releases,1);assert.equal(active,null);
+   assert.deepEqual(inspect(),{state:'complete',settled:1,outcome_state:'reply_abandoned',reply_receipt_id:null,
+    reply_message_id:null,reply_abandon_receipt_id:receiptId});
+   await host.close();host=null;host=await create();await host.coordinator.workOnce();assert.equal(posts,1);assert.equal(releases,1);
+  }else assert.equal(releases,0);
+  assert.ok(reads>=1,'the production host re-enters the actual device client');
+  assert.equal(healthReads,0,'negative technical settlement cannot enter the business-health clearing path');
+  const check=new DatabaseSync(file);try{
+   assert.equal(check.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+   assert.equal(check.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0,'negative settlement never processes or ACKs source originals');
+  }finally{check.close();}
+ }finally{await host?.close();}
+});

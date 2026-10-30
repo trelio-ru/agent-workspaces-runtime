@@ -963,3 +963,10 @@ processed, ACKed, healthy business work or permission to replay the original.
 Attempted, running, missing-marker, changed-source and unknown cases stay fenced.
 Backend migration/endpoint must be deployed before host support. Unknown older
 readers fail closed on schema20 instead of clearing or reinterpreting the row.
+
+The production runtime host forwards this fixed device request through its SAME
+fresh identity/private context, without adding a model MCP tool. Regression
+coverage composes that factory, the real device HTTP codec and reopened SQLite;
+direct coordinator injection alone would miss an absent forwarding method.
+Terminal success/failure, running/unexpired/attempted refusals, changed identity
+and lost negative responses retain their original guards and no-replay behavior.
