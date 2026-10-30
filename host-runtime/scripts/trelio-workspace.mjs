@@ -4161,8 +4161,14 @@ export const migrateHumanCodexHookComponent = async ({
   const inspect = () => inspectHumanCodexHookComponent({ pluginDirectory: main, environment, execFileCommand: execute });
   const before = await inspect();
   if (before.status !== "missing") return { status: before.status, component: before };
-  const key = crypto.createHash("sha256").update(`${codeHome}\n${JSON.stringify(requirement)}`).digest("hex");
-  const root = migrationDirectory ?? path.join(codexRetentionProfile("humanHooks").directory, "migration", key);
+  const key = crypto.createHash("sha256").update(JSON.stringify([
+    codeHome, requirement.pluginId, requirement.version, requirement.integritySha256,
+  ])).digest("hex");
+  // Retention roots admit ONLY immutable snapshot IDs. Keep the mutable attempt
+  // journal in a sibling namespace, including when tests/custom callers isolate
+  // retention. Otherwise its first directory would invalidate future snapshots.
+  const root = migrationDirectory ?? path.join(
+    `${retentionDirectory ?? codexRetentionProfile("humanHooks").directory}-migration`, key);
   await ensurePrivateDirectory(root);
   const { withMirrorRetentionLock } = await import("./trelio-mirror-retention.mjs");
   return withMirrorRetentionLock(root, async () => {
@@ -4234,9 +4240,7 @@ export const startHumanCodexPluginPreservation = (options = {}) => {
     let component = await inspectHookComponent({ ...options, pluginDirectory: entry.installedPath, environment });
     if (["missing", "not_checked"].includes(component.status)) {
       const migrate = options.migrateHookComponent ?? migrateHumanCodexHookComponent;
-      const migration = await migrate({ ...options, entry, environment, signal: migrationAbort.signal,
-        migrationDirectory: options.migrationDirectory
-          ?? (options.retentionDirectory ? `${options.retentionDirectory}-hook-migration` : undefined) });
+      const migration = await migrate({ ...options, entry, environment, signal: migrationAbort.signal });
       if (closed) return entry;
       component = migration.component ?? await inspectHookComponent({ ...options, pluginDirectory: entry.installedPath, environment });
     }

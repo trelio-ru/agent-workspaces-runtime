@@ -129,6 +129,36 @@ test("parallel MCP migrations and lost native replies never install the same dep
   assert.equal(f.state.adds, 1);
 });
 
+test("default migration journal stays outside strict snapshot roots and both components remain retainable", async t => {
+  const f = await humanMigrationFixture(t), errors = [];
+  const options = { ...f.options, migrationDirectory: undefined,
+    hookRetentionDirectory: `${f.retentionDirectory}-human-hooks`, onError: error => errors.push(error) };
+  const lifetime = startHumanCodexPluginPreservation(options);
+  try {
+    await lifetime.ready;
+    assert.deepEqual(errors, []);
+    assert.equal(f.state.adds, 1);
+    const journals = await fs.readdir(`${f.retentionDirectory}-migration`);
+    assert.equal(journals.length, 1);
+    assert.match(journals[0], /^[a-f0-9]{64}$/u);
+    const attempt = JSON.parse(await fs.readFile(path.join(`${f.retentionDirectory}-migration`, journals[0], "attempt.json")));
+    assert.equal(attempt.state, "installed");
+    for (const [profile, retentionDirectory] of [["human", f.retentionDirectory], ["humanHooks", options.hookRetentionDirectory]]) {
+      assert.ok((await fs.readdir(retentionDirectory)).every(name => /^[a-f0-9]{64}$/u.test(name)));
+      await restoreRetainedCodexPluginInstallations({ profile, retentionDirectory });
+    }
+    // Descriptor key order cannot turn a later explicit uninstall into another
+    // install attempt when a main-only update reserializes equivalent metadata.
+    await fs.writeFile(path.join(f.plugin, "codex-hook-component.json"), JSON.stringify({
+      integritySha256: f.requirement.integritySha256, version: f.requirement.version, pluginId: f.requirement.pluginId,
+    }));
+    f.state.installed = [];
+    await fs.rm(f.component, { recursive: true });
+    assert.equal((await migrateHumanCodexHookComponent(options)).status, "installation_unconfirmed");
+    assert.equal(f.state.adds, 1);
+  } finally { await lifetime.close(); }
+});
+
 test("unknown installation outcome remains read-only after process restart", async t => {
   const f = await humanMigrationFixture(t);
   f.state.install = false;

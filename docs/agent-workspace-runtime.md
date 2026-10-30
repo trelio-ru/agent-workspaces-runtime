@@ -143,7 +143,9 @@ descriptor version/inventory и прежние installer/verifier/retention. П�
 Исходная main shell сохраняется вокруг native mutation. Hooks/trust, OAuth,
 pairing и другие клиентские настройки не редактируются runtime.
 
-Тот же private PID-owned mutex сериализует параллельные MCP. Protected intent
+Mutable journal живёт в отдельном sibling namespace вне strict snapshot roots;
+canonical key не зависит от порядка полей descriptor. Тот же private PID-owned
+mutex сериализует параллельные MCP. Protected intent
 записывается до native add; потерянный ответ, авария процесса и последующий
 uninstall допускают только read-back, без повторной установки. Успех требует
 fresh exact inventory и полной проверки bytes. Migration/snapshot не блокируют
