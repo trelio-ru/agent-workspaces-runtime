@@ -1517,6 +1517,17 @@ An end/rotation racing a signed read is checked by that same native endpoint,
 as for any request already in flight after releasing a mutex. No lock deadline,
 private-session budget, proof lifetime or replay policy is extended. The real
 Windows cold composition must include concurrent file reads and MCP polls.
+Cold company native-pass revalidation dispatch is paced at 80ms per admission
+in the SAME managed invocation, shared by its four file readers. The server's
+1200/minute IP ceiling stays unchanged; the nominal 750/minute reservation rate
+leaves headroom for foreground polls/hooks. Timer delays may coalesce at most
+the four pending file readers; idle time cannot accumulate more permits.
+Only future dispatch times are retained,
+never a native response, key or permission. Identity and the native lease/ACL
+are read AFTER the abortable wait, and every content endpoint still validates
+proof/pass/recipient independently. An idle interval cannot bank permits. The
+original first-sync/private/HTTP deadlines and hard refusal on 429 stay intact;
+this is pacing before first dispatch, not retrying a failed or unknown request.
 Tests cover actual serial MCP/current-child pipes and a real aborted Git blob,
 native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
@@ -3456,3 +3467,14 @@ native lease, bounded by30 minutes, with an independent nonrenewing timer. This
 fixes a15-minute observer that expired before the unchanged600s+one600s search
 preparation; polling does not renew a lease, restart old work or change the
 preparation deadline. Old failed attempts keep their original deadlines.
+
+
+The same pure terminal-history classifier can recognize a host-selected positive
+technical reply after the exact structured company-read rate refusal. It requires
+a completed error-free turn, unchanged preparing-only searches, no source reads
+or other effects, and one completed reply_owner whose structured REPLIED receipt,
+source/event/thread and private confirmed read match the fresh native witness.
+Arbitrary prose, ready search, missing receipt, pending/unknown send and another
+tool never qualify. This classification is distinct from absent-provider timeout
+abandonment and conveys no permission to reopen an intake or send again. Only a
+separate current native correction protocol may admit a bounded corrective child.

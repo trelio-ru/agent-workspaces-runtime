@@ -68,7 +68,7 @@ const provisionReview=value=>{
  * caller-authored safety boolean enters this one-use recovery certificate. */
 export const assistantReadOnlyRecoveryMetadata=(value,{local=false,response=false}={})=>{
   const fields=['parentIntakeId','receiptId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey',
-    ...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
+    ...(value?.technicalReplyCorrection===true?['technicalReplyCorrection']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
   if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==fields.sort().join(',')
     ||['parentIntakeId','receiptId','terminalTurnId'].some(key=>!UUID.test(value[key]??''))
     ||['previousPrerequisiteKey','prerequisiteKey'].some(key=>typeof value[key]!=='string'||!/^[0-9a-f]{64}$/u.test(value[key]))
@@ -986,6 +986,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND i.readonly_recovery_json IS NULL AND i.source_revision=s.configuration_revision AND s.state='active'
         AND i.retry_ordinal<20 AND i.next_check_at<=? AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    technicalReplyIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='replied'
+        AND json_extract(s.scope_json,'$.provider')='telegram'
+        AND i.native_started=1 AND i.reply_receipt_id=i.outcome_receipt AND i.reply_message_id>0
+        AND i.reply_abandon_receipt_id IS NULL AND i.outcome_task_id IS NULL
+        AND (i.readonly_recovery_json IS NULL OR json_extract(i.readonly_recovery_json,'$.technicalReplyCorrection') IS NULL)
+        AND i.source_revision=s.configuration_revision AND s.state='active' AND i.retry_ordinal<20 AND i.next_check_at<=?
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+      ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
     readonlyRecoverySuccessors(id){
       const row=this.ownerIntake(id);
       // Inventory, not eligibility: include unsettled/foreign/attempted rows so
@@ -1005,11 +1015,21 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     });},
     retryReadonlyOwnerIntake(id,witness){return transaction(()=>{
       const old=this.ownerIntake(id),metadata=assistantReadOnlyRecoveryMetadata({...witness,parentIntakeId:id,beginAttempted:false},{local:true});
-      if(!metadata||old.kind!=='owner_command'||old.state!=='complete'||old.settled!==1||old.outcome_state!=='reply_abandoned'
-        ||old.readonly_recovery_json!==null||old.native_started!==1||!old.thread_id||old.reply_receipt_id!==null||old.reply_message_id!==null
-        ||old.reply_abandon_receipt_id!==metadata.receiptId||old.outcome_receipt!==metadata.receiptId||old.outcome_task_id!==null
+      const prior=old.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(old.readonly_recovery_json),{local:true}):null;
+      if(!metadata||old.readonly_recovery_json&&!prior||old.kind!=='owner_command'||old.state!=='complete'||old.settled!==1
+        ||old.native_started!==1||!old.thread_id||old.outcome_receipt!==metadata.receiptId||old.outcome_task_id!==null
         ||old.source_state!=='active'||old.source_revision!==old.configuration_revision||old.retry_ordinal>=20
         ||(old.intake_prerequisite??old.retry_prerequisite)!==metadata.previousPrerequisiteKey)fail('ASSISTANT_INBOX_CONFLICT');
+      // These are disjoint certificates. A positive send may only receive one
+      // explicitly marked correction, never the old absent-provider recovery.
+      // The prior correction flag survives every terminal state/restart, so a
+      // failed corrective child cannot form an unbounded answer chain.
+      if(metadata.technicalReplyCorrection===true){
+        if(old.outcome_state!=='replied'||old.reply_receipt_id!==metadata.receiptId||!Number.isSafeInteger(old.reply_message_id)
+          ||old.reply_message_id<1||old.reply_message_id>2147483647||old.reply_abandon_receipt_id!==null
+          ||prior&&!prior.beginAttempted||prior?.technicalReplyCorrection===true)fail('ASSISTANT_INBOX_CONFLICT');
+      }else if(old.outcome_state!=='reply_abandoned'||old.readonly_recovery_json!==null
+        ||old.reply_receipt_id!==null||old.reply_message_id!==null||old.reply_abandon_receipt_id!==metadata.receiptId)fail('ASSISTANT_INBOX_CONFLICT');
       const previous=get('SELECT id,readonly_recovery_json FROM assistant_owner_intakes WHERE retry_of_id=?',old.id);
       if(previous){const existing=JSON.parse(previous.readonly_recovery_json??'null');
         if(!existing||JSON.stringify({...existing,beginAttempted:false})!==JSON.stringify(metadata))fail('ASSISTANT_INBOX_CONFLICT');

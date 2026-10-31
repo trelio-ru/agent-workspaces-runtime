@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto, createHash, createPublicKey } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask, withAssistantManagedContentArguments, validateAssistantNativeInputShape } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask, withAssistantManagedContentArguments, validateAssistantNativeInputShape, createAssistantCompanyReadPacer } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker, canonicalJson,
   encryptFileToCompanyContainer, decryptCompanyPayload, unlockRememberedAgentEncryptionDevice } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
@@ -11,6 +11,21 @@ const memoryStore = () => {
   return { get:async input=>structuredClone(values.get(key(input))??null),
     put:async(input,value)=>values.set(key(input),structuredClone(value)),remove:async input=>values.delete(key(input)) };
 };
+
+test('cold company admission pacing preserves a finite minute budget without caching or retrying native authority',async()=>{
+  let clock=0;const dispatch=[];
+  const pace=createAssistantCompanyReadPacer({monotonic:()=>clock,wait:async ms=>{clock+=ms;}});
+  for(let index=0;index<3000;index++){await pace();dispatch.push(clock);}
+  assert.ok(dispatch.at(-1)<300000,'representative cold work still fits its unchanged ten-minute deadline');
+  for(const start of [0,60000,120000,180000])assert.ok(dispatch.filter(at=>at>=start&&at<start+60000).length<=750);
+  clock+=60000;await pace();assert.equal(clock,dispatch.at(-1)+60000,'idle time earns no burst of saved permits');
+  const controller=new AbortController(),reason=new Error('SYNTHETIC_ORIGINAL_DEADLINE');controller.abort(reason);
+  await assert.rejects(pace(controller.signal),error=>error===reason);
+  const real=createAssistantCompanyReadPacer(),pending=new AbortController();await real();
+  const waited=real(pending.signal);pending.abort(reason);
+  await assert.rejects(waited,error=>error.name==='AbortError'&&error.code==='ABORT_ERR'&&error.cause===reason,
+    'queued waits preserve the exact original deadline/cancellation identity');
+});
 
 test('native MAX selectors are canonical nonzero signed 64-bit IDs, never zero aliases',async()=>{
   const {assistantMaxChatUrl}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
@@ -4207,4 +4222,31 @@ test('negative reply settlement uses only its fixed device HTTP route and exact 
   assert.equal(calls,before+1,'malformed outcome never retries the request');
  }
  const before=calls;await assert.rejects(client.abandonUnattemptedOwnerReply({...input,replyAttempted:false}));assert.equal(calls,before);
+});
+
+test('technical correction uses explicit native capability and strict host-only begin metadata',async()=>{
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+ const witness={parentIntakeId:randomUUID(),receiptId:randomUUID(),terminalTurnId:randomUUID(),
+  previousPrerequisiteKey:'a'.repeat(64),prerequisiteKey:'b'.repeat(64),technicalReplyCorrection:true};
+ const input={companyId,sourceId,intakeId,sourceRevision:2,eventId:randomUUID(),threadId:randomUUID(),
+  ownerIdentityId:randomUUID(),senderExternalUserId:'123',conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,readOnlyRecovery:witness};
+ let calls=0,capability=1,change=null;
+ const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1})},
+  http:async(operation,body)=>{
+   assert.equal(operation,'intakeBegin');calls++;assert.deepEqual(body.readOnlyRecovery,witness);
+   return {schemaVersion:1,id:intakeId,companyId,sourceId,sourceRevision:2,eventId:input.eventId,threadId:input.threadId,
+    state:'leased',taskId:null,receiptId:null,readConfirmed:false,ownerPrivateRead:false,
+    leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},
+    readOnlyRecoveryProtocolVersion:1,...(capability===null?{}:{readOnlyReplyCorrectionProtocolVersion:capability}),
+    readOnlyRecovery:{...witness,...change,replyOnly:true}};
+  }});
+ const accepted=await client.beginSourceIntake(input);
+ assert.equal(accepted.readOnlyReplyCorrectionProtocolVersion,1);assert.equal(accepted.readOnlyRecovery.technicalReplyCorrection,true);
+ capability=null;assert.equal((await client.beginSourceIntake(input)).readOnlyReplyCorrectionProtocolVersion,undefined,'old server is never inferred capable');
+ capability=2;await assert.rejects(client.beginSourceIntake(input),/INVALID_RESPONSE/);capability=1;
+ change={technicalReplyCorrection:undefined};await assert.rejects(client.beginSourceIntake(input),/INVALID_RESPONSE/);change=null;
+ const before=calls;
+ for(const patch of [{technicalReplyCorrection:false},{technicalReplyCorrection:'true'},{extra:true},{receiptId:'private prose'}])
+  await assert.rejects(client.beginSourceIntake({...input,readOnlyRecovery:{...witness,...patch}}),/INVALID_INPUT/);
+ assert.equal(calls,before,'malformed witness refuses before HTTP and never retries a provider');
 });

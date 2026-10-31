@@ -3129,7 +3129,9 @@ test(`production host reconciles the exact absent-send reply across restart: ${s
 // attempts. Only the native peer and server responses are synthetic; no provider
 // send, real model, owner state or company plaintext enters this fixture.
 for(const scenario of ['complete','mutating_history','missing_capability','unchanged_prerequisite','attempted_send','lost_begin','unknown_begin',
- 'successor_created','successor_unsettled','successor_attempted','successor_receipt','successor_event','successor_source','successor_task','successor_history','successor_unknown_turn'])
+ 'successor_created','successor_unsettled','successor_attempted','successor_receipt','successor_event','successor_source','successor_task','successor_history','successor_unknown_turn',
+ 'technical_complete','technical_missing_capability','technical_wrong_receipt',
+ 'technical_legacy_complete','technical_legacy_root_mismatch','technical_legacy_root_unexpired'])
 test(`production worker restores one reply-only original with no blind begin replay: ${scenario}`,async t=>{
  const {EventEmitter}=await import('node:events');
  const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
@@ -3138,16 +3140,34 @@ test(`production worker restores one reply-only original with no blind begin rep
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-readonly-recovery-')),file=path.join(directory,'inbox.sqlite');
  t.after(()=>fs.rm(directory,{recursive:true,force:true}));let clock=Date.now();
  const identity={origin:'https://synthetic.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ const correction=scenario.startsWith('technical_'),legacy=scenario.startsWith('technical_legacy_');let legacyRoot=null;
  const companyId=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),receiptId=randomUUID(),threadId=randomUUID();
  const source={id:sourceId,companyId,localAccountId:accountId,projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
  const scope={...identity,companyId,provider:'telegram',accountId,bindingId:sourceId};delete scope.deviceId;
  const seed=new DatabaseSync(file),inbox=createAssistantInbox({database:seed,now:()=>clock});inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
  inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'initial',hasMore:false,events:[{id:'message:123:4',revision:'a'.repeat(64),
   taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'c'.repeat(64)}`}]});
- const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);inbox.bindOwnerIntakeThread(original.id,threadId);
+ let original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);inbox.bindOwnerIntakeThread(original.id,threadId);
  inbox.readyOwnerIntake(original.id);inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);
- inbox.confirmIntakeModelRead(original.id);inbox.uncertainOwnerIntake(original.id);inbox.startOwnerReplyAbandonment(original.id,receiptId);
- inbox.finishOwnerIntake(original.id,{state:'reply_abandoned',receiptId});inbox.settleOwnerIntake(original.id);
+ inbox.confirmIntakeModelRead(original.id);
+ if(legacy){
+  const rootReceipt=randomUUID();inbox.uncertainOwnerIntake(original.id);inbox.startOwnerReplyAbandonment(original.id,rootReceipt);
+  inbox.finishOwnerIntake(original.id,{state:'reply_abandoned',receiptId:rootReceipt});inbox.settleOwnerIntake(original.id);
+  legacyRoot={row:inbox.ownerIntake(original.id),receiptId:rootReceipt};
+  // Separate historical root chronology from its later recovery child.
+  clock+=1000;
+  original=inbox.retryReadonlyOwnerIntake(original.id,{receiptId:rootReceipt,terminalTurnId:randomUUID(),
+   previousPrerequisiteKey:'a'.repeat(64),prerequisiteKey:'b'.repeat(64)});
+  inbox.startReadonlyIntakeBegin(original.id);inbox.startOwnerIntake(original.id);inbox.confirmIntakeModelRead(original.id);
+ }
+ if(correction){
+  inbox.startOwnerReply(original.id,receiptId);inbox.confirmOwnerReply(original.id,{receiptId,messageId:901});
+  inbox.finishOwnerIntake(original.id,{state:'replied',receiptId});
+ }else{
+  inbox.uncertainOwnerIntake(original.id);inbox.startOwnerReplyAbandonment(original.id,receiptId);
+  inbox.finishOwnerIntake(original.id,{state:'reply_abandoned',receiptId});
+ }
+ inbox.settleOwnerIntake(original.id);
  if(scenario==='attempted_send')seed.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(randomUUID(),original.id);
  createAssistantInbox({database:seed}); // Finish existing conversation-key hydration before the immutable snapshot.
  const parentBefore={...seed.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)};
@@ -3168,17 +3188,24 @@ test(`production worker restores one reply-only original with no blind begin rep
   if(scenario==='successor_unsettled')seed.prepare('UPDATE assistant_owner_intakes SET settled=0 WHERE id=?').run(successor.id);
   if(scenario==='successor_attempted')seed.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(randomUUID(),successor.id);
  }
- seed.close();
+ const priorRecovery=JSON.parse(inbox.ownerIntake(original.id).readonly_recovery_json??'null');seed.close();
  const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
  const parent={schemaVersion:1,id:original.id,companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
-  state:'reply_abandoned',taskId:null,receiptId,ownerPrivateRead:true,readConfirmed:true,execution,
-  leaseExpiresAt:new Date(clock-60000).toISOString(),...(scenario==='missing_capability'?{}:{readOnlyRecoveryProtocolVersion:1})};
+  state:correction?'replied':'reply_abandoned',taskId:null,receiptId,ownerPrivateRead:true,readConfirmed:true,execution,
+  leaseExpiresAt:new Date(clock-60000).toISOString(),...(scenario==='missing_capability'?{}:{readOnlyRecoveryProtocolVersion:1}),
+  ...(correction&&scenario!=='technical_missing_capability'?{readOnlyReplyCorrectionProtocolVersion:1}:{}),
+  ...(priorRecovery?{readOnlyRecovery:{...Object.fromEntries(Object.entries(priorRecovery).filter(([key])=>key!=='beginAttempted')),replyOnly:true}}:{})};
  const intakePass={companyId,sourceId,intakeId:original.id},queries=['SYNTHETIC_PRIVATE_QUERY'];
  const call=(tool,args,code,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,arguments:{intakePass,runtimeSessionProof:{},...args},result:{structuredContent:code}});
  const turn={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',text:`TRELIO_ASSISTANT_DELIVERY ${original.delivery_id}\nSYNTHETIC_PRIVATE_BODY`}]},
   call('get_assistant_intake_context',{},{}),call('search',{companySlugs:['synthetic'],queries},
    {schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:{companySlugs:['synthetic'],queries}}}),
   call('search',{companySlugs:['synthetic'],queries},{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'},'failed')]};
+ if(correction){
+  turn.items[3]=call('search',{companySlugs:['synthetic'],queries},{code:'ASSISTANT_TRANSPORT_RATE_LIMITED'},'failed');
+  turn.items.push(call('resolve_assistant_intake',{decision:'reply_owner',clientRequestId:original.id,replyText:'SYNTHETIC_TECHNICAL_LIMITATION'},
+   {...parent,receiptId:scenario==='technical_wrong_receipt'?randomUUID():receiptId}));
+ }
  if(scenario==='mutating_history')turn.items.splice(2,0,call('create_task',{},{}));
  const successorPass=successor?{companyId,sourceId,intakeId:successor.id}:null,selectedProject=randomUUID();
  const successorTurn=successor?{id:randomUUID(),status:'completed',items:[
@@ -3207,6 +3234,9 @@ test(`production worker restores one reply-only original with no blind begin rep
    const body=JSON.parse(options.body);assert.equal(options.headers.authorization,`Bearer ${credential}`);
    if(url.endsWith('/intake/read')){
     if(body.intakeId===original.id)return new Response(JSON.stringify(parent),{headers:{'content-type':'application/json'}});
+    if(legacyRoot&&body.intakeId===legacyRoot.row.id)return new Response(JSON.stringify({...parent,id:legacyRoot.row.id,state:'reply_abandoned',
+     receiptId:scenario==='technical_legacy_root_mismatch'?randomUUID():legacyRoot.receiptId,readOnlyRecovery:undefined,
+     ...(scenario==='technical_legacy_root_unexpired'?{leaseExpiresAt:new Date(clock+60000).toISOString()}:{} )}),{headers:{'content-type':'application/json'}});
     if(body.intakeId===successor?.id){
      const native=structuredClone(successorOutcome);
      if(scenario==='successor_receipt')native.receiptId=randomUUID();
@@ -3225,6 +3255,7 @@ test(`production worker restores one reply-only original with no blind begin rep
    }finally{check.close();}
    assert.equal(body.eventId,original.original_event_id);assert.equal(body.threadId,threadId);assert.equal(body.readOnlyRecovery.parentIntakeId,original.id);
    assert.equal(body.readOnlyRecovery.receiptId,receiptId);assert.equal(Object.hasOwn(body.readOnlyRecovery,'beginAttempted'),false);
+   assert.equal(body.readOnlyRecovery.technicalReplyCorrection,correction?true:undefined);
    if(scenario==='unknown_begin')throw Error('synthetic uncommitted outcome');
    childReceipt={schemaVersion:1,id:body.intakeId,companyId,sourceId,sourceRevision:0,eventId:body.eventId,threadId,
     state:'leased',taskId:null,receiptId:null,readConfirmed:false,ownerPrivateRead:false,execution,
@@ -3243,12 +3274,13 @@ test(`production worker restores one reply-only original with no blind begin rep
    openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
    readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:ownerId,businessReady:true,
     availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
-   readHookReadiness:async()=>({fingerprint:(scenario==='unchanged_prerequisite'?'a':'b').repeat(64)}),
+   readHookReadiness:async()=>({fingerprint:(scenario==='unchanged_prerequisite'?'a':legacy?'c':'b').repeat(64)}),
    native:{provision:async()=>assert.fail('same original chat must not be reprovisioned'),
     readDelivery:(thread,marker,options)=>{assert.equal(thread,threadId);return readAssistantCodexDelivery(thread,marker,{...options,executable:process.execPath,environment:{},spawnProcess:nativeRpc});},
     run:async(input,options)=>{runs++;assert.equal(input.intakeContext.eventId,original.original_event_id);assert.equal(input.threadId,threadId);
      assert.equal(options.passTimeoutMs,1800000,'new observer is bounded by the SAME original native lease, not the shorter15m default');
      assert.equal(options.replyOnlyRecovery,true,'the certified child queues the narrow reply-only prompt');
+     assert.equal(options.technicalReplyCorrection,correction?true:undefined);
      options.startInvocation();throw Object.assign(Error('synthetic pending original response'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});}}
   }});
  try{
@@ -3256,7 +3288,7 @@ test(`production worker restores one reply-only original with no blind begin rep
   await executeAssistantRuntimeRequest({operation:'background_tick'},{context:async action=>action({identity},{readActivation:async()=>null}),
    backgroundTick:()=>runAssistantBackgroundTick({createHost:async()=>({...host,codexUsage:async()=>({blocked:false})}),
     pluginMaintenance:async()=>({state:'ready'}),codexMaintenance:async()=>({state:'ready'})})}).catch(()=>{});
-  const refused=['mutating_history','missing_capability','unchanged_prerequisite','attempted_send'].includes(scenario)||hasSuccessor&&scenario!=='successor_created';
+  const refused=['mutating_history','missing_capability','unchanged_prerequisite','attempted_send','technical_missing_capability','technical_wrong_receipt','technical_legacy_root_mismatch','technical_legacy_root_unexpired'].includes(scenario)||hasSuccessor&&scenario!=='successor_created';
   if(refused){assert.equal(posts,0);assert.equal(runs,0);assert.equal(active,null);}
   else if(scenario==='lost_begin'||scenario==='unknown_begin'){
    assert.equal(posts,1);assert.equal(runs,0);assert.equal(active,null);await host.close();host=await create();
@@ -3266,7 +3298,7 @@ test(`production worker restores one reply-only original with no blind begin rep
   const inspect=new DatabaseSync(file,{readOnly:true});try{
    const {next_check_at,...parentAfter}=inspect.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id);
    const {next_check_at:oldCheck,...preserved}=parentBefore;assert.deepEqual(parentAfter,preserved,'old receipt/lease/model-read/start bits remain immutable');
-   assert.equal(inspect.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,(refused?1:2)+Number(hasSuccessor));
+   assert.equal(inspect.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,(refused?1:2)+Number(hasSuccessor)+Number(legacy));
    assert.equal(inspect.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
    assert.equal(inspect.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
   }finally{inspect.close();}

@@ -429,8 +429,9 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
 /** Schema discovery before enrollment needs no credential/private worker.
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
-export const createProductionAssistantMcp = async ({presentationProfile='task',prepareCompanySearch=false,context=productionContext,withProfile=withProductionAssistantWorkspace,withManagedContent=withProductionAssistantManagedContent,httpRequest}={}) => {
+export const createProductionAssistantMcp = async ({presentationProfile='task',prepareCompanySearch=false,context=productionContext,withProfile=withProductionAssistantWorkspace,withManagedContent=withProductionAssistantManagedContent,httpRequest,sourcePackage}={}) => {
   if(typeof prepareCompanySearch!=='boolean')fail('ASSISTANT_REQUEST_INVALID');
+  if(sourcePackage!==undefined&&typeof sourcePackage!=='function')fail('ASSISTANT_REQUEST_INVALID');
   const common = await import('./trelio-workspace.mjs');
   // Preserve credential-free production discovery. A trusted maintainer context
   // owns its own private root; no tool, CLI envelope or environment selects it.
@@ -438,6 +439,10 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
     try{await fs.lstat(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
     catch(error){if(error.code==='ENOENT')return null;throw error;}
   }
+  // The optional function belongs only to a trusted host composition (the
+  // cross-repository synthetic stand replaces the external provider package).
+  // No request/MCP field can select it. Native intake checks, the production
+  // reply materializer and durable SQLite/provider fences still execute here.
   const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake}=await import('./trelio-assistant-transport.mjs');
   return context(async(sourceClient,host,store)=>{
   const identity=sourceClient.identity;
@@ -482,7 +487,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // Complete the frozen exact batch through the SAME signed read engine.
       // Partial reads never earn confirmation, owner proof, processing or ACK.
       for(const reference of references){
-        const message=await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal});
+        const message=await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal,sourcePackage});
         bytes+=Buffer.byteLength(message.text);if(bytes>262144)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_READ_INVALID'});
         messages.push({...message,eventId:reference.eventId});
       }
@@ -525,7 +530,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
         ||row.scope.bindingId!==pass.sourceId||row.source_revision!==pass.sourceRevision||row.reply_receipt_id!==null)
         throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
       const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(value=>value.id===pass.sourceId);
-      await replyAssistantOwnerIntake({identity,client:sourceClient,host,store,pass,source,signal,
+      await replyAssistantOwnerIntake({identity,client:sourceClient,host,store,pass,source,signal,sourcePackage,
         receiptId:admitted.receiptId,replyText:args.replyText,
         reference:{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key},
         beforeInvoke:()=>withInbox(inbox=>inbox.startOwnerReply(pass.passId,admitted.receiptId)),

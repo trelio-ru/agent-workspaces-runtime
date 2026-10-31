@@ -15,12 +15,12 @@ import {createAssistantHostState} from '../../../host-runtime/scripts/trelio-ass
 import {createAssistantDeviceClient,createAssistantHttp} from '../../../host-runtime/scripts/trelio-assistant-transport.mjs';
 import {remoteMcpHttpRequest} from '../../../host-runtime/scripts/trelio-remote-mcp.mjs';
 import {withPrivateProcessSession} from '../../../host-runtime/scripts/trelio-hook-private-session.mjs';
-import {withProductionAssistantWorkspace,createProductionAssistantMcp,
+import {withProductionAssistantWorkspace,withProductionAssistantManagedContent,createProductionAssistantMcp,
   executeAssistantCompanyContextRequest,executeAssistantRuntimeRequest,assistantProductionContextSignal} from '../../../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const SAME_ORIGINS=new Set(['https://trelio.ru','https://e2ee.trelio.ru']);
 
-export const openNativeCompanyScenario=async configuration=>{
+export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>{
   assert.equal(configuration.schema,'trelio.test.company-context/v1');
   assert.ok(['cold','owned-timeout-resume','second-timeout-hard','ordinary-refusal-hard','unknown-http-hard'].includes(configuration.caseName));
   const root=await fs.realpath(configuration.root);
@@ -61,11 +61,32 @@ export const openNativeCompanyScenario=async configuration=>{
     return withPrivateProcessSession(()=>action(client,host,store),signal);
   };
   const withProfile=(action,options={})=>withProductionAssistantWorkspace(action,{...options,context});
-  const httpRequest=(input,options)=>remoteMcpHttpRequest(input,{...options,resolveEndpoint:async endpoint=>{
+  const httpRequest=async(input,options)=>{
+    const response=await remoteMcpHttpRequest(input,{...options,resolveEndpoint:async endpoint=>{
     assert.equal(endpoint,'https://trelio.ru/mcp/assistant');
     return {endpoint:new URL('/mcp/assistant',server),address:'127.0.0.1',family:4};
-  }});
-  const proxyFor=options=>createProductionAssistantMcp({...options,context,withProfile,httpRequest});
+    }});
+    if(configuration.nativeBackend===true&&input.payload?.method==='tools/list'){
+      const tools=response.message?.result?.tools;
+      await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation:'native_catalogue',
+        bytes:Buffer.byteLength(JSON.stringify(tools??[])),toolCount:Array.isArray(tools)?tools.length:null,
+        objectSchemas:Array.isArray(tools)&&tools.every(tool=>tool.inputSchema?.type==='object')})+'\n');
+    }
+    if(configuration.nativeBackend===true&&input.payload?.method==='tools/call'){
+      const result=response.message?.result;
+      await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation:'native_result',
+        tool:input.payload.params?.name,bytes:Buffer.byteLength(JSON.stringify(result??null)),
+        contentTypes:Array.isArray(result?.content)?result.content.map(item=>item.type):null,
+        contentCount:result?.content?.length??null,structured:typeof result?.structuredContent,
+        isError:result?.isError??null,code:result?.structuredContent?.code??null})+'\n');
+    }
+    return response;
+  };
+  // The production content protector must share this fixture's SAME native
+  // private context too. Its default context deliberately reads the real host
+  // namespace, which is absent in an isolated fixture and cannot be borrowed.
+  const withManagedContent=(request,send)=>withProductionAssistantManagedContent(request,send,{context,withProfile});
+  const proxyFor=options=>createProductionAssistantMcp({...options,context,withProfile,withManagedContent,httpRequest,sourcePackage});
   return {
     store,host,client,context,withProfile,
     execute:async request=>{

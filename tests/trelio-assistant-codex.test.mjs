@@ -965,3 +965,36 @@ test('read-only recovery skips only separately certified completed task-creation
  const second=settledCreationFixture(f);
  assert.equal((await read([second.turn,successor.turn,f.turn],[second.witness,successor.witness])).readOnlyFailure,'company_context_preparation_timeout');
 });
+
+// A confirmed technical reply is a distinct recovery boundary: the old send
+// happened and remains immutable. Prove the entire native read-only chain and
+// its positive receipt before admitting any later corrective response.
+test('technical reply correction requires exact read-only rate failure and positive native reply receipt',async()=>{
+ const f=readonlyPreparationFixture(),receiptId=randomUUID(),eventId=randomUUID(),sourceRevision=2;
+ const witness={receiptId,eventId,sourceRevision,threadId:f.threadId};
+ const options={...f,technicalReplyCorrection:witness};
+ const error=f.turn.items.at(-2),resolve=f.turn.items.at(-1);
+ error.result.structuredContent={code:'ASSISTANT_TRANSPORT_RATE_LIMITED'};
+ resolve.status='completed';resolve.result.structuredContent={schemaVersion:1,...f.intakePass,id:f.intakePass.intakeId,
+  sourceRevision,eventId,threadId:f.threadId,state:'replied',taskId:null,receiptId,readConfirmed:true,ownerPrivateRead:true};
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,options),true);
+ const nativeRead=turns=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{...options,readOnlyPreparation:f.intakePass,
+  executable:process.execPath,spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+   ?{thread:{id:f.threadId,cwd:process.cwd()}}:{data:turns,nextCursor:null}}))});
+ assert.equal((await nativeRead([f.turn])).readOnlyFailure,'company_context_rate_limited_reply');
+ assert.deepEqual(await nativeRead([f.turn,f.turn]),{state:'uncertain'});
+ assert.deepEqual(await nativeRead([{id:randomUUID(),status:'completed',items:[]},f.turn]),{state:'uncertain'});
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,f),false,'never reclassify a positive send as an absent-provider timeout');
+ for(const patch of [{receiptId:randomUUID()},{eventId:randomUUID()},{threadId:randomUUID()},{sourceRevision:3},{extra:true}])
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,technicalReplyCorrection:{...witness,...patch}}),false);
+ const altered=change=>{const t=structuredClone(f.turn);change(t);return t;};
+ for(const t of [altered(t=>{t.status='failed';}),altered(t=>{t.error={codexErrorInfo:'serverOverloaded'};}),
+  altered(t=>{t.items.at(-1).status='failed';}),altered(t=>{t.items.at(-1).result.structuredContent.state='reply_pending';}),
+  altered(t=>{t.items.at(-1).result.structuredContent.taskId=randomUUID();}),
+  altered(t=>{t.items.at(-2).result.structuredContent.code='ASSISTANT_INTAKE_ACCESS_DENIED';}),
+  altered(t=>{t.items.at(-2).status='completed';}),altered(t=>{t.items.splice(-1,0,structuredClone(t.items.at(-2)));}),
+  altered(t=>{t.items[3].result.structuredContent={schemaVersion:1,state:'ready'};}),
+  altered(t=>{t.items.splice(-1,0,{...structuredClone(t.items[3]),tool:'fetch'});}),
+  altered(t=>{t.items.at(-1).arguments.decision='create_task';})])
+  assert.equal(await assistantReadOnlyPreparationFailure(t,options),false);
+});

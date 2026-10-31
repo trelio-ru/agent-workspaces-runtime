@@ -481,7 +481,15 @@ const publicBootstrapRead=async(item,environment,verifyShell,signal)=>{
   if(normalized(match[2])!==instruction||normalized(item.commandActions[0].path)!==instruction)return false;
   return shells.includes(normalized(match[1]))||await verifyShell(match[1],{environment,signal})===true;
 };
-export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable}={})=>{
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection}={})=>{
+  // This positive-send profile is intentionally separate from absent-provider
+  // abandonment. It accepts only a host-selected immutable native receipt and
+  // the full terminal read-only rate-failure chain; prose never classifies it.
+  const correction=technicalReplyCorrection;
+  if(correction!==undefined&&(!correction||Object.getPrototypeOf(correction)!==Object.prototype
+    ||Object.keys(correction).sort().join(',')!=='eventId,receiptId,sourceRevision,threadId'
+    ||['eventId','receiptId','threadId'].some(key=>!UUID.test(correction[key]??''))
+    ||!Number.isSafeInteger(correction.sourceRevision)||correction.sourceRevision<0||turn?.status!=='completed'))return false;
   if(!UUID.test(deliveryId??'')||!intakePass||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
     ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
     ||!['completed','failed'].includes(turn.status)||turn.error!=null||!Array.isArray(turn.items)
@@ -507,7 +515,7 @@ export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePa
           ||!Array.isArray(args.companySlugs)||args.companySlugs.length!==1||!Array.isArray(args.queries)||!args.queries.length||args.queries.length>5)return false;
         const selected=JSON.stringify({companySlugs:args.companySlugs,queries:args.queries});
         if(business!==null&&selected!==business)return false;business=selected;
-        if(item.status==='failed'&&result?.code==='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT')timeout=true;
+        if(item.status==='failed'&&result?.code===(correction?'ASSISTANT_TRANSPORT_RATE_LIMITED':'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'))timeout=true;
         else if(item.status!=='completed'||item.result.isError===true||result?.schemaVersion!==1||result.state!=='preparing'
           ||result.readOnly!==true||result.nextCall?.tool!=='search'
           ||!result.nextCall.arguments||Object.keys(result.nextCall.arguments).sort().join(',')!=='companySlugs,queries'
@@ -516,12 +524,18 @@ export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePa
       }else if(item.tool==='resolve_assistant_intake'){
         if(!timeout||resolved||keys!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
           ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'||typeof args.replyText!=='string'
-          ||item.status!=='failed'||result?.code!=='ASSISTANT_INTAKE_CHANGED')return false;
+          ||correction&&(item.status!=='completed'||item.result.isError===true||item.error!=null
+            ||result?.schemaVersion!==1||result.id!==intakePass.intakeId||result.companyId!==intakePass.companyId
+            ||result.sourceId!==intakePass.sourceId||result.sourceRevision!==correction.sourceRevision
+            ||result.eventId!==correction.eventId||result.threadId!==correction.threadId||result.receiptId!==correction.receiptId
+            ||result.state!=='replied'||result.readConfirmed!==true||result.ownerPrivateRead!==true||result.taskId!==null
+            ||!args.replyText.trim()||args.replyText.length>4096||args.replyText.includes('\0'))
+          ||!correction&&(item.status!=='failed'||result?.code!=='ASSISTANT_INTAKE_CHANGED'))return false;
         resolved=true;
       }else return false;
     }else return false;
   }
-  return user===1&&contextCalls===1&&searches>0&&timeout;
+  return user===1&&contextCalls===1&&searches>0&&timeout&&(!correction||resolved);
 };
 // A host-selected receipt is necessary but not sufficient: inspect the entire
 // independent native turn. There is no generic "terminal means safe" rule.
@@ -566,6 +580,7 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     if(options.readOnlyPreparation!==undefined){
+      if(options.technicalReplyCorrection!==undefined&&options.technicalReplyCorrection?.threadId!==threadId)return {state:'uncertain'};
       // Recovery needs COMPLETE bounded coverage. The old failure must be the
       // latest turn except for at most eight separately settled task-creation
       // originals whose fresh host-selected receipts AND whole native actions
@@ -601,8 +616,9 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
         }
         if(response.nextCursor===null){
           if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
-            environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable}))return {state:'uncertain'};
-          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:'company_context_preparation_timeout'};
+            environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable,
+            technicalReplyCorrection:options.technicalReplyCorrection}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.technicalReplyCorrection?'company_context_rate_limited_reply':'company_context_preparation_timeout'};
         }
         if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};
         cursor=response.nextCursor;seen.add(cursor);
@@ -720,7 +736,8 @@ export const readAssistantCodexOwnerReply=(threadId,deliveryId,intakePass,option
 export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskContext, intakeContext, execution }, options = {}) => {
   threadId = id(threadId); deliveryId = id(deliveryId);
   if((taskContext!==undefined)===(intakeContext!==undefined)
-    ||options.replyOnlyRecovery!==undefined&&(options.replyOnlyRecovery!==true||intakeContext===undefined))fail('ASSISTANT_CODEX_INVALID_INPUT');
+    ||options.replyOnlyRecovery!==undefined&&(options.replyOnlyRecovery!==true||intakeContext===undefined)
+    ||options.technicalReplyCorrection!==undefined&&(options.technicalReplyCorrection!==true||options.replyOnlyRecovery!==true))fail('ASSISTANT_CODEX_INVALID_INPUT');
   if(options.continuationReview!==undefined){
     const value=options.continuationReview;
     if(intakeContext!==undefined||!value||Object.keys(value).sort().join(',')!=='priorTurnId,reviewId'
@@ -959,6 +976,8 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
   const conversationTracking=options.readinessProbe!==true&&workStateContext?.workStatePath
     ? 'When a Telegram/MAX conversation is established as relevant to this task through an actually read routed original or your authorized task work, retain its exact provider/account/chat/topic selectors in accepted WORK.md for scheduled review, even when no reply is pending. Keep its review bookmark separate from the individual routed-original receipt. Reading one mentioned message does not prove that earlier or neighbouring history was reviewed: retain the old bookmark, or an explicit bounded initial-review starting point, until that history has actually been covered and accepted.\n' : '';
   const replyOnly=options.replyOnlyRecovery===true
-    ? 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only preparation failure. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
+    ? options.technicalReplyCorrection===true
+      ? 'This is ONE corrective reply to the SAME original private owner question after its prior technical limitation reply was positively delivered. Preserve that history and never repeat the prior send. Read the exact original and fresh current company sources yourself, then answer the original question with the verified useful source link. Prior technical replies are not the answer. Only reply_owner is permitted; no Task, Workspace, Run, dialogue, route, ignore, redirect or direct provider sending. The host retains the original peer and fences this one corrective response.\n'
+      : 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only preparation failure. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
   return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${replyOnly}${instruction}\n${conversationTracking}${scheduled}`;
 };

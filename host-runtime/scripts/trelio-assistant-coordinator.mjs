@@ -828,15 +828,45 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const recoverReadonlyOwnerIntake=async signal=>{
     if(typeof native.readPrerequisites!=='function'||await native.ready(identity,signal)!==true)return;lease();
-    for(const row of inbox.readonlyFailedIntakes()){
+    for(const row of [...inbox.readonlyFailedIntakes(),...inbox.technicalReplyIntakes()]){
       try{
         await intakeSource(row,signal);
         const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
-        if(outcome.readOnlyRecoveryProtocolVersion!==1||outcome.readOnlyRecovery!==undefined
+        const correction=row.outcome_state==='replied';
+        if(outcome.readOnlyRecoveryProtocolVersion!==1||correction&&outcome.readOnlyReplyCorrectionProtocolVersion!==1
+          ||!correction&&outcome.readOnlyRecovery!==undefined
           ||outcome.id!==row.id||outcome.companyId!==row.scope.companyId||outcome.sourceId!==row.scope.bindingId
           ||outcome.sourceRevision!==row.source_revision||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id
-          ||outcome.state!=='reply_abandoned'||outcome.receiptId!==row.outcome_receipt||outcome.readConfirmed!==true
-          ||outcome.ownerPrivateRead!==true||outcome.taskId!==null||Date.parse(outcome.leaseExpiresAt)>now())continue;
+          ||outcome.state!==(correction?'replied':'reply_abandoned')||outcome.receiptId!==row.outcome_receipt
+          ||outcome.readConfirmed!==true||outcome.ownerPrivateRead!==true||outcome.taskId!==null
+          ||!correction&&Date.parse(outcome.leaseExpiresAt)>now())continue;
+        if(correction){
+          // A known positive send is not a negative receipt. Recheck its SAME
+          // durable provider observation and the optional ONE legacy abandoned
+          // parent. Never adopt a newer reply, another event or a correction
+          // chain merely because a model's prose says that something failed.
+          const prior=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
+          if(row.reply_receipt_id!==outcome.receiptId||!Number.isSafeInteger(row.reply_message_id)||row.reply_message_id<1
+            ||row.reply_message_id>2147483647||row.reply_abandon_receipt_id!==null
+            ||row.readonly_recovery_json&&!prior||prior?.technicalReplyCorrection===true
+            ||Boolean(prior)!==Boolean(outcome.readOnlyRecovery)
+            ||prior&&(!prior.beginAttempted||prior.parentIntakeId!==row.retry_of_id
+              ||Object.entries(prior).some(([key,value])=>key!=='beginAttempted'&&outcome.readOnlyRecovery[key]!==value)))continue;
+          if(prior){
+            const root=inbox.ownerIntake(prior.parentIntakeId);
+            if(root.state!=='complete'||root.settled!==1||root.outcome_state!=='reply_abandoned'||root.native_started!==1
+              ||root.readonly_recovery_json!==null||root.reply_receipt_id!==null||root.reply_message_id!==null
+              ||root.reply_abandon_receipt_id!==prior.receiptId||root.outcome_receipt!==prior.receiptId||root.outcome_task_id!==null
+              ||['source_key','source_revision','account_key','owner_identity_id','conversation_key','thread_id','original_event_id']
+                .some(key=>root[key]!==row[key]))continue;
+            const nativeRoot=await client.readSourceIntake(intakeLocator(root),signal);lease();
+            if(nativeRoot.id!==root.id||nativeRoot.companyId!==row.scope.companyId||nativeRoot.sourceId!==row.scope.bindingId
+              ||nativeRoot.sourceRevision!==row.source_revision||nativeRoot.eventId!==row.original_event_id||nativeRoot.threadId!==row.thread_id
+              ||nativeRoot.state!=='reply_abandoned'||nativeRoot.receiptId!==prior.receiptId||nativeRoot.readConfirmed!==true
+              ||nativeRoot.ownerPrivateRead!==true||nativeRoot.taskId!==null||nativeRoot.readOnlyRecovery!==undefined
+              ||Date.parse(nativeRoot.leaseExpiresAt)>now())continue;
+          }
+        }
         const previous=row.intake_prerequisite??row.retry_prerequisite;
         if(!/^[0-9a-f]{64}$/u.test(previous??''))continue;
         const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
@@ -867,15 +897,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           settledCreationSuccessors.push({...intakeLocator(successor),sourceRevision:created.sourceRevision,
             eventId:created.eventId,threadId:created.threadId,deliveryId:successor.delivery_id,taskId:created.taskId,receiptId:created.receiptId});
         }
-        const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row),settledCreationSuccessors});lease();
+        const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row),settledCreationSuccessors,
+          ...(correction?{technicalReplyCorrection:{receiptId:outcome.receiptId,eventId:outcome.eventId,sourceRevision:outcome.sourceRevision,threadId:outcome.threadId}}:{})});lease();
         if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??'')
-          ||terminal.readOnlyFailure!=='company_context_preparation_timeout')continue;
+          ||terminal.readOnlyFailure!==(correction?'company_context_rate_limited_reply':'company_context_preparation_timeout'))continue;
         await intakeSource(row,signal);
         // The child is appended only after a positive immutable native outcome,
         // complete read-only history and fresh changed trusted prerequisite.
         // The old row/pass/lease and its provider fence are never reset.
         inbox.retryReadonlyOwnerIntake(row.id,{receiptId:outcome.receiptId,terminalTurnId:terminal.turnId,
-          previousPrerequisiteKey:previous,prerequisiteKey:prerequisite.fingerprint});
+          previousPrerequisiteKey:previous,prerequisiteKey:prerequisite.fingerprint,...(correction?{technicalReplyCorrection:true}:{})});
         return;
       }catch{/* Unknown native/history/ACL/prerequisite stays closed, no write replay. */}
       finally{inbox.deferOwnerIntake(row.id);}
@@ -1150,7 +1181,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     try{
       const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
-          intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,passTimeoutMs:remaining,...(recovery?{replyOnlyRecovery:true}:{}),startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
+          intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,passTimeoutMs:remaining,...(recovery?{replyOnlyRecovery:true,...(recovery.technicalReplyCorrection?{technicalReplyCorrection:true}:{})}:{}),startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
       if(cancelledOutcome)return settleOwnedCancellation();
       let outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
       if(await recoverOwnerCapacity(inbox.ownerIntake(row.id),outcome,result,combined))return await passHost.readActivePass()?{state:'blocked',kind:'source_intake'}:deferredIntake(row);

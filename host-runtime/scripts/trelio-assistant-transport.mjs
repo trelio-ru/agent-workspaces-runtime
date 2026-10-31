@@ -1,6 +1,7 @@
 import { validateAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
+import { setTimeout as waitForTimer } from 'node:timers/promises';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
 import { validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
@@ -32,6 +33,25 @@ export const assistantSetupRecovery = error => {
     ?'device_authorization_required':null;
 };
 const fail = (code, status) => { throw new AssistantTransportError(code, status); };
+/** Cold company sync shares the server's finite pass-read bucket with its
+ * foreground polls/hooks. Reserve dispatch times, never admission results:
+ * every waiter still reads the native lease/ACL AFTER waiting. Four file
+ * readers share this invocation-local pacer; no response, key, scope or grant
+ * is cached, no failed request is retried, and cancellation keeps the original
+ * signal/deadline. The nominal 750/min reservation rate leaves headroom in the
+ * 1200/min server bucket. Timer delays may coalesce the four pending readers;
+ * an idle pool cannot accumulate additional saved permits.
+ * Injectable time/wait are host test dependencies, never request fields. */
+export const createAssistantCompanyReadPacer = ({monotonic=()=>performance.now(),
+  wait=(ms,signal)=>waitForTimer(ms,undefined,{signal})}={}) => {
+  let next=0;
+  return async signal=>{
+    signal?.throwIfAborted();
+    const current=monotonic(),at=Math.max(current,next);next=at+80;
+    if(at>current)await wait(at-current,signal);
+    signal?.throwIfAborted();
+  };
+};
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HEAD = /^[0-9a-f]{40,64}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -1075,6 +1095,8 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
   sourceReads=null,encryptedTaskRead=null,encryptedCompanyContext=null,sourceAttachment=null,sourceWorkspaceFile=null,sourceRegistryDocument=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
+  const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+  const invocationSignal=runtimeHookSignal();
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
   if(!identity || !uuid.test(identity.assistantId??'') || !uuid.test(identity.deviceId??'')
@@ -1173,7 +1195,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     const current=await host.readIdentity();
     if(!same(current,expectedIdentity) || !same(validateAssistantActivePass(await host.readActivePass(),identity),pass)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   };
+  const paceCompanyRead=companyRead?createAssistantCompanyReadPacer():null;
   const assertLivePass=async signal=>{
+    // Some common managed callbacks omit a separate signal argument;
+    // their wait/native read still belongs to this exact private invocation.
+    signal??=invocationSignal;
+    // Wait BEFORE identity/private/native observations, never reuse an earlier
+    // success after a queued interval. The server still makes the final native
+    // decision independently for the exact content request and recipient.
+    if(paceCompanyRead)await paceCompanyRead(signal);
     await assertIdentity();
     const live=ownerReadOrigin?await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal)
       :await client.readTaskPass(locator,signal);
@@ -2472,7 +2502,8 @@ const intakeProjection=(value,expected)=>{
   const recovery=value.readOnlyRecovery===undefined?null:assistantReadOnlyRecoveryMetadata(value.readOnlyRecovery,{response:true});
   if(value.readOnlyRecovery!==undefined&&(!recovery||routing||value.taskId!==null
     ||!['leased','cancelled','reply_pending','replied','reply_abandoned'].includes(value.state))
-    ||value.readOnlyRecoveryProtocolVersion!==undefined&&value.readOnlyRecoveryProtocolVersion!==1)
+    ||value.readOnlyRecoveryProtocolVersion!==undefined&&value.readOnlyRecoveryProtocolVersion!==1
+    ||value.readOnlyReplyCorrectionProtocolVersion!==undefined&&value.readOnlyReplyCorrectionProtocolVersion!==1)
     fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.readOnlyRecovery&&(!recovery||Object.keys(expected.readOnlyRecovery).some(key=>recovery[key]!==expected.readOnlyRecovery[key])))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {schemaVersion:1,id:id(value.id),companyId:id(value.companyId),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
@@ -2480,6 +2511,7 @@ const intakeProjection=(value,expected)=>{
     eventId:id(value.eventId),threadId:value.threadId===null?null:id(value.threadId),state:value.state,leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
     taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
     ...(value.readOnlyRecoveryProtocolVersion===1?{readOnlyRecoveryProtocolVersion:1}:{}),
+    ...(value.readOnlyReplyCorrectionProtocolVersion===1?{readOnlyReplyCorrectionProtocolVersion:1}:{}),
     ...(recovery?{readOnlyRecovery:recovery}:{}),
     readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
@@ -5328,7 +5360,7 @@ export const acknowledgeAssistantSource=async({identity,host,store,client,source
  * account selector and process engine. This taskless read grants no task pass,
  * neighboring history, provider sending, read-state mutation or human vault.
  * The private journal ref is selected by the trusted host, never tool text. */
-export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,pass,source,reference,signal})=>{
+export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,pass,source,reference,signal,sourcePackage=withAssistantSourcePackage})=>{
   pass=validateAssistantActivePass(pass,identity);
   const routing=pass.intakeKind==='route_existing',email=source?.skillId==='email-imap-smtp',max=source?.skillId==='max-web';
   if(pass.kind!=='source_intake'||!source||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision
@@ -5353,7 +5385,7 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
   };
   await check();
   const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
-  return withAssistantSourcePackage({identity,host,store,scope,signal,
+  return sourcePackage({identity,host,store,scope,signal,
     sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision},
     intakeExecution:{accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,runtimeArguments:args,beforeInvoke:check,
       ...(routing?{kind:'route_existing',eventIds:pass.eventIds}:{})}},
@@ -5405,7 +5437,7 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
  * original. Persist the local attempt at the common final-spawn boundary, and
  * persist a verified positive result BEFORE any fallible follow-up HTTP read.
  * A lost/invalid provider result never permits this method to be called again. */
-export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,source,reference,receiptId,replyText,beforeInvoke,onConfirmed,signal})=>{
+export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,source,reference,receiptId,replyText,beforeInvoke,onConfirmed,signal,sourcePackage=withAssistantSourcePackage})=>{
   pass=validateAssistantActivePass(pass,identity);receiptId=id(receiptId);
   if(pass.kind!=='source_intake'||pass.intakeKind||source?.skillId!=='telegram-mtproto'
     ||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision
@@ -5430,7 +5462,7 @@ export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,so
   };
   await check();
   const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
-  return withAssistantSourcePackage({identity,host,store,scope,signal,
+  return sourcePackage({identity,host,store,scope,signal,
     sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,replyReceiptId:receiptId},
     intakeExecution:{kind:'reply_owner',accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,
       runtimeArguments:args,replyText,beforeInvoke:async()=>{await check();await beforeInvoke();}}},

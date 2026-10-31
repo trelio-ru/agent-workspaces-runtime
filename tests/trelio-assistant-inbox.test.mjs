@@ -1586,3 +1586,39 @@ test('schema23 preserves populated schema22 and appends one same-original reply-
  database.exec('ALTER TABLE assistant_owner_intakes DROP COLUMN readonly_recovery_json');
  assert.throws(()=>createAssistantInbox({database}),/CONFLICT/);
 });
+
+// A positive provider receipt may never enter the old no-send recovery path.
+// A separate closed certificate can append ONE corrective child while the
+// original provider fence, native receipt and body/read basis remain intact.
+test('one technical correction preserves a positive original reply and cannot form another recovery chain',t=>{
+ const {database,inbox}=memory(t),source=scope({provider:'telegram'});inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+ page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
+  conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,ownerIdentityId:randomUUID()}]);
+ const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);
+ inbox.bindOwnerIntakeThread(original.id,randomUUID());inbox.readyOwnerIntake(original.id);
+ inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);inbox.confirmIntakeModelRead(original.id);
+ const receiptId=randomUUID();inbox.startOwnerReply(original.id,receiptId);inbox.confirmOwnerReply(original.id,{receiptId,messageId:77});
+ inbox.finishOwnerIntake(original.id,{state:'replied',receiptId});inbox.settleOwnerIntake(original.id);createAssistantInbox({database});
+ const old={...database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)};
+ assert.deepEqual(inbox.technicalReplyIntakes().map(row=>row.id),[original.id],
+  'the production candidate query must read the persisted provider scope and select this exact positive reply');
+ const witness={receiptId,terminalTurnId:randomUUID(),previousPrerequisiteKey:'a'.repeat(64),prerequisiteKey:'b'.repeat(64),technicalReplyCorrection:true};
+ assert.throws(()=>inbox.retryReadonlyOwnerIntake(original.id,{...witness,receiptId:randomUUID()}),/CONFLICT/);
+ const {technicalReplyCorrection,...oldMode}=witness;
+ assert.throws(()=>inbox.retryReadonlyOwnerIntake(original.id,oldMode),/CONFLICT/,'a delivered reply never becomes absent-provider abandonment');
+ const child=inbox.retryReadonlyOwnerIntake(original.id,witness);
+ assert.equal(child.state,'ready');assert.equal(child.native_started,0);assert.equal(child.reply_receipt_id,null);
+ assert.equal(child.original_event_id,original.original_event_id);assert.equal(child.thread_id,inbox.ownerIntake(original.id).thread_id);
+ assert.equal(JSON.parse(child.readonly_recovery_json).technicalReplyCorrection,true);
+ assert.equal(inbox.retryReadonlyOwnerIntake(original.id,witness).id,child.id,'a reopened journal finds the same child');
+ assert.deepEqual({...database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)},old);
+ inbox.startReadonlyIntakeBegin(child.id);const reopened=createAssistantInbox({database});
+ assert.throws(()=>reopened.startReadonlyIntakeBegin(child.id),/CONFLICT/);
+ reopened.startOwnerIntake(child.id);reopened.confirmIntakeModelRead(child.id);
+ const nextReceipt=randomUUID();reopened.startOwnerReply(child.id,nextReceipt);reopened.confirmOwnerReply(child.id,{receiptId:nextReceipt,messageId:78});
+ reopened.finishOwnerIntake(child.id,{state:'replied',receiptId:nextReceipt});reopened.settleOwnerIntake(child.id);
+ assert.deepEqual(reopened.technicalReplyIntakes(),[],'neither a consumed parent nor its corrective reply becomes another candidate');
+ assert.throws(()=>reopened.retryReadonlyOwnerIntake(child.id,{...witness,receiptId:nextReceipt,previousPrerequisiteKey:'b'.repeat(64),prerequisiteKey:'c'.repeat(64)}),/CONFLICT/,'a corrective child never creates a third answer');
+ assert.equal(database.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,2);
+ assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0,'no Task/Run delivery is fabricated');
+});
