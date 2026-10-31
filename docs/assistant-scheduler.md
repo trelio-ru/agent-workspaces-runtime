@@ -3406,9 +3406,31 @@ with the candidate path on private stdin, a 5-second bound and closed output.
 The candidate is never executed by recovery. Native waiting/reasoning is inert;
 an arbitrary shell, extra command or non-public target still refuses before
 inspection. Other tools/actions, unknown
-items, a later/duplicate turn, missing full coverage, a result without the exact
+items, an uncertified later or duplicate turn, missing full coverage, a result without the exact
 structured code, or an attempted/unknown provider send remain closed. No history,
 query/body/native command or content hash is persisted or sent to the backend.
+
+Permanent owner chats may already contain later independent commands. The host
+may skip at most eight of them only when the SAME journal records each as a
+settled `created` original with matching account/owner/source/revision/conversation,
+no send/abandon/recovery fence and a different original event. It fetches each
+exact native intake afresh: `created`, confirmed private-owner read, a real task
+UUID and the SAME immutable local receipt are mandatory. The historical local
+`created` task cell may be null; it never substitutes for the native task UUID.
+Inventory includes unknown/unsettled rows; a ninth row refuses, not truncates.
+
+The full native history must then match every selected later delivery exactly
+once before the original failure. Each completed error-free turn permits only
+one context read, optionally one project-selected context read, then one
+successful `resolve_assistant_intake(create_task)` whose structured receipt
+matches that fresh native original/source/thread/task/receipt. Context prose is
+not inspected or treated as authority; its native content-only result is valid.
+An arbitrary shell/provider/tool, attempted reply, missing/failed call, extra
+user/resolve, unmatched receipt, unknown intervening turn or duplicate marker/turn
+still refuses. Every bounded full-history page remains mandatory, even when the
+original is on a later page. These minimal structural proofs are ephemeral host
+options, not model tools, journal authority, new backend protocol or Task/Run
+permission for the recovered question. Later tasks are never repeated or changed.
 
 Only a changed trusted native/runtime prerequisite and native protocol version1
 permit a new child. Schema23 adds nullable structural witness/prerequisite cells

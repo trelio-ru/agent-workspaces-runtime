@@ -1535,6 +1535,26 @@ test('schema20 reply fence survives schema21 and atomically excludes a late prov
 });
 
 
+test('readonly recovery inventories unknown same-chat successors without filtering or truncating them to success',t=>{
+ const {database,inbox,advance}=memory(t),source=scope({provider:'telegram'}),ownerIdentityId=randomUUID();
+ const originalEvent=id=>({id:`message:123:${id}`,revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
+  conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,ownerIdentityId});
+ inbox.register(source);inbox.observeExternalSourceRevision(source,0);page(inbox,source,[originalEvent(1)]);
+ const parent=inbox.ownerIntakes()[0],threadId=randomUUID();inbox.prepareOwnerIntake(parent.id);
+ inbox.startOwnerIntakeProvision(parent.id);inbox.bindOwnerIntakeThread(parent.id,threadId);inbox.readyOwnerIntake(parent.id);
+ inbox.startOwnerIntake(parent.id);inbox.uncertainOwnerIntake(parent.id);const receiptId=randomUUID();
+ inbox.startOwnerReplyAbandonment(parent.id,receiptId);inbox.finishOwnerIntake(parent.id,{state:'reply_abandoned',receiptId});
+ advance(300001);page(inbox,source,[originalEvent(2)],'second');
+ const later=inbox.ownerIntakes().find(row=>row.id!==parent.id);inbox.prepareOwnerIntake(later.id);
+ inbox.startOwnerIntake(later.id);inbox.uncertainOwnerIntake(later.id);
+ assert.equal(inbox.readonlyRecoverySuccessors(parent.id)[0].state,'uncertain','an unsafe row remains visible to the coordinator');
+ advance(300001);page(inbox,source,Array.from({length:9},(_,i)=>originalEvent(i+3)),'many');
+ for(const row of inbox.ownerIntakes())if(row.state==='pending')inbox.prepareOwnerIntake(row.id);
+ const before=database.prepare('SELECT * FROM assistant_owner_intakes ORDER BY id').all();
+ assert.equal(inbox.readonlyRecoverySuccessors(parent.id).length,9,'the ninth row signals overflow, never an eight-row success prefix');
+ assert.deepEqual(database.prepare('SELECT * FROM assistant_owner_intakes ORDER BY id').all(),before,'inventory is SELECT-only');
+});
+
 test('schema23 preserves populated schema22 and appends one same-original reply-only recovery with a durable begin fence',t=>{
  const {database,inbox}=memory(t),source=scope({provider:'telegram'});inbox.register(source);inbox.observeExternalSourceRevision(source,0);
  page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,

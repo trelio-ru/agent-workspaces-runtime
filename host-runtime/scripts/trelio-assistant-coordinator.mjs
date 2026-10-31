@@ -842,7 +842,32 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
         const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
         if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||prerequisite.fingerprint===previous)continue;
-        const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row)});lease();
+        const successors=inbox.readonlyRecoverySuccessors(row.id),settledCreationSuccessors=[];
+        if(successors.length>8)continue;
+        for(const successor of successors){
+          // A later independent owner command is not evidence that the old
+          // question ran successfully. Only a settled native task creation can
+          // be skipped, with a DIFFERENT original and no send/recovery fence.
+          // `created` historically leaves local outcome_task_id null; require
+          // the real task UUID from its fresh immutable native receipt instead.
+          if(successor.kind!=='owner_command'||successor.state!=='complete'||successor.settled!==1
+            ||successor.outcome_state!=='created'||successor.native_started!==1
+            ||successor.source_key!==row.source_key||successor.source_revision!==row.source_revision
+            ||successor.account_key!==row.account_key||successor.owner_identity_id!==row.owner_identity_id
+            ||successor.conversation_key!==row.conversation_key||successor.thread_id!==row.thread_id
+            ||successor.original_event_id===row.original_event_id||successor.reply_receipt_id!==null
+            ||successor.reply_message_id!==null||successor.reply_abandon_receipt_id!==null
+            ||successor.readonly_recovery_json!==null||!uuid.test(successor.outcome_receipt??''))fail('ASSISTANT_INTAKE_CHANGED');
+          const created=await client.readSourceIntake(intakeLocator(successor),signal);lease();
+          if(created.id!==successor.id||created.companyId!==row.scope.companyId||created.sourceId!==row.scope.bindingId
+            ||created.sourceRevision!==row.source_revision||created.eventId!==successor.original_event_id
+            ||created.threadId!==row.thread_id||created.state!=='created'||created.receiptId!==successor.outcome_receipt
+            ||created.ownerPrivateRead!==true||created.readConfirmed!==true||!uuid.test(created.taskId??'')
+            ||successor.outcome_task_id!==null&&successor.outcome_task_id!==created.taskId)fail('ASSISTANT_INTAKE_CHANGED');
+          settledCreationSuccessors.push({...intakeLocator(successor),sourceRevision:created.sourceRevision,
+            eventId:created.eventId,threadId:created.threadId,deliveryId:successor.delivery_id,taskId:created.taskId,receiptId:created.receiptId});
+        }
+        const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row),settledCreationSuccessors});lease();
         if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??'')
           ||terminal.readOnlyFailure!=='company_context_preparation_timeout')continue;
         await intakeSource(row,signal);

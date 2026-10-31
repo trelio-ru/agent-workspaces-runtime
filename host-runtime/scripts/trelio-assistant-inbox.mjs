@@ -986,6 +986,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND i.readonly_recovery_json IS NULL AND i.source_revision=s.configuration_revision AND s.state='active'
         AND i.retry_ordinal<20 AND i.next_check_at<=? AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    readonlyRecoverySuccessors(id){
+      const row=this.ownerIntake(id);
+      // Inventory, not eligibility: include unsettled/foreign/attempted rows so
+      // they cannot disappear behind a SQL success filter. The coordinator
+      // validates each row and its fresh native receipt. A ninth row refuses
+      // the bounded eight-successor exception; nothing is truncated to success.
+      return all(`SELECT id FROM assistant_owner_intakes WHERE thread_id=? AND id!=? AND created_at>=?
+        ORDER BY created_at DESC,id DESC LIMIT 9`,row.thread_id,row.id,row.created_at).map(value=>this.ownerIntake(value.id));
+    },
     rememberIntakePrerequisite(id,key){return transaction(()=>{
       const row=this.ownerIntake(id);
       if(typeof key!=='string'||!/^[0-9a-f]{64}$/u.test(key)||row.state!=='ready'||row.native_started

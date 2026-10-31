@@ -1090,3 +1090,9 @@ Public plugin shell для этого клиента не меняется.
   See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).
 
 - Read-only owner recovery: one negative parent → one reply-only child, whole terminal native witness and durable begin fence; no Task/dialogue or old lease renewal. See [scheduler](docs/assistant-scheduler.md#readonly-owner-question-recovery).
+  A later independent task creation may be skipped only with SAME settled local
+  original, fresh native created/task/receipt and whole exact completed native
+  context/resolve chain. Inventory unknown rows before the eight-row bound;
+  unknown/attempted/provider/intervening/duplicate history still refuses. Tests
+  compose worker/factory/device codec/SQLite restart and content-only context;
+  a synthetic success is never live Telegram acceptance.

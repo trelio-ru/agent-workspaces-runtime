@@ -907,3 +907,61 @@ test('native recovery reader requires complete latest unique marker coverage and
   'company_context_preparation_timeout');assert.equal(verified,1);
  assert.ok(reads>=5);
 });
+
+const settledCreationFixture=f=>{
+ const witness={companyId:f.intakePass.companyId,sourceId:f.intakePass.sourceId,sourceRevision:1,
+  intakeId:randomUUID(),eventId:randomUUID(),threadId:f.threadId,deliveryId:randomUUID(),taskId:randomUUID(),receiptId:randomUUID()};
+ const intakePass={companyId:witness.companyId,sourceId:witness.sourceId,intakeId:witness.intakeId},projectId=randomUUID();
+ const call=(tool,args,result)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+  arguments:{intakePass,runtimeSessionProof:{},...args},result:{isError:false,structuredContent:result}});
+ const turn={id:randomUUID(),status:'completed',error:null,items:[
+  {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(witness.deliveryId)+'\nSYNTHETIC_OTHER_ORIGINAL'}]},
+  call('get_assistant_intake_context',{},{}),
+  call('get_assistant_intake_context',{projectId},{}),
+  call('resolve_assistant_intake',{clientRequestId:witness.intakeId,decision:'create_task',projectId,fields:{title:'SYNTHETIC_TASK'}},
+   {schemaVersion:1,id:witness.intakeId,companyId:witness.companyId,sourceId:witness.sourceId,sourceRevision:witness.sourceRevision,
+    eventId:witness.eventId,threadId:witness.threadId,state:'created',taskId:witness.taskId,receiptId:witness.receiptId,
+    readConfirmed:true,ownerPrivateRead:true}),{type:'agentMessage',text:'SYNTHETIC_OTHER_RESULT'}]};
+ // Native context is commonly content-only. Its prose is never parsed as
+ // authority; only the final create receipt must be structured and exact.
+ for(const item of turn.items.slice(1,3))item.result={content:[{type:'text',text:'SYNTHETIC_PRIVATE_CONTEXT'}]};
+ return {witness,turn};
+};
+test('read-only recovery skips only separately certified completed task-creation successors across complete history',async()=>{
+ const f=readonlyPreparationFixture(),successor=settledCreationFixture(f);
+ const read=(turns=[successor.turn,f.turn],proofs=[successor.witness],pageSize=20)=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{
+  executable:process.execPath,environment:f.environment,readOnlyPreparation:f.intakePass,settledCreationSuccessors:proofs,
+  spawnProcess:nativeRpc(request=>{
+   if(request.method==='thread/read')return {result:{thread:{id:f.threadId,cwd:process.cwd()}}};
+   assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');
+   const offset=Number(request.params.cursor??0),data=turns.slice(offset,offset+pageSize);
+   return {result:{data,nextCursor:offset+data.length<turns.length?String(offset+data.length):null}};
+  })});
+ assert.equal((await read()).readOnlyFailure,'company_context_preparation_timeout');
+ assert.equal((await read(undefined,undefined,1)).readOnlyFailure,'company_context_preparation_timeout','original may be on the next full page');
+ assert.deepEqual(await read(undefined,[]),{state:'uncertain'},'a completed turn alone is not a native outcome receipt');
+ for(const change of [
+  t=>{t.status='running';},t=>{t.error={codexErrorInfo:'serverOverloaded'};},
+  t=>{t.items.splice(2,0,{type:'commandExecution',status:'completed',exitCode:0});},
+  t=>{t.items[3].arguments.decision='reply_owner';},t=>{t.items[3].arguments.replyText='PRIVATE';},
+  t=>{t.items[3].arguments.clientRequestId=randomUUID();},t=>{t.items[3].arguments.projectId=randomUUID();},
+  t=>{t.items[3].arguments.intakePass={...t.items[3].arguments.intakePass,intakeId:randomUUID()};},
+  t=>{t.items[3].status='failed';},t=>{t.items[3].result.isError=true;},
+  t=>{t.items[3].result.structuredContent.receiptId=randomUUID();},t=>{t.items[3].result.structuredContent.taskId=randomUUID();},
+  t=>{t.items[3].result.structuredContent.eventId=randomUUID();},t=>{t.items[3].result.structuredContent.sourceRevision++;},
+  t=>{t.items[3].result.structuredContent.ownerPrivateRead=false;},
+  t=>{t.items.splice(4,0,structuredClone(t.items[3]));},t=>{t.items[1].tool='send';},
+ ]){
+  const turn=structuredClone(successor.turn);change(turn);
+  assert.deepEqual(await read([turn,f.turn]),{state:'uncertain'},String(change));
+ }
+ for(const proofs of [[{...successor.witness,companyId:randomUUID()}],[{...successor.witness,threadId:randomUUID()}],
+  [{...successor.witness,intakeId:f.intakePass.intakeId}],[successor.witness,successor.witness],Array(9).fill(successor.witness)])
+  assert.deepEqual(await read(undefined,proofs),{state:'uncertain'});
+ assert.deepEqual(await read([successor.turn,successor.turn,f.turn]),{state:'uncertain'},'duplicate native turn refuses');
+ assert.deepEqual(await read([successor.turn,f.turn,structuredClone(f.turn)]),{state:'uncertain'},'duplicate original refuses');
+ assert.deepEqual(await read([f.turn,successor.turn]),{state:'uncertain'},'a receipt cannot excuse a missing newer turn');
+ assert.deepEqual(await read([successor.turn,{id:randomUUID(),status:'completed',items:[]},f.turn]),{state:'uncertain'},'unknown intervening turn refuses');
+ const second=settledCreationFixture(f);
+ assert.equal((await read([second.turn,successor.turn,f.turn],[second.witness,successor.witness])).readOnlyFailure,'company_context_preparation_timeout');
+});

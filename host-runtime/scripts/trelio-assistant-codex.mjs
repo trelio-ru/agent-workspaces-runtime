@@ -523,24 +523,81 @@ export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePa
   }
   return user===1&&contextCalls===1&&searches>0&&timeout;
 };
+// A host-selected receipt is necessary but not sufficient: inspect the entire
+// independent native turn. There is no generic "terminal means safe" rule.
+// Only context selection followed by ONE successful native create_task is
+// allowed; provider/shell calls, failed/unknown actions and conversational
+// replies all retain the older-question refusal. Nothing here repeats a call.
+export const assistantSettledOwnerTaskCreation=(turn,witness)=>{
+  if(!UUID.test(turn?.id??'')||turn.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)
+    ||turn.items.length<3||turn.items.length>512||turn.items[0]?.type!=='userMessage')return false;
+  let user=0,contexts=0,resolved=false,projectId=null;
+  for(const item of turn.items){
+    if(item.type==='userMessage'){
+      if(++user!==1||!Array.isArray(item.content)||item.content.length!==1||item.content[0]?.type!=='text'
+        ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(witness.deliveryId)+'\n'))return false;
+    }else if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+    else if(item.type==='mcpToolCall'){
+      const args=item.arguments,pass=args?.intakePass,result=item.result?.structuredContent;
+      if(item.server!=='trelio-assistant'||item.status!=='completed'||item.error!=null||!item.result||typeof item.result!=='object'||item.result.isError===true
+        ||!pass||Object.keys(pass).sort().join(',')!=='companyId,intakeId,sourceId'
+        ||pass.companyId!==witness.companyId||pass.sourceId!==witness.sourceId||pass.intakeId!==witness.intakeId)return false;
+      const keys=Object.keys(args).sort().join(',');
+      if(item.tool==='get_assistant_intake_context'){
+        if(resolved||contexts>=2||contexts===0&&keys!=='intakePass,runtimeSessionProof'
+          ||contexts===1&&(keys!=='intakePass,projectId,runtimeSessionProof'||!UUID.test(args.projectId??'')))return false;
+        if(contexts++===1)projectId=args.projectId;
+      }else if(item.tool==='resolve_assistant_intake'){
+        if(resolved||!contexts||keys!=='clientRequestId,decision,fields,intakePass,projectId,runtimeSessionProof'
+          ||args.clientRequestId!==witness.intakeId||args.decision!=='create_task'||!UUID.test(args.projectId??'')
+          ||projectId!==null&&args.projectId!==projectId||!args.fields||typeof args.fields!=='object'||Array.isArray(args.fields)
+          ||!result||typeof result!=='object'||result.schemaVersion!==1||result.id!==witness.intakeId||result.companyId!==witness.companyId
+          ||result.sourceId!==witness.sourceId||result.sourceRevision!==witness.sourceRevision||result.eventId!==witness.eventId
+          ||result.threadId!==witness.threadId||result.state!=='created'||result.taskId!==witness.taskId
+          ||result.receiptId!==witness.receiptId||result.readConfirmed!==true||result.ownerPrivateRead!==true)return false;
+        resolved=true;
+      }else return false;
+    }else return false;
+  }
+  return user===1&&resolved;
+};
 export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     if(options.readOnlyPreparation!==undefined){
-      // Recovery needs COMPLETE bounded coverage and the latest exact turn,
-      // not a summary, truncated page, duplicate marker or older safe prefix.
+      // Recovery needs COMPLETE bounded coverage. The old failure must be the
+      // latest turn except for at most eight separately settled task-creation
+      // originals whose fresh host-selected receipts AND whole native actions
+      // match. Unknown later turns never become a safe older prefix.
       // This host-only option exposes only a closed witness; no raw history or
       // shell command enters the coordinator, journal, HTTP or model context.
-      let cursor=null,selected=null,matches=0;const seen=new Set();
+      const proofs=options.settledCreationSuccessors??[];
+      if(!Array.isArray(proofs)||proofs.length>8)return {state:'uncertain'};
+      const proofFields='companyId,deliveryId,eventId,intakeId,receiptId,sourceId,sourceRevision,taskId,threadId';
+      const proofIds=['deliveryId','eventId','intakeId','receiptId','taskId'];
+      if(proofs.some(proof=>!proof||Object.keys(proof).sort().join(',')!==proofFields
+        ||Object.entries(proof).some(([key,value])=>key==='sourceRevision'?!Number.isSafeInteger(value)||value<0:!UUID.test(value??''))
+        ||proof.companyId!==options.readOnlyPreparation?.companyId||proof.sourceId!==options.readOnlyPreparation?.sourceId
+        ||proof.threadId!==threadId||proof.intakeId===options.readOnlyPreparation?.intakeId||proof.deliveryId===deliveryId)
+        ||proofIds.some(key=>new Set(proofs.map(proof=>proof[key])).size!==proofs.length))return {state:'uncertain'};
+      let cursor=null,selected=null,matches=0;const seen=new Set(),turnIds=new Set(),used=new Set();
       for(let page=0;page<10;page++){
         const response=await request('thread/turns/list',{threadId,limit:20,sortDirection:'desc',itemsView:'full',...(cursor?{cursor}:{})});
         if(!Array.isArray(response?.data)||response.data.length>20)return {state:'uncertain'};
         for(let index=0;index<response.data.length;index++){
-          const turn=response.data[index];if(!UUID.test(turn?.id??'')||!Array.isArray(turn.items))return {state:'uncertain'};
+          const turn=response.data[index];if(!UUID.test(turn?.id??'')||!Array.isArray(turn.items)||turnIds.has(turn.id))return {state:'uncertain'};
+          turnIds.add(turn.id);
           const count=turn.items.filter(item=>item.type==='userMessage'&&Array.isArray(item.content)
             &&item.content.some(input=>input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(marker+'\n'))).length;
-          if(count){matches+=count;if(page!==0||index!==0||matches!==1)return {state:'uncertain'};selected=turn;}
+          const successors=proofs.filter(proof=>turn.items.some(item=>item.type==='userMessage'&&Array.isArray(item.content)
+            &&item.content.some(input=>input?.type==='text'&&typeof input.text==='string'
+              &&input.text.startsWith(assistantDeliveryMarker(proof.deliveryId)+'\n'))));
+          if(count){matches+=count;if(matches!==1||successors.length||used.size!==proofs.length)return {state:'uncertain'};selected=turn;}
+          else if(!selected){
+            if(successors.length!==1||used.has(successors[0].intakeId)||!assistantSettledOwnerTaskCreation(turn,successors[0]))return {state:'uncertain'};
+            used.add(successors[0].intakeId);
+          }else if(successors.length)return {state:'uncertain'};
         }
         if(response.nextCursor===null){
           if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
