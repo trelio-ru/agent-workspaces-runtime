@@ -48,7 +48,12 @@ export async function verifyHosted(cwd, sha, requirements, {prepare = false, val
   if (identity !== repo) throw Error('CI policy does not match exact origin repository');
   if (!requirements.length || requirements.some(item => !/^[a-z0-9-]+\.yml$/u.test(item.file) || !item.jobs.length)) throw Error('No exact hosted gate configured');
   const branch = read('git', ['symbolic-ref', '--short', 'HEAD'], cwd);
-  if (prepare) {
+  // A release may tag a commit that the queue has already integrated. GitHub
+  // cannot open another PR with no commits against main. Skip only that PR
+  // creation step for the exact freshly fetched main SHA; the mandatory run,
+  // attempt, jobs and repository-specific proof below are still verified in
+  // full. Equality is not CI evidence and never admits a missing/failed gate.
+  if (prepare && sha !== read('git', ['rev-parse', 'refs/remotes/origin/main'], cwd)) {
     const pulls = api(cwd, `repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':' + branch)}&base=main&state=open&per_page=100`);
     if (!Array.isArray(pulls) || pulls.length > 1) throw Error('Ambiguous pull-request inventory');
     if (!pulls.length) {

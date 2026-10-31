@@ -7,7 +7,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {queue, assertPush, recover} from './git-coordinator.mjs';
-import {validateJobs} from './git-hosted-ci.mjs';
+import {validateJobs, verifyHosted} from './git-hosted-ci.mjs';
 
 const source = fileURLToPath(new URL('.', import.meta.url));
 const command = (cwd, ...args) => {
@@ -116,4 +116,46 @@ test('hosted gate rejects missing/skipped required jobs, stale attempts and self
   check(job);
   for (const patch of [{run_attempt: 1}, {conclusion: 'skipped'}, {name: 'Unrelated'}, {runner_group_name: 'Private'}]) assert.throws(() => check({...job, ...patch}));
   assert.throws(() => validateJobs(run, [{total_count: 2, jobs: [job]}], ['Native Windows']));
+});
+
+test('already integrated release skips empty PR creation but still requires latest exact hosted proof', async t => {
+  const f = fixture(t), cwd = f.main, sha = command(cwd, 'rev-parse', 'HEAD');
+  // Only GitHub is synthetic. Real Git metadata identifies the exact integrated
+  // SHA; the actual verifier still performs its complete CLI/API state machine.
+  command(cwd, 'remote', 'set-url', 'origin', 'https://github.com/fixture/runtime.git');
+  const bin = path.join(f.root, 'bin'), state = path.join(f.root, 'api-state.json');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'gh'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const s = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
+const [verb, endpoint] = process.argv.slice(2);
+if (verb !== 'api' || endpoint.includes('/pulls?')) process.exit(90);
+const run = {id: 5, run_attempt: 2, head_sha: ${JSON.stringify(sha)}, event: 'pull_request',
+  repository: {full_name: 'fixture/runtime'}, path: '.github/workflows/check.yml',
+  status: 'completed', conclusion: s.mode === 'failed' ? 'failure' : 'success'};
+let result;
+if (endpoint.includes('/workflows/')) result = {total_count: s.mode === 'missing' ? 0 : 1,
+  workflow_runs: s.mode === 'missing' ? [] : [run]};
+else if (endpoint.includes('/jobs?')) result = {total_count: 1, jobs: [{id: 9, run_id: 5,
+  run_attempt: 2, head_sha: run.head_sha, name: 'Required', status: 'completed',
+  conclusion: 'success', runner_group_name: 'GitHub Actions'}]};
+else if (endpoint.endsWith('/actions/runs/5')) result = run;
+else process.exit(91);
+process.stdout.write(JSON.stringify(result));
+`, {mode: 0o700});
+  const originalPath = process.env.PATH;
+  process.env.PATH = bin + path.delimiter + originalPath;
+  try {
+    let validated = 0;
+    const verify = () => verifyHosted(cwd, sha, [{file: 'check.yml', jobs: ['Required']}],
+      {prepare: true, timeoutMs: 0, validate: () => { validated++; }});
+    fs.writeFileSync(state, JSON.stringify({mode: 'success'}));
+    await verify();
+    assert.equal(validated, 1, 'repository-specific receipt validation is still mandatory');
+    for (const mode of ['missing', 'failed']) {
+      fs.writeFileSync(state, JSON.stringify({mode}));
+      await assert.rejects(verify(), mode === 'missing' ? /incomplete/ : /gate failed/);
+    }
+    assert.equal(validated, 1, 'main equality cannot substitute for successful evidence');
+  } finally { process.env.PATH = originalPath; }
 });

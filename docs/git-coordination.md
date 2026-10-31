@@ -15,6 +15,11 @@ silently renumbers a release. Tag creation follows verified CI and main+tag push
 is atomic. Artifact signing/activation and their CAS/read-back remain separate
 existing release steps. This command alone is not a product/runtime release.
 
+For an already integrated exact main SHA, the hosted verifier reuses its PR gate
+without creating an empty PR. It still checks the latest exact run/attempt and
+every required job and native receipt. Missing or failed evidence blocks release;
+being on main is never a substitute for CI.
+
 The short existing main mutex serializes FIFO admission and state changes;
 the durable ticket protects CI. Worktree creation therefore remains available.
 Canonical pre-push checks live process ancestry, exact worktree/branch/SHA/tag

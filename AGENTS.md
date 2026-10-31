@@ -958,6 +958,8 @@ publication tooling также остаются вне этого публичн
 - Stable runtime tag создаётся только по явной команде на runtime release и
   резервируется до CI через `npm run git:integrate -- --tag vX.Y.Z`.
   Низкоуровневый `git:push-main` доступен только verified владельцу очереди.
+  Для уже влитого exact main SHA не создаётся пустой PR; обязательный latest
+  exact PR gate/attempt/jobs/native receipt проверяется без ослабления.
 
 ## Проверки
 
