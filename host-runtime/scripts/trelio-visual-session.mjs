@@ -10,12 +10,13 @@ import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivat
 import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
-import { validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { withMirrorRetentionLock } from './trelio-mirror-retention.mjs';
 import { normalizeBrowserMailSpec, validateBrowserMailJournal } from './trelio-browser-session.mjs';
 export { BROWSER_MAIL_AUTH_API } from './trelio-browser-session.mjs';
+export { validateVisualStartupDiagnostic } from './trelio-visual-result.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -118,131 +119,142 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   // invocation cannot enable fixture controls or select an arbitrary root.
   const configDirectory = fixture?.directory || resolveWorkspaceBridgeConfigDirectory();
   const directory = path.join(configDirectory, 'visual-browser', binding.scope);
-  await prepareVisualPrivateDirectory(directory);
-  const active = path.join(directory, 'active');
-  const file = path.join(active, 'owner.json');
-  try { await assertPrivatePathKind(active, 'directory'); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  let owner;
-  try { owner = await readVisualOwner(file); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  if (owner && Object.keys(owner).length) {
-    if (!validOwner(owner, binding)) return busy();
-    let dead = false;
-    try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') dead = true; else throw error; }
-    if (dead || owner.deadlineAt + 60_000 < Date.now()) {
-      // Reap only the exact old claim; never delete a session snapshot, an
-      // unknown file or somebody else's fresh replacement. No PID is killed.
-      // The recovery mutex moves with the old directory. A competing reaper
-      // cannot use a stale read to rename a newly created worker's claim.
-      const recovery = path.join(active, 'recovery');
-      try { await fs.mkdir(recovery, { mode: 0o700 }); }
-      catch (error) { if (['EEXIST', 'ENOENT'].includes(error.code)) return busy(); throw error; }
-      let moved = false;
-      try {
-        await prepareVisualPrivateDirectory(recovery);
-        if ((await fs.readdir(active)).sort().join() !== 'owner.json,recovery') return busy();
-        const recovered = await withVisualOwnerFileLock(file, async () => {
-          const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
-          if (current.token !== owner.token || current.pid !== owner.pid) return false;
-          const abandoned = `${active}.${crypto.randomUUID()}.closed`;
-          await fs.rename(active, abandoned); moved = true;
-          await fs.unlink(path.join(abandoned, 'owner.json'));
-          await fs.rmdir(path.join(abandoned, 'recovery')); await fs.rmdir(abandoned);
-          return true;
-        });
-        if (!recovered) return busy();
-      } finally { if (!moved) await fs.rmdir(recovery); }
-      owner = null;
-    }
-  }
-  if (owner && Object.keys(owner).length) {
-    if (owner.bindingHash !== binding.bindingHash) return busy();
-    // Upgrading a provider may reuse its saved auth but must not silently
-    // reuse an older live worker with a different content-disclosure mode.
-    // Cleanup/status remain available so the exact owner can finish it safely.
-    if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
-    if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
-    // Do not slide the original deadline when another CLI invocation arrives.
-    if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
-    if (Number.isInteger(owner.port) && owner.port > 0 && owner.port < 65536) {
-      try {
-        if (operation !== 'disconnect') return await request(owner, operation, args);
-        await request(owner, 'close', {});
-        for (let i = 0; i < 150; i++) {
-          const next = await readVisualOwner(file);
-          if (!Object.keys(next).length) { owner = null; break; }
-          if (next.token !== owner.token) return busy();
-          await sleep(100);
-        }
-        if (owner) return busy();
+  let startupStage = 'owner_prepare';
+  try {
+    await prepareVisualPrivateDirectory(directory);
+    const active = path.join(directory, 'active');
+    const file = path.join(active, 'owner.json');
+    try { await assertPrivatePathKind(active, 'directory'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    let owner;
+    startupStage = 'owner_read';
+    try { owner = await readVisualOwner(file); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (owner && Object.keys(owner).length) {
+      if (!validOwner(owner, binding)) return busy();
+      let dead = false;
+      try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') dead = true; else throw error; }
+      if (dead || owner.deadlineAt + 60_000 < Date.now()) {
+        // Reap only the exact old claim; never delete a session snapshot, an
+        // unknown file or somebody else's fresh replacement. No PID is killed.
+        // The recovery mutex moves with the old directory. A competing reaper
+        // cannot use a stale read to rename a newly created worker's claim.
+        const recovery = path.join(active, 'recovery');
+        try { await fs.mkdir(recovery, { mode: 0o700 }); }
+        catch (error) { if (['EEXIST', 'ENOENT'].includes(error.code)) return busy(); throw error; }
+        let moved = false;
+        try {
+          await prepareVisualPrivateDirectory(recovery);
+          if ((await fs.readdir(active)).sort().join() !== 'owner.json,recovery') return busy();
+          const recovered = await withVisualOwnerFileLock(file, async () => {
+            const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+            if (current.token !== owner.token || current.pid !== owner.pid) return false;
+            const abandoned = `${active}.${crypto.randomUUID()}.closed`;
+            await fs.rename(active, abandoned); moved = true;
+            await fs.unlink(path.join(abandoned, 'owner.json'));
+            await fs.rmdir(path.join(abandoned, 'recovery')); await fs.rmdir(abandoned);
+            return true;
+          });
+          if (!recovered) return busy();
+        } finally { if (!moved) await fs.rmdir(recovery); }
+        owner = null;
       }
-      catch { return visualStatus('error', 'operation_failed'); }
-    } else {
-      return visualStatus('preparing');
     }
-  }
-  if (!owner || !Object.keys(owner).length) {
-    const pending = await fs.lstat(active).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-    if (pending) return visualStatus('preparing');
-  }
-  if (operation === 'disconnect') {
-    // Only the selected personal account is deleted. The provider exposes this
-    // command solely for an exact human disconnect request, never error recovery.
-    const { AsyncEntry } = await loadVisualDependencies();
-    const store = new ProtectedVisualStore({ directory: configDirectory, scope: binding.scope, AsyncEntry });
-    try { await store.remove(); } finally { store.close(); }
-    return visualStatus('not_configured', 'none', { hasStoredSession: false });
-  }
-  if (operation === 'status' || operation === 'wait' || operation === 'close') {
-    try {
-      await assertPrivatePathKind(path.join(directory, 'state.enc'), 'file');
-      return visualStatus('saved_unverified', 'none', { hasStoredSession: true });
-    } catch (error) {
-      return error.code === 'ENOENT' ? visualStatus('not_configured') : visualStatus('error', 'storage_unavailable');
+    if (owner && Object.keys(owner).length) {
+      if (owner.bindingHash !== binding.bindingHash) return busy();
+      // Upgrading a provider may reuse its saved auth but must not silently
+      // reuse an older live worker with a different content-disclosure mode.
+      // Cleanup/status remain available so the exact owner can finish it safely.
+      if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      // Do not slide the original deadline when another CLI invocation arrives.
+      if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
+      if (Number.isInteger(owner.port) && owner.port > 0 && owner.port < 65536) {
+        try {
+          if (operation !== 'disconnect') return await request(owner, operation, args);
+          await request(owner, 'close', {});
+          for (let i = 0; i < 150; i++) {
+            const next = await readVisualOwner(file);
+            if (!Object.keys(next).length) { owner = null; break; }
+            if (next.token !== owner.token) return busy();
+            await sleep(100);
+          }
+          if (owner) return busy();
+        }
+        catch (error) { return visualStatus('error', 'operation_failed', { diagnostic: visualStartupDiagnostic('worker_request', undefined, error) }); }
+      } else {
+        return visualStatus('preparing');
+      }
     }
-  }
-  if (!['setup', 'navigate', 'credentials-setup', 'credentials-status', 'credentials-forget'].includes(operation)) return visualStatus('error', 'session_closed');
-  if (operation.startsWith('credentials-') && !authentication) return visualStatus('error', 'invalid_input');
-  let workerExecutable;
-  try { workerExecutable = resolveVisualWorkerNode(); }
-  catch { return visualStatus('error', 'bootstrap_failed'); }
-  // mkdir is the account-wide exclusive claim, including concurrent commands
-  // from different company contexts. An incomplete or abandoned claim is never
-  // silently stolen: recovery needs evidence rather than killing a guessed PID.
-  try { await fs.mkdir(active, { mode: 0o700 }); }
-  catch (error) { if (error.code === 'EEXIST') return busy(); throw error; }
-  await prepareVisualPrivateDirectory(active);
-  owner = {
-    schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
-    pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-    origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, fileUploads, authentication, authenticationFingerprint,
-    mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
-    ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
-  };
-  await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
-  const child = spawn(workerExecutable, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
-    detached: true, shell: false, windowsHide: true, stdio: 'ignore', env: visualChildEnvironment(),
-  });
-  let spawnError;
-  child.once('error', error => { spawnError = error; });
-  child.unref();
-  // Observe startup without holding an MCP call open for Chromium download.
-  // No browser action is repeated if the worker's response is lost.
-  for (let attempt = 0; attempt < 20; attempt++) {
-    await sleep(100);
-    if (spawnError) {
-      await withVisualOwnerFileLock(file, async () => {
-        const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
-        if (current.token === owner.token) { await fs.unlink(file); await fs.rmdir(active); }
-      });
-      return visualStatus('error', 'operation_failed');
+    if (!owner || !Object.keys(owner).length) {
+      const pending = await fs.lstat(active).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+      if (pending) return visualStatus('preparing');
     }
-    const next = await readVisualOwner(file);
-    if (next.token !== owner.token) return busy();
-    if (next.port) return visualStatus('preparing');
+    if (operation === 'disconnect') {
+      // Only the selected personal account is deleted. The provider exposes this
+      // command solely for an exact human disconnect request, never error recovery.
+      const { AsyncEntry } = await loadVisualDependencies();
+      const store = new ProtectedVisualStore({ directory: configDirectory, scope: binding.scope, AsyncEntry });
+      try { await store.remove(); } finally { store.close(); }
+      return visualStatus('not_configured', 'none', { hasStoredSession: false });
+    }
+    if (operation === 'status' || operation === 'wait' || operation === 'close') {
+      try {
+        await assertPrivatePathKind(path.join(directory, 'state.enc'), 'file');
+        return visualStatus('saved_unverified', 'none', { hasStoredSession: true });
+      } catch (error) {
+        return error.code === 'ENOENT' ? visualStatus('not_configured') : visualStatus('error', 'storage_unavailable', { diagnostic: visualStartupDiagnostic('storage_read', undefined, error) });
+      }
+    }
+    if (!['setup', 'navigate', 'credentials-setup', 'credentials-status', 'credentials-forget'].includes(operation)) return visualStatus('error', 'session_closed');
+    if (operation.startsWith('credentials-') && !authentication) return visualStatus('error', 'invalid_input');
+    let workerExecutable;
+    try { workerExecutable = resolveVisualWorkerNode(); }
+    catch (error) { return visualStatus('error', 'bootstrap_failed', { diagnostic: visualStartupDiagnostic('worker_node', undefined, error) }); }
+    // mkdir is the account-wide exclusive claim, including concurrent commands
+    // from different company contexts. An incomplete or abandoned claim is never
+    // silently stolen: recovery needs evidence rather than killing a guessed PID.
+    startupStage = 'owner_prepare';
+    try { await fs.mkdir(active, { mode: 0o700 }); }
+    catch (error) { if (error.code === 'EEXIST') return busy(); throw error; }
+    await prepareVisualPrivateDirectory(active);
+    owner = {
+      schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
+      pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
+      origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, fileUploads, authentication, authenticationFingerprint,
+      mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
+      ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
+    };
+    startupStage = 'owner_publish';
+    await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
+    startupStage = 'worker_spawn';
+    const child = spawn(workerExecutable, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
+      detached: true, shell: false, windowsHide: true, stdio: 'ignore', env: visualChildEnvironment(),
+    });
+    let spawnError;
+    child.once('error', error => { spawnError = error; });
+    child.unref();
+    // Observe startup without holding an MCP call open for Chromium download.
+    // No browser action is repeated if the worker's response is lost.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(100);
+      if (spawnError) {
+        await withVisualOwnerFileLock(file, async () => {
+          const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+          if (current.token === owner.token) { await fs.unlink(file); await fs.rmdir(active); }
+        });
+        return visualStatus('error', 'operation_failed', { diagnostic: visualStartupDiagnostic('worker_spawn', undefined, spawnError) });
+      }
+      startupStage = 'owner_read';
+      const next = await readVisualOwner(file);
+      if (next.token !== owner.token) return busy();
+      if (next.port) return visualStatus('preparing');
+    }
+    return visualStatus('preparing');
+  } catch (error) {
+    const diagnostic = visualStartupDiagnostic(startupStage, undefined, error);
+    return visualStatus('error', visualStartupReason(diagnostic), { diagnostic });
   }
-  return visualStatus('preparing');
 }
 
 /** Authenticated loopback transport; web pages cannot call it or read tokens. */
@@ -272,8 +284,9 @@ export function createVisualControlServer({ token, dispatch, mailDispatch }) {
       const result = validateVisualResult(await dispatch(value.operation, value.args));
       const body = JSON.stringify(result);
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body);
-    } catch {
-      const body = JSON.stringify(privateMail ? { ok: false, code: 'authentication_mail_unavailable' } : visualStatus('error', 'operation_failed'));
+    } catch (error) {
+      const body = JSON.stringify(privateMail ? { ok: false, code: 'authentication_mail_unavailable' }
+        : visualStatus('error', 'operation_failed', { diagnostic: visualStartupDiagnostic('worker_request', undefined, error) }));
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }); res.end(body);
     }
   });
@@ -281,6 +294,8 @@ export function createVisualControlServer({ token, dispatch, mailDispatch }) {
 
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
+// Additive marker for signed providers requiring the closed startup result.
+export const VISUAL_STARTUP_DIAGNOSTICS_API = 'trelio.browser-startup-diagnostics/v1';
 export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
 // Additive signed opt-in. A provider checks this marker before relying on file
 // chooser delivery; source availability never claims that an old host has it.

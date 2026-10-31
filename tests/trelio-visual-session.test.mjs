@@ -257,6 +257,25 @@ test('detached worker keeps its original lease and encrypted storage across shor
     // claim to disappear before removing this synthetic key and directory.
     await waitForClose();
     assert.ok(await store.read());
+    // Exercise the REAL detached entrypoint and repeated public observations
+    // after a deterministic pre-browser failure. Never corrupt a real account
+    // or unlock the synthetic vault again: malformed envelope shape is refused
+    // before key access, and the original bytes must remain untouched.
+    await writePrivateJsonFile(store.file, { format: 'SYNTHETIC_INVALID_ENVELOPE' });
+    const rejectedBytes = await fs.readFile(store.file);
+    assert.equal((await call('navigate', { url: origin })).state, 'preparing');
+    let failed;
+    for (let i = 0; i < 120; i++) {
+      failed = await call('status');
+      if (failed.state !== 'preparing') break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    assert.equal(failed.state, 'error');
+    assert.deepEqual(failed.diagnostic, { stage: 'storage_read', code: 'storage_corrupt' });
+    assert.deepEqual((await call('wait')).diagnostic, failed.diagnostic);
+    assert.deepEqual((await call('status')).diagnostic, failed.diagnostic);
+    assert.deepEqual(await fs.readFile(store.file), rejectedBytes, 'diagnosis never resets damaged auth state');
+    await call('close'); await waitForClose();
   } catch (error) { failure = error; }
   finally {
     let stopped = false, diagnostic = '';

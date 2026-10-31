@@ -38,6 +38,52 @@ chunks и trailing bytes. Normalization не добавляет команды �
 Неизвестный результат не разрешает повтор внешней записи. Динамическая страница
 может сдвинуть контрол после кадра: token не заменяет визуальный смысловой review.
 
+### Диагностика запуска
+
+`VISUAL_STARTUP_DIAGNOSTICS_API=trelio.browser-startup-diagnostics/v1` в общем
+host module подтверждает additive контракт. Legacy `state`/`reason` сохраняются;
+error дополнительно содержит закрытый `diagnostic: {stage,code,failureCode?,causeCode?,exitCode?,signal?}`.
+Тот же validator проверяет worker HTTP, provider stdout и MCP; arbitrary поля,
+prose, URL/paths, native output, credentials и diagnostic на успешном результате
+отклоняются. Text-mode ошибки используют тот же status DTO без текста страницы.
+Новых файлов журналов, native logging и telemetry dimensions нет.
+
+Этап – место наблюдения отказа, не установленная первопричина:
+
+| stage | code и смысл |
+| --- | --- |
+| `owner_read`, `owner_prepare`, `owner_publish`, `control_server`, `control_listen`, `worker_spawn` | `startup_failed`: отказ private descriptor/worker; нет оснований менять ACL или удалять claim |
+| `worker_node` | `node_unavailable`: не найден совместимый Node под прежней signing policy |
+| `worker_request` | `worker_unavailable`: не получен корректный ответ; не доказывает, что worker или браузер не запускался |
+| `dependencies`, `dependency_install`, `dependency_load` | `startup_failed`, `dependency_install_failed`, `dependency_load_failed`: общая подготовка, установка либо загрузка native modules |
+| `storage_read`, `storage_prepare` | `storage_unavailable`, `storage_corrupt`: недоступное либо повреждённое protected state |
+| `profile_restore`, `profile_prepare`, `extension_prepare` | `startup_failed`, `storage_unavailable`, `storage_corrupt`: восстановление/подготовка; прежний snapshot не перезаписывается |
+| `browser_install` | `browser_install_failed`: отказ подготовки managed Chromium |
+| `browser_spawn` | `browser_spawn_failed`, `browser_exited`: spawn отказ либо наблюдённый ранний exit |
+| `extension_connect` | `extension_not_connected`, `extension_not_ready`: socket отсутствует либо hello не завершён в прежний deadline |
+| `extension_policy`, `extension_auth`, `extension_window` | `extension_bootstrap_failed`, `storage_unavailable`, `storage_corrupt`: фиксированный policy/auth/window этап расширения |
+
+`failureCode` сохраняет только код настоящего `ProcessDiagnosticError` из общего
+закрытого каталога subprocess diagnostics; native message/details не выдаются.
+`causeCode` принимает только `EACCES|EPERM|ENOENT|EIO|EBUSY|ENOSPC|ENOTDIR|EEXIST|
+ETIMEDOUT|ECONNREFUSED|ECONNRESET|ERR_DLOPEN_FAILED|ABORT_ERR`. `exitCode` – только
+наблюдённый native integer (включая Windows DWORD); `signal` – только
+`SIGKILL|SIGTERM|SIGTRAP|SIGABRT|SIGSEGV`. Неподдержанный code/message не
+разбирается: остаётся известный этап без придуманной причины. Вложенный этап
+сохраняется только у host-owned typed error, не у похожего arbitrary объекта.
+
+Первый startup отказ остаётся в том же worker и возвращается последующими
+`status`/`wait` и content-вызовами. Они не перезапускают browser/install/input,
+не продлевают lease и не сбрасывают credentials/fences. При потере самого worker
+доступный результат может ограничиться `worker_request/worker_unavailable`;
+диагностика не восстанавливает незафиксированное прошлое evidence. Close и
+cleanup сохраняют прежнюю самостоятельную семантику. Установка, reconnect,
+исправление прав и повтор требуют прежних отдельных оснований.
+
+Проверки включают real require/native child failure, отказ storage до запуска,
+первый неизменный result, private HTTP → typed MCP, rejection canaries и native
+detached worker с повреждённым синтетическим envelope на всех обязательных OS.
+
 <a id="текстовый-режим"></a>
 
 ## Текстовый режим

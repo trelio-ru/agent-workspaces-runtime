@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import path from 'node:path';
 import { BROWSER_MAIL_REQUEST_KIND, parseBrowserMailHandle } from './trelio-browser-session.mjs';
+import { ProcessDiagnosticError, PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 // Keep path-only validation at the pure MCP boundary; file IO belongs to the
 // existing private browser attachment lifecycle, never a model projection.
 export function validVisualUploadFiles(files) {
@@ -29,6 +30,67 @@ for (const reason of ['upload_file_invalid', 'upload_file_changed', 'upload_too_
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 for (const reason of ['authentication_required', 'authentication_setup_required', 'authentication_unknown', 'authentication_cancelled', 'authentication_timeout', 'authentication_setup_failed', 'authentication_mail_busy']) reasons.add(reason);
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
+
+// Startup diagnostics are a CLOSED protocol, not a redacted exception dump.
+// Keep this beside the existing result validator so the detached worker, its
+// private HTTP client and MCP all enforce exactly the same disclosure boundary.
+// A stage records where a failure was observed; it never proves its root cause
+// or authorizes another launch, credential input, installation or ACL repair.
+const startupStages = new Set(['owner_read', 'owner_prepare', 'owner_publish', 'control_server', 'control_listen', 'worker_node', 'worker_spawn',
+  'worker_request', 'dependencies', 'dependency_install', 'dependency_load', 'storage_read', 'storage_prepare',
+  'profile_restore', 'profile_prepare', 'extension_prepare', 'browser_install', 'browser_spawn',
+  'extension_connect', 'extension_policy', 'extension_auth', 'extension_window']);
+const startupCodes = new Set(['startup_failed', 'node_unavailable', 'dependency_install_failed', 'dependency_load_failed',
+  'storage_unavailable', 'storage_corrupt', 'browser_install_failed', 'browser_spawn_failed', 'browser_exited',
+  'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed', 'worker_unavailable']);
+const startupCauses = new Set(['EACCES', 'EPERM', 'ENOENT', 'EIO', 'EBUSY', 'ENOSPC', 'ENOTDIR', 'EEXIST',
+  'ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET', 'ERR_DLOPEN_FAILED', 'ABORT_ERR']);
+const startupSignals = new Set(['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV']);
+
+export function validateVisualStartupDiagnostic(value) {
+  if (!exact(value, ['stage', 'code', 'failureCode', 'causeCode', 'exitCode', 'signal']) || !startupStages.has(value.stage)
+    || !startupCodes.has(value.code) || value.causeCode !== undefined && !startupCauses.has(value.causeCode)
+    || value.failureCode !== undefined && !PROCESS_DIAGNOSTIC_CODES.includes(value.failureCode)
+    || value.exitCode !== undefined && (!Number.isSafeInteger(value.exitCode) || value.exitCode < -2147483648 || value.exitCode > 4294967295)
+    || value.signal !== undefined && !startupSignals.has(value.signal)) fail();
+  return { ...value };
+}
+
+const startupStageCodes = { worker_node: 'node_unavailable', worker_request: 'worker_unavailable',
+  dependency_install: 'dependency_install_failed', dependency_load: 'dependency_load_failed',
+  storage_read: 'storage_unavailable', storage_prepare: 'storage_unavailable', browser_install: 'browser_install_failed',
+  browser_spawn: 'browser_spawn_failed', extension_connect: 'extension_not_connected' };
+
+export function visualStartupDiagnostic(stage, code = startupStageCodes[stage] || 'startup_failed', error) {
+  // An inner host phase is more precise than the surrounding dependency or
+  // worker phase. Only errors created by this module can carry that provenance;
+  // an arbitrary object with a `diagnostic` property is never trusted.
+  if (error instanceof VisualStartupError) return validateVisualStartupDiagnostic(error.diagnostic);
+  if (error?.code === 'VISUAL_STORAGE_CORRUPT') code = 'storage_corrupt';
+  else if (['VISUAL_STORAGE_UNAVAILABLE', 'VISUAL_STORAGE_UNSAFE'].includes(error?.code)) code = 'storage_unavailable';
+  return validateVisualStartupDiagnostic({ stage, code,
+    ...(startupCauses.has(error?.code) ? { causeCode: error.code } : {}),
+    // Native ACL/DPAPI already has a typed, closed cause. Preserve that evidence
+    // without its human message/details or accepting a lookalike plain Error.
+    ...(error instanceof ProcessDiagnosticError && PROCESS_DIAGNOSTIC_CODES.includes(error.diagnosticCode)
+      ? { failureCode: error.diagnosticCode,
+        ...(startupCauses.has(error.details?.causeCode) ? { causeCode: error.details.causeCode } : {}) } : {}) });
+}
+
+class VisualStartupError extends Error {
+  constructor(diagnostic) { super('VISUAL_STARTUP_FAILED'); this.diagnostic = validateVisualStartupDiagnostic(diagnostic); }
+}
+
+export const visualStartupFault = diagnostic => new VisualStartupError(diagnostic);
+export const visualStartupReason = diagnostic => ['storage_corrupt', 'storage_unavailable'].includes(diagnostic.code) ? 'storage_unavailable'
+    : ['node_unavailable', 'dependency_install_failed', 'dependency_load_failed', 'browser_install_failed',
+      'browser_spawn_failed', 'browser_exited', 'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed'].includes(diagnostic.code)
+      ? 'bootstrap_failed' : 'operation_failed';
+
+export async function visualStartupPhase(stage, action, code = 'startup_failed') {
+  try { return await action(); }
+  catch (error) { throw new VisualStartupError(visualStartupDiagnostic(stage, code, error)); }
+}
 
 function validatePng(bytes, discardBrowserColorProfile = false) {
   // Accept the raster/color chunks Chromium emits, not arbitrary PNG text,
@@ -71,7 +133,11 @@ function validatePng(bytes, discardBrowserColorProfile = false) {
 }
 
 function validateResult(value, discardBrowserColorProfile) {
-  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (value.diagnostic !== undefined) {
+    if (value.state !== 'error' || !['operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'browser_process_lost'].includes(value.reason)) fail();
+    validateVisualStartupDiagnostic(value.diagnostic);
+  }
   if (value.reason === 'http_document_failure') {
     let url;
     try { url = new URL(value.origin); } catch { fail(); }

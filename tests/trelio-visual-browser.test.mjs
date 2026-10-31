@@ -84,9 +84,12 @@ test('native storage failure precedes browser I/O and remains visible in status'
     async read() { throw Object.assign(new Error('SYNTHETIC_PRIVATE_DETAIL'), { code: 'VISUAL_STORAGE_UNAVAILABLE' }); }, close() {},
   }, policy: createVisualOriginPolicy({ origins: ['https://example.test'] }), lease: { deadlineAt: Date.now() + 60_000 } });
   try {
-    assert.equal((await browser.call('setup', { url: 'https://example.test' })).reason, 'storage_unavailable');
+    const failed = await browser.call('setup', { url: 'https://example.test' });
+    assert.equal(failed.reason, 'storage_unavailable');
+    assert.deepEqual(failed.diagnostic, { stage: 'storage_read', code: 'storage_unavailable' });
     const status = await browser.call('status');
     assert.equal(status.state, 'error'); assert.equal(status.reason, 'storage_unavailable');
+    assert.deepEqual(status.diagnostic, failed.diagnostic);
     assert.doesNotMatch(JSON.stringify(status), /SYNTHETIC_PRIVATE_DETAIL/);
   } finally { await browser.close(); }
 });
@@ -100,8 +103,31 @@ test('invalid private auth state cannot launch Chromium, echo credentials or ove
   try {
     const status = await browser.call('setup', { url: 'https://example.test' });
     assert.equal(status.state, 'error'); assert.equal(status.reason, 'storage_unavailable');
+    assert.deepEqual(status.diagnostic, { stage: 'profile_restore', code: 'storage_corrupt' });
     assert.equal(JSON.stringify(status).includes('SYNTHETIC_PRIVATE_AUTH'), false); assert.equal(writes, 0);
   } finally { await browser.close(); }
+});
+
+test('startup stage and closed native cause survive status without retrying storage or trusting error prose', async () => {
+  for (const cause of ['EACCES', 'ENOSPC', 'PRIVATE_PATH_COOKIE_TOKEN']) {
+    let reads = 0;
+    const browser = new ExtensionVisualBrowser({ origins: ['https://example.test'], dependencies: {}, store: {
+      async read() { reads++; throw Object.assign(new Error('PRIVATE_PATH_COOKIE_TOKEN'), {
+        code: cause, diagnostic: { stage: 'browser_spawn', code: 'browser_exited', exitCode: 1 },
+        path: '/PRIVATE_PATH_COOKIE_TOKEN', stack: 'PRIVATE_PATH_COOKIE_TOKEN' }); }, close() {},
+    }, policy: createVisualOriginPolicy({ origins: ['https://example.test'] }), lease: { deadlineAt: Date.now() + 60000 } });
+    try {
+      const failed = await browser.call('navigate', { url: 'https://example.test' });
+      assert.deepEqual(failed.diagnostic, { stage: 'storage_read', code: 'storage_unavailable',
+        ...(cause === 'PRIVATE_PATH_COOKIE_TOKEN' ? {} : { causeCode: cause }) });
+      for (const command of ['status', 'setup', 'navigate']) {
+        const value = await browser.call(command, command === 'status' ? {} : { url: 'https://example.test' });
+        assert.deepEqual(value.diagnostic, failed.diagnostic);
+      }
+      assert.equal(reads, 1, 'observations and repeated requests cannot retry a failed startup');
+      assert.doesNotMatch(JSON.stringify(failed), /PRIVATE_PATH_COOKIE_TOKEN|browser_exited/);
+    } finally { await browser.close(); }
+  }
 });
 
 test('public visual API rejects private transport commands and extra fields before storage or browser I/O', async () => {

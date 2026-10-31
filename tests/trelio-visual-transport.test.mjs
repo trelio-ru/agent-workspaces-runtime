@@ -7,12 +7,84 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { visualFrame, parseVisualSkillOutput, visualStatus, validateVisualResult, normalizeBrowserVisualResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { visualFrame, parseVisualSkillOutput, visualStatus, validateVisualResult, normalizeBrowserVisualResult,
+  visualStartupDiagnostic, visualStartupPhase } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { visualSessionBinding, createVisualControlServer, runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
-import { prepareVisualPrivateDirectory, runVisualChild, visualChildEnvironment } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
+import { prepareVisualPrivateDirectory, runVisualChild, visualChildEnvironment, loadVisualDependencies,
+  VISUAL_PLAYWRIGHT_VERSION, VISUAL_KEYRING_VERSION, VISUAL_WS_VERSION } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { handleToolCall } from '../host-runtime/scripts/trelio-remote-mcp.mjs';
 import { handleTrelioWorkspaceActionOperation } from '../host-runtime/scripts/trelio-local-context.mjs';
+import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
+
+test('closed startup diagnostics cross actual worker HTTP and typed MCP unchanged without raw output fallback', async () => {
+  const diagnostic = { stage: 'browser_spawn', code: 'browser_exited', exitCode: 1, signal: 'SIGTERM' };
+  const server = createVisualControlServer({ token: 'a'.repeat(64), dispatch: async () => visualStatus('error', 'bootstrap_failed', { diagnostic }) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const input = { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: randomUUID(), skillId: 'synthetic-visual-fixture', releaseId: randomUUID(), arguments: ['status'] } };
+    const result = await handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
+      workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, {
+        runBridge: async () => {
+          const response = await fetch(`http://127.0.0.1:${server.address().port}/command`, { method: 'POST',
+            headers: { authorization: `Bearer ${'a'.repeat(64)}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ operation: 'status', args: {} }) });
+          return { stdout: await response.text(), stderr: 'PRIVATE_STDERR_NOT_FOR_THE_MODEL' };
+        },
+      }),
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(JSON.parse(result.content[0].text).diagnostic, diagnostic);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_STDERR|stdout|Bearer/);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
+test('startup diagnostic validator rejects arbitrary properties, values and successful-state injection', async () => {
+  const safe = { stage: 'dependency_load', code: 'dependency_load_failed', causeCode: 'ERR_DLOPEN_FAILED' };
+  const status = visualStatus('error', 'bootstrap_failed', { diagnostic: safe });
+  assert.deepEqual(parseVisualSkillOutput(JSON.stringify(status)).diagnostic, safe);
+  for (const patch of [{ path: '/PRIVATE' }, { message: 'PRIVATE' }, { stack: 'PRIVATE' }, { stage: 'PRIVATE' },
+    { code: 'PRIVATE' }, { failureCode: 'PRIVATE' }, { causeCode: 'PRIVATE' }, { exitCode: '1' }, { exitCode: Infinity }, { signal: 'PRIVATE' }]) {
+    assert.throws(() => validateVisualResult({ ...status, diagnostic: { ...safe, ...patch } }), /VISUAL_RESULT_INVALID/);
+  }
+  assert.throws(() => visualStatus('ready', 'none', { diagnostic: safe }), /VISUAL_RESULT_INVALID/);
+  const native = Object.assign(new Error('PRIVATE'), { code: 'EACCES', diagnostic: safe, stack: 'PRIVATE' });
+  assert.deepEqual(visualStartupDiagnostic('storage_read', undefined, native), { stage: 'storage_read', code: 'storage_unavailable', causeCode: 'EACCES' });
+  let failure;
+  try { await visualStartupPhase('dependencies', () => visualStartupPhase('dependency_load', () => { throw native; }, 'dependency_load_failed')); }
+  catch (error) { failure = error; }
+  assert.deepEqual(visualStartupDiagnostic('worker_request', undefined, failure), { ...safe, causeCode: 'EACCES' });
+  assert.doesNotMatch(failure.message, /PRIVATE/);
+  assert.deepEqual(visualStartupDiagnostic('owner_read', undefined,
+    new ProcessDiagnosticError('TRELIO_WINDOWS_PRIVATE_ACL_FAILED', 'PRIVATE_NATIVE_MESSAGE', { causeCode: 'EACCES', path: '/PRIVATE' })),
+  { stage: 'owner_read', code: 'startup_failed', failureCode: 'TRELIO_WINDOWS_PRIVATE_ACL_FAILED', causeCode: 'EACCES' });
+});
+
+test('actual dependency load and native installer failures retain their phase without npm output or paths', async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-startup-failures-')));
+  const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  try {
+    // Exact metadata passes the readiness check; intentionally missing module
+    // bytes fail at the real require boundary. install=false guarantees no npm
+    // or network probe and prevents a failed fixture from repairing itself.
+    for (const [name, version] of [['playwright-core', VISUAL_PLAYWRIGHT_VERSION], ['@napi-rs/keyring', VISUAL_KEYRING_VERSION], ['ws', VISUAL_WS_VERSION]]) {
+      const root = path.join(directory, 'node_modules', name);
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ version }));
+    }
+    await assert.rejects(loadVisualDependencies({ root: directory, install: false }), error => {
+      assert.deepEqual(visualStartupDiagnostic('dependencies', undefined, error), { stage: 'dependency_load', code: 'dependency_load_failed' });
+      assert.doesNotMatch(error.message, new RegExp(directory)); return true;
+    });
+    await assert.rejects(runVisualChild(process.execPath, ['-e', 'console.error("PRIVATE_COOKIE_PATH_TOKEN");process.exit(7)'], { startupStage: 'browser_install' }), error => {
+      assert.deepEqual(visualStartupDiagnostic('browser_spawn', undefined, error), { stage: 'browser_install', code: 'browser_install_failed', exitCode: 7 });
+      assert.doesNotMatch(error.message, /PRIVATE_COOKIE_PATH_TOKEN/); return true;
+    });
+  } finally {
+    if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH; else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('headed child retains the X11 authorization-file path while dropping loader and private token environment', () => {
   const previous = Object.fromEntries(['XAUTHORITY', 'NODE_OPTIONS', 'TRELIO_SYNTHETIC_TOKEN'].map(name => [name, process.env[name]]));

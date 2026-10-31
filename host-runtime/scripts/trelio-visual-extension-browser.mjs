@@ -13,7 +13,7 @@ import { visualLinkRouter, visualAttachmentRouter } from './trelio-visual-link-r
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
@@ -236,6 +236,7 @@ export class ExtensionVisualBrowser {
   #authenticationTask; #mailAttempt;
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
+  #startupStage; #startupDiagnostic;
   constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
     if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
@@ -254,7 +255,8 @@ export class ExtensionVisualBrowser {
   }
   #status(reason = 'none') {
     if (this.#mailAttempt && !this.#terminal && !this.#closed) return validateVisualResult(this.#mailAttempt.publicStatus());
-    return visualStatus(this.#state, this.#terminal || this.#setupReason || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
+    return visualStatus(this.#state, this.#terminal || this.#setupReason || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved,
+      ...(this.#state === 'error' && this.#startupDiagnostic ? { diagnostic: this.#startupDiagnostic } : {}) });
   }
   /** Called only by the separately authenticated host-private mail endpoint.
    * It cannot start an attempt, select a mailbox or submit arbitrary inputs.
@@ -277,7 +279,11 @@ export class ExtensionVisualBrowser {
   async #start(url, manual) {
     if (this.#child) return;
     this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false; this.#authHandshake = false; this.#authSnapshotReady = false; this.#windowsClosed = false;
-    const snapshot = await this.store.read(); await this.store.prepare?.(); this.#saved = Boolean(snapshot);
+    this.#startupStage = 'storage_read';
+    const snapshot = await this.store.read();
+    this.#startupStage = 'storage_prepare';
+    await this.store.prepare?.(); this.#saved = Boolean(snapshot);
+    this.#startupStage = 'profile_restore';
     this.#cookies = visualCookieState({ origins: this.origins, domains: this.domains });
     this.#sessionCookies = this.#cookies.validate(snapshot?.sessionCookies ?? []);
     this.#replaceSessionCookies = Object.hasOwn(snapshot || {}, 'sessionCookies');
@@ -286,7 +292,9 @@ export class ExtensionVisualBrowser {
     await prepareVisualPrivateDirectory(this.#directory);
     this.#profile = path.join(this.#directory, 'profile');
     await restoreVisualProfile(snapshot, this.#profile);
+    this.#startupStage = 'profile_prepare';
     await prepareVisualProfileStartup(this.#profile);
+    this.#startupStage = 'extension_prepare';
     const extension = path.join(this.#directory, 'extension'); await prepareVisualPrivateDirectory(extension);
     const token = crypto.randomBytes(32).toString('hex');
     this.#server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
@@ -305,20 +313,40 @@ export class ExtensionVisualBrowser {
             // This local-only initialization never passes through call(), the
             // visual result validator or MCP. A reconnect cannot restore stale
             // auth over a live human session: each worker asks exactly once.
-            void this.#send('restore-session-auth', { cookies: this.#sessionCookies, replace: this.#replaceSessionCookies }).catch(() => { this.#terminal ||= 'storage_unavailable'; this.#state = 'error'; });
+            void this.#send('restore-session-auth', { cookies: this.#sessionCookies, replace: this.#replaceSessionCookies }).catch(error => {
+              this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'storage_unavailable', error);
+              this.#terminal ||= 'storage_unavailable'; this.#state = 'error';
+            });
             return;
           }
           if (value.kind === 'session_auth') {
             try { this.#sessionCookies = this.#cookies.validate(value.cookies); this.#authSnapshotReady = true; }
-            catch { this.#terminal = 'storage_unavailable'; this.#state = 'error'; }
+            catch {
+              this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'storage_corrupt');
+              this.#terminal = 'storage_unavailable'; this.#state = 'error';
+            }
             return;
           }
-          if (value.kind === 'auth_state_failed') { this.#terminal = 'storage_unavailable'; this.#state = 'error'; return; }
-          if (value.kind === 'hello' && value.version === 1) { if (this.#authSnapshotReady) this.#extensionReady = true; else this.#terminal = 'bootstrap_failed'; return; }
+          if (value.kind === 'auth_state_failed') {
+            this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'storage_unavailable');
+            this.#terminal = 'storage_unavailable'; this.#state = 'error'; return;
+          }
+          if (value.kind === 'hello' && value.version === 1) {
+            if (this.#authSnapshotReady) this.#extensionReady = true;
+            else {
+              this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'extension_bootstrap_failed');
+              this.#terminal = 'bootstrap_failed';
+            }
+            return;
+          }
           // Only fixed bootstrap stages can leave the extension on failure.
           // Never include native messages, paths, URLs or its transport token.
           if (value.kind === 'bootstrap_failed' && ['policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window'].includes(value.stage)) {
-            this.testDiagnostics?.({ stage: value.stage }); this.#terminal = 'bootstrap_failed'; return;
+            this.testDiagnostics?.({ stage: value.stage });
+            const stage = value.stage === 'auth' ? 'extension_auth'
+              : ['window', 'window_inventory'].includes(value.stage) ? 'extension_window' : 'extension_policy';
+            this.#startupDiagnostic ||= visualStartupDiagnostic(stage, 'extension_bootstrap_failed');
+            this.#terminal = 'bootstrap_failed'; return;
           }
           if (value.kind === 'windows_closed') { this.testDiagnostics?.({ stage: 'windows_closed' }); this.#windowsClosed = true; if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
@@ -346,6 +374,7 @@ export class ExtensionVisualBrowser {
     await fs.writeFile(path.join(extension, 'authentication.js'), `(${installVisualAuthentication.toString()})(${JSON.stringify(this.authentication)});`, { mode: 0o600 });
     if (this.attachmentDownloads) await fs.writeFile(path.join(extension, 'attachment-router.js'), `(${visualAttachmentRouter.toString()})();`, { mode: 0o600 });
     if (this.observationMode === 'text') await fs.writeFile(path.join(extension, 'text-observer.js'), `(${installTextObserver.toString()})();`, { mode: 0o600 });
+    this.#startupStage = 'browser_install';
     const executable = await ensureVisualChromium(this.dependencies, { signal: this.#launchAbort.signal });
     // A download/native vault wait does not grant a fresh launch budget. Do
     // not open a late window after close or the original signed deadline.
@@ -364,27 +393,42 @@ export class ExtensionVisualBrowser {
     // The extension privately navigates the internal new-tab surface after
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
+    this.#startupStage = 'browser_spawn';
     this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], visualChildEnvironment());
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
     // Reduce only the existing bounded private log, without adding a native
     // pipe or copying its raw text into test evidence.
     this.#nativeStartup = visualNativeStartupEvidence('');
-    this.#child.once('error', () => { this.#terminal = 'bootstrap_failed'; this.#state = 'error'; });
+    this.#child.once('error', error => {
+      this.#startupDiagnostic ||= visualStartupDiagnostic('browser_spawn', undefined, error);
+      this.#terminal = 'bootstrap_failed'; this.#state = 'error';
+    });
     this.#child.once('exit', (code, signal) => {
       this.testDiagnostics?.({ stage: 'browser_exit', exitCode: code, signal });
-      if (this.#state === 'preparing') { this.#terminal = 'bootstrap_failed'; this.#state = 'error'; return; }
+      if (this.#state === 'preparing') {
+        // Keep the actual native exit ahead of a later handshake timeout. A
+        // numeric exit/signal is evidence of termination, not a guessed cause.
+        this.#startupDiagnostic ||= { ...visualStartupDiagnostic('browser_spawn', 'browser_exited'),
+          ...(Number.isSafeInteger(code) ? { exitCode: code } : {}),
+          ...(['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV'].includes(signal) ? { signal } : {}) };
+        this.#terminal = 'bootstrap_failed'; this.#state = 'error'; return;
+      }
       // A normal human window close may finish auth; a crash/kill must retain
       // the previous durable snapshot and report loss instead of claiming save.
       if (!this.#closed && this.#manual && code === 0 && !signal) void this.#finishManual().catch(() => {});
       else if (!this.#closed && !this.#starting) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     });
+    this.#startupStage = 'extension_connect';
     const until = Math.min(Date.now() + 25_000, this.lease.deadlineAt);
     while (!this.#extensionReady && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
-    if (!this.#extensionReady || this.#terminal) { await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', ...this.#nativeStartup }); throw fault('bootstrap_failed'); }
+    if (!this.#extensionReady || this.#terminal) {
+      this.#startupDiagnostic ||= visualStartupDiagnostic('extension_connect', this.#socket ? 'extension_not_ready' : 'extension_not_connected');
+      await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', ...this.#nativeStartup }); throw fault('bootstrap_failed'); }
     this.testWindowController?.({ tabs: () => this.#send('fixture-tab-budget'), running: () => Boolean(this.#child && this.#child.exitCode === null && this.#child.signalCode === null), close: () => this.#send('fixture-close-windows'), crash: () => this.#child?.kill('SIGKILL') });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
+    this.#startupStage = undefined;
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';
   }
   #send(operation, args = {}) {
@@ -539,7 +583,15 @@ export class ExtensionVisualBrowser {
         return this.#status();
       }
       this.#setupReason = undefined;
-      if (operation === 'credentials-status') return visualStatus(await hasVisualAuthenticationCredentials(this.store, this.authentication) ? 'saved_unverified' : 'not_configured');
+      if (operation === 'credentials-status') {
+        // A stopped-state auth probe can fail before any browser exists. Give
+        // that first protected read the same startup evidence as setup, while
+        // a successful probe neither starts a browser nor leaves a stale phase.
+        if (!this.#child) this.#startupStage = 'storage_read';
+        const configured = await hasVisualAuthenticationCredentials(this.store, this.authentication);
+        this.#startupStage = undefined;
+        return visualStatus(configured ? 'saved_unverified' : 'not_configured');
+      }
       if (operation === 'credentials-forget') { await this.store.forgetCredentials(); return visualStatus('not_configured'); }
       if (operation === 'authenticate-mail') {
         if (!this.#child || !this.authentication || !this.mailIdentity
@@ -689,8 +741,17 @@ export class ExtensionVisualBrowser {
     this.#tail = result.catch(() => {});
     return result.catch(error => {
       const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'upload_file_invalid', 'upload_file_changed', 'upload_too_large', 'upload_limit_reached', 'upload_timed_out', 'storage_unavailable', 'authentication_setup_required', 'authentication_mail_busy'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
-      if (this.#state === 'preparing') { this.#state = 'error'; this.#terminal = reason; }
-      return visualStatus('error', reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
+      if (this.#startupStage && reason !== 'lease_expired') {
+        // Persist the FIRST startup failure in this same worker. status/wait
+        // cannot overwrite it with a generic terminal reason or trigger a new
+        // browser. No raw Error, native output or diagnostic log is retained.
+        this.#startupDiagnostic ||= visualStartupDiagnostic(this.#startupStage, undefined, error);
+      }
+      const failureReason = this.#startupDiagnostic && reason !== 'lease_expired'
+        ? visualStartupReason(this.#startupDiagnostic) : reason;
+      if (this.#state === 'preparing' || this.#startupDiagnostic) { this.#state = 'error'; this.#terminal = failureReason; }
+      return visualStatus('error', failureReason, { sessionId: this.sessionId, hasStoredSession: this.#saved,
+        ...(this.#startupDiagnostic && reason !== 'lease_expired' ? { diagnostic: this.#startupDiagnostic } : {}) });
     });
   }
   async close() {

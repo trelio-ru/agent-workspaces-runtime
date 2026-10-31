@@ -6,7 +6,7 @@ import { loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { ExtensionVisualBrowser } from './trelio-visual-extension-browser.mjs';
-import { visualStatus } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, visualStartupPhase, visualStatus } from './trelio-visual-result.mjs';
 import { createVisualControlServer, withVisualOwnerFileLock, readVisualOwner,
   publishVisualWorkerOwner } from './trelio-visual-session.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
@@ -18,7 +18,7 @@ import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnosti
 const file = process.argv[2];
 let engine, server, timer, owner, current = visualStatus('preparing'), stopping = false;
 const startupAbort = new AbortController();
-let startup;
+let startup, startupFailed = false;
 let startupPhase = 'owner_read';
 let fixtureOnly = false, fixtureWrites = Promise.resolve();
 const fixtureEvidence = [];
@@ -101,13 +101,13 @@ try {
       if (!args || Object.keys(args).length) return visualStatus('error', 'invalid_input');
       const until = Math.min(Date.now() + 30_000, owner.deadlineAt);
       do {
-        current = engine ? await engine.call('status') : current;
+        if (!startupFailed) current = engine ? await engine.call('status') : current;
         if (!['preparing', 'manual_input_required'].includes(current.state)) break;
         await sleep(250);
       } while (Date.now() < until);
       return current;
     }
-    if (!engine) return current;
+    if (!engine || startupFailed) return current;
     return engine.call(operation, args);
   }
   startupPhase = 'control_server';
@@ -123,9 +123,10 @@ try {
   await publishVisualWorkerOwner(file, owner, { pid: process.pid, port: server.address().port });
   startupPhase = 'dependencies';
   fixtureDiagnostic({ stage: 'startup_dependencies' });
-  startup = loadVisualDependencies({ signal: startupAbort.signal });
+  startup = visualStartupPhase('dependencies', () => loadVisualDependencies({ signal: startupAbort.signal }));
   const dependencies = await startup;
   if (stopping || Date.now() >= owner.deadlineAt) throw new Error('VISUAL_START_CANCELLED');
+  startupPhase = 'storage_prepare';
   const store = new ProtectedVisualStore({ directory: owner.directory, scope: owner.scope, AsyncEntry: dependencies.AsyncEntry });
   fixtureDiagnostic({ stage: 'startup_browser' });
   // Keep the detached fixture's Chromium flags identical to production. Its
@@ -136,7 +137,9 @@ try {
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed', startupPhase, error, failureCode:error.diagnosticCode,
     causeCode:processDiagnosticCauseCode(error) });
-  current = visualStatus('error', /^VISUAL_(?:BOOTSTRAP|DEPENDENCIES)/u.test(error.code || '') ? 'bootstrap_failed' : 'operation_failed');
+  startupFailed = true;
+  const diagnostic = visualStartupDiagnostic(startupPhase === 'browser' ? 'browser_spawn' : startupPhase, undefined, error);
+  current = visualStatus('error', visualStartupReason(diagnostic), { diagnostic });
   // Preserve a failed startup for an explicit close/status decision. Do not
   // retry installation, login or the initial action from another invocation.
   if (!server) process.exitCode = 1;

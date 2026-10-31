@@ -363,6 +363,9 @@ publication tooling также остаются вне этого публичн
   после persist failure форма терминальна, exact native receipt читается без
   повторной записи. Открытие формы не является сохранением или входом.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
+  Production startup failures carry the SAME closed stage/code result through
+  worker HTTP/MCP and later status/wait. Never forward exception prose, enable
+  native logs, guess a root cause or retry startup from diagnostic evidence.
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
   Missing API support is a runtime capability gap, not a ban on automatic login.
