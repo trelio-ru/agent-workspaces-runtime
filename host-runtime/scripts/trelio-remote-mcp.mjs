@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { readAgentSkillSourceMetadata } from "./trelio-agent-skill-catalog-source.mjs";
-import { normalizeAgentSkillInstructions, AgentSkillInstructionBudgetError } from "./trelio-agent-skill-budget.mjs";
+import { normalizeAgentSkillInstructions, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
