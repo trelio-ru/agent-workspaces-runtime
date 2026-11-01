@@ -318,6 +318,7 @@ jobs:
           node tests/trelio-assistant-codex.test.mjs
           node tests/trelio-assistant-private.test.mjs
           node tests/trelio-assistant-transport.test.mjs
+          node tests/trelio-assistant-company-completion.test.mjs
           node tests/trelio-assistant-company-context-e2e.test.mjs
           node tests/trelio-assistant-source-reader.test.mjs
           node tests/trelio-assistant-setup.test.mjs
@@ -490,6 +491,8 @@ jobs:
           node tests/trelio-assistant-hook.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-coordinator.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-company-completion.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run selected assistant Workspace and proof boundaries

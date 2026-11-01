@@ -985,6 +985,7 @@ publication tooling также остаются вне этого публичн
 - Cross-repository tests запускай с exact plugin root. Ошибка отсутствующего
   plugin checkout – setup failure, а не повод копировать plugin source.
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
+  New host test files must enter both generic and applicable Windows direct CI lanes; the suite-inventory guard must remain strict.
 
 - Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
