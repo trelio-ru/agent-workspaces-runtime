@@ -986,6 +986,7 @@ publication tooling также остаются вне этого публичн
   plugin checkout – setup failure, а не повод копировать plugin source.
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
   New host test files must enter both generic and applicable Windows direct CI lanes; the suite-inventory guard must remain strict.
+  Journal schema bumps must check both inbox and scheduler legacy-upgrade fixtures, then the complete assistant direct-test intersection before enqueue.
 
 - Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
