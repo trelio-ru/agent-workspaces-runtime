@@ -430,7 +430,7 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
 export const createProductionAssistantMcp = async ({presentationProfile='task',prepareCompanySearch=false,context=productionContext,withProfile=withProductionAssistantWorkspace,withManagedContent=withProductionAssistantManagedContent,httpRequest,sourcePackage}={}) => {
-  if(typeof prepareCompanySearch!=='boolean')fail('ASSISTANT_REQUEST_INVALID');
+  if(typeof prepareCompanySearch!=='boolean'&&prepareCompanySearch!==2)fail('ASSISTANT_REQUEST_INVALID');
   if(sourcePackage!==undefined&&typeof sourcePackage!=='function')fail('ASSISTANT_REQUEST_INVALID');
   const common = await import('./trelio-workspace.mjs');
   // Preserve credential-free production discovery. A trusted maintainer context
@@ -560,7 +560,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // fresh managed profile above repeats owner/pass/recipient checks. No
       // original query, plaintext result or key enters the preparation plan.
       if(prepareCompanySearch&&name==='search')return {content:[],
-        _meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding:assistantCompanyPreparationBinding(opened)}}};
+        _meta:{'trelio/assistant-company-read':{schemaVersion:prepareCompanySearch===2?2:1,descriptor,binding:assistantCompanyPreparationBinding(opened)}}};
       return materializeAssistantEncryptedCompanyContext({origin:identity.origin,descriptor,name,arguments:args,signal,
         assertCurrent:current.prepareCompanyContextRead});
     },{signal,encryptedCompanyContext:descriptor}),
@@ -598,12 +598,19 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
       // Preserve exactly the parsed original, never a mutable caller object.
       args=JSON.parse(JSON.stringify(args));
       const result=await request({operation:'call',name,arguments:args,
-        ...(name==='search'?{prepareCompanySearch:true}:{}),
+        ...(name==='search'?{prepareCompanySearch:2}:{}),
         ...(['remote_mcp','skill_setup','company_context'].includes(presentationProfile)?{presentationProfile}:{})},{signal});
       const preparation=result?._meta?.['trelio/assistant-company-read'];
       if(preparation!==undefined){
-        if(name!=='search'||result.isError||preparation?.schemaVersion!==1
+        if(name!=='search'||result.isError||![1,2].includes(preparation?.schemaVersion)
           ||Object.keys(preparation).sort().join(',')!=='binding,descriptor,schemaVersion')fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        const business=Object.fromEntries(Object.entries(args).filter(([key])=>!['taskPass','intakePass','runtimeSessionProof'].includes(key)));
+        if(preparation.schemaVersion===2){
+          const completed=await workspace.completeCompanySearch(preparation,business,{signal,request});
+          if(completed!==null)return completed;
+          return {content:[{type:'text',text:'The complete encrypted company index and query are still preparing. After 10 seconds call nextCall with fresh hook admission. Do not create a task or Workspace Run, claim absence, or send a final unavailable reply while this preparation is progressing.'}],
+            structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:business}}};
+        }
         // The native search proof was consumed exactly once above. A long
         // read-only preparation child has its own managed profile/lifetime;
         // polling never resends that proof or extends this MCP request. The
@@ -611,7 +618,6 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
         // profile and all native source/recipient/generation fences.
         const prepared=await workspace.prepareCompanySearch(preparation,{signal,request});
         if(!prepared){
-          const business=Object.fromEntries(Object.entries(args).filter(([key])=>!['taskPass','intakePass','runtimeSessionProof'].includes(key)));
           return {content:[{type:'text',text:'The complete encrypted company index is still preparing. After 10 seconds call nextCall with fresh hook admission. Do not create a task or Workspace Run, claim absence, or send a final unavailable reply while this preparation is progressing.'}],
             structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:business}}};
         }
@@ -985,19 +991,22 @@ export const maintainAssistantHost = async ({client,probe,update,versions,signal
  * active invocation, tear down stdio, or replay the request after an error.
  * Secrets/content travel only inside protected runtime or bounded stdin pipes. */
 const validateAssistantRuntimeRequest = request => {
-  if(['company_context_prepare','company_context_read'].includes(request?.operation)){
-    const keys=request.operation==='company_context_read'?'arguments,binding,descriptor,operation':'binding,descriptor,operation';
+  if(['company_context_prepare','company_context_read','company_context_search','company_context_validate'].includes(request?.operation)){
+    const query=['company_context_read','company_context_search'].includes(request.operation);
+    const keys=query?'arguments,binding,descriptor,operation':request.operation==='company_context_validate'
+      ?'binding,descriptor,generation,operation':'binding,descriptor,operation';
     if(Object.getPrototypeOf(request)!==Object.prototype||Object.keys(request).sort().join(',')!==keys
       ||!request.descriptor||Object.getPrototypeOf(request.descriptor)!==Object.prototype
       ||request.descriptor.nativeTool!=='search'
-      ||request.operation==='company_context_read'&&(!request.arguments||Object.getPrototypeOf(request.arguments)!==Object.prototype))
+      ||query&&(!request.arguments||Object.getPrototypeOf(request.arguments)!==Object.prototype)
+      ||request.operation==='company_context_validate'&&!/^[a-f0-9]{64}$/u.test(request.generation??''))
       fail('ASSISTANT_REQUEST_INVALID');
     validateAssistantCompanyPreparationBinding(request.binding);
     return request;
   }
   if(!request || !['list','call','health','health_check','background_tick'].includes(request.operation)
     || Object.keys(request).some(key=>!['operation','name','arguments','presentationProfile','prepareCompanySearch'].includes(key))
-    || request.prepareCompanySearch!==undefined&&(request.prepareCompanySearch!==true||request.operation!=='call'||request.name!=='search')
+    || request.prepareCompanySearch!==undefined&&(![true,2].includes(request.prepareCompanySearch)||request.operation!=='call'||request.name!=='search')
     || request.presentationProfile!==undefined && (!['list','call'].includes(request.operation)||!['remote_mcp','skill_setup','company_context'].includes(request.presentationProfile))
     || request.operation==='call' && (typeof request.name!=='string' || !/^[a-z][a-z0-9_]{0,99}$/u.test(request.name)
       || !request.arguments || Object.getPrototypeOf(request.arguments)!==Object.prototype)
@@ -1009,7 +1018,7 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   resolveLoader=resolveHostRuntimeLoader,signal,timeoutMs}={}) => {
   validateAssistantRuntimeRequest(request);
   const interactive=request.operation==='call'&&interactiveAssistantTool(request.name);
-  const preparing=request.operation==='company_context_prepare';
+  const preparing=['company_context_prepare','company_context_search'].includes(request.operation);
   timeoutMs??=interactive||preparing?11*60_000:120_000;
   if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>(request.operation==='background_tick'?35*60_000:interactive||preparing?11*60_000:180_000))fail('ASSISTANT_REQUEST_INVALID');
   const input=JSON.stringify(request);
@@ -1746,7 +1755,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   verifyMaxSource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantMaxSource(input),
   verifySource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
-  if(['company_context_prepare','company_context_read'].includes(request.operation))return companyContextOperation(request);
+  if(['company_context_prepare','company_context_read','company_context_search','company_context_validate'].includes(request.operation))return companyContextOperation(request);
   if(['health','health_check','background_tick'].includes(request.operation)){
     // Fresh workers fence legacy supervisors too: an old parent may ignore
     // this structural response and remain running, but cannot start polling,
@@ -1831,7 +1840,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       fail(blocked==='plugin_update_required'?'ASSISTANT_PLUGIN_UPDATE_REQUIRED':'ASSISTANT_RUNTIME_UPDATE_REQUIRED');
     }
     const proxy=await proxyFor({presentationProfile:request.presentationProfile??'task',
-      ...(request.prepareCompanySearch?{prepareCompanySearch:true}:{})});
+      ...(request.prepareCompanySearch?{prepareCompanySearch:request.prepareCompanySearch}:{})});
     if(!proxy)return request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED');
     try {
       let result;
@@ -2348,12 +2357,13 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
   if(!path.isAbsolute(config))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const plans=new Map();
   const finishes=createWorkspaceFinishOperations({...finishOptions,toolName:'continue_assistant_workspace_action'});
-  // Reuse the SAME bounded operation registry/short-wait algorithm as finish,
-  // but retain only preparation readiness, never a cached company answer. Each
-  // query first obtains a fresh native search admission; after preparation its
-  // real local read rechecks pass, recipient, ACL and current mirror generation.
-  // No Run, writable directory, new journal, provider or background model exists.
+  // Reuse the SAME bounded registry/short waits as finish. Legacy v1 retains
+  // readiness only. V2 owns sync+query together and holds one undelivered value
+  // until fresh native generation/pass/recipient validation; successful delivery
+  // consumes it. Neither path creates a Run, journal, provider or model writer.
   const preparations=createWorkspaceFinishOperations({...companyPreparationOptions,toolName:'search'});
+  const searches=createWorkspaceFinishOperations({...companyPreparationOptions,toolName:'search'});
+  const searchJobs=new Map(),searchFailures=new Map(),searchLaunches=new Map();
   const preparationControllers=new Set(),preparationRequests=new Set();
   // A large first sync can exhaust its existing read-only child deadline after
   // retaining encrypted, revision-bound scratch files. A later fresh search
@@ -2369,7 +2379,141 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
         parameters:{},runIdentity:plan.runIdentity}}),options);
       return {stdout:value.stdout??'',stderr:value.stderr??''};
     }});
-  return {async prepareCompanySearch(raw,{signal,request=requestCurrentAssistantRuntime}={}){
+  const finishSearchJob=(key,job)=>{
+    clearTimeout(job.timer);
+    if(searchJobs.get(key)===job)searchJobs.delete(key);
+    preparationControllers.delete(job.controller);
+  };
+  const rememberSearchFailure=(key,job,error,retryable=false)=>{
+    const previous=searchFailures.get(key);
+    const failures=Math.max((previous?.failures??0)+1,retryable&&(searchLaunches.get(key)??0)>=2?2:1);
+    searchFailures.set(key,{error,failures,retryable,endedAt:Date.now(),fingerprint:job.fingerprint,arguments:job.arguments});finishSearchJob(key,job);
+    return failures;
+  };
+  return {async completeCompanySearch(raw,args,{signal,request=requestCurrentAssistantRuntime}={}){
+    if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||raw.schemaVersion!==2
+      ||Object.keys(raw).sort().join(',')!=='binding,descriptor,schemaVersion'||raw.descriptor?.nativeTool!=='search'
+      ||Buffer.byteLength(JSON.stringify(raw))>8192||!args||Object.getPrototypeOf(args)!==Object.prototype
+      ||['taskPass','intakePass','runtimeSessionProof'].some(key=>Object.hasOwn(args,key)))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    validateAssistantCompanyPreparationBinding(raw.binding);
+    const {descriptor,binding}=structuredClone(raw),argumentsObject=structuredClone(args);
+    const {canonicalJson}=await import('./trelio-company-encryption.mjs');
+    const fingerprint=canonicalJson({descriptor,binding,arguments:argumentsObject});
+    const key=createHash('sha256').update(canonicalJson({descriptor,binding})).digest('hex');
+    for(const [oldKey,old] of searchFailures){
+      if(Date.now()-old.endedAt>(companyPreparationOptions.retentionMs??30*60_000)&&!searches.active(oldKey)){
+        searchFailures.delete(oldKey);searchLaunches.delete(oldKey);
+      }
+    }
+    const exhausted=searchFailures.get(key);
+    if(exhausted&&(!exhausted.retryable||exhausted.failures>1))throw exhausted.error;
+    if(!exhausted&&searchFailures.size>=64||!searchJobs.has(key)&&searchJobs.size>=64)fail('ASSISTANT_WORKSPACE_CAPACITY');
+    let job=searchJobs.get(key);
+    const originalQuery=job??exhausted;
+    if(originalQuery&&originalQuery.fingerprint!==fingerprint){
+      // Changing a formulation while the original query is pending cannot
+      // launch another full-sync reader or reset its timeout accounting. Both
+      // calls have the SAME native pass/recipient binding; return only the
+      // original business nextCall, never its result, proof or private locator.
+      // The same rule survives its first owned timeout: that grants ONE resume
+      // of this query, not a replacement formulation under a fresh600s clock.
+      return {content:[{type:'text',text:'The original encrypted company query is still preparing. Continue its nextCall with fresh admission before starting another formulation.'}],
+        structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:structuredClone(originalQuery.arguments)}}};
+    }
+    if(!job){
+      const controller=new AbortController(),deadlineError=new DOMException('Owned company search deadline','TimeoutError');
+      // ONE original ten-minute budget now covers mirror synchronization AND
+      // the actual query. A generation conflict cannot restart this clock, and
+      // a short MCP wait never owns/cancels the query child. This replaces the
+      // old prepare -> second full sync under setup's unrelated 45-second clock.
+      job={controller,deadlineError,conflicts:0,fingerprint,arguments:argumentsObject};
+      job.timer=setTimeout(()=>controller.abort(deadlineError),10*60_000);job.timer.unref();
+      searchJobs.set(key,job);preparationControllers.add(controller);
+    }
+    let result;
+    try{
+      result=await searches.start({key,scope:key,fingerprint,pollAction:{},signal,execute:async()=>{
+        const launches=searchLaunches.get(key)??0;
+        // Snapshot refresh and owned-timeout resume share ONE two-child cap.
+        // A changed formulation or generation cannot buy a third first sync.
+        if(launches>=2){
+          const error=Object.assign(new Error(),{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID'});
+          rememberSearchFailure(key,job,error);throw error;
+        }
+        searchLaunches.set(key,launches+1);
+        const pending=Promise.resolve().then(()=>request({operation:'company_context_search',descriptor,binding,arguments:argumentsObject},
+          {signal:job.controller.signal}));
+        preparationRequests.add(pending);
+        try{
+          const value=await pending;
+          if(value?.schemaVersion!==1||Object.keys(value).sort().join(',')!=='generation,result,schemaVersion'
+            ||!/^[a-f0-9]{64}$/u.test(value.generation??'')||!value.result||typeof value.result!=='object'
+            ||!Array.isArray(value.result.content)||!value.result.structuredContent
+            ||typeof value.result.structuredContent!=='object'||value.result.isError===true
+            ||Buffer.byteLength(JSON.stringify(value.result))>512*1024)fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID');
+          return value;
+        }catch(error){
+          // Identity of this exact timer, not a public code/elapsed clock,
+          // proves the original owned deadline. Other cancellations stay hard.
+          const ownedTimeout=job.controller.signal.aborted&&job.controller.signal.reason===job.deadlineError;
+          if(ownedTimeout)
+            error=Object.assign(new Error(),{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'});
+          rememberSearchFailure(key,job,error,ownedTimeout);throw error;
+        }finally{preparationRequests.delete(pending);}
+      }});
+    }catch(error){
+      const failure=searchFailures.get(key);
+      if(failure?.error===error&&failure.retryable&&failure.failures===1)return null;
+      throw error;
+    }
+    if(result.state==='running')return null;
+    if(result.state!=='completed')fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    const refuseAbortedCompletion=()=>{
+      const owned=job.controller.signal.reason===job.deadlineError;
+      const error=Object.assign(new Error(),{code:owned?'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT':'ASSISTANT_RUNTIME_REQUEST_CANCELLED'});
+      searches.discardTerminal(key,result.operationId,key);
+      const failures=rememberSearchFailure(key,job,error,owned);
+      if(owned&&failures===1)return null;
+      throw error;
+    };
+    if(job.controller.signal.aborted)return refuseAbortedCompletion();
+    // This is an undelivered value, not a reusable search cache. Each poll has
+    // already consumed fresh native admission. Revalidate the SAME native
+    // manifest, pass and recipient in a NEW short worker before releasing any
+    // result. A revocation/refusal never returns the retained plaintext value.
+    let current;
+    try{current=await request({operation:'company_context_validate',descriptor,binding,generation:result.generation},{signal});}
+    catch(error){
+      // Cancelling only this waiter cannot replay the query or deliver its
+      // value. A new admitted poll may revalidate that undelivered result. An
+      // actual native ACL/transport refusal is terminal for this operation.
+      if(signal?.aborted)throw error;
+      searches.discardTerminal(key,result.operationId,key);
+      // Even a lookalike timeout code from this DIFFERENT short validator
+      // cannot grant an owned search/first-sync resume.
+      rememberSearchFailure(key,job,error);throw error;
+    }
+    if(current?.schemaVersion!==1||typeof current.current!=='boolean'
+      ||Object.keys(current).sort().join(',')!=='current,schemaVersion'){
+      searches.discardTerminal(key,result.operationId,key);
+      const error=Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+      rememberSearchFailure(key,job,error);throw error;
+    }
+    if(job.controller.signal.aborted)return refuseAbortedCompletion();
+    searches.discardTerminal(key,result.operationId,key);
+    if(!current.current){
+      // An ordinary optimistic snapshot refresh is read-only, gets another
+      // fresh native admission on the NEXT poll and keeps this original timer.
+      // Even a changed generation cannot exceed the SAME two-child bound as
+      // the one owned-timeout resume. Both refreshes keep this original timer.
+      job.conflicts++;
+      if((searchLaunches.get(key)??0)<2)return null;
+      const error=Object.assign(new Error(),{code:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'});
+      rememberSearchFailure(key,job,error);throw error;
+    }
+    finishSearchJob(key,job);searchFailures.delete(key);searchLaunches.delete(key);
+    return result.result;
+  },async prepareCompanySearch(raw,{signal,request=requestCurrentAssistantRuntime}={}){
     if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||raw.schemaVersion!==1
       ||Object.keys(raw).sort().join(',')!=='binding,descriptor,schemaVersion'||raw.descriptor?.nativeTool!=='search'
       ||Buffer.byteLength(JSON.stringify(raw))>8192)fail('ASSISTANT_MCP_INVALID_RESPONSE');
@@ -2473,6 +2617,9 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     for(const controller of preparationControllers)controller.abort();
     await Promise.allSettled([...preparationRequests]);
     preparationFailures.clear();
+    for(const [key,job] of searchJobs)finishSearchJob(key,job);
+    searchFailures.clear();
+    searchLaunches.clear();
   }};
 };
 
@@ -2498,7 +2645,7 @@ const assistantCompanyPreparationBinding = opened => validateAssistantCompanyPre
 export const executeAssistantCompanyContextRequest = async(raw,{withProfile=withProductionAssistantWorkspace,
   loadContext=()=>import('./trelio-local-context.mjs'),loadTransport=()=>import('./trelio-assistant-transport.mjs'),signal}={})=>{
   const request=validateAssistantRuntimeRequest(raw);
-  if(!['company_context_prepare','company_context_read'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
+  if(!['company_context_prepare','company_context_read','company_context_search','company_context_validate'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
   try{return await withProfile(async current=>{
     // Propagate the profile's ORIGINAL bounded private-session deadline, not
     // merely an optional outer poll signal, through mirror lock/network work.
@@ -2512,6 +2659,12 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
       return opened;
     };
     await assertCurrent(signal);
+    if(request.operation==='company_context_validate'){
+      const context=await loadContext();
+      const currentGeneration=await context.isTrelioLocalCompanyGenerationCurrent(current.identity.origin,
+        request.descriptor.companySlug,request.generation,{signal});
+      await assertCurrent(signal);return {schemaVersion:1,current:currentGeneration};
+    }
     if(request.operation==='company_context_prepare'){
       const context=await loadContext();
       const result=await context.prepareTrelioLocalCompanyContext(current.identity.origin,request.descriptor.companySlug,{signal});
@@ -2519,10 +2672,15 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
       return result;
     }
     const transport=await loadTransport();
-    return transport.materializeAssistantEncryptedCompanyContext({origin:current.identity.origin,descriptor:request.descriptor,
-      name:'search',arguments:request.arguments,signal,assertCurrent});
+    let generation;
+    const result=await transport.materializeAssistantEncryptedCompanyContext({origin:current.identity.origin,descriptor:request.descriptor,
+      name:'search',arguments:request.arguments,signal,assertCurrent,
+      ...(request.operation==='company_context_search'?{onSearchSnapshot:value=>{generation=value;}}:{})});
+    if(request.operation!=='company_context_search')return result;
+    if(!/^[a-f0-9]{64}$/u.test(generation??''))fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID');
+    return {schemaVersion:1,generation,result};
   },{signal,encryptedCompanyContext:request.descriptor,
-    ...(request.operation==='company_context_prepare'?{companyReadPreparation:true}:{})});
+    ...(['company_context_prepare','company_context_search'].includes(request.operation)?{companyReadPreparation:true}:{})});
   }catch(error){
     // Native ChildProcess aborts wrap the ORIGINAL signal reason in `cause`;
     // fetch/throwIfAborted may throw that reason directly. Compare object
@@ -2530,7 +2688,7 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     // clock. An unrelated error after expiry must never gain retry authority.
     // Keep this boundary outside the managed profile as well: a late native
     // read/refusal is still part of this same invocation, not setup failure.
-    if(request.operation==='company_context_prepare'&&signal?.aborted&&signal.reason?.name==='TimeoutError'){
+    if(['company_context_prepare','company_context_search'].includes(request.operation)&&signal?.aborted&&signal.reason?.name==='TimeoutError'){
       const {isRuntimeHookDeadlineError}=await import('./trelio-hook-private-session.mjs');
       // Native ACL/private reads project their original deadline as a closed
       // ProcessDiagnosticError. Its public code alone is NOT origin evidence.

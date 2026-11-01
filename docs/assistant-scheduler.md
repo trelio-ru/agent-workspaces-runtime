@@ -1463,20 +1463,35 @@ ordinary task `get_task` retains its task schema/adapter. A routing-only intake
 still refuses search before I/O. Search results are followed by exact fetch and
 needed current discussion; snippets or stale initial descriptions are not facts.
 
-Cold encrypted search preparation reuses the SAME complete company mirror and
-the common short-wait operation registry. Each `search` first consumes a fresh
-native schema/proof/read admission. The host-only descriptor pins that original
-pass plus the exact managed scope/epoch/device/envelope; it contains no query,
-source body or key. One existing signed request child prepares the complete
-mirror under the existing ten-minute first-sync budget. Short MCP polls keep
-their ordinary deadlines and return `state:preparing` plus a fresh `search`
-nextCall; this is neither an empty result nor a terminal unavailable reply.
+Encrypted search completion reuses the SAME complete company mirror and common
+short-wait operation registry. Each `search` consumes a fresh native schema/proof/
+read admission. Its host-only descriptor pins the original pass and managed
+scope/epoch/device/envelope; it contains no query, source body or key. Completion
+ABI v2 passes the validated query over private stdin to ONE signed read child.
+Its original ten-minute first-sync budget covers synchronization AND the actual
+query, rather than synchronizing again under setup's unrelated 45-second clock.
+Short MCP polls retain that ordinary deadline and return `state:preparing` plus
+fresh `search` nextCall; this is neither an empty result nor a terminal reply.
 The model continues the same question without a task, Run or owner decision.
-Only readiness is retained in RAM. The actual query executes in a fresh managed
-invocation, without replaying the consumed MCP proof or a cached business answer.
-Recipient/pass/ACL/manifest and late native fences remain independent. EOF aborts
-only the host's preparation children and awaits cleanup; encrypted scratch may
-resume normally, but an incomplete mirror is never published or searched.
+
+The bounded host registry retains one undelivered result in RAM (at most 512 KiB,
+64 operations), bound to the exact query, descriptor, recipient and native
+snapshot generation. Before one-time delivery a NEW short worker validates the
+same native manifest generation and fresh pass/recipient before and after that
+read. Revocation or a failed native read never returns retained plaintext. A
+generation change discards the value and permits another freshly admitted
+read-only snapshot assembly under the SAME original timer. Snapshot refresh
+and the one owned-timeout resume share a maximum of TWO read children; a changed
+formulation cannot launch a parallel reader or buy a third first sync. It never renews a lease, poll clock or owned read deadline.
+Successful delivery consumes the value: another same-query call must read anew.
+No result/proof/key is written to a second cache or journal. EOF cancels only
+owned read children and awaits cleanup. Existing ABI v1 facades keep their
+readiness-only preparation and separate fresh query path; both remain strict.
+An unchanged warm sync rereads the protected pointer under the retention lock
+but reuses its already authenticated immutable object within that SAME
+invocation. A changed pointer reads/decrypts the replacement. Scratch inventory
+is opened only when the fresh native manifest actually needs a rebuild, without
+changing its quota, binding or ordinary generation pruning.
 The common mirror writer recovers an exact fresh dead-owner claim through its
 existing metadata mutex, native ESRCH and protected identity rechecks. Live or
 unknown owners are never declared dead from elapsed clocks. A cold mirror keeps
@@ -3478,3 +3493,27 @@ Arbitrary prose, ready search, missing receipt, pending/unknown send and another
 tool never qualify. This classification is distinct from absent-provider timeout
 abandonment and conveys no permission to reopen an intake or send again. Only a
 separate current native correction protocol may admit a bounded corrective child.
+
+An already reply-only child with a positive immutable CANCELLED receipt has a
+separate continuation profile, advertised by native
+`readOnlyContinuationProtocolVersion:1`. Journal schema24 adds no column or
+historical backfill: its strict metadata codec recognises the disjoint
+`readOnlyContinuation:true` discriminator. The parent must be complete/settled,
+private/read-confirmed/task-null with its ORIGINAL lease expired and all local
+provider-attempt/message/abandon fences absent. Ordinary body-confirmed intakes,
+pending/unknown sends and an unchanged trusted prerequisite never qualify.
+
+The whole exact terminal turn permits only context, unchanged preparing
+searches and final structured `ASSISTANT_RUNTIME_REQUEST_CANCELLED`; no resolve,
+READY, fetch or unknown action. The coordinator walks every immutable local AND
+fresh native ancestor/receipt back to the original positive/negative anchor,
+under the same source/revision/event/device/account/owner/conversation/thread.
+Historical continuation links bind their previous prerequisite; cycles/missing
+links, mixed correction/continuation modes and scope drift hard-refuse. Service
+and SQL independently repeat native ancestry checks. Each parent admits one
+child, sharing the unchanged total20-child bound across all recovery modes.
+The child starts unread; no old lease, pass/ACK, receipt, model/effort or prior
+preparation clock resets. SQLite saves begin-attempt before HTTP; lost admission
+permits exact child read-back only, never a second POST. An eventual positive
+original reply still requires current exact source/comments and the ordinary
+native one-send/receipt/pass-release engine.

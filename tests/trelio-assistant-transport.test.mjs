@@ -4250,3 +4250,32 @@ test('technical correction uses explicit native capability and strict host-only 
   await assert.rejects(client.beginSourceIntake({...input,readOnlyRecovery:{...witness,...patch}}),/INVALID_INPUT/);
  assert.equal(calls,before,'malformed witness refuses before HTTP and never retries a provider');
 });
+
+test('cancelled reply-only continuation keeps its separate strict witness and native capability',async()=>{
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+ const witness={parentIntakeId:randomUUID(),receiptId:randomUUID(),terminalTurnId:randomUUID(),
+  previousPrerequisiteKey:'b'.repeat(64),prerequisiteKey:'c'.repeat(64),readOnlyContinuation:true};
+ const input={companyId,sourceId,intakeId,sourceRevision:2,eventId:randomUUID(),threadId:randomUUID(),
+  ownerIdentityId:randomUUID(),senderExternalUserId:'123',conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,readOnlyRecovery:witness};
+ let calls=0,capability=1,change=null;
+ const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1})},
+  http:async(operation,body)=>{
+   assert.equal(operation,'intakeBegin');calls++;assert.deepEqual(body.readOnlyRecovery,witness);
+   return {schemaVersion:1,id:intakeId,companyId,sourceId,sourceRevision:2,eventId:input.eventId,threadId:input.threadId,
+    state:'leased',taskId:null,receiptId:null,readConfirmed:false,ownerPrivateRead:false,
+    leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},
+    readOnlyRecoveryProtocolVersion:1,...(capability===null?{}:{readOnlyContinuationProtocolVersion:capability}),
+    readOnlyRecovery:{...witness,...change,replyOnly:true}};
+  }});
+ const accepted=await client.beginSourceIntake(input);
+ assert.equal(accepted.readOnlyContinuationProtocolVersion,1);assert.equal(accepted.readOnlyRecovery.readOnlyContinuation,true);
+ capability=null;assert.equal((await client.beginSourceIntake(input)).readOnlyContinuationProtocolVersion,undefined);
+ capability=2;await assert.rejects(client.beginSourceIntake(input),/INVALID_RESPONSE/);capability=1;
+ for(const patch of [{readOnlyContinuation:undefined},{technicalReplyCorrection:true}]){
+  change=patch;await assert.rejects(client.beginSourceIntake(input),/INVALID_RESPONSE/);
+ }
+ change=null;const before=calls;
+ for(const patch of [{readOnlyContinuation:false},{readOnlyContinuation:'true'},{technicalReplyCorrection:true},{extra:true}])
+  await assert.rejects(client.beginSourceIntake({...input,readOnlyRecovery:{...witness,...patch}}),/INVALID_INPUT/);
+ assert.equal(calls,before,'no mixed/forged certificate reaches HTTP');
+});

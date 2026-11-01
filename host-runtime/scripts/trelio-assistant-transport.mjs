@@ -2503,7 +2503,8 @@ const intakeProjection=(value,expected)=>{
   if(value.readOnlyRecovery!==undefined&&(!recovery||routing||value.taskId!==null
     ||!['leased','cancelled','reply_pending','replied','reply_abandoned'].includes(value.state))
     ||value.readOnlyRecoveryProtocolVersion!==undefined&&value.readOnlyRecoveryProtocolVersion!==1
-    ||value.readOnlyReplyCorrectionProtocolVersion!==undefined&&value.readOnlyReplyCorrectionProtocolVersion!==1)
+    ||value.readOnlyReplyCorrectionProtocolVersion!==undefined&&value.readOnlyReplyCorrectionProtocolVersion!==1
+    ||value.readOnlyContinuationProtocolVersion!==undefined&&value.readOnlyContinuationProtocolVersion!==1)
     fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.readOnlyRecovery&&(!recovery||Object.keys(expected.readOnlyRecovery).some(key=>recovery[key]!==expected.readOnlyRecovery[key])))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {schemaVersion:1,id:id(value.id),companyId:id(value.companyId),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
@@ -2512,6 +2513,7 @@ const intakeProjection=(value,expected)=>{
     taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
     ...(value.readOnlyRecoveryProtocolVersion===1?{readOnlyRecoveryProtocolVersion:1}:{}),
     ...(value.readOnlyReplyCorrectionProtocolVersion===1?{readOnlyReplyCorrectionProtocolVersion:1}:{}),
+    ...(value.readOnlyContinuationProtocolVersion===1?{readOnlyContinuationProtocolVersion:1}:{}),
     ...(recovery?{readOnlyRecovery:recovery}:{}),
     readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
@@ -3779,7 +3781,7 @@ export const materializeAssistantEncryptedTask = async ({origin,descriptor,signa
  * file downloader. Source rules are returned as context; the protected active
  * task/pass is neither rebound nor replaced by a found task's instructions. */
 export const materializeAssistantEncryptedCompanyContext = async ({origin,descriptor,name,arguments:raw,signal,
-  common,context,files,assertCurrent}) => {
+  common,context,files,assertCurrent,onSearchSnapshot}) => {
   if(typeof assertCurrent!=='function'||descriptor?.nativeTool!==name||!object(raw)
     ||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   common??=await import('./trelio-workspace.mjs');
@@ -3809,7 +3811,7 @@ export const materializeAssistantEncryptedCompanyContext = async ({origin,descri
     }else payload=receipt;
   }else{
     payload=await context.handleTrelioLocalContextOperation(origin,{operation:'native_read',companySlug:slug,nativeTool:name,
-      arguments:{...input,companySlug:slug}},{signal});
+      arguments:{...input,companySlug:slug}},{signal,...(name==='search'&&onSearchSnapshot?{onSearchSnapshot}:{})});
   }
   signal?.throwIfAborted();await assertCurrent(signal);
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');

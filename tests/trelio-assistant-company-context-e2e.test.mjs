@@ -18,6 +18,7 @@ for(const scenario of [
   {name:'second-timeout-hard',files:16,stallAttempts:2},
   {name:'ordinary-refusal-hard',files:16,stallAttempts:0,refuse:true},
   {name:'unknown-http-hard',files:16,stallAttempts:0,refuse:true,unknownCode:true},
+  {name:'legacy-slow-warm',files:16,stallAttempts:0,nativeCase:'cold',legacyWarm:true},
 ])test(`owner company composition [${scenario.name}]`,{
   skip:!['win32','darwin'].includes(process.platform),
 },async t=>{
@@ -79,7 +80,7 @@ for(const scenario of [
     runtimePublicKey:key.publicKey.export({type:'spki',format:'pem'})});
   t.after(()=>backend.close());
   const configuration={schema:'trelio.test.company-context/v1',root,server:backend.url,identity,
-    caseName:scenario.name};
+    caseName:scenario.nativeCase??scenario.name,...(scenario.legacyWarm?{slowLegacyGenerationRead:true}:{})};
   const native=await openNativeCompanyScenario(configuration);
   const configFile=path.join(root,'scenario.json'),loader=path.join(root,'loader.mjs');
   await fs.writeFile(configFile,JSON.stringify(configuration),{mode:0o600});
@@ -98,8 +99,24 @@ for(const scenario of [
     const {resolveMirrorPaths}=await import('../host-runtime/scripts/trelio-local-context.mjs');
     const paths=await native.withProfile(async()=>resolveMirrorPaths({origin:identity.origin,companyId:pass.companyId}),
       {encryptedCompanyContext:backend.descriptor('search')});
-    const request=(raw,options)=>requestCurrentAssistantRuntime(raw,{...options,environment:process.env,resolveLoader:async()=>loader,
-      spawnProcess:(...args)=>{const child=spawn(...args);children.add(child);child.once('close',()=>children.delete(child));return child;}});
+    const operations=[];let legacyFacade=false;
+    const request=async(raw,options)=>{
+      if(legacyFacade&&raw.operation==='call'&&raw.name==='search')raw={...raw,prepareCompanySearch:true};
+      const result=await requestCurrentAssistantRuntime(raw,{...options,environment:process.env,resolveLoader:async()=>loader,
+        spawnProcess:(...args)=>{const child=spawn(...args);children.add(child);child.once('close',()=>children.delete(child));return child;}});
+      operations.push({operation:raw.operation,completionVersion:result?._meta?.['trelio/assistant-company-read']?.schemaVersion??null});
+      return result;
+    };
+    if(scenario.stallAttempts){
+      // Recovery origin is THIS parent's exact timer/signal, not a public
+      // timeout code emitted by a different short private invocation. Shorten
+      // only that original600s timer in this isolated fault process; cold and
+      // legacy volume cases keep real production budgets. No wall clock moves,
+      // and polling never extends or resets a stopped child's timer.
+      const originalSetTimeout=globalThis.setTimeout;
+      t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>
+        originalSetTimeout(callback,delay===600000?10000:delay,...args));
+    }
     const directory=path.join(root,'native-context'),workspace=await createAssistantWorkspaceExecutor({configDirectory:directory,companyPreparationOptions:{waitMs:2}});
     output.on('data',chunk=>{buffer+=chunk;for(;;){const end=buffer.indexOf('\n');if(end<0)break;responses.push(JSON.parse(buffer.slice(0,end)));buffer=buffer.slice(end+1);}});
     running=runAssistantSetupMcp({input,output,preservePlugin:()=>null,scheduleMaintenance:()=>null,createWorkspace:()=>workspace,
@@ -107,7 +124,10 @@ for(const scenario of [
     let sequence=0;
     const send=async(method,params)=>{
       const id=++sequence;input.write(JSON.stringify({jsonrpc:'2.0',id,method,...(params?{params}:{})})+'\n');
-      const limit=Date.now()+45000;while(Date.now()<limit){const value=responses.find(row=>row.id===id);if(value)return value;await new Promise(resolve=>setTimeout(resolve,10));}
+      // Collect the facade's own 45s cancellation too; a fixture collection
+      // race must not hide its exact result at that same millisecond. No
+      // production signal/private-session/HTTP clock is changed here.
+      const limit=Date.now()+75000;while(Date.now()<limit){const value=responses.find(row=>row.id===id);if(value)return value;await new Promise(resolve=>setTimeout(resolve,10));}
       assert.fail('Original serial MCP request did not settle');
     };
     await send('initialize');
@@ -144,6 +164,7 @@ for(const scenario of [
     assert.ok(search,JSON.stringify({reason:'cold_preparation_did_not_complete',
       terminal:terminal?.structuredContent?.code??null,
       diagnostics:await fs.readFile(path.join(root,'fixture-diagnostics.jsonl'),'utf8').catch(()=>null)}));
+    assert.ok(operations.some(value=>value.operation==='company_context_search'),JSON.stringify(operations));
     assert.equal((await fs.lstat(paths.pointer)).isFile(),true,'READY requires a complete published generation');
     if(scenario.files===3000)assert.ok(backend.counts.ciphertextBytes>142*1024*1024,'cold input retains representative encrypted volume');
     assert.equal(backend.counts.builds,scenario.stallAttempts+1);
@@ -157,8 +178,34 @@ for(const scenario of [
     backend.assertClean();
     assert.match(JSON.stringify(current),/CURRENT_SYNTHETIC_PLAN/);
     const filesRead=backend.counts.fileReads;
-    const second=await call('search',{queries:[`COLD_VOLUME_CANARY_${scenario.files-1}`]});
-    assert.match(JSON.stringify(second),new RegExp(`COLD_VOLUME_CANARY_${scenario.files-1}`));
+    let second;
+    for(let poll=0;poll<1200;poll++){
+      second=await call('search',{queries:[`COLD_VOLUME_CANARY_${scenario.files-1}`]});
+      assert.notEqual(second.result?.isError,true,JSON.stringify(second.result));
+      if(second.result?.structuredContent?.state!=='preparing')break;
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+    // nextCall repeats the query, so matching the whole envelope would accept
+    // a PREPARING response as a false positive. Require actual material data.
+    assert.notEqual(second.result?.structuredContent?.state,'preparing');
+    assert.match(JSON.stringify(second.result.structuredContent.results),new RegExp(`COLD_VOLUME_CANARY_${scenario.files-1}`));
+    assert.ok(operations.filter(value=>value.operation==='company_context_validate').length>=2);
+    if(scenario.legacyWarm){
+      legacyFacade=true;
+      let legacy;
+      for(let poll=0;poll<1200;poll++){
+        legacy=await call('search',{queries:['weekend']});
+        assert.notEqual(legacy.result?.isError,true,JSON.stringify(legacy.result));
+        if(legacy.result?.structuredContent?.state!=='preparing')break;
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      assert.match(JSON.stringify(legacy.result.structuredContent.results),/Synthetic weekend journey/);
+      const diagnostic=(await fs.readFile(path.join(root,'fixture-diagnostics.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+      const legacyRead=diagnostic.filter(value=>value.operation==='company_context_read'&&Number.isInteger(value.generationReads));
+      assert.equal(legacyRead.length,1);assert.equal(legacyRead[0].generationReads,1,'one invocation must not decrypt the same complete mirror twice');
+      assert.equal(legacyRead[0].scratchInventories,0,'an unchanged native generation cannot rescan the entire file scratchpad');
+      legacyFacade=false;
+    }
     assert.equal(backend.counts.fileReads,filesRead,'a second question reuses only the COMPLETE accepted-head mirror');
     backend.setMode('recipient_revoked');
     const changed=await call('search',{queries:['weekend']});

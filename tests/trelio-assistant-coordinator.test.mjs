@@ -77,6 +77,96 @@ const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={})
     counts:()=>({starts,provisions,runs,acks}),advance:ms=>{clock+=ms;},failNative:value=>{nativeFailure=value;},failInventory:value=>{inventoryFailure=value;}};
 };
 
+// This is journal/coordinator coverage, not the native HTTP system stand. It
+// deliberately keeps the positive old send and the cancelled no-send child in
+// one real SQLite history, then restarts the coordinator over that SAME file.
+for(const mode of ['success','lost_committed','lost_unknown','no_capability','bad_receipt','foreign_ancestor',
+  'attempted','wrong_terminal','unchanged_prerequisite'])test(`cancelled reply-only continuation retains the original and its no-replay fences (${mode})`,async t=>{
+ const f=fixture(t);await f.coordinator.close();
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID();
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,
+  projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ f.options.client.tasks=async()=>({bindings:[],nextCursor:null});f.options.client.sourceAccounts=async()=>[source];
+ f.options.client.sourceRoutes=async()=>[];
+ f.options.client.ownerIdentities=async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]});
+ f.options.workspaceForIntake=async()=>process.cwd();
+ const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+ const scope={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
+ inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+ inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,
+  providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+ const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);
+ inbox.bindOwnerIntakeThread(original.id,threadId);inbox.readyOwnerIntake(original.id);
+ inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);inbox.confirmIntakeModelRead(original.id);
+ const positive=randomUUID();inbox.startOwnerReply(original.id,positive);inbox.confirmOwnerReply(original.id,{receiptId:positive,messageId:77});
+ inbox.finishOwnerIntake(original.id,{state:'replied',receiptId:positive});inbox.settleOwnerIntake(original.id);f.advance(1);
+ const cancelled=inbox.retryReadonlyOwnerIntake(original.id,{receiptId:positive,terminalTurnId:randomUUID(),
+  previousPrerequisiteKey:'a'.repeat(64),prerequisiteKey:'b'.repeat(64),technicalReplyCorrection:true});
+ inbox.startReadonlyIntakeBegin(cancelled.id);inbox.startOwnerIntake(cancelled.id);inbox.confirmIntakeModelRead(cancelled.id);
+ if(mode==='attempted')inbox.startOwnerReply(cancelled.id,randomUUID());
+ const negative=randomUUID();inbox.finishOwnerIntake(cancelled.id,{state:'cancelled',receiptId:negative});inbox.settleOwnerIntake(cancelled.id);
+ createAssistantInbox({database:f.database,now:f.options.now});
+ const snapshots=f.database.prepare('SELECT * FROM assistant_owner_intakes ORDER BY id').all();
+ f.advance(300001);
+ const common={schemaVersion:1,companyId:f.companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
+  taskId:null,readConfirmed:true,ownerPrivateRead:true,execution:f.execution.configuration,
+  leaseExpiresAt:new Date(f.options.now()-1).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyReplyCorrectionProtocolVersion:1,
+  ...(mode==='no_capability'?{}:{readOnlyContinuationProtocolVersion:1})};
+ const metadata=JSON.parse(inbox.ownerIntake(cancelled.id).readonly_recovery_json);delete metadata.beginAttempted;
+ const outcomes=new Map([[original.id,{...common,id:original.id,state:'replied',receiptId:positive}],
+  [cancelled.id,{...common,id:cancelled.id,state:'cancelled',receiptId:negative,readOnlyRecovery:{...metadata,replyOnly:true}}]]);
+ if(mode==='bad_receipt')outcomes.get(cancelled.id).receiptId=randomUUID();
+ if(mode==='foreign_ancestor')outcomes.get(original.id).eventId=randomUUID();
+ let begins=0,starts=0,sends=0,active=null;
+ f.options.passHost={readActivePass:async()=>active,activatePass:async value=>{assert.equal(active,null);active=value;},
+  releasePass:async value=>{assert.equal(value.id,active.passId);active=null;}};
+ f.options.client.readSourceIntake=async input=>{
+  const value=outcomes.get(input.intakeId);if(!value)throw Object.assign(new Error('unknown admission'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  return structuredClone(value);
+ };
+ f.options.client.beginSourceIntake=async input=>{
+  begins++;assert.equal(begins,1,'one durable attempt, including across a coordinator restart');
+  assert.equal(JSON.parse(inbox.ownerIntake(input.intakeId).readonly_recovery_json).beginAttempted,true);
+  assert.equal(input.eventId,original.original_event_id);assert.equal(input.threadId,threadId);
+  assert.equal(input.readOnlyRecovery.readOnlyContinuation,true);assert.equal(input.readOnlyRecovery.technicalReplyCorrection,undefined);
+  const value={...common,id:input.intakeId,state:'leased',receiptId:null,readConfirmed:false,ownerPrivateRead:false,
+   leaseExpiresAt:new Date(f.options.now()+1800000).toISOString(),readOnlyRecovery:{...input.readOnlyRecovery,replyOnly:true}};
+  if(mode!=='lost_unknown')outcomes.set(input.intakeId,value);
+  if(mode.startsWith('lost_'))throw Object.assign(new Error('lost begin outcome'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  return structuredClone(value);
+ };
+ f.options.native.readPrerequisites=async()=>({fingerprint:(mode==='unchanged_prerequisite'?'b':'c').repeat(64)});
+ f.options.native.provision=async()=>assert.fail('a continuation must reuse the permanent owner chat');
+ f.options.native.readDelivery=async(thread,marker,options)=>{
+  assert.equal(thread,threadId);
+  if(marker===cancelled.delivery_id){assert.equal(options.readOnlyContinuation,true);
+   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:'company_context_read_cancelled'})};}
+  return f.deliveries.get(marker)??{state:'uncertain'};
+ };
+ f.options.native.run=async(input,options)=>{
+  starts++;assert.equal(starts,1);assert.equal(input.threadId,threadId);assert.equal(input.intakeContext.eventId,original.original_event_id);
+  assert.equal(options.replyOnlyRecovery,true);assert.notEqual(options.technicalReplyCorrection,true);
+  options.startInvocation();inbox.confirmIntakeModelRead(active.passId);
+  const receiptId=randomUUID();inbox.startOwnerReply(active.passId,receiptId);sends++;
+  inbox.confirmOwnerReply(active.passId,{receiptId,messageId:78});
+  Object.assign(outcomes.get(active.passId),{state:'replied',receiptId,readConfirmed:true,ownerPrivateRead:true});
+  const result={state:'completed',turnId:randomUUID()};f.deliveries.set(input.deliveryId,result);return result;
+ };
+ let coordinator=createAssistantCoordinator(f.options);
+ try{
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/UNAVAILABLE|UNCERTAIN/u));
+  await coordinator.close();f.advance(300001);coordinator=createAssistantCoordinator(f.options);
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/UNAVAILABLE|UNCERTAIN/u));
+  assert.equal(begins,['success','lost_committed','lost_unknown'].includes(mode)?1:0);
+  assert.equal(starts,['success','lost_committed'].includes(mode)?1:0);assert.equal(sends,starts);
+  const immutable=rows=>rows.map(({next_check_at,...row})=>row);
+  assert.deepEqual(immutable(f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id IN(?,?) ORDER BY id').all(original.id,cancelled.id)),
+   immutable(snapshots),'only the existing read-only inspection backoff may advance; no receipt, lease, send fence or event is rewritten');
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+  assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+ }finally{await coordinator.close();}
+});
+
 for(const mode of ['success','lost','unknown','changed_boundary','policy_blocked','active_pass'])test(`owner completed bootstrap resumes SAME original through one independent readiness verification (${mode})`,async t=>{
   const f=fixture(t);await f.coordinator.close();
   const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID(),turnId=randomUUID();

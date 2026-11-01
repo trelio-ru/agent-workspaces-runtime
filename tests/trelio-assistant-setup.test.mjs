@@ -2405,7 +2405,7 @@ test('company preparation reuses short-poll coordination without retaining queri
  let finish,prepares=0,reads=0;const admitted=[];
  const request=async input=>{
   if(input.operation==='call'){
-   assert.equal(input.name,'search');assert.equal(input.prepareCompanySearch,true);admitted.push(input.arguments.runtimeSessionProof.nonce);
+   assert.equal(input.name,'search');assert.equal(input.prepareCompanySearch,2);admitted.push(input.arguments.runtimeSessionProof.nonce);
    return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding}}};
   }
   if(input.operation==='company_context_prepare'){

@@ -100,6 +100,14 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
     return snapshot(entry);
   };
   return {
+    // A read-only consumer may deliver a terminal value exactly once, after
+    // fresh native validation outside this generic registry. Never discard an
+    // active operation, an unknown ID or another scope's retained receipt.
+    discardTerminal(key, id, scope) {
+      const entry=entries.get(key);
+      if (!entry || entry.id!==id || entry.scope!==scope || entry.state==='running') return false;
+      entries.delete(key);return true;
+    },
     active(key) { const entry = entries.get(key); return entry?.state === "running" ? snapshot(entry) : null; },
     async start({ key, scope, fingerprint, pollAction, execute, signal }) {
       signal?.throwIfAborted();

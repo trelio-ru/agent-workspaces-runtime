@@ -119,7 +119,13 @@ publication tooling также остаются вне этого публичн
   Fresh native input inventory checks closed fields/container types BEFORE managed staging;
   generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
   V2 company reads use SAME native schemas/ACL/mirror/exact/files; genuine task or private-owner intake origin, never fake task/Run. Initial discovery includes native search/fetch/contract alongside task/intake tools, without a mid-turn catalogue dependency. Exact repeated scalar schemas may share tool-local definitions only when lossless and smaller; retain native validation and 65 536-byte bounds. See the company-context scheduler contract.
-  Cold search reuses the common short-wait registry and SAME signed read child;
+  Search completion keeps sync+query in the SAME original bounded read child;
+  the common short-wait registry retains only a bounded undelivered value.
+  Fresh native generation/pass/recipient validation precedes one-time delivery;
+  snapshot refresh never renews its clock. Legacy readiness-only facades stay
+  supported. Warm sync rereads the protected pointer but never decrypts the
+  same immutable generation twice within one invocation or inventories scratch
+  files before an unchanged native manifest. No cross-call permission/key cache.
   Native company pass reads share an abortable 80ms invocation-local dispatch
   pacer before fresh identity/ACL checks; no response cache, retry or new budget.
   preparing is not an empty/error result. Fresh native admission on every poll,
@@ -1096,7 +1102,7 @@ Public plugin shell для этого клиента не меняется.
   or percentages, purchase credits/reset limits, or replay unknown work.
   See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).
 
-- Read-only owner recovery: one negative parent → one reply-only child, whole terminal native witness and durable begin fence; no Task/dialogue or old lease renewal. Positive technical replies require a distinct read-only terminal witness; never reinterpret a confirmed send as absent. See [scheduler](docs/assistant-scheduler.md#readonly-owner-question-recovery).
+- Read-only owner recovery: unique consumed parent, whole terminal witness and durable begin fence; no Task/dialogue or old lease renewal. Positive technical correction and cancelled/no-send reply-only continuation require distinct native capabilities/ancestry. All share the original bounded chain; never reinterpret a confirmed/unknown send as absent. See [scheduler](docs/assistant-scheduler.md#one-post-fix-reply-only-owner-question-recovery).
   A later independent task creation may be skipped only with SAME settled local
   original, fresh native created/task/receipt and whole exact completed native
   context/resolve chain. Inventory unknown rows before the eight-row bound;

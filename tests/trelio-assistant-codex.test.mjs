@@ -998,3 +998,29 @@ test('technical reply correction requires exact read-only rate failure and posit
   altered(t=>{t.items.at(-1).arguments.decision='create_task';})])
   assert.equal(await assistantReadOnlyPreparationFailure(t,options),false);
 });
+
+test('cancelled reply-only continuation certifies only the whole original no-send search turn',async()=>{
+ const f=readonlyPreparationFixture();f.turn.items.pop();
+ f.turn.items.at(-1).result.structuredContent={code:'ASSISTANT_RUNTIME_REQUEST_CANCELLED'};
+ const options={...f,readOnlyContinuation:true};
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,options),true);
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,f),false,'cancellation never becomes legacy timeout authority');
+ const read=turns=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{...options,readOnlyPreparation:f.intakePass,
+  executable:process.execPath,spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+   ?{thread:{id:f.threadId,cwd:process.cwd()}}:{data:turns,nextCursor:null}}))});
+ assert.equal((await read([f.turn])).readOnlyFailure,'company_context_read_cancelled');
+ assert.deepEqual(await read([f.turn,f.turn]),{state:'uncertain'});
+ assert.deepEqual(await read([{id:randomUUID(),status:'completed',items:[]},f.turn]),{state:'uncertain'});
+ for(const change of [t=>{t.items.at(-1).result.structuredContent={code:'OTHER'};},
+  t=>{t.items.at(-1).status='completed';},t=>{t.items[3].result.structuredContent={schemaVersion:1,state:'ready'};},
+  t=>{t.items.push({...structuredClone(t.items[3]),tool:'fetch'});},
+  t=>{t.items.push({...structuredClone(t.items[3]),tool:'resolve_assistant_intake'});},
+  t=>{t.items.at(-1).arguments.queries=['changed query'];},
+  t=>{t.items[1].command+='; side_effect';},t=>{t.status='running';},
+  t=>{t.error={codexErrorInfo:'serverOverloaded'};}]){
+  const turn=structuredClone(f.turn);change(turn);
+  assert.equal(await assistantReadOnlyPreparationFailure(turn,options),false);
+ }
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,technicalReplyCorrection:{}}),false);
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,readOnlyContinuation:false}),false);
+});

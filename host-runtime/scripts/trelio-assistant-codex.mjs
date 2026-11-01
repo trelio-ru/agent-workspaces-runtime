@@ -481,11 +481,16 @@ const publicBootstrapRead=async(item,environment,verifyShell,signal)=>{
   if(normalized(match[2])!==instruction||normalized(item.commandActions[0].path)!==instruction)return false;
   return shells.includes(normalized(match[1]))||await verifyShell(match[1],{environment,signal})===true;
 };
-export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection}={})=>{
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation}={})=>{
   // This positive-send profile is intentionally separate from absent-provider
   // abandonment. It accepts only a host-selected immutable native receipt and
   // the full terminal read-only rate-failure chain; prose never classifies it.
   const correction=technicalReplyCorrection;
+  // This independent native mode applies only after the coordinator observes
+  // an immutable CANCELLED reply-only parent with no provider-attempt fence.
+  // A generic aborted tool, model message or completed turn never selects it.
+  const continuation=readOnlyContinuation===true;
+  if(readOnlyContinuation!==undefined&&(!continuation||correction!==undefined))return false;
   if(correction!==undefined&&(!correction||Object.getPrototypeOf(correction)!==Object.prototype
     ||Object.keys(correction).sort().join(',')!=='eventId,receiptId,sourceRevision,threadId'
     ||['eventId','receiptId','threadId'].some(key=>!UUID.test(correction[key]??''))
@@ -515,14 +520,15 @@ export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePa
           ||!Array.isArray(args.companySlugs)||args.companySlugs.length!==1||!Array.isArray(args.queries)||!args.queries.length||args.queries.length>5)return false;
         const selected=JSON.stringify({companySlugs:args.companySlugs,queries:args.queries});
         if(business!==null&&selected!==business)return false;business=selected;
-        if(item.status==='failed'&&result?.code===(correction?'ASSISTANT_TRANSPORT_RATE_LIMITED':'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'))timeout=true;
+        if(item.status==='failed'&&result?.code===(correction?'ASSISTANT_TRANSPORT_RATE_LIMITED'
+          :continuation?'ASSISTANT_RUNTIME_REQUEST_CANCELLED':'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'))timeout=true;
         else if(item.status!=='completed'||item.result.isError===true||result?.schemaVersion!==1||result.state!=='preparing'
           ||result.readOnly!==true||result.nextCall?.tool!=='search'
           ||!result.nextCall.arguments||Object.keys(result.nextCall.arguments).sort().join(',')!=='companySlugs,queries'
           ||JSON.stringify(result.nextCall.arguments.companySlugs)!==JSON.stringify(args.companySlugs)
           ||JSON.stringify(result.nextCall.arguments.queries)!==JSON.stringify(args.queries))return false;
       }else if(item.tool==='resolve_assistant_intake'){
-        if(!timeout||resolved||keys!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
+        if(continuation||!timeout||resolved||keys!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
           ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'||typeof args.replyText!=='string'
           ||correction&&(item.status!=='completed'||item.result.isError===true||item.error!=null
             ||result?.schemaVersion!==1||result.id!==intakePass.intakeId||result.companyId!==intakePass.companyId
@@ -581,6 +587,7 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   return readNative(threadId, async (_thread, request) => {
     if(options.readOnlyPreparation!==undefined){
       if(options.technicalReplyCorrection!==undefined&&options.technicalReplyCorrection?.threadId!==threadId)return {state:'uncertain'};
+      if(options.readOnlyContinuation!==undefined&&(options.readOnlyContinuation!==true||options.technicalReplyCorrection!==undefined))return {state:'uncertain'};
       // Recovery needs COMPLETE bounded coverage. The old failure must be the
       // latest turn except for at most eight separately settled task-creation
       // originals whose fresh host-selected receipts AND whole native actions
@@ -617,8 +624,9 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
         if(response.nextCursor===null){
           if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
             environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable,
-            technicalReplyCorrection:options.technicalReplyCorrection}))return {state:'uncertain'};
-          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.technicalReplyCorrection?'company_context_rate_limited_reply':'company_context_preparation_timeout'};
+            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.technicalReplyCorrection
+            ?'company_context_rate_limited_reply':options.readOnlyContinuation?'company_context_read_cancelled':'company_context_preparation_timeout'};
         }
         if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};
         cursor=response.nextCursor;seen.add(cursor);

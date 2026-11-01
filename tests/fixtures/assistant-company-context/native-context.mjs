@@ -36,6 +36,7 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
   assert.equal(server.username,'');assert.equal(server.password,'');
   assert.equal(configuration.identity.origin,'https://trelio.ru');
   const originalFetch=globalThis.fetch;
+  const continuationBeginFaults={attempts:0,lostCommitted:false};
   globalThis.fetch=async(input,options={})=>{
     const selected=new URL(input instanceof Request?input.url:input);
     assert.ok(SAME_ORIGINS.has(selected.origin),'fixture cannot contact an external origin');
@@ -43,7 +44,19 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
     // server independently checks these, recipient/pass/proof and ciphertext
     // bindings. Only the network destination changes to its owned loopback.
     const target=new URL(selected.pathname+selected.search,server);
-    return originalFetch(target,{...options,redirect:'error',headers:new Headers(options.headers)});
+    const response=await originalFetch(target,{...options,redirect:'error',headers:new Headers(options.headers)});
+    if(configuration.loseContinuationBegin&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/begin'
+      &&options.method==='POST'&&typeof options.body==='string'&&JSON.parse(options.body).readOnlyRecovery?.readOnlyContinuation===true){
+      continuationBeginFaults.attempts++;
+      if(response.ok&&!continuationBeginFaults.lostCommitted){
+        // Receive the REAL server's committed native result, then lose only
+        // its transport outcome. No handwritten admission/receipt substitutes
+        // the backend, and the production HTTP codec must refuse automatic retry.
+        await response.arrayBuffer();continuationBeginFaults.lostCommitted=true;
+        throw new TypeError('synthetic committed begin transport loss');
+      }
+    }
+    return response;
   };
   const directory=path.join(root,'native-context','digital-assistants');
   const store=createAssistantPrivateStore({directory:path.join(directory,'credentials')});
@@ -90,6 +103,25 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
   return {
     store,host,client,context,withProfile,
     execute:async request=>{
+      // Count real opened ciphertext generations in this isolated child only.
+      // No path/content is logged and the ordinary fd/ACL/crypto reader remains
+      // unchanged. This catches an accidental second whole-mirror decrypt in
+      // the same fresh managed invocation, including legacy facade requests.
+      const originalOpen=fs.open,originalReaddir=fs.readdir;let generationReads=0,scratchInventories=0;
+      fs.readdir=async(file,...rest)=>{
+        if(typeof file==='string'&&file.startsWith(root+path.sep)&&/[/\\]search-files-v1$/u.test(file))scratchInventories++;
+        return originalReaddir(file,...rest);
+      };
+      fs.open=async(file,flags,...rest)=>{
+        const handle=await originalOpen(file,flags,...rest);
+        if(typeof file==='string'&&file.startsWith(root+path.sep)&&typeof flags==='number'&&(flags&3)===0
+          &&/[/\\]generations[/\\][0-9a-f]{64}\.json$/u.test(file)){
+          generationReads++;
+          if(request.operation==='company_context_read'&&configuration.slowLegacyGenerationRead===true)
+            await new Promise(resolve=>setTimeout(resolve,24000));
+        }
+        return handle;
+      };
       try{return await executeAssistantRuntimeRequest(request,{context,proxyFor,
         companyContextOperation:raw=>executeAssistantCompanyContextRequest(raw,{withProfile})});}
       catch(error){
@@ -105,8 +137,13 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
           frames:String(error.stack??'').split('\n').slice(1,5)
             .map(line=>line.match(/([a-zA-Z0-9_-]+\.mjs:\d+:\d+)/u)?.[1]??'native')})+'\n');
         throw error;
+      }finally{
+        fs.open=originalOpen;fs.readdir=originalReaddir;
+        if(['company_context_search','company_context_read'].includes(request.operation))
+          await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation:request.operation,generationReads,scratchInventories})+'\n');
       }
     },
+    continuationBeginFaults,
     // Only the parent seeds a synthetic, independently generated identity and
     // observed session. Children read it through the real protected store.
     async seed({credential,pass,runtime}){

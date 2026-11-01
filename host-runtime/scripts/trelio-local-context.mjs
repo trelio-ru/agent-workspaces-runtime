@@ -622,7 +622,7 @@ const acquireMirrorWriter = async (
   );
 };
 
-const readMirrorGenerationUnlocked = async ({ paths, companyEncryption }) => {
+const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous }) => {
   const pointer = await readPrivateJsonFile(paths.pointer);
   if (Object.keys(pointer).length === 0) return null;
   if (pointer.schemaVersion === 1) {
@@ -641,6 +641,16 @@ const readMirrorGenerationUnlocked = async ({ paths, companyEncryption }) => {
       "The local company context pointer is invalid.",
     );
   }
+  // Only the caller's ALREADY authenticated/decrypted immutable object from
+  // this SAME sync invocation may survive the writer-lock acquisition. Reread
+  // and validate the protected pointer under retention.lock; if another writer
+  // published meanwhile, read/decrypt its different generation normally. This
+  // is not a cross-call permission/key/snapshot cache. A large warm mirror must
+  // not be read/decrypted twice under one ordinary 45-second request budget.
+  if (previous?.schemaVersion === MIRROR_SCHEMA_VERSION
+    && previous.company?.id === pointer.companyId
+    && previous.generation === pointer.generation
+    && previous.serverGeneration === pointer.serverGeneration) return previous;
   const record = await readPrivateJsonFile(
     path.join(paths.generations, `${pointer.generation}.json`),
   );
@@ -4185,14 +4195,18 @@ export const syncCompanyContextMirror = async ({
   try {
     // Another writer may have published between the optimistic read and our
     // lock acquisition. Always reread the atomic pointer under ownership.
-    previous = await readMirrorGeneration({ paths, companyEncryption });
-    const searchCache = await createEncryptedSearchFileCache({ paths, origin, companyEncryption });
+    previous = await readMirrorGeneration({ paths, companyEncryption, previous });
+    let searchCache;
     const result = await buildStableCompanyMirror({
       previous,
       readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
-      buildCandidate: (rawManifest, reusable) => buildMirror({
+      buildCandidate: async (rawManifest, reusable) => buildMirror({
         origin, requestOrigin, token, companyEncryption, rawManifest,
-        previous: reusable, signal, searchCache,
+        // A native unchanged-generation read needs neither scratch inventory
+        // nor quota eviction across thousands of completed encrypted files.
+        // Laziness changes no cache binding/ACL/quota or pruning: a genuinely
+        // changed manifest opens the SAME writer-owned scratchpad once.
+        previous: reusable, signal, searchCache:searchCache??=await createEncryptedSearchFileCache({paths,origin,companyEncryption}),
       }),
       publish: (mirror) => publishMirrorGeneration({ paths, companyEncryption, mirror }),
     });
@@ -8419,6 +8433,24 @@ export const prepareTrelioLocalCompanyContext = async (origin, companySlug, {sig
   return {schemaVersion:1,prepared:true};
 };
 
+/** A pending managed search result is not a retained permission. Before its
+ * one-time delivery, a fresh short invocation compares the SAME native manifest
+ * generation, including its ACL-filtered inventory. This reads no mirror or
+ * answer and never falls back after a refusal. The caller separately fences the
+ * original pass and managed scope/epoch/device/envelope before and after it. */
+export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug, generation, {signal}={}) => {
+  if (!MIRROR_GENERATION_PATTERN.test(String(generation ?? "")))
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid search generation.");
+  const provider = await resolveLocalCompanyProvider({origin, companySlug:normalizeCompanySlug(companySlug), signal});
+  if (provider.nativeProvider) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed.");
+  const manifest = await fetchManifest({origin:provider.requestOrigin, token:provider.token,
+    companySlug:normalizeCompanySlug(companySlug), signal});
+  if (!MIRROR_GENERATION_PATTERN.test(String(manifest?.generation ?? "")))
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid native generation.");
+  signal?.throwIfAborted();
+  return manifest.generation === generation;
+};
+
 export const usesFreshExactTaskRead = (nativeTool, input) => {
   if (!["get_task", "get_tasks", "get_task_instruction_page", "get_task_sections"].includes(nativeTool)) return false;
   const locators = ["get_tasks", "get_task_instruction_page"].includes(nativeTool) ? input?.tasks : [input];
@@ -8517,7 +8549,7 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
 export const handleTrelioLocalContextOperation = async (
   origin,
   rawInput,
-  { signal, readUnfiledQueue } = {},
+  { signal, readUnfiledQueue, onSearchSnapshot } = {},
 ) => {
   const operation = String(rawInput?.operation || "").trim();
   const companySlug = normalizeCompanySlug(rawInput?.companySlug);
@@ -8620,6 +8652,12 @@ export const handleTrelioLocalContextOperation = async (
     signal,
   });
   if (ready.nativeProvider) return ready.result;
+
+  // Trusted in-process completion observer only: raw MCP arguments cannot
+  // supply it. Bind the pending answer to exactly the complete snapshot used by
+  // this query, without a second mirror read/decrypt or a cached native grant.
+  if (operation === "native_read" && rawInput.nativeTool === "search")
+    onSearchSnapshot?.(ready.mirror.serverGeneration);
 
   // The backend owns which response DTOs may carry live context. Polls,
   // proposal snapshots and unrelated receipts must keep their existing ABI.
