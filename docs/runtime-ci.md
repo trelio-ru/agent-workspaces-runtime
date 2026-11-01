@@ -166,3 +166,11 @@ Missing controls fail before input; no failed chooser is automatically retried.
 
 Full Linux/macOS runs `trelio-search-provider-parity.test.mjs` directly alongside
 matching/ranking suites; adapter parity is mandatory, not just generated-vector tests.
+
+Search pacing parity executes the actual Yandex and Google controllers from the
+same explicitly pinned public provider commit in Linux/macOS and visual lanes.
+The provider checkout is read-only input, outside the signed package. Its declared
+controller names/methods are tested with synthetic clocks; no browser request is
+sent. A reviewed provider update changes the pin and selectors together, retaining
+all interval, concurrent-call and unknown-send assertions. Floating provider main
+must not change the test meaning of an otherwise unchanged runtime candidate.

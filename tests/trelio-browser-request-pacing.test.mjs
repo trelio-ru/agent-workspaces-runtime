@@ -25,7 +25,7 @@ const nativeFactory = deps => createBrowserRequestPacing({ now: deps.now, random
  */
 const factories = [['runtime', nativeFactory]];
 const root = process.env.TRELIO_AGENT_SKILLS_ROOT;
-if (root) for (const [skill, variable, ready] of [['yandex-search', 'yandexSearchPacing', 'resultsReady'], ['google-ai-search', 'googleAiPacing', 'answerReady']]) {
+if (root) for (const [skill, variable, ready] of [['yandex-search', 'yandexPacing', 'responseReady'], ['google-ai-search', 'googleAiPacing', 'answerReady']]) {
   const markdown = fs.readFileSync(path.join(root, 'platform-skills', skill, 'SKILL.md'), 'utf8');
   const snippet = [...markdown.matchAll(/```javascript\r?\n([\s\S]*?)```/gu)].map(match => match[1]).find(source => source.startsWith(`var ${variable} =`));
   assert.ok(snippet, `Missing exact ${skill} pacing source`);

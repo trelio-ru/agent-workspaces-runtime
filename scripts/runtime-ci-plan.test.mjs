@@ -218,3 +218,17 @@ test('workflow connects the planner, exact attempt artifact verification and sel
     assert.ok(block, name); assert.ok(!block.includes("profile == 'full'"), name);
   }
 });
+
+// Actual provider controllers are cross-repository input, never copied fixtures.
+// Pin every pacing checkout alike so a later provider publication cannot change
+// the meaning of an unchanged runtime candidate or turn its exact gate red.
+test('every real search pacing checkout uses the reviewed immutable provider source', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/runtime-tests.yml'), 'utf8');
+  const blocks = [...workflow.matchAll(/      - name: Read actual search pacing contract sources\n([\s\S]*?)(?=\n      - |$)/gu)];
+  assert.equal(blocks.length, 2);
+  for (const [, block] of blocks) {
+    assert.match(block, /repository: trelio-ru\/agent-skills\n/u);
+    assert.match(block, /ref: 101dbe178690d40e1685b511f0a72787133762a2\n/u);
+    assert.match(block, /path: _contracts\/agent-skills(?:\n|$)/u);
+  }
+});

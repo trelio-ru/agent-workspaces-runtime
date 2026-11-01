@@ -989,6 +989,7 @@ publication tooling также остаются вне этого публичн
 - Перед локальным gate `npm run check:dependencies` должен подтвердить exact
   dependency tree; `node_modules` разных worktree не объединяются.
 - Package builder проверяй двумя сборками одной версии и byte comparison.
+- Search pacing parity executes the actual provider controllers from one immutable public revision; all CI lanes pin that same source, and controller names follow its declared API. Never skip parity or copy snippets after provider drift.
 - Cross-repository tests запускай с exact plugin root. Ошибка отсутствующего
   plugin checkout – setup failure, а не повод копировать plugin source.
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.

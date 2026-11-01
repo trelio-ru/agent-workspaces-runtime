@@ -68,6 +68,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: trelio-ru/agent-skills
+          ref: 101dbe178690d40e1685b511f0a72787133762a2
           path: _contracts/agent-skills
       - uses: actions/download-artifact@v4
         with:
@@ -252,6 +253,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: trelio-ru/agent-skills
+          ref: 101dbe178690d40e1685b511f0a72787133762a2
           path: _contracts/agent-skills
 
       - name: Check out plugin contract
