@@ -104,8 +104,16 @@ export const prepareLocalProposalFiles = async ({ origin, files, allowEncrypted 
 } = {}) => {
   if (!Array.isArray(files) || files.length === 0) return [];
   const roots = [];
+  const requestedRuns = new Set(files.map((file) => file.sourceRunId).filter(Boolean));
+  const requestedCompanies = new Set(files.filter((file) => !file.sourceRunId)
+    .map((file) => file.companySlug).filter(Boolean));
   try {
-    for (const root of (await readRegistry()).slice(0, 256)) {
+    // Registry order is not a source selector: stale entries can precede a
+    // current Run, and a later duplicate must still invalidate uniqueness.
+    // Inspect the complete registry under the caller's original abort budget,
+    // retaining only the explicitly requested Run/company metadata. Never
+    // touch unrelated workspace files or grant access from registry position.
+    for (const root of await readRegistry()) {
       signal?.throwIfAborted();
       try {
         await assertRealOwnedPath(root, "directory");
@@ -113,9 +121,12 @@ export const prepareLocalProposalFiles = async ({ origin, files, allowEncrypted 
         if (metadata.origin !== origin || !UUID.test(String(metadata.runId)) || !UUID.test(String(metadata.workspaceId))
           || (allowEncrypted ? !metadata.encryption?.enabled : metadata.encryption?.enabled !== false)
           || path.resolve(metadata.workspaceDirectory || "") !== path.join(path.resolve(root), "workspace")) continue;
-        roots.push({ root, metadata });
+        if (requestedRuns.has(metadata.runId) || requestedCompanies.has(metadata.company?.slug)) roots.push({ root, metadata });
       } catch { /* Unknown, stale and unsafe registry entries grant no file access. */ }
     }
+    // Cancellation during the final metadata read must not turn an incomplete
+    // inventory into a unique source, even when there is no next iteration.
+    signal?.throwIfAborted();
   } catch { return []; }
   const cacheRoot = path.join(configDirectory, "proposal-file-previews");
   try {
@@ -154,7 +165,12 @@ export const prepareLocalProposalFiles = async ({ origin, files, allowEncrypted 
         : roots.filter(({ metadata }) => metadata.company?.slug === selected.companySlug)
           .map(({ metadata }) => ({ ...selected, sourceRunId: metadata.runId, workspaceId: metadata.workspaceId })));
       const seen = new Set();
-      for (const selected of candidatesByFile.slice(0, MAX_FILES)) {
+      for (const selected of candidatesByFile) {
+        // Completion plans expose a company and filename, not their source
+        // Run. Missing files in other Runs are lookup misses, not prepared
+        // previews; only successful immutable copies consume the file quota.
+        // The byte/cache quotas and the same caller deadline still bound work.
+        if (result.length >= MAX_FILES) break;
         let directory, source, target;
         try {
           signal?.throwIfAborted();

@@ -1588,6 +1588,15 @@ attachment после ACL; extension не даёт полномочий и не 
 и minimum не меняются. Optional hook preparation имеет отдельный бюджет две
 секунды внутри непродлеваемого общего deadline.
 
+Поиск source просматривает весь зарегистрированный inventory под тем же
+abort/deadline, без позиционного prefix-limit. Сохраняется только metadata
+запрошенных Run либо явной компании completion plan; чужие workspace files
+не читаются. Проверка уникальности охватывает и поздние копии exact Run.
+В completion flow отсутствующие файлы других Run не расходуют лимит:
+20 файлов считаются по успешно созданным snapshots, а 24 MiB/cache/deadline
+остаются независимыми ограничениями. Неполный поиск при отмене оставляет
+download, не выдавая частичный inventory за уникальное совпадение.
+
 В encrypted-компании native hook snapshots не готовит. Local proposal save
 берёт `plaintextSha256` из authenticated decrypted accepted manifest и сравнивает
 с локальными bytes/size перед созданием snapshot. Descriptor передаётся между

@@ -928,6 +928,9 @@ publication tooling также остаются вне этого публичн
   Решения остаются локально; stale/использованный план не повторять автоматически.
 - Локальное открытие proposal-файлов, signed evidence, E2EE и fallback –
   [контракт](docs/agent-workspace-runtime.md#локальное-открытие-proposal-файлов-в-codex).
+  Registry lookup не обрезает positional prefix и проверяет поздние duplicate
+  Run; лимит файлов считает successful snapshots, не missing candidates.
+  Исходные abort/deadline, ACL/digest и private-cache quotas сохраняются.
 - Default selection context/worklog вложений, прямой пользовательский exception
   и E2EE local selection – [контракт proposals](docs/agent-workspace-runtime.md).
   Pure policy генерируется из backend, вручную не дублируется.

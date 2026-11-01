@@ -74,6 +74,64 @@ test("private snapshot preserves exact bytes after the editable source changes",
   await assert.rejects(fs.stat(preview.localPath), { code: "ENOENT" });
 });
 
+test("preview lookup reaches an exact Run beyond the old registry prefix", async (t) => {
+  const f = await fixture(t);
+  // Real registries retain old/missing Run paths. Their position must not
+  // decide whether a later valid attachment can open in the Codex viewer.
+  const staleRoots = Array.from({ length: 700 }, (_, index) => path.join(f.directory, `old-${index}`));
+  const options = { ...f.options, readRegistry: async () => [...staleRoots, f.root] };
+  const [preview] = await prepareLocalProposalFiles({ origin, files: f.files }, options);
+  assert.equal(preview?.sourceRunId, runId);
+  assert.deepEqual(await fs.readFile(preview.localPath), bytes);
+
+  // Finding one early match is not permission to stop checking uniqueness:
+  // a second registered copy of that same Run still keeps downloads active.
+  assert.deepEqual(await prepareLocalProposalFiles({ origin, files: f.files },
+    { ...options, readRegistry: async () => [f.root, ...staleRoots, f.root] }), []);
+});
+
+test("completion previews count actual snapshots rather than unrelated Run candidates", async (t) => {
+  const f = await fixture(t);
+  const unrelatedRoots = [];
+  for (let index = 0; index < 25; index++) {
+    const root = path.join(f.directory, `unrelated-${index}`);
+    const workspaceDirectory = path.join(root, "workspace");
+    await ensurePrivateDirectory(root);
+    await ensurePrivateDirectory(workspaceDirectory);
+    await writePrivateJsonFile(path.join(root, ".trelio-run.json"), {
+      origin, runId: crypto.randomUUID(), workspaceId: crypto.randomUUID(),
+      workspaceDirectory, company: { slug: "demo" }, encryption: { enabled: false },
+    });
+    unrelatedRoots.push(root);
+  }
+  const files = selectNativeProposalFiles("render_task_proposals", {
+    companySlug: "demo", completions: [{ decisions: { comment: { filePaths: ["result.md"] } } }],
+  });
+  // Completion refs intentionally keep the exact source Run model-hidden.
+  // Missing files in other Runs must not consume the twenty-file quota.
+  const [preview] = await prepareLocalProposalFiles({ origin, files },
+    { ...f.options, readRegistry: async () => [...unrelatedRoots, f.root] });
+  assert.equal(preview?.sourceRunId, runId);
+  assert.deepEqual(await fs.readFile(preview.localPath), bytes);
+
+  // Lifting the candidate-prefix bug must not lift the actual snapshot quota.
+  for (const root of unrelatedRoots) await fs.writeFile(path.join(root, "workspace", "result.md"), bytes, { mode: 0o600 });
+  const bounded = await prepareLocalProposalFiles({ origin, files },
+    { ...f.options, readRegistry: async () => [...unrelatedRoots, f.root] });
+  assert.equal(bounded.length, 20);
+  assert.ok(bounded.every((file) => file.sha256 === sha256 && file.sizeBytes === bytes.length));
+});
+
+test("registry discovery retains the caller deadline without publishing partial previews", async (t) => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const files = await prepareLocalProposalFiles({ origin, files: f.files, signal: controller.signal }, {
+    ...f.options, readRegistry: async () => { controller.abort(); return [f.root]; },
+  });
+  assert.deepEqual(files, []);
+  await assert.rejects(fs.stat(path.join(f.options.configDirectory, "proposal-file-previews")), { code: "ENOENT" });
+});
+
 test("missing files, traversal, ambiguous roots and symlinks retain download", async (t) => {
   const f = await fixture(t);
   for (const filePath of ["missing.md", "../result.md", "/result.md", "a/../../result.md", "AGENTS.md", ".git/config"])
