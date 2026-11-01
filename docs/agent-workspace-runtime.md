@@ -171,6 +171,12 @@ Regression `trelio-plugin-preservation.test.mjs` проверяет production M
 3.2.5, запускает ту же миграцию без предварительного companion add, проверяет
 его установку и discovery всех трёх untrusted hooks. Native approval не пишется.
 
+Native hook-discovery fixture retains only a closed failure stage, initialize/
+reply-presence flags and numeric process exit/allowlisted signal. Native frames,
+stderr, paths and arbitrary error prose stay discarded. A received reply followed
+by the original timeout still fails; diagnostics never relax discovery, shutdown,
+hook trust or no-replay requirements.
+
 <a id="codex-plugin-preservation"></a>
 
 ## Сохранение открытых Codex-сессий при обновлении плагина

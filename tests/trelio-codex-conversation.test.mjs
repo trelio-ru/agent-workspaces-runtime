@@ -90,20 +90,32 @@ test('actual Codex migrates an existing combined main to independent hooks witho
  const discovered=await new Promise((resolve,reject)=>{
    const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,shell:false,windowsHide:true,
      stdio:['pipe','pipe','ignore']});
-   let pending='',bytes=0,result,failed=false;
-   const timer=setTimeout(()=>{failed=true;child.kill();},20000);
+   let pending='',bytes=0,result,failed=false,initialized=false,failure='no_result';
+   // Preserve the first closed failure and whether the native reply arrived.
+   // Otherwise an EOF shutdown timeout looks exactly like failed discovery.
+   // Never attach native frames/stderr, plugin paths or exception prose.
+   const fail=reason=>{if(!failed)failure=reason;failed=true;};
+   const timer=setTimeout(()=>{fail('timeout');child.kill();},20000);
    const send=value=>child.stdin.write(JSON.stringify(value)+'\n');
-   child.once('error',()=>{failed=true;});child.stdin.on('error',()=>{failed=true;});
+   child.once('error',()=>{fail('spawn');});child.stdin.on('error',()=>{fail('stdin');});
    child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{
-     bytes+=Buffer.byteLength(chunk);if(bytes>1024*1024){failed=true;child.kill();return;}pending+=chunk;
+     bytes+=Buffer.byteLength(chunk);if(bytes>1024*1024){fail('output_limit');child.kill();return;}pending+=chunk;
      let at;while((at=pending.indexOf('\n'))>=0){let message;try{message=JSON.parse(pending.slice(0,at));}
-       catch{failed=true;child.kill();return;}pending=pending.slice(at+1);
-       if(message.error){failed=true;child.stdin.end();return;}
-       if(message.id===1){send({method:'initialized'});send({id:2,method:'hooks/list',params:{cwds:[root]}});}
+       catch{fail('invalid_json');child.kill();return;}pending=pending.slice(at+1);
+       if(message.error){fail('rpc');child.stdin.end();return;}
+       if(message.id===1){initialized=true;send({method:'initialized'});send({id:2,method:'hooks/list',params:{cwds:[root]}});}
        if(message.id===2){result=message.result;child.stdin.end();}
      }
    });
-   child.once('close',()=>{clearTimeout(timer);failed||!result?reject(Error('native hook discovery failed')):resolve(result);});
+   child.once('close',(code,signal)=>{
+     clearTimeout(timer);
+     // Keep the original strict outcome/deadline: a reply followed by timeout
+     // still fails. These facts diagnose that distinction without granting a
+     // retry, changing hook trust or treating installation as native discovery.
+     if(failed||!result)reject(Error('native hook discovery failed '+JSON.stringify({failure,initialized,resultReceived:Boolean(result),
+       exitCode:Number.isInteger(code)?code:null,signal:['SIGTERM','SIGKILL','SIGABRT','SIGSEGV'].includes(signal)?signal:null})));
+     else resolve(result);
+   });
    send({id:1,method:'initialize',params:{clientInfo:{name:'trelio_hook_migration_fixture',version:'1'},capabilities:{experimentalApi:true}}});
  });
  assert.equal(discovered.data.length,1);
