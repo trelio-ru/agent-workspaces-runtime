@@ -2954,3 +2954,36 @@ not_checked. Actual native core fixture + shared proof/installer/OAuth tests
 проверяется отдельно после signed artifact и backend rollout; offline gate не
 является live readiness. Fixture зависимости не входят в runtime artifact.
 Qualification fixture rc.3 содержит Zod 4.4.3 с [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5); bundle не исправляет Harness.
+
+<a id="skill-awareness"></a>
+## Company skill awareness
+
+Backend передаёт publisher-owned `slug: routingSummary` вместе с effective
+company/project rules. Это discovery, не executable authority или connection
+readiness. Current member/assignment ACL и project-only ограничения сохраняются;
+список не запрашивается перед каждой операцией. Direct exact reads/Run не требуют
+дополнительного catalog search. Selected skill требует обычных полных instruction
+и execution reads. Explicit user choice и published fallback/approval остаются.
+
+Private authoring create/release требуют `routingSummary` в JSON schema и common
+input, проверяют portable policy до credential/network/encryption/plan и включают
+значение в exact plan/hash/change preview. English capability sentence: 12–180
+ASCII characters, обычно 6–12 слов. Нельзя синтезировать её из keywords или менять
+`searchTerms`. В encrypted draft поле становится exact `routing_summary` marker
+того же signed payload; backend повторяет field/ownership/CAS checks. Generated
+policy принадлежит backend (`scripts/build-agent-skill-budget.mjs`). Старый host
+без поля не может опубликовать новую версию. Backend и runtime обновляются
+согласованно, с сохранением backend-first metadata capability gate выше;
+stable plugin shell и общий minimum ради инструкции не меняются.
+Create/release требуют согласованного rollout: новый host со старым strict
+backend также откажет из-за неизвестного поля. Этот короткий upgrade gap
+не считается отсутствием навыка и не разрешает другой transport/fallback.
+
+`search(queries=[slug], intent=request)` сохраняет смысл original intent и
+отдельно разрешает exact slug только среди ACL-filtered current enabled навыков
+и published процедур. Native/local используют одну generated pure matching
+policy. Unknown/hidden slug не даёт доступа и не создаёт результат; обычные
+лексические material queries не становятся новыми aliases. Runtime принимает
+локально гидратированные private hints через прежний encrypted flow и не создаёт
+plaintext index/cache/outbox. Scope/compaction invalidate verified retention;
+unknown clients получают full authority, без server «уже отправлено» cache.

@@ -630,6 +630,11 @@ publication tooling также остаются вне этого публичн
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.
   Проверяй `--check`, scope parity и раздельные limits. Legacy guidance tool
   сохраняется, а searched block не требует второго catalog call.
+  Company skill awareness приходит с effective rules: без повторного inventory.
+  `routingSummary` обязателен для create/release, валидируется общей generated
+  policy до encryption и защищается как `routing_summary`; keywords не меняются.
+  Exact slug queries разрешаются после scope ACL общим matcher, original intent
+  сохраняется. Контракт – [routing](docs/agent-workspace-runtime.md#skill-awareness).
 
 - Для личных аккаунтов, их миграции и гонок блокировок читай
   [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков);

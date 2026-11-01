@@ -144,3 +144,20 @@ export const enforceAgentSkillMcpBudget = (toolName, result) => {
   };
   return { isError: true, structuredContent: payload, content: [{ type: "text", text: JSON.stringify(payload) }] };
 };
+
+/** Publisher-owned discovery prose, shared by server and browser encryption.
+ * ASCII English keeps the always-on layer small; searchTerms remain multilingual.
+ * This is a capability description, never a replacement for skill authority.
+ */
+export const AGENT_SKILL_ROUTING_SUMMARY_MAX_CHARS = 180;
+
+/** @param {unknown} value */
+export const normalizeAgentSkillRoutingSummary = (value) => {
+  if (typeof value !== "string") throw new Error("routingSummary is required.");
+  const normalized = value.trim();
+  if (normalized.length < 12 || normalized.length > AGENT_SKILL_ROUTING_SUMMARY_MAX_CHARS
+    || !/^[\x20-\x7e]+$/u.test(normalized) || /~e1:|https?:\/\//iu.test(normalized)) {
+    throw new Error("routingSummary must be one English capability sentence (12–180 ASCII characters), without URLs or markers.");
+  }
+  return normalized;
+};

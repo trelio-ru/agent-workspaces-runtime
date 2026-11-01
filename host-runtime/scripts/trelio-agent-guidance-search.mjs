@@ -5,6 +5,10 @@ export const DEFAULT_GUIDANCE_RESULTS = 3;
 export const MAX_GUIDANCE_RESULTS = 5;
 export const guidanceSearchInput = (input) => ({
     query: (input.intent ?? input.queries.join(" ")).slice(0, 500),
+    // Keep original intent for lexical discovery. A query that is exactly a
+    // technical slug can also resolve an already chosen awareness hint; only
+    // an exact member of the ACL-filtered catalog receives the lookup priority.
+    exactSlugs: [...new Set(input.queries.map((query) => query.trim()).filter((query) => (/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(query) && query.length <= 120)))],
     // Read one extra match for honest truncation metadata, never a full catalog.
     limit: Math.min(MAX_GUIDANCE_RESULTS, Math.max(1, input.guidanceLimit ?? DEFAULT_GUIDANCE_RESULTS)) + 1,
 });
@@ -99,7 +103,7 @@ export const rankAgentSkillSearchDocuments = (documents, input) => {
     const normalizedRequest = normalizeAgentSkillSearchText([query, ...hints].join(" "));
     const requestTokens = [...new Set(tokenizeAgentSkillSearchText(normalizedRequest))];
     const limit = Math.max(1, Math.min(input.limit ?? 5, 10));
-    if (!normalizedRequest || requestTokens.length === 0) {
+    if ((!normalizedRequest || requestTokens.length === 0) && !input.exactSlugs?.length) {
         return [];
     }
     return documents
@@ -124,8 +128,14 @@ export const rankAgentSkillSearchDocuments = (documents, input) => {
             description: 3,
             search_terms: 12,
         };
-        let score = 0;
+        // Explicit slug resolution is identity lookup, not keyword stuffing.
+        // This runs after enabled/published scope filtering in both providers;
+        // unknown or inaccessible slugs never manufacture candidates or ACL.
+        const exactSlug = input.exactSlugs?.some((slug) => slug === skill.catalogSlug || slug === skill.id) ?? false;
+        let score = exactSlug ? 1_000_000 : 0;
         const matchedFields = new Set();
+        if (exactSlug)
+            matchedFields.add("id");
         for (const token of requestTokens) {
             for (const field of ["id", "title", "description", "search_terms"]) {
                 if (fieldTokens[field].some((candidate) => agentSkillSearchTokensMatch(token, candidate))) {

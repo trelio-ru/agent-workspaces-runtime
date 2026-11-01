@@ -1112,6 +1112,7 @@ const LOCAL_ACTION_PROTECTED_FIELDS = new Map([
   ["aliases", "aliases_json"],
   ["tags", "tags_json"],
   ["searchTerms", "search_terms_json"],
+  ["routingSummary", "routing_summary"],
   ["originalName", "original_name"],
   ["mimeType", "mime_type"],
   ["fileName", "original_name"],
@@ -6158,7 +6159,9 @@ const searchAgentGuidanceFromMirror = (mirror, rawInput) => {
       kind: "procedure", source: procedure,
     })),
   ];
-  const ranked = rankAgentSkillSearchDocuments(documents, { query, hints, limit });
+  const ranked = rankAgentSkillSearchDocuments(documents, { query, hints, limit,
+    exactSlugs: Array.isArray(rawInput?.exactSlugs) ? rawInput.exactSlugs : [],
+  });
 
   return {
     company: buildLocalCompanySummary(mirror.company),
