@@ -87,6 +87,51 @@ test('an already occupied version fails before CI, with no source/tag overwrite'
   assert.deepEqual(queue(cwd), []);
 });
 
+test('ordinary predecessor exit between ticket read and process inventory is a handoff, not a dead owner', {timeout: 25_000}, async t => {
+  const f = fixture(t), one = f.branch('one'), two = f.branch('two');
+  const first = f.start(one); await until(() => f.events().length === 1);
+  const bin = path.join(f.root, 'bin'), observed = path.join(f.root, 'handoff-observed.json');
+  fs.mkdirSync(bin);
+  // This fixture-only ps wrapper makes the real race deterministic. Only the
+  // waiting synthetic worker releases its own predecessor's blocked CI. With
+  // the production mutex held, predecessor settlement must wait for this short
+  // observation; without it the ticket disappears before the process snapshot.
+  // No process is killed and no production queue or repository is accessed.
+  const helper = path.join(bin, 'handoff.mjs');
+  fs.writeFileSync(helper, `import fs from 'node:fs'; import path from 'node:path';
+const directory=${JSON.stringify(path.join(f.main, '.git', 'trelio-git-coordination'))};
+const observed=${JSON.stringify(observed)};
+const rows=fs.existsSync(directory)?fs.readdirSync(directory).filter(name=>/^\\d{12}\\.json$/u.test(name)).map(name=>JSON.parse(fs.readFileSync(path.join(directory,name),'utf8'))).sort((a,b)=>a.id.localeCompare(b.id)):[];
+if(rows.length===2&&rows[1].pid===Number(process.argv[2])&&!fs.existsSync(observed)){
+  fs.writeFileSync(observed,JSON.stringify({triggered:true}),{flag:'wx'});
+  fs.writeFileSync(${JSON.stringify(path.join(f.root, 'release'))},'go');
+  const predecessor=path.join(directory,rows[0].id+'.json'), deadline=Date.now()+1500;
+  while(fs.existsSync(predecessor)&&Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,10));
+  const removed=!fs.existsSync(predecessor);
+  if(removed) await new Promise(resolve=>setTimeout(resolve,100));
+  fs.writeFileSync(observed,JSON.stringify({triggered:true,removedBeforeInventory:removed}));
+}
+`, {mode: 0o600});
+  // exec preserves the actual ps PID; a second resident wrapper process would
+  // itself look like a live descendant to the coordinator's strict cleanup.
+  fs.writeFileSync(path.join(bin, 'ps'), `#!/bin/sh
+"${process.execPath}" "${helper}" "$PPID" || exit $?
+exec /bin/ps "$@"
+`, {mode: 0o700});
+  const originalPath = process.env.PATH;
+  let second;
+  try { process.env.PATH = bin + path.delimiter + originalPath; second = f.start(two); }
+  finally { process.env.PATH = originalPath; }
+  // A wrapper/setup failure must not leave our first synthetic CI blocked.
+  second.done.finally(() => fs.writeFileSync(path.join(f.root, 'release'), 'go'));
+  assert.equal((await first.done).code, 0);
+  const result = await second.done; assert.equal(result.code, 0, result.output);
+  assert.deepEqual(JSON.parse(fs.readFileSync(observed, 'utf8')),
+    {triggered: true, removedBeforeInventory: false}, 'predecessor removal waits for the same inventory mutex');
+  assert.deepEqual(f.events(), ['codex/one', 'codex/two']);
+  assert.deepEqual(queue(two), []);
+});
+
 test('changed waiting candidate is retained without running its final CI', async t => {
   const f = fixture(t), one = f.branch('one'), two = f.branch('two');
   const first = f.start(one); await until(() => f.events().length === 1);

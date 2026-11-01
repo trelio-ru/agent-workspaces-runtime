@@ -190,10 +190,18 @@ export async function coordinate(cwd, tag = '', actions = {}) {
     console.log(`FIFO ${entry.id}: ${entry.branch}${tag ? ' / ' + tag : ''}`);
     for (;;) {
       if (cancelled) throw Error('Coordination interrupted');
-      const first = queue(cwd)[0];
-      if (!first || !local(first) || !inventory().some(row => row.pid === first.pid && row.live)) {
-        throw Error('First FIFO owner is not live; inspect --status and --recover TICKET');
-      }
+      // Normal completion removes a ticket under this same short mutex before
+      // its owner exits. Observe ticket and process together: a stale unlocked
+      // ticket snapshot can otherwise outlive that successful predecessor and
+      // falsely demand dead-owner recovery. A crashed owner retains its ticket
+      // and is still refused; no age/takeover or unknown-child rule changes.
+      const first = await mutex(cwd, config, () => {
+        const first = queue(cwd)[0];
+        if (!first || !local(first) || !inventory().some(row => row.pid === first.pid && row.live)) {
+          throw Error('First FIFO owner is not live; inspect --status and --recover TICKET');
+        }
+        return first;
+      }, () => cancelled);
       if (first.id === entry.id) break;
       await delay(250);
     }

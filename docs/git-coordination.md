@@ -22,6 +22,9 @@ being on main is never a substitute for CI.
 
 The short existing main mutex serializes FIFO admission and state changes;
 the durable ticket protects CI. Worktree creation therefore remains available.
+Waiting workers read the first ticket and its process inventory under that same
+mutex, so normal predecessor removal/exit is an atomic handoff rather than a
+false dead-owner failure. An unchanged dead ticket still requires exact recovery.
 Canonical pre-push checks live process ancestry, exact worktree/branch/SHA/tag
 and verified ticket state. A caller-authored boolean, direct main/tag push or
 old transport wrapper cannot borrow the slot. Required CI remains repository
