@@ -884,6 +884,8 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  const scope=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_INTAKE '));
  assert.deepEqual(JSON.parse(scope.slice('TRELIO_ASSISTANT_INTAKE '.length)),{kind:'source_intake',...intakeContext});
  assert.match(input,/Only reply_owner is permitted/);assert.match(input,/fresh current company sources again/);
+ assert.match(input,/does not establish that a prior response was delivered/);
+ assert.doesNotMatch(input,/prior technical limitation reply was positively delivered/);
  assert.doesNotMatch(scope,/taskId|recovery|workStatePath/,'hook ABI stays structural and unchanged');
  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{replyOnlyRecovery:true}),/INVALID_INPUT/);
 });
@@ -1069,4 +1071,88 @@ test('generation correction certifies the whole positive technical turn, one ref
  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,technicalReplyCorrection:witness}),false);
  assert.deepEqual(await read([f.turn,f.turn]),{state:'uncertain'});
  assert.deepEqual(await read([{id:randomUUID(),status:'completed',items:[]},f.turn]),{state:'uncertain'});
+});
+
+
+test('final dispatch refusal requires the whole successful read-only turn and one exact failed resolve',async()=>{
+ const f=readonlyPreparationFixture(),options={...f,replyDispatchCorrection:true};
+ f.turn.items.splice(4,1); // No prior preparation error may borrow this certificate.
+ const call=(tool,args,result={})=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+  arguments:{...args,intakePass:f.intakePass,runtimeSessionProof:{}},result:{content:[],structuredContent:result}});
+ f.turn.items.splice(-1,0,
+  call('search',{companySlugs:['synthetic'],queries:['SYNTHETIC_PRIVATE_QUERY']},{schemaVersion:1,results:[{id:'task:synthetic/work/1'}]}),
+  call('fetch',{id:'task:synthetic/work/1'},{task:{number:1}}),
+  call('get_task_sections',{companySlug:'synthetic',projectSlug:'work',taskNumber:1,sections:['comments']},{comments:[]}));
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,options),true);
+ const read=turns=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{...options,readOnlyPreparation:f.intakePass,
+  executable:process.execPath,spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+   ?{thread:{id:f.threadId,cwd:process.cwd()}}:{data:turns,nextCursor:null}}))});
+ assert.equal((await read([f.turn])).readOnlyFailure,'owner_reply_dispatch_refused');
+ for(const shape of ['native_error','content']){
+  const turn=structuredClone(f.turn),last=turn.items.at(-1);last.result={isError:true};
+  if(shape==='native_error')last.error={message:'ASSISTANT_INTAKE_CHANGED'};
+  else last.result.content=[{type:'text',text:'ASSISTANT_INTAKE_CHANGED'}];
+  assert.equal(await assistantReadOnlyPreparationFailure(turn,options),true,shape);
+ }
+ for(const alter of [t=>{t.status='running';},t=>{t.status='failed';},t=>{t.error={codexErrorInfo:'serverOverloaded'};},
+  t=>{t.items.at(-1).status='completed';},t=>{t.items.at(-1).arguments.decision='create_task';},
+  t=>{t.items.at(-1).arguments.clientRequestId=randomUUID();},t=>{t.items.at(-1).arguments.intakePass.sourceId=randomUUID();},
+  t=>{t.items.at(-1).result.structuredContent={code:'explanation ASSISTANT_INTAKE_CHANGED'};},
+  t=>{t.items.at(-1).result.structuredContent={code:'ASSISTANT_TRANSPORT_RATE_LIMITED'};},
+  t=>{t.items.at(-1).result.isError=false;},t=>{t.items.at(-1).error={message:'OTHER'};},
+  t=>{t.items[3].status='failed';},t=>{t.items[3].result.isError=true;},
+  t=>{t.items[4].tool='create_comment';},t=>{t.items[4].server='other';},
+  t=>{t.items.splice(2,1);},t=>{t.items[1].command+='; side_effect';},
+  t=>{t.items.push(structuredClone(t.items.at(-1)));}]){
+  const turn=structuredClone(f.turn);alter(turn);assert.equal(await assistantReadOnlyPreparationFailure(turn,options),false,String(alter));
+ }
+ for(const patch of [{replyDispatchCorrection:false},{readOnlyContinuation:true},{technicalReplyCorrection:{}},{generationReplyCorrection:{}}])
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,...patch}),false);
+ assert.deepEqual(await read([f.turn,f.turn]),{state:'uncertain'});
+ assert.deepEqual(await read([{id:randomUUID(),status:'completed',items:[]},f.turn]),{state:'uncertain'});
+});
+
+// A permanent owner chat may receive an independent question while an older
+// no-send receipt is closed. Only the new dispatch profile can skip a later
+// fully settled read-only reply; its positive receipt never proves the old
+// answer or permits provider replay. Exercise complete pagination and refusals.
+test('dispatch recovery skips only independently certified settled read-only replies',async()=>{
+ const f=readonlyPreparationFixture(),context=structuredClone(f.turn.items.find(i=>i.tool==='get_assistant_intake_context'));
+ const refused=structuredClone(f.turn.items.at(-1));
+ const parent={id:randomUUID(),status:'completed',error:null,items:[structuredClone(f.turn.items[0]),context,refused]};
+ const later=settledCreationFixture(f);later.witness.taskId=null;
+ const pass={companyId:later.witness.companyId,sourceId:later.witness.sourceId,intakeId:later.witness.intakeId};
+ const call=(tool,args,result={})=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+  arguments:{intakePass:pass,runtimeSessionProof:{},...args},result:{structuredContent:result}});
+ later.turn.items=[later.turn.items[0],call('get_assistant_intake_context',{}),
+  call('search',{companySlugs:['synthetic'],queries:['SYNTHETIC_OTHER_QUERY']},{state:'ready',results:[]}),
+  call('fetch',{id:'task:synthetic/work/other'}),call('get_task_sections',{sections:['comments']}),
+  call('resolve_assistant_intake',{decision:'reply_owner',clientRequestId:pass.intakeId,replyText:'SYNTHETIC_OTHER_REPLY'},
+   {schemaVersion:1,id:pass.intakeId,companyId:pass.companyId,sourceId:pass.sourceId,sourceRevision:later.witness.sourceRevision,
+    eventId:later.witness.eventId,threadId:f.threadId,state:'replied',taskId:null,receiptId:later.witness.receiptId,
+    readConfirmed:true,ownerPrivateRead:true})];
+ const read=(turns=[later.turn,parent],proofs=[later.witness],patch={})=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{
+  executable:process.execPath,environment:f.environment,readOnlyPreparation:f.intakePass,replyDispatchCorrection:true,
+  settledReplySuccessors:proofs,...patch,spawnProcess:nativeRpc(request=>{
+   if(request.method==='thread/read')return {result:{thread:{id:f.threadId,cwd:process.cwd()}}};
+   assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');
+   const index=Number(request.params.cursor??0);return {result:{data:turns.slice(index,index+1),nextCursor:index+1<turns.length?String(index+1):null}};
+  })});
+ assert.equal((await read()).readOnlyFailure,'owner_reply_dispatch_refused');
+ assert.deepEqual(await read(undefined,[]),{state:'uncertain'});
+ assert.deepEqual(await read(undefined,undefined,{replyDispatchCorrection:undefined}),{state:'uncertain'},'older modes do not acquire this exception');
+ for(const change of [t=>{t.status='running';},t=>{t.error={codexErrorInfo:'serverOverloaded'};},
+  t=>{t.items[2].status='failed';},t=>{t.items[3].tool='create_comment';},t=>{t.items[1].server='foreign';},
+  t=>{t.items.at(-1).status='failed';},t=>{t.items.at(-1).result.isError=true;},
+  t=>{t.items.at(-1).result.structuredContent.state='reply_pending';},t=>{t.items.at(-1).result.structuredContent.taskId=randomUUID();},
+  t=>{t.items.at(-1).result.structuredContent.receiptId=randomUUID();},t=>{t.items.at(-1).result.structuredContent.eventId=randomUUID();},
+  t=>{t.items.at(-1).result.structuredContent.ownerPrivateRead=false;},t=>{t.items.at(-1).arguments.clientRequestId=randomUUID();},
+  t=>{t.items.splice(2,0,structuredClone(t.items[1]));},t=>{t.items.push(structuredClone(t.items.at(-1)));}]){
+  const turn=structuredClone(later.turn);change(turn);assert.deepEqual(await read([turn,parent]),{state:'uncertain'},String(change));
+ }
+ for(const proofs of [[{...later.witness,taskId:randomUUID()}],[{...later.witness,threadId:randomUUID()}],
+  [later.witness,later.witness],Array(9).fill(later.witness)])assert.deepEqual(await read(undefined,proofs),{state:'uncertain'});
+ assert.deepEqual(await read([later.turn,later.turn,parent]),{state:'uncertain'});
+ assert.deepEqual(await read([parent,later.turn]),{state:'uncertain'});
+ assert.deepEqual(await read([later.turn,{id:randomUUID(),status:'completed',items:[]},parent]),{state:'uncertain'});
 });

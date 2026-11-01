@@ -686,6 +686,17 @@ process engine persists the attempt at its final spawn boundary. Exact signed
 send/read-back is persisted before native `replied` confirmation. A lost HTTP
 confirmation is a receipt-only technical retry, even after SessionEnd; it never
 starts another model/provider invocation or invents fresh observed model proof.
+A dispatcher can lose its independent GUI observation while that same model turn
+continues. UNCERTAIN alone is therefore not a provider-attempt or cancellation
+fence. A freshly native-admitted, unexpired reply may take its FIRST provider
+spawn from STARTED or UNCERTAIN only when native_started is preserved and every
+current capacity-cancellation episode, abandonment receipt, prior send/message
+and outcome fence is absent. A fresh unread-capacity child retains its consumed
+OLDER marker only as pacing history; it does not reset that clock or inherit
+permission to cancel/send under the previous marker. Entry admission and final SQLite CAS share this predicate. They never
+reset UNCERTAIN to STARTED or replay resolve. A racing capacity/abandon transaction
+wins before the CAS and prevents the signed provider process. Native pass,
+private owner, exact original/source/revision and lease checks remain mandatory.
 The actual CLI success envelope includes `ok:true`; the strict positive reply
 validator retains that field and all exact reference/message checks. A lost
 provider result can be reconciled without sending: read one completed original
@@ -994,8 +1005,9 @@ attempt receipt and positive message ID must still be NULL.
 `startOwnerReplyAbandonment` atomically freezes STARTED to UNCERTAIN and persists
 the original native intent receipt before HTTP. It serializes with the existing
 final provider-spawn fence: either the send started first and negative settlement
-refuses, or a stale callback can no longer start it. One fixed device request
-admits no new model/provider call. A lost response permits only exact native
+refuses, or the explicit abandonment receipt blocks a stale callback. Dispatch
+UNCERTAIN by itself is never used as evidence of a provider attempt. One fixed
+device request admits no new model/provider call. A lost response permits only exact native
 read-back; a still-pending unknown result never repeats the POST. Native
 `reply_abandoned` must retain the SAME receipt and original fields. Only then may
 the SAME journal settle and release its protected pass. It never means replied,
@@ -1022,3 +1034,30 @@ failure proof may acquire this separate certificate. A same-original/source-revi
 query excludes every history that already contains it, even after cancellation or
 restart; exact same known append remains idempotent. No flags/backfill reset an old
 provider fence, begin attempt, shared twenty-child bound, ACK or health latch.
+
+## Schema v26: one final dispatch-refusal correction
+
+Schema26 adds no column or historical backfill. The SAME strict immutable JSON
+has four mutually exclusive mode flags; `replyDispatchCorrection:true` requires
+its own native protocol capability. A complete/settled native reply_abandoned
+parent with its original expired lease and matching negative receipt may earn
+one child only when no provider-attempt/message or current capacity episode
+exists. The whole exact completed native history must end with one failed final
+reply resolve carrying exact ASSISTANT_INTAKE_CHANGED after successful read-only
+calls. No reply text/history is journaled or treated as authority.
+
+Every native/local ancestor retains the same original/source/revision/owner/
+account/chat and immutable receipt. Only this separate mode may follow earlier
+generation-correction ancestry. A dispatch bit anywhere in the whole original
+forbids ALL further recovery modes; the unique parent and existing total bound
+still apply. Changed trusted prerequisite, durable begin-before-HTTP and exact
+GET-only unknown-begin recovery remain mandatory. The ordinary new reply-only
+child rereads current sources and takes its FIRST signed provider attempt; no
+old lease, state, pacing history, send receipt, ACK or health is reset.
+
+The complete successor inventory still includes unknown/unsettled rows before
+its eight-row bound. Dispatch recovery alone may skip an independent settled
+positive read-only reply, only after fresh native receipt/private-read checks,
+durable local provider observation and full exact native context/read/reply
+history. No reply text is persisted or reused. Task-creation and reply proofs
+share the original eight-successor bound; all other modes stay creation-only.

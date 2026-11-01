@@ -513,7 +513,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
     },
     materializeSourceReply:async({result,arguments:args,signal})=>{
-      const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox}]=await Promise.all([
+      const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox,assistantOwnerReplyAttemptReady}]=await Promise.all([
         import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs')]);
       const pass=validateAssistantActivePass(await host.readActivePass(),identity),admitted=result.structuredContent;
       if(pass.kind!=='source_intake'||pass.intakeKind||args.intakePass?.intakeId!==pass.passId
@@ -526,8 +526,8 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
         try{return await action(createAssistantInbox({database:opened.database}));}finally{await opened.close();}
       };
       const row=await withInbox(inbox=>inbox.ownerIntake(pass.passId));
-      if(row.kind!=='owner_command'||row.state!=='started'||row.thread_id!==pass.threadId||row.original_event_id!==pass.eventId
-        ||row.scope.bindingId!==pass.sourceId||row.source_revision!==pass.sourceRevision||row.reply_receipt_id!==null)
+      if(!assistantOwnerReplyAttemptReady(row)||row.thread_id!==pass.threadId||row.original_event_id!==pass.eventId
+        ||row.scope.bindingId!==pass.sourceId||row.source_revision!==pass.sourceRevision)
         throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
       const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(value=>value.id===pass.sourceId);
       await replyAssistantOwnerIntake({identity,client:sourceClient,host,store,pass,source,signal,sourcePackage,

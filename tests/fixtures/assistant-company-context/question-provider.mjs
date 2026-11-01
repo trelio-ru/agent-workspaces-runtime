@@ -54,7 +54,10 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
       const ordinal=configuration.replyOrdinal??1,rows=prior.trim()?prior.trim().split('\n').map(line=>JSON.parse(line)):[];
       assert.equal(rows.length,ordinal-1,'each admitted reply may invoke the external provider exactly once');
       assert.ok(!rows.some(row=>row.receiptId===admission.receiptId),'a known or unknown send is never replayed');
-      const messageId=900+ordinal;
+      // Recorded historical positive rows are not fresh provider invocations.
+      // Keep the one-send counter strict while assigning a distinct new
+      // message ID after their already consumed IDs in recovery scenarios.
+      const messageId=900+(configuration.replyMessageOrdinal??ordinal);
       await fs.writeFile(capture,prior+JSON.stringify({reference,receiptId:admission.receiptId,
         text:input.intakeExecution.replyText,messageId})+'\n',{mode:0o600,flag:ordinal===1?'wx':'w'});
       if(configuration.fault==='lost_send')throw Object.assign(Error('synthetic lost provider result'),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});

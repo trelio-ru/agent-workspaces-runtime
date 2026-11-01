@@ -69,7 +69,7 @@ export const createQuestionSystemDriver=async configuration=>{
   });
   await native.seed({credential,pass,runtime:{schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state}});
   await withInbox(inbox=>{inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);});
-  let historicalRows,historicalPositiveOutcome;
+  let historicalRows,historicalPositiveOutcome,laterReply;
   if(configuration.historicalCancelledReply){
     assert.equal(typeof configuration.seedHistoricalIntakes,'function');
     historicalRows=await withInbox(inbox=>{
@@ -107,6 +107,43 @@ export const createQuestionSystemDriver=async configuration=>{
       assert.equal(positive.state,'replied');assert.equal(positive.receiptId,delivered.outcome_receipt);
       historicalPositiveOutcome=positive;
       historicalRows.push(delivered);
+    }
+    if(configuration.historicalDispatchRefusal){
+      // Historical generation correction finished its native intent, but the
+      // old local final-send guard refused before ANY provider spawn. Seed
+      // this fifth expired row as DATA, then use the real negative endpoint;
+      // the coordinator must earn the separate dispatch certificate itself.
+      historicalClock++;
+      const refused=await withInbox(inbox=>{
+        const parent=inbox.ownerIntake(historicalRows.at(-1).id);
+        const row=inbox.retryReadonlyOwnerIntake(parent.id,{receiptId:parent.outcome_receipt,terminalTurnId:randomUUID(),
+          previousPrerequisiteKey:'d'.repeat(64),prerequisiteKey:'e'.repeat(64),generationReplyCorrection:true});
+        inbox.startReadonlyIntakeBegin(row.id);inbox.startOwnerIntake(row.id);inbox.confirmIntakeModelRead(row.id);
+        inbox.uncertainOwnerIntake(row.id);
+        const receipt=randomUUID();inbox.startOwnerReplyAbandonment(row.id,receipt);
+        inbox.finishOwnerIntake(row.id,{state:'reply_abandoned',receiptId:receipt});inbox.settleOwnerIntake(row.id);
+        return inbox.ownerIntake(row.id);
+      });
+      const negative=await configuration.seedHistoricalIntakes({rows:[refused],native});
+      assert.equal(negative.state,'reply_abandoned');assert.equal(negative.receiptId,refused.outcome_receipt);
+      historicalRows.push(refused);
+      historicalClock+=300001; // Only the isolated history clock; ordinary source poll is due.
+      const later=await withInbox(inbox=>{
+        const scope={origin:identity.origin,assistantId:identity.assistantId,companyId:source.companyId,
+          provider:'telegram',accountId:source.localAccountId,bindingId:source.id};
+        inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'synthetic-independent',hasMore:false,events:[{
+          id:`message:${configuration.ownerExternalUserId}:778`,revision:'b'.repeat(64),taskId:null,wake:false,providerWake:true,
+          ownerIdentityId,conversationKey:configuration.reference.conversationKey}]});
+        const row=inbox.ownerIntakes().find(value=>value.original_event_id!==original.original_event_id);
+        assert.equal(inbox.prepareOwnerIntake(row.id).thread_id,original.thread_id);
+        inbox.startOwnerIntake(row.id);inbox.confirmIntakeModelRead(row.id);
+        const receipt=randomUUID();inbox.startOwnerReply(row.id,receipt);inbox.confirmOwnerReply(row.id,{receiptId:receipt,messageId:902});
+        inbox.finishOwnerIntake(row.id,{state:'replied',receiptId:receipt});inbox.settleOwnerIntake(row.id);
+        return inbox.ownerIntake(row.id);
+      });
+      const positive=await configuration.seedHistoricalIntakes({rows:[later],native});
+      assert.equal(positive.state,'replied');assert.equal(positive.receiptId,later.outcome_receipt);
+      laterReply={row:later,outcome:positive};
     }
     historicalRows=await withInbox(inbox=>historicalRows.map(row=>inbox.ownerIntake(row.id)));historicalClock=null;
   }
@@ -157,6 +194,7 @@ export const createQuestionSystemDriver=async configuration=>{
       store:native.store,lockDirectory:path.join(root,'company-key-locks'),assertCurrent:()=>native.client.readSourceIntake(locator)}));},
     async setManagedFingerprint(fingerprint){configuration.managedFingerprint=fingerprint;await saveConfiguration();},
     get historicalRows(){return historicalRows;},
+    get laterReplyHistory(){return laterReply?.row??null;},
     async recoverTechnicalReply(answer){return this.recoverReadOnlyReply(answer);},
     async recoverCancelledReply(answer){
       assert.ok(historicalRows);
@@ -174,11 +212,13 @@ export const createQuestionSystemDriver=async configuration=>{
             return {state:'completed',turnId:randomUUID()};}}}});
       try{await host.coordinator.workOnce();}finally{await host.close();}
       original=historicalRows.at(-1);locator={companyId:source.companyId,sourceId:source.id,intakeId:original.id};
-      return this.recoverReadOnlyReply(answer,{continuation:!configuration.historicalGenerationReply,generation:configuration.historicalGenerationReply===true});
+      return this.recoverReadOnlyReply(answer,{continuation:!configuration.historicalGenerationReply,
+        generation:configuration.historicalGenerationReply===true&&!configuration.historicalDispatchRefusal,
+        dispatch:configuration.historicalDispatchRefusal===true});
     },
-    async recoverReadOnlyReply(answer,{continuation=false,generation=false}={}){
+    async recoverReadOnlyReply(answer,{continuation=false,generation=false,dispatch=false}={}){
       const parent=await withInbox(inbox=>inbox.ownerIntake(original.id)),parentPass={...locator};
-      assert.equal(parent.state,'complete');assert.equal(parent.outcome_state,continuation?'cancelled':'replied');assert.equal(parent.settled,1);
+      assert.equal(parent.state,'complete');assert.equal(parent.outcome_state,dispatch?'reply_abandoned':continuation?'cancelled':'replied');assert.equal(parent.settled,1);
       assert.equal(await native.context(()=>native.host.readActivePass()),null);
       // The external Codex history is a recorded historical DATA fixture, not
       // a fake backend response. Its successful context/resolve results below
@@ -188,14 +228,21 @@ export const createQuestionSystemDriver=async configuration=>{
       const argumentsSearch={companySlugs:[configuration.companySlug],queries:['SYNTHETIC_WEEKEND_JOURNEY']};
       const call=(tool,args,result,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
         arguments:{...args,intakePass:parentPass,runtimeSessionProof:{}},result});
-      const contextCall=continuation||generation?call('get_assistant_intake_context',{}, {structuredContent:{schemaVersion:1}}):
+      const contextCall=continuation||generation||dispatch?call('get_assistant_intake_context',{}, {structuredContent:{schemaVersion:1}}):
         modelCalls.find(item=>item.tool==='get_assistant_intake_context');
       // Use the ACTUAL native positive receipt, not a hand-built backend DTO.
       const resolveCall=generation?call('resolve_assistant_intake',{clientRequestId:parent.id,decision:'reply_owner',replyText:'SYNTHETIC_GENERATION_FAILURE'},
         {structuredContent:historicalPositiveOutcome})
         :modelCalls.findLast(item=>item.tool==='resolve_assistant_intake'&&item.result.structuredContent?.state==='replied');
-      assert.ok(contextCall&&(continuation||resolveCall));
-      const turn={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',
+      assert.ok(contextCall&&(continuation||dispatch||resolveCall));
+      const marker={type:'userMessage',content:[{type:'text',
+        text:`TRELIO_ASSISTANT_DELIVERY ${parent.delivery_id}\nSYNTHETIC_ORIGINAL`} ]};
+      const turn={id:randomUUID(),status:'completed',items:dispatch?[marker,contextCall,
+        call('search',argumentsSearch,{structuredContent:{schemaVersion:1,state:'ready',results:[]}}),
+        call('fetch',{id:'task:synthetic/exact/69'},{structuredContent:{schemaVersion:1}}),
+        call('get_task_sections',{sections:['comments']},{structuredContent:{schemaVersion:1}}),
+        call('resolve_assistant_intake',{clientRequestId:parent.id,decision:'reply_owner',replyText:'SYNTHETIC_FINAL_DISPATCH_REFUSAL'},
+          {isError:true,structuredContent:{code:'ASSISTANT_INTAKE_CHANGED'}},'failed')]:[{type:'userMessage',content:[{type:'text',
         text:`TRELIO_ASSISTANT_DELIVERY ${parent.delivery_id}\nSYNTHETIC_ORIGINAL`} ]},contextCall,
         call('search',argumentsSearch,{structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,
           nextCall:{tool:'search',arguments:argumentsSearch}}}),
@@ -203,30 +250,51 @@ export const createQuestionSystemDriver=async configuration=>{
         ...(generation?[contextCall,call('search',{...argumentsSearch,queries:['SECOND_GENERATION_REFUSAL']},
           {isError:true,content:[{type:'text',text:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'}]},'failed')]:[]),
         ...(continuation?[]:[resolveCall])]};
+      const laterWitness=laterReply?{companyId:source.companyId,sourceId:source.id,sourceRevision:source.revision,
+        intakeId:laterReply.row.id,eventId:laterReply.row.original_event_id,threadId:parent.thread_id,
+        deliveryId:laterReply.row.delivery_id,taskId:null,receiptId:laterReply.outcome.receiptId}:null;
+      const laterPass=laterWitness?{companyId:source.companyId,sourceId:source.id,intakeId:laterWitness.intakeId}:null;
+      const laterCall=(tool,args,result)=>{const item=call(tool,args,result);item.arguments.intakePass=laterPass;return item;};
+      // One independently delivered later question remains immutable. The
+      // real full native decoder must match its own positive receipt before
+      // reaching the earlier final-dispatch refusal; chronology alone is not
+      // authority. The fresh recovered answer below still reads real sources.
+      const history=laterWitness?[{id:randomUUID(),status:'completed',items:[
+        {type:'userMessage',content:[{type:'text',text:`TRELIO_ASSISTANT_DELIVERY ${laterWitness.deliveryId}\nSYNTHETIC_LATER_ORIGINAL`}]},
+        laterCall('get_assistant_intake_context',{}, {structuredContent:{schemaVersion:1}}),
+        laterCall('search',{companySlugs:[configuration.companySlug],queries:['SYNTHETIC_OTHER_QUESTION']},{structuredContent:{state:'ready',results:[]}}),
+        laterCall('resolve_assistant_intake',{decision:'reply_owner',clientRequestId:laterWitness.intakeId,replyText:'SYNTHETIC_LATER_REPLY'},
+          {structuredContent:laterReply.outcome})]},turn]:[turn];
       const rpc=()=>{
         const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};let buffered='';
         child.stdin.on('data',chunk=>{buffered+=chunk;let index;
           while((index=buffered.indexOf('\n'))!==-1){const request=JSON.parse(buffered.slice(0,index));buffered=buffered.slice(index+1);
             if(!request.id)continue;
             const result=request.method==='initialize'?{}:request.method==='thread/read'?{thread:{id:parent.thread_id,cwd:root}}:
-              (assert.equal(request.method,'thread/turns/list'),assert.equal(request.params.itemsView,'full'),{data:[turn],nextCursor:null});
+              (assert.equal(request.method,'thread/turns/list'),assert.equal(request.params.itemsView,'full'),{data:history,nextCursor:null});
             queueMicrotask(()=>child.stdout.write(JSON.stringify({id:request.id,result})+'\n'));}});
         return child;
       };
       const historical=await readAssistantCodexDelivery(parent.thread_id,parent.delivery_id,{executable:process.execPath,
         environment:{},spawnProcess:rpc,readOnlyPreparation:parentPass,settledCreationSuccessors:[],
-        ...(continuation?{readOnlyContinuation:true}:{[generation?'generationReplyCorrection':'technicalReplyCorrection']:{receiptId:parent.outcome_receipt,eventId:parent.original_event_id,
+        ...(laterWitness?{settledReplySuccessors:[laterWitness]}:{}),
+        ...(dispatch?{replyDispatchCorrection:true}:continuation?{readOnlyContinuation:true}:{[generation?'generationReplyCorrection':'technicalReplyCorrection']:{receiptId:parent.outcome_receipt,eventId:parent.original_event_id,
           sourceRevision:parent.source_revision,threadId:parent.thread_id}})});
-      assert.equal(historical.readOnlyFailure,generation?'company_context_generation_changed_reply':continuation?'company_context_read_cancelled':'company_context_rate_limited_reply',
+      assert.equal(historical.readOnlyFailure,dispatch?'owner_reply_dispatch_refused':generation?'company_context_generation_changed_reply':continuation?'company_context_read_cancelled':'company_context_rate_limited_reply',
         'the real native decoder must certify the complete historical turn');
-      await workspace.stop();configuration.replyOrdinal=continuation||generation?1:2;await saveConfiguration();let modelStarts=0;
+      // Historical replies already own IDs 900/901 (and dispatch's later902).
+      // A genuinely new send must not reuse either ID merely because the
+      // disposable provider journal begins with its first current process.
+      await workspace.stop();configuration.replyOrdinal=continuation||generation||dispatch?1:2;
+      configuration.replyMessageOrdinal=dispatch?4:generation?3:configuration.replyOrdinal;
+      await saveConfiguration();let modelStarts=0;
       // Move only the coordinator's existing injected test clock past its
       // retained five-minute read-only backoff. Native PostgreSQL, runtime
       // proof clocks and every original child/lease deadline stay real. No
       // live clock, journal timestamp or native row is edited by this fixture.
       let offset=Math.max(0,parent.next_check_at-Date.now()+1);
       const openHost=()=>createAssistantRuntimeHost({context:native.context,dependencies:{configurationDirectory:directory,now:()=>Date.now()+offset,
-        readHookReadiness:async()=>({fingerprint:(generation?'e':continuation?'d':'b').repeat(64)}),readStatus:async()=>({structuredContent:{schemaVersion:1,
+        readHookReadiness:async()=>({fingerprint:(dispatch?'f':generation?'e':continuation?'d':'b').repeat(64)}),readStatus:async()=>({structuredContent:{schemaVersion:1,
           assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:configuration.ownerUserId,businessReady:true,
           availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
         native:{provision:async()=>assert.fail('one original must keep its existing chat'),
@@ -235,7 +303,7 @@ export const createQuestionSystemDriver=async configuration=>{
           run:async(input,options)=>{
             assert.equal(++modelStarts,1);assert.equal(input.threadId,parent.thread_id);
             assert.equal(input.intakeContext.eventId,parent.original_event_id);
-            assert.equal(options.replyOnlyRecovery,true);assert.equal(options.technicalReplyCorrection===true,!continuation);
+            assert.equal(options.replyOnlyRecovery,true);assert.equal(options.technicalReplyCorrection===true,!continuation&&!dispatch);
             options.startInvocation();pass=await native.context(()=>native.host.readActivePass());
             original=await withInbox(inbox=>inbox.ownerIntake(pass.passId));locator={companyId:source.companyId,sourceId:source.id,intakeId:pass.passId};
             const pair=generateKeyPairSync('ed25519'),observed={...observation,observedAt:new Date().toISOString()};
@@ -248,10 +316,10 @@ export const createQuestionSystemDriver=async configuration=>{
           }}}});
       let host=await openHost();
       try{await host.coordinator.workOnce().catch(error=>{
-        if(!(continuation||generation)||!configuration.loseContinuationBegin)throw error;
+        if(!(continuation||generation||dispatch)||!configuration.loseContinuationBegin)throw error;
         assert.equal(error.code,'ASSISTANT_TRANSPORT_UNAVAILABLE');
       });}finally{await host.close();}
-      if((continuation||generation)&&configuration.loseContinuationBegin){
+      if((continuation||generation||dispatch)&&configuration.loseContinuationBegin){
         assert.equal(modelStarts,0,'a lost begin does not invent positive admission');
         assert.deepEqual(native.continuationBeginFaults,{attempts:1,lostCommitted:true});
         const frozen=await withInbox((_inbox,database)=>database.prepare('SELECT id,native_started,readonly_recovery_json FROM assistant_owner_intakes WHERE retry_of_id=?').all(parent.id));
@@ -263,7 +331,7 @@ export const createQuestionSystemDriver=async configuration=>{
         try{await host.coordinator.workOnce();}finally{await host.close();}
         assert.deepEqual(native.continuationBeginFaults,{attempts:1,lostCommitted:true},'restart only reads the exact committed child; no second HTTP begin');
       }
-      if(generation){
+      if(generation||dispatch){
         offset+=300001;host=await openHost();
         try{await host.coordinator.workOnce();}finally{await host.close();}
         assert.deepEqual(native.continuationBeginFaults,{attempts:1,lostCommitted:true},

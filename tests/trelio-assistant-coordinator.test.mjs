@@ -2497,8 +2497,8 @@ test('an unknown next READY restores ordinary dispatch review, never a repeated 
   }finally{await f.coordinator.close();}
 });
 
-for(const mode of ['success','lost_committed','lost_unknown','no_capability','bad_receipt','foreign_ancestor',
-  'attempted','wrong_terminal','unchanged_prerequisite'])test(`generation-only positive continuation correction is bounded and durable (${mode})`,async t=>{
+for(const profile of ['generation','dispatch'])for(const mode of ['success','lost_committed','lost_unknown','no_capability','bad_receipt','foreign_ancestor',
+  'attempted','wrong_terminal','unchanged_prerequisite',...(profile==='dispatch'?['later_uncertain','later_unknown_send','later_native_pending']:[])])test(`${profile} positive continuation correction is bounded and durable (${mode})`,async t=>{
  const f=fixture(t);await f.coordinator.close();
  const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID();
  const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,
@@ -2528,20 +2528,48 @@ for(const mode of ['success','lost_committed','lost_unknown','no_capability','ba
  inbox.startReadonlyIntakeBegin(prior.id);inbox.startOwnerIntake(prior.id);inbox.confirmIntakeModelRead(prior.id);
  const delivered=randomUUID();inbox.startOwnerReply(prior.id,delivered);inbox.confirmOwnerReply(prior.id,{receiptId:delivered,messageId:79});
  inbox.finishOwnerIntake(prior.id,{state:'replied',receiptId:delivered});inbox.settleOwnerIntake(prior.id);
- cancelled=prior;
- if(mode==='attempted')f.database.prepare('UPDATE assistant_owner_intakes SET reply_message_id=NULL WHERE id=?').run(cancelled.id);
+ cancelled=prior;let generationParent,later;
+ if(profile==='dispatch'){
+  f.advance(1);generationParent=prior;
+  cancelled=inbox.retryReadonlyOwnerIntake(prior.id,{receiptId:delivered,terminalTurnId:randomUUID(),
+   previousPrerequisiteKey:'c'.repeat(64),prerequisiteKey:'d'.repeat(64),generationReplyCorrection:true});
+  inbox.startReadonlyIntakeBegin(cancelled.id);inbox.startOwnerIntake(cancelled.id);inbox.confirmIntakeModelRead(cancelled.id);
+  const receiptId=randomUUID();inbox.startOwnerReplyAbandonment(cancelled.id,receiptId);
+  inbox.finishOwnerIntake(cancelled.id,{state:'reply_abandoned',receiptId});inbox.settleOwnerIntake(cancelled.id);
+  f.advance(300001); // Only the existing injected test clock, so the ordinary source poll is due.
+  inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'later',hasMore:false,events:[{id:'message:123:2',revision:'b'.repeat(64),
+   taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+  later=inbox.ownerIntakes().find(row=>row.original_event_id!==original.original_event_id);
+  assert.equal(inbox.prepareOwnerIntake(later.id).thread_id,threadId); // Ordinary permanent-chat reuse.
+  inbox.startOwnerIntake(later.id);inbox.confirmIntakeModelRead(later.id);
+  const positive=randomUUID();inbox.startOwnerReply(later.id,positive);inbox.confirmOwnerReply(later.id,{receiptId:positive,messageId:80});
+  inbox.finishOwnerIntake(later.id,{state:'replied',receiptId:positive});inbox.settleOwnerIntake(later.id);
+  later=inbox.ownerIntake(later.id);
+  if(mode==='later_uncertain')f.database.prepare("UPDATE assistant_owner_intakes SET state='uncertain',settled=0 WHERE id=?").run(later.id);
+  if(mode==='later_unknown_send')f.database.prepare('UPDATE assistant_owner_intakes SET reply_message_id=NULL WHERE id=?').run(later.id);
+ }
+ if(mode==='attempted'){
+  if(profile==='dispatch')f.database.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(randomUUID(),cancelled.id);
+  else f.database.prepare('UPDATE assistant_owner_intakes SET reply_message_id=NULL WHERE id=?').run(cancelled.id);
+ }
  createAssistantInbox({database:f.database,now:f.options.now});
  const snapshots=f.database.prepare('SELECT * FROM assistant_owner_intakes ORDER BY id').all();
  f.advance(300001);
  const common={schemaVersion:1,companyId:f.companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
   taskId:null,readConfirmed:true,ownerPrivateRead:true,execution:f.execution.configuration,
   leaseExpiresAt:new Date(f.options.now()-1).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyReplyCorrectionProtocolVersion:1,
-  readOnlyContinuationProtocolVersion:1,...(mode==='no_capability'?{}:{readOnlyGenerationCorrectionProtocolVersion:1})};
+  readOnlyContinuationProtocolVersion:1,...(mode==='no_capability'&&profile==='generation'?{}:{readOnlyGenerationCorrectionProtocolVersion:1}),
+  ...(mode==='no_capability'&&profile==='dispatch'?{}:{readOnlyReplyDispatchCorrectionProtocolVersion:1})};
  const metadata=JSON.parse(inbox.ownerIntake(cancelled.id).readonly_recovery_json);delete metadata.beginAttempted;
  const outcomes=new Map([[original.id,{...common,id:original.id,state:'replied',receiptId:positive}],
   [oldCancelled.id,{...common,id:oldCancelled.id,state:'cancelled',receiptId:negative,readOnlyRecovery:{...JSON.parse(oldCancelled.readonly_recovery_json),beginAttempted:undefined,replyOnly:true}}],
-  [cancelled.id,{...common,id:cancelled.id,state:'replied',receiptId:delivered,readOnlyRecovery:{...metadata,replyOnly:true}}]]);
+  [cancelled.id,{...common,id:cancelled.id,state:profile==='dispatch'?'reply_abandoned':'replied',receiptId:profile==='dispatch'?inbox.ownerIntake(cancelled.id).outcome_receipt:delivered,readOnlyRecovery:{...metadata,replyOnly:true}}]]);
  delete outcomes.get(oldCancelled.id).readOnlyRecovery.beginAttempted;
+ if(generationParent){
+  const binding=JSON.parse(inbox.ownerIntake(generationParent.id).readonly_recovery_json);delete binding.beginAttempted;
+  outcomes.set(generationParent.id,{...common,id:generationParent.id,state:'replied',receiptId:delivered,readOnlyRecovery:{...binding,replyOnly:true}});
+  outcomes.set(later.id,{...common,id:later.id,eventId:later.original_event_id,state:mode==='later_native_pending'?'reply_pending':'replied',receiptId:later.outcome_receipt});
+ }
  if(mode==='bad_receipt')outcomes.get(cancelled.id).receiptId=randomUUID();
  if(mode==='foreign_ancestor')outcomes.get(original.id).eventId=randomUUID();
  let begins=0,starts=0,sends=0,active=null;
@@ -2555,24 +2583,26 @@ for(const mode of ['success','lost_committed','lost_unknown','no_capability','ba
   begins++;assert.equal(begins,1,'one durable attempt, including across a coordinator restart');
   assert.equal(JSON.parse(inbox.ownerIntake(input.intakeId).readonly_recovery_json).beginAttempted,true);
   assert.equal(input.eventId,original.original_event_id);assert.equal(input.threadId,threadId);
-  assert.equal(input.readOnlyRecovery.generationReplyCorrection,true);assert.equal(input.readOnlyRecovery.technicalReplyCorrection,undefined);
+  assert.equal(input.readOnlyRecovery[profile==='dispatch'?'replyDispatchCorrection':'generationReplyCorrection'],true);assert.equal(input.readOnlyRecovery.technicalReplyCorrection,undefined);
   const value={...common,id:input.intakeId,state:'leased',receiptId:null,readConfirmed:false,ownerPrivateRead:false,
    leaseExpiresAt:new Date(f.options.now()+1800000).toISOString(),readOnlyRecovery:{...input.readOnlyRecovery,replyOnly:true}};
   if(mode!=='lost_unknown')outcomes.set(input.intakeId,value);
   if(mode.startsWith('lost_'))throw Object.assign(new Error('lost begin outcome'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
   return structuredClone(value);
  };
- f.options.native.readPrerequisites=async()=>({fingerprint:(mode==='unchanged_prerequisite'?'c':'d').repeat(64)});
+ f.options.native.readPrerequisites=async()=>({fingerprint:(profile==='dispatch'?(mode==='unchanged_prerequisite'?'d':'e'):(mode==='unchanged_prerequisite'?'c':'d')).repeat(64)});
  f.options.native.provision=async()=>assert.fail('a continuation must reuse the permanent owner chat');
  f.options.native.readDelivery=async(thread,marker,options)=>{
   assert.equal(thread,threadId);
-  if(marker===cancelled.delivery_id){assert.equal(options.generationReplyCorrection.receiptId,delivered);
-   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:'company_context_generation_changed_reply'})};}
+  if(marker===cancelled.delivery_id){
+   if(profile==='dispatch'){assert.equal(options.replyDispatchCorrection,true);assert.equal(options.settledReplySuccessors.length,1);assert.equal(options.settledReplySuccessors[0].receiptId,later.outcome_receipt);}
+   else assert.equal(options.generationReplyCorrection.receiptId,delivered);
+   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:profile==='dispatch'?'owner_reply_dispatch_refused':'company_context_generation_changed_reply'})};}
   return f.deliveries.get(marker)??{state:'uncertain'};
  };
  f.options.native.run=async(input,options)=>{
   starts++;assert.equal(starts,1);assert.equal(input.threadId,threadId);assert.equal(input.intakeContext.eventId,original.original_event_id);
-  assert.equal(options.replyOnlyRecovery,true);assert.equal(options.technicalReplyCorrection,true);
+  assert.equal(options.replyOnlyRecovery,true);assert.equal(options.technicalReplyCorrection===true,profile==='generation');
   options.startInvocation();inbox.confirmIntakeModelRead(active.passId);
   const receiptId=randomUUID();inbox.startOwnerReply(active.passId,receiptId);sends++;
   inbox.confirmOwnerReply(active.passId,{receiptId,messageId:79});
@@ -2587,7 +2617,8 @@ for(const mode of ['success','lost_committed','lost_unknown','no_capability','ba
   assert.equal(begins,['success','lost_committed','lost_unknown'].includes(mode)?1:0);
   assert.equal(starts,['success','lost_committed'].includes(mode)?1:0);assert.equal(sends,starts);
   const immutable=rows=>rows.map(({next_check_at,...row})=>row);
-  assert.deepEqual(immutable(f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id IN(?,?,?) ORDER BY id').all(original.id,oldCancelled.id,cancelled.id)),
+  const oldIds=new Set(snapshots.map(row=>row.id));
+  assert.deepEqual(immutable(f.database.prepare('SELECT * FROM assistant_owner_intakes ORDER BY id').all().filter(row=>oldIds.has(row.id))),
    immutable(snapshots),'only the existing read-only inspection backoff may advance; no receipt, lease, send fence or event is rewritten');
   assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
   assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);

@@ -1764,19 +1764,41 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
  }
 });
 
-for(const encrypted of [false,true])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted})`,async t=>{
+for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])for(const boundaryRace of dispatchUncertain?['none','capacity','abandon']:['none'])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted}, dispatchUncertain=${dispatchUncertain}, race=${boundaryRace})`,async t=>{
  const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
  scope.skillId='telegram-mtproto';
- const sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),receiptId=randomUUID();
+ const sourceId=randomUUID(),accountId=randomUUID(),threadId=randomUUID(),receiptId=randomUUID();
+ let intakeId=randomUUID(),eventId=randomUUID(),deliveryId=randomUUID(),inboxDirectory=null;
+ const ownerIdentityId=randomUUID();
+ // Reproduce the real boundary: the GUI model continues after its independent
+ // dispatcher lost observation. Native admission is fresh, but the SAME durable
+ // inbox is UNCERTAIN before resolve returns. No fixture resets that state.
+ const {openAssistantDatabase}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+ const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+ if(dispatchUncertain){
+  inboxDirectory=path.join(directory,`reply-materializer-${encrypted}-${boundaryRace}`,'digital-assistants','runtime',assistantId,deviceId);
+  const opened=await openAssistantDatabase(inboxDirectory);
+  try{
+   const inbox=createAssistantInbox({database:opened.database});
+   const localSource={origin,assistantId,companyId,provider:'telegram',accountId,bindingId:sourceId};
+   inbox.register(localSource);inbox.observeExternalSourceRevision(localSource,0);
+   inbox.commitPage(localSource,{...inbox.claimPoll(localSource),nextCursor:'reply-boundary',hasMore:false,events:[{
+    id:'message:123456:8',revision:'b'.repeat(64),taskId:null,wake:false,providerWake:true,
+    conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,ownerIdentityId}]});
+   const row=inbox.ownerIntakes()[0];intakeId=row.id;eventId=row.original_event_id;deliveryId=row.delivery_id;
+   inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);inbox.bindOwnerIntakeThread(row.id,threadId);
+   inbox.readyOwnerIntake(row.id);inbox.startOwnerIntake(row.id);inbox.uncertainOwnerIntake(row.id);
+  }finally{await opened.close();}
+ }
  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,ownerTaskIntakeAllowed:true};
- const pass={schemaVersion:1,kind:'source_intake',assistantId,deviceId,companyId,sourceId,sourceRevision:0,passId:intakeId,deliveryId:randomUUID(),eventId,threadId};
+ const pass={schemaVersion:1,kind:'source_intake',assistantId,deviceId,companyId,sourceId,sourceRevision:0,passId:intakeId,deliveryId,eventId,threadId};
  const reference={eventId,id:'message:123456:8',revision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
  const args=['reply-reference','--chat','123456','--message-id','8','--expected-revision',reference.revision,
    '--expected-conversation-key',reference.conversationKey,'--expected-owner-id','123456','--confirm'];
  intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,replyReceiptId:receiptId},admission:{schemaVersion:1,kind:'reply_owner',
-   intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId:randomUUID(),ownerExternalUserId:'123456'}};
- const dir=path.join(directory,`owner-private-reply-${encrypted}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
+   intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId,ownerExternalUserId:'123456'}};
+ const dir=path.join(directory,`owner-private-reply-${encrypted}-${dispatchUncertain}-${boundaryRace}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
  const replyText='Здравствуйте! Уже проверяю';
  const positive={ok:true,schemaVersion:1,protocol:'telegram-owner-reply/v1',sent:true,automaticRetryAllowed:false,
    reference:{id:reference.id,revision:reference.revision,conversationKey:reference.conversationKey},replyToMessageId:8,messageId:91};
@@ -1789,18 +1811,73 @@ for(const encrypted of [false,true])test(`owner-private reply uses signed source
    fs.appendFileSync(${JSON.stringify(marker)},'sent;');process.stdout.write(${JSON.stringify(JSON.stringify(positive))});`);
  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',
    sourceDirectory:dir,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
- const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope}),root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+ const replyHost={...host,...(dispatchUncertain?{configurationDirectory:path.join(directory,`reply-materializer-${encrypted}-${boundaryRace}`)}:{}),readActivePass:async()=>pass};
+ const profile=await createAssistantSourceRuntimeProfile({identity,host:replyHost,store,scope}),root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),
    io:{ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
  await catalogue.change({operation:'create',id:accountId,name:'Synthetic reply',expectedRevision:(await catalogue.list()).revision});
  let attempt=false,confirmed=null,state='reply_pending';
- const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state,receiptId,ownerPrivateRead:true,threadId,eventId,
+ const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({id:intakeId,companyId,sourceId,taskId:null,readConfirmed:true,state,receiptId,ownerPrivateRead:true,threadId,eventId,
    sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
- const input={identity,client,host:{...host,readActivePass:async()=>pass},store:selectedStore,pass,source,reference,receiptId,replyText,
+ const input={identity,client,host:replyHost,store:selectedStore,pass,source,reference,receiptId,replyText,
    beforeInvoke:async()=>{assert.equal(attempt,false,'a persisted attempt never dispatches twice');attempt=true;},
    onConfirmed:async value=>{confirmed=value;}};
  if(encrypted){for(const mode of ['selection','recipient','missing']){setMode(mode);await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(attempt,false,'changed source/recipient refuses before send fence');}setMode('valid');}
- assert.deepEqual(await replyAssistantOwnerIntake(input),{receiptId,messageId:91});assert.deepEqual(confirmed,{receiptId,messageId:91});
+ if(dispatchUncertain){
+  const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const admitted={id:intakeId,companyId,sourceId,sourceRevision:0,eventId,threadId,state:'reply_pending',receiptId,
+   reply:{schemaVersion:1,receiptId,delivery:'not_observed'}};
+  let nativeResolves=0;
+  const sourceClient={...client,confirmOwnerReply:async()=>({...admitted,state:'replied'}),sourceAccounts:async()=>{
+   // A real competing SQLite transaction lands AFTER initial entry admission,
+   // before the signed executor's final beforeInvoke. Only explicit fences,
+   // not local dispatch-state reset, may quiesce this first provider spawn.
+   if(boundaryRace!=='none'){
+    const opened=await openAssistantDatabase(inboxDirectory);
+    try{const inbox=createAssistantInbox({database:opened.database}),row=inbox.ownerIntake(intakeId);
+     if(boundaryRace==='capacity'&&row.model_capacity_json===null)
+      inbox.observeOwnerModelCapacity(intakeId,{turnId:randomUUID(),markerId:row.delivery_id});
+     if(boundaryRace==='abandon'&&row.reply_abandon_receipt_id===null)inbox.startOwnerReplyAbandonment(intakeId,receiptId);
+    }finally{await opened.close();}
+   }
+   return [source];
+  }};
+  const boundHost={...host,configurationDirectory:path.join(directory,`reply-materializer-${encrypted}-${boundaryRace}`),readActivePass:async()=>pass};
+  const proxy=await createProductionAssistantMcp({context:async action=>action(sourceClient,boundHost,selectedStore),
+   withManagedContent:async({args},send)=>send(args),httpRequest:async wire=>{
+    const reply=result=>({sessionId:'reply-boundary',message:{jsonrpc:'2.0',id:wire.payload?.id,result}});
+    if(wire.method==='DELETE'||wire.payload.method==='notifications/initialized')return reply({});
+    if(wire.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+    if(wire.payload.method==='tools/list')return reply({tools:[{name:'resolve_assistant_intake',inputSchema:{type:'object'},description:'Synthetic native reply schema'}]});
+    assert.equal(wire.payload.method,'tools/call');nativeResolves++;return reply({content:[],structuredContent:admitted});
+   }});
+  const resolve=()=>proxy.callTool('resolve_assistant_intake',{decision:'reply_owner',clientRequestId:intakeId,
+   intakePass:{companyId,sourceId,intakeId},replyText});
+  try{if(boundaryRace==='none')assert.equal((await resolve()).structuredContent.state,'replied');
+   else await assert.rejects(resolve(),{code:'ASSISTANT_INBOX_CONFLICT'});}
+  finally{await proxy.close?.();}
+  if(boundaryRace!=='none'){
+   assert.equal(nativeResolves,1);await assert.rejects(fs.stat(marker),{code:'ENOENT'});
+   const opened=await openAssistantDatabase(inboxDirectory);
+   try{const row=createAssistantInbox({database:opened.database}).ownerIntake(intakeId);
+    assert.equal(row.reply_receipt_id,null);assert.equal(row.reply_message_id,null);
+    assert.equal(row.reply_abandon_receipt_id,boundaryRace==='abandon'?receiptId:null);
+    assert.equal(row.model_capacity_json!==null,boundaryRace==='capacity');
+   }finally{await opened.close();}
+   return;
+  }
+  assert.equal(nativeResolves,1,'one native resolve, never a materialization replay');
+  const reopened=await openAssistantDatabase(inboxDirectory);
+  try{
+   const row=createAssistantInbox({database:reopened.database}).ownerIntake(intakeId);
+   assert.equal(row.state,'uncertain','dispatch uncertainty is retained, never reset to STARTED');
+   assert.equal(row.reply_receipt_id,receiptId);assert.equal(row.reply_message_id,91);
+   assert.equal(row.reply_abandon_receipt_id,null);assert.equal(row.settled,0,'native confirmation alone is not coordinator settlement');
+   assert.throws(()=>createAssistantInbox({database:reopened.database}).startOwnerReply(intakeId,receiptId),/CONFLICT/);
+  }finally{await reopened.close();}
+  // The remaining direct invocation below must still refuse its second spawn.
+  attempt=true;
+ }else{assert.deepEqual(await replyAssistantOwnerIntake(input),{receiptId,messageId:91});assert.deepEqual(confirmed,{receiptId,messageId:91});}
  assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  state='replied';await assert.rejects(replyAssistantOwnerIntake(input),/INTAKE_CHANGED/);

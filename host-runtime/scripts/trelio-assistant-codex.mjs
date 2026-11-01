@@ -550,7 +550,68 @@ const generationReplyFailure=async(turn,{deliveryId,intakePass,environment,signa
   }
   return users===1&&contexts>=1&&searches>0&&failures>0&&resolved;
 };
-export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection}={})=>{
+/** A final local reply materializer can refuse after native intent commit,
+ * while the independent GUI turn itself completed. This separate certificate
+ * accepts only successful read-only tools followed by ONE exact closed refusal.
+ * It never interprets the answer, exposes history/body, treats a failed search
+ * as successful work or declares provider absence. Fresh native abandonment,
+ * local no-attempt fences and immutable ancestry remain coordinator duties. */
+const readonlyOwnerReplyHistory=async(turn,{deliveryId,intakePass,environment,signal,verifyShell,settledReply})=>{
+  if(!UUID.test(deliveryId??'')||!intakePass||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
+    ||turn.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)||turn.items.length<3||turn.items.length>512
+    ||turn.items[0]?.type!=='userMessage')return false;
+  const readTools=new Set(['search','fetch','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract']);
+  const code='ASSISTANT_INTAKE_CHANGED';let users=0,contexts=0,calls=0,commands=0,resolved=false;
+  for(const item of turn.items){
+    if(item.type==='userMessage'){
+      if(++users!==1||!Array.isArray(item.content)||item.content.length!==1||item.content[0]?.type!=='text'
+        ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return false;
+    }else if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+    else if(item.type==='commandExecution'){
+      if(++commands>1||contexts||!await publicBootstrapRead(item,environment,verifyShell,signal))return false;
+    }else if(item.type==='mcpToolCall'){
+      const args=item.arguments,result=item.result?.structuredContent;
+      if(resolved||++calls>128||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype
+        ||!args.intakePass||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+        ||Object.keys(intakePass).some(key=>args.intakePass[key]!==intakePass[key]))return false;
+      if(item.tool==='resolve_assistant_intake'){
+        if(!contexts||Object.keys(args).sort().join(',')!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
+          ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'||typeof args.replyText!=='string'
+          ||!args.replyText.trim()||args.replyText.length>4096||args.replyText.includes('\0'))return false;
+        if(settledReply){
+          // A later independent reply is never proof of this older question's
+          // success. It may be skipped only with its OWN fresh native positive
+          // receipt AND durable local provider observation selected by the host.
+          if(item.status!=='completed'||item.error!=null||item.result?.isError===true||result?.schemaVersion!==1
+            ||result.id!==settledReply.intakeId||result.companyId!==settledReply.companyId||result.sourceId!==settledReply.sourceId
+            ||result.sourceRevision!==settledReply.sourceRevision||result.eventId!==settledReply.eventId
+            ||result.threadId!==settledReply.threadId||result.receiptId!==settledReply.receiptId||result.state!=='replied'
+            ||result.taskId!==null||result.readConfirmed!==true||result.ownerPrivateRead!==true)return false;
+        }else if(item.status!=='failed'||item.result?.isError===false||(result!==undefined&&result?.code!==code)
+          ||item.error!=null&&item.error.message!==code
+          ||!(result?.code===code||item.error?.message===code||item.result?.content?.length===1
+            &&item.result.content[0]?.type==='text'&&item.result.content[0].text===code))return false;
+        resolved=true;
+      }else{
+        if(item.status!=='completed'||item.error!=null||item.result?.isError===true||!item.result)return false;
+        if(item.tool==='get_assistant_intake_context'){
+          if(++contexts!==1||Object.keys(args).sort().join(',')!=='intakePass,runtimeSessionProof')return false;
+        }else if(!contexts||!readTools.has(item.tool))return false;
+      }
+    }else return false;
+  }
+  return users===1&&contexts===1&&resolved;
+};
+const dispatchReplyFailure=(turn,options)=>readonlyOwnerReplyHistory(turn,options);
+export const assistantSettledOwnerReply=(turn,witness,options={})=>readonlyOwnerReplyHistory(turn,{
+  environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyShell??verifyAssistantPowerShellReadExecutable,
+  deliveryId:witness.deliveryId,intakePass:{companyId:witness.companyId,sourceId:witness.sourceId,intakeId:witness.intakeId},settledReply:witness});
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection}={})=>{
+  if(replyDispatchCorrection!==undefined){
+    if(replyDispatchCorrection!==true||technicalReplyCorrection!==undefined||readOnlyContinuation!==undefined||generationReplyCorrection!==undefined)return false;
+    return dispatchReplyFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell});
+  }
   if(generationReplyCorrection!==undefined){
     if(technicalReplyCorrection!==undefined||readOnlyContinuation!==undefined)return false;
     return generationReplyFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell,generationReplyCorrection});
@@ -669,15 +730,19 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       // match. Unknown later turns never become a safe older prefix.
       // This host-only option exposes only a closed witness; no raw history or
       // shell command enters the coordinator, journal, HTTP or model context.
-      const proofs=options.settledCreationSuccessors??[];
-      if(!Array.isArray(proofs)||proofs.length>8)return {state:'uncertain'};
+      const creations=options.settledCreationSuccessors??[],replies=options.settledReplySuccessors??[];
+      if(!Array.isArray(creations)||!Array.isArray(replies)||creations.length+replies.length>8
+        ||replies.length&&options.replyDispatchCorrection!==true)return {state:'uncertain'};
+      const proofs=[...creations,...replies];
       const proofFields='companyId,deliveryId,eventId,intakeId,receiptId,sourceId,sourceRevision,taskId,threadId';
-      const proofIds=['deliveryId','eventId','intakeId','receiptId','taskId'];
+      const proofIds=['deliveryId','eventId','intakeId','receiptId'];
       if(proofs.some(proof=>!proof||Object.keys(proof).sort().join(',')!==proofFields
-        ||Object.entries(proof).some(([key,value])=>key==='sourceRevision'?!Number.isSafeInteger(value)||value<0:!UUID.test(value??''))
+        ||Object.entries(proof).some(([key,value])=>key==='sourceRevision'?!Number.isSafeInteger(value)||value<0
+          :key==='taskId'&&replies.includes(proof)?value!==null:!UUID.test(value??''))
         ||proof.companyId!==options.readOnlyPreparation?.companyId||proof.sourceId!==options.readOnlyPreparation?.sourceId
         ||proof.threadId!==threadId||proof.intakeId===options.readOnlyPreparation?.intakeId||proof.deliveryId===deliveryId)
-        ||proofIds.some(key=>new Set(proofs.map(proof=>proof[key])).size!==proofs.length))return {state:'uncertain'};
+        ||proofIds.some(key=>new Set(proofs.map(proof=>proof[key])).size!==proofs.length)
+        ||new Set(creations.map(proof=>proof.taskId)).size!==creations.length)return {state:'uncertain'};
       let cursor=null,selected=null,matches=0;const seen=new Set(),turnIds=new Set(),used=new Set();
       for(let page=0;page<10;page++){
         const response=await request('thread/turns/list',{threadId,limit:20,sortDirection:'desc',itemsView:'full',...(cursor?{cursor}:{})});
@@ -692,15 +757,19 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
               &&input.text.startsWith(assistantDeliveryMarker(proof.deliveryId)+'\n'))));
           if(count){matches+=count;if(matches!==1||successors.length||used.size!==proofs.length)return {state:'uncertain'};selected=turn;}
           else if(!selected){
-            if(successors.length!==1||used.has(successors[0].intakeId)||!assistantSettledOwnerTaskCreation(turn,successors[0]))return {state:'uncertain'};
+            if(successors.length!==1||used.has(successors[0].intakeId))return {state:'uncertain'};
+            const proof=successors[0],valid=proof.taskId===null?await assistantSettledOwnerReply(turn,proof,{
+              environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable})
+              :assistantSettledOwnerTaskCreation(turn,proof);
+            if(!valid)return {state:'uncertain'};
             used.add(successors[0].intakeId);
           }else if(successors.length)return {state:'uncertain'};
         }
         if(response.nextCursor===null){
           if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
             environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable,
-            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection}))return {state:'uncertain'};
-          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
+            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection,replyDispatchCorrection:options.replyDispatchCorrection}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.replyDispatchCorrection?'owner_reply_dispatch_refused':options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
             ?'company_context_rate_limited_reply':options.readOnlyContinuation?'company_context_read_cancelled':'company_context_preparation_timeout'};
         }
         if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};
@@ -1061,6 +1130,6 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
   const replyOnly=options.replyOnlyRecovery===true
     ? options.technicalReplyCorrection===true
       ? 'This is ONE corrective reply to the SAME original private owner question after its prior technical limitation reply was positively delivered. Preserve that history and never repeat the prior send. Read the exact original and fresh current company sources yourself, then answer the original question with the verified useful source link. Prior technical replies are not the answer. Only reply_owner is permitted; no Task, Workspace, Run, dialogue, route, ignore, redirect or direct provider sending. The host retains the original peer and fences this one corrective response.\n'
-      : 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only preparation failure. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
+      : 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only execution failure. This negative recovery does not establish that a prior response was delivered. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
   return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${replyOnly}${instruction}\n${conversationTracking}${scheduled}`;
 };

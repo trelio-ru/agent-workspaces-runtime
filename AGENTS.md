@@ -759,6 +759,10 @@ publication tooling также остаются вне этого публичн
   worker/factory/device-codec/SQLite-reopen path, not only injected coordinator methods.
   Done permits only its existing canonical Run settlement, never new work; original binding/source receipts remain exact.
   Taskless reply schema20: terminal exact native marker + expired intent + atomic absent-send fence only; original receipt settles as reply_abandoned, never delivery/ACK/health/replay. Attempted/unknown sends stay fenced; backend first.
+  A dispatch-uncertain GUI turn may cross its FIRST reply spawn only on fresh
+  unexpired native admission with no capacity/abandon/attempt/result fence.
+  Share entry/final-SQL predicates; never reset dispatch state or replay resolve.
+  Test production MCP -> signed source process -> reopened SQLite and late fences.
   Its fixed host-only device method must also cross the production runtime
   factory's fresh identity/private-context forwarding. Exercise that factory,
   real HTTP codec and SQLite restart together; direct coordinator injection
@@ -1108,7 +1112,7 @@ Public plugin shell для этого клиента не меняется.
   or percentages, purchase credits/reset limits, or replay unknown work.
   See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).
 
-- Read-only owner recovery: unique consumed parent, whole terminal witness and durable begin fence; no Task/dialogue or old lease renewal. Positive technical correction, cancelled/no-send continuation and one-per-original generation correction require distinct native capabilities/ancestry. All share the original bounded chain; never reinterpret a confirmed/unknown send as absent. See [scheduler](docs/assistant-scheduler.md#one-post-fix-reply-only-owner-question-recovery).
+- Read-only owner recovery: unique consumed parent, whole terminal witness and durable begin fence; no Task/dialogue or old lease renewal. Technical, cancelled, generation and final dispatch-refusal corrections require distinct native capabilities/ancestry. Only dispatch may follow generation; no mode follows dispatch. All share the original bound; confirmed/unknown sends never become absent. See [scheduler](docs/assistant-scheduler.md#one-post-fix-reply-only-owner-question-recovery).
   A later independent task creation may be skipped only with SAME settled local
   original, fresh native created/task/receipt and whole exact completed native
   context/resolve chain. Inventory unknown rows before the eight-row bound;

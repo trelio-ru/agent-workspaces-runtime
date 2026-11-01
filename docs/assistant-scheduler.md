@@ -3458,6 +3458,19 @@ original is on a later page. These minimal structural proofs are ephemeral host
 options, not model tools, journal authority, new backend protocol or Task/Run
 permission for the recovered question. Later tasks are never repeated or changed.
 
+Only the separate dispatch-refusal profile may also certify a later independent
+read-only owner reply. Its SAME settled local original must retain a confirmed
+positive provider message/receipt, no abandonment/recovery/current-capacity
+fence and a different event. Fresh native REPLIED/private/read-confirmed/task-null
+with the exact same receipt/source/revision/account/owner/chat is mandatory.
+Full terminal history permits one context, successful read-only company tools
+and one successful reply_owner with that native structured receipt. Its answer
+is not inspected as authority or repeated. The combined creation/reply successor
+bound remains eight, with unique markers/turns/proofs and complete pages;
+unsettled, unknown-send, failed, impure or missing successors refuse. Other
+recovery profiles retain their creation-only exception. These transient
+structural proofs never become model tools, HTTP payloads or journal authority.
+
 Only a changed trusted native/runtime prerequisite and native protocol version1
 permit a new child. Schema23 adds nullable structural witness/prerequisite cells
 without rewriting an original. The old terminal receipt/start bits/model-read and
@@ -3532,9 +3545,36 @@ unknown/attempted replies or impure history refuse. Changed queries are safe onl
 when they themselves return that exact hard refusal without any result/effect.
 Fresh trusted prerequisite and full native/local same-event/device/account/owner/
 conversation/thread/receipt ancestry remain mandatory. A generation certificate
-is consumed once for the WHOLE original; no later recovery mode may follow it,
-including after failure/cancellation. PostgreSQL0318 enforces this independently.
+is consumed once for the WHOLE original; no older recovery mode may follow it,
+including after failure/cancellation. Only the independently admitted final
+dispatch-refusal certificate below may follow an expired negative generation
+child. PostgreSQL0318/0319 enforce the separate cases independently.
 The production coordinator alone appends the reply-only child under the SAME
 durable begin fence; lost begin performs exact read-back, never another POST.
 The normal signed original-peer response is the only send; preserve all older
 technical replies, deadlines, ACK/health and Task/Workspace/Run boundaries.
+
+A completed read-only turn whose FIRST final reply was refused locally after
+native intent commit has a separate host-only `replyDispatchCorrection:true`
+certificate: native `readOnlyReplyDispatchCorrectionProtocolVersion:1`, journal26
+and backend0319 must all be present. Whole bounded native history permits one
+context, successful read-only company tools and exactly one failed final
+`resolve_assistant_intake(reply_owner)` with exact `ASSISTANT_INTAKE_CHANGED`.
+Its text is neither parsed as authority nor retained/exported; failed searches,
+other effects, mixed modes or incomplete/intervening history refuse.
+
+The parent must already be immutable native reply_abandoned under its ORIGINAL
+expired lease, locally complete/settled with matching negative receipt, no
+provider attempt/message and no live capacity episode. Consumed older capacity
+metadata remains pacing history only. Use the generic reply-only failure prompt;
+this negative receipt never earns a claim that a prior reply was delivered.
+Every local and freshly read native
+ancestor retains SAME source/revision/event/device/account/owner/chat and exact
+receipts. This one separate capability may follow earlier generation ancestry;
+it is consumed once for the WHOLE original and forbids ALL later recovery modes.
+The shared20-child bound, changed trusted prerequisite, durable begin-before-HTTP
+and GET-only lost-outcome recovery remain unchanged. Only the ordinary new
+reply-only child may reread current source/comments and perform its FIRST signed
+original-peer send. Backend expansion/deploy precedes runtime activation; an old
+backend fails closed. No model tool, old lease renewal, Task/Run, ACK or health
+shortcut is introduced.

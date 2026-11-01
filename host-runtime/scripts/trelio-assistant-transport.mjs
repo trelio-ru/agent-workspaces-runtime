@@ -2505,7 +2505,8 @@ const intakeProjection=(value,expected)=>{
     ||value.readOnlyRecoveryProtocolVersion!==undefined&&value.readOnlyRecoveryProtocolVersion!==1
     ||value.readOnlyReplyCorrectionProtocolVersion!==undefined&&value.readOnlyReplyCorrectionProtocolVersion!==1
     ||value.readOnlyContinuationProtocolVersion!==undefined&&value.readOnlyContinuationProtocolVersion!==1
-    ||value.readOnlyGenerationCorrectionProtocolVersion!==undefined&&value.readOnlyGenerationCorrectionProtocolVersion!==1)
+    ||value.readOnlyGenerationCorrectionProtocolVersion!==undefined&&value.readOnlyGenerationCorrectionProtocolVersion!==1
+    ||value.readOnlyReplyDispatchCorrectionProtocolVersion!==undefined&&value.readOnlyReplyDispatchCorrectionProtocolVersion!==1)
     fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.readOnlyRecovery&&(!recovery||Object.keys(expected.readOnlyRecovery).some(key=>recovery[key]!==expected.readOnlyRecovery[key])))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {schemaVersion:1,id:id(value.id),companyId:id(value.companyId),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
@@ -2516,6 +2517,7 @@ const intakeProjection=(value,expected)=>{
     ...(value.readOnlyReplyCorrectionProtocolVersion===1?{readOnlyReplyCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyContinuationProtocolVersion===1?{readOnlyContinuationProtocolVersion:1}:{}),
     ...(value.readOnlyGenerationCorrectionProtocolVersion===1?{readOnlyGenerationCorrectionProtocolVersion:1}:{}),
+    ...(value.readOnlyReplyDispatchCorrectionProtocolVersion===1?{readOnlyReplyDispatchCorrectionProtocolVersion:1}:{}),
     ...(recovery?{readOnlyRecovery:recovery}:{}),
     readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),

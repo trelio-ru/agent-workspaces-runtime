@@ -70,15 +70,41 @@ export const assistantReadOnlyRecoveryMetadata=(value,{local=false,response=fals
   const fields=['parentIntakeId','receiptId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey',
     ...(value?.technicalReplyCorrection===true?['technicalReplyCorrection']:[]),
     ...(value?.readOnlyContinuation===true?['readOnlyContinuation']:[]),
-    ...(value?.generationReplyCorrection===true?['generationReplyCorrection']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
+    ...(value?.generationReplyCorrection===true?['generationReplyCorrection']:[]),
+    ...(value?.replyDispatchCorrection===true?['replyDispatchCorrection']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
   if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==fields.sort().join(',')
     ||['parentIntakeId','receiptId','terminalTurnId'].some(key=>!UUID.test(value[key]??''))
     ||['previousPrerequisiteKey','prerequisiteKey'].some(key=>typeof value[key]!=='string'||!/^[0-9a-f]{64}$/u.test(value[key]))
-    ||[value.technicalReplyCorrection,value.readOnlyContinuation,value.generationReplyCorrection].filter(value=>value===true).length>1
+    ||[value.technicalReplyCorrection,value.readOnlyContinuation,value.generationReplyCorrection,value.replyDispatchCorrection].filter(value=>value===true).length>1
     ||value.previousPrerequisiteKey===value.prerequisiteKey||local&&typeof value.beginAttempted!=='boolean'
     ||response&&value.replyOnly!==true)return null;
   return Object.freeze({...Object.fromEntries(fields.map(key=>[key,['parentIntakeId','receiptId','terminalTurnId'].includes(key)?value[key].toLowerCase():value[key]]))});
 };
+/** Unread capacity recovery carries its CONSUMED pacing episode into the
+ * fresh child so restart cannot reset backoff. That older marker is history,
+ * not a cancellation fence on the newly admitted delivery. A waiting episode,
+ * the current marker, malformed data or a row without a real predecessor stays
+ * quiescent. Fresh native admission/lease/owner checks remain independent. */
+export const assistantOwnerReplyCapacityOpen=row=>{
+  if(row?.model_capacity_json===null)return true;
+  try{const episode=capacityState(JSON.parse(row.model_capacity_json));
+    return UUID.test(row.retry_of_id??'')&&row.retry_of_id!==row.id&&episode.waiting===false&&episode.markerId!==row.delivery_id;
+  }catch{return false;}
+};
+/** Dispatch observation and a provider attempt are different boundaries. A GUI
+ * turn may keep running after its coordinator lost the independent reader. Its
+ * freshly native-admitted reply may cross the FIRST provider boundary from
+ * UNCERTAIN, but never a capacity-cancel, abandonment, result or attempt fence.
+ * The caller must still prove the exact live native intent/pass/source; this
+ * local predicate alone grants no send or permission to replay native resolve.
+ * Reuse it at admission AND the final SQLite transaction so a racing quiescent
+ * fence cannot slip between the asynchronous provider checks and child spawn. */
+export const assistantOwnerReplyAttemptReady=row=>row?.kind==='owner_command'
+  &&['started','uncertain'].includes(row.state)&&row.native_started===1&&typeof row.thread_id==='string'
+  &&row.source_state==='active'&&row.source_revision===row.configuration_revision
+  &&assistantOwnerReplyCapacityOpen(row)&&row.outcome_task_id===null&&row.outcome_receipt===null&&row.outcome_state===null
+  &&row.reply_receipt_id===null&&row.reply_message_id===null&&row.reply_abandon_receipt_id===null;
+
 const ownerProvisionCandidate=row=>row.kind==='owner_command'&&row.state==='provisioning'&&row.native_started===1
   &&UUID.test(row.thread_id??'')&&row.settled===0&&row.source_state==='active'&&row.source_revision===row.configuration_revision
   &&row.reply_receipt_id===null&&row.reply_message_id===null&&row.reply_abandon_receipt_id===null
@@ -170,7 +196,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -260,7 +286,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -495,10 +521,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // provider fence, model-read/ACK basis, lease or negative receipt.
       if(!readonlyColumns.includes(name))db.exec(`ALTER TABLE assistant_owner_intakes ADD COLUMN ${name} TEXT`);
     }
-    // Schema25 adds a strict generation-correction discriminator inside
+    // Schema26 adds a strict final-dispatch-correction discriminator inside
     // the existing recovery JSON. Historical rows/fences are never backfilled.
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=25');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (25)');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=26');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (26)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1013,6 +1039,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           AND n.source_revision=i.source_revision AND n.original_event_id=i.original_event_id
           AND json_extract(n.readonly_recovery_json,'$.generationReplyCorrection')=1)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    dispatchReplyIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='reply_abandoned'
+        AND json_extract(s.scope_json,'$.provider')='telegram'
+        AND i.native_started=1 AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL
+        AND i.reply_abandon_receipt_id=i.outcome_receipt AND i.outcome_task_id IS NULL
+        AND i.source_revision=s.configuration_revision AND s.state='active' AND i.retry_ordinal<20 AND i.next_check_at<=?
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.source_key=i.source_key
+          AND n.source_revision=i.source_revision AND n.original_event_id=i.original_event_id
+          AND json_extract(n.readonly_recovery_json,'$.replyDispatchCorrection')=1)
+      ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
     cancelledReadonlyIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
       JOIN assistant_inbox_sources s ON s.source_key=i.source_key
       WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='cancelled'
@@ -1053,7 +1091,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // Consume this independent certificate once for the entire original,
       // including after failure/restart. SQL repeats this native boundary; a
       // positive send is never recast as absent and no old lease is renewed.
-      if(metadata.generationReplyCorrection===true){
+      if(metadata.replyDispatchCorrection===true){
+        // A confirmed provider attempt can NEVER use this edge. Only ordinary
+        // immutable negative settlement plus a separately certified terminal
+        // materializer refusal may admit ONE new read-only child. The old row,
+        // expired lease, abandoned receipt and source-read history stay intact.
+        if(old.outcome_state!=='reply_abandoned'||old.reply_receipt_id!==null||old.reply_message_id!==null
+          ||old.reply_abandon_receipt_id!==metadata.receiptId||!assistantOwnerReplyCapacityOpen(old)
+          ||prior&&(!prior.beginAttempted||prior.parentIntakeId!==old.retry_of_id))fail('ASSISTANT_INBOX_CONFLICT');
+      }else if(metadata.generationReplyCorrection===true){
         if(old.outcome_state!=='replied'||old.reply_receipt_id!==metadata.receiptId||!Number.isSafeInteger(old.reply_message_id)
           ||old.reply_message_id<1||old.reply_message_id>2147483647||old.reply_abandon_receipt_id!==null
           ||prior&&(!prior.beginAttempted||prior.parentIntakeId!==old.retry_of_id))fail('ASSISTANT_INBOX_CONFLICT');
@@ -1077,7 +1123,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(!existing||JSON.stringify({...existing,beginAttempted:false})!==JSON.stringify(metadata))fail('ASSISTANT_INBOX_CONFLICT');
         return this.ownerIntake(previous.id);}
       if(get(`SELECT 1 FROM assistant_owner_intakes WHERE source_key=? AND source_revision=? AND original_event_id=?
-        AND json_extract(readonly_recovery_json,'$.generationReplyCorrection')=1`,old.source_key,old.source_revision,old.original_event_id))fail('ASSISTANT_INBOX_CONFLICT');
+        AND (json_extract(readonly_recovery_json,'$.replyDispatchCorrection')=1
+          OR json_extract(readonly_recovery_json,'$.generationReplyCorrection')=1 AND ?=0)`,
+          old.source_key,old.source_revision,old.original_event_id,metadata.replyDispatchCorrection===true?1:0))fail('ASSISTANT_INBOX_CONFLICT');
       if(get("SELECT 1 FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND state!='complete'",old.account_key,old.native_event_id))fail('ASSISTANT_INBOX_CONFLICT');
       const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
       assertIntakeRoom(originals.length);const next=randomUUID();
@@ -1170,8 +1218,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ||row.reply_abandon_receipt_id!==null||row.outcome_receipt!==null||row.outcome_task_id!==null)fail('ASSISTANT_INBOX_CONFLICT');
       const previous=row.model_capacity_json?capacityState(JSON.parse(row.model_capacity_json)):null;
       const next=nextCapacityState(previous,turnId,markerId,time());
-      // UNCERTAIN also excludes a late provider spawn while native cancellation
-      // is prepared. Native read-confirmed/task/receipt checks are independent.
+      // The capacity episode is an explicit quiescence fence, independently
+      // of dispatch uncertainty. A late native-admitted reply may never spawn
+      // after this episode is persisted or after its cancellation POST.
       run("UPDATE assistant_owner_intakes SET state='uncertain',model_capacity_json=? WHERE id=?",JSON.stringify(next),row.id);
       return Object.freeze(next);
     });},
@@ -1192,8 +1241,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ||row.reply_receipt_id!==null||row.reply_message_id!==null||row.reply_abandon_receipt_id!==null)
         fail('ASSISTANT_INBOX_CONFLICT');
       // Serialize against startOwnerReply in this SAME database. The final
-      // provider spawn requires STARTED; this quiescent receipt never enables
-      // that boundary again, including after restart or a lost HTTP response.
+      // provider spawn requires an absent abandonment receipt; this explicit
+      // quiescence fence survives restart or a lost HTTP response. Dispatch
+      // UNCERTAIN alone is not evidence that a provider was ever attempted.
       run("UPDATE assistant_owner_intakes SET state='uncertain',reply_abandon_receipt_id=? WHERE id=?",receiptId,row.id);
     });},
     /** Candidates come only from signed monitor refs in this exact private
@@ -1209,9 +1259,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     },
     startOwnerReply(id,receiptId){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
-      if(row.kind!=='owner_command'||row.state!=='started'||row.source_state!=='active'
-        ||row.source_revision!==row.configuration_revision||row.reply_receipt_id!==null||row.reply_abandon_receipt_id!==null)
-        fail('ASSISTANT_INBOX_CONFLICT');
+      if(!assistantOwnerReplyAttemptReady(row))fail('ASSISTANT_INBOX_CONFLICT');
       // The SAME process engine calls this once at its final spawn boundary.
       // Persist before any bytes reach Telegram. There is no retry/clear edge.
       run('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?',receiptId,row.id);
