@@ -1010,3 +1010,15 @@ coverage composes that factory, the real device HTTP codec and reopened SQLite;
 direct coordinator injection alone would miss an absent forwarding method.
 Terminal success/failure, running/unexpired/attempted refusals, changed identity
 and lost negative responses retain their original guards and no-replay behavior.
+
+
+## Schema v25: one generation-only original reply correction
+
+Schema25 retains every existing row/receipt/lease and adds only the strict
+`generationReplyCorrection:true` alternative inside SAME immutable recovery JSON.
+The three mode flags are mutually exclusive. Only a fully settled positive native
+reply with matching durable provider receipt/message and whole-terminal generation
+failure proof may acquire this separate certificate. A same-original/source-revision
+query excludes every history that already contains it, even after cancellation or
+restart; exact same known append remains idempotent. No flags/backfill reset an old
+provider fence, begin attempt, shared twenty-child bound, ACK or health latch.

@@ -1024,3 +1024,49 @@ test('cancelled reply-only continuation certifies only the whole original no-sen
  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,technicalReplyCorrection:{}}),false);
  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,readOnlyContinuation:false}),false);
 });
+
+test('generation correction certifies the whole positive technical turn, one refresh and no business effect',async()=>{
+ const f=readonlyPreparationFixture(),receiptId=randomUUID(),eventId=randomUUID(),sourceRevision=2;
+ const witness={receiptId,eventId,sourceRevision,threadId:f.threadId};
+ const options={...f,generationReplyCorrection:witness};
+ const refusal=f.turn.items.at(-2),resolve=f.turn.items.at(-1);
+ refusal.result.structuredContent={code:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'};
+ resolve.status='completed';resolve.result.structuredContent={schemaVersion:1,...f.intakePass,id:f.intakePass.intakeId,
+  sourceRevision,eventId,threadId:f.threadId,state:'replied',taskId:null,receiptId,readConfirmed:true,ownerPrivateRead:true};
+ const refresh=structuredClone(f.turn.items.find(item=>item.tool==='get_assistant_intake_context'));
+ const second=structuredClone(refusal);second.arguments.queries=['independent closed failure'];
+ f.turn.items.splice(-1,0,refresh,second);
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,options),true);
+ const read=turns=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{...options,readOnlyPreparation:f.intakePass,
+  executable:process.execPath,spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+   ?{thread:{id:f.threadId,cwd:process.cwd()}}:{data:turns,nextCursor:null}}))});
+ assert.equal((await read([f.turn])).readOnlyFailure,'company_context_generation_changed_reply');
+ for(const shape of ['native_error','content']){
+  const turn=structuredClone(f.turn);
+  for(const item of turn.items.filter(item=>item.tool==='search'&&item.status==='failed')){
+   item.result={isError:true};
+   if(shape==='native_error')item.error={message:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'};
+   else item.result.content=[{type:'text',text:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'}];
+  }
+  assert.equal(await assistantReadOnlyPreparationFailure(turn,options),true,shape);
+ }
+ for(const alter of [t=>{t.status='failed';},t=>{t.error={codexErrorInfo:'serverOverloaded'};},
+  t=>{t.items.at(-1).result.structuredContent.state='reply_pending';},
+  t=>{t.items.at(-1).result.structuredContent.receiptId=randomUUID();},
+  t=>{t.items.at(-1).result.structuredContent.taskId=randomUUID();},
+  t=>{t.items.at(-2).result.structuredContent.code='ASSISTANT_TRANSPORT_RATE_LIMITED';},
+  t=>{t.items.at(-2).result.isError=false;},t=>{t.items.at(-2).error={message:'OTHER'};},
+  t=>{t.items.at(-2).status='completed';},t=>{t.items.splice(-1,0,refresh);},
+  t=>{t.items.splice(2,0,refresh);},t=>{t.items.splice(-1,0,{...second,tool:'fetch'});},
+  t=>{t.items.at(-1).arguments.decision='create_task';},
+  t=>{t.items.find(item=>item.tool==='search'&&item.status==='completed').result.structuredContent.state='ready';},
+  t=>{t.items.at(-2).result.structuredContent={code:'explanation ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'};},
+  t=>{t.items.push(structuredClone(resolve));}]){
+  const turn=structuredClone(f.turn);alter(turn);
+  assert.equal(await assistantReadOnlyPreparationFailure(turn,options),false,String(alter));
+ }
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,readOnlyContinuation:true}),false);
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...options,technicalReplyCorrection:witness}),false);
+ assert.deepEqual(await read([f.turn,f.turn]),{state:'uncertain'});
+ assert.deepEqual(await read([{id:randomUUID(),status:'completed',items:[]},f.turn]),{state:'uncertain'});
+});

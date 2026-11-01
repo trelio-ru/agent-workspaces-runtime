@@ -2496,3 +2496,100 @@ test('an unknown next READY restores ordinary dispatch review, never a repeated 
     f.advance(86400_000);assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(attempts,2);
   }finally{await f.coordinator.close();}
 });
+
+for(const mode of ['success','lost_committed','lost_unknown','no_capability','bad_receipt','foreign_ancestor',
+  'attempted','wrong_terminal','unchanged_prerequisite'])test(`generation-only positive continuation correction is bounded and durable (${mode})`,async t=>{
+ const f=fixture(t);await f.coordinator.close();
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID();
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,
+  projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ f.options.client.tasks=async()=>({bindings:[],nextCursor:null});f.options.client.sourceAccounts=async()=>[source];
+ f.options.client.sourceRoutes=async()=>[];
+ f.options.client.ownerIdentities=async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]});
+ f.options.workspaceForIntake=async()=>process.cwd();
+ const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+ const scope={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
+ inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+ inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,
+  providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+ const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);
+ inbox.bindOwnerIntakeThread(original.id,threadId);inbox.readyOwnerIntake(original.id);
+ inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);inbox.confirmIntakeModelRead(original.id);
+ const positive=randomUUID();inbox.startOwnerReply(original.id,positive);inbox.confirmOwnerReply(original.id,{receiptId:positive,messageId:77});
+ inbox.finishOwnerIntake(original.id,{state:'replied',receiptId:positive});inbox.settleOwnerIntake(original.id);f.advance(1);
+ let cancelled=inbox.retryReadonlyOwnerIntake(original.id,{receiptId:positive,terminalTurnId:randomUUID(),
+  previousPrerequisiteKey:'a'.repeat(64),prerequisiteKey:'b'.repeat(64),technicalReplyCorrection:true});
+ inbox.startReadonlyIntakeBegin(cancelled.id);inbox.startOwnerIntake(cancelled.id);inbox.confirmIntakeModelRead(cancelled.id);
+
+ const negative=randomUUID();inbox.finishOwnerIntake(cancelled.id,{state:'cancelled',receiptId:negative});inbox.settleOwnerIntake(cancelled.id);
+ const oldCancelled=cancelled;f.advance(1);
+ const prior=inbox.retryReadonlyOwnerIntake(oldCancelled.id,{receiptId:negative,terminalTurnId:randomUUID(),
+  previousPrerequisiteKey:'b'.repeat(64),prerequisiteKey:'c'.repeat(64),readOnlyContinuation:true});
+ inbox.startReadonlyIntakeBegin(prior.id);inbox.startOwnerIntake(prior.id);inbox.confirmIntakeModelRead(prior.id);
+ const delivered=randomUUID();inbox.startOwnerReply(prior.id,delivered);inbox.confirmOwnerReply(prior.id,{receiptId:delivered,messageId:79});
+ inbox.finishOwnerIntake(prior.id,{state:'replied',receiptId:delivered});inbox.settleOwnerIntake(prior.id);
+ cancelled=prior;
+ if(mode==='attempted')f.database.prepare('UPDATE assistant_owner_intakes SET reply_message_id=NULL WHERE id=?').run(cancelled.id);
+ createAssistantInbox({database:f.database,now:f.options.now});
+ const snapshots=f.database.prepare('SELECT * FROM assistant_owner_intakes ORDER BY id').all();
+ f.advance(300001);
+ const common={schemaVersion:1,companyId:f.companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
+  taskId:null,readConfirmed:true,ownerPrivateRead:true,execution:f.execution.configuration,
+  leaseExpiresAt:new Date(f.options.now()-1).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyReplyCorrectionProtocolVersion:1,
+  readOnlyContinuationProtocolVersion:1,...(mode==='no_capability'?{}:{readOnlyGenerationCorrectionProtocolVersion:1})};
+ const metadata=JSON.parse(inbox.ownerIntake(cancelled.id).readonly_recovery_json);delete metadata.beginAttempted;
+ const outcomes=new Map([[original.id,{...common,id:original.id,state:'replied',receiptId:positive}],
+  [oldCancelled.id,{...common,id:oldCancelled.id,state:'cancelled',receiptId:negative,readOnlyRecovery:{...JSON.parse(oldCancelled.readonly_recovery_json),beginAttempted:undefined,replyOnly:true}}],
+  [cancelled.id,{...common,id:cancelled.id,state:'replied',receiptId:delivered,readOnlyRecovery:{...metadata,replyOnly:true}}]]);
+ delete outcomes.get(oldCancelled.id).readOnlyRecovery.beginAttempted;
+ if(mode==='bad_receipt')outcomes.get(cancelled.id).receiptId=randomUUID();
+ if(mode==='foreign_ancestor')outcomes.get(original.id).eventId=randomUUID();
+ let begins=0,starts=0,sends=0,active=null;
+ f.options.passHost={readActivePass:async()=>active,activatePass:async value=>{assert.equal(active,null);active=value;},
+  releasePass:async value=>{assert.equal(value.id,active.passId);active=null;}};
+ f.options.client.readSourceIntake=async input=>{
+  const value=outcomes.get(input.intakeId);if(!value)throw Object.assign(new Error('unknown admission'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  return structuredClone(value);
+ };
+ f.options.client.beginSourceIntake=async input=>{
+  begins++;assert.equal(begins,1,'one durable attempt, including across a coordinator restart');
+  assert.equal(JSON.parse(inbox.ownerIntake(input.intakeId).readonly_recovery_json).beginAttempted,true);
+  assert.equal(input.eventId,original.original_event_id);assert.equal(input.threadId,threadId);
+  assert.equal(input.readOnlyRecovery.generationReplyCorrection,true);assert.equal(input.readOnlyRecovery.technicalReplyCorrection,undefined);
+  const value={...common,id:input.intakeId,state:'leased',receiptId:null,readConfirmed:false,ownerPrivateRead:false,
+   leaseExpiresAt:new Date(f.options.now()+1800000).toISOString(),readOnlyRecovery:{...input.readOnlyRecovery,replyOnly:true}};
+  if(mode!=='lost_unknown')outcomes.set(input.intakeId,value);
+  if(mode.startsWith('lost_'))throw Object.assign(new Error('lost begin outcome'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  return structuredClone(value);
+ };
+ f.options.native.readPrerequisites=async()=>({fingerprint:(mode==='unchanged_prerequisite'?'c':'d').repeat(64)});
+ f.options.native.provision=async()=>assert.fail('a continuation must reuse the permanent owner chat');
+ f.options.native.readDelivery=async(thread,marker,options)=>{
+  assert.equal(thread,threadId);
+  if(marker===cancelled.delivery_id){assert.equal(options.generationReplyCorrection.receiptId,delivered);
+   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:'company_context_generation_changed_reply'})};}
+  return f.deliveries.get(marker)??{state:'uncertain'};
+ };
+ f.options.native.run=async(input,options)=>{
+  starts++;assert.equal(starts,1);assert.equal(input.threadId,threadId);assert.equal(input.intakeContext.eventId,original.original_event_id);
+  assert.equal(options.replyOnlyRecovery,true);assert.equal(options.technicalReplyCorrection,true);
+  options.startInvocation();inbox.confirmIntakeModelRead(active.passId);
+  const receiptId=randomUUID();inbox.startOwnerReply(active.passId,receiptId);sends++;
+  inbox.confirmOwnerReply(active.passId,{receiptId,messageId:79});
+  Object.assign(outcomes.get(active.passId),{state:'replied',receiptId,readConfirmed:true,ownerPrivateRead:true});
+  const result={state:'completed',turnId:randomUUID()};f.deliveries.set(input.deliveryId,result);return result;
+ };
+ let coordinator=createAssistantCoordinator(f.options);
+ try{
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/UNAVAILABLE|UNCERTAIN/u));
+  await coordinator.close();f.advance(300001);coordinator=createAssistantCoordinator(f.options);
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/UNAVAILABLE|UNCERTAIN/u));
+  assert.equal(begins,['success','lost_committed','lost_unknown'].includes(mode)?1:0);
+  assert.equal(starts,['success','lost_committed'].includes(mode)?1:0);assert.equal(sends,starts);
+  const immutable=rows=>rows.map(({next_check_at,...row})=>row);
+  assert.deepEqual(immutable(f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id IN(?,?,?) ORDER BY id').all(original.id,oldCancelled.id,cancelled.id)),
+   immutable(snapshots),'only the existing read-only inspection backoff may advance; no receipt, lease, send fence or event is rewritten');
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+  assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+ }finally{await coordinator.close();}
+});

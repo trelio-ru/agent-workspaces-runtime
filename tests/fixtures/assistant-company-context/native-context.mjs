@@ -46,7 +46,7 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
     const target=new URL(selected.pathname+selected.search,server);
     const response=await originalFetch(target,{...options,redirect:'error',headers:new Headers(options.headers)});
     if(configuration.loseContinuationBegin&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/begin'
-      &&options.method==='POST'&&typeof options.body==='string'&&JSON.parse(options.body).readOnlyRecovery?.readOnlyContinuation===true){
+      &&options.method==='POST'&&typeof options.body==='string'&&(JSON.parse(options.body).readOnlyRecovery?.readOnlyContinuation===true||JSON.parse(options.body).readOnlyRecovery?.generationReplyCorrection===true)){
       continuationBeginFaults.attempts++;
       if(response.ok&&!continuationBeginFaults.lostCommitted){
         // Receive the REAL server's committed native result, then lose only

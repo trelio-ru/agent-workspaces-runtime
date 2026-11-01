@@ -481,7 +481,80 @@ const publicBootstrapRead=async(item,environment,verifyShell,signal)=>{
   if(normalized(match[2])!==instruction||normalized(item.commandActions[0].path)!==instruction)return false;
   return shells.includes(normalized(match[1]))||await verifyShell(match[1],{environment,signal})===true;
 };
-export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation}={})=>{
+/** One independent corrective generation reply requires a COMPLETE native
+ * terminal certificate, never a model explanation of an error. Only preparing
+ * searches, the exact closed generation refusal, at most one context refresh
+ * AFTER that refusal, and the one positively delivered native reply are safe.
+ * A READY result, exact source, business tool, unknown error or provider action
+ * makes the whole turn ineligible. This does not reclassify the old send. */
+const generationReplyFailure=async(turn,{deliveryId,intakePass,environment,signal,verifyShell,generationReplyCorrection:witness})=>{
+  if(!witness||Object.getPrototypeOf(witness)!==Object.prototype
+    ||Object.keys(witness).sort().join(',')!=='eventId,receiptId,sourceRevision,threadId'
+    ||['eventId','receiptId','threadId'].some(key=>!UUID.test(witness[key]??''))
+    ||!Number.isSafeInteger(witness.sourceRevision)||witness.sourceRevision<0
+    ||!UUID.test(deliveryId??'')||!intakePass||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
+    ||turn.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)||turn.items.length<4||turn.items.length>512
+    ||turn.items[0]?.type!=='userMessage')return false;
+  const code='ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED';
+  let users=0,contexts=0,searches=0,failures=0,resolved=false,commands=0,business=null;
+  for(const item of turn.items){
+    if(item.type==='userMessage'){
+      if(++users!==1||!Array.isArray(item.content)||item.content.length!==1||item.content[0]?.type!=='text'
+        ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return false;
+    }else if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+    else if(item.type==='commandExecution'){
+      if(++commands>1||contexts||!await publicBootstrapRead(item,environment,verifyShell,signal))return false;
+    }else if(item.type==='mcpToolCall'){
+      const args=item.arguments,result=item.result?.structuredContent;
+      if(resolved||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype
+        ||!args.intakePass||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+        ||Object.keys(intakePass).some(key=>args.intakePass[key]!==intakePass[key]))return false;
+      const keys=Object.keys(args).sort().join(',');
+      if(item.tool==='get_assistant_intake_context'){
+        if(++contexts>2||contexts===2&&!failures||keys!=='intakePass,runtimeSessionProof'
+          ||item.status!=='completed'||item.error!=null||item.result?.isError===true||!item.result)return false;
+        business=null;
+      }else if(item.tool==='search'){
+        if(!contexts||++searches>100||keys!=='companySlugs,intakePass,queries,runtimeSessionProof'
+          ||!Array.isArray(args.companySlugs)||args.companySlugs.length!==1
+          ||!Array.isArray(args.queries)||!args.queries.length||args.queries.length>5
+          ||args.queries.some(query=>typeof query!=='string'||!query.trim()))return false;
+        // Native App Server versions project the SAME failed MCP code in one
+        // of these documented result/error fields. Only literal equality is
+        // accepted; no substring, prose classifier or generic status shortcut.
+        const closed=item.status==='failed'&&item.result?.isError!==false
+          &&(result===undefined||result?.code===code)&&(item.error==null||item.error.message===code)
+          &&(result?.code===code||item.error?.message===code
+          ||item.result?.content?.length===1&&item.result.content[0]?.type==='text'&&item.result.content[0].text===code);
+        if(closed){failures++;continue;}
+        const selected=JSON.stringify({companySlugs:args.companySlugs,queries:args.queries});
+        if(failures||business!==null&&business!==selected||item.status!=='completed'||item.error!=null||item.result?.isError===true
+          ||result?.schemaVersion!==1||result.state!=='preparing'||result.readOnly!==true||result.nextCall?.tool!=='search'
+          ||!result.nextCall.arguments||Object.keys(result.nextCall.arguments).sort().join(',')!=='companySlugs,queries'
+          ||JSON.stringify(result.nextCall.arguments.companySlugs)!==JSON.stringify(args.companySlugs)
+          ||JSON.stringify(result.nextCall.arguments.queries)!==JSON.stringify(args.queries))return false;
+        business=selected;
+      }else if(item.tool==='resolve_assistant_intake'){
+        if(!failures||keys!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
+          ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'||typeof args.replyText!=='string'
+          ||!args.replyText.trim()||args.replyText.length>4096||args.replyText.includes('\0')
+          ||item.status!=='completed'||item.result?.isError===true||item.error!=null
+          ||result?.schemaVersion!==1||result.id!==intakePass.intakeId||result.companyId!==intakePass.companyId
+          ||result.sourceId!==intakePass.sourceId||result.sourceRevision!==witness.sourceRevision
+          ||result.eventId!==witness.eventId||result.threadId!==witness.threadId||result.receiptId!==witness.receiptId
+          ||result.state!=='replied'||result.readConfirmed!==true||result.ownerPrivateRead!==true||result.taskId!==null)return false;
+        resolved=true;
+      }else return false;
+    }else return false;
+  }
+  return users===1&&contexts>=1&&searches>0&&failures>0&&resolved;
+};
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection}={})=>{
+  if(generationReplyCorrection!==undefined){
+    if(technicalReplyCorrection!==undefined||readOnlyContinuation!==undefined)return false;
+    return generationReplyFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell,generationReplyCorrection});
+  }
   // This positive-send profile is intentionally separate from absent-provider
   // abandonment. It accepts only a host-selected immutable native receipt and
   // the full terminal read-only rate-failure chain; prose never classifies it.
@@ -586,7 +659,9 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     if(options.readOnlyPreparation!==undefined){
-      if(options.technicalReplyCorrection!==undefined&&options.technicalReplyCorrection?.threadId!==threadId)return {state:'uncertain'};
+      if(options.technicalReplyCorrection!==undefined&&options.technicalReplyCorrection?.threadId!==threadId
+        ||options.generationReplyCorrection!==undefined&&(options.generationReplyCorrection?.threadId!==threadId
+          ||options.technicalReplyCorrection!==undefined||options.readOnlyContinuation!==undefined))return {state:'uncertain'};
       if(options.readOnlyContinuation!==undefined&&(options.readOnlyContinuation!==true||options.technicalReplyCorrection!==undefined))return {state:'uncertain'};
       // Recovery needs COMPLETE bounded coverage. The old failure must be the
       // latest turn except for at most eight separately settled task-creation
@@ -624,8 +699,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
         if(response.nextCursor===null){
           if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
             environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable,
-            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation}))return {state:'uncertain'};
-          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.technicalReplyCorrection
+            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
             ?'company_context_rate_limited_reply':options.readOnlyContinuation?'company_context_read_cancelled':'company_context_preparation_timeout'};
         }
         if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};

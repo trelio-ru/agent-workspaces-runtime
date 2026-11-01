@@ -69,11 +69,12 @@ const provisionReview=value=>{
 export const assistantReadOnlyRecoveryMetadata=(value,{local=false,response=false}={})=>{
   const fields=['parentIntakeId','receiptId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey',
     ...(value?.technicalReplyCorrection===true?['technicalReplyCorrection']:[]),
-    ...(value?.readOnlyContinuation===true?['readOnlyContinuation']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
+    ...(value?.readOnlyContinuation===true?['readOnlyContinuation']:[]),
+    ...(value?.generationReplyCorrection===true?['generationReplyCorrection']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
   if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==fields.sort().join(',')
     ||['parentIntakeId','receiptId','terminalTurnId'].some(key=>!UUID.test(value[key]??''))
     ||['previousPrerequisiteKey','prerequisiteKey'].some(key=>typeof value[key]!=='string'||!/^[0-9a-f]{64}$/u.test(value[key]))
-    ||value.technicalReplyCorrection===true&&value.readOnlyContinuation===true
+    ||[value.technicalReplyCorrection,value.readOnlyContinuation,value.generationReplyCorrection].filter(value=>value===true).length>1
     ||value.previousPrerequisiteKey===value.prerequisiteKey||local&&typeof value.beginAttempted!=='boolean'
     ||response&&value.replyOnly!==true)return null;
   return Object.freeze({...Object.fromEntries(fields.map(key=>[key,['parentIntakeId','receiptId','terminalTurnId'].includes(key)?value[key].toLowerCase():value[key]]))});
@@ -169,7 +170,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -259,7 +260,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -494,10 +495,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // provider fence, model-read/ACK basis, lease or negative receipt.
       if(!readonlyColumns.includes(name))db.exec(`ALTER TABLE assistant_owner_intakes ADD COLUMN ${name} TEXT`);
     }
-    // Schema24 adds only a strict optional continuation discriminator inside
+    // Schema25 adds a strict generation-correction discriminator inside
     // the existing recovery JSON. Historical rows/fences are never backfilled.
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=24');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (24)');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=25');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (25)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1000,6 +1001,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND i.source_revision=s.configuration_revision AND s.state='active' AND i.retry_ordinal<20 AND i.next_check_at<=?
         AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    generationReplyIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='replied'
+        AND json_extract(s.scope_json,'$.provider')='telegram'
+        AND i.native_started=1 AND i.reply_receipt_id=i.outcome_receipt AND i.reply_message_id>0
+        AND i.reply_abandon_receipt_id IS NULL AND i.outcome_task_id IS NULL
+        AND i.source_revision=s.configuration_revision AND s.state='active' AND i.retry_ordinal<20 AND i.next_check_at<=?
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.source_key=i.source_key
+          AND n.source_revision=i.source_revision AND n.original_event_id=i.original_event_id
+          AND json_extract(n.readonly_recovery_json,'$.generationReplyCorrection')=1)
+      ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
     cancelledReadonlyIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
       JOIN assistant_inbox_sources s ON s.source_key=i.source_key
       WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='cancelled'
@@ -1037,7 +1050,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // explicitly marked correction, never the old absent-provider recovery.
       // The prior correction flag survives every terminal state/restart, so a
       // failed corrective child cannot form an unbounded answer chain.
-      if(metadata.readOnlyContinuation===true){
+      // Consume this independent certificate once for the entire original,
+      // including after failure/restart. SQL repeats this native boundary; a
+      // positive send is never recast as absent and no old lease is renewed.
+      if(metadata.generationReplyCorrection===true){
+        if(old.outcome_state!=='replied'||old.reply_receipt_id!==metadata.receiptId||!Number.isSafeInteger(old.reply_message_id)
+          ||old.reply_message_id<1||old.reply_message_id>2147483647||old.reply_abandon_receipt_id!==null
+          ||prior&&(!prior.beginAttempted||prior.parentIntakeId!==old.retry_of_id))fail('ASSISTANT_INBOX_CONFLICT');
+      }else if(metadata.readOnlyContinuation===true){
         // Positive native CANCELLED plus this immutable earlier reply-only
         // binding is different from both a positive send and abandonment.
         // The coordinator independently verifies native ancestry/whole-turn
@@ -1056,6 +1076,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(previous){const existing=JSON.parse(previous.readonly_recovery_json??'null');
         if(!existing||JSON.stringify({...existing,beginAttempted:false})!==JSON.stringify(metadata))fail('ASSISTANT_INBOX_CONFLICT');
         return this.ownerIntake(previous.id);}
+      if(get(`SELECT 1 FROM assistant_owner_intakes WHERE source_key=? AND source_revision=? AND original_event_id=?
+        AND json_extract(readonly_recovery_json,'$.generationReplyCorrection')=1`,old.source_key,old.source_revision,old.original_event_id))fail('ASSISTANT_INBOX_CONFLICT');
       if(get("SELECT 1 FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND state!='complete'",old.account_key,old.native_event_id))fail('ASSISTANT_INBOX_CONFLICT');
       const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
       assertIntakeRoom(originals.length);const next=randomUUID();

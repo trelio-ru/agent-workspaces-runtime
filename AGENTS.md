@@ -1104,7 +1104,7 @@ Public plugin shell для этого клиента не меняется.
   or percentages, purchase credits/reset limits, or replay unknown work.
   See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).
 
-- Read-only owner recovery: unique consumed parent, whole terminal witness and durable begin fence; no Task/dialogue or old lease renewal. Positive technical correction and cancelled/no-send reply-only continuation require distinct native capabilities/ancestry. All share the original bounded chain; never reinterpret a confirmed/unknown send as absent. See [scheduler](docs/assistant-scheduler.md#one-post-fix-reply-only-owner-question-recovery).
+- Read-only owner recovery: unique consumed parent, whole terminal witness and durable begin fence; no Task/dialogue or old lease renewal. Positive technical correction, cancelled/no-send continuation and one-per-original generation correction require distinct native capabilities/ancestry. All share the original bounded chain; never reinterpret a confirmed/unknown send as absent. See [scheduler](docs/assistant-scheduler.md#one-post-fix-reply-only-owner-question-recovery).
   A later independent task creation may be skipped only with SAME settled local
   original, fresh native created/task/receipt and whole exact completed native
   context/resolve chain. Inventory unknown rows before the eight-row bound;

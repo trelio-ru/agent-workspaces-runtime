@@ -69,7 +69,7 @@ export const createQuestionSystemDriver=async configuration=>{
   });
   await native.seed({credential,pass,runtime:{schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state}});
   await withInbox(inbox=>{inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);});
-  let historicalRows;
+  let historicalRows,historicalPositiveOutcome;
   if(configuration.historicalCancelledReply){
     assert.equal(typeof configuration.seedHistoricalIntakes,'function');
     historicalRows=await withInbox(inbox=>{
@@ -92,6 +92,22 @@ export const createQuestionSystemDriver=async configuration=>{
     const cancelled=await configuration.seedHistoricalIntakes({rows:historicalRows,native});
     assert.equal(cancelled.state,'cancelled');assert.equal(cancelled.id,historicalRows.at(-1).id);
     await withInbox(inbox=>{inbox.finishOwnerIntake(cancelled.id,cancelled);inbox.settleOwnerIntake(cancelled.id);});
+    if(configuration.historicalGenerationReply){
+      historicalClock++;
+      const delivered=await withInbox(inbox=>{
+        const parent=inbox.ownerIntake(cancelled.id);
+        const row=inbox.retryReadonlyOwnerIntake(parent.id,{receiptId:parent.outcome_receipt,terminalTurnId:randomUUID(),
+          previousPrerequisiteKey:'c'.repeat(64),prerequisiteKey:'d'.repeat(64),readOnlyContinuation:true});
+        inbox.startReadonlyIntakeBegin(row.id);inbox.startOwnerIntake(row.id);inbox.confirmIntakeModelRead(row.id);
+        const receipt=randomUUID();inbox.startOwnerReply(row.id,receipt);inbox.confirmOwnerReply(row.id,{receiptId:receipt,messageId:901});
+        inbox.finishOwnerIntake(row.id,{state:'replied',receiptId:receipt});inbox.settleOwnerIntake(row.id);
+        return inbox.ownerIntake(row.id);
+      });
+      const positive=await configuration.seedHistoricalIntakes({rows:[delivered],native});
+      assert.equal(positive.state,'replied');assert.equal(positive.receiptId,delivered.outcome_receipt);
+      historicalPositiveOutcome=positive;
+      historicalRows.push(delivered);
+    }
     historicalRows=await withInbox(inbox=>historicalRows.map(row=>inbox.ownerIntake(row.id)));historicalClock=null;
   }
   const configFile=path.join(root,'question-scenario.json'),loader=path.join(root,'question-loader.mjs');
@@ -158,9 +174,9 @@ export const createQuestionSystemDriver=async configuration=>{
             return {state:'completed',turnId:randomUUID()};}}}});
       try{await host.coordinator.workOnce();}finally{await host.close();}
       original=historicalRows.at(-1);locator={companyId:source.companyId,sourceId:source.id,intakeId:original.id};
-      return this.recoverReadOnlyReply(answer,{continuation:true});
+      return this.recoverReadOnlyReply(answer,{continuation:!configuration.historicalGenerationReply,generation:configuration.historicalGenerationReply===true});
     },
-    async recoverReadOnlyReply(answer,{continuation=false}={}){
+    async recoverReadOnlyReply(answer,{continuation=false,generation=false}={}){
       const parent=await withInbox(inbox=>inbox.ownerIntake(original.id)),parentPass={...locator};
       assert.equal(parent.state,'complete');assert.equal(parent.outcome_state,continuation?'cancelled':'replied');assert.equal(parent.settled,1);
       assert.equal(await native.context(()=>native.host.readActivePass()),null);
@@ -172,15 +188,20 @@ export const createQuestionSystemDriver=async configuration=>{
       const argumentsSearch={companySlugs:[configuration.companySlug],queries:['SYNTHETIC_WEEKEND_JOURNEY']};
       const call=(tool,args,result,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
         arguments:{...args,intakePass:parentPass,runtimeSessionProof:{}},result});
-      const contextCall=continuation?call('get_assistant_intake_context',{}, {structuredContent:{schemaVersion:1}}):
+      const contextCall=continuation||generation?call('get_assistant_intake_context',{}, {structuredContent:{schemaVersion:1}}):
         modelCalls.find(item=>item.tool==='get_assistant_intake_context');
-      const resolveCall=modelCalls.findLast(item=>item.tool==='resolve_assistant_intake'&&item.result.structuredContent?.state==='replied');
+      // Use the ACTUAL native positive receipt, not a hand-built backend DTO.
+      const resolveCall=generation?call('resolve_assistant_intake',{clientRequestId:parent.id,decision:'reply_owner',replyText:'SYNTHETIC_GENERATION_FAILURE'},
+        {structuredContent:historicalPositiveOutcome})
+        :modelCalls.findLast(item=>item.tool==='resolve_assistant_intake'&&item.result.structuredContent?.state==='replied');
       assert.ok(contextCall&&(continuation||resolveCall));
       const turn={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',
         text:`TRELIO_ASSISTANT_DELIVERY ${parent.delivery_id}\nSYNTHETIC_ORIGINAL`} ]},contextCall,
         call('search',argumentsSearch,{structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,
           nextCall:{tool:'search',arguments:argumentsSearch}}}),
-        call('search',argumentsSearch,{isError:true,structuredContent:{code:continuation?'ASSISTANT_RUNTIME_REQUEST_CANCELLED':'ASSISTANT_TRANSPORT_RATE_LIMITED'}},'failed'),
+        call('search',argumentsSearch,{isError:true,structuredContent:{code:generation?'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED':continuation?'ASSISTANT_RUNTIME_REQUEST_CANCELLED':'ASSISTANT_TRANSPORT_RATE_LIMITED'}},'failed'),
+        ...(generation?[contextCall,call('search',{...argumentsSearch,queries:['SECOND_GENERATION_REFUSAL']},
+          {isError:true,content:[{type:'text',text:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'}]},'failed')]:[]),
         ...(continuation?[]:[resolveCall])]};
       const rpc=()=>{
         const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};let buffered='';
@@ -194,18 +215,18 @@ export const createQuestionSystemDriver=async configuration=>{
       };
       const historical=await readAssistantCodexDelivery(parent.thread_id,parent.delivery_id,{executable:process.execPath,
         environment:{},spawnProcess:rpc,readOnlyPreparation:parentPass,settledCreationSuccessors:[],
-        ...(continuation?{readOnlyContinuation:true}:{technicalReplyCorrection:{receiptId:parent.outcome_receipt,eventId:parent.original_event_id,
+        ...(continuation?{readOnlyContinuation:true}:{[generation?'generationReplyCorrection':'technicalReplyCorrection']:{receiptId:parent.outcome_receipt,eventId:parent.original_event_id,
           sourceRevision:parent.source_revision,threadId:parent.thread_id}})});
-      assert.equal(historical.readOnlyFailure,continuation?'company_context_read_cancelled':'company_context_rate_limited_reply',
+      assert.equal(historical.readOnlyFailure,generation?'company_context_generation_changed_reply':continuation?'company_context_read_cancelled':'company_context_rate_limited_reply',
         'the real native decoder must certify the complete historical turn');
-      await workspace.stop();configuration.replyOrdinal=continuation?1:2;await saveConfiguration();let modelStarts=0;
+      await workspace.stop();configuration.replyOrdinal=continuation||generation?1:2;await saveConfiguration();let modelStarts=0;
       // Move only the coordinator's existing injected test clock past its
       // retained five-minute read-only backoff. Native PostgreSQL, runtime
       // proof clocks and every original child/lease deadline stay real. No
       // live clock, journal timestamp or native row is edited by this fixture.
       let offset=Math.max(0,parent.next_check_at-Date.now()+1);
       const openHost=()=>createAssistantRuntimeHost({context:native.context,dependencies:{configurationDirectory:directory,now:()=>Date.now()+offset,
-        readHookReadiness:async()=>({fingerprint:(continuation?'d':'b').repeat(64)}),readStatus:async()=>({structuredContent:{schemaVersion:1,
+        readHookReadiness:async()=>({fingerprint:(generation?'e':continuation?'d':'b').repeat(64)}),readStatus:async()=>({structuredContent:{schemaVersion:1,
           assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:configuration.ownerUserId,businessReady:true,
           availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
         native:{provision:async()=>assert.fail('one original must keep its existing chat'),
@@ -227,10 +248,10 @@ export const createQuestionSystemDriver=async configuration=>{
           }}}});
       let host=await openHost();
       try{await host.coordinator.workOnce().catch(error=>{
-        if(!continuation||!configuration.loseContinuationBegin)throw error;
+        if(!(continuation||generation)||!configuration.loseContinuationBegin)throw error;
         assert.equal(error.code,'ASSISTANT_TRANSPORT_UNAVAILABLE');
       });}finally{await host.close();}
-      if(continuation&&configuration.loseContinuationBegin){
+      if((continuation||generation)&&configuration.loseContinuationBegin){
         assert.equal(modelStarts,0,'a lost begin does not invent positive admission');
         assert.deepEqual(native.continuationBeginFaults,{attempts:1,lostCommitted:true});
         const frozen=await withInbox((_inbox,database)=>database.prepare('SELECT id,native_started,readonly_recovery_json FROM assistant_owner_intakes WHERE retry_of_id=?').all(parent.id));
@@ -241,6 +262,12 @@ export const createQuestionSystemDriver=async configuration=>{
         offset+=300001;host=await openHost();
         try{await host.coordinator.workOnce();}finally{await host.close();}
         assert.deepEqual(native.continuationBeginFaults,{attempts:1,lostCommitted:true},'restart only reads the exact committed child; no second HTTP begin');
+      }
+      if(generation){
+        offset+=300001;host=await openHost();
+        try{await host.coordinator.workOnce();}finally{await host.close();}
+        assert.deepEqual(native.continuationBeginFaults,{attempts:1,lostCommitted:true},
+          'the consumed generation certificate cannot earn another child after positive delivery/restart');
       }
       assert.equal(modelStarts,1,'the normal coordinator must reach one fresh model invocation');
       assert.equal(await native.context(()=>native.host.readActivePass()),null);

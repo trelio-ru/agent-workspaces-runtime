@@ -3517,3 +3517,24 @@ preparation clock resets. SQLite saves begin-attempt before HTTP; lost admission
 permits exact child read-back only, never a second POST. An eventual positive
 original reply still requires current exact source/comments and the ordinary
 native one-send/receipt/pass-release engine.
+
+
+A positively delivered generation-only technical reply has one independent
+post-fix certificate, `generationReplyCorrection:true`, requiring native
+`readOnlyGenerationCorrectionProtocolVersion:1` and journal25. This is separate
+from old rate correction and cancelled/no-send continuation. The full exact native
+terminal turn must show only preparing searches, exact closed
+`ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED` errors, at most one
+context refresh after that error and the SAME successful original `reply_owner`
+receipt. Native literal error/result projections are accepted only by exact code
+equality on a failed search; prose/substrings, READY, exact source, other tools,
+unknown/attempted replies or impure history refuse. Changed queries are safe only
+when they themselves return that exact hard refusal without any result/effect.
+Fresh trusted prerequisite and full native/local same-event/device/account/owner/
+conversation/thread/receipt ancestry remain mandatory. A generation certificate
+is consumed once for the WHOLE original; no later recovery mode may follow it,
+including after failure/cancellation. PostgreSQL0318 enforces this independently.
+The production coordinator alone appends the reply-only child under the SAME
+durable begin fence; lost begin performs exact read-back, never another POST.
+The normal signed original-peer response is the only send; preserve all older
+technical replies, deadlines, ACK/health and Task/Workspace/Run boundaries.
