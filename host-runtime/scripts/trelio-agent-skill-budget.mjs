@@ -1,4 +1,6 @@
 // Generated portable agent skill budget. Do not edit by hand.
+import { stripAgentSkillCatalogMetadata } from "./trelio-agent-skill-catalog-source.mjs";
+
 /**
  * One portable policy for publication and final model delivery. UTF-8 bytes,
  * rather than string.length or tokenizer guesses, account for Cyrillic and
@@ -24,7 +26,7 @@ export class AgentSkillInstructionBudgetError extends Error {
  * @param {string} value
  */
 export const normalizeAgentSkillInstructions = (value) => {
-  const normalized = value.trim();
+  const normalized = stripAgentSkillCatalogMetadata(value).trim();
   const bytes = agentSkillUtf8Bytes(normalized);
   if (bytes > AGENT_SKILL_INSTRUCTIONS_MAX_BYTES) throw new AgentSkillInstructionBudgetError(bytes);
   return normalized;

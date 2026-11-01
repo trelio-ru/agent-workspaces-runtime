@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readAgentSkillSourceMetadata } from "./trelio-agent-skill-catalog-source.mjs";
 import { normalizeAgentSkillInstructions, AgentSkillInstructionBudgetError } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
@@ -3131,7 +3132,18 @@ const normalizeCommonPublicationInput = (rawInput) => ({
   changeReason: requireBoundedText(rawInput?.changeReason, "changeReason", 2_000),
 });
 
-const protectPublicationDraft = async ({
+/** Explicit catalog copy wins only for an exact matching SKILL.md. Legacy/ordinary Markdown
+ * keeps the explicit draft or the current published pair; never guess copy
+ * from arbitrary prose or erase it when an older caller omits the fields. */
+export const resolveCompanySkillPublicationMetadata = (input, common, current = {}) => {
+  const source = readAgentSkillSourceMetadata(input.instructionsMarkdown ?? common.instructionsMarkdown, common.skillSlug);
+  return source ?? {
+    title: requireBoundedText(input.title ?? current.title, "title", 255),
+    description: requireBoundedText(input.description ?? current.description, "description", 10_000),
+  };
+};
+
+export const protectPublicationDraft = async ({
   operation,
   companyEncryption,
   draft,
@@ -3139,9 +3151,8 @@ const protectPublicationDraft = async ({
 }) => {
   const entityId = crypto.randomUUID();
   const values = {
-    ...(operation === "create"
-      ? { title: draft.title, description: draft.description }
-      : {}),
+    title: draft.title,
+    description: draft.description,
     ...Object.fromEntries(draft.searchTerms.map((term, index) => [
       `search_term_${index}`,
       term,
@@ -3202,12 +3213,8 @@ const protectPublicationDraft = async ({
     encryptedPayloads: [encryptedPayload],
     draft: {
       ...draft,
-      ...(operation === "create"
-        ? {
-            title: buildCompanyEncryptedTextMarker(entityId, "title"),
-            description: buildCompanyEncryptedTextMarker(entityId, "description"),
-          }
-        : {}),
+      title: buildCompanyEncryptedTextMarker(entityId, "title"),
+      description: buildCompanyEncryptedTextMarker(entityId, "description"),
       searchTerms: draft.searchTerms.map((_term, index) => (
         buildCompanyEncryptedTextMarker(entityId, `search_term_${index}`)
       )),
@@ -3351,8 +3358,7 @@ const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) 
   }
   const draft = {
     slug: common.skillSlug,
-    title: requireBoundedText(rawInput?.title, "title", 255),
-    description: requireBoundedText(rawInput?.description, "description", 10_000),
+    ...resolveCompanySkillPublicationMetadata(rawInput, common),
     searchTerms: common.searchTerms,
     marketplaceCategory: category,
     instructionsMarkdown: common.instructionsMarkdown,
@@ -3384,6 +3390,7 @@ const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) 
       operation: "create",
       company: { id: context.company.id, slug: context.company.slug },
       skill: { slug: common.skillSlug, version: "1.0.0", title: draft.title },
+      metadata: { before: null, after: { title: draft.title, description: draft.description } },
       execution: buildExecutionSummary(execution),
       contentProtection: context.companyEncryption ? "company_e2ee_v1" : "plain",
       changes: [
@@ -3414,9 +3421,17 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
       "Приватный навык не найден; сначала подготовьте его создание.",
     );
   }
+  // Refuse during planning, before a human reviews a payload an old backend
+  // cannot apply. An update never falls back to a second metadata mutation.
+  if (context.capabilities?.publicationMetadata !== 1) {
+    throw new RemoteMcpHostError("AGENT_SKILL_METADATA_PUBLICATION_UNAVAILABLE",
+      "Сервер ещё не поддерживает публикацию названия и описания вместе с версией.");
+  }
+  const metadata = resolveCompanySkillPublicationMetadata(rawInput, common, context.skill);
   const draft = {
     skillSlug: common.skillSlug,
     version,
+    ...metadata,
     instructionsMarkdown: common.instructionsMarkdown,
     searchTerms: common.searchTerms,
     summary: common.summary,
@@ -3440,6 +3455,8 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
     : buildPlainPublicationDraft({ draft, execution });
   const applyBase = { companySlug: common.companySlug, ...protectedDraft };
   const changedFields = [
+    context.skill.title !== metadata.title ? "title" : null,
+    context.skill.description !== metadata.description ? "description" : null,
     context.skill.version !== version ? "version" : null,
     canonicalJson(context.skill.searchTerms ?? []) !== canonicalJson(common.searchTerms)
       ? "searchTerms"
@@ -3468,6 +3485,7 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
       contentProtection: context.companyEncryption ? "company_e2ee_v1" : "plain",
       expectedCurrentReleaseId: context.skill.currentReleaseId,
       changedFields,
+      metadata: { before: { title: context.skill.title, description: context.skill.description }, after: metadata },
       assignmentChanged: false,
       warnings: execution.kind === "runtime"
         ? ["Новая исполняемая публикация остаётся company_unverified и потребует отдельного согласия устройства."]
@@ -4055,8 +4073,6 @@ const LOCAL_TOOLS = [
       required: [
         "companySlug",
         "skillSlug",
-        "title",
-        "description",
         "instructionsMarkdown",
         "searchTerms",
         "summary",
@@ -4094,7 +4110,7 @@ const LOCAL_TOOLS = [
   {
     name: "plan_company_private_agent_skill_release",
     title: "Plan a company-private Agent Skill release",
-    description: "Owner/admin only. After loading the current authoring contract, read the live current release, validate Markdown, Remote MCP, a new local .skillpkg, or reuse of the current package, encrypt locally for company E2EE, and return an exact CAS-bound planHash. This does not publish; ask for separate explicit confirmation before apply.",
+    description: "Owner/admin only. Read current authoring contract/live release. Validate Markdown, Remote MCP or new/reused .skillpkg; encrypt company E2EE locally. Return an exact CAS-bound planHash. No publication; apply needs separate explicit confirmation of that plan.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -4110,6 +4126,8 @@ const LOCAL_TOOLS = [
       ],
       properties: {
         ...companySkillPlanCommonProperties,
+        title: { type: "string", minLength: 1, maxLength: 255 },
+        description: { type: "string", minLength: 1, maxLength: 10000 },
         version: { type: "string", pattern: "^\\d+\\.\\d+\\.\\d+$" },
       },
     },

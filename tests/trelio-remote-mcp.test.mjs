@@ -30,6 +30,8 @@ import {
   handleToolCall as handleToolCallProduction,
   isHostRuntimeUpgradeRequiredError,
   normalizeCompanyPrivateSkillAuthoringContract,
+  resolveCompanySkillPublicationMetadata,
+  protectPublicationDraft,
   openCredentialFormInBrowser,
   persistLocalProposalProviderSelection,
   readLocalProposalAppResource,
@@ -192,6 +194,42 @@ test("large private packages raise their exact runtime host floor", () => {
     encrypted: true,
     hostRuntimeVersion: "2.4.1",
   }), "2.4.1");
+});
+
+test("private metadata resolves from exact source or one complete editable draft", () => {
+  const current = { title: "Saved title", description: "Saved description" };
+  const common = { skillSlug: "weekly-report", instructionsMarkdown: "# Ordinary Markdown" };
+  assert.deepEqual(resolveCompanySkillPublicationMetadata({}, common, current), current);
+  assert.deepEqual(resolveCompanySkillPublicationMetadata({ title: "New title" }, common, current), { ...current, title: "New title" });
+  const source = { ...common, instructionsMarkdown: "---\nname: weekly-report\ndescription: Technical routing description\nmetadata:\n  catalog_title: Source title\n  catalog_description: Source description\n---\n\n# Source title\n\nDo work" };
+  assert.deepEqual(resolveCompanySkillPublicationMetadata({}, source), { title: "Source title", description: "Source description" });
+  assert.deepEqual(resolveCompanySkillPublicationMetadata({ instructionsMarkdown: source.instructionsMarkdown },
+    { ...source, instructionsMarkdown: "# Already projected instruction" }), { title: "Source title", description: "Source description" });
+  assert.deepEqual(resolveCompanySkillPublicationMetadata(current, { ...source, skillSlug: "other" }), current);
+  assert.throws(() => resolveCompanySkillPublicationMetadata({ title: " " }, common, current));
+});
+
+test("private release binds the reviewed metadata to its encrypted payload and plan hash", async () => {
+  const { webcrypto, randomUUID } = await import("node:crypto");
+  const { decryptCompanyPayload } = await import("../host-runtime/scripts/trelio-company-encryption.mjs");
+  const scope = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const signing = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+  const companyEncryption = { runtime: { company: { id: randomUUID() }, device: { id: randomUUID() },
+    scope: { id: randomUUID(), epoch: 1, publicEncryptionJwk: await webcrypto.subtle.exportKey("jwk", scope.publicKey) } },
+    device: { privateKeys: { signingPrivateKey: signing.privateKey } } };
+  const draft = { skillSlug: "weekly-report", version: "1.1.0", title: "New private title", description: "New private description",
+    searchTerms: ["weekly report"], instructionsMarkdown: "New private instruction", summary: "Updated copy", changeReason: "Current source", expectedCurrentReleaseId: randomUUID() };
+  const protectedDraft = await protectPublicationDraft({ operation: "publish", companyEncryption, draft, execution: { kind: "markdown" } });
+  assert.equal(protectedDraft.encryptedPayloads.length, 1);
+  assert.doesNotMatch(JSON.stringify(protectedDraft), /New private/u);
+  const opened = await decryptCompanyPayload({ encryptedPayload: protectedDraft.encryptedPayloads[0], scopePrivateKey: scope.privateKey,
+    scopePrivateJwk: await webcrypto.subtle.exportKey("jwk", scope.privateKey) });
+  assert.equal(opened.values.title, draft.title);
+  assert.equal(opened.values.description, draft.description);
+  assert.equal(opened.values.instructions_markdown, draft.instructionsMarkdown);
+  const apply = { companySlug: "acme", ...protectedDraft };
+  assert.notEqual(fingerprintCompanySkillApplyPlan("publish", apply), fingerprintCompanySkillApplyPlan("publish", {
+    ...apply, draft: { ...apply.draft, title: "~e1:foreign:title~" } }));
 });
 
 test("private skill authoring contract preserves additive backend policy", () => {
