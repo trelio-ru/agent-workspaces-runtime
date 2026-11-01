@@ -101,11 +101,26 @@ async function mutex(cwd, config, action, cancelled = () => false) {
     if (cancelled()) throw Error('Coordination interrupted');
     try { fs.mkdirSync(directory, {mode: 0o700}); break; } catch (error) {
       if (error.code !== 'EEXIST') throw error;
+      let observed;
+      try { observed = fs.lstatSync(directory, {bigint: true}); }
+      catch (failure) { if (failure.code === 'ENOENT') continue; throw failure; }
       let value;
       try { value = fs.readFileSync(owner, 'utf8'); } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
       if (value) {
         const pid = +(/^pid=(\d+)$/mu.exec(value)?.[1] ?? 0), host = /^host=(.+)$/mu.exec(value)?.[1];
-        if (host !== startHost || !inventory().some(row => row.pid === pid && row.live)) throw Error('Inspect existing main mutex; owner is not confirmed live');
+        if (host !== startHost || !inventory().some(row => row.pid === pid && row.live)) {
+          // A normal holder may remove its SAME mutex and exit between our
+          // owner-file read and ps. Only a fresh no-follow absence/replacement
+          // permits another acquisition attempt. Never remove/steal an
+          // unchanged dead or unknown claim, infer age, or replay its action.
+          // Birth identity also distinguishes promptly reused directory inodes.
+          let current;
+          try { current = fs.lstatSync(directory, {bigint: true}); }
+          catch (failure) { if (failure.code === 'ENOENT') continue; throw failure; }
+          if (current.dev !== observed.dev || current.ino !== observed.ino
+            || current.birthtimeNs !== observed.birthtimeNs) continue;
+          throw Error('Inspect existing main mutex; owner is not confirmed live');
+        }
       } else if (Date.now() - started > 5000) throw Error('Main mutex has no owner');
       await delay(100);
     }

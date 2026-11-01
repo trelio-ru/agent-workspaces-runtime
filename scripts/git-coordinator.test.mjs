@@ -204,3 +204,74 @@ process.stdout.write(JSON.stringify(result));
     assert.equal(validated, 1, 'main equality cannot substitute for successful evidence');
   } finally { process.env.PATH = originalPath; }
 });
+
+// The occupied short mutex may disappear normally AFTER its owner file is
+// read but BEFORE the process snapshot. Make that exact observation ordering
+// deterministic; no production process, queue or lock is involved.
+for(const mode of ['normal_release','normal_replacement','unchanged_dead'])test(`main mutex owner observation keeps its path identity (${mode})`, {timeout:25000},async t=>{
+ const f=fixture(t),cwd=f.branch('mutex'),directory=path.join(f.main,'.git','main.lock');
+ const ready=path.join(f.root,'owner-ready'),release=path.join(f.root,'owner-release'),observed=path.join(f.root,'mutex-observed');
+ const activateSecond=path.join(f.root,'second-activate'),readySecond=path.join(f.root,'second-ready'),releaseSecond=path.join(f.root,'second-release');
+ const ownerScript=path.join(f.root,'owner.mjs');
+ fs.writeFileSync(ownerScript,`import fs from 'node:fs';import os from 'node:os';
+const directory=${JSON.stringify(directory)},second=process.argv[2]==='second';
+const release=second?${JSON.stringify(releaseSecond)}:${JSON.stringify(release)};
+if(second)while(!fs.existsSync(${JSON.stringify(activateSecond)}))await new Promise(r=>setTimeout(r,5));
+fs.mkdirSync(directory,{mode:0o700});fs.writeFileSync(directory+'/owner','operation=synthetic mutex\\npid='+process.pid+'\\nhost='+os.hostname()+'\\n',{mode:0o600});
+fs.writeFileSync(second?${JSON.stringify(readySecond)}:${JSON.stringify(ready)},'ready');
+if(${JSON.stringify(mode)}==='unchanged_dead')process.exit(0);
+while(!fs.existsSync(release))await new Promise(r=>setTimeout(r,5));
+fs.unlinkSync(directory+'/owner');fs.rmdirSync(directory);
+`,{mode:0o600});
+ const owner=spawn(process.execPath,[ownerScript],{stdio:'ignore'}),ownerDone=new Promise(resolve=>owner.once('close',resolve));
+ let successor,successorDone;
+ if(mode==='normal_replacement'){
+  successor=spawn(process.execPath,[ownerScript,'second'],{stdio:'ignore'});
+  successorDone=new Promise(resolve=>successor.once('close',resolve));
+ }
+ t.after(async()=>{try{owner.kill();successor?.kill();}catch{}await ownerDone;if(successorDone)await successorDone;});
+ await until(()=>fs.existsSync(ready));
+ const contents=fs.readFileSync(path.join(directory,'owner'),'utf8');
+ if(mode==='unchanged_dead')await ownerDone;
+ const bin=path.join(f.root,'bin');fs.mkdirSync(bin);
+ const helper=path.join(bin,'observe.mjs');
+ fs.writeFileSync(helper,`import fs from 'node:fs';
+const observed=${JSON.stringify(observed)},release=${JSON.stringify(release)},directory=${JSON.stringify(directory)},counter=observed+'.count';
+const activateSecond=${JSON.stringify(activateSecond)},readySecond=${JSON.stringify(readySecond)},releaseSecond=${JSON.stringify(releaseSecond)};
+const count=(fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0)+1;fs.writeFileSync(counter,String(count));
+// The first inventory verifies the worker's own isolated process group.
+// The SECOND runs only after the occupied mutex owner has been read.
+if(count===2&&!fs.existsSync(observed)){
+ fs.writeFileSync(observed,'observed',{flag:'wx'});
+ if(${JSON.stringify(mode)}!=='unchanged_dead'){
+  fs.writeFileSync(release,'go');const deadline=Date.now()+2000;
+  while(fs.existsSync(directory)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,10));
+  if(fs.existsSync(directory))throw Error('synthetic owner did not release its own mutex');
+  if(${JSON.stringify(mode)}==='normal_replacement'){
+   fs.writeFileSync(activateSecond,'go');
+   while(!fs.existsSync(readySecond)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,10));
+   if(!fs.existsSync(readySecond))throw Error('synthetic successor did not publish its own mutex');
+  }
+  await new Promise(r=>setTimeout(r,100));
+ }
+}else if(count===3&&${JSON.stringify(mode)}==='normal_replacement'){
+ fs.writeFileSync(releaseSecond,'go');const deadline=Date.now()+2000;
+ while(fs.existsSync(directory)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,10));
+ if(fs.existsSync(directory))throw Error('synthetic successor did not release its own mutex');
+ await new Promise(r=>setTimeout(r,100));
+}
+
+`,{mode:0o600});
+ fs.writeFileSync(path.join(bin,'ps'),`#!/bin/sh\n"${process.execPath}" "${helper}" || exit $?\nexec /bin/ps "$@"\n`,{mode:0o700});
+ const originalPath=process.env.PATH;let worker;
+ try{process.env.PATH=bin+path.delimiter+originalPath;worker=f.start(cwd);}finally{process.env.PATH=originalPath;}
+ const result=await worker.done;assert.equal(fs.readFileSync(observed,'utf8'),'observed');
+ if(mode!=='unchanged_dead'){
+  assert.equal(result.code,0,result.output);assert.equal(await ownerDone,0);if(successorDone)assert.equal(await successorDone,0);assert.deepEqual(f.events(),['codex/mutex']);
+  assert.equal(fs.existsSync(directory),false);assert.deepEqual(queue(cwd),[]);
+ }else{
+  assert.notEqual(result.code,0);assert.match(result.output,/owner is not confirmed live/);
+  assert.equal(fs.readFileSync(path.join(directory,'owner'),'utf8'),contents,'unchanged dead mutex is never stolen or cleared');
+  assert.deepEqual(f.events(),[]);
+ }
+});

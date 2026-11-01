@@ -955,7 +955,7 @@ publication tooling также остаются вне этого публичн
   task branch/PR, exact hosted CI и guarded main push/read-back. Не менять HEAD
   или files ожидающей/работающей ветки. Старые wrappers и boolean-флаги не
   заменяют live owner ancestry и verified exact SHA в canonical pre-push.
-  Waiter ticket/process observation shares the same short mutex as predecessor removal; dead/unknown owners still refuse.
+  Waiter ticket/process observation shares the same short mutex as predecessor removal; dead/unknown owners still refuse. A disappeared/replaced mutex is freshly reacquired after owner exit; unchanged dead claims are never stolen.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/

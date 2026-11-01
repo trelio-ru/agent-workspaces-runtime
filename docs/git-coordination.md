@@ -24,7 +24,11 @@ The short existing main mutex serializes FIFO admission and state changes;
 the durable ticket protects CI. Worktree creation therefore remains available.
 Waiting workers read the first ticket and its process inventory under that same
 mutex, so normal predecessor removal/exit is an atomic handoff rather than a
-false dead-owner failure. An unchanged dead ticket still requires exact recovery.
+false dead-owner failure. An unchanged dead ticket still requires exact recovery. An occupied mutex may also
+be removed normally between its owner-file read and the process inventory.
+Only fresh no-follow absence or a different directory identity permits a new
+acquisition attempt; an unchanged dead/unknown claim is never removed or stolen.
+Tests force both disappearance and replacement at that exact observation boundary.
 Canonical pre-push checks live process ancestry, exact worktree/branch/SHA/tag
 and verified ticket state. A caller-authored boolean, direct main/tag push or
 old transport wrapper cannot borrow the slot. Required CI remains repository
