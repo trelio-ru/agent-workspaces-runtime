@@ -2121,6 +2121,68 @@ test('company read negotiation hides only the closed host branch and keeps origi
   }finally{f.close();}
 });
 
+test('selected company file fetch delivers bounded text or original receipt without mirror preparation',async()=>{
+  const {materializeAssistantEncryptedCompanyContext}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const files=await import('../host-runtime/scripts/trelio-workspace-files.mjs');
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'selected-file-text-'));
+  const workspaceId=randomUUID(),workspaceHead='a'.repeat(40),filePath='sources/current plan.md';
+  const localFilePath=path.join(directory,'original'),descriptor={nativeTool:'fetch',companySlug:'synthetic'};
+  const input={id:`workspace-file:${workspaceId}:${workspaceHead}:${encodeURIComponent(filePath)}`};
+  let downloads=0,checks=0,denyLate=false;
+  const run=()=>materializeAssistantEncryptedCompanyContext({origin:'https://synthetic.invalid',descriptor,name:'fetch',arguments:input,
+    context:{handleTrelioLocalContextOperation:()=>assert.fail('an exact file never starts a company mirror')},
+    assertCurrent:async()=>{checks++;if(denyLate&&checks===2)throw Object.assign(new Error(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});},
+    files:{workspaceFileLocatorFromResultId:files.workspaceFileLocatorFromResultId,workspaceFileSearchText:files.workspaceFileSearchText,
+      downloadAcceptedWorkspaceFile:async(_origin,locator)=>{downloads++;assert.deepEqual(locator,{workspaceId,workspaceHead,filePath});
+        return {delivery:'local-file',localFilePath,...locator};}}});
+  try{
+    for(const [bytes,inline]of [[Buffer.alloc(0),true],[Buffer.from('Текущий план 🧭'),true],
+      [Buffer.from('binary\0original'),false],[Buffer.alloc(256*1024+1,120),false],
+      // Valid UTF-8 can exceed the final JSON bound through escaping alone.
+      // The SAME original stays accessible, without partial inline content.
+      [Buffer.alloc(256*1024,92),false]]){
+      await fs.writeFile(localFilePath,bytes,{mode:0o600});checks=0;
+      const result=await run();
+      assert.equal(checks,2,'fresh admission is repeated after the exact file read');
+      assert.equal(result.structuredContent.delivery,inline?'text':'local-file');
+      assert.equal(result.structuredContent.text,inline?bytes.toString('utf8'):undefined);
+      assert.ok(Buffer.byteLength(JSON.stringify(result))<=512*1024);
+      assert.deepEqual(await fs.readFile(localFilePath),bytes,'private input bytes are not edited');
+    }
+    assert.equal(downloads,5);
+    denyLate=true;checks=0;
+    await assert.rejects(run(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  }finally{await fs.rm(directory,{recursive:true,force:true});}
+});
+
+test('production owner reply rejects malformed or overflowing private input before native commit in every content mode',async()=>{
+  const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const identity={origin:'https://synthetic.invalid',assistantId:randomUUID(),deviceId:randomUUID()},store=memoryStore();
+  await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},
+    {...identity,credential:`tda_${'p'.repeat(43)}`,expiresAt:1});
+  const pass={kind:'source_intake',companyId:randomUUID(),sourceId:randomUUID(),passId:randomUUID()};
+  let nativeCalls=0;
+  const client=await createProductionAssistantMcp({context:action=>action({identity},{readActivePass:async()=>pass},store),
+    // This is also the production plain-company branch: managed protection
+    // passes arguments unchanged. The outer factory must reject BEFORE it.
+    withManagedContent:({args},send)=>send(args),withProfile:()=>assert.fail('no file/content access for malformed text'),
+    httpRequest:async input=>{
+      const message=input.payload,reply=result=>({sessionId:'synthetic',message:{jsonrpc:'2.0',id:message?.id,result}});
+      if(input.method==='DELETE'||message.method==='notifications/initialized')return reply({});
+      if(message.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(message.method==='tools/list')return reply({tools:[{name:'resolve_assistant_intake',description:'Synthetic native schema',inputSchema:{type:'object'}}]});
+      nativeCalls++;return reply({isError:true,content:[],structuredContent:{code:'SYNTHETIC_BEFORE_PENDING'}});
+    }});
+  for(const replyText of ['\ud800','\udc00','\0',' ', 'x'.repeat(4097),'\u0001'.repeat(2725)]){
+    for(const replyFile of [undefined,{workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),name:'original.md'}]){
+      await assert.rejects(client.callTool('resolve_assistant_intake',{decision:'reply_owner',replyText,
+        ...(replyFile?{replyFile}:{}),clientRequestId:pass.passId,
+        intakePass:{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}}),{code:'ASSISTANT_SOURCE_INVALID_INPUT'});
+    }
+  }
+  assert.equal(nativeCalls,0,'a refused body never commits pending or earns a file/provider attempt');
+});
+
 test('encrypted company source search uses the SAME HPKE mirror with isolated device namespace and fresh recipient',async()=>{
   if(process.env.TRELIO_ASSISTANT_COMPANY_CONTEXT_FIXTURE!=='1'){
     const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-read-'));
@@ -2252,8 +2314,12 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
         'x-trelio-workspace-id':workspaceId,'x-trelio-workspace-head':workspaceHead,
         'x-trelio-ciphertext-sha256':createHash('sha256').update(bytes).digest('hex')}});
     }
-    if(url.pathname.endsWith(`/workspaces/${workspaceId}/read-snapshot`))return json({schemaVersion:1,encryptedPayloads:[payload],context:{company,
-      workspace:{id:workspaceId,acceptedHead:workspaceHead},agentInstructionsSnapshot:{compiledMarkdown:marker('rules')},userProfileSnapshot:null}});
+    if(url.pathname.endsWith(`/workspaces/${workspaceId}/read-snapshot`)){
+      if(mode==='file_denied')return new Response('{}',{status:403,headers:{'content-type':'application/json'}});
+      return json({schemaVersion:1,encryptedPayloads:[payload],context:{company,
+        workspace:{id:workspaceId,acceptedHead:mode==='file_head'?'b'.repeat(40):workspaceHead},
+        agentInstructionsSnapshot:{compiledMarkdown:marker('rules')},userProfileSnapshot:null}});
+    }
     if(url.pathname.endsWith(`/workspaces/${workspaceId}`))return json({schemaVersion:1,encryptedPayloads:[],context:{company,
       workspace:{id:workspaceId,acceptedHead:workspaceHead},encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount:1}}}});
     if(url.pathname.endsWith('/reads/get_task_activity')){
@@ -2288,6 +2354,25 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     });
   };
   try{
+    // A previously advertised immutable file is already an exact source, not
+    // another company search. Exercise a genuinely cold managed task/owner
+    // profile with the real HPKE manifest/file reader: no company mirror has
+    // been prepared, and no broad manifest GET may be needed to open it.
+    const selectedFile=await read('fetch',{
+      id:`workspace-file:${workspaceId}:${workspaceHead}:${encodeURIComponent(filePath)}`,
+    });
+    assert.deepEqual(await fs.readFile(selectedFile.structuredContent.localFilePath),original);
+    assert.equal(manifestReads,0,'an exact file fetch must not join or rebuild the company mirror');
+    assert.equal(fileReads,2,'only the selected encrypted manifest and original are opened');
+    for(const refusal of ['file_head','file_denied']){
+      mode=refusal;
+      await assert.rejects(read('fetch',{
+        id:`workspace-file:${workspaceId}:${workspaceHead}:${encodeURIComponent(filePath)}`,
+      }));
+      assert.equal(fileReads,2,'revocation/head changes refuse before encrypted file bytes');
+      assert.equal(manifestReads,0,'a refused exact file never falls back to company search');
+    }
+    mode='valid';
     // Exercise the new worker operation against the REAL managed profile,
     // HPKE envelope, common encrypted mirror and native fixed HTTP guards.
     // The outer child has isolated OS/config roots; no human credentials or
@@ -2335,7 +2420,7 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     assert.match(JSON.stringify(activity),/Synthetic exact source rules/);assert.equal(activity.structuredContent.pagination.nextOffset,2);
     assert.equal(activityReads,1);
     const file=await read('get_agent_workspace_file',{workspaceId,workspaceHead,filePath,delivery:'local-file'});
-    assert.deepEqual(await fs.readFile(file.structuredContent.localFilePath),original);assert.equal(fileReads,2);
+    assert.deepEqual(await fs.readFile(file.structuredContent.localFilePath),original);assert.equal(fileReads,4);
     assert.match(JSON.stringify(file),/Synthetic source rules/,'the source file carries its own read authority, never a new pass');
     assert.doesNotMatch(JSON.stringify(requests),new RegExp(canary));
     assert.doesNotMatch(JSON.stringify(requests),/SOURCE_PRIVATE_FILENAME_CANARY|ORIGINAL_PRIVATE_BYTES_CANARY/);

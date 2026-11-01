@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
-import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator } from "../host-runtime/scripts/trelio-workspace-files.mjs";
+import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator, workspaceFileLocatorFromResultId } from "../host-runtime/scripts/trelio-workspace-files.mjs";
 import { matchWorkspaceTextChunks } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
 import { createEncryptedSearchFileCache, handleNativeLocalContextRead, syncCompanyContextMirror, resolveMirrorPaths } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory, resolveCompanyContextMirrorDirectory,
@@ -353,6 +353,23 @@ test("file locators reject traversal and foreign path syntax before transport", 
   for (const filePath of ["../secret", "/etc/passwd", "x/../secret", "x\\secret", "x//secret", "x\0secret"]) {
     assert.throws(() => validateWorkspaceFileLocator({ workspaceId: "11111111-1111-4111-8111-111111111111", workspaceHead: "a".repeat(40), filePath }), { code: "WORKSPACE_FILE_INVALID_LOCATOR" });
   }
+});
+
+test("advertised exact file ids share one bounded decode and reject unsafe coordinates", () => {
+  const workspaceId="11111111-1111-4111-8111-111111111111",workspaceHead="a".repeat(40);
+  const filePath="sources/План #1: проверка.md";
+  assert.deepEqual(workspaceFileLocatorFromResultId(`workspace-file:${workspaceId}:${workspaceHead}:${encodeURIComponent(filePath)}`),
+    {workspaceId,workspaceHead,filePath});
+  assert.equal(workspaceFileLocatorFromResultId(`workspace:${workspaceId}`),null);
+  for(const value of [
+    `workspace-file:${workspaceId}:${workspaceHead}:../private`,
+    `workspace-file:${workspaceId}:${workspaceHead}:%2Fprivate`,
+    `workspace-file:${workspaceId}:${workspaceHead}:x%5Cprivate`,
+    `workspace-file:${workspaceId}:${workspaceHead}:%E0%A4`,
+    `workspace-file:${workspaceId}:other-head:notes.md`,
+    `workspace-file:${workspaceId}:${workspaceHead}:notes.md:extra`,
+    `workspace-file:${workspaceId}:${workspaceHead}:${'x'.repeat(4096)}`,
+  ])assert.throws(()=>workspaceFileLocatorFromResultId(value),{code:'WORKSPACE_FILE_INVALID_LOCATOR'});
 });
 
 // The first-sync child has a fixed deadline. A resumed child must reuse the

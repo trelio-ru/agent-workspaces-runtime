@@ -13,7 +13,7 @@ import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { LOCAL_PROPOSAL_FILES, prepareLocalProposalFiles, bindLocalProposalFilePreviews } from "./trelio-proposal-local-files.mjs";
-import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
+import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator, workspaceFileLocatorFromResultId } from "./trelio-workspace-files.mjs";
 import { validateNativeCheckpoint, parseNativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -7166,12 +7166,7 @@ export const fetchMirrorResult = (mirror, rawResultId, knownInstructionLayerKeys
     );
   }
   if (resultId.startsWith("workspace-file:")) {
-    const encodedParts = resultId.slice("workspace-file:".length).split(":");
-    const [workspaceId, workspaceHead, filePath] = encodedParts.map(decodeMirrorDocumentIdPart);
-    if (encodedParts.length !== 3) {
-      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Invalid Workspace file result id.");
-    }
-    return getWorkspaceFileFromMirror(mirror, { workspaceId, workspaceHead, filePath });
+    return getWorkspaceFileFromMirror(mirror, workspaceFileLocatorFromResultId(resultId));
   }
   if (resultId.startsWith("workspace:")) {
     const workspaceId = normalizeUuid(

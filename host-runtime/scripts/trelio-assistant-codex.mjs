@@ -873,7 +873,10 @@ export const readAssistantCodexOwnerReply=(threadId,deliveryId,intakePass,option
       ||!args.intakePass||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
       ||Object.entries(intakePass).some(([key,value])=>args.intakePass[key]!==value)
       ||typeof args.replyText!=='string'||!args.replyText.trim()||args.replyText.length>4096||args.replyText.includes('\0'))return null;
-    return args.replyText.trim();
+    // This is an immutable comparison witness, not an editor. Legacy plain
+    // sends preserved leading/trailing whitespace; trimming history here
+    // would make their exact provider read-back fail after an upgrade.
+    return args.replyText;
   },options);
 };
 

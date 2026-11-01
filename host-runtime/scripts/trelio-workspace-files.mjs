@@ -28,6 +28,23 @@ export const validateWorkspaceFileLocator = ({ workspaceId, workspaceHead, fileP
   return { workspaceId, workspaceHead, filePath };
 };
 
+/** Decode the immutable locator advertised by Workspace search. Both mirror
+ * fetch and managed exact-file fetch use this one grammar. Decoding supplies
+ * coordinates only: current source ACL, accepted head, encrypted manifest and
+ * recipient checks still belong to downloadAcceptedWorkspaceFile. A model can
+ * neither choose a URL/local destination nor turn a stale head into a new one. */
+export const workspaceFileLocatorFromResultId = (resultId) => {
+  if (typeof resultId !== "string" || !resultId.startsWith("workspace-file:")) return null;
+  if (resultId.length > 4096) fail("WORKSPACE_FILE_INVALID_LOCATOR");
+  const parts = resultId.slice("workspace-file:".length).split(":");
+  if (parts.length !== 3) fail("WORKSPACE_FILE_INVALID_LOCATOR");
+  let decoded;
+  try { decoded = parts.map(value => decodeURIComponent(value)); }
+  catch { fail("WORKSPACE_FILE_INVALID_LOCATOR"); }
+  const [workspaceId, workspaceHead, filePath] = decoded;
+  return validateWorkspaceFileLocator({ workspaceId, workspaceHead, filePath });
+};
+
 /** Bound reads before allocating: a hostile/incorrect content-length is not a limit. */
 const readBoundedBytes = async (response, maximum, signal) => {
   const chunks = [];

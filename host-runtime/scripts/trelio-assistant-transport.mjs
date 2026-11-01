@@ -151,7 +151,7 @@ const object = value => value && Object.getPrototypeOf(value) === Object.prototy
 // JSON escaping can exceed the plain UTF-8 size; malformed UTF-16 must not be
 // silently replaced by a later encoder after the one-attempt fence is saved.
 const assistantOwnerReplyText=value=>typeof value==='string'&&value.trim().length>0
-  &&value.length<=4096&&value.isWellFormed()&&Buffer.byteLength(JSON.stringify({text:value}),'utf8')<=16384;
+  &&value.length<=4096&&!value.includes('\0')&&value.isWellFormed()&&Buffer.byteLength(JSON.stringify({text:value}),'utf8')<=16384;
 const revision = value => {
   if (!Number.isSafeInteger(value) || value < 0) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); return value;
 };
@@ -1129,7 +1129,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   // An intake may compose only this shared READ cell (or privacy metadata
   // preflight). It never inherits the task profile's skill/Secret/Run routes.
   if(ownerReadOrigin && (pass.intakeKind==='route_existing' || [sourceReads,encryptedTaskRead,sourceAttachment,
-    sourceWorkspaceFile,sourceRegistryDocument,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,
+    sourceRegistryDocument,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,
     secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup].some(Boolean)))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   // A native plan narrows this invocation to ONE prepared private grant.
   // Structural IDs alone do not authorize it: every HTTP request still repeats
@@ -1209,7 +1209,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       :await client.readTaskPass(locator,signal);
     if(live.state!=='leased'||live.threadId!==pass.threadId
       ||(ownerReadOrigin?live.kind==='route_existing'||live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
-        ||companyRead&&(!live.ownerPrivateRead||!live.readConfirmed)
+        ||(companyRead||plainSourceFile)&&(!live.ownerPrivateRead||!live.readConfirmed)
         :['passId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key]))
       || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     if(accountSetup)setupLeaseExpiresAt=setupLeaseExpiresAt?Math.min(setupLeaseExpiresAt,Date.parse(live.leaseExpiresAt)):Date.parse(live.leaseExpiresAt);
@@ -2474,6 +2474,20 @@ const sourceRouteEventIds=value=>{
   if(!Array.isArray(value)||value.length>100||new Set(value).size!==value.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return value.map(id);
 };
+const assistantReplyFileSelection=value=>{
+  if(!object(value)||Object.keys(value).sort().join(',')!=='workspaceHead,workspaceId'
+    ||!UUID.test(value.workspaceId??'')||!(/^[0-9a-f]{40,64}$/u).test(value.workspaceHead??''))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {workspaceId:value.workspaceId,workspaceHead:value.workspaceHead};
+};
+const assistantReplyDocument=(value,{send=false}={})=>{
+  if(!object(value)||Object.keys(value).sort().join(',')!==['fileName','sha256','sizeBytes','workspaceHead','workspaceId',...(send?['filePath']:[])].sort().join(',')
+    ||typeof value.fileName!=='string'||!value.fileName||Buffer.byteLength(value.fileName)>255
+    ||/[/\\\x00-\x1f]/u.test(value.fileName)||['.','..'].includes(value.fileName)
+    ||!Number.isSafeInteger(value.sizeBytes)||value.sizeBytes<0||value.sizeBytes>20*1024*1024
+    ||!(/^[0-9a-f]{64}$/u).test(value.sha256??'')||send&&!path.isAbsolute(value.filePath??''))fail('ASSISTANT_REPLY_FILE_UNAVAILABLE');
+  const selected=assistantReplyFileSelection({workspaceId:value.workspaceId,workspaceHead:value.workspaceHead});
+  return Object.freeze({...selected,fileName:value.fileName,sizeBytes:value.sizeBytes,sha256:value.sha256,...(send?{filePath:value.filePath}:{})});
+};
 const intakeProjection=(value,expected)=>{
   if(!object(value)||value.schemaVersion!==1||value.id!==expected.intakeId||value.sourceId!==expected.sourceId||value.companyId!==expected.companyId
     ||!['leased','ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied','reply_abandoned'].includes(value.state)||typeof value.readConfirmed!=='boolean'
@@ -2519,6 +2533,7 @@ const intakeProjection=(value,expected)=>{
     ...(value.readOnlyGenerationCorrectionProtocolVersion===1?{readOnlyGenerationCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyReplyDispatchCorrectionProtocolVersion===1?{readOnlyReplyDispatchCorrectionProtocolVersion:1}:{}),
     ...(recovery?{readOnlyRecovery:recovery}:{}),
+    ...(value.replyFile!==undefined?{replyFile:assistantReplyFileSelection(value.replyFile)}:{}),
     readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
     ...(value.redirect?{redirect:{sourceId:id(value.redirect.sourceId),companyId:id(value.redirect.companyId),sourceRevision:revision(value.redirect.sourceRevision)}}:{}),
@@ -2801,7 +2816,9 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     },
     async cancelSourceIntake(input,signal){const body=intakeLocator(input);return intakeProjection(await call('intakeCancel',body,signal),body);},
     async readSourceIntake(input,signal){
-      const body=intakeLocator(input);return intakeProjection(await call('intakeRead',body,signal),body);
+      if(input.verifyReplyFile!==undefined&&input.verifyReplyFile!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={...intakeLocator(input),...(input.verifyReplyFile===true?{verifyReplyFile:true}:{})};
+      return intakeProjection(await call('intakeRead',body,signal),body);
     },
     async endIntakeRuntime(input,signal){
       const value=await call('intakeEnd',{...intakeLocator(input),runtimeSessionId:id(input.runtimeSessionId)},signal);
@@ -3447,7 +3464,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if (["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(name) && value.isError !== true) return localOperation('attachment_read',()=>materializeAttachment({
           result: value, attachmentId: argumentsSnapshot.attachmentId,
           ...(name==='download_registry_document'?{registryDocument:argumentsSnapshot}:name==='download_knowledge_base_attachment'?{knowledgeAttachment:argumentsSnapshot}:{}),signal }));
-        if(presentationProfile==='company_context'&&name==='get_agent_workspace_file'&&value.isError!==true
+        if((presentationProfile==='company_context'||active?.kind==='source_intake')&&name==='get_agent_workspace_file'&&value.isError!==true
           &&value.structuredContent?.delivery==='local-file'){
           if(typeof materializeCompanyFile!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           return localOperation('company_file',()=>materializeCompanyFile({result:value,arguments:argumentsSnapshot,signal}));
@@ -3798,18 +3815,28 @@ export const materializeAssistantEncryptedCompanyContext = async ({origin,descri
     fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   if(Object.hasOwn(input,'localContextRead'))fail('ASSISTANT_MCP_INPUT_INVALID');
   await assertCurrent(signal);
-  let payload;
-  if(name==='get_agent_workspace_file'){
+  let payload,originalFileReceipt=null;
+  files??=await import('./trelio-workspace-files.mjs');
+  const selectedFile=name==='fetch'?files.workspaceFileLocatorFromResultId(input.id):null;
+  if(name==='get_agent_workspace_file'||selectedFile){
     // Original paths remain local. The SAME downloader first obtains the
     // source's fresh accepted snapshot, then matches this path against its
     // authenticated encrypted manifest before requesting one opaque file ID.
-    files??=await import('./trelio-workspace-files.mjs');
-    const receipt=await files.downloadAcceptedWorkspaceFile(origin,input,{signal});
+    // A search's pinned workspace-file ref is just another exact-file locator.
+    // Do not send it through whole-company mirror preparation: that unrelated
+    // snapshot may still be cold/failed even while this file is readable. This
+    // is not a fallback: no mirror lookup, alternate head or cached plaintext
+    // is attempted. Native per-request ACL/head/recipient checks remain fresh.
+    const receipt=await files.downloadAcceptedWorkspaceFile(origin,selectedFile??input,{signal});
+    originalFileReceipt=receipt;
     if(input.delivery!=='local-file'){
       const fs=await import('node:fs/promises');
       const bytes=await fs.readFile(receipt.localFilePath,{signal});
       try{
-        const text=files.workspaceFileSearchText(bytes);
+        // Larger/binary originals keep their authenticated private file receipt
+        // instead of overflowing the MCP envelope after a successful download.
+        // This budget limits inline delivery, not read access or source bytes.
+        const text=bytes.length<=256*1024?files.workspaceFileSearchText(bytes):null;
         payload=text||bytes.length===0?{...receipt,delivery:'text',text}:receipt;
       }finally{bytes.fill(0);}
     }else payload=receipt;
@@ -3820,9 +3847,16 @@ export const materializeAssistantEncryptedCompanyContext = async ({origin,descri
   signal?.throwIfAborted();await assertCurrent(signal);
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
   const {buildLocalTaskReadToolResult}=await import('./trelio-task-read-budget.mjs');
-  const result=compactLocalNativeMcpResult(name,['get_task','get_tasks','get_task_instruction_page'].includes(name)
-    ?buildLocalTaskReadToolResult(projectAssistantCompanySourceContext(payload))
-    :{structuredContent:projectAssistantCompanySourceContext(payload),content:[{type:'text',text:'Read the native source context from structuredContent. It does not replace pinned task authority.'}]},input);
+  const render=value=>compactLocalNativeMcpResult(name,['get_task','get_tasks','get_task_instruction_page'].includes(name)
+    ?buildLocalTaskReadToolResult(projectAssistantCompanySourceContext(value))
+    :{structuredContent:projectAssistantCompanySourceContext(value),content:[{type:'text',text:'Read the native source context from structuredContent. It does not replace pinned task authority.'}]},input);
+  let result=render(payload);
+  // The raw text limit is not a serialized envelope limit: quotes, backslashes
+  // and controls expand in JSON. Keep the SAME authenticated original receipt
+  // when inline presentation does not fit. This never rereads another source,
+  // changes its head, prepares a mirror, truncates text or enlarges the bound.
+  if(originalFileReceipt&&payload!==originalFileReceipt&&Buffer.byteLength(JSON.stringify(result))>512*1024)
+    result=render(originalFileReceipt);
   if(Buffer.byteLength(JSON.stringify(result))>512*1024)fail('ASSISTANT_COMPANY_READ_TOO_LARGE');
   return result;
 };
@@ -4398,28 +4432,39 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     const routing=intakeExecution?.kind==='route_existing';
     const replying=intakeExecution?.kind==='reply_owner',verifying=intakeExecution?.kind==='verify_owner_reply';
     if(accountSetup||sourceAcknowledgement||!['telegram-mtproto','email-imap-smtp','max-web'].includes(scope.skillId)||!object(sourceIntake)
-      ||Object.keys(sourceIntake).sort().join(',')!==['expectedRevision','intakeId','sourceId',...((replying||verifying)?['replyReceiptId']:[]),...(verifying?['replyVerificationMessageId']:[])].sort().join(',')||!object(intakeExecution)
-      ||Object.keys(intakeExecution).sort().join(',')!==['accountId','beforeInvoke','eventId','runtimeArguments','threadId',...(routing?['kind','eventIds']:replying?['kind','replyText']:verifying?['kind']:[])].sort().join(',')
+      ||Object.keys(sourceIntake).sort().join(',')!==['expectedRevision','intakeId','sourceId',...((replying||verifying)?['replyReceiptId',...(sourceIntake.replyProtocolVersion!==undefined?['replyProtocolVersion']:[])]:[]),...(verifying?['replyVerificationMessageId']:[])].sort().join(',')||!object(intakeExecution)
+      ||Object.keys(intakeExecution).sort().join(',')!==['accountId','beforeInvoke','eventId','runtimeArguments','threadId',...(routing?['kind','eventIds']:replying||verifying&&sourceIntake.replyProtocolVersion===2?['kind','replyText']:verifying?['kind']:[]),...(intakeExecution.replyDocument!==undefined?['replyDocument']:[])].sort().join(',')
       ||typeof intakeExecution.beforeInvoke!=='function'||!routing&&scope.skillId==='email-imap-smtp')fail('ASSISTANT_SOURCE_INVALID_INPUT');
     sourceIntake=Object.freeze({intakeId:id(sourceIntake.intakeId),sourceId:id(sourceIntake.sourceId),expectedRevision:revision(sourceIntake.expectedRevision),
-      ...((replying||verifying)?{replyReceiptId:id(sourceIntake.replyReceiptId)}:{}),
+      ...((replying||verifying)?{replyReceiptId:id(sourceIntake.replyReceiptId),...(sourceIntake.replyProtocolVersion!==undefined?{replyProtocolVersion:(()=>{if(sourceIntake.replyProtocolVersion!==2)fail('ASSISTANT_SOURCE_INVALID_INPUT');return 2;})()}:{} )}:{}),
       ...(verifying?{replyVerificationMessageId:(()=>{const value=sourceIntake.replyVerificationMessageId;if(!Number.isSafeInteger(value)||value<1||value>=2147483648)fail('ASSISTANT_SOURCE_INVALID_INPUT');return value;})()}:{} )});
     const args=intakeExecution.runtimeArguments;
+    const replyDocument=intakeExecution.replyDocument===undefined?null:assistantReplyDocument(intakeExecution.replyDocument,{send:replying});
+    if(replyDocument&&(!(replying||verifying)||sourceIntake.replyProtocolVersion!==2))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     if(replying&&(scope.skillId!=='telegram-mtproto'||!Array.isArray(args)||args.length!==12||args[0]!=='reply-reference'
       ||args[9]!=='--expected-owner-id'||args[10]!==args[2]||!/^[1-9]\d{0,18}$/u.test(args[10]??'')||args[11]!=='--confirm'
       ||!assistantOwnerReplyText(intakeExecution.replyText)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     // Reuse the original reference grammar; this closed wrapper adds only the
     // private owner target and literal confirmation. No provider selector,
     // body, file path or arbitrary argument comes from MCP tool input.
-    if(verifying&&(scope.skillId!=='telegram-mtproto'||!Array.isArray(args)||args.length!==5||args[0]!=='read'||args[1]!=='--chat'
-      ||!/^[1-9]\d{0,18}$/u.test(args[2]??'')||args[3]!=='--message-id'||args[4]!==String(sourceIntake.replyVerificationMessageId)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    if(verifying){
+      const rich=sourceIntake.replyProtocolVersion===2;
+      if(scope.skillId!=='telegram-mtproto'||!Array.isArray(args)||(rich
+        ?args.length!==14||args[0]!=='reply-reference'||args[9]!=='--expected-owner-id'||args[10]!==args[2]
+          ||args[11]!=='--confirm'||args[12]!=='--verify-message-id'||args[13]!==String(sourceIntake.replyVerificationMessageId)
+          ||!assistantOwnerReplyText(intakeExecution.replyText)
+          ||!parseAssistantSourceReadReference({skillId:scope.skillId,arguments:['read-reference',...args.slice(1,9)]})
+        :args.length!==5||args[0]!=='read'||args[1]!=='--chat'||args[3]!=='--message-id'||args[4]!==String(sourceIntake.replyVerificationMessageId))
+        ||!/^[1-9]\d{0,18}$/u.test(args[2]??''))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    }
     const parsed=verifying?null:parseAssistantSourceReadReference({skillId:scope.skillId,arguments:replying?['read-reference',...args.slice(1,9)]:args});
     if(!verifying&&(!parsed||parsed.accountId!==null))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     if(routing&&(!Array.isArray(intakeExecution.eventIds)||!intakeExecution.eventIds.length||intakeExecution.eventIds.length>100
       ||new Set(intakeExecution.eventIds).size!==intakeExecution.eventIds.length||intakeExecution.eventIds[0]!==intakeExecution.eventId))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     intakeExecution=Object.freeze({accountId:id(intakeExecution.accountId),eventId:id(intakeExecution.eventId),threadId:id(intakeExecution.threadId),
       ...(routing?{kind:'route_existing',eventIds:Object.freeze(intakeExecution.eventIds.map(id))}:{}),
-      ...(replying?{kind:'reply_owner',replyText:intakeExecution.replyText}:verifying?{kind:'verify_owner_reply'}:{}),
+      ...(replying?{kind:'reply_owner',replyText:intakeExecution.replyText}:verifying?{kind:'verify_owner_reply',...(sourceIntake.replyProtocolVersion===2?{replyText:intakeExecution.replyText}:{})}:{}),
+      ...(replyDocument?{replyDocument}:{}),
       runtimeArguments:Object.freeze([...args]),beforeInvoke:intakeExecution.beforeInvoke});
   }else if(intakeExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
@@ -4551,11 +4596,14 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       return {ownerIdentityId:intakeAdmission.ownerIdentityId,ownerExternalUserId:intakeAdmission.ownerExternalUserId};},
     async readSourceReplyInput(){
       await assertCurrent();
-      if(!intakeStarted||intakeExecution?.kind!=='reply_owner'||intakeAdmission?.kind!=='reply_owner')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      if(!intakeStarted||!['reply_owner','verify_owner_reply'].includes(intakeExecution?.kind)||intakeAdmission?.kind!==intakeExecution.kind||intakeExecution.kind==='verify_owner_reply'&&sourceIntake.replyProtocolVersion!==2)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       // This value exists only in the active signed host closure and child
       // stdin. Passive readers cannot obtain it; no body file/journal/env or
       // second process executor is introduced.
-      return Buffer.from(JSON.stringify({text:intakeExecution.replyText}),'utf8');
+      // Pending v1 sends may survive a host upgrade. Verification accepts the
+      // exact original literal body OR the exact native rich text/entities,
+      // never a different URL, upload, inferred absence or second send.
+      return assistantOwnerReplyInput(sourceIntake,intakeExecution);
     },
     async requireToken(requestOrigin){
       if(requestOrigin!==origin)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
@@ -4608,9 +4656,9 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(sourceIntake?(intakeExecution.kind==='reply_owner'?'telegram-owner-reply/v1':intakeExecution.kind==='verify_owner_reply'?'telegram-owner-reply-read/v1':scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
+        || admission.provider!==protocol.provider || admission.protocol!==(sourceIntake?(intakeExecution.kind==='reply_owner'?`telegram-owner-reply/v${sourceIntake.replyProtocolVersion??1}`:intakeExecution.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${sourceIntake.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
           ?(scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1'):setupCommand?interactiveProtocol:protocol.protocol)
-        || admission.command!==(sourceIntake?(intakeExecution.kind==='reply_owner'?'reply-reference':intakeExecution.kind==='verify_owner_reply'?'read':'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
+        || admission.command!==(sourceIntake?(intakeExecution.kind==='reply_owner'?'reply-reference':intakeExecution.kind==='verify_owner_reply'?(sourceIntake.replyProtocolVersion===2?'reply-reference':'read'):'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
@@ -4664,10 +4712,11 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       }else if(admission.acknowledgement!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(sourceIntake){
         const approved=admission.intake,routing=intakeExecution.kind==='route_existing',replying=intakeExecution.kind==='reply_owner',verifying=intakeExecution.kind==='verify_owner_reply';
-        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId',...(routing?['kind','eventIds']:['ownerExternalUserId','ownerIdentityId',...((replying||verifying)?['kind','receiptId']:[]),...(verifying?['verificationMessageId']:[])]),'schemaVersion','sourceId','sourceRevision','threadId',...(scope.skillId==='max-web'?['maxChatUrl',...(maxAccountDiscovery?['maxAccountDiscovery']:[])]:[])].sort().join(',')
+        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId',...(routing?['kind','eventIds']:['ownerExternalUserId','ownerIdentityId',...((replying||verifying)?['kind','receiptId']:[]),...(verifying?['verificationMessageId']:[])]),'schemaVersion','sourceId','sourceRevision','threadId',...(intakeExecution.replyDocument?['replyFile']:[]),...(scope.skillId==='max-web'?['maxChatUrl',...(maxAccountDiscovery?['maxAccountDiscovery']:[])]:[])].sort().join(',')
           ||approved.schemaVersion!==1||approved.intakeId!==sourceIntake.intakeId||approved.sourceId!==sourceIntake.sourceId
           ||approved.sourceRevision!==sourceIntake.expectedRevision||approved.localAccountId!==intakeExecution.accountId
           ||approved.eventId!==intakeExecution.eventId||approved.threadId!==intakeExecution.threadId
+          ||intakeExecution.replyDocument&&JSON.stringify(assistantReplyFileSelection(approved.replyFile))!==JSON.stringify({workspaceId:intakeExecution.replyDocument.workspaceId,workspaceHead:intakeExecution.replyDocument.workspaceHead})
           ||(replying||verifying)&&(approved.kind!==(verifying?'verify_owner_reply':'reply_owner')||approved.receiptId!==sourceIntake.replyReceiptId
             ||verifying&&approved.verificationMessageId!==sourceIntake.replyVerificationMessageId
             ||approved.ownerExternalUserId!==intakeExecution.runtimeArguments[2])
@@ -5443,8 +5492,27 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
  * original. Persist the local attempt at the common final-spawn boundary, and
  * persist a verified positive result BEFORE any fallible follow-up HTTP read.
  * A lost/invalid provider result never permits this method to be called again. */
-export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,source,reference,receiptId,replyText,beforeInvoke,onConfirmed,signal,sourcePackage=withAssistantSourcePackage})=>{
+/** One private wire codec for the signed process and the composed provider
+ * fixture. It projects host-owned file metadata only; selection/ACL/pass and
+ * one-use dispatch authority remain the surrounding native profile's job. */
+export const assistantOwnerReplyInput=(sourceIntake,intakeExecution)=>{
+  if(!assistantOwnerReplyText(intakeExecution.replyText))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  const bytes=Buffer.from(JSON.stringify({
+    ...(sourceIntake.replyProtocolVersion===2?{schemaVersion:2,format:'telegram-markdown'}:{}),
+    text:intakeExecution.replyText,...(intakeExecution.replyDocument?{document:Object.fromEntries(Object.entries(intakeExecution.replyDocument)
+      .filter(([key])=>!['workspaceId','workspaceHead'].includes(key)))}
+      :intakeExecution.kind==='verify_owner_reply'?{legacyPlainVerification:true}:{})}),'utf8');
+  // Validate the actual versioned pipe, including formatting/document keys.
+  // Production also calls this SAME codec before committing reply_pending;
+  // a plain-company path must not defer malformed UTF-16/NUL/escaped overflow
+  // until the provider starts. The later private process repeats this check.
+  if(bytes.length>16_384){bytes.fill(0);fail('ASSISTANT_SOURCE_INVALID_INPUT');}
+  return bytes;
+};
+
+export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,source,reference,receiptId,replyText,replyDocument=null,beforeInvoke,onConfirmed,signal,sourcePackage=withAssistantSourcePackage})=>{
   pass=validateAssistantActivePass(pass,identity);receiptId=id(receiptId);
+  replyDocument=replyDocument===null?null:assistantReplyDocument(replyDocument,{send:true});
   if(pass.kind!=='source_intake'||pass.intakeKind||source?.skillId!=='telegram-mtproto'
     ||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision
     ||source.state!=='active'||source.ownerTaskIntakeAllowed!==true||reference.eventId!==pass.eventId
@@ -5459,21 +5527,24 @@ export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,so
   const args=['reply-reference',...readArgs.slice(1),'--expected-owner-id',pieces[1],'--confirm'];
   const check=async()=>{
     if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_INTAKE_CHANGED');
-    const current=await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal);
+    const current=await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId,
+      ...(replyDocument?{verifyReplyFile:true}:{})},signal);
     if(current.state!=='reply_pending'||current.receiptId!==receiptId||current.ownerPrivateRead!==true
       ||current.threadId!==pass.threadId||current.eventId!==pass.eventId||current.sourceRevision!==pass.sourceRevision
       ||Date.parse(current.leaseExpiresAt)<=Date.now())fail('ASSISTANT_INTAKE_CHANGED');
+    if(replyDocument?JSON.stringify(assistantReplyFileSelection(current.replyFile))!==JSON.stringify({workspaceId:replyDocument.workspaceId,workspaceHead:replyDocument.workspaceHead})
+      :current.replyFile!==undefined)fail('ASSISTANT_INTAKE_CHANGED');
     const sources=await client.sourceAccounts(pass.companyId,signal);
     if(!sameAssistantSourceRegistration(source,sources.find(row=>row.id===source.id)))fail('ASSISTANT_INTAKE_CHANGED');
   };
   await check();
   const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
   return sourcePackage({identity,host,store,scope,signal,
-    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,replyReceiptId:receiptId},
+    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,replyReceiptId:receiptId,replyProtocolVersion:2},
     intakeExecution:{kind:'reply_owner',accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,
-      runtimeArguments:args,replyText,beforeInvoke:async()=>{await check();await beforeInvoke();}}},
+      runtimeArguments:args,replyText,...(replyDocument?{replyDocument}:{}),beforeInvoke:async()=>{await check();await beforeInvoke();}}},
   async({engine,profile,materialized,resolution,signal:combined})=>{
-    if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.14.0'))fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
+    if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.16.0'))fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
     const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection};
     const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
       executionContext,runtimeArguments:['reply-reference','--local-account',source.localAccountId,...args.slice(1)]});
@@ -5484,7 +5555,7 @@ export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,so
       timeoutMs:Math.min(60000,await profile.remainingMs()),signal:combined});
     let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');}
     if(result.exitCode!==0||!object(value)||Object.keys(value).sort().join(',')!=='automaticRetryAllowed,messageId,ok,protocol,reference,replyToMessageId,schemaVersion,sent'||value.ok!==true
-      ||value.schemaVersion!==1||value.protocol!=='telegram-owner-reply/v1'||value.sent!==true||value.automaticRetryAllowed!==false
+      ||value.schemaVersion!==2||value.protocol!=='telegram-owner-reply/v2'||value.sent!==true||value.automaticRetryAllowed!==false
       ||!object(value.reference)||Object.keys(value.reference).sort().join(',')!=='conversationKey,id,revision'
       ||['id','revision','conversationKey'].some(key=>value.reference[key]!==reference[key])
       ||value.replyToMessageId!==Number(pieces[2])||!Number.isSafeInteger(value.messageId)||value.messageId<1||value.messageId>=2147483648)
@@ -5500,7 +5571,7 @@ export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,so
  * its native reply header; only the original text from the completed Codex
  * tool call is compared in private memory. This function cannot send, invent
  * an ID, mark read, expose history to the model or turn absence into a retry. */
-export const verifyAssistantOwnerReply=async({identity,client,host,store,pass,source,reference,receiptId,replyText,candidateMessageId,signal})=>{
+export const verifyAssistantOwnerReply=async({identity,client,host,store,pass,source,reference,receiptId,replyText,candidateMessageId,signal,sourcePackage=withAssistantSourcePackage})=>{
   pass=validateAssistantActivePass(pass,identity);receiptId=id(receiptId);
   const pieces=reference.id?.split(':')??[];
   if(pass.kind!=='source_intake'||pass.intakeKind||source?.skillId!=='telegram-mtproto'||source.id!==pass.sourceId
@@ -5508,33 +5579,52 @@ export const verifyAssistantOwnerReply=async({identity,client,host,store,pass,so
     ||reference.eventId!==pass.eventId||pieces.length!==3||pieces[0]!=='message'||!/^[1-9]\d{0,18}$/u.test(pieces[1]??'')
     ||!assistantOwnerReplyText(replyText)||!Number.isSafeInteger(candidateMessageId)||candidateMessageId<=Number(pieces[2])||candidateMessageId>=2147483648)
     fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  let replyDocument=null;
   const check=async()=>{
     if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_INTAKE_CHANGED');
-    const current=await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal);
+    const locator={companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId};
+    let current=await client.readSourceIntake(locator,signal);
     if(current.state!=='reply_pending'||current.receiptId!==receiptId||current.ownerPrivateRead!==true||current.threadId!==pass.threadId
       ||current.eventId!==pass.eventId||current.sourceRevision!==pass.sourceRevision)fail('ASSISTANT_INTAKE_CHANGED');
+    if(current.replyFile!==undefined){
+      // SAME encrypted OS runtime record survives SessionEnd and is removed by
+      // normal final settlement. It contains document metadata, never a body,
+      // local path or new send authority; SQLite remains content-free.
+      const saved=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+      const metadata=saved?.ownerReplyDocument;
+      if(saved?.passId!==pass.passId||saved?.threadId!==pass.threadId||metadata?.receiptId!==receiptId)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+      replyDocument=assistantReplyDocument(metadata.document);
+      current=await client.readSourceIntake({...locator,verifyReplyFile:true},signal);
+      if(JSON.stringify(assistantReplyFileSelection(current.replyFile))!==JSON.stringify({workspaceId:replyDocument.workspaceId,workspaceHead:replyDocument.workspaceHead}))fail('ASSISTANT_INTAKE_CHANGED');
+    }else if(replyDocument!==null)fail('ASSISTANT_INTAKE_CHANGED');
     if(!sameAssistantSourceRegistration(source,(await client.sourceAccounts(pass.companyId,signal)).find(row=>row.id===source.id)))fail('ASSISTANT_INTAKE_CHANGED');
   };
   await check();const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
-  const args=['read','--chat',pieces[1],'--message-id',String(candidateMessageId)];
-  return withAssistantSourcePackage({identity,host,store,scope,signal,
-    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,replyReceiptId:receiptId,replyVerificationMessageId:candidateMessageId},
-    intakeExecution:{kind:'verify_owner_reply',accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,runtimeArguments:args,beforeInvoke:check}},
+  // A read-only signed-provider branch uses the SAME Markdown parser as send.
+  // The native v2 grant still binds this original, receipt, owner and one exact
+  // candidate. Its final flag cannot dispatch a provider write or upload.
+  const args=['reply-reference','--chat',pieces[1],'--message-id',pieces[2],
+    '--expected-revision',reference.revision,'--expected-conversation-key',reference.conversationKey,
+    '--expected-owner-id',pieces[1],'--confirm','--verify-message-id',String(candidateMessageId)];
+  return sourcePackage({identity,host,store,scope,signal,
+    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,replyReceiptId:receiptId,replyProtocolVersion:2,replyVerificationMessageId:candidateMessageId},
+    intakeExecution:{kind:'verify_owner_reply',accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,runtimeArguments:args,replyText,
+      ...(replyDocument?{replyDocument}:{}),beforeInvoke:check}},
   async({engine,profile,materialized,resolution,signal:combined})=>{
     const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection};
     const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
-      executionContext,runtimeArguments:['read','--local-account',source.localAccountId,...args.slice(1)]});
+      executionContext,runtimeArguments:['reply-reference','--local-account',source.localAccountId,...args.slice(1)]});
     if(selected.handled||selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
     executionContext.account=selected.account;
     const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,executionContext,
-      runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,
+      runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_reply',captureOutput:true,captureExitCode:true,
       timeoutMs:Math.min(60000,await profile.remainingMs()),signal:combined});
     let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');}
-    const message=value?.message,reply=message?.replyContext;
-    if(result.exitCode!==0||value?.ok!==true||String(value.chat?.id)!==pieces[1]
-      ||message?.id!==candidateMessageId||message.outgoing!==true||message.textTruncated!==false||message.hasMedia!==false
-      ||message.text!==replyText||reply?.messageId!==Number(pieces[2])||String(reply.chat?.id)!==pieces[1]
-      ||value.readState?.mode!=='history-only'||value.readState?.marksRead!==false) return null;
+    if(result.exitCode!==0||!object(value)||Object.keys(value).sort().join(',')!=='automaticRetryAllowed,messageId,ok,protocol,reference,replyToMessageId,schemaVersion,verified'
+      ||value.ok!==true||value.schemaVersion!==2||value.protocol!=='telegram-owner-reply-read/v2'||value.verified!==true
+      ||value.automaticRetryAllowed!==false||value.messageId!==candidateMessageId||value.replyToMessageId!==Number(pieces[2])
+      ||!object(value.reference)||Object.keys(value.reference).sort().join(',')!=='conversationKey,id,revision'
+      ||['id','revision','conversationKey'].some(key=>value.reference[key]!==reference[key]))return null;
     await check();return {receiptId,messageId:candidateMessageId};
   });
 };

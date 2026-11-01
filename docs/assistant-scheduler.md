@@ -1636,6 +1636,15 @@ container until local opening. Late authority/digest/AAD/epoch changes prevent
 private publication. All local originals retain the shared 24 MiB/one-hour
 owner-private file contract, not a promise of remote deletion or durable saving.
 
+An immutable `workspace-file:` reference passed to `fetch` is decoded by the
+same locator parser as mirror fetch, then opened by that exact file reader.
+It does not start/join a whole-company mirror or use an old local generation as
+permission. The source snapshot must still match the pinned accepted head;
+current ACL, selected encrypted manifest, AAD/digest and late recipient/pass
+checks remain mandatory. Changed heads or denied reads never trigger another
+source or a mirror fallback. Small UTF-8 originals may be returned inline;
+binary/large originals keep the same bounded private local-file receipt.
+
 Registry publication is narrower than Workspace access: exact registry/row UUID,
 row revision, document column/index select ONE pinned published file through the
 SAME native publication service. No Workspace snapshot/path/head/key or siblings
@@ -2858,8 +2867,29 @@ identifiers, counts, paths or native exceptions, and never permit a read retry. 
 context and the answer cites the verified native source in the original chat.
 Self-contained greetings/arithmetic need no company search. Clear direct
 work commands alone select `create_task`. The native one-attempt receipt, exact
-peer/revision/key and signed provider >=2.14.0 fence conversational sending.
-No model-selected recipient/account/file/schedule or human transport is accepted.
+peer/revision/key and signed provider >=2.16.0 fence native rich conversational
+sending. V2 private stdin uses the SAME Telethon Markdown parser for send and
+read-only text/entity verification; v1 literal compatibility is verify-only.
+No model-selected recipient/account/local-file/schedule or human transport is accepted.
+Optional replyFile names ONE exact accepted Workspace original. The production
+MCP preparer uses the SAME pinned file reader and fresh observed native proof
+while still LEASED, then adds its reserved capability. Native current head and
+BOTH assistant/owner ordinary ACL bind UUID/head to the immutable reply receipt.
+Prepare caption/private-input bounds before that commit in BOTH content modes,
+using the SAME actual versioned private-pipe codec. Malformed UTF-16, NUL and
+JSON-escaped overflow refuse while still LEASED; a raw character bound alone
+does not bound the wire. Native admission and
+the final spawn repeat selection/head/ACL; changed/denied reads never upload.
+The <=20MiB original and <=1024 UTF-16 caption are ONE forced-document effect.
+Persist verification metadata without local path in the SAME protected runtime
+slot before the existing SQLite send fence; SessionEnd retains it and final
+settlement removes it. Lost results verify actual native text/entities plus
+filename/size/streamed digest, without local file, upload or another send.
+The completed native-call witness preserves original text byte-for-byte,
+including legacy plain leading/trailing whitespace; it is never trimmed as an edit.
+The required question stand pins BOTH public runtime and provider source and
+uses real native PostgreSQL/HTTP/OS storage/crypto/SQLite with actual SDK parser
+and original bytes; only external Telegram and model choices are synthetic.
 Native positive settlement is a fixed device endpoint over the original receipt,
 not a new business action/approval; current device/source/owner ACL remains live.
 An expired intent whose send fence is independently absent may finish only as

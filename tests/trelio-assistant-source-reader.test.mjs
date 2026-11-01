@@ -64,7 +64,7 @@ const store={get:async slot=>{
 let setupFixture=null,ackFixture=null,intakeFixture=null,maxAccountFixture=false,sourceSelectionFixture=null;
 const baseAdmission=()=>{
   if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
-    protocol:intakeFixture.admission.kind==='reply_owner'?'telegram-owner-reply/v1':intakeFixture.admission.kind==='verify_owner_reply'?'telegram-owner-reply-read/v1':scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?'read':'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    protocol:intakeFixture.admission.kind==='reply_owner'?`telegram-owner-reply/v${intakeFixture.intent.replyProtocolVersion??1}`:intakeFixture.admission.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${intakeFixture.intent.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?(intakeFixture.intent.replyProtocolVersion===2?'reply-reference':'read'):'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
@@ -1764,7 +1764,7 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
  }
 });
 
-for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])for(const boundaryRace of dispatchUncertain?['none','capacity','abandon']:['none'])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted}, dispatchUncertain=${dispatchUncertain}, race=${boundaryRace})`,async t=>{
+for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])for(const boundaryRace of dispatchUncertain?['none','capacity','abandon']:['none'])for(const withDocument of dispatchUncertain?[false]:[false,true])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted}, dispatchUncertain=${dispatchUncertain}, race=${boundaryRace}, document=${withDocument})`,async t=>{
  const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
  scope.skillId='telegram-mtproto';
@@ -1796,17 +1796,24 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
  const reference={eventId,id:'message:123456:8',revision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
  const args=['reply-reference','--chat','123456','--message-id','8','--expected-revision',reference.revision,
    '--expected-conversation-key',reference.conversationKey,'--expected-owner-id','123456','--confirm'];
- intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,replyReceiptId:receiptId},admission:{schemaVersion:1,kind:'reply_owner',
+ intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,replyReceiptId:receiptId,replyProtocolVersion:2},admission:{schemaVersion:1,kind:'reply_owner',
    intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId,ownerExternalUserId:'123456'}};
- const dir=path.join(directory,`owner-private-reply-${encrypted}-${dispatchUncertain}-${boundaryRace}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
- const replyText='Здравствуйте! Уже проверяю';
- const positive={ok:true,schemaVersion:1,protocol:'telegram-owner-reply/v1',sent:true,automaticRetryAllowed:false,
+ const dir=path.join(directory,`owner-private-reply-${encrypted}-${dispatchUncertain}-${boundaryRace}-${withDocument}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
+ const replyText='📎 [Проверенный источник](https://example.invalid/current)';
+ const bytes=Buffer.from('SYNTHETIC ORIGINAL FILE\n📎'),workspaceId=randomUUID(),workspaceHead='a'.repeat(40);
+ const replyDocument=withDocument?{workspaceId,workspaceHead,filePath:path.join(dir,'original.md'),fileName:'original.md',
+  sizeBytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}:null;
+ if(replyDocument){await fs.writeFile(replyDocument.filePath,bytes);intakeFixture.admission.replyFile={workspaceId,workspaceHead};}
+ const privateInput={schemaVersion:2,format:'telegram-markdown',text:replyText,...(replyDocument?{document:Object.fromEntries(
+  Object.entries(replyDocument).filter(([key])=>!['workspaceId','workspaceHead'].includes(key)))}:{})};
+ const verificationInput={...privateInput,...(replyDocument?{document:Object.fromEntries(Object.entries(privateInput.document).filter(([key])=>key!=='filePath'))}:{legacyPlainVerification:true})};
+ const positive={ok:true,schemaVersion:2,protocol:'telegram-owner-reply/v2',sent:true,automaticRetryAllowed:false,
    reference:{id:reference.id,revision:reference.revision,conversationKey:reference.conversationKey},replyToMessageId:8,messageId:91};
  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
    assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});
    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
    assert.equal(process.env.CODEX_THREAD_ID,undefined);
-   const input=JSON.parse(fs.readFileSync(0,'utf8'));assert.deepEqual(input,${JSON.stringify({text:replyText})});
+   const input=JSON.parse(fs.readFileSync(0,'utf8'));assert.deepEqual(input,${JSON.stringify(privateInput)});
    assert.equal(Object.values(process.env).some(value=>value.includes(input.text)),false);
    fs.appendFileSync(${JSON.stringify(marker)},'sent;');process.stdout.write(${JSON.stringify(JSON.stringify(positive))});`);
  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',
@@ -1817,10 +1824,18 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
    io:{ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
  await catalogue.change({operation:'create',id:accountId,name:'Synthetic reply',expectedRevision:(await catalogue.list()).revision});
  let attempt=false,confirmed=null,state='reply_pending';
+ const runtimeRecords=new Map(),replyStore={
+  get:slot=>slot.kind==='runtime'?runtimeRecords.get(slot.id):selectedStore.get(slot),
+  put:async(slot,value)=>{if(slot.kind==='runtime')runtimeRecords.set(slot.id,structuredClone(value));else await selectedStore.put(slot,value);},
+  remove:async slot=>{assert.equal(slot.kind,'runtime');runtimeRecords.delete(slot.id);}};
  const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({id:intakeId,companyId,sourceId,taskId:null,readConfirmed:true,state,receiptId,ownerPrivateRead:true,threadId,eventId,
-   sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
- const input={identity,client,host:replyHost,store:selectedStore,pass,source,reference,receiptId,replyText,
-   beforeInvoke:async()=>{assert.equal(attempt,false,'a persisted attempt never dispatches twice');attempt=true;},
+   sourceRevision:0,...(replyDocument?{replyFile:{workspaceId,workspaceHead}}:{}),leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
+ const input={identity,client,host:replyHost,store:replyStore,pass,source,reference,receiptId,replyText,replyDocument,
+   beforeInvoke:async()=>{assert.equal(attempt,false,'a persisted attempt never dispatches twice');
+    if(replyDocument){const {filePath:_path,...document}=replyDocument;
+     await replyStore.put({origin,kind:'runtime',id:pass.passId},{schemaVersion:1,passId:pass.passId,threadId:pass.threadId,ownerReplyDocument:{receiptId,document}});
+     t.after(()=>replyStore.remove({origin,kind:'runtime',id:pass.passId}));}
+    attempt=true;},
    onConfirmed:async value=>{confirmed=value;}};
  if(encrypted){for(const mode of ['selection','recipient','missing']){setMode(mode);await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(attempt,false,'changed source/recipient refuses before send fence');}setMode('valid');}
  if(dispatchUncertain){
@@ -1883,19 +1898,24 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
  state='replied';await assert.rejects(replyAssistantOwnerIntake(input),/INTAKE_CHANGED/);
  state='reply_pending';
  intakeFixture.intent.replyVerificationMessageId=91;intakeFixture.admission.kind='verify_owner_reply';intakeFixture.admission.verificationMessageId=91;
- const verification={ok:true,chat:{id:123456,title:'Synthetic'},message:{id:91,outgoing:true,text:replyText,textTruncated:false,hasMedia:false,
-   replyContext:{messageId:8,chat:{id:123456}}},readState:{mode:'history-only',marksRead:false}};
+ if(replyDocument){
+  await fs.unlink(replyDocument.filePath);
+  const slot={origin,kind:'runtime',id:pass.passId};
+  await replyStore.put(slot,{...await replyStore.get(slot),ended:true});
+ }
+ const verification={ok:true,schemaVersion:2,protocol:'telegram-owner-reply-read/v2',verified:true,
+   automaticRetryAllowed:false,messageId:91,replyToMessageId:8,reference:positive.reference};
  const verificationOutput=path.join(dir,'verification.json');await fs.writeFile(verificationOutput,JSON.stringify(verification));
  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
-   assert.deepEqual(process.argv.slice(2),['read','--chat','123456','--message-id','91']);
-   assert.equal(fs.readFileSync(0,'utf8'),'');fs.appendFileSync(${JSON.stringify(marker)},'verified;');
+   assert.deepEqual(process.argv.slice(2),${JSON.stringify([...args,'--verify-message-id','91'])});
+   assert.deepEqual(JSON.parse(fs.readFileSync(0,'utf8')),${JSON.stringify(verificationInput)});fs.appendFileSync(${JSON.stringify(marker)},'verified;');
    process.stdout.write(fs.readFileSync(${JSON.stringify(verificationOutput)},'utf8'));`);
  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',
    sourceDirectory:dir,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
  assert.deepEqual(await verifyAssistantOwnerReply({...input,candidateMessageId:91}),{receiptId,messageId:91});
- for(const invalid of [{...verification,ok:false},{...verification,message:{...verification.message,outgoing:false}},
-   {...verification,message:{...verification.message,text:'different'}},{...verification,message:{...verification.message,replyContext:{messageId:9,chat:{id:123456}}}},
-   {...verification,message:{...verification.message,replyContext:{messageId:8,chat:{id:654321}}}},{...verification,chat:{id:654321}}]){
+ for(const invalid of [{...verification,ok:false},{...verification,verified:false},
+   {...verification,protocol:'telegram-owner-reply-read/v1'},{...verification,replyToMessageId:9},
+   {...verification,reference:{...verification.reference,id:'message:654321:8'}},{...verification,automaticRetryAllowed:true}]){
    await fs.writeFile(verificationOutput,JSON.stringify(invalid));assert.equal(await verifyAssistantOwnerReply({...input,candidateMessageId:91}),null);
  }
  const afterVerification=await fs.readFile(marker,'utf8');assert.equal(afterVerification.split('sent;').length-1,1,'reconciliation never sends');

@@ -12,11 +12,12 @@ import {spawn} from 'node:child_process';
 import {PassThrough} from 'node:stream';
 import {EventEmitter} from 'node:events';
 import {openNativeCompanyScenario} from './native-context.mjs';
-import {questionProviderPackage} from './question-provider.mjs';
+import {questionProviderPackage,callQuestionTelegram} from './question-provider.mjs';
 import {openAssistantDatabase,resolveAssistantCompanyEncryptionDevice} from '../../../host-runtime/scripts/trelio-assistant-private.mjs';
 import {createAssistantInbox} from '../../../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import {buildRuntimeSessionProof} from '../../../host-runtime/scripts/trelio-runtime-session.mjs';
-import {readAssistantCodexDelivery} from '../../../host-runtime/scripts/trelio-assistant-codex.mjs';
+import {readAssistantCodexDelivery,readAssistantCodexOwnerReply} from '../../../host-runtime/scripts/trelio-assistant-codex.mjs';
+import {verifyAssistantOwnerReply} from '../../../host-runtime/scripts/trelio-assistant-transport.mjs';
 import {runAssistantSetupMcp,createForwardingAssistantMcp,createAssistantWorkspaceExecutor,
   requestCurrentAssistantRuntime,createAssistantRuntimeHost} from '../../../host-runtime/scripts/trelio-assistant-entry.mjs';
 
@@ -341,17 +342,56 @@ export const createQuestionSystemDriver=async configuration=>{
       assert.equal(await native.context(()=>native.host.readActivePass()),null);
       return {parent,current:await withInbox(inbox=>inbox.ownerIntake(original.id))};
     },
-    async settle({uncertain=false}={}){
+    async settle({uncertain=false,reconcileDocument=null}={}){
       // Restart the actual production host over the SAME SQLite and protected
       // pass. Only the external native turn is synthetic. The coordinator must
       // read the backend's positive receipt before its normal pass release;
       // this helper never edits a completion bit or removes a protected slot.
+      let reconcileNative={};
+      if(reconcileDocument){
+        const candidate=await callQuestionTelegram(configuration,{candidate:reconcileDocument.messageId});
+        // Candidate DATA came from the actual provider's native projection.
+        // Insert via the SAME passive journal API, not a guessed SQL candidate
+        // or a new incoming/model wake. Only this fixture poll clock advances.
+        historicalClock=Date.now()+300001;
+        try{await withInbox(inbox=>{
+          const scope={origin:identity.origin,assistantId:identity.assistantId,companyId:source.companyId,
+            provider:'telegram',accountId:source.localAccountId,bindingId:source.id};
+          inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'synthetic-outgoing',hasMore:false,
+            events:[{...candidate,taskId:null,wake:false,providerWake:false}]});
+          assert.deepEqual(inbox.ownerReplyCandidates(original.id),[reconcileDocument.messageId]);
+        });}finally{historicalClock=null;}
+        const selected=JSON.parse(await fs.readFile(path.join(root,'synthetic-prepared-file.json'),'utf8'));
+        assert.ok((await fs.realpath(selected.filePath)).startsWith(root+path.sep));
+        await fs.unlink(selected.filePath);
+        await native.context(async()=>{const slot={origin:identity.origin,kind:'runtime',id:pass.passId},saved=await native.store.get(slot);
+          assert.equal(saved.ownerReplyDocument.receiptId,reconcileDocument.receiptId);
+          assert.equal(saved.ownerReplyDocument.document.filePath,undefined);
+          await native.store.put(slot,{...saved,ended:true});});
+        const turns=[{id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',
+          text:`TRELIO_ASSISTANT_DELIVERY ${pass.deliveryId}\nSYNTHETIC_ORIGINAL`} ]},...structuredClone(modelCalls)]}];
+        const rpc=()=>{
+          const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};let buffer='';
+          child.stdin.on('data',chunk=>{buffer+=chunk;let at;while((at=buffer.indexOf('\n'))>=0){
+            const input=JSON.parse(buffer.slice(0,at));buffer=buffer.slice(at+1);if(!input.id)continue;
+            assert.ok(['initialize','thread/read'].includes(input.method));
+            const result=input.method==='initialize'?{}:{thread:{id:pass.threadId,cwd:root,turns}};
+            queueMicrotask(()=>child.stdout.write(JSON.stringify({id:input.id,result})+'\n'));
+          }});return child;
+        };
+        reconcileNative={readOwnerReply:(thread,delivery,intake,options)=>readAssistantCodexOwnerReply(thread,delivery,intake,
+          {...options,executable:process.execPath,environment:{},spawnProcess:rpc})};
+      }
       const host=await createAssistantRuntimeHost({context:native.context,dependencies:{configurationDirectory:directory,
+        ...(reconcileDocument?{verifyOwnerReply:(input,signal)=>native.context(()=>verifyAssistantOwnerReply({identity,client:native.client,
+          host:native.host,store:native.store,pass,source,signal,receiptId:input.outcome.receiptId,replyText:input.replyText,
+          candidateMessageId:input.candidateMessageId,reference:{...configuration.reference,eventId:pass.eventId},
+          sourcePackage:questionProviderPackage(configuration)}))}:{}),
         native:{provision:async()=>assert.fail('settlement cannot reprovision a chat'),
           run:async()=>assert.fail('settlement cannot start another model turn'),
           readDelivery:async(thread,marker)=>{
             assert.equal(thread,pass.threadId);assert.equal(marker,pass.deliveryId);
-            return {state:'completed',threadId:thread,turnId:randomUUID()};}},
+            return {state:'completed',threadId:thread,turnId:randomUUID()};},...reconcileNative},
         readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
         readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,
           deviceId:identity.deviceId,authorizedByUserId:configuration.ownerUserId,businessReady:true,

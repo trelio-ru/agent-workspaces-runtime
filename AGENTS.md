@@ -163,6 +163,13 @@ publication tooling также остаются вне этого публичн
   MCP auth provenance through an arguments adapter; provider errors do not.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
+  A selected `workspace-file:` fetch uses the SAME exact accepted-file reader
+  as get_agent_workspace_file, never a company-mirror prerequisite or fallback.
+  Keep its pinned head and late pass/recipient/ACL checks; oversized/binary
+  originals retain the private file receipt instead of overflowing inline MCP.
+  Measure the actual serialized envelope, including escaped text; a receipt
+  fallback keeps the SAME original and never rereads or enlarges the budget.
+  Exercise cold task and owner profiles plus changed-head/revoked-file refusal.
   Before pairing discovery не читает credential. Confirmed local device mismatch
   or fixed assistant native/MCP auth denial preserves exactly six public setup
   tools plus a closed diagnostic, never business authority or false readiness;
@@ -1050,8 +1057,10 @@ publication tooling также остаются вне этого публичн
   and schema16 attempt/positive receipts without task/Run. Lost provider results
   reconcile only through exact completed-call text + signed journal candidate +
   native read-only admission/header/peer/full-text checks, never another send.
-  Never replay unknown
-  sends or borrow task ACK. Native
+  Preserve original completed-call text without trimming. Validate the actual
+  versioned private-input envelope before native reply reservation in BOTH
+  content modes; malformed text must not consume an irreversible send intent.
+  Never replay unknown sends or borrow task ACK. Native
   incoming/original linked sender ID is separate from model command assessment.
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an

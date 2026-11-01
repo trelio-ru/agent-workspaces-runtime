@@ -443,16 +443,68 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
   // cross-repository synthetic stand replaces the external provider package).
   // No request/MCP field can select it. Native intake checks, the production
   // reply materializer and durable SQLite/provider fences still execute here.
-  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake}=await import('./trelio-assistant-transport.mjs');
+  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake,assistantOwnerReplyInput}=await import('./trelio-assistant-transport.mjs');
   return context(async(sourceClient,host,store)=>{
   const identity=sourceClient.identity;
   const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
-  return createAssistantMcpClient({ ...identity, store, presentationProfile,httpRequest,
+  let proxy;
+  const preparedReplyFiles=new WeakMap();
+  proxy=createAssistantMcpClient({ ...identity, store, presentationProfile,httpRequest,
     withWorkspaceArguments:async(request,send)=>{
       // Discovery has its own native read session from startup. Ordinary task
       // get_task retains its existing adapter; only the protected owner intake
       // selects other company reads implicitly. Names never select authority.
       const active=typeof host.readActivePass==='function'?await host.readActivePass():null;
+      if(request.name==='resolve_assistant_intake'&&request.args.decision==='reply_owner'){
+        // Plain and encrypted modes share the exact outgoing codec BEFORE
+        // native reservation or any file read. A refused body stays editable
+        // while LEASED; no half-committed intent or provider attempt is earned.
+        assistantOwnerReplyInput({replyProtocolVersion:2},{replyText:request.args.replyText}).fill(0);
+      }
+      if(request.name==='resolve_assistant_intake'&&request.args.decision==='reply_owner'&&request.args.replyFile!==undefined){
+        // Prepare through the SAME ordinary exact reader while still LEASED,
+        // before committing the irreversible reply intent. A missing/changed
+        // file therefore returns a read error, not a half-committed send.
+        if(active?.kind!=='source_intake'||active.intakeKind)fail('ASSISTANT_INTAKE_CHANGED');
+        // Bound raw UTF-16 before the native pending transition. Markdown
+        // removal can only reduce this budget; the provider independently
+        // checks its rendered caption. A model can shorten a refused caption
+        // while still LEASED, rather than acquiring an unknown send fence.
+        if(typeof request.args.replyText!=='string'||request.args.replyText.length>1024)fail('ASSISTANT_REPLY_CAPTION_TOO_LARGE');
+        const {validateWorkspaceFileLocator}=await import('./trelio-workspace-files.mjs');
+        const selected=validateWorkspaceFileLocator({...request.args.replyFile,filePath:request.args.replyFile.name});
+        // This nested native read is a different tool from the outer resolve.
+        // Mint its ordinary observed proof from the SAME protected runtime
+        // slot; copying resolve's proof would cross its tool binding/replay
+        // fence, and omitting the proof would fail before the exact reader.
+        const {buildRuntimeSessionProof,withRuntimeStateLock}=await import('./trelio-runtime-session.mjs');
+        const fileProof=await withRuntimeStateLock(path.join(directory,'runtime-locks',`${active.passId}.json`),async()=>{
+          const saved=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
+          if(saved?.passId!==active.passId||saved?.threadId!==active.threadId||saved.ended||!saved.state
+            ||JSON.stringify(await host.readActivePass())!==JSON.stringify(active))fail('ASSISTANT_INTAKE_CHANGED');
+          return buildRuntimeSessionProof({state:saved.state,toolName:'get_agent_workspace_file',now:new Date()});
+        });
+        const result=await proxy.callTool('get_agent_workspace_file',{...selected,delivery:'local-file',
+          intakePass:{companyId:active.companyId,sourceId:active.sourceId,intakeId:active.passId},runtimeSessionProof:fileProof},request.signal);
+        const file=result?.structuredContent;
+        if(result.isError||file?.delivery!=='local-file'||file.workspaceId!==selected.workspaceId
+          ||file.workspaceHead!==selected.workspaceHead||file.filePath!==selected.filePath
+          ||!path.isAbsolute(file.localFilePath??'')||!Number.isSafeInteger(file.sizeBytes)
+          ||file.sizeBytes<0||file.sizeBytes>20*1024*1024||!(/^[0-9a-f]{64}$/u).test(file.sha256??'')
+          ||typeof file.originalName!=='string'||file.originalName!==selected.filePath.split('/').at(-1)
+          ||Buffer.byteLength(file.originalName)>255||!Number.isFinite(Date.parse(file.expiresAt))
+          ||Date.parse(file.expiresAt)<=Date.now())fail('ASSISTANT_REPLY_FILE_UNAVAILABLE');
+        // Key by this immutable invocation object, not passId: two concurrent
+        // refused model calls cannot replace one another's file preparation.
+        // The native original CAS still permits at most one provider attempt.
+        let privatePath;try{privatePath=await fs.realpath(file.localFilePath);}catch{fail('ASSISTANT_REPLY_FILE_UNAVAILABLE');}
+        assistantOwnerReplyInput({replyProtocolVersion:2},{replyText:request.args.replyText,
+          replyDocument:{filePath:privatePath,fileName:file.originalName,sizeBytes:file.sizeBytes,sha256:file.sha256}}).fill(0);
+        preparedReplyFiles.set(request.args,{intakeId:active.passId,selection:selected,
+          document:{filePath:privatePath,fileName:file.originalName,sizeBytes:file.sizeBytes,sha256:file.sha256}});
+        request={...request,args:{...request.args,localContextRead:{schemaVersion:1,kind:'owner_reply_file',
+          workspaceId:selected.workspaceId,workspaceHead:selected.workspaceHead}}};
+      }
       return withAssistantEncryptedWorkspaceArguments(request,send,{withProfile,withManagedContent,
         companyContextRead:ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(request.name)||presentationProfile==='company_context'
           ||active?.kind==='source_intake'&&ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(request.name)});
@@ -529,11 +581,34 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       if(!assistantOwnerReplyAttemptReady(row)||row.thread_id!==pass.threadId||row.original_event_id!==pass.eventId
         ||row.scope.bindingId!==pass.sourceId||row.source_revision!==pass.sourceRevision)
         throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+      let replyDocument=null;
+      if(args.replyFile!==undefined){
+        const prepared=preparedReplyFiles.get(args);preparedReplyFiles.delete(args);
+        if(prepared?.intakeId!==pass.passId||prepared.selection.workspaceId!==admitted.replyFile?.workspaceId
+          ||prepared.selection.workspaceHead!==admitted.replyFile?.workspaceHead
+          ||prepared.selection.filePath!==args.replyFile.name)fail('ASSISTANT_REPLY_FILE_UNAVAILABLE');
+        replyDocument={workspaceId:prepared.selection.workspaceId,workspaceHead:prepared.selection.workspaceHead,...prepared.document};
+      }else if(admitted.replyFile!==undefined)fail('ASSISTANT_REPLY_FILE_UNAVAILABLE');
       const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(value=>value.id===pass.sourceId);
       await replyAssistantOwnerIntake({identity,client:sourceClient,host,store,pass,source,signal,sourcePackage,
-        receiptId:admitted.receiptId,replyText:args.replyText,
+        receiptId:admitted.receiptId,replyText:args.replyText,replyDocument,
         reference:{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key},
-        beforeInvoke:()=>withInbox(inbox=>inbox.startOwnerReply(pass.passId,admitted.receiptId)),
+        beforeInvoke:async()=>{
+          if(replyDocument){
+            const {withRuntimeStateLock}=await import('./trelio-runtime-session.mjs');
+            await withRuntimeStateLock(path.join(directory,'runtime-locks',`${pass.passId}.json`),async()=>{
+              const slot={origin:identity.origin,kind:'runtime',id:pass.passId};
+              const saved=await store.get(slot);
+              if(saved?.passId!==pass.passId||saved?.threadId!==pass.threadId||saved.ended)fail('ASSISTANT_INTAKE_CHANGED');
+              const {filePath:_privatePath,...document}=replyDocument;
+              // SAME encrypted OS record/key lifetime, no second outbox or
+              // SQLite content. Metadata proves only a later candidate read;
+              // the one-send SQLite fence below remains mandatory authority.
+              await store.put(slot,{...saved,ownerReplyDocument:{receiptId:admitted.receiptId,document}});
+            });
+          }
+          await withInbox(inbox=>inbox.startOwnerReply(pass.passId,admitted.receiptId));
+        },
         onConfirmed:positive=>withInbox(inbox=>inbox.confirmOwnerReply(pass.passId,positive))});
       // Positive provider evidence is already durable in SAME private SQLite.
       // A failed/lost confirmation is retried by coordinator as receipt-only
@@ -580,6 +655,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
     },{signal,...(registryDocument?{sourceRegistryDocument:result.structuredContent}:{sourceAttachment:presentationProfile==='company_context'?result.structuredContent:null})}),
     materializeCompanyFile: input => materializeProductionAssistantCompanyFile({...input,identity,withProfile}),
   });
+  return proxy;
   });
 };
 

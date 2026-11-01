@@ -8,7 +8,33 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {spawn} from 'node:child_process';
 import {isStableVersionAtLeast} from '../../../host-runtime/scripts/trelio-workspace.mjs';
+import {assistantOwnerReplyInput} from '../../../host-runtime/scripts/trelio-assistant-transport.mjs';
+
+/** Cross-repository TEST input, not a runtime/model executable override. The
+ * required private gate checks out immutable public provider bytes and owns a
+ * disposable SDK venv. Only its external Telegram client is replaced below. */
+export const callQuestionTelegram=async(configuration,input)=>{
+  assert.ok(path.isAbsolute(configuration.telegramPython));
+  assert.ok(path.isAbsolute(configuration.telegramProviderRoot));
+  const projected={root:configuration.root,companyId:configuration.companyId,identity:{assistantId:configuration.identity.assistantId},
+    source:{localAccountId:configuration.source.localAccountId},ownerExternalUserId:configuration.ownerExternalUserId,
+    originalText:configuration.originalText,telegramProviderRoot:configuration.telegramProviderRoot,
+    reference:configuration.reference,replyOrdinal:configuration.replyOrdinal,replyMessageOrdinal:configuration.replyMessageOrdinal};
+  return new Promise((resolve,reject)=>{
+    const child=spawn(configuration.telegramPython,[new URL('./question-telegram.py',import.meta.url).pathname],{
+      env:process.env,stdio:['pipe','pipe','ignore'],windowsHide:true});let stdout='',settled=false;
+    const timer=setTimeout(()=>child.kill('SIGKILL'),60000);
+    child.stdout.on('data',chunk=>{stdout+=chunk;if(Buffer.byteLength(stdout)>16_384)child.kill('SIGKILL');});
+    child.once('error',()=>{settled=true;clearTimeout(timer);reject(Error('Synthetic Telegram process startup failed'));});
+    child.once('close',code=>{clearTimeout(timer);if(settled)return;
+      if(code!==0)return reject(Error(`Synthetic Telegram process failed (${Number.isInteger(code)?code:'signal'})`));
+      try{resolve(JSON.parse(stdout));}catch{reject(Error('Synthetic Telegram result invalid'));}});
+    child.stdin.on('error',()=>{});
+    child.stdin.end(JSON.stringify({...input,configuration:projected}));
+  });
+};
 
 export const questionProviderPackage=configuration=>async(input,action)=>{
   assert.equal(configuration.schema,'trelio.test.company-context/v1');
@@ -48,21 +74,15 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
           readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}})};
       }
       assert.equal(captureMode,'assistant_source_reply');assert.equal(runtimeArguments[0],'reply-reference');
-      assert.equal(admission.kind,'reply_owner');assert.equal(admission.receiptId,input.sourceIntake.replyReceiptId);
-      const capture=path.join(configuration.root,'synthetic-provider-sends.jsonl');
-      const prior=await fs.readFile(capture,'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
-      const ordinal=configuration.replyOrdinal??1,rows=prior.trim()?prior.trim().split('\n').map(line=>JSON.parse(line)):[];
-      assert.equal(rows.length,ordinal-1,'each admitted reply may invoke the external provider exactly once');
-      assert.ok(!rows.some(row=>row.receiptId===admission.receiptId),'a known or unknown send is never replayed');
-      // Recorded historical positive rows are not fresh provider invocations.
-      // Keep the one-send counter strict while assigning a distinct new
-      // message ID after their already consumed IDs in recovery scenarios.
-      const messageId=900+(configuration.replyMessageOrdinal??ordinal);
-      await fs.writeFile(capture,prior+JSON.stringify({reference,receiptId:admission.receiptId,
-        text:input.intakeExecution.replyText,messageId})+'\n',{mode:0o600,flag:ordinal===1?'wx':'w'});
-      if(configuration.fault==='lost_send')throw Object.assign(Error('synthetic lost provider result'),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});
-      return {exitCode:0,stdout:JSON.stringify({schemaVersion:1,protocol:'telegram-owner-reply/v1',ok:true,sent:true,
-        automaticRetryAllowed:false,reference,replyToMessageId:Number(reference.id.split(':')[2]),messageId})};
+      assert.ok(['reply_owner','verify_owner_reply'].includes(admission.kind));assert.equal(admission.receiptId,input.sourceIntake.replyReceiptId);
+      assert.equal(input.sourceIntake.replyProtocolVersion,2);
+      if(input.intakeExecution.replyDocument?.filePath)await fs.writeFile(path.join(configuration.root,'synthetic-prepared-file.json'),
+        JSON.stringify({filePath:input.intakeExecution.replyDocument.filePath}),{mode:0o600});
+      const value=await callQuestionTelegram(configuration,{receiptId:admission.receiptId,
+        arguments:runtimeArguments.filter((value,index)=>index!==1&&index!==2),
+        privateInput:assistantOwnerReplyInput(input.sourceIntake,input.intakeExecution).toString('base64')});
+      if(configuration.fault==='lost_send'&&admission.kind==='reply_owner')throw Object.assign(Error('synthetic lost provider result'),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});
+      return {exitCode:0,stdout:JSON.stringify({ok:true,...value})};
     },
   };
   return action({engine,profile:{remainingMs:async()=>60000,readIntakeOwner:async()=>admission},

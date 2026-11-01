@@ -667,11 +667,12 @@ test('separate native hook trust survives main metadata changes but refuses miss
 test('owner reply recovery reads one completed exact native call, never invokes a model or accepts ambiguous history',async()=>{
  const threadId=randomUUID(),deliveryId=randomUUID(),pass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()};
  const original={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nprivate scope'}]},
-  {type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',arguments:{intakePass:pass,clientRequestId:pass.intakeId,decision:'reply_owner',replyText:'Synthetic answer'}}]};
+  {type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',arguments:{intakePass:pass,clientRequestId:pass.intakeId,decision:'reply_owner',replyText:'  Synthetic answer\n'}}]};
  let turns=[original];const spawnProcess=nativeRpc(request=>{
   assert.equal(request.method,'thread/read');return {result:{thread:{id:threadId,cwd:process.cwd(),...(request.params.includeTurns?{turns}:{})}}};});
  const options={executable:process.execPath,environment:{},spawnProcess};
- assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),'Synthetic answer');
+ assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),'  Synthetic answer\n',
+  'read-only reconciliation preserves the immutable original, including legacy plain whitespace');
  for(const changed of [{...original,status:'interrupted'},{...original,items:[...original.items,original.items[1]]},
   {...original,items:[original.items[0],{...original.items[1],arguments:{...original.items[1].arguments,intakePass:{...pass,sourceId:randomUUID()}}}]}]){
    turns=[changed];assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),null);
