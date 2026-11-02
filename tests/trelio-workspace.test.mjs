@@ -2952,6 +2952,7 @@ for (const recoverDirtyLegacy of [false, true]) test(`legacy layout migration ig
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-legacy-layout-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
+  const childEnvironment = workspaceFixtureEnvironment(homeDirectory);
   const workspaceId = "41414141-4141-4141-8141-414141414141";
   const legacyRunId = "42424242-4242-4242-8242-424242424242";
   const targetRunId = "43434343-4343-4343-8343-434343434343";
@@ -3115,7 +3116,7 @@ for (const recoverDirtyLegacy of [false, true]) test(`legacy layout migration ig
     const serverAddress = server.address();
     assert.ok(serverAddress && typeof serverAddress === "object");
     const origin = `http://127.0.0.1:${serverAddress.port}`;
-    await writeTestCredential(homeDirectory, origin);
+    await writeTestCredential(homeDirectory, origin, childEnvironment);
 
     const rootDirectory = path.join(homeDirectory, "Trelio Workspaces", workspaceId);
     const legacyRoot = path.join(rootDirectory, legacyRunId);
@@ -3156,7 +3157,7 @@ for (const recoverDirtyLegacy of [false, true]) test(`legacy layout migration ig
       cwd: temporaryDirectory,
       encoding: "utf8",
       timeout: legacyLayoutChildTimeoutMs,
-      env: { ...process.env, HOME: homeDirectory },
+      env: childEnvironment,
     };
     const readStructuredBridgeError = async () => {
       const error = await execFileAsync(process.execPath, command, executionOptions)

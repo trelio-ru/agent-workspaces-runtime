@@ -568,7 +568,7 @@ jobs:
         if: needs.ci-plan.outputs.profile == 'full'
         run: >-
           node --test
-          --test-name-pattern="clean lists|future Runs|blocker checkpoint"
+          --test-name-pattern="clean lists|future Runs|blocker checkpoint|legacy layout migration"
           tests/trelio-workspace.test.mjs
 
       - name: Run Windows path comparison regressions

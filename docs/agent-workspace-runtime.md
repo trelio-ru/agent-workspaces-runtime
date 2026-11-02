@@ -1848,6 +1848,9 @@ acceptance. Одного hash файла недостаточно для оце�
 полезность или разрешить конфликт содержания. Само открытие не означает
 сохранение. Исходный каталог не перемещается и не архивируется для разблокировки;
 согласие человека требуется только при содержательном конфликте.
+Real Git/HTTP fixtures проверяют clean sibling, automatic legacy recovery,
+повторное exact открытие и сохранность source в generic и Windows direct lanes;
+HOME/USERPROFILE/config изолированы, individual child deadlines не расширяются.
 
 Этот recovery code, его model-facing action contract и local MCP description
 принадлежат independently signed runtime/server contour. Ради их изменения
