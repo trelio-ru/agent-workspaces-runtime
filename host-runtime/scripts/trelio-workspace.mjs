@@ -12664,7 +12664,7 @@ const pathEntryExists = async (candidatePath) => {
 };
 
 export const resolveRegisteredWorkspaceRootDirectory = async (
-  { workspaceId, runId, origin, startDirectory = process.cwd() },
+  { workspaceId, runId, origin, startDirectory = process.cwd(), exactRunOnly = false },
   { readRegistry = readRunRegistry } = {},
 ) => {
   const candidates = [];
@@ -12714,7 +12714,7 @@ export const resolveRegisteredWorkspaceRootDirectory = async (
   const exactRunCandidates = runId
     ? candidates.filter((candidate) => candidate.runId === runId)
     : [];
-  const selectedCandidates = exactRunCandidates.length > 0
+  const selectedCandidates = exactRunOnly || exactRunCandidates.length > 0
     ? exactRunCandidates
     : candidates;
 
@@ -12812,6 +12812,17 @@ const resolveWorkspaceRootDirectory = async ({
     const legacyRunRoot = path.join(legacyPersistentRoot, runId);
     const legacyRunMetadata = await readOptionalRunMetadata(legacyRunRoot);
 
+    if (!legacyRunMetadata) {
+      // A legacy container has no current Run metadata of its own. Once the
+      // exact target has opened in recovery, prefer that SAME registered Run
+      // instead of rediscovering the untouched old delta on every open. Do not
+      // adopt another Run's root or silently choose between duplicate copies;
+      // both still go through the ordinary selector and native/Git preflight.
+      const recoveredRoot = await resolveRegisteredWorkspaceRootDirectory({
+        workspaceId, runId, origin, startDirectory, exactRunOnly: true,
+      });
+      if (recoveredRoot) return { rootDirectory: recoveredRoot, layout: "registered", workingFolderRoot: null };
+    }
     return {
       rootDirectory: legacyRunMetadata?.workspaceId === workspaceId
         && legacyRunMetadata?.runId === runId
@@ -13224,16 +13235,17 @@ const preflightWorkspaceDirectory = async ({
           changes: localChanges,
         });
       }
-      // An active or expired source may still own recoverable server work;
-      // its lifecycle needs a separate exact decision before another Run.
-      throw new WorkspaceLayoutMigrationBlockedError({
+      // A known unfinished source is a Run-lifecycle review, not an unknown
+      // directory whose owner must authorize archiving. Reuse the SAME exact
+      // recovery route as persistent roots: review its files/checkpoint under
+      // native ACL/claim/fencing, then continue the pending target. This does
+      // not cancel/take over a live worker or modify any source file here.
+      throw new WorkspaceRunReclaimRequiredError({
         workspaceId,
-        rootDirectory,
-        blockingEntries: [{
-          name: entry.name,
-          entryType: "directory",
-          reasonCode: "LEGACY_RUN_LOCAL_CHANGES",
-        }],
+        sourceRunId: legacyMetadata.runId,
+        targetRunId: requestedRunId,
+        reasonCode: materializedRunState.status === "expired"
+          ? "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW" : "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW",
       });
     }
   }

@@ -186,7 +186,7 @@ import {
   hpkeSeal,
   wrapAndRememberAgentEncryptionDevice,
 } from "../host-runtime/scripts/trelio-company-encryption.mjs";
-import { selectEncryptedProposalFilesFromManifest } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { handleTrelioWorkspaceActionOperation, selectEncryptedProposalFilesFromManifest } from "../host-runtime/scripts/trelio-local-context.mjs";
 import {
   buildSecretBrowserArguments,
   controlSecretBrowserViaDevTools,
@@ -2943,8 +2943,12 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
   }
 });
 
-test("legacy layout migration ignores only safe OS metadata and reports exact blockers", {
-  timeout: 35_000,
+// The recovery variant runs at most sixteen sequential real bridge children.
+// Budget their unchanged individual deadlines plus fixture setup/cleanup;
+// a slow Windows process start must not cancel valid later recovery evidence.
+const legacyLayoutChildTimeoutMs = 10_000;
+for (const recoverDirtyLegacy of [false, true]) test(`legacy layout migration ignores only safe OS metadata and reports exact blockers (${recoverDirtyLegacy ? "automatic recovery" : "clean sibling"})`, {
+  timeout: 16 * legacyLayoutChildTimeoutMs + 20_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-legacy-layout-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
@@ -2959,6 +2963,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
   const expiredActivityAt = new Date().toISOString();
   const expiredCheckpoint = { id: "49494949-4949-4949-8949-494949494949", runId: expiredRunId };
   let expiredRunKnown = true;
+  let expiredRunStatus = "expired";
   const targetExport = await createExportBundle(path.join(temporaryDirectory, "target"), {
     "WORKSPACE_CONTEXT.md": "# Migrated persistent workspace\n",
     "result.md": "new Run content\n",
@@ -3017,7 +3022,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
           runs: [
             serializeRun(legacyRunId, "accepted"),
             serializeRun(contextOnlyRunId, "running"),
-            { ...serializeRun(expiredRunId, "expired"), updatedAt: expiredActivityAt },
+            { ...serializeRun(expiredRunId, expiredRunStatus), updatedAt: expiredActivityAt },
             { ...serializeRun(expiredResidueRunId, "expired"), updatedAt: oldActivityAt },
           ],
           checkpoints: [],
@@ -3035,7 +3040,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
         }
         response.end(JSON.stringify({
           run: {
-            ...serializeRun(expiredRunId, "expired"),
+            ...serializeRun(expiredRunId, expiredRunStatus),
             workspaceId,
             updatedAt: expiredActivityAt,
           },
@@ -3150,7 +3155,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     const executionOptions = {
       cwd: temporaryDirectory,
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: legacyLayoutChildTimeoutMs,
       env: { ...process.env, HOME: homeDirectory },
     };
     const readStructuredBridgeError = async () => {
@@ -3258,12 +3263,21 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     expiredRunKnown = true;
     await writeFile(path.join(expiredWorkspaceDirectory, "unsaved.txt"), "local draft\n");
     const dirtyLegacyRun = await readStructuredBridgeError();
-    assert.equal(dirtyLegacyRun.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
-    assert.deepEqual(dirtyLegacyRun.details.blockingEntries, [{
-      name: expiredRunId,
-      entryType: "directory",
-      reasonCode: "LEGACY_RUN_LOCAL_CHANGES",
-    }]);
+    assert.equal(dirtyLegacyRun.code, "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED");
+    assert.equal(dirtyLegacyRun.details.runId, expiredRunId);
+    assert.equal(dirtyLegacyRun.details.targetRunId, targetRunId);
+    assert.equal(dirtyLegacyRun.details.reasonCode, "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW");
+    assert.equal(await readFile(path.join(expiredWorkspaceDirectory, "unsaved.txt"), "utf8"), "local draft\n");
+    for (const status of ["running", "waiting_for_human", "review"]) {
+      expiredRunStatus = status;
+      const unfinishedLegacy = await readStructuredBridgeError();
+      assert.equal(unfinishedLegacy.code, "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED");
+      assert.equal(unfinishedLegacy.details.runId, expiredRunId);
+      assert.equal(unfinishedLegacy.details.targetRunId, targetRunId);
+      assert.equal(unfinishedLegacy.details.reasonCode, "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW");
+      assert.equal(claimCount, 0, "lifecycle review never claims a live legacy Run");
+    }
+    expiredRunStatus = "expired";
     await rm(path.join(expiredWorkspaceDirectory, "unsaved.txt"));
     assert.equal(startCount, 0, "unsafe legacy state must fail before server start");
 
@@ -3308,16 +3322,33 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     assert.deepEqual(ignoredRecovery.details.changes, ["IGNORED\tnotes.tmp"]);
     await rm(path.join(legacyWorkspaceDirectory, "notes.tmp"));
 
-    // This legacy checkout is still a recent expired Run with a durable server
-    // checkpoint. It must remain intact while a distinct persistent checkout
-    // is created for the newly selected Run.
-    const opened = await execFileAsync(process.execPath, command, executionOptions);
-    assert.equal(opened.stdout.trim(), path.join(rootDirectory, "workspace"));
+    // Keep the original clean-sibling scenario as well as ordinary MCP recovery
+    // against the REAL bridge/Git/HTTP fixture. Neither may modify the old
+    // checkout or the recent expired sibling with its durable checkpoint.
+    const retainedDraft = path.join(legacyWorkspaceDirectory, "unsaved.txt");
+    if (recoverDirtyLegacy) await writeFile(retainedDraft, "local draft already saved elsewhere\n");
+    const opened = recoverDirtyLegacy ? await handleTrelioWorkspaceActionOperation(origin, {
+      schemaVersion: 1, operation: "open", parameters: { workspaceId, runId: targetRunId },
+      workingDirectory: temporaryDirectory,
+    }, {
+      runBridge: (requestOrigin, args, options) => execFileAsync(process.execPath,
+        [bridgePath, ...args, "--origin", requestOrigin], { ...executionOptions, ...options }),
+    }) : await execFileAsync(process.execPath, command, executionOptions);
+    const recoveredWorkspaceDirectory = path.join(recoverDirtyLegacy
+      ? terminalRecovery.details.suggestedDirectory : rootDirectory, "workspace");
+    assert.equal(opened.stdout.trim(), recoveredWorkspaceDirectory);
+    if (recoverDirtyLegacy) {
+      assert.equal(opened.recovery.sourceDirectory, legacyRoot);
+      assert.deepEqual(opened.recovery.changes, ["?? unsaved.txt"]);
+      assert.equal(await readFile(retainedDraft, "utf8"), "local draft already saved elsewhere\n");
+      assert.equal(await pathExists(path.join(rootDirectory, "workspace")), false);
+    }
+    assert.equal(await readFile(legacyMetadataPath, "utf8"), originalLegacyMetadata);
     assert.equal(startCount, 0, "an exact prepared Run must be claimed, not recreated");
     assert.equal(claimCount, 1);
     assert.equal((await stat(path.join(rootDirectory, ".DS_Store"))).size, 6 * 1024);
     assert.equal(
-      await readFile(path.join(rootDirectory, "workspace", "result.md"), "utf8"),
+      await readFile(path.join(recoveredWorkspaceDirectory, "result.md"), "utf8"),
       "new Run content\n",
     );
     assert.equal(await pathExists(legacyRoot), true, "legacy Run history must remain untouched");
@@ -3327,6 +3358,24 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     assert.equal(await readFile(path.join(expiredWorkspaceDirectory, "old.md"), "utf8"), "old clean result\n");
     assert.equal(await readFile(contextOnlyFile, "utf8"), "old read-only context\n");
     assert.equal(await readFile(expiredResidueFile, "utf8"), "retained read-only context\n");
+    if (recoverDirtyLegacy) {
+      let launches = 0;
+      const continued = await handleTrelioWorkspaceActionOperation(origin, {
+        schemaVersion: 1, operation: "open", parameters: { workspaceId, runId: targetRunId },
+        workingDirectory: temporaryDirectory,
+      }, {
+        runBridge: (requestOrigin, args, options) => {
+          launches++;
+          return execFileAsync(process.execPath, [bridgePath, ...args, "--origin", requestOrigin],
+            { ...executionOptions, ...options });
+        },
+      });
+      assert.equal(continued.stdout.trim(), recoveredWorkspaceDirectory);
+      assert.equal(continued.recovery, undefined, "the exact registered recovery is reused directly");
+      assert.equal(launches, 1, "retained legacy data must not trigger recovery on every open");
+      assert.equal(await readFile(retainedDraft, "utf8"), "local draft already saved elsewhere\n");
+      assert.equal(await readFile(legacyMetadataPath, "utf8"), originalLegacyMetadata);
+    }
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));

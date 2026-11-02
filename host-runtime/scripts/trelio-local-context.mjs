@@ -24,6 +24,7 @@ import {
   parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
+  workspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import {
   buildContextSearchPreview,
@@ -10952,22 +10953,51 @@ const executeTrelioWorkspaceActionOperation = async (
         )
       : null;
     if (openRecovery) {
-      // A trusted host may opt into the SAME exact local recovery route. This
-      // callback is not a model field and receives only the already parsed
-      // common envelope. It cannot select another path. Re-enter open ONCE
-      // with the original signal/Run/runtimeSession, after a positive recovery
-      // refusal; network/lease/unknown effects never enter this branch. The
-      // default human route still returns the envelope without doing anything.
-      if(typeof selectOpenRecovery==='function'&&await selectOpenRecovery(openRecovery)===true){
-        return executeTrelioWorkspaceActionOperation(origin,{...rawInput,
-          parameters:{...rawInput.parameters,directory:openRecovery.details.suggestedDirectory}},
-        {signal,runBridge,runHeartbeatManager,onProgress,folderOnboardingApply,resolveRunRootDirectory});
+      // LOCAL/DRAFT positively refuse replacement of the source tree, rather
+      // than reporting an ambiguous failed save. Their exact Run can open in
+      // its deterministic sibling without asking a human to move old files.
+      // Directory ambiguity, unknown/live old Runs and transport/ACL failures
+      // retain their original refusal. A trusted assistant profile additionally
+      // checks its private root through the existing host-only selector.
+      const recoverable = recoveryRunId && [
+        "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED", "TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED",
+      ].includes(openRecovery.code);
+      const details = openRecovery.details;
+      // Legacy envelopes derive the sibling from the Workspace container, not
+      // its old <workspaceId>/<sourceRunId> child. Accept only that exact shape
+      // or the ordinary source-based locator; never adopt an arbitrary path
+      // merely because a child printed a well-formed recovery envelope.
+      const recoverySources = recoverable ? [details.sourceDirectory] : [];
+      if (recoverable && openRecovery.code === "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED"
+        && path.basename(details.sourceDirectory).toLowerCase() === details.sourceRunId.toLowerCase()
+        && path.basename(path.dirname(details.sourceDirectory)).toLowerCase() === recoveryWorkspaceId.toLowerCase()) {
+        recoverySources.push(path.dirname(details.sourceDirectory));
       }
-      // Не повторяем open и не выбираем первый root за вызывающего агента.
-      // Structured recovery сохраняет exact пути без второй копии stderr. Для
-      // dirty terminal Run или same-Run draft divergence открываются отдельным
-      // повторным action; source root остаётся нетронутым до осознанного
-      // переноса файлов.
+      const automaticRecovery = selectOpenRecovery === undefined && recoverySources.some(source =>
+        sameLocalPath(details.suggestedDirectory, workspaceRecoveryDirectory(source, recoveryWorkspaceId, recoveryRunId)));
+      if (recoverable && (automaticRecovery
+        || typeof selectOpenRecovery === "function" && await selectOpenRecovery(openRecovery) === true)) {
+        const result = await executeTrelioWorkspaceActionOperation(origin, {
+          ...rawInput,
+          parameters: { ...rawInput.parameters, directory: details.suggestedDirectory },
+        }, {
+          signal, runBridge, runHeartbeatManager, onProgress, folderOnboardingApply, resolveRunRootDirectory,
+          // A second refusal must remain visible. It never earns another open,
+          // a fresh signal/deadline, a new Run or a replay of the pending save.
+          selectOpenRecovery: null,
+        });
+        if (!automaticRecovery) return result;
+        // Opening is not reconciliation or acceptance. Keep the bounded source
+        // evidence in the SAME response so the agent can compare all local
+        // material, skip verified duplicates and continue its authorized save.
+        return { ...result, recovery: {
+          code: openRecovery.code,
+          ...details,
+          nextAction: "Compare the source delta with the opened Run; copy useful compatible material and continue the authorized save. Leave the source directory untouched. Ask the human only about a substantive conflict; opening alone is not saving.",
+        } };
+      }
+      // Older/noncanonical envelopes remain actionable without silently
+      // selecting a path. No source file is moved, archived or removed here.
       throw new TrelioLocalContextError(
         openRecovery.code,
         openRecovery.message,
@@ -12377,7 +12407,7 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
 
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
-  description: "Copy action.arguments; TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED: reopen details.suggestedDirectory immediately and continue.",
+  description: "Copy action.arguments. Open recovers once; reconcile recovery and save without moving source. Ask only on semantic conflict.",
   inputSchema: {
     type: "object",
     additionalProperties: false,

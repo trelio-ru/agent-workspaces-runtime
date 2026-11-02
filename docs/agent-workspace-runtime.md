@@ -1371,9 +1371,11 @@ root действует прежняя строгая проверка его с
 дельта принятого или отменённого Run возвращает
 `TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED` с точным отдельным
 `suggestedDirectory`; агент сам сравнивает её с принятой версией и переносит
-нужные материалы, не перемещая старый каталог. Неизвестное серверное состояние,
-неуправляемая запись рядом с `workspace/` и дельта незавершённого Run остаются
-`TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED` с точным `reasonCode`. Остаток только с
+нужные материалы, не перемещая старый каталог. Дельта известного незавершённого
+Run получает `TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED` для exact lifecycle review
+перед продолжением target, без архивирования и автоматического takeover/cancel.
+Неизвестное серверное состояние и неуправляемая запись рядом с `workspace/`
+остаются `TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED` с точным `reasonCode`. Остаток только с
 read-only `context/` и подтверждённым Run также остаётся на месте и не
 блокирует другой Run независимо от его статуса.
 
@@ -1824,6 +1826,28 @@ source в retention-only, но лишь после fresh exact native read, по
 ordinary open: выбирается активный registered root с прежними ACL/Git guards.
 Посторонние duplicate roots остаются
 неоднозначными; ни возраст файла, ни максимальный fence не выбирают путь.
+
+Обычный local MCP `open` сам один раз открывает exact целевой Run в
+детерминированном `suggestedDirectory` после положительного LOCAL/DRAFT отказа
+заменить исходное дерево. Поддерживаются persistent root и terminal legacy
+`<workspaceId>/<sourceRunId>`; Workspace/Run/runtime session, cwd и исходный
+signal сохраняются. Другой код, произвольный suggested path, отсутствие exact
+target Run, unknown outcome или повторный отказ не разрешают автоматический
+retry. Callback цифрового ассистента сохраняет дополнительную private-root
+проверку; повторный `open` проходит прежние native ACL/claim/fencing и Git guards.
+Последующий exact `open` использует зарегистрированный recovery того же Run
+перед legacy container без своей metadata. Чужой Run не выбирается; duplicate
+exact copies по-прежнему требуют однозначного выбора.
+
+Успешный ответ содержит `recovery` с прежними bounded source/target locators,
+changed paths и следующим шагом. Агент сравнивает весь материал с открытой
+принятой версией/server draft, пропускает проверенные дубли, переносит только
+полезную совместимую дельту и продолжает исходное авторизованное сохранение до
+acceptance. Одного hash файла недостаточно для оценки всего каталога.
+Модель сохраняет смысловую оценку материалов; код не может определить их
+полезность или разрешить конфликт содержания. Само открытие не означает
+сохранение. Исходный каталог не перемещается и не архивируется для разблокировки;
+согласие человека требуется только при содержательном конфликте.
 
 Этот recovery code, его model-facing action contract и local MCP description
 принадлежат independently signed runtime/server contour. Ради их изменения

@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import {
   formatBridgeCommandError,
   resolveRegisteredWorkspaceRootDirectory,
@@ -172,6 +173,9 @@ test("directory recovery keeps ambiguity without choosing a root or exposing pri
 test("directory recovery prefers exact Run over another root's cwd and preserves legacy single-root reuse", async (t) => {
   const f = await fixture(t);
   assert.equal(await f.resolve({ runId: firstRun, startDirectory: f.second }), f.first);
+  assert.equal(await f.resolve({ runId: firstRun, exactRunOnly: true }), f.first);
+  assert.equal(await f.resolve({ runId: newRun, exactRunOnly: true }), null,
+    "an exact recovery lookup must never reuse another Run's registered root");
   f.roots.splice(1);
   assert.equal(await f.resolve(), f.first);
 });
@@ -355,7 +359,85 @@ test("local change recovery preserves bounded source evidence and an exact safe 
     assert.equal(Object.hasOwn(actual.details, "stderr"), false);
     return true;
   });
-  assert.equal(calls, 1, "recovery must not move files or retry open automatically");
+  assert.equal(calls, 1, "a noncanonical suggested path must not authorize automatic open");
+});
+
+test("ordinary open recovers terminal, legacy and same-Run drafts once and retains reconciliation evidence", async () => {
+  const sourceDirectory = path.resolve(os.tmpdir(), "owned recovery source");
+  const legacyContainer = path.resolve(os.tmpdir(), "Trelio Workspaces", workspaceId);
+  const legacySource = path.join(legacyContainer, firstRun);
+  const recoveries = [
+    ...["accepted", "cancelled"].map(sourceRunStatus => new WorkspaceLocalRecoveryRequiredError({
+      workspaceId, sourceRunId: firstRun, targetRunId: newRun, sourceRunStatus,
+      sourceDirectory, sourceWorkspaceDirectory: path.join(sourceDirectory, "workspace"),
+      suggestedDirectory: workspaceRecoveryDirectory(sourceDirectory, workspaceId, newRun),
+      lastSavedDraftHead: null, changes: ["?? saved-duplicate.md", "?? useful-local.md"],
+    })),
+    new WorkspaceLocalRecoveryRequiredError({
+      workspaceId, sourceRunId: firstRun, targetRunId: newRun, sourceRunStatus: "accepted",
+      sourceDirectory: legacySource, sourceWorkspaceDirectory: path.join(legacySource, "workspace"),
+      suggestedDirectory: workspaceRecoveryDirectory(legacyContainer, workspaceId, newRun),
+      lastSavedDraftHead: null, changes: ["?? useful-local.md"],
+    }),
+    new WorkspaceDraftRecoveryRequiredError({
+      workspaceId, runId: newRun, reasonCode: "DIVERGED_HISTORY",
+      sourceDirectory, sourceWorkspaceDirectory: path.join(sourceDirectory, "workspace"),
+      suggestedDirectory: workspaceRecoveryDirectory(sourceDirectory, workspaceId, newRun),
+      baseHead: "a".repeat(40), localHead: "b".repeat(40), serverDraftHead: "c".repeat(40),
+      changes: ["M WORKSPACE_CONTEXT.md"],
+    }),
+  ];
+  for (const recovery of recoveries) {
+    const input = { schemaVersion: 1, operation: "open", workingDirectory: sourceDirectory,
+      parameters: { workspaceId, runId: newRun, runtimeSessionId: secondRun } };
+    const originalInput = structuredClone(input);
+    const signal = new AbortController().signal;
+    const calls = [];
+    const result = await handleTrelioWorkspaceActionOperation(origin, input, {
+      signal,
+      runBridge: async (actualOrigin, args, options) => {
+        assert.equal(actualOrigin, origin);
+        assert.equal(options.signal, signal);
+        assert.equal(options.cwd, sourceDirectory);
+        calls.push(args);
+        if (calls.length === 1) throw Object.assign(new Error("positive source refusal"), {
+          stderr: "Ошибка: " + formatBridgeCommandError(recovery, "open"),
+        });
+        assert.equal(args[args.indexOf("--dir") + 1], recovery.details.suggestedDirectory);
+        assert.deepEqual(args.filter((_, index) => index !== args.indexOf("--dir")
+          && index !== args.indexOf("--dir") + 1), calls[0]);
+        return { stdout: path.join(recovery.details.suggestedDirectory, "workspace"), stderr: "" };
+      },
+    });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(input, originalInput);
+    assert.equal(result.operation, "open");
+    assert.deepEqual(result.recovery, {
+      code: recovery.code, ...recovery.details, nextAction: result.recovery.nextAction,
+    });
+    assert.match(result.recovery.nextAction, /continue the authorized save/u);
+    assert.match(result.recovery.nextAction, /only about a substantive conflict/u);
+    const delivered = await handleToolCall(origin, TRELIO_WORKSPACE_ACTION_TOOL.name, input, {
+      workspaceActionOperation: async () => result,
+    });
+    assert.deepEqual(JSON.parse(delivered.content[0].text), result,
+      "the actual MCP projection must deliver recovery evidence and the save instruction");
+
+    let repeated = 0;
+    await assert.rejects(handleTrelioWorkspaceActionOperation(origin, input, {
+      runBridge: async () => { repeated++; throw Object.assign(new Error("second refusal"), {
+        stderr: "Ошибка: " + formatBridgeCommandError(recovery, "open"),
+      }); },
+    }), { code: recovery.code });
+    assert.equal(repeated, 2, "the recovery cannot recursively reopen");
+
+    let failed = 0;
+    await assert.rejects(handleTrelioWorkspaceActionOperation(origin, input, {
+      runBridge: async () => { failed++; throw Object.assign(new Error("unknown open outcome"),
+        failed === 1 ? { stderr: "Ошибка: " + formatBridgeCommandError(recovery, "open") } : {}); },
+    }), { code: "TRELIO_WORKSPACE_ACTION_FAILED" });
+    assert.equal(failed, 2, "an unknown recovery-open outcome must never be retried");
+  }
 });
 
 test("trusted local recovery reopens only the common suggested root once with the original binding", async () => {
@@ -466,10 +548,10 @@ test("same-Run draft recovery preserves both histories and exposes one exact rec
     assert.equal(Object.hasOwn(actual.details, "stderr"), false);
     return true;
   });
-  assert.equal(calls, 1, "the host must leave exact recovery execution to the agent");
+  assert.equal(calls, 1, "noncanonical older envelopes remain available for explicit recovery");
   assert.match(
     TRELIO_WORKSPACE_ACTION_TOOL.description,
-    /Copy action\.arguments; TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED.*reopen details\.suggestedDirectory immediately and continue/u,
+    /Open recovers once.*save without moving source.*only on semantic conflict/u,
   );
 
   for (const mutate of [

@@ -598,6 +598,9 @@ publication tooling также остаются вне этого публичн
   unknown/ACL/crypto/stale ошибки не разрешают fallback или пропуск Workspace.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - Recovery roots имеют собственные 3 дня retention; sibling Runs не продлевают срок.
+  Human open автоматически открывает exact LOCAL/DRAFT recovery sibling один раз;
+  bounded evidence остаётся модели для сравнения и продолжения сохранения.
+  Старый каталог не архивируется; вопрос человеку – только о содержательном конфликте.
   Проверенный recovery source остаётся в retention-only индексе, не в выборе writable root.
   Read-only managed context удаляется общим no-follow helper только после всех guards;
   permissions skipped roots, symlink targets и Git objects не меняются.
