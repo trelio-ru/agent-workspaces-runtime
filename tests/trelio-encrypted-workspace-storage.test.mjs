@@ -341,26 +341,24 @@ test("429 respects Retry-After, uses bounded fallback and stops after eight retr
   }
 });
 
-test("HTTP retry and the single transport cooldown remain independent", async () => {
+test("eligible HTTP retry stops immediately at transport uncertainty without cooldown or replay", async () => {
   const waits = [];
   let attempts = 0;
   const network = new TypeError("fetch failed");
   await assert.rejects(withEncryptedWorkspaceRequestRetry(async () => {
     attempts++;
-    if (attempts === 1 || attempts === 3) throw new TrelioApiError(429, "rate limit", 2000);
+    if (attempts === 1) throw new TrelioApiError(429, "rate limit", 2000);
     throw network;
   }, {
     random: () => 0, report: () => {},
     waitForRetry: async (ms) => waits.push(ms),
-    waitForCooldown: async (ms) => waits.push(ms),
   }), (error) => error === network);
-  assert.equal(attempts, 4);
-  assert.deepEqual(waits, [2000, 600000, 2000]);
+  assert.equal(attempts, 2, "a lost result never starts a new transport attempt");
+  assert.deepEqual(waits, [2000], "only the explicit pre-execution rate limit may wait");
   for (const status of [401, 403, 409, 500, 503]) {
     const error = new TrelioApiError(status, "explicit HTTP error");
     await assert.rejects(withEncryptedWorkspaceRequestRetry(async () => { throw error; }, {
       waitForRetry: async () => assert.fail("not 429"),
-      waitForCooldown: async () => assert.fail("not a transport failure"),
     }), (caught) => caught === error);
   }
 });

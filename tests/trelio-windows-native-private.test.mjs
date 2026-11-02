@@ -15,6 +15,23 @@ import { createAssistantPrivateStore, resolveAssistantCompanyEncryptionDevice } 
 import { createEncryptedSearchFileCache } from '../host-runtime/scripts/trelio-local-context.mjs';
 
 const windows = {skip: process.platform !== 'win32'};
+// Installed-path fixtures need the selector's real static dependency closure.
+// Exercise that import on every OS too, so a new shared primitive cannot stay
+// unnoticed until the Windows-only CreateProcess assertion is finally reached.
+const selectorDependencies = ['trelio-hook-private-session.mjs','trelio-process-diagnostics.mjs','trelio-call-budget.mjs'];
+const copySelectorDependencies = async scripts => {
+  for (const name of selectorDependencies) {
+    await copyFile(fileURLToPath(new URL('../host-runtime/scripts/'+name,import.meta.url)),path.join(scripts,name));
+  }
+};
+test('isolated installed selector retains its complete module dependencies', async () => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'trelio-selector-modules-'));
+  try {
+    await copySelectorDependencies(root);
+    const installed=await import(pathToFileURL(path.join(root,'trelio-hook-private-session.mjs')).href);
+    assert.ok(installed.windowsPrivateWorkerOptions('arm64').executable.endsWith('trelio-private-process.exe'));
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
 test('managed company identity survives real CurrentUser DPAPI restart without plaintext key files', windows, async () => {
   const root=await mkdtemp(path.join(os.tmpdir(),'trelio-assistant-company-key-'));
   const identity={origin:'https://fixture.invalid',assistantId:crypto.randomUUID(),deviceId:crypto.randomUUID()};
@@ -332,9 +349,7 @@ test('native selector and ACL support installed paths beyond Win32 MAX_PATH', wi
     // Preserve the selector's reviewed module dependency too, as the signed
     // package builder does. A partial source copy cannot represent an actual
     // installed runtime and would fail module resolution before CreateProcess.
-    for (const name of ['trelio-hook-private-session.mjs','trelio-process-diagnostics.mjs']) {
-      await copyFile(fileURLToPath(new URL('../host-runtime/scripts/'+name,import.meta.url)),path.join(scripts,name));
-    }
+    await copySelectorDependencies(scripts);
     // Load the exact production selector at an installed-style long location.
     // Node fs success alone does not prove CreateProcess can execute that path.
     const installed=await import(pathToFileURL(modulePath).href);
