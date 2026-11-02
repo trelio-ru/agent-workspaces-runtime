@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
-import {queue, assertPush, recover} from './git-coordinator.mjs';
+import {queue, assertPush, recover, status} from './git-coordinator.mjs';
 import {validateJobs, verifyHosted} from './git-hosted-ci.mjs';
 
 const source = fileURLToPath(new URL('.', import.meta.url));
@@ -28,12 +28,13 @@ function fixture(t) {
   command(main, 'config', 'user.name', 'Coordination fixture');
   command(main, 'config', 'user.email', 'fixture@example.invalid');
   fs.mkdirSync(path.join(main, 'scripts'));
-  for (const name of ['git-coordinator.mjs', 'assert-coordination.mjs']) fs.copyFileSync(path.join(source, name), path.join(main, 'scripts', name));
+  for (const name of ['git-coordinator.mjs', 'git-background.mjs', 'assert-coordination.mjs']) fs.copyFileSync(path.join(source, name), path.join(main, 'scripts', name));
   fs.writeFileSync(path.join(main, 'git-coordination.json'), JSON.stringify({schemaVersion: 1, repository: 'fixture/runtime',
     canonicalKey: 'trelio.canonicalMainWorktree', mainMutex: 'main.lock', verify: ['node', 'scripts/ci.mjs'], transport: ['node', 'scripts/push.mjs']}));
   fs.writeFileSync(path.join(main, 'scripts/ci.mjs'), `import fs from 'node:fs'; import {execFileSync} from 'node:child_process';
 const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim();
 fs.appendFileSync(${JSON.stringify(path.join(root, 'events'))},branch+'\\n');
+if(fs.existsSync(${JSON.stringify(path.join(root, 'fail'))}))throw Error('Synthetic executed CI failure');
 if(branch==='codex/one') while(!fs.existsSync(${JSON.stringify(path.join(root, 'release'))})) await new Promise(r=>setTimeout(r,30));\n`);
   fs.writeFileSync(path.join(main, 'scripts/push.mjs'), `import {assertPush} from './git-coordinator.mjs'; import {execFileSync} from 'node:child_process';
 const sha=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); const tag=process.argv[3]??''; assertPush(process.cwd(),sha,tag);
@@ -46,6 +47,9 @@ execFileSync('git',['-C',${JSON.stringify(main)},'merge','--ff-only',sha],{stdio
   t.after(async () => {
     // These are only process groups created by this synthetic fixture.
     for (const child of processes) { try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    for (const entry of queue(main)) {
+      try { process.kill(-entry.pgid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
     await delay(100); fs.rmSync(root, {recursive: true, force: true});
   });
   const branch = name => {
@@ -55,15 +59,70 @@ execFileSync('git',['-C',${JSON.stringify(main)},'merge','--ff-only',sha],{stdio
     command(cwd, 'add', '.'); command(cwd, 'commit', '-m', name);
     return cwd;
   };
-  const start = (cwd, ...args) => {
-    const child = spawn(process.execPath, [path.join(source, 'git-coordinator.mjs'), '--worker', ...args], {cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
+  const launch = (cwd, ...args) => {
+    const child = spawn(process.execPath, [path.join(source, 'git-coordinator.mjs'), ...args], {cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
     processes.push(child); let output = '';
     child.stdout.on('data', value => { output += value; }); child.stderr.on('data', value => { output += value; });
     const done = new Promise(resolve => child.on('close', code => resolve({code, output})));
     return {child, done};
   };
-  return {root, main, remote, branch, start, events: () => fs.existsSync(path.join(root, 'events')) ? fs.readFileSync(path.join(root, 'events'), 'utf8').trim().split('\n') : []};
+  return {root, main, remote, branch, launch, start: (cwd, ...args) => launch(cwd, '--worker', ...args),
+    events: () => fs.existsSync(path.join(root, 'events')) ? fs.readFileSync(path.join(root, 'events'), 'utf8').trim().split('\n') : []};
 }
+
+test('background admission detaches and concurrent callers reuse one owner through FIFO completion', async t => {
+  const f = fixture(t), one = f.branch('one'), two = f.branch('two');
+  const background = async cwd => {
+    const result = await f.launch(cwd, '--background').done;
+    assert.equal(result.code, 0, result.output); return JSON.parse(result.output);
+  };
+  const [first, duplicate] = await Promise.all([background(one), background(one)]);
+  assert.equal(first.id, duplicate.id); assert.equal(queue(one).length, 1);
+  await until(() => f.events().length === 1);
+  assert.equal(fs.statSync(first.logPath).mode & 0o777, 0o600);
+  const original = command(two, 'rev-parse', 'HEAD'), second = await background(two);
+  assert.equal(status(f.main, second.id).state, 'waiting');
+  fs.writeFileSync(path.join(f.root, 'release'), 'go');
+  await until(() => status(f.main, second.id).state === 'succeeded');
+  assert.deepEqual(f.events(), ['codex/one', 'codex/two']);
+  assert.equal(status(f.main, second.id).sourceSha, original);
+  assert.equal(status(f.main, second.id).sha, command(two, 'rev-parse', 'HEAD'));
+  assert.equal(status(f.main, first.id).outcome, 'integrated');
+  const observed = await f.launch(f.main, '--status', second.id).done;
+  assert.equal(JSON.parse(observed.output).state, 'succeeded');
+  assert.equal(status(f.main, '999999999999').state, 'unknown');
+});
+
+test('background failure retains a private terminal result without assuming ticket disappearance is success', async t => {
+  const f = fixture(t), cwd = f.branch('failure'), before = command(f.main, 'rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(f.root, 'fail'), 'fail CI');
+  const launched = await f.launch(cwd, '--background').done;
+  assert.equal(launched.code, 0, launched.output);
+  const {id} = JSON.parse(launched.output);
+  await until(() => status(f.main, id).state === 'failed');
+  assert.deepEqual(queue(cwd), []); assert.equal(command(f.main, 'rev-parse', 'HEAD'), before);
+  const file = path.join(f.main, '.git/trelio-git-coordination/results', id + '.json');
+  fs.chmodSync(file, 0o644); assert.throws(() => status(f.main, id), /Unsafe coordination/);
+  fs.chmodSync(file, 0o600);
+  const saved = fs.readFileSync(file); fs.writeFileSync(file, '{}');
+  assert.throws(() => status(f.main, id), /Invalid coordination result/); fs.writeFileSync(file, saved);
+});
+
+test('killed background owner stays fenced until exact dead-group recovery, without replacement', async t => {
+  const f = fixture(t), cwd = f.branch('one');
+  const launched = await f.launch(cwd, '--background').done;
+  assert.equal(launched.code, 0, launched.output);
+  const entry = JSON.parse(launched.output);
+  await until(() => f.events().length === 1);
+  process.kill(entry.pid, 'SIGKILL');
+  await until(() => status(cwd, entry.id).state === 'recovery_required');
+  await assert.rejects(recover(cwd, entry.id), /live owner/);
+  const duplicate = await f.launch(cwd, '--background').done;
+  assert.notEqual(duplicate.code, 0); assert.match(duplicate.output, /needs recovery/);
+  process.kill(-entry.pgid, 'SIGKILL'); await delay(100);
+  await recover(cwd, entry.id);
+  assert.equal(status(f.main, entry.id).state, 'recovered');
+});
 
 test('real linked worktrees serialize preparation/CI/push and rebase only after predecessor', async t => {
   const f = fixture(t), one = f.branch('one'), two = f.branch('two');

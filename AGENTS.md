@@ -981,6 +981,9 @@ publication tooling также остаются вне этого публичн
   Waiter ticket/process observation shares the same short mutex as predecessor removal; dead/unknown owners still refuse. A disappeared/replaced mutex is freshly reacquired after owner exit; unchanged dead claims are never stolen.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
+  При долгом ожидании использовать `git:integrate -- --background` и один
+  15-минутный heartbeat этого же чата по тому же контракту; без подтверждённого
+  admission и сохранённой автоматизации не обещать автоматическое продолжение.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требует full с четырьмя visual OS jobs; узкий профиль сохраняет Windows,
   ARM64, proof/signature/package и проверяется существующим native plan verifier.

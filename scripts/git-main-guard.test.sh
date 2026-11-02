@@ -63,6 +63,7 @@ cp "${PROJECT_ROOT}/scripts/git-finish-worktree.mjs" \
 cp "${PROJECT_ROOT}/scripts/push-main.sh" \
   "${CANONICAL_REPOSITORY}/scripts/push-main.sh"
 cp "${PROJECT_ROOT}/scripts/git-coordinator.mjs" "${CANONICAL_REPOSITORY}/scripts/git-coordinator.mjs"
+cp "${PROJECT_ROOT}/scripts/git-background.mjs" "${CANONICAL_REPOSITORY}/scripts/git-background.mjs"
 cp "${PROJECT_ROOT}/scripts/assert-coordination.mjs" "${CANONICAL_REPOSITORY}/scripts/assert-coordination.mjs"
 cat > "${CANONICAL_REPOSITORY}/git-coordination.json" <<'EOF'
 {"schemaVersion":1,"repository":"test/runtime","canonicalKey":"trelioAgentWorkspaces.canonicalMainWorktree","mainMutex":"trelio-agent-workspaces-runtime-main-update.lock","verify":["node","scripts/fixture-ci.mjs"],"transport":["bash","scripts/push-main.sh"]}

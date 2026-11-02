@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
+import {acknowledgeAdmission, launchBackground} from './git-background.mjs';
 
 const SHA = /^[a-f0-9]{40}$/u;
 const ID = /^\d{12}$/u;
@@ -90,6 +91,49 @@ export function queue(cwd, attempt = 0) {
   }
 }
 
+function resultPath(cwd, id, create = false) {
+  if (!ID.test(id)) throw Error('Status requires one exact ticket');
+  if (!fs.existsSync(root(cwd))) return path.join(root(cwd), 'results', id + '.json');
+  privatePath(root(cwd), true);
+  const directory = path.join(root(cwd), 'results');
+  if (create && !fs.existsSync(directory)) fs.mkdirSync(directory, {mode: 0o700});
+  if (fs.existsSync(directory)) privatePath(directory, true);
+  return path.join(directory, id + '.json');
+}
+function result(cwd, id) {
+  const filename = resultPath(cwd, id);
+  if (!fs.existsSync(filename)) return null;
+  privatePath(filename);
+  const value = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  if (value.schemaVersion !== 1 || value.id !== id || !SHA.test(value.sha ?? '') || !SHA.test(value.sourceSha ?? '')
+    || !['succeeded', 'failed', 'interrupted', 'recovered'].includes(value.state)
+    || typeof value.cwd !== 'string' || typeof value.branch !== 'string' || typeof value.tag !== 'string'
+    || !Number.isFinite(Date.parse(value.finishedAt))) throw Error('Invalid coordination result');
+  return value;
+}
+function settle(cwd, entry, observation) {
+  const filename = resultPath(cwd, entry.id, true);
+  if (fs.existsSync(filename)) throw Error('Coordination result already exists; inspect before recovery');
+  // Persist the outcome before releasing FIFO. A missing ticket, launcher exit
+  // or lost IPC message never stands in for successful guarded read-back.
+  save(filename, {...entry, ...observation, sourceSha: entry.sourceSha ?? entry.sha, finishedAt: new Date().toISOString()});
+}
+export function status(cwd, id) {
+  if (!ID.test(id)) throw Error('Status requires one exact ticket');
+  const rows = queue(cwd), index = rows.findIndex(row => row.id === id);
+  let value;
+  if (index >= 0) {
+    const entry = rows[index];
+    const live = local(entry) && inventory().some(row => row.pid === entry.pid && row.live);
+    value = {...entry, state: live ? entry.state : 'recovery_required', position: index + 1};
+  } else value = result(cwd, id) ?? {id, state: 'unknown'};
+  if (value.logFile !== undefined) {
+    if (!/^[a-f0-9]{32}\.log$/u.test(value.logFile)) throw Error('Invalid coordination log');
+    value.logPath = path.join(root(cwd), 'logs', value.logFile);
+  }
+  return value;
+}
+
 /** This is the SAME mutex used by existing worktree/transport shell helpers.
  * Keep it short, owner-compatible and never steal an unknown or dead lock.
  * CI is protected by the durable FIFO ticket, so worktree creation stays usable.
@@ -162,6 +206,7 @@ export async function recover(cwd, id) {
     if (!entry || !local(entry) || inventory().some(row => row.live && (row.pid === entry.pid || row.pgid === entry.pgid))) {
       throw Error('Cannot recover an unknown or live owner/process group');
     }
+    if (!result(cwd, id)) settle(cwd, entry, {state: 'recovered'});
     fs.unlinkSync(path.join(root(cwd), id + '.json'));
   });
 }
@@ -180,13 +225,14 @@ function run(command, args, cwd) {
  */
 export async function coordinate(cwd, tag = '', actions = {}) {
   const config = policy(cwd), initial = candidate(cwd);
+  if (actions.expected) candidate(cwd, actions.expected);
   if (tag && !/^(?:v|skill-[a-z0-9-]+-v|codex-hooks-source-v)\d+\.\d+\.\d+$/u.test(tag)) throw Error('Invalid immutable release tag');
   const canonical = fs.realpathSync(git(cwd, 'config', '--get', config.canonicalKey));
   if (common(canonical) !== common(cwd) || git(canonical, 'branch', '--show-current') !== 'main'
     || git(canonical, 'status', '--porcelain=v1', '-z', '--untracked-files=all')) throw Error('Canonical main must be configured and clean');
   const processRow = inventory().find(row => row.pid === process.pid);
   if (processRow?.pgid !== process.pid) throw Error('Coordinator must own its isolated process group');
-  let cancelled = false, entry;
+  let cancelled = false, entry, observation = {state: 'failed'};
   const stop = () => { if (!cancelled) { cancelled = true; process.kill(-process.pid, 'SIGTERM'); } };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   const command = actions.run ?? run;
@@ -198,11 +244,15 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       let next = 1;
       if (fs.existsSync(counter)) { privatePath(counter); next = JSON.parse(fs.readFileSync(counter, 'utf8')); }
       if (!Number.isSafeInteger(next) || next < 1 || next >= 1e12 || queue(cwd).some(row => +row.id >= next)) throw Error('Invalid FIFO sequence');
+      const duplicate = queue(cwd).find(row => row.cwd === fs.realpathSync(cwd) || row.branch === initial.branch);
+      if (duplicate) throw Object.assign(Error(`FIFO ${duplicate.id} already owns this task; inspect its status`), {code: 'INTEGRATION_ALREADY_QUEUED'});
       const row = {schemaVersion: 1, id: String(next).padStart(12, '0'), pid: process.pid, pgid: process.pid,
-        host: startHost, stableHost, cwd: fs.realpathSync(cwd), ...initial, tag, state: 'waiting'};
+        host: startHost, stableHost, cwd: fs.realpathSync(cwd), ...initial, sourceSha: initial.sha, tag, state: 'waiting',
+        createdAt: new Date().toISOString(), ...(actions.logFile ? {logFile: actions.logFile} : {})};
       save(counter, next + 1); save(path.join(root(cwd), row.id + '.json'), row); return row;
     }, () => cancelled);
     console.log(`FIFO ${entry.id}: ${entry.branch}${tag ? ' / ' + tag : ''}`);
+    await acknowledgeAdmission({id: entry.id});
     for (;;) {
       if (cancelled) throw Error('Coordination interrupted');
       // Normal completion removes a ticket under this same short mutex before
@@ -236,7 +286,8 @@ export async function coordinate(cwd, tag = '', actions = {}) {
     entry.sha = git(cwd, 'rev-parse', 'HEAD'); save(path.join(root(cwd), entry.id + '.json'), entry);
     candidate(cwd, entry);
     if (!tag && entry.sha === git(cwd, 'rev-parse', 'refs/remotes/origin/main')) {
-      await command('git', ['merge', '--ff-only', entry.sha], canonical); return;
+      await command('git', ['merge', '--ff-only', entry.sha], canonical);
+      observation = {state: 'succeeded', outcome: 'already_integrated'}; return;
     }
     await command('git', ['push', `--force-with-lease=${remoteRef}:${remoteSha}`, 'origin', `HEAD:${remoteRef}`], cwd);
     await command(config.verify[0], [...config.verify.slice(1), '--prepare', entry.sha], cwd);
@@ -251,6 +302,10 @@ export async function coordinate(cwd, tag = '', actions = {}) {
     assertPush(cwd, entry.sha, tag);
     await command(config.transport[0], [...config.transport.slice(1), ...(tag ? ['--tag', tag] : [])], cwd);
     console.log(`FIFO ${entry.id} complete; finish this worktree from canonical main`);
+    observation = {state: 'succeeded', outcome: 'integrated'};
+  } catch (error) {
+    observation = {state: cancelled ? 'interrupted' : 'failed', error: error.message.slice(0, 2000)};
+    throw error;
   } finally {
     if (entry) {
       const deadline = Date.now() + 30_000;
@@ -261,23 +316,64 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       await mutex(cwd, config, () => {
         const current = queue(cwd).find(row => row.id === entry.id);
         if (current && (current.pid !== process.pid || !local(current))) throw Error('Cannot remove another ticket');
-        if (current) fs.unlinkSync(path.join(root(cwd), entry.id + '.json'));
+        if (current) { settle(cwd, entry, observation); fs.unlinkSync(path.join(root(cwd), entry.id + '.json')); }
       });
     }
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
 }
 
+function reusable(cwd, tag, identity) {
+  const entry = queue(cwd).find(row => row.cwd === cwd);
+  if (!entry) return null;
+  if (entry.branch !== identity.branch || entry.tag !== tag || entry.sha !== identity.sha && entry.sourceSha !== identity.sha) {
+    throw Error(`FIFO ${entry.id} owns another candidate; inspect before retrying`);
+  }
+  const value = status(cwd, entry.id);
+  if (value.state === 'recovery_required') throw Error(`FIFO ${entry.id} needs recovery; no replacement was started`);
+  return value;
+}
+async function background(cwd, tag) {
+  // Reattachment precedes clean-tree checks: the worker may be rebasing now.
+  const identity = {branch: git(cwd, 'symbolic-ref', '--short', 'HEAD'), sha: git(cwd, 'rev-parse', 'HEAD')};
+  const existing = reusable(cwd, tag, identity);
+  if (existing) return existing;
+  candidate(cwd); policy(cwd);
+  if (!fs.existsSync(root(cwd))) {
+    try { fs.mkdirSync(root(cwd), {mode: 0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  }
+  return launchBackground({cwd, script: fileURLToPath(import.meta.url), ...identity,
+    tagArguments: tag ? ['--tag', tag] : [], logDirectory: path.join(root(cwd), 'logs'),
+    observe: message => {
+      const value = message?.duplicate ? reusable(cwd, tag, identity) : status(cwd, message?.id);
+      if (!value || value.state === 'unknown') throw Error('No durable coordination admission was found');
+      return value;
+    }});
+}
+
 export async function main(args = process.argv.slice(2)) {
   const cwd = fs.realpathSync(process.cwd());
   if (args[0] === '--assert-push' && args.length >= 2 && args.length <= 3) return assertPush(cwd, args[1], args[2]);
   if (args[0] === '--status' && args.length === 1) return console.log(JSON.stringify(queue(cwd), null, 2));
+  if (args[0] === '--status' && args.length === 2) return console.log(JSON.stringify(status(cwd, args[1])));
   if (args[0] === '--recover' && args.length === 2) return recover(cwd, args[1]);
-  const worker = args[0] === '--worker';
-  if (worker) args = args.slice(1);
-  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--tag TAG | --status | --recover TICKET]');
+  const worker = args[0] === '--worker', backgroundWorker = args[0] === '--background-worker', detached = args[0] === '--background';
+  const expected = backgroundWorker ? {logFile: args[1], sha: args[2], branch: args[3]} : null;
+  if (backgroundWorker && (!/^[a-f0-9]{32}\.log$/u.test(expected.logFile ?? '') || !SHA.test(expected.sha ?? '')
+    || !/^codex\/[a-z0-9][a-z0-9._-]*$/u.test(expected.branch ?? ''))) throw Error('Invalid background worker identity');
+  if (backgroundWorker) args = args.slice(4);
+  else if (worker || detached) args = args.slice(1);
+  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--background] [--tag TAG] | --status [TICKET] | --recover TICKET');
   if (!['darwin', 'linux'].includes(process.platform) || Number(process.versions.node.split('.')[0]) < 22) throw Error('Coordinator requires native Linux/macOS and Node >=22');
   if (worker) return coordinate(cwd, args[1] ?? '');
+  if (backgroundWorker) {
+    try { return await coordinate(cwd, args[1] ?? '', {expected, logFile: expected.logFile}); }
+    catch (error) {
+      await acknowledgeAdmission(error.code === 'INTEGRATION_ALREADY_QUEUED' ? {duplicate: true} : {error: error.message});
+      throw error;
+    }
+  }
+  if (detached) return console.log(JSON.stringify(await background(cwd, args[1] ?? '')));
   // Each worker owns an observable group, including all ordinary Git/gh children.
   // A SIGKILL keeps its ticket until exact dead-group recovery is established.
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--worker', ...args], {cwd, stdio: 'inherit', detached: true});

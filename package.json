@@ -24,11 +24,13 @@
   },
   "files": [
     "scripts/git-coordinator.mjs",
-    "scripts/git-hosted-ci.mjs"
+    "scripts/git-hosted-ci.mjs",
+    "scripts/git-background.mjs"
   ],
   "exports": {
     "./coordinator": "./scripts/git-coordinator.mjs",
-    "./hosted-ci": "./scripts/git-hosted-ci.mjs"
+    "./hosted-ci": "./scripts/git-hosted-ci.mjs",
+    "./background": "./scripts/git-background.mjs"
   },
   "version": "0.0.0"
 }
