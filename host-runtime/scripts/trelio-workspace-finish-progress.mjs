@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { outsideTrelioCallBudget } from "./trelio-call-budget.mjs";
 
 const PREFIX = "TRELIO_FINISH_PROGRESS ";
 const STAGES = new Set([
@@ -138,14 +139,14 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       // Register synchronously before the first await: simultaneous finish
       // requests must share one execution even before child spawn completes.
       entries.set(key, entry);
-      entry.done = Promise.resolve().then(() => execute((progress) => {
+      entry.done = outsideTrelioCallBudget(() => Promise.resolve().then(() => execute((progress) => {
         const safe = normalizeFinishProgress(progress);
         if (safe) entry.progress = { ...safe, updatedAt: new Date().toISOString() };
       })).then((result) => {
         entry.state = "completed"; entry.result = result; entry.endedAt = Date.now();
       }, (error) => {
         entry.state = "failed"; entry.error = error; entry.endedAt = Date.now();
-      });
+      }));
       return wait(entry, signal);
     },
     async poll(key, id, signal, scope) {

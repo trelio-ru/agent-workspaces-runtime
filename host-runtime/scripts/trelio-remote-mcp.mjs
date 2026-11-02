@@ -17,6 +17,7 @@ import { isDeepStrictEqual } from "node:util";
 import { prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
 import { recoverSelectedContinuation, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import { withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
+import { TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, withTrelioCallBudget } from "./trelio-call-budget.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
 import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
@@ -6469,6 +6470,7 @@ const safeErrorPayload = (error) => {
   // as the child bridge adapter does; never spread Error/cause/details here.
   // This is serialization only: neither a read nor a mutation is retried.
   if (error instanceof BridgeTransportError) return error.toJSON();
+  if (error instanceof TrelioCallTimeoutError) return error.toJSON();
   if (error instanceof RuntimeProofPreparationError) return error.toJSON();
   return {
     code: error instanceof RemoteMcpHostError
@@ -6498,6 +6500,7 @@ export const handleLocalMcpMessage = async (
   {
     origin = normalizeOrigin(process.env.TRELIO_ORIGIN || DEFAULT_ORIGIN),
     callTool = handleToolCall,
+    toolCallBudgetMs = TRELIO_CALL_BUDGET_MS,
     readResource = readLocalProposalAppResource,
     proposalProviderSelectionRecorder = persistLocalProposalProviderSelection,
     proposalCapabilityConfigDirectory,
@@ -6599,10 +6602,41 @@ export const handleLocalMcpMessage = async (
   }
   if (message.method === "tools/call") {
     try {
-      const result = deliverLocalMcpResult(await callTool(
-          origin, String(message.params?.name || ""), message.params?.arguments,
-          { signal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, requestClient, codexLegacyMcpMigration },
-      ), textCompatibility, message.params?.name === "continue_trelio_local_action"
+      let delegated = false;
+      const execute = async (callSignal) => {
+        try {
+          return await callTool(origin, String(message.params?.name || ""), message.params?.arguments,
+            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, requestClient, codexLegacyMcpMigration });
+        } catch (error) {
+          // A verified pre-dispatch upgrade is the only safe automatic replay.
+          // Recovery spends this SAME call budget; a stalled update must not
+          // turn a timed-out ordinary call into a late delegated mutation.
+          if (runtimeUpgradeRecovery && isHostRuntimeUpgradeRequiredError(error)) {
+            try {
+              if (await runtimeUpgradeRecovery(error, message, callSignal)) { delegated = true; return null; }
+            } catch (recoveryError) {
+              if (recoveryError instanceof HostRuntimeRecoveryError) recoveryError.details.originalCode = error.code;
+              throw recoveryError;
+            }
+          }
+          throw error;
+        }
+      };
+      // Human forms/consent and signed provider commands already own their
+      // explicit lifetimes. Do not terminate a person reviewing a write after
+      // one minute. Their Trelio HTTP requests still use the common 60s bound.
+      // Only closed existing routes qualify; arbitrary nativeTool/input fields
+      // cannot opt an ordinary company read or mutation out of its budget.
+      const name = message.params?.name;
+      const args = message.params?.arguments;
+      const workspace = name === TRELIO_WORKSPACE_ACTION_TOOL.name ? args
+        : name === TRELIO_LOCAL_ACTION_TOOL.name && args?.route === "workspace" ? args.parameters : null;
+      const ownsLifetime = ["connect_remote_agent_skill", "call_remote_agent_skill_tool", TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name].includes(name)
+        || workspace && ["login", "encryption_setup", "skill_run", "secret_skill_run", "secret_exec"].includes(workspace.operation);
+      const value = await (ownsLifetime ? execute(signal)
+        : withTrelioCallBudget(execute, { signal, timeoutMs: toolCallBudgetMs }));
+      if (delegated) return null;
+      const result = deliverLocalMcpResult(value, textCompatibility, message.params?.name === "continue_trelio_local_action"
         ? message.params?.arguments?.parameters?.nativeTool ?? ""
         : String(message.params?.name || ""));
       // Only the MCP envelope boolean is read, never provider text/details.
@@ -6614,25 +6648,13 @@ export const handleLocalMcpMessage = async (
         result,
       };
     } catch (error) {
-      let effectiveError = error;
-      if (
-        runtimeUpgradeRecovery
-        && isHostRuntimeUpgradeRequiredError(error)
-      ) {
-        try {
-          // The backend raises these gates before consuming the runtime proof
-          // or invoking the selected operation. The delegate may therefore
-          // replay this exact rejected JSON-RPC request once without guessing
-          // whether a side effect already happened.
-          if (await runtimeUpgradeRecovery(error, message)) return null;
-        } catch (recoveryError) {
-          if (recoveryError instanceof HostRuntimeRecoveryError) recoveryError.details.originalCode = error.code;
-          effectiveError = recoveryError;
-        }
-      }
+      const effectiveError = error;
       const errorPayload = safeErrorPayload(effectiveError);
       let diagnosticCode = errorPayload.code;
-      if (effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError)
+      // Reuse the published Trelio deadline bucket without widening the
+      // backend-owned telemetry vocabulary or degrading this result to UNKNOWN.
+      if (effectiveError instanceof TrelioCallTimeoutError) diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
+      else if (effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError)
         diagnosticCode = effectiveError.diagnosticCode ?? errorPayload.code;
       else if (effectiveError instanceof TrelioApiError) {
         diagnosticCode = bridgeHttpDiagnosticCode(effectiveError.statusCode, effectiveError.code);
@@ -6899,7 +6921,7 @@ export const runStdioHost = async ({
         requestClient,
         codexLegacyMcpMigration,
         recordDiagnostic: diagnosticReporter.record,
-        runtimeUpgradeRecovery: async (_error, rejectedMessage) => {
+        runtimeUpgradeRecovery: async (_error, rejectedMessage, recoverySignal) => {
           if (
             controller
             && activeToolCalls.get(rejectedMessage.id) === controller
@@ -6912,7 +6934,7 @@ export const runStdioHost = async ({
           }
           return await forwardToRuntimeDelegate(
             rejectedMessage,
-            { respondOnFailure: false, signal: controller?.signal },
+            { respondOnFailure: false, signal: recoverySignal ?? controller?.signal },
           );
         },
       }), message?.jsonrpc === "2.0" && message.method === "initialize");

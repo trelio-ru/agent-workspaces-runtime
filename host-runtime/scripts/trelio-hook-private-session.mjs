@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { ProcessDiagnosticError, processDiagnosticCauseCode } from "./trelio-process-diagnostics.mjs";
+import { trelioCallSignal } from "./trelio-call-budget.mjs";
 
 const hookScope = new AsyncLocalStorage();
 const stageScope = new AsyncLocalStorage();
@@ -88,13 +89,18 @@ export const withRuntimeHookStage = (stage, operation) => {
 export const runtimeHookSignal = () => hookScope.getStore()?.signal;
 export const assertRuntimeHookBudget = () => {
   if (runtimeHookSignal()?.aborted) throw budgetFailure();
+  // MCP calls have a separate shorter lifetime than a hook/CLI session. A
+  // late filesystem continuation must stop before its next private operation;
+  // keep hook-owned deadline diagnostics unchanged when that clock expires.
+  trelioCallSignal()?.throwIfAborted();
 };
 
 export const privateProcessOptions = () => {
   assertRuntimeHookBudget();
+  const signal = trelioCallSignal(runtimeHookSignal());
   return {
     timeout: PRIVATE_PROCESS_TIMEOUT_MILLISECONDS,
-    ...(runtimeHookSignal() ? { signal: runtimeHookSignal() } : {}),
+    ...(signal ? { signal } : {}),
   };
 };
 
@@ -176,6 +182,7 @@ export const createPrivateAclWorker = ({
   spawnProcess = spawn, requestTimeoutMilliseconds = PRIVATE_PROCESS_TIMEOUT_MILLISECONDS,
   startupTimeoutMilliseconds = PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS,
 }) => {
+  signal = trelioCallSignal(signal);
   let child, failure, startupTimer, startupDeadline;
   let sequence = 0, closing = false, ready = false;
   let output = Buffer.alloc(0);
@@ -357,7 +364,7 @@ export const scopedPrivateAclWorker = (options) => {
   const scope = hookScope.getStore();
   if (!scope) return null;
   assertRuntimeHookBudget();
-  scope.worker ??= createPrivateAclWorker({ ...options, signal: scope.signal });
+  scope.worker ??= createPrivateAclWorker({ ...options, signal: trelioCallSignal(scope.signal) });
   return scope.worker;
 };
 

@@ -9,8 +9,38 @@ import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHand
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { trelioCallSignal, withTrelioCallBudget } from "../host-runtime/scripts/trelio-call-budget.mjs";
 
 const pending = () => { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; };
+
+test("background finish detaches from a short caller budget but every poll remains cancellable", async () => {
+  const manager = createWorkspaceFinishOperations({ waitMs: 5 });
+  const child = pending();
+  const controller = new AbortController();
+  const first = await withTrelioCallBudget(signal => manager.start({
+    key: "root", scope: "run", fingerprint: "original", pollAction: {}, signal,
+    execute: async () => {
+      assert.equal(trelioCallSignal(), undefined);
+      await child.promise;
+      // Check the retained continuation too: clearing only the explicit child
+      // signal would still inherit an expired parent through AsyncLocalStorage.
+      assert.equal(trelioCallSignal(), undefined);
+      return { stdout: "accepted" };
+    },
+  }), { signal: controller.signal, timeoutMs: 30 });
+  controller.abort();
+  assert.equal(first.state, "running");
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const pollAbort = new AbortController();
+  const poll = withTrelioCallBudget(signal => manager.poll("root", first.operationId, signal, "run"), { signal: pollAbort.signal });
+  pollAbort.abort();
+  await assert.rejects(poll, { name: "AbortError" });
+  assert.equal(manager.active("root").operationId, first.operationId);
+  child.resolve();
+  const final = await manager.poll("root", first.operationId, undefined, "run");
+  assert.equal(final.state, "completed");
+  assert.equal(final.stdout, "accepted");
+});
 
 test("progress parser accepts split frames and drops prose, fields and oversized lines", () => {
   const seen = [];

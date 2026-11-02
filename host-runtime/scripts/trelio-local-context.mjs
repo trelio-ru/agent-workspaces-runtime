@@ -1,6 +1,7 @@
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
+import { trelioCallSignal, parseTrelioCallTimeout } from "./trelio-call-budget.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
@@ -9560,6 +9561,10 @@ const normalizeGitHead = (value, fieldName) => {
 };
 
 const runLocalProcess = async (executable, argumentsList, { cwd, signal, input, onProgress } = {}) => {
+  // Resolve the invocation signal here as well as at HTTP dispatch: a late
+  // filesystem continuation must not spawn a writer after its MCP timeout.
+  signal = trelioCallSignal(signal);
+  signal?.throwIfAborted();
   if (onProgress) return runWorkspaceFinishProcess(executable, argumentsList, { cwd, signal, onProgress });
   const pending = execFileAsync(executable, argumentsList, {
     ...(cwd ? { cwd } : {}),
@@ -10914,6 +10919,8 @@ const executeTrelioWorkspaceActionOperation = async (
     }
     const stderr = truncateWorkspaceActionOutput(error?.stderr).trim();
     const stdout = truncateWorkspaceActionOutput(error?.stdout).trim();
+    const callTimeout = parseTrelioCallTimeout(error?.stderr);
+    if (callTimeout) throw callTimeout;
     const checkpointError = invocation.parameters.nativeInput ? parseNativeCheckpointError(stderr) : null;
     if (checkpointError) throw new TrelioLocalContextError(checkpointError.code, checkpointError.message);
     const runtimeRecovery = parseHostRuntimeRecoveryError(error?.stderr);

@@ -306,6 +306,11 @@ publication tooling также остаются вне этого публичн
   403, transport/5xx, version gate и противоречивый успешный probe не разрешают
   замену. Исходная рабочая mutation не повторяется этим recovery.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
+- Обычный local MCP использует один непродлеваемый бюджет 60 секунд, включая
+  подготовку, HTTP/body и 429 waits. HTTP standalone/background bridge также
+  ограничен 60 секундами; transport failure не запускает sleep/replay.
+  Human/provider lifetimes и зарегистрированный finish сохраняют отдельные
+  границы: [контракт](docs/agent-workspace-runtime.md#call-time-budget).
 - Долгий `finish` возвращает bounded operation/poll по [контракту](docs/agent-workspace-runtime.md#finish-progress).
   Повтор не создаёт второго writer; прогресс содержит только стадии/счётчики,
   а timeout ожидания не означает принятия candidate или отмены сохранения.

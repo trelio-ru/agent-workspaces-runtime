@@ -122,7 +122,6 @@ import {
   hydrateEncryptedAgentSkillRuntimeResolution,
   inspectWorkspaceFile,
   isCodexPluginAutoUpdateEnvironment,
-  isEncryptedWorkspaceRetryableTransportError,
   isProtectedWorkspaceControlPath,
   isStableVersionAtLeast,
   isTransientCodexMarketplaceUpdateError,
@@ -173,7 +172,7 @@ import {
   validateHandoffTaskOutcome,
   validateEncryptedAgentWorkspaceDerivedArtifacts,
   withEncryptedWorkspaceBrowserProjection,
-  withEncryptedWorkspaceTransportCooldownRetry,
+  withEncryptedWorkspaceTransport,
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { saveRuntimeChatBinding } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
@@ -750,62 +749,19 @@ test("every bridge transport request preserves upgrade compatibility for recover
   }
 });
 
-test("encrypted Workspace transport waits 10-12 minutes and retries exactly once", async () => {
-  const delays = [];
-  const reports = [];
-  let attempts = 0;
-  const result = await withEncryptedWorkspaceTransportCooldownRetry(
-    async () => {
-      attempts += 1;
-      if (attempts === 1) {
-        const error = new TypeError("fetch failed");
-        error.cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
-        throw error;
-      }
-      return "recovered";
-    },
-    {
-      random: () => 0.5,
-      waitForCooldown: async (milliseconds) => delays.push(milliseconds),
-      report: (message) => reports.push(message),
-    },
-  );
-
-  assert.equal(result, "recovered");
-  assert.equal(attempts, 2);
-  assert.deepEqual(delays, [11 * 60 * 1000]);
-  assert.equal(reports.length, 1);
-  assert.match(reports[0], /новых соединений не будет 11 мин/u);
-});
-
-test("encrypted Workspace cooldown never retries HTTP errors or a failed second attempt", async () => {
-  assert.equal(
-    isEncryptedWorkspaceRetryableTransportError(new TrelioApiError(503, "upstream")),
-    false,
-  );
-  let httpAttempts = 0;
-  await assert.rejects(
-    withEncryptedWorkspaceTransportCooldownRetry(async () => {
-      httpAttempts += 1;
-      throw new TrelioApiError(503, "upstream");
-    }, { waitForCooldown: async () => assert.fail("HTTP response must not start cooldown") }),
-    TrelioApiError,
-  );
-  assert.equal(httpAttempts, 1);
-
-  let transportAttempts = 0;
-  await assert.rejects(
-    withEncryptedWorkspaceTransportCooldownRetry(async () => {
-      transportAttempts += 1;
-      throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
-    }, {
-      random: () => 0,
-      waitForCooldown: async () => undefined,
-      report: () => undefined,
-    }),
-    /timeout/u,
-  );
-  assert.equal(transportAttempts, 2, "the second transport failure must not start another cycle");
+test("encrypted Workspace transport fails immediately without sleeping or replaying", async () => {
+  for (const failure of [
+    new TrelioApiError(503, "upstream"),
+    Object.assign(new Error("transport"), { code: "ECONNRESET" }),
+    Object.assign(new TypeError("fetch failed"), { cause: { code: "ETIMEDOUT" } }),
+  ]) {
+    let attempts = 0;
+    await assert.rejects(withEncryptedWorkspaceTransport(async () => {
+      attempts++;
+      throw failure;
+    }), error => error === failure);
+    assert.equal(attempts, 1);
+  }
 });
 
 test("storage billing blocker preserves the current Run and gives one exact recovery", () => {
@@ -824,7 +780,6 @@ test("storage billing blocker preserves the current Run and gives one exact reco
   assert.match(finishMessage, /не создавайте новый/u);
   assert.match(finishMessage, /повторите ту же команду trelio-workspace finish/u);
   assert.doesNotMatch(finishMessage, /Trelio API 400/u);
-  assert.equal(isEncryptedWorkspaceRetryableTransportError(error), false);
 
   assert.match(
     formatBridgeCommandError(error, "open"),
@@ -897,7 +852,6 @@ test("bridge transport diagnostics preserve phase and safe cause code without le
     details: { phase: "bridge_compatibility", causeCode: "ECONNRESET" },
   });
   assert.doesNotMatch(formatBridgeCommandError(diagnostic), /private-proxy|secret-token/u);
-  assert.equal(isEncryptedWorkspaceRetryableTransportError(diagnostic), true);
   const enriched = new BridgeTransportError(privateText, new Error(privateText));
   enriched.causeCode = privateText;
   enriched.details = { privateText };

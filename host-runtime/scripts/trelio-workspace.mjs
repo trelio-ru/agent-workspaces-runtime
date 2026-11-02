@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, trelioCallSignal, waitWithinTrelioCall, withTrelioCallBudget } from "./trelio-call-budget.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 
@@ -1537,6 +1538,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
+  if (error instanceof TrelioCallTimeoutError) return JSON.stringify(error.toJSON());
   if (error instanceof SkillAccountImportError || error instanceof SkillAccountCommandError) return JSON.stringify(error);
   if (error instanceof NativeCheckpointError) return JSON.stringify(error);
   if (error instanceof ProcessDiagnosticError) return JSON.stringify(error);
@@ -1610,18 +1612,35 @@ export const formatBridgeCommandError = (error, command = "") => {
 
 export const request = async (origin, token, pathname, options = {}) => {
   const { diagnosticPhase = "api_request", maximumErrorResponseBytes, ...fetchOptions } = options;
+  // Keep the signal on the Response too: fetch resolves at headers, whereas
+  // the body can still stall or trickle forever. Native timeout is absolute,
+  // not renewed by bytes, and also bounds standalone/background bridge HTTP.
+  const requestDeadline = AbortSignal.timeout(TRELIO_CALL_BUDGET_MS);
+  const callerSignal = trelioCallSignal(fetchOptions.signal);
+  fetchOptions.signal = callerSignal ? AbortSignal.any([callerSignal, requestDeadline]) : requestDeadline;
+  fetchOptions.signal.throwIfAborted();
   const profile = currentWorkspaceExecutionProfile();
   const prepared = profile
     ? await profile.prepareRequest({ origin, token, pathname, options: fetchOptions, buildHeaders: buildBridgeRequestHeaders })
     : { url: new URL(pathname, `${origin}/`), headers: buildBridgeRequestHeaders(token, fetchOptions.headers || {}), options: {} };
+  // A managed execution profile may impose an even shorter pass lifetime.
+  // Preserve it as well; neither a profile nor a caller may extend this HTTP.
+  const requestSignal = prepared.options?.signal
+    ? AbortSignal.any([fetchOptions.signal, prepared.options.signal]) : fetchOptions.signal;
+  requestSignal.throwIfAborted();
 
   let response;
   try {
-    response = await fetch(prepared.url, { ...fetchOptions, ...prepared.options, headers: prepared.headers });
+    response = await fetch(prepared.url, { ...fetchOptions, ...prepared.options, signal: requestSignal, headers: prepared.headers });
   } catch (error) {
-    // Cancellation belongs to the caller and must not be misreported as a
-    // network failure or put an encrypted Workspace into transport cooldown.
-    if (fetchOptions.signal?.aborted || error?.name === "AbortError") throw error;
+    // Caller cancellation and our deadline are distinct from a network fault;
+    // neither permits a transport retry or replacement of local credentials.
+    if (requestSignal.aborted) {
+      if (callerSignal?.aborted) throw callerSignal.reason;
+      if (requestDeadline.aborted) throw new TrelioCallTimeoutError();
+      throw requestSignal.reason;
+    }
+    if (error?.name === "AbortError") throw error;
     throw new BridgeTransportError(diagnosticPhase, error);
   }
 
@@ -1791,79 +1810,11 @@ export const readBoundedResponseBuffer = async (
   return Buffer.concat(chunks, totalBytes);
 };
 
-const wait = (milliseconds) => new Promise((resolve) => {
-  setTimeout(resolve, milliseconds);
-});
-
-const ENCRYPTED_WORKSPACE_TRANSPORT_COOLDOWN_MIN_MS = 10 * 60 * 1000;
-const ENCRYPTED_WORKSPACE_TRANSPORT_COOLDOWN_JITTER_MS = 2 * 60 * 1000;
-const ENCRYPTED_WORKSPACE_RETRYABLE_TRANSPORT_CODES = new Set([
-  "EAI_AGAIN",
-  "ECONNABORTED",
-  "ECONNRESET",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "ENOTFOUND",
-  "EPIPE",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
-
-export const isEncryptedWorkspaceRetryableTransportError = (error) => {
-  if (error instanceof TrelioApiError || error?.name === "AbortError") return false;
-
-  let current = error;
-  const seen = new Set();
-  for (let depth = 0; current && depth < 6 && !seen.has(current); depth += 1) {
-    seen.add(current);
-    const code = typeof current.code === "string" ? current.code : "";
-    if (ENCRYPTED_WORKSPACE_RETRYABLE_TRANSPORT_CODES.has(code)) return true;
-    current = current.cause;
-  }
-
-  // Native fetch uses a bare TypeError("fetch failed") when the lower-level
-  // cause is unavailable. Keep this narrow so HTTP responses, validation
-  // failures and user cancellation never enter the long cooldown path.
-  return error instanceof TypeError && /^fetch failed$/iu.test(error.message.trim());
-};
-
-export const withEncryptedWorkspaceTransportCooldownRetry = async (
-  operation,
-  {
-    waitForCooldown = wait,
-    random = Math.random,
-    report = (message) => process.stderr.write(message),
-  } = {},
-) => {
-  try {
-    return await operation();
-  } catch (error) {
-    if (!isEncryptedWorkspaceRetryableTransportError(error)) throw error;
-
-    const boundedRandom = Math.min(1, Math.max(0, Number(random()) || 0));
-    const cooldownMilliseconds = ENCRYPTED_WORKSPACE_TRANSPORT_COOLDOWN_MIN_MS
-      + Math.floor(boundedRandom * ENCRYPTED_WORKSPACE_TRANSPORT_COOLDOWN_JITTER_MS);
-    const cooldownMinutes = Math.ceil(cooldownMilliseconds / 60_000);
-
-    // A burst of handshakes during a stateful network block extends the
-    // failure window for every user sharing the destination IP. Keep the Run
-    // and exact immutable upload in place, make no requests during cooldown,
-    // then perform one and only one byte-identical retry.
-    report(
-      "Encrypted Workspace transport оборвался. "
-      + `Run и локальные изменения сохранены; новых соединений не будет ${cooldownMinutes} мин. `
-      + "После паузы bridge один раз повторит exact запрос.\n",
-    );
-    const previousStage = finishProgressStage;
-    reportFinishProgress("retry_wait", { retryAfterMs: cooldownMilliseconds });
-    await waitForCooldown(cooldownMilliseconds);
-    reportFinishProgress(previousStage);
-    return operation();
-  }
-};
+const wait = waitWithinTrelioCall;
+// A transport interruption returns immediately, without a cooldown sleep or
+// implicit replay. Immutable upload state and exact server read-back remain the
+// only recovery basis for a later explicit save; the local Run is preserved.
+export const withEncryptedWorkspaceTransport = (operation) => withTrelioCallBudget(operation);
 
 // Retry surrounds the logical operation, not just fetch. Protocol-v2 callers
 // first reconcile upload/publication state inside that operation, so even an
@@ -1873,10 +1824,11 @@ export const withRateLimitRetry = async (operation, {
   random = Math.random,
   report = (message) => process.stdout.write(message),
   canRetry = () => true,
-} = {}) => {
+} = {}) => withTrelioCallBudget(async (signal) => {
   let retryCount = 0;
 
   while (true) {
+    signal.throwIfAborted();
     try {
       return await operation();
     } catch (error) {
@@ -1912,10 +1864,11 @@ export const withRateLimitRetry = async (operation, {
       const previousStage = finishProgressStage;
       reportFinishProgress("retry_wait", { retryAfterMs: delayMilliseconds });
       await waitForRetry(delayMilliseconds);
+      signal.throwIfAborted();
       reportFinishProgress(previousStage);
     }
   }
-};
+});
 
 export const requestWithRateLimitRetry = ({
   origin, token, pathname, createOptions,
@@ -1931,11 +1884,10 @@ export const requestWithRateLimitRetry = ({
   });
 
 export const withEncryptedWorkspaceRequestRetry = (operation, options = {}) =>
-  // HTTP 429 has its own short Retry-After path. A real transport failure
-  // still gets exactly one 10–12 minute cooldown, never one per HTTP retry.
-  withEncryptedWorkspaceTransportCooldownRetry(
+  // Only an eligible 429 follows the bounded retry path. Network uncertainty
+  // returns immediately and never starts another transport attempt.
+  withEncryptedWorkspaceTransport(
     () => withRateLimitRetry(operation, options),
-    options,
   );
 
 const getKeychainValue = async (
@@ -7426,10 +7378,10 @@ const requestAndDecryptCompanyWorkspaceBundle = async ({
   expectedWorkspaceHead,
   signal,
   inspectResponse = () => null,
-}) => withEncryptedWorkspaceTransportCooldownRetry(async () => {
-  // The first response may fail after writing only part of the encrypted
-  // stream. Both paths are private temporary files owned by this operation;
-  // clear them before rebuilding the exact GET on the one permitted retry.
+}) => withEncryptedWorkspaceTransport(async () => {
+  // An interrupted earlier inspection may leave a partial encrypted stream.
+  // Both paths are private temporary files owned by this operation; clear
+  // them before this explicit GET. A failed attempt is never replayed here.
   await fs.rm(destination, { force: true }).catch(() => undefined);
   await fs.rm(`${destination}.trelioe1`, { force: true }).catch(() => undefined);
   const response = await request(
@@ -17055,7 +17007,7 @@ const promoteEncryptedAgentWorkspaceDraft = async ({
   await resolveEncryptedWorkspaceStorage({ metadata, origin, token, companyEncryption });
   return publishEncryptedWorkspaceRecord({ metadata, kind: "accepted", record: manifest, signature,
     api: (pathname, options) => request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token, pathname, options),
-    retry: withEncryptedWorkspaceTransportCooldownRetry, publish,
+    retry: withEncryptedWorkspaceTransport, publish,
   });
 };
 

@@ -66,6 +66,41 @@ Stale input, неизвестный результат mutation и непров�
 прав, скрытого fallback или blind retry. Проверяются отказы и совместимость
 затронутых клиентов.
 
+<a id="call-time-budget"></a>
+
+## Бюджет вызова и отмена
+
+Generic runtime ограничивает обычный local MCP `tools/call` одним абсолютным
+бюджетом 60 секунд. Подготовка, локальные продолжения, HTTP, чтение тела ответа
+и допустимые 429-повторы используют оставшийся срок. Ни retry, ни поступление
+bytes/heartbeat не начинают новую минуту. Сигнал передаётся HTTP и bridge child;
+завершившаяся поздно зависимость сохраняет aborted scope и не может запустить
+новый HTTP-запрос или child после ответа о тайм-ауте. Некооперативная platform
+операция может завершить локальный cleanup позже; это не разрешает remote dispatch.
+
+Каждый HTTP-запрос общего bridge helper, в том числе из standalone CLI и фонового
+`finish`, дополнительно имеет абсолютный предел 60 секунд до конца response body.
+При transport failure нет многоминутного sleep или автоматического повторения
+записи. `TRELIO_CALL_TIMEOUT` содержит только фиксированное объяснение и
+`timeoutMs=60000`, `automaticRetry=false`: истечение срока не доказывает отмену
+серверной mutation. Exact server read-back/CAS и сохранённый immutable upload
+ledger остаются основанием последующего явного продолжения; файлы Run не удаляются.
+Telemetry использует существующий закрытый bucket `REMOTE_MCP_TRELIO_TIMEOUT`;
+новый model-visible code не расширяет backend-owned диагностический каталог.
+
+Ожидание человека в Remote MCP connect/write confirmation и proposal renderer,
+а также exact workspace `login`, `encryption_setup`, `skill_run`,
+`secret_skill_run`, `secret_exec` сохраняют собственные прежние сроки и отмену.
+Произвольные параметры/nativeTool не создают исключения. Их Trelio HTTP-запросы
+всё равно ограничены общей transport-минутой; provider HTTP сохраняет меньший срок.
+
+Уже зарегистрированный `finish` отделяет execution от короткого ожидания ответа:
+первый вызов и poll возвращают состояние не позже чем через 10 секунд. Отмена
+poll не отменяет child и не разрешает второй writer. Этот реестр не переносится
+в generic background mutation service; restart/unknown outcome требует прежнего
+exact Run read-back. Ограничение signed runtime не меняет client-managed сроки
+удалённого native MCP `/mcp`, plugin shell, OAuth, hook trust или минимальные версии.
+
 <a id="unfiled-response-reminders"></a>
 
 ## Очередь «Неразобранные» перед каждым ответом
@@ -1773,7 +1808,8 @@ accepted Run, вывод агента и условное «когда зако�
 ### Сохранение после ограничения частоты
 
 Heartbeat, checkpoint и plain draft/candidate используют bounded rate-limit
-retry: максимум восемь повторов, Retry-After до пяти минут либо паузы
+retry: максимум восемь повторов в одном общем бюджете 60 секунд,
+Retry-After до пяти минут либо паузы
 1/2/4/8/16/30 секунд и далее по 30 секунд с jitter до 250 мс. Для этих mutations
 повтор разрешает только HTTP 429 с `REQUEST_RATE_LIMITED`: backend явно отказал
 до исполнения domain operation. Неизвестный proxy 429 и старый backend без
@@ -2499,13 +2535,15 @@ Inspect, draft resume, history и restore используют тот же ло�
 `.encrypted-uploads/<runId>` рядом с Run metadata, вне Workspace Git. После
 обрыва или restart bridge сначала читает upload/publication state, затем
 передаёт только недостающие части или незавершённую публикацию. HTTP 429
-запускает до восьми повторов логической операции: Retry-After до пяти минут,
+запускает до восьми повторов логической операции в одном бюджете 60 секунд:
+Retry-After до пяти минут,
 при отсутствии заголовка – 1/2/4/8/16/30 секунд и далее по 30 секунд, с jitter
 до 250 мс. Каждый повтор сначала сверяет состояние, сохраняя UUID, ciphertext
 и точную подпись; готовые части и публикации не отправляются повторно.
 Heartbeat во время загрузки тоже соблюдает Retry-After. HTTP 401/403/409/5xx
-не повторяются этим механизмом. Отдельный cooldown 10–12 минут с одним повтором
-остаётся только для transport-обрыва. Backend отделяет upload metadata/parts
+не повторяются этим механизмом. Transport-обрыв возвращается сразу, без cooldown
+и автоматического replay; следующий явный save использует прежний upload-state read-back.
+Backend отделяет upload metadata/parts
 от control/publication traffic, ограничивает verified userId и оставляет широкий
 pre-auth IP ceiling. Plain/encrypted storage разделяют user/process concurrency
 pool без малой квоты на офисный IP. После подтверждённого acceptance cache удаляется;

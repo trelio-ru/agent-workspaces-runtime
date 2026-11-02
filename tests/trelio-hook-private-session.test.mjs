@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { TrelioCallTimeoutError, withTrelioCallBudget } from "../host-runtime/scripts/trelio-call-budget.mjs";
 import {
   assertRuntimeHookBudget, buildPrivateAclWorkerScript, createPrivateAclWorker, privateProcessOptions,
   runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage, withPrivateProcessSession,
@@ -60,6 +61,18 @@ const assertStopped = async (state) => {
     assert.ok(child.exitCode !== null || child.signalCode !== null);
   }
 };
+
+test("MCP deadline cancels and reaps the real private helper", async () => {
+  const state = { starts: 0, children: [] };
+  let worker;
+  await assert.rejects(withTrelioCallBudget(async () => {
+    worker = createPrivateAclWorker(fixtureOptions(state));
+    await worker.harden("stall", "file");
+  }, { timeoutMs: 150 }), TrelioCallTimeoutError);
+  await worker.close();
+  await assertStopped(state);
+  assert.equal(state.starts, 1);
+});
 
 test("one hook reuses one ACL process but verifies every path, and closes it before returning", async () => {
   const state = { starts: 0, children: [] };

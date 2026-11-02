@@ -62,7 +62,136 @@ import {
   connectRemoteMcpOAuth,
   refreshRemoteMcpOAuth,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
-import { BridgeTransportError, TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { BridgeTransportError, TrelioApiError, request, withRateLimitRetry } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, parseTrelioCallTimeout, withTrelioCallBudget } from "../host-runtime/scripts/trelio-call-budget.mjs";
+
+test("timeout child projection retains only the fixed diagnosis and refuses unconfirmed frames", () => {
+  const frame = "Ошибка: " + JSON.stringify({ ...new TrelioCallTimeoutError().toJSON(), message: "PRIVATE_CANARY" });
+  const parsed = parseTrelioCallTimeout(frame);
+  assert.ok(parsed instanceof TrelioCallTimeoutError);
+  assert.doesNotMatch(JSON.stringify(parsed.toJSON()), /PRIVATE_CANARY/u);
+  assert.equal(parseTrelioCallTimeout(frame + "\ntrailing prose"), null);
+  assert.equal(parseTrelioCallTimeout("x".repeat(65 * 1024) + frame), null);
+  assert.equal(parseTrelioCallTimeout(frame.replace('"automaticRetry":false', '"automaticRetry":true')), null);
+});
+
+test("verified runtime recovery spends the same call budget and receives cancellation", async () => {
+  let resume;
+  let replays = 0;
+  const response = await handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "continue_trelio_local_action", arguments: {} } }, {
+    toolCallBudgetMs: 30,
+    callTool: async () => { throw new TrelioApiError(409, "required", null, "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED"); },
+    runtimeUpgradeRecovery: async (_error, _message, signal) => {
+      await new Promise(resolve => { resume = resolve; });
+      signal.throwIfAborted();
+      replays++; return true;
+    },
+  });
+  assert.match(JSON.stringify(response.result), /TRELIO_CALL_TIMEOUT/u);
+  resume();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(replays, 0);
+});
+
+test("ordinary MCP calls share one 60s budget and a timed-out stdio call does not block the next call", async () => {
+  assert.equal(TRELIO_CALL_BUDGET_MS, 60_000);
+  let cancelled = false;
+  const harness = createStdioHarness(async (_origin, name, _args, { signal }) => {
+    if (name === "stalled") return new Promise(() => signal.addEventListener("abort", () => { cancelled = true; }, { once: true }));
+    return { content: [{ type: "text", text: "available" }] };
+  }, { handleMessage: (message, options) => handleLocalMcpMessageProduction(message, { ...options, toolCallBudgetMs: 50 }) });
+  try {
+    harness.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "stalled", arguments: {} } });
+    const failed = await harness.waitForFrame(frame => frame.id === 1);
+    assert.equal(failed.result.isError, true);
+    assert.match(JSON.stringify(failed.result), /TRELIO_CALL_TIMEOUT/u);
+    assert.equal(cancelled, true);
+    harness.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "available", arguments: {} } });
+    assert.equal((await harness.waitForFrame(frame => frame.id === 2)).result.isError, undefined);
+  } finally { await harness.close(); }
+});
+
+test("one MCP deadline aborts stalled HTTP headers, stalled bodies and trickling bodies without replaying a POST", async () => {
+  for (const phase of ["headers", "body", "trickle"]) {
+    let attempts = 0;
+    const diagnoses = [];
+    const server = await listenOnLoopback((_incoming, outgoing) => {
+      attempts++;
+      if (phase === "headers") return;
+      outgoing.writeHead(200, { "content-type": "application/json" }); outgoing.flushHeaders();
+      if (phase === "trickle") {
+        const interval = setInterval(() => outgoing.write(" "), 5);
+        outgoing.once("close", () => clearInterval(interval));
+      }
+    });
+    try {
+      const origin = `http://127.0.0.1:${server.address().port}`;
+      const response = await handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "continue_trelio_local_action", arguments: {} } }, {
+        toolCallBudgetMs: 500,
+        callTool: async () => (await request(origin, null, "/write", { method: "POST", body: "synthetic" })).text(),
+        recordDiagnostic: (_tool, _args, code) => diagnoses.push(code),
+      });
+      assert.equal(response.result.isError, true, phase);
+      assert.match(JSON.stringify(response.result), /TRELIO_CALL_TIMEOUT/u, phase);
+      assert.deepEqual(diagnoses, ["REMOTE_MCP_TRELIO_TIMEOUT"]);
+      assert.equal(attempts, 1, "an unknown POST outcome never grants replay");
+    } finally { await closeTestServer(server); }
+  }
+});
+
+test("rate-limit waits consume the original budget and cannot launch a late retry", async () => {
+  let attempts = 0;
+  await assert.rejects(withTrelioCallBudget(() => withRateLimitRetry(async () => {
+    attempts++;
+    throw new TrelioApiError(429, "synthetic guard rejection", 1000);
+  }, { report: () => {} }), { timeoutMs: 40 }), TrelioCallTimeoutError);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(attempts, 1);
+});
+
+test("an ignored cancellation cannot dispatch late HTTP after MCP has timed out", async () => {
+  let late;
+  let attempts = 0;
+  const server = await listenOnLoopback((_req, res) => { attempts++; res.end("unexpected"); });
+  try {
+    await assert.rejects(withTrelioCallBudget(async () => {
+      await new Promise(resolve => { late = resolve; });
+      return request(`http://127.0.0.1:${server.address().port}`, null, "/late");
+    }, { timeoutMs: 30 }), TrelioCallTimeoutError);
+    late();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(attempts, 0);
+  } finally { await closeTestServer(server); }
+});
+
+test("synchronous preparation cannot dispatch HTTP after consuming the absolute budget", async () => {
+  let attempts = 0;
+  const server = await listenOnLoopback((_req, res) => { attempts++; res.end("unexpected"); });
+  try {
+    await assert.rejects(withTrelioCallBudget(async () => {
+      const end = performance.now() + 20;
+      while (performance.now() < end) { /* Deliberately delay the deadline timer. */ }
+      return request(`http://127.0.0.1:${server.address().port}`, null, "/late");
+    }, { timeoutMs: 5 }), TrelioCallTimeoutError);
+    assert.equal(attempts, 0);
+  } finally { await closeTestServer(server); }
+});
+
+test("caller cancellation stays distinct and explicit human connection retains its own lifetime", async () => {
+  const controller = new AbortController();
+  const reason = new Error("synthetic cancellation");
+  const cancelled = withTrelioCallBudget(() => new Promise(() => {}), { signal: controller.signal });
+  controller.abort(reason);
+  await assert.rejects(cancelled, error => error === reason);
+  const result = await handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "connect_remote_agent_skill", arguments: {} } }, {
+    toolCallBudgetMs: 5,
+    callTool: async () => { await new Promise(resolve => setTimeout(resolve, 20)); return { content: [] }; },
+  });
+  assert.equal(result.result.isError, undefined);
+});
 import { CodexRoutingConfigError, planCodexTrelioHookRouting } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
