@@ -9,7 +9,7 @@ import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHand
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { trelioCallSignal, withTrelioCallBudget } from "../host-runtime/scripts/trelio-call-budget.mjs";
+import { trelioCallSignal, withTrelioCallBudget } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 
 const pending = () => { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; };
 

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { outsideTrelioCallBudget } from "./trelio-call-budget.mjs";
+import { outsideTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 
 const PREFIX = "TRELIO_FINISH_PROGRESS ";
 const STAGES = new Set([

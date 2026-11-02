@@ -4,11 +4,10 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { TrelioCallTimeoutError, withTrelioCallBudget } from "../host-runtime/scripts/trelio-call-budget.mjs";
 import {
   assertRuntimeHookBudget, buildPrivateAclWorkerScript, createPrivateAclWorker, privateProcessOptions,
   runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage, withPrivateProcessSession,
-  windowsPrivateWorkerOptions,
+  windowsPrivateWorkerOptions, TrelioCallTimeoutError, withTrelioCallBudget,
 } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 import {
   hardenWindowsPrivatePath, resolveWindowsPowerShellExecutable, WINDOWS_PRIVATE_ACL_SCRIPT,

@@ -18,7 +18,7 @@ const windows = {skip: process.platform !== 'win32'};
 // Installed-path fixtures need the selector's real static dependency closure.
 // Exercise that import on every OS too, so a new shared primitive cannot stay
 // unnoticed until the Windows-only CreateProcess assertion is finally reached.
-const selectorDependencies = ['trelio-hook-private-session.mjs','trelio-process-diagnostics.mjs','trelio-call-budget.mjs'];
+const selectorDependencies = ['trelio-hook-private-session.mjs','trelio-process-diagnostics.mjs'];
 const copySelectorDependencies = async scripts => {
   for (const name of selectorDependencies) {
     await copyFile(fileURLToPath(new URL('../host-runtime/scripts/'+name,import.meta.url)),path.join(scripts,name));

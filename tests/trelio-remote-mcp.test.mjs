@@ -63,7 +63,7 @@ import {
   refreshRemoteMcpOAuth,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { BridgeTransportError, TrelioApiError, request, withRateLimitRetry } from "../host-runtime/scripts/trelio-workspace.mjs";
-import { TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, parseTrelioCallTimeout, withTrelioCallBudget } from "../host-runtime/scripts/trelio-call-budget.mjs";
+import { TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, parseTrelioCallTimeout, withTrelioCallBudget } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 
 test("timeout child projection retains only the fixed diagnosis and refuses unconfirmed frames", () => {
   const frame = "Ошибка: " + JSON.stringify({ ...new TrelioCallTimeoutError().toJSON(), message: "PRIVATE_CANARY" });

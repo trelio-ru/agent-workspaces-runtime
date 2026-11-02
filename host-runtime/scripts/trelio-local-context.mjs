@@ -1,7 +1,7 @@
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
-import { trelioCallSignal, parseTrelioCallTimeout } from "./trelio-call-budget.mjs";
+import { trelioCallSignal, parseTrelioCallTimeout } from "./trelio-hook-private-session.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";

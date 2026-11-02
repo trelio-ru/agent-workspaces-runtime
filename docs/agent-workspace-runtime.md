@@ -70,6 +70,8 @@ Stale input, неизвестный результат mutation и непров�
 
 ## Бюджет вызова и отмена
 
+Общий механизм invocation lifetime находится в `trelio-hook-private-session.mjs`
+рядом с отменой private helpers; signed package сохраняет предел 100 файлов.
 Generic runtime ограничивает обычный local MCP `tools/call` одним абсолютным
 бюджетом 60 секунд. Подготовка, локальные продолжения, HTTP, чтение тела ответа
 и допустимые 429-повторы используют оставшийся срок. Ни retry, ни поступление
