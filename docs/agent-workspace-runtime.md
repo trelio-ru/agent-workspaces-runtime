@@ -2580,11 +2580,14 @@ Portable projection генерируется из backend и сохраняет 
 
 ## Названия связанных Codex-чатов
 
-Связь task/чат возникает только через verified Agent Run. Обсуждение и accepted
+Связь Workspace/чат возникает только через verified Agent Run. Обсуждение и accepted
 read без Run не создают её и не требуют дополнительных инструкций модели.
 Generic runtime после успешных open/claim, heartbeat и checkpoint читает
 private `GET /api/agent-workspaces/runs/:runId/codex-conversation`. Backend
-возвращает только initiating member locator текущего task Run и CAS hash;
+возвращает только initiating member locator текущего Run и CAS hash для любого
+Workspace: task, project, company, включая unfiled. Локальный scope не ограничивает
+синхронизацию: существующую связь, live ACL и допустимость Run определяет private
+endpoint. Без его verified locator App Server не читается и title не записывается;
 унаследованный `CODEX_THREAD_ID` не выбирает чат.
 
 Exact UUID передаётся локальному `codex app-server --listen stdio://`: initialize,

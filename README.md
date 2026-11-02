@@ -590,7 +590,8 @@ fixture или log.
 ### Названия Codex-чатов
 
 При open, heartbeat и checkpoint runtime автоматически обновляет название
-уже связанного с task Run чата через точный read-only App Server запрос, без
+уже связанного с Run чата для task/project/company Workspace, включая unfiled,
+через точный read-only App Server запрос, без
 хода модели. Переименование видно при следующем таком событии; недоступный
 CLI оставляет прежнюю подпись. Малые обсуждения без Run не регистрируются.
 Bounds, private Run binding и E2EE – в

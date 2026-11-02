@@ -361,8 +361,10 @@ publication tooling также остаются вне этого публичн
   directory aliases, а argv сохраняет исходный путь. Это не меняет запрет
   symlink entries в package/private storage. Проверяй всю signed loader →
   entrypoint → hook цепочку через Windows shells, а не только stub loader.
-- Синхронизация названия task-чата – optional механика runtime после Run lifecycle,
-  без модели: [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
+- Синхронизация названия связанного чата – optional механика runtime после Run lifecycle,
+  без модели, для task/project/company Workspace, включая unfiled:
+  [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
+  Локальный scope не заменяет серверный допуск.
   Exact locator выбирает сервер, inherited `CODEX_THREAD_ID` не заменяет его.
 - Для session-bound Agent Skill `CODEX_THREAD_ID` берётся из private exact-ID
   binding текущего hook-события, а не окружения долгоживущего MCP. Отсутствующий

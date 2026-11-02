@@ -14739,7 +14739,11 @@ const withRun = async (handler, { validateMetadata } = {}) => {
 };
 
 export const synchronizeRunCodexTitle = async ({ metadata, workspaceOrigin, token, companyEncryption, readTitle }) => {
-  if (metadata.scopeType !== "task") return;
+  // The private Run endpoint owns eligibility for every Workspace scope,
+  // including project/company and unfiled Workspaces. A task-only local guard
+  // would silently skip their already verified personal conversation links.
+  // No locator is inferred here: absent/denied server metadata still stops
+  // discovery before App Server access, encryption or a title mutation.
   const endpoint = `/api/agent-workspaces/runs/${metadata.runId}/codex-conversation`;
   await syncRunCodexConversationTitle({
     readTitle,

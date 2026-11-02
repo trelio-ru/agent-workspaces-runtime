@@ -532,55 +532,77 @@ test("encrypted renamed title reaches the writer only as existing field-bound ci
     } }), true);
 });
 
-test("lifecycle transport retries only GET, carries the exact lease and skips named Workspaces", async () => {
-  const originalFetch = globalThis.fetch;
-  const requests = [];
-  let failures = 3;
-  globalThis.fetch = async (url, options) => {
-    requests.push({ url: String(url), ...options });
-    if (!options.method && failures-- > 0) throw new TypeError("fixture transport failure");
-    if (options.method === "PUT") return new Response("{}", { status: 503 });
-    return Response.json({ conversation: snapshot });
-  };
-  const metadata = { scopeType: "task", runId: "22222222-2222-4222-8222-222222222222",
-    leaseId: "33333333-3333-4333-8333-333333333333", fencingToken: 7 };
-  try {
-    await synchronizeRunCodexTitle({ metadata, workspaceOrigin: "https://trelio.example.test", token: "fixture",
-      readTitle: async (exactId) => { assert.equal(exactId, id); return "Changed"; } });
-    assert.equal(requests.length, 5);
-    assert.ok(requests.every((request) => request.url === `https://trelio.example.test/api/agent-workspaces/runs/${metadata.runId}/codex-conversation`));
-    assert.deepEqual(JSON.parse(requests[4].body), { conversationId: id, expectedStateHash: snapshot.expectedStateHash,
-      title: "Changed", leaseId: metadata.leaseId, fencingToken: metadata.fencingToken });
-    await synchronizeRunCodexTitle({ metadata: { ...metadata, scopeType: "workspace" } });
-    assert.equal(requests.length, 5);
-    requests.length = 0;
-    globalThis.fetch = async () => { requests.push({}); return new Response("{}", { status: 404 }); };
-    await synchronizeRunCodexTitle({ metadata, workspaceOrigin: "https://trelio.example.test", token: "fixture", readTitle: assert.fail });
-    assert.equal(requests.length, 1);
-  } finally { globalThis.fetch = originalFetch; }
-});
+for (const workspace of [
+  { scopeType: "task" },
+  { scopeType: "project" },
+  { scopeType: "company" },
+]) {
+  const scopeLabel = workspace.scopeType;
 
-test("lifecycle E2EE transport uploads a signed title payload before sending only its marker", async () => {
-  const originalFetch = globalThis.fetch;
-  const device = await createAgentEncryptionDevice();
-  const companyEncryption = { runtime: { company: { id, slug: "acme" },
-    scope: { id: "22222222-2222-4222-8222-222222222222", epoch: 1, publicEncryptionJwk: device.publicEncryptionJwk },
-    device: { id: "33333333-3333-4333-8333-333333333333" } }, device };
-  const requests = [];
-  globalThis.fetch = async (url, options) => {
-    requests.push({ url: String(url), ...options });
-    return options.method ? Response.json({ syncedCount: 1 }) : Response.json({ conversation: { ...snapshot, title: null } });
-  };
-  try {
-    await synchronizeRunCodexTitle({ metadata: { scopeType: "task", runId: id, leaseId: id, fencingToken: 1 },
-      workspaceOrigin: "https://e2ee.trelio.ru", token: "fixture", companyEncryption, readTitle: async () => "Private new title" });
-    assert.equal(requests.length, 3);
-    assert.equal(requests[1].url, "https://e2ee.trelio.ru/api/agent-workspaces/encryption/payloads");
-    assert.equal(requests[2].method, "PUT");
-    const payload = JSON.parse(requests[1].body).payloads[0];
-    assert.equal(payload.entityType, "api.browser_mutation");
-    assert.ok(payload.signature);
-    assert.equal(JSON.parse(requests[2].body).title, `~e1:${payload.entityId}:title~`);
-    assert.ok(requests.every((request) => !request.body?.includes("Private new title")));
-  } finally { globalThis.fetch = originalFetch; }
-});
+  test(`lifecycle ${scopeLabel} transport retries only GET and carries the exact lease`, async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    let failures = 3;
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url: String(url), ...options });
+      if (!options.method && failures-- > 0) throw new TypeError("fixture transport failure");
+      if (options.method === "PUT") return new Response("{}", { status: 503 });
+      return Response.json({ conversation: snapshot });
+    };
+    const metadata = { ...workspace, runId: "22222222-2222-4222-8222-222222222222",
+      leaseId: "33333333-3333-4333-8333-333333333333", fencingToken: 7 };
+    try {
+      await synchronizeRunCodexTitle({ metadata, workspaceOrigin: "https://trelio.example.test", token: "fixture",
+        readTitle: async (exactId) => { assert.equal(exactId, id); return "Changed"; } });
+      assert.equal(requests.length, 5);
+      assert.ok(requests.every((request) => request.url === `https://trelio.example.test/api/agent-workspaces/runs/${metadata.runId}/codex-conversation`));
+      assert.deepEqual(JSON.parse(requests[4].body), { conversationId: id, expectedStateHash: snapshot.expectedStateHash,
+        title: "Changed", leaseId: metadata.leaseId, fencingToken: metadata.fencingToken });
+      requests.length = 0;
+      globalThis.fetch = async () => { requests.push({}); return new Response("{}", { status: 404 }); };
+      await synchronizeRunCodexTitle({ metadata, workspaceOrigin: "https://trelio.example.test", token: "fixture", readTitle: assert.fail });
+      assert.equal(requests.length, 1);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test(`lifecycle ${scopeLabel} without a verified conversation never reads a local title or writes`, async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url: String(url), ...options });
+      return Response.json({ conversation: null });
+    };
+    try {
+      await synchronizeRunCodexTitle({ metadata: { ...workspace, runId: id, leaseId: id, fencingToken: 1 },
+        workspaceOrigin: "https://trelio.example.test", token: "fixture", readTitle: assert.fail });
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].method, undefined);
+      assert.equal(requests[0].url, `https://trelio.example.test/api/agent-workspaces/runs/${id}/codex-conversation`);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test(`lifecycle ${scopeLabel} E2EE uploads a signed title payload before sending only its marker`, async () => {
+    const originalFetch = globalThis.fetch;
+    const device = await createAgentEncryptionDevice();
+    const companyEncryption = { runtime: { company: { id, slug: "acme" },
+      scope: { id: "22222222-2222-4222-8222-222222222222", epoch: 1, publicEncryptionJwk: device.publicEncryptionJwk },
+      device: { id: "33333333-3333-4333-8333-333333333333" } }, device };
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url: String(url), ...options });
+      return options.method ? Response.json({ syncedCount: 1 }) : Response.json({ conversation: { ...snapshot, title: null } });
+    };
+    try {
+      await synchronizeRunCodexTitle({ metadata: { ...workspace, runId: id, leaseId: id, fencingToken: 1 },
+        workspaceOrigin: "https://e2ee.trelio.ru", token: "fixture", companyEncryption, readTitle: async () => "Private new title" });
+      assert.equal(requests.length, 3);
+      assert.equal(requests[1].url, "https://e2ee.trelio.ru/api/agent-workspaces/encryption/payloads");
+      assert.equal(requests[2].method, "PUT");
+      const payload = JSON.parse(requests[1].body).payloads[0];
+      assert.equal(payload.entityType, "api.browser_mutation");
+      assert.ok(payload.signature);
+      assert.equal(JSON.parse(requests[2].body).title, `~e1:${payload.entityId}:title~`);
+      assert.ok(requests.every((request) => !request.body?.includes("Private new title")));
+    } finally { globalThis.fetch = originalFetch; }
+  });
+}
