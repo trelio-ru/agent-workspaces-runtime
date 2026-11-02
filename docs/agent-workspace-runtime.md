@@ -2837,6 +2837,13 @@ in-process consumer; он обязан разобрать source DTO и прое
 refs до SQLite/model boundary. Raw stderr и exec exception никогда не становятся
 диагностикой; byte copies обнуляются после decode/failure.
 
+Для completed nonzero monitor exit native source profile получает bounded strict UTF-8
+stderr; legacy stdout сохраняется, только если stderr пуст. Success использует
+stdout, даже при stderr warnings. Source consumer допускает лишь exact monitor
+refusal либо закрытый operational Telegram code общей классификации; неизвестный
+JSON/prose и setup-only codes сохраняют исходный process-exit bucket. Raw pipes
+не попадают в Error/MCP/журнал. Это не retry, login, ACK или сброс cursor.
+
 Explicit host-only `captureExitCode` вместе с `captureOutput=true` возвращает
 private `{stdout, exitCode}` и для нормального nonzero завершения. Это нужно,
 чтобы consumer мог разобрать native GAP/auth/cursor refusal и сохранить прежнюю

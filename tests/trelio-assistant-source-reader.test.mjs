@@ -156,6 +156,11 @@ test('source reader composes real signature/cache/account/executor and resolves 
       const account=JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON);assert.equal(account.id,${JSON.stringify('ACCOUNT_ID')});
       let stdin='';for await(const chunk of process.stdin)stdin+=chunk;assert.equal(stdin,'');
       const fs=await import('node:fs');fs.appendFileSync(${JSON.stringify(path.join(directory,'native-calls'))},'1');
+      // Providers report failed commands on stderr and leave stdout empty.
+      // Exercise that actual pipe, not an injected already-decoded DTO.
+      const failure=${JSON.stringify(path.join(directory,'monitor-failure.json'))};
+      if(fs.existsSync(failure)){process.stderr.write(fs.readFileSync(failure));process.exit(2);}
+      process.stderr.write('PRIVATE_SUCCESS_WARNING');
       const result=${JSON.stringify(page())};
       if(args.includes('--chat')){
         const unread=args.includes('--unread-backfill'),account=args.includes('--initial-account-cursor');
@@ -241,6 +246,31 @@ test('source reader composes real signature/cache/account/executor and resolves 
   const cacheRoot=process.platform==='win32'?path.join(process.env.LOCALAPPDATA,'Trelio','workspace-bridge','cache'):
     path.join(process.env.XDG_CACHE_HOME,'trelio','workspace-bridge');
   const cacheDir=path.join(cacheRoot,'skill-runtimes',scope.skillId,'2.99.42',resolution().artifact.packageSha256);
+  // A completed failed source read preserves its exact reviewed refusal,
+  // while private prose and unrelated setup-only codes remain undisclosed.
+  // Count actual child invocations: diagnostics cannot authorize replay.
+  const monitorFailure=path.join(directory,'monitor-failure.json');
+  for(const [wire,expectedCode] of [
+    ...['TELEGRAM_MONITOR_GAP','TELEGRAM_MONITOR_INVALID_CURSOR'].map(code=>[JSON.stringify({ok:false,code,error:'PRIVATE_BODY'}),code]),
+    ...['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_RATE_LIMITED','TELEGRAM_WINDOWS_NATIVE_FAILURE']
+      .map(code=>[JSON.stringify({ok:false,code,error:'PRIVATE_FACTOR',details:{path:'PRIVATE_PATH'},nextAction:{command:'PRIVATE_COMMAND'}}),`ASSISTANT_SOURCE_MONITOR_${code}`]),
+    ['PRIVATE_TRACEBACK','TRELIO_SKILL_RUNTIME_EXIT_2'],
+    [Buffer.from([255]),'TRELIO_SKILL_RUNTIME_OUTPUT_INVALID'],
+    [JSON.stringify({ok:false,code:'TELEGRAM_NETWORK_UNAVAILABLE_PRIVATE'}),'TRELIO_SKILL_RUNTIME_EXIT_2'],
+    [JSON.stringify({ok:false,code:'TELEGRAM_PASSWORD_INVALID'}),'TRELIO_SKILL_RUNTIME_EXIT_2'],
+    [JSON.stringify({ok:true,code:'TELEGRAM_NETWORK_UNAVAILABLE'}),'TRELIO_SKILL_RUNTIME_EXIT_2'],
+  ]){
+    const calls=await fs.readFile(path.join(directory,'native-calls'),'utf8');
+    await fs.writeFile(monitorFailure,wire);
+    await assert.rejects(readAssistantSourceMonitor({identity,host,store,source}),error=>{
+      assert.equal(error.code,expectedCode);
+      assert.doesNotMatch(JSON.stringify(error)+error.message,/PRIVATE/);return true;
+    });
+    assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls+'1');
+  }
+  await fs.unlink(monitorFailure);
+  assert.deepEqual(await readAssistantSourceMonitor({identity,host,store,source}),projected,
+    'successful stdout remains authoritative despite private stderr warnings');
   await fs.writeFile(path.join(cacheDir,'main.mjs'),'throw new Error("PRIVATE_TAMPERED");');
   assert.deepEqual(await readAssistantSourceMonitor({identity,host,store,source}),projected);
   assert.equal(downloadCalls,2);
@@ -696,7 +726,9 @@ test('structural projection rejects bad pages, scope swaps, receipts and gaps wi
   for(const code of ['TELEGRAM_MONITOR_GAP','TELEGRAM_MONITOR_INVALID_CURSOR']){
     assert.throws(()=>projectAssistantMonitorPage({exitCode:1,stdout:JSON.stringify({code,message:'PRIVATE',nextCursor:'do_not_use'})},options),error=>error.code===code && !JSON.stringify(error).includes('PRIVATE'));
   }
-  assert.throws(()=>projectAssistantMonitorPage({exitCode:1,stdout:JSON.stringify({code:'PRIVATE_ERROR',message:'PRIVATE'})},options),/SOURCE_PROVIDER_UNAVAILABLE/);
+  assert.throws(()=>projectAssistantMonitorPage({exitCode:1,stdout:JSON.stringify({code:'PRIVATE_ERROR',message:'PRIVATE'})},options),
+    error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_1'&&!JSON.stringify(error).includes('PRIVATE'),
+    'unknown provider prose retains its actual process-exit bucket');
 });
 
 test('signed source attention projection keeps only closed native signals and never trusts provider prose',()=>{

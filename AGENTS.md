@@ -4,6 +4,9 @@ Protected Telegram setup failures preserve only the reviewed provider code and
 bounded wait alongside the original process-exit bucket; see the
 [setup diagnostic contract](docs/assistant-scheduler.md#telegram-login-diagnostics).
 Raw factors/prose never cross the pipe, and classification never grants replay.
+Passive monitor refusals likewise consume complete bounded stderr privately
+(legacy stdout only when stderr is empty), then expose only reviewed source
+codes or the original exit bucket. Success/partial-pipe guards stay unchanged.
 
 ## Назначение репозитория
 

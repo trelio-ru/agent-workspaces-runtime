@@ -9268,17 +9268,24 @@ export const runMaterializedAgentSkill = async ({
       // Decode only after the pipe is complete. Chunk-level toString() can
       // corrupt a multibyte character; replacement decoding could turn an
       // invalid native ID/checkpoint into a different valid JSON reference.
-      // Only the private native-ACK and source-setup adapters consume a failed
-      // provider's stderr. Both immediately project a closed result; stderr is
-      // never attached to a public Error or returned by normal/task calls.
+      // Only native source monitor, native-ACK and source-setup consumers inspect
+      // a complete failed provider's stderr. Their strict adapters immediately
+      // project closed codes; normal/task calls never receive that pipe. A
+      // monitor's nonzero exit with empty stdout is a refusal, not malformed
+      // success. Keep successful stdout and every partial-pipe guard unchanged.
       // Setup providers deliberately leave stdout empty on failure. Reading
       // stdout in that case would hide the original failure behind a JSON error.
       // A credential setup is deliberately output-free: even a reviewed
       // provider could echo/encode the granted value. Do not project its text,
       // image or stderr to the model. A separate native auth probe must verify
       // login; process success alone neither proves login nor completes work.
+      // Legacy reviewed monitors may put their refusal on stdout. Retain that
+      // ABI only when completed stderr is empty; never merge pipes, scan prose
+      // or turn invalid UTF-8 into a success.
+      const failedPrivatePipe=result.exitCode!==0 && (sourceAckCapture || sourceSetupCapture
+        || captureMode==='monitor' && profile?.kind==='digital_assistant_source' && result.stderr.length>0);
       const stdout = privateSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
-        : new TextDecoder('utf-8', { fatal: true }).decode((sourceAckCapture || sourceSetupCapture) && result.exitCode !== 0 ? result.stderr : result.stdout);
+        : new TextDecoder('utf-8', { fatal: true }).decode(failedPrivatePipe ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.

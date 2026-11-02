@@ -4759,14 +4759,26 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
   const invalid=()=>fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   if(!object(result) || !Number.isSafeInteger(result.exitCode) || typeof result.stdout!=='string'
     || Buffer.byteLength(result.stdout,'utf8')>1024*1024 || !Object.hasOwn(SOURCE_PROTOCOLS,skillId))invalid();
-  let raw;try{raw=JSON.parse(result.stdout);}catch{invalid();}
-  if(!object(raw))invalid();
-
+  let raw;try{raw=JSON.parse(result.stdout);}catch{
+    if(result.exitCode!==0)throw skillRuntimeExitError(result.exitCode);
+    invalid();
+  }
   if(result.exitCode!==0){
     const prefix={ 'telegram-mtproto':'TELEGRAM','email-imap-smtp':'EMAIL','max-web':'MAX' }[skillId];
     const allowed=ASSISTANT_SOURCE_MONITOR_ERROR_CODES.filter(code=>code.startsWith(`${prefix}_MONITOR_`));
-    fail(allowed.includes(raw.code)?raw.code:'ASSISTANT_SOURCE_PROVIDER_UNAVAILABLE');
+    if(object(raw)&&allowed.includes(raw.code))fail(raw.code);
+    // Reuse the shared exact provider-error decoder, then narrow it to passive
+    // operational failures. Setup/password/QR codes never become a monitor
+    // diagnosis. Prose/details/retry hints remain private; this code grants no
+    // login, reset, replay, ACK, source generation or cursor change.
+    const failure=skillSetupExitError(result.exitCode,{skillId,stderr:result.stdout});
+    if(['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_RATE_LIMITED',
+      'TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED',
+      'TELEGRAM_SERVICE_UNAVAILABLE','TELEGRAM_WINDOWS_NATIVE_FAILURE'].includes(failure.details.providerCode))
+      fail(`ASSISTANT_SOURCE_MONITOR_${failure.details.providerCode}`);
+    throw skillRuntimeExitError(result.exitCode);
   }
+  if(!object(raw))invalid();
   const ref=value=>typeof value==='string' && value.length>0 && value.length<=512 && !/[\x00-\x20\x7f]/u.test(value);
   const digest=value=>typeof value==='string' && /^[a-f0-9]{64}$/u.test(value);
   const positive=value=>typeof value==='string' && /^[1-9]\d{0,18}$/u.test(value);
