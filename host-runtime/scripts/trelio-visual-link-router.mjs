@@ -105,6 +105,16 @@ export function visualAttachmentRouter() {
  */
 export function visualAudioReceiver() {
   let pending;
+  // Only this fixed family table crosses the private channel on a refusal.
+  // Never return the actual header value or a source URL as diagnostics.
+  const mimeFamilies = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav',
+    'audio/mpeg': 'mpeg', 'audio/mp3': 'mpeg', 'audio/ogg': 'ogg', 'audio/opus': 'ogg', 'application/ogg': 'ogg',
+    'audio/mp4': 'mp4', 'audio/x-m4a': 'mp4', 'audio/aac': 'aac', 'audio/aacp': 'aac', 'audio/flac': 'flac',
+    'audio/x-flac': 'flac', 'audio/webm': 'webm', 'video/webm': 'webm', 'audio/amr': 'amr', 'audio/3gpp': '3gpp' };
+  const mimeFamily = mime => Object.hasOwn(mimeFamilies, mime) ? mimeFamilies[mime] : 'other';
+  const refuse = (code, format) => Object.assign(Error('attachment_unsupported'), {
+    audioDiagnostic: { stage: 'audio_blob', code, ...(format ? { format } : {}) },
+  });
   // A reused player may still expose the PREVIOUS loaded currentSrc while
   // src already targets another message. Never return that earlier voice as
   // the selected original; defer to the one-play route or refuse ambiguity.
@@ -123,9 +133,10 @@ export function visualAudioReceiver() {
     if (parsed.origin !== location.origin || !['https:', 'http:'].includes(location.protocol)) throw Error('attachment_unsupported');
     const response = await fetch(parsed.href, { signal });
     const mimeType = (response.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
-    if (!response.ok || !/^(?:audio\/(?:wav|x-wav|wave|mpeg|mp3|ogg|opus|mp4|x-m4a|aac|aacp|flac|x-flac)|application\/(?:ogg|octet-stream))$/u.test(mimeType)) throw Error('attachment_unsupported');
+    if (!response.ok) throw refuse('invalid_body');
+    if (!/^(?:audio\/(?:wav|x-wav|wave|mpeg|mp3|ogg|opus|mp4|x-m4a|aac|aacp|flac|x-flac)|application\/(?:ogg|octet-stream))$/u.test(mimeType)) throw refuse('unsupported_mime', mimeFamily(mimeType));
     const reader = response.body?.getReader();
-    if (!reader) throw Error('attachment_unsupported');
+    if (!reader) throw refuse('invalid_body');
     const chunks = []; let total = 0;
     try {
       for (;;) {
@@ -135,7 +146,7 @@ export function visualAudioReceiver() {
         if ((total += item.value.length) > 20 * 1024 * 1024) throw Error('attachment_too_large');
         chunks.push(item.value);
       }
-      if (!total || signal.aborted || Date.now() >= until) throw Error('attachment_unsupported');
+      if (!total || signal.aborted || Date.now() >= until) throw refuse('invalid_body');
       const bytes = new Uint8Array(total); let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; chunk.fill(0); }
       let dataBase64 = '';
@@ -153,7 +164,8 @@ export function visualAudioReceiver() {
     if (message?.kind === 'cancel_audio_click') { stop(); return; }
     if (message?.kind === 'read_audio_blob') {
       const abort = new AbortController(), timer = setTimeout(() => abort.abort(), Math.max(1, message.until - Date.now()));
-      resolve(message.url, message.until, abort.signal).then(reply, () => reply({ reason: 'attachment_unsupported' })).finally(() => clearTimeout(timer));
+      resolve(message.url, message.until, abort.signal).then(reply, error => reply({ reason: 'attachment_unsupported',
+        ...(error.audioDiagnostic ? { audioDiagnostic: error.audioDiagnostic } : {}) })).finally(() => clearTimeout(timer));
       return true;
     }
     if (message?.kind !== 'arm_audio_click' || typeof message.nonce !== 'string' || message.nonce.length !== 36 || !Number.isSafeInteger(message.until) || message.until <= Date.now()) return;
@@ -168,7 +180,9 @@ export function visualAudioReceiver() {
       current.timer = setTimeout(() => { if (pending === current) { void chrome.runtime.sendMessage({ kind: 'route_audio_source', nonce: current.nonce, reason: 'attachment_link_required' }); stop(); } }, Math.max(1, message.until - Date.now()));
       resolve(event.data.url, message.until, current.abort.signal).then(
         result => { if (pending === current) void chrome.runtime.sendMessage({ kind: 'route_audio_source', nonce: current.nonce, ...result }); },
-        error => { if (pending === current) void chrome.runtime.sendMessage({ kind: 'route_audio_source', nonce: current.nonce, reason: ['attachment_too_large', 'attachment_unsupported'].includes(error.message) ? error.message : 'attachment_link_required' }); },
+        error => { if (pending === current) void chrome.runtime.sendMessage({ kind: 'route_audio_source', nonce: current.nonce,
+          reason: ['attachment_too_large', 'attachment_unsupported'].includes(error.message) ? error.message : 'attachment_link_required',
+          ...(error.audioDiagnostic ? { audioDiagnostic: error.audioDiagnostic } : {}) }); },
       ).finally(() => { if (pending === current) stop(); });
     };
     pending = current;

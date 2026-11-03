@@ -85,7 +85,8 @@ test('audio source delivery rechecks navigation and credentials, consumes its fr
           clicks++;
           if (mode === 'navigate') nativeEvent({ tabId: 1 }, 'Page.navigatedWithinDocument', { frameId: 'main' });
           if (mode === 'credential') blocked = true;
-          messageEvent({ kind: 'route_audio_source', nonce: armed.nonce, file: { mimeType: 'audio/wav', dataBase64: 'AQID' } }, { id: 'fixture', tab: { id: 1 }, frameId: 0 });
+          messageEvent({ kind: 'route_audio_source', nonce: armed.nonce,
+            ...(['response206', 'mimewebm'].includes(mode) ? { url: 'https://example.test/audio' } : { file: { mimeType: 'audio/wav', dataBase64: 'AQID' } }) }, { id: 'fixture', tab: { id: 1 }, frameId: 0 });
         }
         assert.notEqual(method, 'Fetch.takeResponseBodyAsStream', 'no test case grants a network body');
         return {};
@@ -96,7 +97,15 @@ test('audio source delivery rechecks navigation and credentials, consumes its fr
     tabs: { onCreated: events, onRemoved: events,
       async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
       async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
-      async update(_id, input) { currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
+      async update(_id, input) {
+        currentUrl = input.url || currentUrl;
+        if (currentUrl === 'https://example.test/audio') queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
+          requestId: 'fixture', frameId: 'main', resourceType: 'Document', request: { url: currentUrl },
+          responseStatusCode: mode === 'response206' ? 206 : 200,
+          responseHeaders: [{ name: 'content-type', value: mode === 'mimewebm' ? 'audio/webm' : 'audio/mpeg' }, { name: 'x-private', value: 'PRIVATE_HEADER_BODY' }],
+        }));
+        return { id: 1, url: currentUrl, status: 'complete' };
+      },
       async sendMessage(_id, message) {
         if (message.kind === 'authentication-guard') return { blocked };
         if (message.kind === 'resolve_audio_link') return null;
@@ -113,16 +122,19 @@ test('audio source delivery rechecks navigation and credentials, consumes its fr
     throw Error('synthetic_command_timeout');
   };
   await dispatch('restore-session-auth', { cookies: [], replace: false });
-  for (const [next, reason] of [['navigate', 'stale_frame'], ['credential', 'manual_control_active'], ['valid', undefined]]) {
+  for (const [next, reason] of [['navigate', 'stale_frame'], ['credential', 'manual_control_active'], ['response206', 'attachment_unsupported'], ['mimewebm', 'attachment_unsupported'], ['valid', undefined]]) {
     mode = next; blocked = false;
     const frame = await dispatch('read-text'), args = { frameId: frame.frameId, x: 10, y: 20 };
     const result = await dispatch('download-audio', args);
     if (reason) { assert.equal(result.reason, reason); assert.equal(result.file, undefined); }
     else { assert.equal(result.state, 'ready'); assert.equal(result.file.mimeType, 'audio/wav'); }
+    if (next === 'response206') assert.deepEqual(JSON.parse(JSON.stringify(result.audioDiagnostic)), { stage: 'audio_response', code: 'unsupported_status', httpStatus: 206 });
+    if (next === 'mimewebm') assert.deepEqual(JSON.parse(JSON.stringify(result.audioDiagnostic)), { stage: 'audio_response', code: 'unsupported_mime', format: 'webm' });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_HEADER_BODY|https:|dataBase64.*PRIVATE/u);
     blocked = false;
     assert.equal((await dispatch('download-audio', args)).reason, 'stale_frame');
   }
-  assert.equal(clicks, 3, 'each independent source dispatch gets exactly one original click');
+  assert.equal(clicks, 5, 'each independent source dispatch gets exactly one original click');
 });
 
 test('extension installs literal origin guards before bootstrap and never navigates an adversarial sibling', async () => {

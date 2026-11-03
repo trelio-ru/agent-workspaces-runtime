@@ -8,7 +8,29 @@ import { crc32 } from 'node:zlib';
 import { visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { saveVisualAttachment, freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
-import { validVisualArguments } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { validVisualArguments, visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
+
+test('audio refusal diagnostics survive MCP with closed evidence only and never authorize a receipt', () => {
+  const diagnostics = [
+    { stage: 'audio_response', code: 'unsupported_status', httpStatus: 206 },
+    { stage: 'audio_response', code: 'invalid_headers' },
+    { stage: 'audio_blob', code: 'unsupported_mime', format: 'webm' },
+    { stage: 'audio_container', code: 'unsupported_container', format: 'mpeg' },
+  ];
+  for (const audioDiagnostic of diagnostics) {
+    const value = visualStatus('error', 'attachment_unsupported', { audioDiagnostic });
+    assert.deepEqual(JSON.parse(visualMcpResult(parseVisualSkillOutput(JSON.stringify(value))).content[0].text).audioDiagnostic, audioDiagnostic);
+    for (const patch of [{ url: 'https://example.test/private' }, { message: 'PRIVATE_HEADER_BODY' }, { format: 'PRIVATE_MIME' }, { httpStatus: 999 }]) {
+      assert.throws(() => visualStatus('error', 'attachment_unsupported', { audioDiagnostic: { ...audioDiagnostic, ...patch } }), { code: 'VISUAL_RESULT_INVALID' });
+    }
+    assert.throws(() => visualStatus('ready', 'none', { audioDiagnostic }), { code: 'VISUAL_RESULT_INVALID' });
+    assert.throws(() => visualStatus('error', 'operation_failed', { audioDiagnostic }), { code: 'VISUAL_RESULT_INVALID' });
+  }
+  let refusal;
+  try { visualAudioFormat(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0]), 'application/octet-stream'); } catch (error) { refusal = error; }
+  assert.equal(refusal.code, 'attachment_unsupported');
+  assert.deepEqual(refusal.audioDiagnostic, { stage: 'audio_container', code: 'unsupported_container', format: 'ebml' });
+});
 
 test('audio originals require complete containers/frames and a matching MIME, independently of document downloads', async () => {
   const wav = Buffer.alloc(204);

@@ -13,7 +13,7 @@ import { visualLinkRouter, visualAttachmentRouter, visualAudioReceiver, visualAu
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validateVisualAudioDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
@@ -732,7 +732,10 @@ export class ExtensionVisualBrowser {
       }
       if (fresh) await sleep(500);
       const value = await this.#send(fresh && operation === 'navigate' ? (this.observationMode === 'text' ? 'read-text' : 'screenshot') : operation, args);
-      if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId, ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
+      if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId,
+        ...(operation === 'download-audio' && value.reason === 'attachment_unsupported' && value.audioDiagnostic
+          ? { audioDiagnostic: validateVisualAudioDiagnostic(value.audioDiagnostic) } : {}),
+        ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
       if (value.state !== 'ready') throw fault('operation_failed');
       this.#state = 'ready';
       if (operation === 'download-attachment' || operation === 'download-audio') {
@@ -756,6 +759,8 @@ export class ExtensionVisualBrowser {
         ? visualStartupReason(this.#startupDiagnostic) : reason;
       if (this.#state === 'preparing' || this.#startupDiagnostic) { this.#state = 'error'; this.#terminal = failureReason; }
       return visualStatus('error', failureReason, { sessionId: this.sessionId, hasStoredSession: this.#saved,
+        ...(operation === 'download-audio' && reason === 'attachment_unsupported' && error.audioDiagnostic
+          ? { audioDiagnostic: validateVisualAudioDiagnostic(error.audioDiagnostic) } : {}),
         ...(this.#startupDiagnostic && reason !== 'lease_expired' ? { diagnostic: this.#startupDiagnostic } : {}) });
     });
   }

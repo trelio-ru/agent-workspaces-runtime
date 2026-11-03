@@ -363,6 +363,18 @@ Chromium fixture проверяет HTTP, lazy blob и native `<audio>`, exact b
 сохранение чата, отсутствие replay и новые late guards в обязательных OS lanes.
 Синтетический fixture не доказывает совместимость живого плеера конкретного сайта.
 
+Отказ `attachment_unsupported` при `download-audio` может дополнительно вернуть
+закрытый `audioDiagnostic`: `audio_response` различает unsupported status,
+invalid headers, unsupported MIME и invalid body; `audio_blob` – MIME/body;
+`audio_container` – неподдержанный/повреждённый контейнер. Numeric `httpStatus`
+допустим только для status refusal. `format` – только фиксированная family
+(`wav|mpeg|ogg|mp4|aac|flac|webm|ebml|amr|3gpp|other`), без actual header value,
+prefix bytes, source URL или filename. EBML magic не доказывает WebM/audio.
+Обычные вложения и startup diagnostics сохраняют прежний контракт. MCP повторно
+валидирует точные поля и сочетания; successful result не содержит диагностику.
+Наблюдённый 206, MIME family или container signature не разрешают экспорт,
+повтор input, новый transport, auth reset или ослабление format validation.
+
 ## Исходящие файлы
 
 `VISUAL_FILE_UPLOAD_API === 'trelio.visual-file-upload/v1'` в host module

@@ -10,13 +10,19 @@ export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
  */
 export function visualAudioFormat(bytes, mimeType) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_ATTACHMENT_BYTES) throw fault('attachment_too_large');
-  const reject = () => { throw fault('attachment_unsupported'); };
+  // A fixed magic-family bucket is diagnostic evidence, never permission to
+  // export an unsupported container. No file prefix or MIME prose is returned.
+  let containerFamily = 'other';
+  const reject = () => { throw Object.assign(fault('attachment_unsupported'), {
+    audioDiagnostic: { stage: 'audio_container', code: 'unsupported_container', format: containerFamily },
+  }); };
   const accept = (mime, extension, aliases = []) => {
     if (mimeType !== 'application/octet-stream' && ![mime, ...aliases].includes(mimeType)) reject();
     return { mimeType: mime, extension };
   };
   const text = (start, end) => bytes.subarray(start, end).toString('latin1');
   if (text(0, 4) === 'RIFF' && text(8, 12) === 'WAVE') {
+    containerFamily = 'wav';
     if (bytes.length < 44 || bytes.readUInt32LE(4) + 8 !== bytes.length) reject();
     let offset = 12, format = false, data = false;
     while (offset < bytes.length) {
@@ -31,6 +37,7 @@ export function visualAudioFormat(bytes, mimeType) {
     return accept('audio/wav', 'wav', ['audio/x-wav', 'audio/wave']);
   }
   if (text(0, 4) === 'OggS') {
+    containerFamily = 'ogg';
     let offset = 0, serial, first = true, opus = false;
     while (offset < bytes.length) {
       if (offset + 27 > bytes.length || text(offset, offset + 4) !== 'OggS' || bytes[offset + 4] !== 0) reject();
@@ -51,6 +58,7 @@ export function visualAudioFormat(bytes, mimeType) {
     return accept('audio/ogg', opus ? 'opus' : 'ogg', opus ? ['audio/opus', 'application/ogg'] : ['application/ogg']);
   }
   if (text(0, 4) === 'fLaC') {
+    containerFamily = 'flac';
     let offset = 4, last = false, blocks = 0;
     while (!last) {
       if (offset + 4 > bytes.length || ++blocks > 128) reject();
@@ -66,6 +74,7 @@ export function visualAudioFormat(bytes, mimeType) {
   // samples. Require an actual audio track and data; an ftyp/video or a file
   // containing the word 'soun' in arbitrary payload is not an audio original.
   if (text(4, 8) === 'ftyp') {
+    containerFamily = 'mp4';
     let audio = false, video = false, data = false, boxes = 0;
     const walk = (start, end, depth) => {
       if (depth > 4) reject();
@@ -90,11 +99,16 @@ export function visualAudioFormat(bytes, mimeType) {
   // MPEG Layer III and ADTS are sequences of complete frames. ID3's bounded
   // synchsafe length is skipped, never interpreted as speech or site content.
   let offset = 0, count = 0;
+  if (bytes.subarray(0, 4).toString('hex') === '1a45dfa3') containerFamily = 'ebml';
+  if (text(0, 5) === '#!AMR') containerFamily = 'amr';
   if (text(0, 3) === 'ID3') {
+    containerFamily = 'mpeg';
     if (bytes.length < 10 || [6, 7, 8, 9].some(i => bytes[i] & 128)) reject();
     offset = 10 + bytes[6] * 2097152 + bytes[7] * 16384 + bytes[8] * 128 + bytes[9] + ((bytes[5] & 16) ? 10 : 0);
   }
   const adts = offset + 7 <= bytes.length && bytes[offset] === 255 && (bytes[offset + 1] & 246) === 240;
+  if (adts) containerFamily = 'aac';
+  else if (offset + 2 <= bytes.length && bytes[offset] === 255 && (bytes[offset + 1] & 224) === 224) containerFamily = 'mpeg';
   while (offset + (adts ? 7 : 4) <= bytes.length) {
     if (!adts && bytes.length - offset === 128 && text(offset, offset + 3) === 'TAG') { offset += 128; break; }
     const a = bytes[offset], b = bytes[offset + 1], c = bytes[offset + 2];

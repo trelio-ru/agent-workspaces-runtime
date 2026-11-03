@@ -528,6 +528,9 @@ publication tooling также остаются вне этого публичн
   или прежний guarded main-document stream. Не XHR/HTTP extractor, не запись
   микрофона/системного звука. MIME/bytes, общий deadline, late credential/frame
   guards и private receipt обязательны; unknown не разрешает replay.
+  Audio refusals retain only closed stage/code/format-family or numeric HTTP
+  status through the SAME result validator; no raw headers, prefix bytes, URL
+  or exception prose. Diagnostic evidence never admits a container or a retry.
 - Исходящие файлы – signed `fileUploads` opt-in и additive API marker по
   [visual contract](docs/visual-browser.md#исходящие-файлы). Один coordinate
   click/native chooser получает только frozen regular files, без фильтра

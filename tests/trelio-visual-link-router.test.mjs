@@ -39,11 +39,11 @@ test('audio routing binds one trusted coordinate click, preserves native methods
 });
 
 test('isolated audio reads only same-origin blobs and never fetches an HTTPS or foreign source', async () => {
-  let listener, requests = 0, audio;
+  let listener, requests = 0, audio, mime = 'audio/ogg';
   vm.runInNewContext(`(${visualAudioReceiver.toString()})();`, {
     chrome: { runtime: { id: 'fixture', onMessage: { addListener(fn) { listener = fn; } } } },
     window: {}, document: { elementFromPoint() { return { closest(selector) { assert.equal(selector, 'audio'); return audio; } }; } }, location: { origin: 'https://example.test', protocol: 'https:' }, URL, Date, AbortController, setTimeout, clearTimeout,
-    async fetch(url) { requests++; assert.equal(url, 'blob:https://example.test/synthetic'); return new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'audio/ogg' } }); },
+    async fetch(url) { requests++; assert.equal(url, 'blob:https://example.test/synthetic'); return new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': mime } }); },
     Uint8Array, Response, btoa,
   });
   const native = () => new Promise(resolve => listener({ kind: 'resolve_audio_link', x: 10, y: 20 }, { id: 'fixture' }, resolve));
@@ -59,6 +59,13 @@ test('isolated audio reads only same-origin blobs and never fetches an HTTPS or 
   const result = await read('blob:https://example.test/synthetic');
   assert.equal(result.file.dataBase64, 'AQID'); assert.equal(requests, 1);
   assert.equal(Object.keys(result.file).sort().join(), 'dataBase64,mimeType');
+  mime = 'audio/webm';
+  const refused = await read('blob:https://example.test/synthetic');
+  assert.equal(refused.reason, 'attachment_unsupported'); assert.equal(refused.file, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(refused.audioDiagnostic)), { stage: 'audio_blob', code: 'unsupported_mime', format: 'webm' });
+  mime = 'application/PRIVATE_HEADER';
+  const unknown = await read('blob:https://example.test/synthetic');
+  assert.equal(unknown.audioDiagnostic.format, 'other'); assert.doesNotMatch(JSON.stringify(unknown), /PRIVATE_HEADER|blob:|dataBase64/u);
 });
 
 test('link routing is one-shot, trusted and bound to the armed coordinates', () => {

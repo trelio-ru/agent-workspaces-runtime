@@ -39,6 +39,28 @@ test('closed startup diagnostics cross actual worker HTTP and typed MCP unchange
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
 
+test('closed audio refusal crosses worker HTTP and the real typed action without exposing the response', async () => {
+  const audioDiagnostic = { stage: 'audio_response', code: 'unsupported_status', httpStatus: 206 };
+  const server = createVisualControlServer({ token: 'a'.repeat(64), dispatch: async () => visualStatus('error', 'attachment_unsupported', { audioDiagnostic }) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const input = { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: randomUUID(), skillId: 'synthetic-visual-fixture', releaseId: randomUUID(), arguments: ['download-audio'] } };
+    const result = await handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
+      workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, {
+        runBridge: async () => {
+          const response = await fetch(`http://127.0.0.1:${server.address().port}/command`, { method: 'POST',
+            headers: { authorization: `Bearer ${'a'.repeat(64)}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ operation: 'download-audio', args: { frameId: randomUUID(), x: 1, y: 2 } }) });
+          return { stdout: await response.text(), stderr: 'PRIVATE_AUDIO_URL_HEADER_BODY' };
+        },
+      }),
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(JSON.parse(result.content[0].text).audioDiagnostic, audioDiagnostic);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_AUDIO|stdout|Bearer|filePath/u);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
 test('startup diagnostic validator rejects arbitrary properties, values and successful-state injection', async () => {
   const safe = { stage: 'dependency_load', code: 'dependency_load_failed', causeCode: 'ERR_DLOPEN_FAILED' };
   const status = visualStatus('error', 'bootstrap_failed', { diagnostic: safe });

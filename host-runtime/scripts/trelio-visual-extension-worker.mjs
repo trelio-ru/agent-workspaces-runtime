@@ -134,7 +134,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (manual || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
     if (message?.kind === 'route_audio_source' && pendingAudio?.tabId === sender.tab.id && pendingAudio.nonce === message.nonce) {
       if (pendingAudio.generation !== navigationGeneration || Date.now() >= pendingAudio.until) pendingAudio.reject(Error('stale_frame'));
-      else if (message.reason) pendingAudio.reject(Error(['attachment_too_large', 'attachment_unsupported'].includes(message.reason) ? message.reason : 'attachment_link_required'));
+      else if (message.reason) pendingAudio.reject(Object.assign(Error(['attachment_too_large', 'attachment_unsupported'].includes(message.reason) ? message.reason : 'attachment_link_required'),
+        message.reason === 'attachment_unsupported' && message.audioDiagnostic ? { audioDiagnostic: message.audioDiagnostic } : {}));
       else pendingAudio.resolve(message.file ? { file: message.file } : { url: message.url });
       return;
     }
@@ -231,18 +232,29 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // incoming attachment. It cannot read an HTML page/source, take a URL from
     // the model, intercept XHR/subresources, or continue into native Save As.
     const maximum = 20 * 1024 * 1024, headers = new Map();
-    if (params.responseStatusCode !== 200 || !Array.isArray(params.responseHeaders) || params.responseHeaders.length > 256) throw Error('attachment_unsupported');
+    // Preserve the original refusal and all transfer bounds. Diagnostics name
+    // only a fixed observation stage/family, never raw headers or a URL/body.
+    // In particular, observing 206 does NOT permit a partial original export.
+    const refuse = (code, extra = {}) => Object.assign(Error('attachment_unsupported'), download.audioOnly
+      ? { audioDiagnostic: { stage: 'audio_response', code, ...extra } } : {});
+    if (params.responseStatusCode !== 200) throw Number.isInteger(params.responseStatusCode) && params.responseStatusCode >= 100 && params.responseStatusCode <= 599
+      ? refuse('unsupported_status', { httpStatus: params.responseStatusCode }) : refuse('invalid_headers');
+    if (!Array.isArray(params.responseHeaders) || params.responseHeaders.length > 256) throw refuse('invalid_headers');
     let headerBytes = 0;
     for (const header of params.responseHeaders) {
-      if (typeof header.name !== 'string' || typeof header.value !== 'string' || (headerBytes += header.name.length + header.value.length) > 65536) throw Error('attachment_unsupported');
+      if (!header || typeof header.name !== 'string' || typeof header.value !== 'string' || (headerBytes += header.name.length + header.value.length) > 65536) throw refuse('invalid_headers');
       const name = header.name.toLowerCase();
-      if (['content-type', 'content-length', 'content-disposition', 'content-encoding'].includes(name)) { if (headers.has(name)) throw Error('attachment_unsupported'); headers.set(name, header.value); }
+      if (['content-type', 'content-length', 'content-disposition', 'content-encoding'].includes(name)) { if (headers.has(name)) throw refuse('invalid_headers'); headers.set(name, header.value); }
     }
     const mimeType = (headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
     const types = download.audioOnly
       ? /^(?:audio\/(?:wav|x-wav|wave|mpeg|mp3|ogg|opus|mp4|x-m4a|aac|aacp|flac|x-flac)|application\/(?:ogg|octet-stream))$/u
       : /^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:octet-stream|pdf|rtf|zip|x-zip-compressed|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u;
-    if (!types.test(mimeType)) throw Error('attachment_unsupported');
+    if (!types.test(mimeType)) {
+      const families = { 'audio/webm': 'webm', 'video/webm': 'webm', 'audio/amr': 'amr', 'audio/3gpp': '3gpp' };
+      const format = Object.hasOwn(families, mimeType) ? families[mimeType] : 'other';
+      throw refuse('unsupported_mime', { format });
+    }
     const length = headers.get('content-length');
     if (length !== undefined && (!/^\d{1,10}$/u.test(length) || Number(length) > maximum)) throw Error('attachment_too_large');
     const check = () => { if (pendingAttachment !== download || Date.now() >= download.until || Date.now() >= config.deadlineAt) throw Error('operation_failed'); };
@@ -266,7 +278,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // Content-Length may describe the encoded transfer; IO reads decoded
       // bytes. Enforce the hard decoded budget independently, and compare the
       // declared size only for an identity/no-encoding response.
-      if (!total || (length !== undefined && (!headers.get('content-encoding') || headers.get('content-encoding') === 'identity') && Number(length) !== total)) throw Error('attachment_unsupported');
+      if (!total || (length !== undefined && (!headers.get('content-encoding') || headers.get('content-encoding') === 'identity') && Number(length) !== total)) throw refuse('invalid_body');
       const bytes = new Uint8Array(total); let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; chunk.fill(0); }
       let dataBase64 = '';
@@ -594,7 +606,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         if (url.origin !== new URL(tab.url).origin) throw Error('navigation_blocked');
         value = await chrome.tabs.sendMessage(f.tabId, { kind: 'read_audio_blob', url: url.href, until }, { frameId: 0 });
         current(); await credentialGuard(f.tabId); current();
-        if (!value?.file) throw Error('attachment_unsupported');
+        if (!value?.file) throw Object.assign(Error('attachment_unsupported'), value?.audioDiagnostic ? { audioDiagnostic: value.audioDiagnostic } : {});
         return { state: 'ready', file: value.file };
       }
       return downloadOriginal({ ...f, generation }, url.href, true, until);
@@ -700,7 +712,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         catch (error) {
           const pacingReason = { BROWSER_REQUEST_PREVIOUS_RESULT_NOT_REVIEWED: 'request_not_reviewed', BROWSER_REQUEST_NO_RESULT_TO_REVIEW: 'request_not_ready' }[error.message];
           const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required', 'upload_control_required'].includes(error.message) ? error.message : 'operation_failed');
-          send({ kind: 'result', id: message.id, result: { state: 'error', reason } });
+          send({ kind: 'result', id: message.id, result: { state: 'error', reason,
+            ...(message.operation === 'download-audio' && reason === 'attachment_unsupported' && error.audioDiagnostic
+              ? { audioDiagnostic: error.audioDiagnostic } : {}) } });
         }
       };
       // A renderer input acknowledgement must not prevent transport keepalive

@@ -31,6 +31,23 @@ const exact = (value, keys) => value && typeof value === 'object' && !Array.isAr
 for (const reason of ['authentication_required', 'authentication_setup_required', 'authentication_unknown', 'authentication_cancelled', 'authentication_timeout', 'authentication_setup_failed', 'authentication_mail_busy']) reasons.add(reason);
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
 
+/** Audio refusal evidence is deliberately content-free. A closed stage and
+ * format family distinguish transport/MIME/container refusals without copying
+ * a response header, source URL, bytes, filename or native exception to MCP.
+ * This describes the observed refusal only; it grants no download/input retry.
+ */
+export function validateVisualAudioDiagnostic(value) {
+  if (!exact(value, ['stage', 'code', 'format', 'httpStatus'])
+    || !['audio_response', 'audio_blob', 'audio_container'].includes(value.stage)
+    || !['unsupported_status', 'invalid_headers', 'unsupported_mime', 'invalid_body', 'unsupported_container'].includes(value.code)
+    || value.format !== undefined && !['wav', 'mpeg', 'ogg', 'mp4', 'aac', 'flac', 'webm', 'ebml', 'amr', '3gpp', 'other'].includes(value.format)
+    || value.httpStatus !== undefined && (!Number.isInteger(value.httpStatus) || value.httpStatus < 100 || value.httpStatus > 599)
+    || (value.code === 'unsupported_status' ? value.stage !== 'audio_response' || value.httpStatus === undefined || value.format !== undefined : value.httpStatus !== undefined)
+    || (value.code === 'unsupported_container' ? value.stage !== 'audio_container' || value.format === undefined : value.stage === 'audio_container')
+    || (value.code === 'unsupported_mime' ? value.format === undefined : value.format !== undefined && value.code !== 'unsupported_container')) fail();
+  return { ...value };
+}
+
 // Startup diagnostics are a CLOSED protocol, not a redacted exception dump.
 // Keep this beside the existing result validator so the detached worker, its
 // private HTTP client and MCP all enforce exactly the same disclosure boundary.
@@ -133,7 +150,11 @@ function validatePng(bytes, discardBrowserColorProfile = false) {
 }
 
 function validateResult(value, discardBrowserColorProfile) {
-  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic', 'audioDiagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (value.audioDiagnostic !== undefined) {
+    if (value.state !== 'error' || value.reason !== 'attachment_unsupported' || value.diagnostic !== undefined) fail();
+    validateVisualAudioDiagnostic(value.audioDiagnostic);
+  }
   if (value.diagnostic !== undefined) {
     if (value.state !== 'error' || !['operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'browser_process_lost'].includes(value.reason)) fail();
     validateVisualStartupDiagnostic(value.diagnostic);
