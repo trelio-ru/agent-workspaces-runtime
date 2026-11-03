@@ -8,10 +8,10 @@ import {PassThrough} from 'node:stream';
 import {createForwardingAssistantMcp,createAssistantWorkspaceExecutor,requestCurrentAssistantRuntime,
   runAssistantSetupMcp} from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
-const pendingSearchFixture=async(t,handlers={})=>{
+const pendingSearchFixture=async(t,handlers={},nativeTool='search')=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-pending-search-'));
   await fs.mkdir(path.join(root,'digital-assistants'));await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
-  const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+  const descriptor={nativeTool,companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
   const observed=[],admissions=[];
   const value=title=>({schemaVersion:1,generation:'a'.repeat(64),result:{content:[],structuredContent:{results:[{title}]}}});
   const workspace=await createAssistantWorkspaceExecutor({configDirectory:root,companyPreparationOptions:{waitMs:2}});
@@ -19,14 +19,14 @@ const pendingSearchFixture=async(t,handlers={})=>{
     observed.push(raw.operation);
     if(raw.operation==='call'){
       admissions.push(raw.arguments.runtimeSessionProof.nonce);
-      return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:2,descriptor,binding:{...binding}}}};
+      return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:nativeTool==='fetch'?3:2,descriptor,binding:{...binding}}}};
     }
     if(raw.operation==='company_context_search')return handlers.search?handlers.search(raw,options):value('CURRENT');
     assert.equal(raw.operation,'company_context_validate');
     return handlers.validate?handlers.validate(raw,options):{schemaVersion:1,current:true};
   };
   const proxy=await createForwardingAssistantMcp({configurationDirectory:root,request,createWorkspace:()=>workspace});
-  const call=(args={},signal)=>proxy.callTool('search',{companySlugs:['synthetic'],queries:['PRIVATE_QUERY'],
+  const call=(args={},signal)=>proxy.callTool(nativeTool,{...(nativeTool==='fetch'?{id:'context:registry:synthetic'}:{companySlugs:['synthetic'],queries:['PRIVATE_QUERY']}),
     ...args,runtimeSessionProof:{nonce:randomUUID()}},signal);
   t.after(async()=>{await workspace.stop();await fs.rm(root,{recursive:true,force:true});});
   return {workspace,call,observed,admissions,value,binding};
@@ -213,4 +213,22 @@ test('a slow fresh search stays in its original owned read operation after prepa
   assert.equal(result.structuredContent.results[0].title,'SYNTHETIC_CURRENT_SOURCE');
   assert.equal(reads,1,'polling must not launch another query reader');
   assert.ok(admissions>1,'each short poll needs a fresh native admission');
+});
+
+test('pending exact fetch binds the original selection and independently refuses late revocation',async t=>{
+  let release,reads=0,refuse=false;
+  const denied=Object.assign(Error(),{code:'ASSISTANT_COMPANY_CONTEXT_ACCESS_DENIED'});
+  const f=await pendingSearchFixture(t,{search:raw=>{
+    reads++;assert.equal(raw.descriptor.nativeTool,'fetch');assert.deepEqual(raw.arguments,{id:'context:registry:synthetic'});
+    return new Promise(resolve=>{release=()=>resolve(f.value('EXACT_SOURCE'));});
+  },validate:()=>{if(refuse)throw denied;return {schemaVersion:1,current:true};}},'fetch');
+  assert.equal((await f.call()).structuredContent.state,'preparing');
+  const changed=await f.call({id:'context:registry:different'});
+  assert.equal(changed.structuredContent.nextCall.tool,'fetch');
+  assert.deepEqual(changed.structuredContent.nextCall.arguments,{id:'context:registry:synthetic'});
+  assert.equal(reads,1,'another selected id cannot launch a parallel reader or reset its budget');
+  release();await new Promise(resolve=>setImmediate(resolve));refuse=true;
+  for(let attempt=0;attempt<2;attempt++)await assert.rejects(f.call(),error=>error===denied);
+  assert.equal(reads,1,'fresh native refusal never retries or leaks the completed source');
+  assert.equal(new Set(f.admissions).size,4);
 });

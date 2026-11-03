@@ -14,6 +14,7 @@ import {PassThrough} from 'node:stream';
 // plaintext substitute a native assistant private-store E2E result.
 for(const scenario of [
   {name:'cold',files:3000,stallAttempts:0},
+  {name:'slow-exact',files:16,stallAttempts:0,slowExact:true,nativeCase:'cold'},
   {name:'owned-timeout-resume',files:16,stallAttempts:1},
   {name:'second-timeout-hard',files:16,stallAttempts:2},
   {name:'ordinary-refusal-hard',files:16,stallAttempts:0,refuse:true},
@@ -76,7 +77,7 @@ for(const scenario of [
     privateKeyPkcs8:key.privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
     observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}};
   const backend=await startCompanyScenarioBackend({identity,pass,credential,root,fileCount:scenario.files,
-    stallAttempts:scenario.stallAttempts,refuse:scenario.refuse===true,unknownCode:scenario.unknownCode===true,
+    stallAttempts:scenario.stallAttempts,refuse:scenario.refuse===true,unknownCode:scenario.unknownCode===true,slowExact:scenario.slowExact===true,
     runtimePublicKey:key.publicKey.export({type:'spki',format:'pem'})});
   t.after(()=>backend.close());
   const configuration={schema:'trelio.test.company-context/v1',root,server:backend.url,identity,
@@ -171,9 +172,30 @@ for(const scenario of [
     for(let index=0;index<8;index++)assert.equal(backend.fileHits(index),1,'completed exact-head cache survives a bounded failed child');
     console.log(JSON.stringify({fixture:scenario.name,files:scenario.files,elapsedMs:Date.now()-coldStarted,ciphertextBytes:backend.counts.ciphertextBytes}));
     assert.match(JSON.stringify(search),/Synthetic weekend journey/);
-    const exact=await call('fetch',{id:`task:synthetic/${backend.projectSlug}/1`});
+    // A selected exact read may refresh the SAME large company generation.
+    // Its genuine child, not a native 30s MCP callback, owns that read. Each
+    // poll independently consumes fresh native proof and never repeats it.
+    let exact;
+    for(let poll=0;poll<1200;poll++){
+      exact=await call('fetch',{id:`task:synthetic/${backend.projectSlug}/1`});
+      if(exact.result?.structuredContent?.state!=='preparing')break;
+      assert.equal(exact.result.structuredContent.nextCall.tool,'fetch');
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+    assert.notEqual(exact.result?.isError,true,JSON.stringify(exact));
+    assert.notEqual(exact.result?.structuredContent?.state,'preparing');
     backend.assertClean();
     assert.match(JSON.stringify(exact),/OLD_SYNTHETIC_DESCRIPTION/);
+    let document;
+    for(let poll=0;poll<1200;poll++){
+      document=await call('fetch',{id:`context:registry:${backend.registryId}`});
+      if(document.result?.structuredContent?.state!=='preparing')break;
+      assert.equal(document.result.structuredContent.nextCall.tool,'fetch');
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+    assert.notEqual(document.result?.isError,true,JSON.stringify(document));
+    assert.match(JSON.stringify(document),/SYNTHETIC_EXACT_REGISTRY_ROW/,
+      'a context-document fetch uses the SAME owned reader after the selected task');
     const current=await call('get_task_activity',{companySlug:'synthetic',projectSlug:backend.projectSlug,taskNumber:1});
     backend.assertClean();
     assert.match(JSON.stringify(current),/CURRENT_SYNTHETIC_PLAN/);

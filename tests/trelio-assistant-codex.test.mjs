@@ -987,7 +987,10 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
  const scope=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_INTAKE '));
  assert.deepEqual(JSON.parse(scope.slice('TRELIO_ASSISTANT_INTAKE '.length)),{kind:'source_intake',...intakeContext});
- assert.match(input,/Only reply_owner is permitted/);assert.match(input,/fresh current company sources again/);
+ assert.match(input,/Only reply_owner is permitted/);
+ assert.match(input,/already available external sources/);
+ assert.match(input,/A personal question does not require a task or Workspace Run/);
+ assert.match(input,/real ACL and current login/);assert.match(input,/fresh current company sources again/);
  assert.match(input,/does not establish that a prior response was delivered/);
  assert.doesNotMatch(input,/prior technical limitation reply was positively delivered/);
  assert.doesNotMatch(scope,/taskId|recovery|workStatePath/,'hook ABI stays structural and unchanged');
@@ -1259,4 +1262,41 @@ test('dispatch recovery skips only independently certified settled read-only rep
  assert.deepEqual(await read([later.turn,later.turn,parent]),{state:'uncertain'});
  assert.deepEqual(await read([parent,later.turn]),{state:'uncertain'});
  assert.deepEqual(await read([later.turn,{id:randomUUID(),status:'completed',items:[]},parent]),{state:'uncertain'});
+});
+
+
+test('exact-read technical correction certifies READY, selected failures and the original positive reply',async()=>{
+  const f=readonlyPreparationFixture(),witness={receiptId:randomUUID(),eventId:randomUUID(),sourceRevision:1,threadId:f.threadId};
+  f.turn.items=f.turn.items.filter(item=>item.type!=='commandExecution');
+  const ready=structuredClone(f.turn.items[2]);
+  ready.result.structuredContent={schemaVersion:1,provider:'local_company_context',results:[{id:'context:registry:synthetic'}]};
+  const failure={type:'mcpToolCall',server:'trelio-assistant',tool:'fetch',status:'failed',
+    arguments:{id:'context:registry:synthetic',intakePass:f.intakePass,runtimeSessionProof:{}},
+    result:{isError:true,content:[{type:'text',text:'ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED'}]}};
+  const resolve=f.turn.items.at(-1);resolve.status='completed';
+  resolve.result.structuredContent={schemaVersion:1,id:f.intakePass.intakeId,...f.intakePass,...witness,
+    state:'replied',taskId:null,readConfirmed:true,ownerPrivateRead:true};
+  f.turn.items.splice(3,1,ready,failure);
+  const options={...f,technicalReplyCorrection:witness};
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,options),true);
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,f),false,'a positive reply never becomes absent-send recovery');
+  const read=turns=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{...options,readOnlyPreparation:f.intakePass,
+    executable:process.execPath,spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+      ?{thread:{id:f.threadId,cwd:process.cwd()}}:{data:turns,nextCursor:null}}))});
+  assert.equal((await read([f.turn])).readOnlyFailure,'company_context_exact_read_failed_reply');
+  assert.deepEqual(await read([f.turn,f.turn]),{state:'uncertain'});
+  for(const change of [t=>{t.status='running';},t=>{t.error={message:'PRIVATE'};},
+    t=>{t.items[4].status='completed';},t=>{t.items[4].result.isError=false;},
+    t=>{t.items[4].arguments.id='unselected';},t=>{t.items[4].tool='create_task';},
+    t=>{t.items[4].result.content[0].text='explanation ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED';},
+    t=>{t.items[4].arguments.intakePass.sourceId=randomUUID();},
+    t=>{t.items[3].result.structuredContent.results=[];},
+    t=>{t.items.at(-1).result.structuredContent.receiptId=randomUUID();},
+    t=>{t.items.at(-1).result.structuredContent.state='reply_pending';},
+    t=>{t.items.at(-1).result.structuredContent.taskId=randomUUID();},
+    t=>{t.items.at(-1).arguments.decision='create_task';},
+    t=>{t.items.push(structuredClone(t.items.at(-1)));}]){
+    const changed=structuredClone(f.turn);change(changed);
+    assert.equal(await assistantReadOnlyPreparationFailure(changed,options),false,String(change));
+  }
 });

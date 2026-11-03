@@ -164,6 +164,13 @@ publication tooling также остаются вне этого публичн
   All local MCP materializers retain closed refusal codes or a fixed local stage,
   never a false endpoint outage. Only the exact native send error retains native
   MCP auth provenance through an arguments adapter; provider errors do not.
+  Mirror-backed fetch uses ABI v3 of the SAME bounded short-wait read engine;
+  never run its fresh whole-company sync inside the 30s native MCP callback.
+  Each poll consumes fresh native admission; original selection/generation,
+  recipient and one-time delivery remain fenced. Exact Workspace/file readers
+  keep their independent immediate path. Owner questions may use already
+  authorized external sources/browser sessions without a fictitious Task/Run;
+  real source ACL/login and external-change authority remain independent.
   Immediate company fetch/files and search share one explicit common-reader
   refusal projector; exact legacy constants only, no prose parsing or retry.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
@@ -1168,3 +1175,10 @@ Public plugin shell для этого клиента не меняется.
   unknown/attempted/provider/intervening/duplicate history still refuses. Tests
   compose worker/factory/device codec/SQLite restart and content-only context;
   a synthetic success is never live Telegram acceptance.
+
+- One positive technical reply after READY plus exact-reader refusals may use the
+  SAME native one-child correction protocol only after full terminal evidence:
+  one context, unchanged preparation then one READY, one to four literal failed
+  fetches including a returned selection, and the exact positive reply receipt.
+  No successful/unknown read, provider call, business tool or prose earns this
+  certificate. Keep its failure label separate from rate-limit diagnostics.

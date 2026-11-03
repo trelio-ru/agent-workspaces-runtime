@@ -3130,7 +3130,7 @@ test(`production host reconciles the exact absent-send reply across restart: ${s
 // send, real model, owner state or company plaintext enters this fixture.
 for(const scenario of ['complete','mutating_history','missing_capability','unchanged_prerequisite','attempted_send','lost_begin','unknown_begin',
  'successor_created','successor_unsettled','successor_attempted','successor_receipt','successor_event','successor_source','successor_task','successor_history','successor_unknown_turn',
- 'technical_complete','technical_missing_capability','technical_wrong_receipt',
+ 'technical_complete','technical_exact_read','technical_missing_capability','technical_wrong_receipt',
  'technical_legacy_complete','technical_legacy_root_mismatch','technical_legacy_root_unexpired'])
 test(`production worker restores one reply-only original with no blind begin replay: ${scenario}`,async t=>{
  const {EventEmitter}=await import('node:events');
@@ -3205,6 +3205,12 @@ test(`production worker restores one reply-only original with no blind begin rep
   turn.items[3]=call('search',{companySlugs:['synthetic'],queries},{code:'ASSISTANT_TRANSPORT_RATE_LIMITED'},'failed');
   turn.items.push(call('resolve_assistant_intake',{decision:'reply_owner',clientRequestId:original.id,replyText:'SYNTHETIC_TECHNICAL_LIMITATION'},
    {...parent,receiptId:scenario==='technical_wrong_receipt'?randomUUID():receiptId}));
+ }
+ if(scenario==='technical_exact_read'){
+  turn.items[3]=call('search',{companySlugs:['synthetic'],queries},
+    {schemaVersion:1,provider:'local_company_context',results:[{id:'context:registry:synthetic'}]});
+  turn.items.splice(4,0,call('fetch',{id:'context:registry:synthetic'},
+    {code:'ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED'},'failed'));
  }
  if(scenario==='mutating_history')turn.items.splice(2,0,call('create_task',{},{}));
  const successorPass=successor?{companyId,sourceId,intakeId:successor.id}:null,selectedProject=randomUUID();

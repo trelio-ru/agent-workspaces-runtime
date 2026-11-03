@@ -634,8 +634,16 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // passed the ordinary search schema/proof/native read admission, and the
       // fresh managed profile above repeats owner/pass/recipient checks. No
       // original query, plaintext result or key enters the preparation plan.
-      if(prepareCompanySearch&&name==='search')return {content:[],
-        _meta:{'trelio/assistant-company-read':{schemaVersion:prepareCompanySearch===2?2:1,descriptor,binding:assistantCompanyPreparationBinding(opened)}}};
+      // A mirror-backed exact fetch has the SAME potentially slow fresh-sync
+      // prerequisite as search. Running it inside the 30s native callback
+      // killed a healthy read after READY and hid the deadline as a local
+      // materialization error. V3 reuses the existing owned read coordinator;
+      // it changes neither per-request clocks nor native pass/recipient ACL.
+      // Exact Workspace/file readers retain their immediate independent path.
+      const deferredFetch=prepareCompanySearch===2&&name==='fetch'
+        &&!/^workspace(?:-file)?:/u.test(args.id??'');
+      if((prepareCompanySearch&&name==='search')||deferredFetch)return {content:[],
+        _meta:{'trelio/assistant-company-read':{schemaVersion:deferredFetch?3:prepareCompanySearch===2?2:1,descriptor,binding:assistantCompanyPreparationBinding(opened)}}};
       return materializeAssistantEncryptedCompanyContext({origin:identity.origin,descriptor,name,arguments:args,signal,
         assertCurrent:current.prepareCompanyContextRead});
     },{signal,encryptedCompanyContext:descriptor}),
@@ -674,18 +682,19 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
       // Preserve exactly the parsed original, never a mutable caller object.
       args=JSON.parse(JSON.stringify(args));
       const result=await request({operation:'call',name,arguments:args,
-        ...(name==='search'?{prepareCompanySearch:2}:{}),
+        ...(['search','fetch'].includes(name)?{prepareCompanySearch:2}:{}),
         ...(['remote_mcp','skill_setup','company_context'].includes(presentationProfile)?{presentationProfile}:{})},{signal});
       const preparation=result?._meta?.['trelio/assistant-company-read'];
       if(preparation!==undefined){
-        if(name!=='search'||result.isError||![1,2].includes(preparation?.schemaVersion)
+        if(result.isError||!(name==='search'&&[1,2].includes(preparation?.schemaVersion)
+          ||name==='fetch'&&preparation?.schemaVersion===3)
           ||Object.keys(preparation).sort().join(',')!=='binding,descriptor,schemaVersion')fail('ASSISTANT_MCP_INVALID_RESPONSE');
         const business=Object.fromEntries(Object.entries(args).filter(([key])=>!['taskPass','intakePass','runtimeSessionProof'].includes(key)));
-        if(preparation.schemaVersion===2){
+        if([2,3].includes(preparation.schemaVersion)){
           const completed=await workspace.completeCompanySearch(preparation,business,{signal,request});
           if(completed!==null)return completed;
-          return {content:[{type:'text',text:'The complete encrypted company index and query are still preparing. After 10 seconds call nextCall with fresh hook admission. Do not create a task or Workspace Run, claim absence, or send a final unavailable reply while this preparation is progressing.'}],
-            structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:business}}};
+          return {content:[{type:'text',text:'The selected encrypted company read is still preparing. After 10 seconds call nextCall with fresh hook admission. Do not create a task or Workspace Run, claim absence, or send a final unavailable reply while this preparation is progressing.'}],
+            structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:name,arguments:business}}};
         }
         // The native search proof was consumed exactly once above. A long
         // read-only preparation child has its own managed profile/lifetime;
@@ -1073,7 +1082,8 @@ const validateAssistantRuntimeRequest = request => {
       ?'binding,descriptor,generation,operation':'binding,descriptor,operation';
     if(Object.getPrototypeOf(request)!==Object.prototype||Object.keys(request).sort().join(',')!==keys
       ||!request.descriptor||Object.getPrototypeOf(request.descriptor)!==Object.prototype
-      ||request.descriptor.nativeTool!=='search'
+      ||!['search','fetch'].includes(request.descriptor.nativeTool)
+      ||request.descriptor.nativeTool==='fetch'&&!['company_context_search','company_context_validate'].includes(request.operation)
       ||query&&(!request.arguments||Object.getPrototypeOf(request.arguments)!==Object.prototype)
       ||request.operation==='company_context_validate'&&!/^[a-f0-9]{64}$/u.test(request.generation??''))
       fail('ASSISTANT_REQUEST_INVALID');
@@ -1082,7 +1092,7 @@ const validateAssistantRuntimeRequest = request => {
   }
   if(!request || !['list','call','health','health_check','background_tick'].includes(request.operation)
     || Object.keys(request).some(key=>!['operation','name','arguments','presentationProfile','prepareCompanySearch'].includes(key))
-    || request.prepareCompanySearch!==undefined&&(![true,2].includes(request.prepareCompanySearch)||request.operation!=='call'||request.name!=='search')
+    || request.prepareCompanySearch!==undefined&&(![true,2].includes(request.prepareCompanySearch)||request.operation!=='call'||!(request.name==='search'||request.name==='fetch'&&request.prepareCompanySearch===2))
     || request.presentationProfile!==undefined && (!['list','call'].includes(request.operation)||!['remote_mcp','skill_setup','company_context'].includes(request.presentationProfile))
     || request.operation==='call' && (typeof request.name!=='string' || !/^[a-z][a-z0-9_]{0,99}$/u.test(request.name)
       || !request.arguments || Object.getPrototypeOf(request.arguments)!==Object.prototype)
@@ -2467,8 +2477,9 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     return failures;
   };
   return {async completeCompanySearch(raw,args,{signal,request=requestCurrentAssistantRuntime}={}){
-    if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||raw.schemaVersion!==2
-      ||Object.keys(raw).sort().join(',')!=='binding,descriptor,schemaVersion'||raw.descriptor?.nativeTool!=='search'
+    if(!raw||Object.getPrototypeOf(raw)!==Object.prototype
+      ||!(raw.schemaVersion===2&&raw.descriptor?.nativeTool==='search'||raw.schemaVersion===3&&raw.descriptor?.nativeTool==='fetch')
+      ||Object.keys(raw).sort().join(',')!=='binding,descriptor,schemaVersion'
       ||Buffer.byteLength(JSON.stringify(raw))>8192||!args||Object.getPrototypeOf(args)!==Object.prototype
       ||['taskPass','intakePass','runtimeSessionProof'].some(key=>Object.hasOwn(args,key)))fail('ASSISTANT_MCP_INVALID_RESPONSE');
     validateAssistantCompanyPreparationBinding(raw.binding);
@@ -2494,7 +2505,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       // The same rule survives its first owned timeout: that grants ONE resume
       // of this query, not a replacement formulation under a fresh600s clock.
       return {content:[{type:'text',text:'The original encrypted company query is still preparing. Continue its nextCall with fresh admission before starting another formulation.'}],
-        structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:'search',arguments:structuredClone(originalQuery.arguments)}}};
+        structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:descriptor.nativeTool,arguments:structuredClone(originalQuery.arguments)}}};
     }
     if(!job){
       const controller=new AbortController(),deadlineError=new DOMException('Owned company search deadline','TimeoutError');
@@ -2750,7 +2761,7 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     const transport=await loadTransport();
     let generation;
     const result=await transport.materializeAssistantEncryptedCompanyContext({origin:current.identity.origin,descriptor:request.descriptor,
-      name:'search',arguments:request.arguments,signal,assertCurrent,
+      name:request.descriptor.nativeTool,arguments:request.arguments,signal,assertCurrent,
       ...(request.operation==='company_context_search'?{onSearchSnapshot:value=>{generation=value;}}:{})});
     if(request.operation!=='company_context_search')return result;
     if(!/^[a-f0-9]{64}$/u.test(generation??''))fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID');

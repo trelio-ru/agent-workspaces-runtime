@@ -9,9 +9,9 @@ import path from 'node:path';
 import {randomUUID,webcrypto,verify,createPublicKey,createHash} from 'node:crypto';
 import {hpkeSeal,encryptCompanyPayload,buildCompanyEncryptedTextMarker,encryptFileToCompanyContainer} from '../../../host-runtime/scripts/trelio-company-encryption.mjs';
 
-export const startCompanyScenarioBackend=async({identity,pass,credential,runtimePublicKey,root,fileCount=0,stallAttempts=0,refuse=false,unknownCode=false})=>{
+export const startCompanyScenarioBackend=async({identity,pass,credential,runtimePublicKey,root,fileCount=0,stallAttempts=0,refuse=false,unknownCode=false,slowExact=false})=>{
   assert.ok(Number.isInteger(fileCount)&&fileCount>=0&&fileCount<=3000);
-  const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),projectId=randomUUID(),taskId=randomUUID();
+  const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),projectId=randomUUID(),taskId=randomUUID(),registryId=randomUUID();
   const projectSlug=`e-${projectId}`,company={id:pass.companyId,slug:'synthetic',name:'Synthetic fixture company'};
   const origin={companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId};
   const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
@@ -27,12 +27,12 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
   const manifest={schemaVersion:2,provider:'local_company_context',generation:'a'.repeat(64),company,
     viewer:{memberId:randomUUID(),companyRole:'admin'},viewerGroupIds:[],projects:[project],
     tasks:[{id:taskId,projectId,projectSlug,number:1,title:marker(taskId,'title'),revisionToken:'b'.repeat(64)}],
-    acceptedWorkspaces:[],workspaces:[],contextDocuments:[],
+    acceptedWorkspaces:[],workspaces:[],contextDocuments:[{id:registryId,type:'registry',title:marker(projectId,'title'),projectId,projectSlug,revisionToken:'d'.repeat(64),payload:null}],
     searchDocuments:[{id:`task:synthetic/${projectSlug}/1`,type:'task',title:marker(taskId,'title'),
       stableKey:`synthetic/${projectSlug}/1/task`,referenceValues:[taskId],revisionToken:'b'.repeat(64),
       fields:[{source:'title',values:[marker(taskId,'title')]}],metadata:{projectId,projectSlug,taskNumber:1}}],
     instructions,agentSkills:{company:[],projects:[]},agentProcedures:[]};
-  let managed,envelope,mode='ready',closed=false,healthRevision=1;
+  let managed,envelope,mode='ready',closed=false,healthRevision=1,lastNativeTool=null,slowExactConsumed=false;
   const workspaceId=randomUUID(),workspaceHead='c'.repeat(40),projectionId=randomUUID(),manifestFileId=randomUUID();
   const containers=new Map(),fileIds=[],hits=new Map();
   const counts={nativeAdmissions:0,manifests:0,exact:0,current:0,mutations:0,fileReads:0,ciphertextBytes:0,builds:0},proofs=new Set(),failures=[];
@@ -78,7 +78,7 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
         if(body.method==='initialize'){reply({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'synthetic native backend',version:'1'}});return;}
         if(body.method==='tools/list'){reply({tools});return;}
         assert.equal(body.method,'tools/call');
-        const {name,arguments:args}=body.params;
+        const {name,arguments:args}=body.params;lastNativeTool=name;
         if(name==='get_assistant_status'){reply({content:[],structuredContent:{companyContextRead:true,presentationProfile:'company_context'}});return;}
         assert.ok(['search','fetch','get_task_activity'].includes(name),'no task/Workspace write is part of a company question');
         assert.deepEqual(args.intakePass,origin);assert.equal(args.localContextRead,true);
@@ -138,13 +138,27 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
         json(response,{schemaVersion:1,encryptedPayloads:[],context:{company,workspace:{id:workspaceId,acceptedHead:workspaceHead},
           encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount}}}});return;
       }
-      if(selected.pathname.endsWith(`/company-context/${company.slug}/manifest`)){counts.manifests++;json(response,{schemaVersion:1,context:manifest,encryptedPayloads:payloads});return;}
+      if(selected.pathname.endsWith(`/company-context/${company.slug}/manifest`)){
+        if(slowExact&&lastNativeTool==='fetch'&&!slowExactConsumed){
+          slowExactConsumed=true;
+          // Real pending native HTTP response: cross the unchanged 30s MCP
+          // deadline, while staying inside the common first-sync budget.
+          // A disconnected old reader cannot be called a successful read.
+          await new Promise(resolve=>{const timer=setTimeout(resolve,32000);response.once('close',()=>{clearTimeout(timer);resolve();});});
+          if(response.destroyed)return;
+        }
+        counts.manifests++;json(response,{schemaVersion:1,context:manifest,encryptedPayloads:payloads});return;}
       if(selected.pathname.endsWith(`/company-context/${company.slug}/tasks/${projectSlug}/1`)){
         counts.exact++;assert.equal(request.method,'GET');
         assert.equal(selected.searchParams.get('expectedRevision'),'b'.repeat(64));
         json(response,{schemaVersion:1,encryptedPayloads:payloads,context:{schemaVersion:1,revisionToken:'b'.repeat(64),
           task:{company,project,task:{id:taskId,number:1,title:marker(taskId,'title'),descriptionPlainText:marker(taskId,'description'),
             status:{code:'active',name:'Active'},participants:[],controls:[],comments:[],checklists:[]}},connections:{},relatedWorkspaces:[]}});return;
+      }
+      if(selected.pathname.endsWith(`/company-context/${company.slug}/documents/registry/${registryId}`)){
+        assert.equal(selected.searchParams.get('expectedRevision'),'d'.repeat(64));
+        json(response,{schemaVersion:1,encryptedPayloads:payloads,context:{schemaVersion:1,
+          document:{...manifest.contextDocuments[0],payload:{rows:[{value:'SYNTHETIC_EXACT_REGISTRY_ROW'}]}}}});return;
       }
       if(selected.pathname.endsWith('/tasks/read')){
         counts.exact++;assert.deepEqual(body.tasks,[{projectSlug,taskNumber:1}]);
@@ -160,7 +174,7 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
     }catch(error){failures.push(error);json(response,{code:'SYNTHETIC_SCENARIO_REJECTED'},500);}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  return {url:`http://127.0.0.1:${server.address().port}`,company,projectSlug,taskId,counts,manifest,descriptor,
+  return {url:`http://127.0.0.1:${server.address().port}`,company,projectSlug,taskId,registryId,counts,manifest,descriptor,
     async setManagedDevice(device){
       managed=device;const aad={suite:'trelio-e2ee-v1',companyId:company.id,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:cryptoDeviceId};
       const sealed=await hpkeSeal({recipientPublicEncryptionJwk:device.publicEncryptionJwk,

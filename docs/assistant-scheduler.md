@@ -1484,6 +1484,22 @@ read-only snapshot assembly under the SAME original timer. Snapshot refresh
 and the one owned-timeout resume share a maximum of TWO read children; a changed
 formulation cannot launch a parallel reader or buy a third first sync. It never renews a lease, poll clock or owned read deadline.
 Successful delivery consumes the value: another same-query call must read anew.
+
+ABI v3 applies this SAME owned operation to mirror-backed `fetch`. A completed
+search does not make a subsequent fresh company manifest/sync fit inside the
+native MCP callback's unchanged 30-second clock. The facade requests host-only
+preparation, receives the current native `fetch` descriptor, and returns short
+`state:preparing` responses whose `nextCall.tool` remains `fetch`. The selected
+ID stays in invocation RAM; changing it cannot launch a concurrent reader or
+reset its deadline. The existing ten-minute read child performs sync plus exact
+hydration, with the same two-child ceiling, fresh per-poll proof/admission,
+late generation/pass/recipient checks and consumed-on-delivery result. This is
+not a longer native request, completed-answer cache, permission cache or replay
+of a tool proof. Exact `workspace:` and `workspace-file:` reads keep their
+independent current-ACL/pinned-head path. The composed native fixture delays
+one real exact-read manifest response for 32 seconds: the previous callback
+returns `ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED`; v3 completes under the same
+owned read without a Task/Run or external effect.
 No result/proof/key is written to a second cache or journal. EOF cancels only
 owned read children and awaits cleanup. Existing ABI v1 facades keep their
 readiness-only preparation and separate fresh query path; both remain strict.
@@ -2858,7 +2874,12 @@ Taskless source intake reuses the SAME Codex native provision/resume/model/effor
 observed hook/session/proof, MCP transport and signed account/process engine. A
 private `kind:source_intake` journal admits context/resolve and the existing
 company_context READ catalogue for verified private-owner questions; normal
-task/Workspace/Secret tools cannot run under it. Native original-body
+task/Workspace/Secret tools cannot run under it. Already available external
+readers and assistant-owned browser sessions are also valid for a personal
+question under their existing ACL/login. Do not require a fictitious Task/Run
+for calendar/email/source reading, or infer missing browser access from the
+company MCP catalogue. This grants no new account, login, Secret or external
+mutation authority. Native original-body
 confirmation is host-only and not a model tool. Genuine owner linked native IDs,
 current incoming/original message flags and source/project/company ACL are
 independent of natural command assessment. Clear owner commands need no second
@@ -3545,6 +3566,19 @@ Arbitrary prose, ready search, missing receipt, pending/unknown send and another
 tool never qualify. This classification is distinct from absent-provider timeout
 abandonment and conveys no permission to reopen an intake or send again. Only a
 separate current native correction protocol may admit a bounded corrective child.
+
+That SAME native positive-reply correction protocol also accepts one separate
+whole-turn certificate for mirror-backed exact-reader failure: one context,
+unchanged preparing searches ending in one successful `local_company_context`
+READY, one to four failed `fetch` calls with the literal
+`ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED`, at least one exact ID returned by
+that READY, then one successful `reply_owner` matching the fresh immutable
+native receipt. No successful/unknown fetch, extra tool, shell, changed query,
+missing/duplicate terminal, unknown provider result or prose earns it. Its
+closed witness is `company_context_exact_read_failed_reply`, distinct from a
+rate refusal. Existing native capability, positive prior send, changed trusted
+prerequisite, one-child/restart fences and current source/account/owner checks
+remain mandatory. The original reply is never resent or declared absent.
 
 An already reply-only child with a positive immutable CANCELLED receipt has a
 separate continuation profile, advertised by native

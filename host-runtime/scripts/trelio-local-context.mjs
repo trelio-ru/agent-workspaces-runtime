@@ -8656,7 +8656,7 @@ export const handleTrelioLocalContextOperation = async (
   // Trusted in-process completion observer only: raw MCP arguments cannot
   // supply it. Bind the pending answer to exactly the complete snapshot used by
   // this query, without a second mirror read/decrypt or a cached native grant.
-  if (operation === "native_read" && rawInput.nativeTool === "search")
+  if (operation === "native_read" && ["search", "fetch"].includes(rawInput.nativeTool))
     onSearchSnapshot?.(ready.mirror.serverGeneration);
 
   // The backend owns which response DTOs may carry live context. Polls,

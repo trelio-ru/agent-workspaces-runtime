@@ -1004,8 +1004,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           ...(dispatch?{settledReplySuccessors}:{}),
           ...(cancelledContextRead?{cancelledContextRead:true}:continuation?{readOnlyContinuation:true}:{}),...(dispatch?{replyDispatchCorrection:true}:{}),
           ...(correction?{[generation?'generationReplyCorrection':'technicalReplyCorrection']:{receiptId:outcome.receiptId,eventId:outcome.eventId,sourceRevision:outcome.sourceRevision,threadId:outcome.threadId}}:{})});lease();
-        if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??'')
-          ||terminal.readOnlyFailure!==(cancelledContextRead?'company_context_file_read_cancelled':dispatch?'owner_reply_dispatch_refused':generation?'company_context_generation_changed_reply':correction?'company_context_rate_limited_reply':continuation?'company_context_read_cancelled':'company_context_preparation_timeout'))continue;
+        // Positive technical replies have two distinct whole-turn certificates.
+        // Both still require the SAME native correction capability/receipt above;
+        // a label alone cannot cross the full-history reader or append a child.
+        const matchesFailure=correction&&!generation
+          ?['company_context_rate_limited_reply','company_context_exact_read_failed_reply'].includes(terminal.readOnlyFailure)
+          :terminal.readOnlyFailure===(cancelledContextRead?'company_context_file_read_cancelled':dispatch?'owner_reply_dispatch_refused'
+            :generation?'company_context_generation_changed_reply':continuation?'company_context_read_cancelled':'company_context_preparation_timeout');
+        if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??'')||!matchesFailure)continue;
         await intakeSource(row,signal);
         // The child is appended only after a positive immutable native outcome,
         // complete read-only history and fresh changed trusted prerequisite.

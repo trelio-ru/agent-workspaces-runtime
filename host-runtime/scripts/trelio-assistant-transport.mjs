@@ -3872,7 +3872,7 @@ export const materializeAssistantEncryptedCompanyContext = async ({origin,descri
     }else payload=receipt;
   }else{
     payload=await context.handleTrelioLocalContextOperation(origin,{operation:'native_read',companySlug:slug,nativeTool:name,
-      arguments:{...input,companySlug:slug}},{signal,...(name==='search'&&onSearchSnapshot?{onSearchSnapshot}:{})});
+      arguments:{...input,companySlug:slug}},{signal,...(['search','fetch'].includes(name)&&onSearchSnapshot?{onSearchSnapshot}:{})});
   }
   signal?.throwIfAborted();await assertCurrent(signal);
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
