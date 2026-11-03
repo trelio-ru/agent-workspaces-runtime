@@ -38,13 +38,19 @@ Both profiles require these seven successful jobs:
 - `Build native Windows private worker`
 - `Native Windows private worker (arm64)`
 - `Runtime tests (ubuntu-latest)`
-- `Runtime tests (macos-latest)`
+- `Runtime tests (macos-15-intel)`
 - `Windows runtime and private ACL`
 
 Full adds the four existing `Native visual browser (...)` jobs and keeps every
 existing direct Node invocation and Windows group. The narrow profile skips
 those unchanged browser GUI jobs and selects existing suites inside the same
 Linux/macOS and Windows jobs, rather than reporting skipped suites as success.
+
+Both macOS matrices use the standard GitHub-hosted `macos-15-intel` pool.
+The floating `macos-latest` label selects ARM hardware and can be refused before
+any step when that pool lacks capacity. The explicit Intel lane retains every
+native Keychain/browser/focus assertion and the exact job/attempt guards; it
+does not claim hosted macOS ARM coverage or permit a local-runner fallback.
 
 Linux/macOS run all eleven assistant suites plus context budget, real native
 Codex adapter, runtime entry/recovery, signed hook/package chain, hook/private

@@ -27,7 +27,7 @@ test('closed assistant code/tests plus non-runtime maintainer docs select seven 
   assert.equal(selected.profile, 'assistant-orchestration');
   assert.equal(selected.requiredJobs.length, 7);
   for (const name of ['Windows runtime and private ACL', 'Native Windows private worker (arm64)',
-    'Build native Windows private worker', 'Runtime tests (macos-latest)', 'Runtime tests (ubuntu-latest)'])
+    'Build native Windows private worker', 'Runtime tests (macos-15-intel)', 'Runtime tests (ubuntu-latest)'])
     assert.ok(selected.requiredJobs.includes(name));
   assert.equal(selected.requiredJobs.some(name => name.startsWith('Native visual browser')), false);
   assert.ok(ASSISTANT_CI_TESTS.includes('tests/trelio-assistant-transport.test.mjs'));
@@ -203,6 +203,13 @@ test('actual CLI creates and verifies an exact Git/run receipt; tampered source 
 
 test('workflow connects the planner, exact attempt artifact verification and selected Windows native boundaries', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/runtime-tests.yml'), 'utf8');
+  // Both actual matrices and the gate must move together. A green result from
+  // the old floating label must not satisfy the explicitly selected native OS.
+  assert.equal((workflow.match(/\bos: \[macos-15-intel,/gu) ?? []).length, 1);
+  assert.equal((workflow.match(/^          - macos-15-intel$/gmu) ?? []).length, 1);
+  const state = setup(plan([modified('.github/workflows/runtime-tests.yml')]));
+  for (const job of state.jobsPages[0].jobs) job.name = job.name.replace('macos-15-intel', 'macos-latest');
+  assert.throws(() => verifyRuntimeCiGate(state), /Incomplete exact CI gate/u);
   assert.match(workflow, /PR_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u);
   assert.match(workflow, /PR_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
   assert.match(workflow, /fetch-depth: 0/u);

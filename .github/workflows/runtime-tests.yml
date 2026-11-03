@@ -53,7 +53,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, windows-11-arm, ubuntu-latest]
+        # Pin the standard hosted Intel pool: macos-latest currently selects
+        # ARM runners whose capacity refusals can cancel a job before any step.
+        # This retains the complete native macOS fixtures on GitHub hardware;
+        # no local runner, skipped suite or architecture override is substituted.
+        os: [macos-15-intel, windows-latest, windows-11-arm, ubuntu-latest]
     env:
       TRELIO_VISUAL_NATIVE_TEST: '1'
       TRELIO_VISUAL_EXTENSION_TEST: '1'
@@ -234,7 +238,8 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
+          # Use the same explicit hosted macOS pool as the browser lane.
+          - macos-15-intel
 
     steps:
       - name: Check out runtime repository

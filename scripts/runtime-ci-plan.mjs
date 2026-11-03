@@ -58,10 +58,10 @@ export const ASSISTANT_CI_TESTS = Object.freeze([
     'workspace-files'].map(name => `tests/trelio-${name}.test.mjs`),
 ]);
 export const BASE_CI_JOBS = Object.freeze(['Runtime CI plan', 'Canonical main Git guard',
-  'Runtime tests (ubuntu-latest)', 'Runtime tests (macos-latest)',
+  'Runtime tests (ubuntu-latest)', 'Runtime tests (macos-15-intel)',
   'Windows runtime and private ACL', 'Build native Windows private worker',
   'Native Windows private worker (arm64)']);
-export const VISUAL_CI_JOBS = Object.freeze(['macos-latest', 'windows-latest', 'windows-11-arm', 'ubuntu-latest']
+export const VISUAL_CI_JOBS = Object.freeze(['macos-15-intel', 'windows-latest', 'windows-11-arm', 'ubuntu-latest']
   .map(os => `Native visual browser (${os})`));
 export const requiredRuntimeCiJobs = profile => {
   if (!['full', 'assistant-orchestration'].includes(profile)) throw Error('Unknown runtime CI profile');

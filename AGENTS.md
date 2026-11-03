@@ -1025,7 +1025,9 @@ publication tooling также остаются вне этого публичн
   15-минутный heartbeat этого же чата по тому же контракту; без подтверждённого
   admission и сохранённой автоматизации не обещать автоматическое продолжение.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
-  CI требует full с четырьмя visual OS jobs; узкий профиль сохраняет Windows,
+  CI требует full с четырьмя visual OS jobs; обе macOS lanes используют явный
+  GitHub-hosted `macos-15-intel` по [CI-контракту](docs/runtime-ci.md), без
+  local fallback или пропуска native fixtures. Узкий профиль сохраняет Windows,
   ARM64, proof/signature/package и проверяется существующим native plan verifier.
 - После интеграции выполни из canonical checkout
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
