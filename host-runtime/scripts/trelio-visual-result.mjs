@@ -170,7 +170,7 @@ export function validateVisualResult(value) {
     if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'filePath', 'sizeBytes', 'sha256', 'mimeType', 'expiresAt']) || value.state !== 'ready' || value.reason !== 'none' || !uuid.test(value.sessionId)
       || typeof value.filePath !== 'string' || value.filePath.length > 4096 || !path.isAbsolute(value.filePath) || /[\x00-\x1f]/u.test(value.filePath)
       || !Number.isInteger(value.sizeBytes) || value.sizeBytes < 1 || value.sizeBytes > 20 * 1024 * 1024 || !/^[0-9a-f]{64}$/u.test(value.sha256)
-      || typeof value.mimeType !== 'string' || value.mimeType.length > 128 || !/^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:pdf|rtf|zip|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u.test(value.mimeType)
+      || typeof value.mimeType !== 'string' || value.mimeType.length > 128 || !/^(?:audio\/(?:wav|mpeg|ogg|mp4|aac|flac)|image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:pdf|rtf|zip|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u.test(value.mimeType)
       || !Number.isSafeInteger(value.expiresAt)) fail();
     return value;
   }
@@ -222,9 +222,10 @@ export function parseVisualSkillOutput(stdout) {
 
 // Value-free command schemas shared by the public controller and browser.
 // Reject unknown fields BEFORE private owner state or worker creation.
-const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
+const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], 'download-audio': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
 fields['upload-files'] = ['frameId', 'x', 'y', 'files'];
 export const validVisualArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768
+  && (operation !== 'download-audio' || typeof args.frameId === 'string' && args.frameId.length > 0 && Number.isInteger(args.x) && args.x >= 0 && Number.isInteger(args.y) && args.y >= 0)
   && (operation !== 'authenticate-mail' || Object.keys(args).length === 1 && typeof args.mailAccountId === 'string' && uuid.test(args.mailAccountId))
   && (operation !== 'upload-files' || validVisualUploadFiles(args.files) && typeof args.frameId === 'string' && Number.isInteger(args.x) && Number.isInteger(args.y));
 for (const operation of ['credentials-setup', 'credentials-status', 'credentials-forget', 'authenticate']) fields[operation] = [];

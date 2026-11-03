@@ -72,6 +72,59 @@ test('document response guard distinguishes redirects from final resources witho
   assert.equal(visualDocumentResponsePolicy(200, [header('content-type', 'text/html'), header('irrelevant', 'x'.repeat(65536))]), 'block');
 });
 
+test('audio source delivery rechecks navigation and credentials, consumes its frame and never reads an arbitrary body', async () => {
+  const events = { addListener() {} }, sent = [];
+  let socket, nativeEvent, messageEvent, currentUrl = 'about:blank', clicks = 0, armed, mode = 'navigate', blocked = false;
+  const context = { URL, Date, TextEncoder, performance, setTimeout, clearTimeout, crypto: { randomUUID }, chrome: {
+    runtime: { id: 'fixture', onMessage: { addListener(fn) { messageEvent = fn; } } },
+    debugger: { onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
+      async sendCommand(_source, method, args) {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } };
+        if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
+        if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
+          clicks++;
+          if (mode === 'navigate') nativeEvent({ tabId: 1 }, 'Page.navigatedWithinDocument', { frameId: 'main' });
+          if (mode === 'credential') blocked = true;
+          messageEvent({ kind: 'route_audio_source', nonce: armed.nonce, file: { mimeType: 'audio/wav', dataBase64: 'AQID' } }, { id: 'fixture', tab: { id: 1 }, frameId: 0 });
+        }
+        assert.notEqual(method, 'Fetch.takeResponseBodyAsStream', 'no test case grants a network body');
+        return {};
+      } },
+    webRequest: { onBeforeRequest: events, onHeadersReceived: events }, cookies: { onChanged: events, async getAll() { return []; } },
+    declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
+    windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
+    tabs: { onCreated: events, onRemoved: events,
+      async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
+      async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
+      async update(_id, input) { currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
+      async sendMessage(_id, message) {
+        if (message.kind === 'authentication-guard') return { blocked };
+        if (message.kind === 'resolve_audio_link') return null;
+        if (message.kind === 'arm_audio_click') { armed = message; return { ready: true }; }
+        return { text: 'synthetic', controls: [], nextOffset: null, scanLimited: false };
+      } },
+  }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
+  startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text', audioDownloads: true, deadlineAt: Date.now() + 10_000 }, context);
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick(); socket.onopen(); let sequence = 0;
+  const dispatch = async (operation, args = {}) => {
+    const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
+    for (let i = 0; i < 30; i++) { await tick(); const item = sent.find(value => value.id === id); if (item) return item.result; }
+    throw Error('synthetic_command_timeout');
+  };
+  await dispatch('restore-session-auth', { cookies: [], replace: false });
+  for (const [next, reason] of [['navigate', 'stale_frame'], ['credential', 'manual_control_active'], ['valid', undefined]]) {
+    mode = next; blocked = false;
+    const frame = await dispatch('read-text'), args = { frameId: frame.frameId, x: 10, y: 20 };
+    const result = await dispatch('download-audio', args);
+    if (reason) { assert.equal(result.reason, reason); assert.equal(result.file, undefined); }
+    else { assert.equal(result.state, 'ready'); assert.equal(result.file.mimeType, 'audio/wav'); }
+    blocked = false;
+    assert.equal((await dispatch('download-audio', args)).reason, 'stale_frame');
+  }
+  assert.equal(clicks, 3, 'each independent source dispatch gets exactly one original click');
+});
+
 test('extension installs literal origin guards before bootstrap and never navigates an adversarial sibling', async () => {
   let rules, socket, detach; const sent = [], events = { addListener() {} };
   const guardCommands = [];

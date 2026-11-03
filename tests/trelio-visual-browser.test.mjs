@@ -134,6 +134,7 @@ test('public visual API rejects private transport commands and extra fields befo
   let reads = 0;
   const browser = new ExtensionVisualBrowser({ origins: ['https://example.test'], dependencies: {}, store: { async read() { reads++; }, close() {} }, policy: createVisualOriginPolicy({ origins: ['https://example.test'] }), lease: { deadlineAt: Date.now() + 60_000 } });
   try {
+    assert.equal((await browser.call('download-audio', { frameId: 'fresh', x: 10, y: 20 })).reason, 'invalid_input', 'existing signed file/browser opt-ins never grant audio');
     for (const operation of ['evaluate', 'manual', 'heartbeat', 'close-windows', 'fixture-close-windows', 'restore-session-auth', 'snapshot-session-auth', 'Runtime.evaluate']) assert.equal((await browser.call(operation)).reason, 'invalid_input');
     assert.equal((await browser.call('status', { script: 'not-executed' })).reason, 'invalid_input');
     assert.equal((await browser.call('click', { frameId: 'x', x: 1, y: 1, selector: '#unsafe' })).reason, 'invalid_input');

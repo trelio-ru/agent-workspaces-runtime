@@ -511,6 +511,12 @@ publication tooling также остаются вне этого публичн
   с quota/unsafe-path guards, без исполнения, извлечения архива или auth reset.
   Обычные non-HTML navigate остаются запрещены; native fixtures проверяют
   anchor/button, bytes, сохранение чата и отсутствие focus на всех OS.
+- Голосовые плееры требуют отдельный signed `audioDownloads` и API marker:
+  [контракт](docs/visual-browser.md#голосовые-сообщения). Только fresh координаты,
+  native audio source либо один trusted play; локальный blob того же документа
+  или прежний guarded main-document stream. Не XHR/HTTP extractor, не запись
+  микрофона/системного звука. MIME/bytes, общий deadline, late credential/frame
+  guards и private receipt обязательны; unknown не разрешает replay.
 - Исходящие файлы – signed `fileUploads` opt-in и additive API marker по
   [visual contract](docs/visual-browser.md#исходящие-файлы). Один coordinate
   click/native chooser получает только frozen regular files, без фильтра

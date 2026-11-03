@@ -5,10 +5,46 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
-import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
+import { visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { saveVisualAttachment, freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { validVisualArguments } from '../host-runtime/scripts/trelio-visual-result.mjs';
+
+test('audio originals require complete containers/frames and a matching MIME, independently of document downloads', async () => {
+  const wav = Buffer.alloc(204);
+  wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+  wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
+  const ogg = Buffer.alloc(47); ogg.write('OggS'); ogg[26] = 1; ogg[27] = 19; ogg.write('OpusHead', 28);
+  const mp3 = Buffer.alloc(417 * 2); for (const offset of [0, 417]) mp3.set([255, 251, 144, 0], offset);
+  const aac = Buffer.from([255,241,80,128,1,63,252,0,0, 255,241,80,128,1,63,252,0,0]);
+  const flac = Buffer.alloc(43); flac.write('fLaC'); flac[4] = 128; flac[7] = 34;
+  const box = (type, data) => { const value = Buffer.alloc(data.length + 8); value.writeUInt32BE(value.length); value.write(type, 4); data.copy(value, 8); return value; };
+  const handler = Buffer.alloc(12); handler.write('soun', 8);
+  const m4a = Buffer.concat([box('ftyp', Buffer.from('M4A \0\0\0\0')), box('moov', box('trak', box('mdia', box('hdlr', handler)))), box('mdat', Buffer.from([1]))]);
+  for (const [bytes, mime, extension] of [[wav,'audio/x-wav','wav'],[ogg,'audio/opus','opus'],[mp3,'audio/mpeg','mp3'],[aac,'audio/aac','aac'],[flac,'audio/flac','flac'],[m4a,'audio/mp4','m4a']]) {
+    assert.equal(visualAudioFormat(bytes, mime).extension, extension);
+    assert.equal(visualAudioFormat(bytes, 'application/octet-stream').extension, extension);
+    assert.throws(() => visualAudioFormat(bytes, 'text/html'), { code: 'attachment_unsupported' });
+    assert.throws(() => visualAttachmentFormat(bytes, mime), { code: 'attachment_unsupported' });
+    assert.throws(() => visualAudioFormat(bytes.subarray(0, -1), mime), { code: 'attachment_unsupported' });
+  }
+  for (const bytes of [Buffer.from('<html>not audio</html>'), Buffer.from('{"url":"private"}'), Buffer.from('OggS'), Buffer.from('ID3'), Buffer.from('RIFF\0\0\0\0WAVE')]) assert.throws(() => visualAudioFormat(bytes, 'audio/mpeg'), { code: 'attachment_unsupported' });
+  assert.throws(() => visualAudioFormat(Buffer.alloc(MAX_ATTACHMENT_BYTES + 1), 'audio/wav'), { code: 'attachment_too_large' });
+  const video = Buffer.from(m4a); video.write('vide', video.indexOf('soun'));
+  assert.throws(() => visualAudioFormat(video, 'audio/mp4'), { code: 'attachment_unsupported' });
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-audio-receipt-')));
+  try {
+    const file = { mimeType: 'audio/wav', dataBase64: wav.toString('base64') }, sessionId = randomUUID();
+    await assert.rejects(saveVisualAttachment(directory, file, sessionId), { code: 'attachment_unsupported' });
+    const receipt = await saveVisualAttachment(directory, file, sessionId, { audioOnly: true });
+    assert.deepEqual(await fs.readFile(receipt.filePath), wav);
+    assert.equal(receipt.mimeType, 'audio/wav'); assert.equal(path.extname(receipt.filePath), '.wav');
+    assert.equal(Object.keys(receipt).sort().join(), 'expiresAt,filePath,kind,mimeType,reason,sessionId,sha256,sizeBytes,state');
+    await saveVisualAttachment(directory, { mimeType: 'audio/opus', dataBase64: ogg.toString('base64') }, sessionId, { audioOnly: true });
+    assert.deepEqual(await fs.readFile(receipt.filePath), wav, 'a later audio receipt never evicts a fresh original');
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
 
 // A tiny stored ZIP builder keeps the fixture public, deterministic and free
 // of Office tooling, downloaded documents and corporate source/code samples.

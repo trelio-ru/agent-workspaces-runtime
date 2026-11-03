@@ -322,6 +322,47 @@ Workspace. Разрешённое сохранение в Workspace выполн
 Unsupported/link-required/size/limit – отдельные закрытые причины; generic
 HTTP/другой browser transport не является fallback.
 
+## Голосовые сообщения
+
+`VISUAL_AUDIO_DOWNLOAD_API === 'trelio.visual-audio-download/v1'` подтверждает
+отдельный signed `audioDownloads: true`. Default false сохраняет прежние
+границы файлов и других навыков. Opt-in закрепляется в том же owner/lease;
+старый worker требует обычного close с сохранением авторизации.
+
+`download-audio {frameId,x,y}` выбирает один видимый голосовой плеер. Native
+`<audio>` отдаёт свой source без input. Для custom control один trusted click
+по свежим координатам временно разрешает fixed MAIN adapter наблюдать native
+`HTMLAudioElement.play`, включая detached `new Audio()`. В нём нет selectors,
+site variables, JS evaluation или model-selected URL. Source должен появиться
+за пять секунд; несколько одновременно выбранных audio players не считаются
+однозначным результатом. Native play временно muted, после readiness ставится
+на паузу с восстановлением прежнего mute; wrapper снимается при любом исходе.
+Сценарий не обещает поддержку Web Audio/MediaSource, DRM, streaming playlists,
+iframe или произвольных cached/replaced play methods.
+
+HTTPS original получает прежний browser-owned main-document stream с exact
+signed origins/redirect/MIME guards. XHR/subresource bodies не перехватываются.
+Blob читается fixed isolated reader только при creator origin исходного top
+document, без HTTP fallback. Его MIME ограничен до body, bytes и формат
+повторно проверяет host. Поддержаны WAV, MP3, OGG/Opus/Vorbis, M4A с audio track,
+AAC/ADTS и FLAC; HTML/JSON, video-only/unknown containers и несовпадение MIME
+отклоняются. Проверка формата не заменяет последующее декодирование reader-ом.
+
+Оба пути делят один 30-секундный deadline внутри исходной lease, максимум
+20 МиБ и тот же private attachments cache/receipt на 24ч. Source selection не
+даёт новый transfer budget. Navigation/detach отзывают pending source; перед
+выдачей blob повторно проверяются frame generation и credential gate.
+Модель получает только path/size/SHA/MIME/expiry, без URL, headers и binary.
+Чтение не включает ASR и не отправляет запись во внешний сервис: разрешённый
+local file обрабатывается отдельно подходящим навыком. Текст/снимок плеера и
+успех нажатия не доказывают получение аудио либо содержание речи.
+
+Pure tests проверяют trusted click, однозначность, восстановление native method
+и mute, отказ чужого blob и отсутствие HTTP fetch в isolated reader. Native
+Chromium fixture проверяет HTTP, lazy blob и native `<audio>`, exact bytes,
+сохранение чата, отсутствие replay и новые late guards в обязательных OS lanes.
+Синтетический fixture не доказывает совместимость живого плеера конкретного сайта.
+
 ## Исходящие файлы
 
 `VISUAL_FILE_UPLOAD_API === 'trelio.visual-file-upload/v1'` в host module

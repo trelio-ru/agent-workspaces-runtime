@@ -97,13 +97,15 @@ async function request(owner, operation, args) {
   return validateVisualResult(JSON.parse(text));
 }
 
+export const VISUAL_AUDIO_DOWNLOAD_API = 'trelio.visual-audio-download/v1';
+
 /**
  * Short-lived provider invocations talk to one private, absolute-lease worker.
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, env = process.env, fixture }) {
-  if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof fileUploads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads) || (operation === 'upload-files' && !fileUploads)) return visualStatus('error', 'invalid_input');
+export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, env = process.env, fixture }) {
+  if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads) || (operation === 'download-audio' && !audioDownloads) || (operation === 'upload-files' && !fileUploads)) return visualStatus('error', 'invalid_input');
   if (['wait', 'close', 'disconnect'].includes(operation) ? !args || Object.keys(args).length : !validVisualArguments(operation, args)) return visualStatus('error', 'invalid_input');
   const binding = visualSessionBinding(env);
   const policy = createVisualOriginPolicy({ origins, domains, allowLoopback: Boolean(fixture) });
@@ -165,7 +167,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
       // Upgrading a provider may reuse its saved auth but must not silently
       // reuse an older live worker with a different content-disclosure mode.
       // Cleanup/status remain available so the exact owner can finish it safely.
-      if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       // Do not slide the original deadline when another CLI invocation arrives.
       if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
@@ -221,7 +223,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     owner = {
       schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
       pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-      origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, fileUploads, authentication, authenticationFingerprint,
+      origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint,
       mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
       ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
     };

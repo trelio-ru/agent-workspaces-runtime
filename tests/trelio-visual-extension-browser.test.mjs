@@ -13,6 +13,84 @@ import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bo
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 
+test('voice players deliver the complete HTTP/blob original through the audio-only path without replacing the chat or replay', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-voice-browser-')));
+  // Real playable PCM, not an external recording, network fixture or company
+  // data. The player may be detached and construct its blob only AFTER click.
+  const bytes = Buffer.alloc(16044); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8); bytes.writeUInt32LE(16, 16);
+  bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22); bytes.writeUInt32LE(8000, 24); bytes.writeUInt32LE(16000, 28); bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
+  let clicks = 0, foreignRequests = 0, snapshot;
+  const server = http.createServer((request, response) => {
+    if (request.url === '/clicked') { clicks++; response.end(); return; }
+    if (request.url === '/voice') { response.setHeader('Content-Type', 'audio/wav'); response.end(bytes); return; }
+    if (request.url === '/foreign') { foreignRequests++; response.writeHead(302, { Location: 'http://127.0.0.1:1/not-allowed' }); response.end(); return; }
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end(`<!doctype html><body style="font:24px sans-serif">
+      <h1>Synthetic private chat</h1>
+      <button onclick="fetch('/clicked');new Audio('/voice').play()">HTTP voice</button>
+      <button onclick="fetch('/clicked');fetch('/voice').then(r=>r.blob()).then(b=>new Audio(window.URL.createObjectURL(b)).play()).catch(()=>{})">Blob voice</button>
+      <button onclick="fetch('/clicked');new Audio('/foreign').play().catch(()=>{})">Unavailable voice</button>
+      <audio controls src="/voice" style="position:absolute;left:20px;top:240px;width:300px;height:60px"></audio>`);
+  });
+  const ownedHttp = ownFixtureHttpServer(server, t.signal);
+  t.after(() => ownedHttp.stop());
+  await ownedHttp.listen();
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
+  const diagnostics = [];
+  const browser = new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], audioDownloads: true, observationMode: 'text', lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
+  const abortOwned = () => browser.abort(); t.signal.addEventListener('abort', abortOwned, { once: true });
+  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
+  const target = (frame, label) => {
+    const controls = frame.controls.filter(value => value.role === 'button' && value.label === label);
+    assert.equal(controls.length, 1); return { frameId: frame.frameId, x: controls[0].x, y: controls[0].y };
+  };
+  const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1' ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
+  let primaryFailure;
+  try {
+    ready(await browser.call('navigate', { url: origin }));
+    if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
+    let frame = ready(await browser.call('read-text'));
+    for (const label of ['HTTP voice', 'Blob voice']) {
+      const selected = target(frame, label), before = focus();
+      const outcome = await browser.call('download-audio', selected);
+      if (outcome.state !== 'ready') {
+        const observed = await browser.call('read-text');
+        assert.fail(JSON.stringify({ label, state: outcome.state, reason: outcome.reason, clicks, foreignRequests, chatRetained: observed.text?.includes('Synthetic private chat') === true, diagnostics }));
+      }
+      const receipt = ready(outcome);
+      assert.equal(receipt.kind, 'trelio.browser-file/v1'); assert.equal(receipt.mimeType, 'audio/wav');
+      assert.equal(receipt.sizeBytes, bytes.length); assert.equal(receipt.sha256, createHash('sha256').update(bytes).digest('hex'));
+      assert.deepEqual(await fs.readFile(receipt.filePath), bytes);
+      assert.equal(Object.keys(receipt).sort().join(), 'expiresAt,filePath,kind,mimeType,reason,sessionId,sha256,sizeBytes,state');
+      if (before) assert.equal(focus(), before);
+      assert.equal((await browser.call('download-audio', selected)).reason, 'stale_frame');
+      frame = ready(await browser.call('read-text')); assert.ok(frame.text.includes('Synthetic private chat'));
+    }
+    assert.equal(clicks, 2, 'each lazy voice player is clicked exactly once');
+    // Native <audio> can expose its source without clicking at all. Use its
+    // known fixture box; text frames use the same CSS coordinate space.
+    const receipt = ready(await browser.call('download-audio', { frameId: frame.frameId, x: 100, y: 270 }));
+    assert.deepEqual(await fs.readFile(receipt.filePath), bytes); assert.equal(clicks, 2);
+    frame = ready(await browser.call('read-text'));
+    const unavailable = await browser.call('download-audio', target(frame, 'Unavailable voice'));
+    assert.equal(unavailable.state, 'error'); assert.equal(unavailable.reason, 'attachment_link_required');
+    assert.equal(clicks, 3); assert.ok(foreignRequests <= 1, 'source failure never replays the player');
+    frame = ready(await browser.call('read-text')); assert.ok(frame.text.includes('Synthetic private chat'));
+    assert.equal((await browser.call('download-audio', { ...target(frame, 'HTTP voice'), url: origin })).reason, 'invalid_input');
+  } catch (error) { primaryFailure = error; throw error; }
+  finally {
+    t.signal.removeEventListener('abort', abortOwned);
+    if (primaryFailure || t.signal.aborted) browser.abort();
+    await ownedHttp.stop();
+    if (!primaryFailure && !t.signal.aborted) {
+      await browser.close();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test('outgoing chooser uploads original image, document, archive and arbitrary files without a native dialog or replay', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-browser-')));
   const originals = path.join(directory, 'originals'); await fs.mkdir(originals, { mode: 0o700 });

@@ -38,7 +38,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const attached = new Set();
   const guardedTabs = new Set(), documentFailures = new Set();
   let guardUpdate = Promise.resolve(), guardFailed = false;
-  let pendingAttachment, pendingFileLink, pendingUpload;
+  let pendingAttachment, pendingFileLink, pendingAudio, pendingUpload;
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
   const admitTab = tab => {
     if (tabBudget.admit(tab.id)) return;
@@ -132,6 +132,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   }, { urls: config.matches, types: ['main_frame'] });
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (manual || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
+    if (message?.kind === 'route_audio_source' && pendingAudio?.tabId === sender.tab.id && pendingAudio.nonce === message.nonce) {
+      if (pendingAudio.generation !== navigationGeneration || Date.now() >= pendingAudio.until) pendingAudio.reject(Error('stale_frame'));
+      else if (message.reason) pendingAudio.reject(Error(['attachment_too_large', 'attachment_unsupported'].includes(message.reason) ? message.reason : 'attachment_link_required'));
+      else pendingAudio.resolve(message.file ? { file: message.file } : { url: message.url });
+      return;
+    }
     if (message?.kind === 'route_attachment_open' && pendingFileLink?.tabId === sender.tab.id && pendingFileLink.nonce === message.nonce) {
       pendingFileLink.resolve(message.url); return;
     }
@@ -145,6 +151,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     attached.delete(source.tabId); guardedTabs.delete(source.tabId);
     if (frame?.tabId === source.tabId) frame = undefined;
     if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
+    if (pendingAudio?.tabId === source.tabId) pendingAudio.reject(Error('operation_failed'));
     if (pendingUpload?.tabId === source.tabId) pendingUpload.reject(Error('operation_failed'));
     // Revoke the response-rule exception after unexpected native detach. No
     // further observation/input runs while that policy write is unresolved.
@@ -214,6 +221,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if ((method === 'Page.frameNavigated' && !params.frame?.parentId) || method === 'Page.navigatedWithinDocument') {
       navigationGeneration++;
       if (pendingUpload?.tabId === source.tabId && !pendingUpload.dispatched) pendingUpload.reject(Error('stale_frame'));
+      if (pendingAudio?.tabId === source.tabId) pendingAudio.reject(Error('stale_frame'));
     }
     if (source.tabId === frame?.tabId && ((method === 'Page.frameNavigated' && !params.frame?.parentId)
       || (method === 'Page.navigatedWithinDocument' && params.frameId === frame.mainFrameId))) frame = undefined;
@@ -231,7 +239,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (['content-type', 'content-length', 'content-disposition', 'content-encoding'].includes(name)) { if (headers.has(name)) throw Error('attachment_unsupported'); headers.set(name, header.value); }
     }
     const mimeType = (headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
-    const types = /^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:octet-stream|pdf|rtf|zip|x-zip-compressed|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u;
+    const types = download.audioOnly
+      ? /^(?:audio\/(?:wav|x-wav|wave|mpeg|mp3|ogg|opus|mp4|x-m4a|aac|aacp|flac|x-flac)|application\/(?:ogg|octet-stream))$/u
+      : /^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:octet-stream|pdf|rtf|zip|x-zip-compressed|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u;
     if (!types.test(mimeType)) throw Error('attachment_unsupported');
     const length = headers.get('content-length');
     if (length !== undefined && (!/^\d{1,10}$/u.test(length) || Number(length) > maximum)) throw Error('attachment_too_large');
@@ -274,6 +284,32 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     } finally {
       for (const chunk of chunks) chunk.fill(0);
       await command(download.tabId, 'IO.close', { handle: stream }).catch(() => {});
+    }
+  }
+  async function downloadOriginal(f, candidate, audioOnly, until) {
+    if (typeof candidate !== 'string' || !candidate || candidate.length > 4096) throw Error('attachment_link_required');
+    const url = new URL(candidate);
+    if (!allowed(url.href) || /\.(?:js|mjs|cjs|css|json|map|xml|html?|xhtml|svg|wasm|exe|dll|dmg|sh|ps1|bat|cmd)$/iu.test(decodeURIComponent(url.pathname))) throw Error('navigation_blocked');
+    // This helper is the SAME single main-document browser stream for files
+    // and audio. It never enables XHR/subresource interception or raw HTTP.
+    // Source discovery, blob reading and network transfer share ONE deadline.
+    let timer;
+    const promise = new Promise((resolve, reject) => {
+      pendingAttachment = { tabId: f.tabId, mainFrameId: f.mainFrameId, audioOnly, until, resolve, reject };
+      timer = setTimeout(() => reject(Error('operation_failed')), Math.max(1, until - Date.now()));
+    });
+    promise.catch(() => {});
+    try {
+      await credentialGuard(f.tabId);
+      if (navigationGeneration !== f.generation && f.generation !== undefined) throw Error('stale_frame');
+      guardUpdate = guardUpdate.then(() => installRules()); await guardUpdate;
+      if (guardFailed || Date.now() >= until) throw Error('operation_failed');
+      await chrome.tabs.update(f.tabId, { url: url.href });
+      return await promise;
+    } finally {
+      clearTimeout(timer); pendingAttachment = undefined;
+      guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+      await guardUpdate;
     }
   }
   async function attach(tabId) {
@@ -516,8 +552,53 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     await credentialGuard(tab.id);
     frame = undefined; // consume before any input, including an unknown outcome
     const integer = (v, low, high) => Number.isInteger(v) && v >= low && v <= high;
-    if (['click', 'scroll', 'download-attachment', 'upload-files'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
+    if (['click', 'scroll', 'download-attachment', 'download-audio', 'upload-files'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
     const x = args.x * f.cssWidth / f.width, y = args.y * f.cssHeight / f.height;
+    if (op === 'download-audio') {
+      if (config.audioDownloads !== true || pendingAudio || pendingAttachment) throw Error('invalid_input');
+      const until = Math.min(Date.now() + 30_000, config.deadlineAt), generation = navigationGeneration;
+      const current = () => {
+        if (Date.now() >= config.deadlineAt) throw Error('lease_expired');
+        if (manual || authenticating) throw Error('manual_control_active');
+        if (navigationGeneration !== generation) throw Error('stale_frame');
+        if (Date.now() >= until) throw Error('operation_failed');
+      };
+      let value = await chrome.tabs.sendMessage(f.tabId, { kind: 'resolve_audio_link', x, y }, { frameId: 0 });
+      current();
+      if (!value?.url) {
+        const nonce = crypto.randomUUID(); let timer;
+        const source = new Promise((resolve, reject) => {
+          pendingAudio = { nonce, tabId: f.tabId, generation, until, resolve, reject };
+          timer = setTimeout(() => reject(Error('attachment_link_required')), Math.max(1, until - Date.now()));
+        });
+        source.catch(() => {});
+        try {
+          const ack = await chrome.tabs.sendMessage(f.tabId, { kind: 'arm_audio_click', nonce, x, y, until }, { frameId: 0 });
+          current();
+          if (ack?.ready !== true) throw Error('attachment_link_required');
+          await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+          await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+          await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+          value = await source;
+        } finally {
+          clearTimeout(timer); pendingAudio = undefined;
+          await chrome.tabs.sendMessage(f.tabId, { kind: 'cancel_audio_click' }, { frameId: 0 }).catch(() => {});
+        }
+      }
+      current();
+      await credentialGuard(f.tabId); current();
+      if (value.file) return { state: 'ready', file: value.file };
+      if (typeof value.url !== 'string' || value.url.length > 4096) throw Error('attachment_link_required');
+      const url = new URL(value.url);
+      if (url.protocol === 'blob:') {
+        if (url.origin !== new URL(tab.url).origin) throw Error('navigation_blocked');
+        value = await chrome.tabs.sendMessage(f.tabId, { kind: 'read_audio_blob', url: url.href, until }, { frameId: 0 });
+        current(); await credentialGuard(f.tabId); current();
+        if (!value?.file) throw Error('attachment_unsupported');
+        return { state: 'ready', file: value.file };
+      }
+      return downloadOriginal({ ...f, generation }, url.href, true, until);
+    }
     if (op === 'upload-files') {
       if (config.fileUploads !== true || pendingUpload || !Array.isArray(args.files)
         || args.files.length < 1 || args.files.length > 32
@@ -567,26 +648,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         }
       }
       if (typeof candidate !== 'string' || !candidate || candidate.length > 4096) throw Error('attachment_link_required');
-      const url = new URL(candidate, tab.url);
-      if (!allowed(url.href) || /\.(?:js|mjs|cjs|css|json|map|xml|html?|xhtml|svg|wasm|exe|dll|dmg|sh|ps1|bat|cmd)$/iu.test(decodeURIComponent(url.pathname))) throw Error('navigation_blocked');
-      let timer;
-      const promise = new Promise((resolve, reject) => {
-        pendingAttachment = { tabId: f.tabId, mainFrameId: f.mainFrameId, until: Math.min(Date.now() + 30_000, config.deadlineAt), resolve, reject };
-        timer = setTimeout(() => reject(Error('operation_failed')), Math.max(1, pendingAttachment.until - Date.now()));
-      });
-      // Observe rejection immediately while Chrome installs the exact-tab rule;
-      // a detach/expiry must not become an unhandled rejected worker promise.
-      promise.catch(() => {});
-      try {
-        guardUpdate = guardUpdate.then(() => installRules()); await guardUpdate;
-        if (guardFailed || Date.now() >= pendingAttachment.until) throw Error('operation_failed');
-        await chrome.tabs.update(f.tabId, { url: url.href });
-        return await promise;
-      } finally {
-        clearTimeout(timer); pendingAttachment = undefined;
-        guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
-        await guardUpdate;
-      }
+      return downloadOriginal(f, new URL(candidate, tab.url).href, false, Math.min(Date.now() + 30_000, config.deadlineAt));
     }
     if (op === 'click') {
       // Arm a fixed, isolated content adapter before this exact trusted click.
