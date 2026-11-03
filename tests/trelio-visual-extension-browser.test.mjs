@@ -19,16 +19,24 @@ test('voice players deliver the complete HTTP/blob original through the audio-on
   // data. The player may be detached and construct its blob only AFTER click.
   const bytes = Buffer.alloc(16044); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8); bytes.writeUInt32LE(16, 16);
   bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22); bytes.writeUInt32LE(8000, 24); bytes.writeUInt32LE(16000, 28); bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
+  // Public synthetic 250-ms mono silence, generated with FFmpeg's anullsrc
+  // + AAC at 8 kHz/24 kbit and bitexact flags; no real recording or site data.
+  // Unlike a box-only parser fixture, this exercises an actually playable
+  // AAC-in-M4A source through native play, HTTP and lazy same-document blob.
+  const m4a = Buffer.from('AAAAHGZ0eXBNNEEgAAACAE00QSBpc29taXNvMgAAAtZtb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAB9AAAAH0AABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACJXRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAH0AAAAAAAAAAAAAAAAQEAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAB9AAAAQAAAEAAAAAAZ1tZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAAB9AAAAL0FXEAAAAAAAtaGRscgAAAAAAAAAAc291bgAAAAAAAAAAAAAAAFNvdW5kSGFuZGxlcgAAAAFIbWluZgAAABBzbWhkAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAEMc3RibAAAAGpzdHNkAAAAAAAAAAEAAABabXA0YQAAAAAAAAABAAAAAAAAAAAAAQAQAAAAAB9AAAAAAAA2ZXNkcwAAAAADgICAJQABAASAgIAXQBUAAAAAAF3AAAAA/QWAgIAFFYhW5QAGgICAAQIAAAAgc3R0cwAAAAAAAAACAAAAAgAABAAAAAABAAAD0AAAABxzdHNjAAAAAAAAAAEAAAABAAAAAwAAAAEAAAAUc3RzegAAAAAAAAAEAAAAAwAAABRzdGNvAAAAAAAAAAEAAAMCAAAAGnNncGQBAAAAcm9sbAAAAAIAAAAB//8AAAAcc2JncAAAAAByb2xsAAAAAQAAAAMAAAABAAAAPXVkdGEAAAA1bWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAIaWxzdAAAAAhmcmVlAAAAFG1kYXQBGCAHARggBwEYIAc=', 'base64');
   let clicks = 0, foreignRequests = 0, snapshot;
   const server = http.createServer((request, response) => {
     if (request.url === '/clicked') { clicks++; response.end(); return; }
     if (request.url === '/voice') { response.setHeader('Content-Type', 'audio/wav'); response.end(bytes); return; }
+    if (request.url === '/codec-labelled') { response.setHeader('Content-Type', 'audio/aac'); response.end(m4a); return; }
     if (request.url === '/foreign') { foreignRequests++; response.writeHead(302, { Location: 'http://127.0.0.1:1/not-allowed' }); response.end(); return; }
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><body style="font:24px sans-serif">
       <h1>Synthetic private chat</h1>
       <button onclick="fetch('/clicked');new Audio('/voice').play()">HTTP voice</button>
       <button onclick="fetch('/clicked');fetch('/voice').then(r=>r.blob()).then(b=>new Audio(window.URL.createObjectURL(b)).play()).catch(()=>{})">Blob voice</button>
+      <button onclick="fetch('/clicked');new Audio('/codec-labelled').play().catch(()=>{})">M4A HTTP voice</button>
+      <button onclick="fetch('/clicked');fetch('/codec-labelled').then(r=>r.blob()).then(b=>new Audio(window.URL.createObjectURL(b)).play()).catch(()=>{})">M4A blob voice</button>
       <button onclick="fetch('/clicked');new Audio('/foreign').play().catch(()=>{})">Unavailable voice</button>
       <audio controls src="/voice" style="position:absolute;left:20px;top:240px;width:300px;height:60px"></audio>`);
   });
@@ -52,7 +60,8 @@ test('voice players deliver the complete HTTP/blob original through the audio-on
     ready(await browser.call('navigate', { url: origin }));
     if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
     let frame = ready(await browser.call('read-text'));
-    for (const label of ['HTTP voice', 'Blob voice']) {
+    for (const [label, original, mimeType] of [['HTTP voice', bytes, 'audio/wav'], ['Blob voice', bytes, 'audio/wav'],
+      ['M4A HTTP voice', m4a, 'audio/mp4'], ['M4A blob voice', m4a, 'audio/mp4']]) {
       const selected = target(frame, label), before = focus();
       const outcome = await browser.call('download-audio', selected);
       if (outcome.state !== 'ready') {
@@ -60,23 +69,24 @@ test('voice players deliver the complete HTTP/blob original through the audio-on
         assert.fail(JSON.stringify({ label, state: outcome.state, reason: outcome.reason, clicks, foreignRequests, chatRetained: observed.text?.includes('Synthetic private chat') === true, diagnostics }));
       }
       const receipt = ready(outcome);
-      assert.equal(receipt.kind, 'trelio.browser-file/v1'); assert.equal(receipt.mimeType, 'audio/wav');
-      assert.equal(receipt.sizeBytes, bytes.length); assert.equal(receipt.sha256, createHash('sha256').update(bytes).digest('hex'));
-      assert.deepEqual(await fs.readFile(receipt.filePath), bytes);
+      assert.equal(receipt.kind, 'trelio.browser-file/v1'); assert.equal(receipt.mimeType, mimeType);
+      assert.equal(receipt.sizeBytes, original.length); assert.equal(receipt.sha256, createHash('sha256').update(original).digest('hex'));
+      assert.deepEqual(await fs.readFile(receipt.filePath), original);
+      assert.equal(path.extname(receipt.filePath), mimeType === 'audio/mp4' ? '.m4a' : '.wav');
       assert.equal(Object.keys(receipt).sort().join(), 'expiresAt,filePath,kind,mimeType,reason,sessionId,sha256,sizeBytes,state');
       if (before) assert.equal(focus(), before);
       assert.equal((await browser.call('download-audio', selected)).reason, 'stale_frame');
       frame = ready(await browser.call('read-text')); assert.ok(frame.text.includes('Synthetic private chat'));
     }
-    assert.equal(clicks, 2, 'each lazy voice player is clicked exactly once');
+    assert.equal(clicks, 4, 'each lazy voice player is clicked exactly once');
     // Native <audio> can expose its source without clicking at all. Use its
     // known fixture box; text frames use the same CSS coordinate space.
     const receipt = ready(await browser.call('download-audio', { frameId: frame.frameId, x: 100, y: 270 }));
-    assert.deepEqual(await fs.readFile(receipt.filePath), bytes); assert.equal(clicks, 2);
+    assert.deepEqual(await fs.readFile(receipt.filePath), bytes); assert.equal(clicks, 4);
     frame = ready(await browser.call('read-text'));
     const unavailable = await browser.call('download-audio', target(frame, 'Unavailable voice'));
     assert.equal(unavailable.state, 'error'); assert.equal(unavailable.reason, 'attachment_link_required');
-    assert.equal(clicks, 3); assert.ok(foreignRequests <= 1, 'source failure never replays the player');
+    assert.equal(clicks, 5); assert.ok(foreignRequests <= 1, 'source failure never replays the player');
     frame = ready(await browser.call('read-text')); assert.ok(frame.text.includes('Synthetic private chat'));
     assert.equal((await browser.call('download-audio', { ...target(frame, 'HTTP voice'), url: origin })).reason, 'invalid_input');
   } catch (error) { primaryFailure = error; throw error; }

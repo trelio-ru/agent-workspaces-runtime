@@ -32,7 +32,7 @@ test('audio refusal diagnostics survive MCP with closed evidence only and never 
   assert.deepEqual(refusal.audioDiagnostic, { stage: 'audio_container', code: 'unsupported_container', format: 'ebml', detail: 'container_structure' });
 });
 
-test('audio originals require complete containers/frames and a matching MIME, independently of document downloads', async () => {
+test('audio originals require complete containers/frames and a compatible MIME, independently of document downloads', async () => {
   const wav = Buffer.alloc(204);
   wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
   wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
@@ -74,6 +74,26 @@ test('audio originals require complete containers/frames and a matching MIME, in
   const video = Buffer.from(m4a); video.write('vide', video.indexOf('soun'));
   assert.throws(() => visualAudioFormat(video, 'audio/mp4'), { code: 'attachment_unsupported' });
   refusal(video, 'audio/mp4', 'video_track_present');
+  const videoHandler = Buffer.alloc(12); videoHandler.write('vide', 8);
+  const mixed = Buffer.concat([box('ftyp', Buffer.from('M4A \0\0\0\0')),
+    box('moov', Buffer.concat([box('trak', box('mdia', box('hdlr', handler))), box('trak', box('mdia', box('hdlr', videoHandler)))])),
+    box('mdat', Buffer.from([1]))]);
+  // Codec-labelled M4A is a narrow compatibility case, not a MIME override:
+  // every structural/video guard still executes before either AAC alias.
+  for (const mime of ['audio/aac', 'audio/aacp']) {
+    assert.deepEqual(visualAudioFormat(m4a, mime), { mimeType: 'audio/mp4', extension: 'm4a' });
+    refusal(noAudio, mime, 'audio_track_missing');
+    refusal(m4a.subarray(0, -9), mime, 'media_data_missing');
+    refusal(bounds, mime, 'box_bounds');
+    refusal(manyBoxes, mime, 'box_count');
+    refusal(deep, mime, 'box_depth');
+    refusal(video, mime, 'video_track_present');
+    refusal(mixed, mime, 'video_track_present');
+    for (const bytes of [Buffer.from('<html>not audio</html>'), mp3, m4a.subarray(0, -1)]) {
+      assert.throws(() => visualAudioFormat(bytes, mime), { code: 'attachment_unsupported' });
+    }
+  }
+  refusal(aac, 'audio/mp4', 'mime_mismatch', 'mp4');
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-audio-receipt-')));
   try {
     const file = { mimeType: 'audio/wav', dataBase64: wav.toString('base64') }, sessionId = randomUUID();
@@ -84,6 +104,19 @@ test('audio originals require complete containers/frames and a matching MIME, in
     assert.equal(Object.keys(receipt).sort().join(), 'expiresAt,filePath,kind,mimeType,reason,sessionId,sha256,sizeBytes,state');
     await saveVisualAttachment(directory, { mimeType: 'audio/opus', dataBase64: ogg.toString('base64') }, sessionId, { audioOnly: true });
     assert.deepEqual(await fs.readFile(receipt.filePath), wav, 'a later audio receipt never evicts a fresh original');
+    for (const mimeType of ['audio/aac', 'audio/aacp']) {
+      const original = await saveVisualAttachment(directory, { mimeType, dataBase64: m4a.toString('base64') }, sessionId, { audioOnly: true });
+      assert.equal(original.mimeType, 'audio/mp4'); assert.equal(path.extname(original.filePath), '.m4a');
+      assert.deepEqual(await fs.readFile(original.filePath), m4a);
+      assert.equal(original.sha256, createHash('sha256').update(m4a).digest('hex'));
+      const projected = visualMcpResult(parseVisualSkillOutput(JSON.stringify(original)));
+      // MCP uses its existing file-receipt projection: the validated producer
+      // kind marker is consumed, all original identity fields remain exact.
+      const { kind, ...modelReceipt } = original;
+      assert.equal(kind, 'trelio.browser-file/v1');
+      assert.deepEqual(JSON.parse(projected.content[0].text), modelReceipt);
+      assert.doesNotMatch(JSON.stringify(projected), /dataBase64|Content-Type|http:/u);
+    }
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 

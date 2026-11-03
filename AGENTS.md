@@ -533,6 +533,8 @@ publication tooling также остаются вне этого публичн
   or exception prose. Diagnostic evidence never admits a container or a retry.
   MP4 refusal details distinguish MIME mismatch, bounded boxes and required
   audio/data from forbidden video tracks without disclosing metadata or bytes.
+  AAC MIME labels may describe a fully validated audio-only M4A container;
+  retain canonical audio/mp4 receipts and exact bytes, never relax box/video guards.
 - Исходящие файлы – signed `fileUploads` opt-in и additive API marker по
   [visual contract](docs/visual-browser.md#исходящие-файлы). Один coordinate
   click/native chooser получает только frozen regular files, без фильтра

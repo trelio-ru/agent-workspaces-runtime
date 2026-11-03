@@ -106,7 +106,13 @@ export function visualAudioFormat(bytes, mimeType) {
     if (video) reject('video_track_present');
     if (!audio) reject('audio_track_missing');
     if (!data) reject('media_data_missing');
-    return accept('audio/mp4', 'm4a', ['audio/x-m4a']);
+    // Some voice players label an AAC-in-M4A original as audio/aac(aacp),
+    // describing the codec rather than its ISO BMFF container. Admit those
+    // two existing audio-only MIME labels ONLY after the complete bounded
+    // box/handler/data walk above. Never infer M4A from the MIME, accept a
+    // video track, transcode samples or rewrite the original bytes. Receipts
+    // describe the verified container, so readers receive audio/mp4 + .m4a.
+    return accept('audio/mp4', 'm4a', ['audio/x-m4a', 'audio/aac', 'audio/aacp']);
   }
   // MPEG Layer III and ADTS are sequences of complete frames. ID3's bounded
   // synchsafe length is skipped, never interpreted as speech or site content.

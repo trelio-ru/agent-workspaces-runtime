@@ -345,8 +345,12 @@ signed origins/redirect/MIME guards. XHR/subresource bodies не перехва�
 Blob читается fixed isolated reader только при creator origin исходного top
 document, без HTTP fallback. Его MIME ограничен до body, bytes и формат
 повторно проверяет host. Поддержаны WAV, MP3, OGG/Opus/Vorbis, M4A с audio track,
-AAC/ADTS и FLAC; HTML/JSON, video-only/unknown containers и несовпадение MIME
-отклоняются. Проверка формата не заменяет последующее декодирование reader-ом.
+AAC/ADTS и FLAC; HTML/JSON, video-only/unknown containers и несовместимый MIME
+отклоняются. Для полностью проверенного audio-only M4A допускаются также
+`audio/aac` и `audio/aacp`: некоторые плееры указывают codec вместо контейнера.
+Это не разрешает другие несовпадения MIME, video tracks, повреждённые boxes
+или отсутствие audio/data. Receipt получает `audio/mp4` и `.m4a` по контейнеру;
+исходные bytes не меняются. Проверка формата не заменяет последующее декодирование reader-ом.
 
 Оба пути делят один 30-секундный deadline внутри исходной lease, максимум
 20 МиБ и тот же private attachments cache/receipt на 24ч. Source selection не
