@@ -1,7 +1,7 @@
 # Визуальный браузер Agent Skills
 
 API v1 принадлежит generic host. Signed provider задаёт
-HTTPS origins/domains, начальный адрес и явный observationMode; binary, профиль, ключ и executable
+HTTPS origins/domains, optional externalNavigation, начальный адрес и явный observationMode; binary, профиль, ключ и executable
 выбирает host. Source не означает stable release или завершённую native-проверку.
 
 Signed authentication recipe может добавить `setup: {paragraphs, links}` для
@@ -199,7 +199,8 @@ policy и не добавляет `--no-sandbox`; это отдельная ло
 а не обслуживание со стороны администратора компании Trelio.
 Для X11 child сохраняет также путь XAUTHORITY: без него DISPLAY недостаточно.
 
-Main-frame HTTP(S) navigation ограничена signed origins/domains через DNR.
+Main-frame HTTP(S) navigation по умолчанию ограничена signed origins/domains
+через DNR; внешний web navigation включается отдельным signed opt-in ниже.
 Правила принадлежат browser session: устанавливаются до первой provider
 navigation и не сохраняются как persistent extension ruleset. Их lifetime
 совпадает с owned browser process; reconnect не снимает действующие правила.
@@ -214,6 +215,31 @@ write и fail-closed при ошибке. Browser error document возвращ�
 не выдаётся за страницу с отсутствующим text adapter.
 Source/resource URLs и специальные схемы отклоняются. Browser downloads
 запрещены отдельно: suffix URL не доказывает тип ответа.
+
+### Внешние ссылки
+
+`VISUAL_EXTERNAL_NAVIGATION_API = trelio.visual-external-navigation/v1` подтверждает
+signed `runVisualSession({ externalNavigation: true })`. В этом режиме обычные
+HTTP(S)-страницы, ссылки и redirect не ограничены исходными origins/domains.
+Host policy, native DNR и content-script matches используют один выбор; одного
+разрешения в provider matcher недостаточно. Флаг не принимается из обычных
+CLI/MCP arguments и по умолчанию остаётся false для прежних providers.
+
+Выбор закреплён в private owner вместе с observation/download mode. Живой worker
+с другим значением не переиспользуется для чтения или input; обычный close
+сохраняет авторизацию. Это не требует удаления snapshot или повторного setup.
+Explicit origins/domains по-прежнему ограничивают private session-cookie overlay;
+только exact origins signed recipe разрешают protected credential delivery.
+Внешний сайт не получает Dodo/другие provider credentials из-за одного перехода.
+
+Общий document guard сохраняет отдельный путь получения originals через
+`attachmentDownloads`. Навигация не выполняет бинарные файлы и не выдаёт их за
+HTML. Special schemes, credentials в URL, source/resource suffix, чувствительные
+формы, frame/lease и no-replay guards сохраняются. Внешний документ читается тем
+же fixed rendered-text adapter; iframe/canvas не объявляются полным текстом.
+Native fixture проверяет target=_blank на другой origin, HTTP redirect и текст
+конечного документа через реальный Chromium; cookie/auth scopes проверяются
+отдельно от успешной навигации.
 
 ### Клик и фокус
 
@@ -291,7 +317,8 @@ DOM/source/site state и не исполняет model-selected JS. В оста�
 Нельзя обещать отсутствие focus для сайта, который заменил этот router.
 
 Browser сам делает один authenticated main-document GET по выбранной ссылке.
-Каждый redirect ограничен signed origins/domains. Только exact pending main frame
+Каждый redirect следует той же signed navigation policy: origins/domains
+либо явному externalNavigation. Только exact pending main frame
 получает временное исключение из attachment DNR rule; subframes, другие вкладки
 и обычные navigate/click сохраняют запрет. Fetch stream читает лишь этот ответ,
 не HTML/JS/JSON/XML/SVG, XHR, subresources или arbitrary URL. MIME и bounded

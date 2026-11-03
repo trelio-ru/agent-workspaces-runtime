@@ -514,6 +514,10 @@ publication tooling также остаются вне этого публичн
   Capture/input не активируют app; native foreground test проверяет это без
   возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
   popups/iframes. Source probes не входят в package и не являются fallback.
+- Внешние HTTP(S)-ссылки могут быть разрешены signed `externalNavigation` по
+  [visual contract](docs/visual-browser.md#внешние-ссылки). Host/worker/DNR/content
+  adapters применяют один owner-pinned выбор; default прежних providers сохранён.
+  Cookie overlay и protected authentication сохраняют исходные exact scopes.
 - Входящие вложения – отдельный signed `attachmentDownloads` opt-in в
   [visual contract](docs/visual-browser.md#входящие-вложения). Только координаты
   fresh frame: локальный href/one-click popup router, browser-owned authenticated

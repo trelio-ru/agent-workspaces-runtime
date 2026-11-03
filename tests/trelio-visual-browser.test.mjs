@@ -79,6 +79,24 @@ test('origin policy rejects source resources, credentials, schemes and sibling o
   assert.equal(policy.allowsCookie('.other.test'), false);
 });
 
+test('signed external navigation opens web documents without widening cookie or credential origins', async () => {
+  const origins = ['https://example.test'];
+  const policy = createVisualOriginPolicy({ origins, externalNavigation: true });
+  for (const url of ['https://documents.other.test/contract?view=1', 'http://other.test/document', 'https://other.test:8443/page']) {
+    assert.equal(policy.navigate(url), url);
+  }
+  for (const url of ['file:///private/data', 'javascript:alert(1)', 'data:text/html,document', 'https://user:secret@other.test', 'https://other.test/code.js']) {
+    assert.throws(() => policy.navigate(url), { code: 'navigation_blocked' });
+  }
+  assert.equal(policy.allowsCookie('.other.test'), false);
+  assert.equal(policy.allowsCookie('.example.test'), true);
+  assert.throws(() => createVisualOriginPolicy({ origins, externalNavigation: 'true' }), { code: 'invalid_input' });
+  const { normalizeVisualAuthentication } = await import('../host-runtime/scripts/trelio-visual-session.mjs');
+  assert.throws(() => normalizeVisualAuthentication({ steps: [{ id: 'login', origin: 'https://other.test',
+    challenge: '#form', fields: { password: '#password' }, submit: '#submit' }],
+    success: [{ origin: origins[0], selector: '#ready' }] }, { origins }), { code: 'navigation_blocked' });
+});
+
 test('native storage failure precedes browser I/O and remains visible in status', async () => {
   const browser = new ExtensionVisualBrowser({ origins: ['https://example.test'], dependencies: {}, store: {
     async read() { throw Object.assign(new Error('SYNTHETIC_PRIVATE_DETAIL'), { code: 'VISUAL_STORAGE_UNAVAILABLE' }); }, close() {},

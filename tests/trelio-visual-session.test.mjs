@@ -223,7 +223,7 @@ test('detached worker keeps its original lease and encrypted storage across shor
   const origin = `http://127.0.0.1:${server.address().port}`;
   const start = Date.now();
   const env = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-visual-fixture', TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(), TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({ apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 150_000 }), TRELIO_BROWSER_SESSION_STARTED_AT: String(start), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(start + 150_000) };
-  const call = (operation, args = {}) => runVisualSession({ origins: [origin], operation, args, env, fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } });
+  const call = (operation, args = {}) => runVisualSession({ origins: [origin], externalNavigation: true, operation, args, env, fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } });
   const scope = visualStorageScope({ origin: 'https://example.test', skillId: env.TRELIO_SKILL_ID, accountId: JSON.parse(env.TRELIO_SKILL_ACCOUNT_JSON).id });
   const { AsyncEntry } = await loadVisualDependencies();
   const store = new ProtectedVisualStore({ directory, scope, AsyncEntry });
@@ -248,6 +248,10 @@ test('detached worker keeps its original lease and encrypted storage across shor
     assert.equal((await call('ready')).state, 'saved_unverified');
     const frame = await call('navigate', { url: origin });
     assert.equal(frame.state, 'ready', JSON.stringify({ reason: frame.reason, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') })); assert.ok(frame.image);
+    assert.equal((await runVisualSession({ origins: [origin], externalNavigation: false,
+      operation: 'navigate', args: { url: origin }, env,
+      fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } })).reason,
+      'observation_mode_mismatch', 'a live worker cannot silently acquire broader navigation');
     const next = await call('scroll', { frameId: frame.frameId, x: 300, y: 300, deltaY: 500 });
     assert.equal(next.state, 'ready', JSON.stringify({ next, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') }));
     assert.equal(next.scroll.up, true);

@@ -66,11 +66,18 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
   const directory = new URL('../host-runtime/scripts/', import.meta.url);
   const fixture = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-text-fixture-')));
   let received, window;
+  const externalServer = http.createServer((req, res) => {
+    if (req.url === '/redirect') { res.writeHead(302, { Location: '/contract' }); res.end(); return; }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end('<!doctype html><title>External contract</title><h1>EXTERNAL_CONTRACT_TEXT</h1><p>Linked document body</p>');
+  });
+  await new Promise(resolve => externalServer.listen(0, '127.0.0.1', resolve));
+  const externalOrigin = `http://127.0.0.1:${externalServer.address().port}`;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/submitted') received = url.searchParams.get('q');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(`<!doctype html><title>Синтетическое объявление</title><body style="font:20px sans-serif"><h1>Объявление для проверки</h1><form action="/submitted"><input name="q" placeholder="Поиск" value="INPUT_SECRET"><button>Найти</button></form><a target="_blank" href="/detail">Подробности</a><div hidden>HIDDEN_SECRET</div><script>const secret='SCRIPT_SECRET';</script><label>Комментарий<textarea>TEXTAREA_SECRET</textarea></label><div contenteditable="plaintext-only" role="textbox" aria-label="Текст сообщения">DRAFT_SECRET</div><input type="password" hidden value="HIDDEN_PASSWORD_SECRET">${url.pathname === '/password' ? '<input type="password" value="PASSWORD_SECRET">' : ''}${url.pathname === '/otp' ? '<input autocomplete="ONE-TIME-CODE" value="OTP_SECRET">' : ''}${url.pathname === '/readonly' ? readonlyDocumentFixture() : ''}<p>Редкая фраза: проверка фильтра</p>${url.pathname === '/long' ? '<div>' + 'Длинное описание '.repeat(800) + '</div>' : ''}${Array.from({ length: 200 }, (_, i) => `<p>Строка ${i} – ${'Описание услуги '.repeat(5)}</p>`).join('')}</body>`);
+    res.end(`<!doctype html><title>Синтетическое объявление</title><body style="font:20px sans-serif"><h1>Объявление для проверки</h1><form action="/submitted"><input name="q" placeholder="Поиск" value="INPUT_SECRET"><button>Найти</button></form><a target="_blank" href="/detail">Подробности</a><a target="_blank" href="${externalOrigin}/redirect">Внешний договор</a><div hidden>HIDDEN_SECRET</div><script>const secret='SCRIPT_SECRET';</script><label>Комментарий<textarea>TEXTAREA_SECRET</textarea></label><div contenteditable="plaintext-only" role="textbox" aria-label="Текст сообщения">DRAFT_SECRET</div><input type="password" hidden value="HIDDEN_PASSWORD_SECRET">${url.pathname === '/password' ? '<input type="password" value="PASSWORD_SECRET">' : ''}${url.pathname === '/otp' ? '<input autocomplete="ONE-TIME-CODE" value="OTP_SECRET">' : ''}${url.pathname === '/readonly' ? readonlyDocumentFixture() : ''}<p>Редкая фраза: проверка фильтра</p>${url.pathname === '/long' ? '<div>' + 'Длинное описание '.repeat(800) + '</div>' : ''}${Array.from({ length: 200 }, (_, i) => `<p>Строка ${i} – ${'Описание услуги '.repeat(5)}</p>`).join('')}</body>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -78,7 +85,7 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
   const { loadVisualDependencies } = await import(new URL('trelio-visual-bootstrap.mjs', directory));
   const { createVisualOriginPolicy } = await import(new URL('trelio-visual-browser.mjs', directory));
   const dependencies = await loadVisualDependencies();
-  const browser = new ExtensionVisualBrowser({ dependencies, observationMode: 'text', testWindowController: value => { window = value; }, store: { directory: fixture, async read() { return null; }, async prepare() {}, async write() {}, close() {} }, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 100_000 }, testHeadless: process.env.TRELIO_TEXT_HEADED !== '1' });
+  const browser = new ExtensionVisualBrowser({ dependencies, observationMode: 'text', externalNavigation: true, testWindowController: value => { window = value; }, store: { directory: fixture, async read() { return null; }, async prepare() {}, async write() {}, close() {} }, policy: createVisualOriginPolicy({ origins: [origin], externalNavigation: true, allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 100_000 }, testHeadless: process.env.TRELIO_TEXT_HEADED !== '1' });
   const nativeCall = browser.call.bind(browser);
   const focus = () => process.platform === 'darwin' && process.env.TRELIO_TEXT_HEADED === '1' ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
   browser.call = async (operation, args) => {
@@ -141,7 +148,11 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
     for (const marker of ['READONLY_DOCUMENT_HEADING', 'READONLY_PARAGRAPH_START', 'выделенный текст', 'READONLY_TABLE_HEADER', 'READONLY_TABLE_CELL', 'READONLY_CASE_INSENSITIVE', 'READONLY_DOCUMENT_END']) assert.ok(documentText.includes(marker), `missing ${marker}`);
     assert.equal((documentText.match(/READONLY_DOCUMENT_END/gu) || []).length, 1);
     assert.ok(documentText.indexOf('READONLY_TABLE_HEADER') < documentText.indexOf('READONLY_TABLE_CELL'));
-    assert.equal((await browser.call('navigate', { url: 'https://example.com/' })).reason, 'navigation_blocked');
+    frame = ready(await browser.call('navigate', { url: origin }));
+    frame = ready(await browser.call('click', control(frame, 'Внешний договор')));
+    frame = ready(await browser.call('read-text'));
+    assert.match(frame.text, /EXTERNAL_CONTRACT_TEXT/);
+    ready(await browser.call('navigate', { url: origin }));
     assert.equal((await browser.call('navigate', { url: `${origin}/password` })).reason, 'manual_control_active');
     assert.equal((await browser.call('read-text')).reason, 'manual_control_active');
     assert.equal((await browser.call('navigate', { url: `${origin}/otp` })).reason, 'manual_control_active');
@@ -151,7 +162,8 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
   } finally {
     await browser.close().catch(() => browser.abort());
     assert.equal(window?.running() ?? false, false, 'close leaves no owned browser process or tabs');
-    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    server.closeAllConnections(); externalServer.closeAllConnections();
+    await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => externalServer.close(resolve))]);
     await fs.rm(fixture, { recursive: true, force: true });
   }
 });

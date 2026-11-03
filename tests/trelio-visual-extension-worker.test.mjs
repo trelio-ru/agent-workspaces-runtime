@@ -137,7 +137,8 @@ test('audio source delivery rechecks navigation and credentials, consumes its fr
   assert.equal(clicks, 5, 'each independent source dispatch gets exactly one original click');
 });
 
-test('extension installs literal origin guards before bootstrap and never navigates an adversarial sibling', async () => {
+for (const externalNavigation of [false, true]) test(`extension applies signed navigation policy before bootstrap (external=${externalNavigation})`, async () => {
+  const initialUrl = externalNavigation ? 'https://documents.other.test/contract' : 'https://www.example.test/';
   let rules, socket, detach; const sent = [], events = { addListener() {} };
   const guardCommands = [];
   const context = {
@@ -148,7 +149,7 @@ test('extension installs literal origin guards before bootstrap and never naviga
       windows: { onCreated: events, onRemoved: events, async getAll() { assert.ok(rules, 'navigation policy precedes window discovery'); return [{ id: 1 }]; } },
       tabs: { onCreated: events, onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'chrome://newtab/' }]; }, async update(_id, value) {
         if (value.url === 'about:blank') assert.equal(guardCommands.includes('Fetch.enable'), false, 'privileged new-tab commits inert blank before attachment');
-        else { assert.equal(value.url, 'https://www.example.test/'); assert.ok(guardCommands.includes('Fetch.enable'), 'provider URL follows the installed response guard'); }
+        else { assert.equal(value.url, initialUrl); assert.ok(guardCommands.includes('Fetch.enable'), 'provider URL follows the installed response guard'); }
         return { id: 1, url: value.url, status: 'complete' };
       } },
       cookies: { onChanged: events, async getAll() { return []; }, async set() { throw Error('unexpected_cookie_restore'); } },
@@ -160,7 +161,7 @@ test('extension installs literal origin guards before bootstrap and never naviga
       send(value) { sent.push(JSON.parse(value)); }
     },
   };
-  const config = { origins: ['https://www.example.test'], domains: ['example.test'], matches: ['https://*.example.test/*'], initialUrl: 'https://www.example.test/', endpoint: 'ws://127.0.0.1/fixture', token: 'synthetic', deadlineAt: Date.now() + 10_000 };
+  const config = { externalNavigation, origins: ['https://www.example.test'], domains: ['example.test'], matches: ['https://*.example.test/*'], initialUrl, endpoint: 'ws://127.0.0.1/fixture', token: 'synthetic', deadlineAt: Date.now() + 10_000 };
   startWorker(config, context);
   await new Promise(resolve => setImmediate(resolve));
   socket.onopen();
@@ -176,8 +177,9 @@ test('extension installs literal origin guards before bootstrap and never naviga
   assert.equal(rules.find(rule => rule.id === 3).condition.excludedTabIds, undefined, 'native detach revokes the exact MIME exception');
   const allows = url => rules.some(rule => rule.action.type === 'allow' && new RegExp(rule.condition.regexFilter).test(url));
   assert.equal(allows('https://www.example.test/detail'), true);
-  for (const url of ['https://wwwXexampleXtest/detail', 'https://example.test.evil.com/detail', 'https://evilexample.test/detail', 'https://example.test:444/detail']) assert.equal(allows(url), false, url);
-  socket.onmessage({ data: JSON.stringify({ id: 'one', operation: 'navigate', args: { url: 'https://example.test.evil.com/' } }) });
+  assert.equal(allows('https://user:secret@documents.other.test/contract'), false, 'web navigation never admits URL credentials');
+  for (const url of ['https://wwwXexampleXtest/detail', 'https://example.test.evil.com/detail', 'https://evilexample.test/detail', 'https://example.test:444/detail']) assert.equal(allows(url), externalNavigation, url);
+  socket.onmessage({ data: JSON.stringify({ id: 'one', operation: 'navigate', args: { url: externalNavigation ? 'file:///private/data' : 'https://example.test.evil.com/' } }) });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sent.at(-1).result.reason, 'navigation_blocked');
 });

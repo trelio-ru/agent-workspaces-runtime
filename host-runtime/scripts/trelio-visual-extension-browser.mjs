@@ -237,11 +237,11 @@ export class ExtensionVisualBrowser {
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic;
-  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
-    if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, lease, observationMode = 'image', attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
+    if (typeof externalNavigation !== 'boolean' || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
+    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
     // The diagnostic native.log may remain locked after browser exit on Windows
@@ -361,8 +361,10 @@ export class ExtensionVisualBrowser {
       });
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
-    const matches = [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
+    // Content adapters follow the same signed navigation policy. Cookie restore
+    // and protected authentication deliberately keep their original origins.
+    const matches = this.externalNavigation ? ['http://*/*', 'https://*/*'] : [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     // Only the ephemeral transport token is materialized here. Cookie values

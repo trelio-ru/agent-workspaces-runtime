@@ -216,8 +216,8 @@ export function visualAttachmentFormat(bytes, mimeType) {
   throw fault('attachment_unsupported');
 }
 
-export function createVisualOriginPolicy({ origins, domains = [], allowLoopback = false }) {
-  if (!Array.isArray(origins) || !origins.length || origins.length > 16 || !Array.isArray(domains) || domains.length > 8) throw fault('invalid_input');
+export function createVisualOriginPolicy({ origins, domains = [], externalNavigation = false, allowLoopback = false }) {
+  if (typeof externalNavigation !== 'boolean' || !Array.isArray(origins) || !origins.length || origins.length > 16 || !Array.isArray(domains) || domains.length > 8) throw fault('invalid_input');
   const exact = new Set(origins.map(value => {
     const url = new URL(value);
     if (url.origin !== value || url.username || url.password || (url.protocol !== 'https:' && !(allowLoopback && url.protocol === 'http:' && url.hostname === '127.0.0.1'))) throw fault('invalid_input');
@@ -225,7 +225,10 @@ export function createVisualOriginPolicy({ origins, domains = [], allowLoopback 
   }));
   if (domains.some(value => !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(value))) throw fault('invalid_input');
   const allowsOrigin = raw => {
-    try { const url = new URL(raw); return exact.has(url.origin) || (url.protocol === 'https:' && !url.port && domains.some(domain => url.hostname === domain || url.hostname.endsWith(`.${domain}`))); }
+    // A signed reading provider may follow ordinary web links without turning
+    // every destination into a credential-delivery or saved-cookie origin.
+    // Keep those scopes separate: allowsCookie below remains exact/domain-bound.
+    try { const url = new URL(raw); return (externalNavigation && ['http:', 'https:'].includes(url.protocol)) || exact.has(url.origin) || (url.protocol === 'https:' && !url.port && domains.some(domain => url.hostname === domain || url.hostname.endsWith(`.${domain}`))); }
     catch { return false; }
   };
   return Object.freeze({

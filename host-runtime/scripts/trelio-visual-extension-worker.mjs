@@ -52,7 +52,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const allowed = raw => {
     try {
       const u = new URL(raw);
-      return !u.username && !u.password && (config.origins.includes(u.origin) || (u.protocol === 'https:' && !u.port && config.domains.some(d => u.hostname === d || u.hostname.endsWith('.' + d))));
+      return !u.username && !u.password && ((config.externalNavigation === true && ['http:', 'https:'].includes(u.protocol)) || config.origins.includes(u.origin) || (u.protocol === 'https:' && !u.port && config.domains.some(d => u.hostname === d || u.hostname.endsWith('.' + d))));
     } catch { return false; }
   };
   const allowedNavigation = raw => {
@@ -750,6 +750,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         { id: 5, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['sub_frame'], responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
       ];
       let ruleId = 6;
+      // The provider's signed web-navigation opt-in must reach native DNR too,
+      // including redirects and target=_blank links routed into this same tab.
+      // Higher-priority MIME/attachment rules still own document delivery.
+      if (config.externalNavigation === true) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https?://[^/?#@]+(?:[/?#]|$)', resourceTypes: ['main_frame'] } });
       for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
       // This profile and its signed navigation policy live for one browser
