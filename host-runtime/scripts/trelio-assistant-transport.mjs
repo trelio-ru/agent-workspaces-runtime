@@ -16,6 +16,29 @@ import { canonicalJson } from './trelio-company-encryption.mjs';
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
 }
+// ONE closed projection for immediate exact reads and the background search
+// worker. These are existing common-reader refusals, not provider-selected
+// codes or a new recovery capability. Keeping the projector here prevents an
+// outdated accepted file from becoming a generic company-read failure merely
+// because it did not pass through the long-running search request boundary.
+const companyContextReadRefusals=new Set([
+  'LOCAL_CONTEXT_BROWSER_PROJECTION_INVALID','LOCAL_CONTEXT_BROWSER_PROJECTION_MISSING',
+  'LOCAL_CONTEXT_CACHE_INVALID','LOCAL_CONTEXT_COMPANY_MISMATCH','LOCAL_CONTEXT_GENERATION_CHANGED',
+  'LOCAL_CONTEXT_INVALID_HYDRATION','LOCAL_CONTEXT_INVALID_MANIFEST','LOCAL_CONTEXT_MIRROR_INVALID',
+  'LOCAL_CONTEXT_RESULT_NOT_FOUND','LOCAL_CONTEXT_RESULT_TOO_LARGE','LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE',
+  'LOCAL_CONTEXT_SYNC_BUSY','LOCAL_CONTEXT_TASK_NOT_FOUND','LOCAL_CONTEXT_TOO_LARGE',
+  'LOCAL_CONTEXT_WORKSPACE_FILE_NOT_FOUND','LOCAL_CONTEXT_WORKSPACE_OUTDATED','WORKSPACE_OUTDATED',
+  'WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE','WORKSPACE_FILE_INVALID_LOCATOR','WORKSPACE_FILE_MANIFEST_INVALID',
+  'WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID','WORKSPACE_FILE_SIZE_MISMATCH','WORKSPACE_FILE_TOO_LARGE',
+  'WORKSPACE_FILE_GIT_READ_FAILED',
+]);
+export const assistantCompanyContextReadRefusalCode=error=>{
+  // The older accepted-Git reader throws one literal constant as its complete
+  // message. Preserve that exact compatibility only: no substring parsing,
+  // path/prose copying, status-shaped errors or native authentication grant.
+  const code=error?.code??error?.message;
+  return companyContextReadRefusals.has(code)?'ASSISTANT_COMPANY_CONTEXT_'+code:null;
+};
 /** Public setup remains available for two closed failures: an observed local
  * slot mismatch, or confirmed 401/403 from the fixed native device transport.
  * They are separately diagnosed, never an empty/healthy privileged catalogue.
@@ -3276,8 +3299,10 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         const {bridgeHttpDiagnosticCode}=await import('./trelio-bridge-http-diagnostics.mjs');
         throw new AssistantTransportError(`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_${bridgeHttpDiagnosticCode(error.statusCode,error.code)}`);
       }
-      const code=/^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_|REMOTE_MCP_)[A-Z_]{1,100}$/u.test(error?.code??'')
-        ?error.code:localFailureCodes[stage];
+      const readRefusal=['company_read','company_file'].includes(stage)
+        ?assistantCompanyContextReadRefusalCode(error):null;
+      const code=readRefusal??(/^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_|REMOTE_MCP_)[A-Z_]{1,100}$/u.test(error?.code??'')
+        ?error.code:localFailureCodes[stage]);
       throw Object.assign(new AssistantTransportError(code),
         code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid','expired','replayed'].includes(error.reason)
           ?{reason:error.reason}:{});

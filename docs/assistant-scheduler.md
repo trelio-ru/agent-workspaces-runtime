@@ -1586,6 +1586,15 @@ admission, one-use proof, unchanged deadlines and no-replay remain independent.
 Tests exercise every callback through the real MCP wrapper, exact native send
 versus copied auth errors, privacy and one native call per explicit invocation.
 
+Immediate company `fetch` and accepted-file materializers reuse the SAME explicit
+common-reader refusal set as background company search. A changed accepted head,
+missing result or invalid mirror retains its fixed `ASSISTANT_COMPANY_CONTEXT_*`
+code instead of a generic local-read failure. The older Git reader's literal
+constant is accepted only as its entire message and only without a code property;
+substrings, arbitrary messages/codes and status-shaped foreign errors remain
+opaque. This diagnostic parity neither selects another head, starts a new search,
+retries a read, grants authentication recovery nor changes native admission.
+
 Native selected ciphertext has the lifetime of its exact decoded response. The
 managed profile holds only weak root/projection associations, not a cumulative
 company-wide entity map. Common mirror field-only metadata projections explicitly

@@ -11,7 +11,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
@@ -2777,20 +2777,8 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     // an arbitrary exception, filesystem path, crypto message or backend body
     // through the setup worker. Retaining a fixed read failure neither opens
     // another route nor permits a preparation/query replay.
-    const readCodes=new Set(['LOCAL_CONTEXT_BROWSER_PROJECTION_INVALID','LOCAL_CONTEXT_BROWSER_PROJECTION_MISSING',
-      'LOCAL_CONTEXT_CACHE_INVALID','LOCAL_CONTEXT_COMPANY_MISMATCH','LOCAL_CONTEXT_GENERATION_CHANGED',
-      'LOCAL_CONTEXT_INVALID_HYDRATION','LOCAL_CONTEXT_INVALID_MANIFEST','LOCAL_CONTEXT_MIRROR_INVALID',
-      'LOCAL_CONTEXT_RESULT_NOT_FOUND','LOCAL_CONTEXT_RESULT_TOO_LARGE','LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE',
-      'LOCAL_CONTEXT_SYNC_BUSY','LOCAL_CONTEXT_TASK_NOT_FOUND','LOCAL_CONTEXT_TOO_LARGE',
-      'LOCAL_CONTEXT_WORKSPACE_FILE_NOT_FOUND','LOCAL_CONTEXT_WORKSPACE_OUTDATED','WORKSPACE_OUTDATED',
-      'WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE','WORKSPACE_FILE_INVALID_LOCATOR','WORKSPACE_FILE_MANIFEST_INVALID',
-      'WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID','WORKSPACE_FILE_SIZE_MISMATCH','WORKSPACE_FILE_TOO_LARGE',
-      'WORKSPACE_FILE_GIT_READ_FAILED']);
-    // The accepted-Git reader predates typed code properties and throws one
-    // literal constant as its entire message. Admit only exact members of
-    // this SAME closed set, never parse or copy native stderr/prose.
-    const readCode=error?.code??error?.message;
-    if(readCodes.has(readCode))fail('ASSISTANT_COMPANY_CONTEXT_'+readCode);
+    const readRefusal=assistantCompanyContextReadRefusalCode(error);
+    if(readRefusal)fail(readRefusal);
     // The SAME common request engine can refuse a ciphertext read with a
     // native HTTP status/domain code. Do not collapse that real ACL refusal
     // into setup unavailability at the request pipe. Reuse the existing closed

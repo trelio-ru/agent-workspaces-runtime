@@ -164,6 +164,8 @@ publication tooling также остаются вне этого публичн
   All local MCP materializers retain closed refusal codes or a fixed local stage,
   never a false endpoint outage. Only the exact native send error retains native
   MCP auth provenance through an arguments adapter; provider errors do not.
+  Immediate company fetch/files and search share one explicit common-reader
+  refusal projector; exact legacy constants only, no prose parsing or retry.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
   A selected `workspace-file:` fetch uses the SAME exact accepted-file reader

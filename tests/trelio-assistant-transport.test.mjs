@@ -1118,6 +1118,7 @@ test('all trusted materializers preserve local refusal provenance without claimi
     ['source_read','get_assistant_intake_context','materializeSourceIntake',{}, {content:[]}],
     ['source_reply','resolve_assistant_intake','materializeSourceReply',{decision:'reply_owner'}, {content:[]}],
     ['company_read','search','materializeEncryptedCompanyContext',{},refusal('ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',company)],
+    ['company_read','fetch','materializeEncryptedCompanyContext',{id:'task:synthetic/project/1'},refusal('ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',{...company,nativeTool:'fetch'})],
     ['task_read','get_task','materializeEncryptedTask',{},refusal('ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED',f.descriptor)],
     ['skill_read','get_agent_skill','materializeEncryptedSkill',{},refusal('ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED',skill)],
     ['company_file','get_agent_workspace_file','materializeCompanyFile',{}, {content:[],structuredContent:{delivery:'local-file'}}],
@@ -1142,6 +1143,15 @@ test('all trusted materializers preserve local refusal provenance without claimi
       [new TrelioApiError(403,'PRIVATE_NATIVE_HTTP_CANARY',null,'ACCESS_DENIED',{private:'PRIVATE'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_ACCESS_DENIED`],
       [new TrelioApiError(403,'PRIVATE_NATIVE_HTTP_CANARY',null,'PRIVATE_CODE_CANARY'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_TRELIO_BACKEND_HTTP_403`],
       [Object.assign(Error('PRIVATE_FORGED_HTTP_CANARY'),{statusCode:403,code:'ACCESS_DENIED'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+      // Exact shared-reader codes are already safe across the search worker.
+      // The immediate fetch/file path must retain the SAME refusal instead of
+      // turning an outdated original or missing target into an opaque outage.
+      [Object.assign(Error('PRIVATE_ACCEPTED_PATH_CANARY'),{code:'WORKSPACE_OUTDATED'}),
+        ['company_read','company_file'].includes(stage)?'ASSISTANT_COMPANY_CONTEXT_WORKSPACE_OUTDATED':`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+      [Error('LOCAL_CONTEXT_RESULT_NOT_FOUND'),
+        ['company_read','company_file'].includes(stage)?'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_RESULT_NOT_FOUND':`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+      [Error('PRIVATE path contains WORKSPACE_OUTDATED'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+      [Object.assign(Error('LOCAL_CONTEXT_RESULT_NOT_FOUND'),{code:'PRIVATE_UNREVIEWED_CODE'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
     ]){
       error=failure;
       await assert.rejects(proxy.callTool(name,args),caught=>{
@@ -1150,7 +1160,7 @@ test('all trusted materializers preserve local refusal provenance without claimi
         assert.doesNotMatch(JSON.stringify(caught),/PRIVATE|payload|reason/);return true;
       });
     }
-    assert.equal(requests,stage==='workspace_arguments'?0:6);assert.equal(materializations,6,'each explicit invocation materializes once; no retry/fallback');
+    assert.equal(requests,stage==='workspace_arguments'?0:10);assert.equal(materializations,10,'each explicit invocation materializes once; no retry/fallback');
   }
 });
 
