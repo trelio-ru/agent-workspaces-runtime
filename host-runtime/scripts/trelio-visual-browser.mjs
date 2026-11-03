@@ -13,11 +13,20 @@ export function visualAudioFormat(bytes, mimeType) {
   // A fixed magic-family bucket is diagnostic evidence, never permission to
   // export an unsupported container. No file prefix or MIME prose is returned.
   let containerFamily = 'other';
-  const reject = () => { throw Object.assign(fault('attachment_unsupported'), {
-    audioDiagnostic: { stage: 'audio_container', code: 'unsupported_container', format: containerFamily },
+  const reject = (detail = 'container_structure', declaredFormat) => { throw Object.assign(fault('attachment_unsupported'), {
+    audioDiagnostic: { stage: 'audio_container', code: 'unsupported_container', format: containerFamily,
+      detail, ...(declaredFormat ? { declaredFormat } : {}) },
   }); };
   const accept = (mime, extension, aliases = []) => {
-    if (mimeType !== 'application/octet-stream' && ![mime, ...aliases].includes(mimeType)) reject();
+    if (mimeType !== 'application/octet-stream' && ![mime, ...aliases].includes(mimeType)) {
+      // Distinguish a valid audio container with a conflicting declared type
+      // from damaged bytes. Emit only this finite MIME family, never the raw
+      // header. A mismatch remains a refusal; diagnostics cannot admit a file.
+      const families = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav',
+        'audio/mpeg': 'mpeg', 'audio/mp3': 'mpeg', 'audio/ogg': 'ogg', 'audio/opus': 'ogg', 'application/ogg': 'ogg',
+        'audio/mp4': 'mp4', 'audio/x-m4a': 'mp4', 'audio/aac': 'aac', 'audio/aacp': 'aac', 'audio/flac': 'flac', 'audio/x-flac': 'flac' };
+      reject('mime_mismatch', Object.hasOwn(families, mimeType) ? families[mimeType] : 'other');
+    }
     return { mimeType: mime, extension };
   };
   const text = (start, end) => bytes.subarray(start, end).toString('latin1');
@@ -77,13 +86,14 @@ export function visualAudioFormat(bytes, mimeType) {
     containerFamily = 'mp4';
     let audio = false, video = false, data = false, boxes = 0;
     const walk = (start, end, depth) => {
-      if (depth > 4) reject();
+      if (depth > 4) reject('box_depth');
       for (let offset = start; offset < end;) {
-        if (offset + 8 > end || ++boxes > 4096) reject();
+        if (offset + 8 > end) reject('box_bounds');
+        if (++boxes > 4096) reject('box_count');
         let size = bytes.readUInt32BE(offset), header = 8;
-        if (size === 1) { if (offset + 16 > end) reject(); const wide = bytes.readBigUInt64BE(offset + 8); if (wide > BigInt(bytes.length)) reject(); size = Number(wide); header = 16; }
+        if (size === 1) { if (offset + 16 > end) reject('box_bounds'); const wide = bytes.readBigUInt64BE(offset + 8); if (wide > BigInt(bytes.length)) reject('box_bounds'); size = Number(wide); header = 16; }
         if (size === 0) size = end - offset;
-        if (size < header || offset + size > end) reject();
+        if (size < header || offset + size > end) reject('box_bounds');
         const type = text(offset + 4, offset + 8), body = offset + header;
         if (['moov', 'trak', 'mdia'].includes(type)) walk(body, offset + size, depth + 1);
         if (type === 'hdlr' && depth === 3 && size >= header + 12) { audio ||= text(body + 8, body + 12) === 'soun'; video ||= text(body + 8, body + 12) === 'vide'; }
@@ -91,9 +101,11 @@ export function visualAudioFormat(bytes, mimeType) {
         offset += size;
       }
     };
-    if (bytes.length < 24 || bytes.readUInt32BE(0) < 16) reject();
+    if (bytes.length < 24 || bytes.readUInt32BE(0) < 16) reject('ftyp_header');
     walk(0, bytes.length, 0);
-    if (!audio || video || !data) reject();
+    if (video) reject('video_track_present');
+    if (!audio) reject('audio_track_missing');
+    if (!data) reject('media_data_missing');
     return accept('audio/mp4', 'm4a', ['audio/x-m4a']);
   }
   // MPEG Layer III and ADTS are sequences of complete frames. ID3's bounded

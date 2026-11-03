@@ -37,14 +37,18 @@ const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.cod
  * This describes the observed refusal only; it grants no download/input retry.
  */
 export function validateVisualAudioDiagnostic(value) {
-  if (!exact(value, ['stage', 'code', 'format', 'httpStatus'])
+  if (!exact(value, ['stage', 'code', 'format', 'httpStatus', 'detail', 'declaredFormat'])
     || !['audio_response', 'audio_blob', 'audio_container'].includes(value.stage)
     || !['unsupported_status', 'invalid_headers', 'unsupported_mime', 'invalid_body', 'unsupported_container'].includes(value.code)
     || value.format !== undefined && !['wav', 'mpeg', 'ogg', 'mp4', 'aac', 'flac', 'webm', 'ebml', 'amr', '3gpp', 'other'].includes(value.format)
     || value.httpStatus !== undefined && (!Number.isInteger(value.httpStatus) || value.httpStatus < 100 || value.httpStatus > 599)
     || (value.code === 'unsupported_status' ? value.stage !== 'audio_response' || value.httpStatus === undefined || value.format !== undefined : value.httpStatus !== undefined)
     || (value.code === 'unsupported_container' ? value.stage !== 'audio_container' || value.format === undefined : value.stage === 'audio_container')
-    || (value.code === 'unsupported_mime' ? value.format === undefined : value.format !== undefined && value.code !== 'unsupported_container')) fail();
+    || (value.code === 'unsupported_mime' ? value.format === undefined : value.format !== undefined && value.code !== 'unsupported_container')
+    || value.detail !== undefined && (value.stage !== 'audio_container' || !['container_structure', 'mime_mismatch', 'box_bounds', 'box_count', 'box_depth', 'ftyp_header', 'video_track_present', 'audio_track_missing', 'media_data_missing'].includes(value.detail))
+    || value.detail !== undefined && !['container_structure', 'mime_mismatch'].includes(value.detail) && value.format !== 'mp4'
+    || value.declaredFormat !== undefined && (value.detail !== 'mime_mismatch' || !['wav', 'mpeg', 'ogg', 'mp4', 'aac', 'flac', 'other'].includes(value.declaredFormat))
+    || value.detail === 'mime_mismatch' && value.declaredFormat === undefined) fail();
   return { ...value };
 }
 

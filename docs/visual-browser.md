@@ -374,6 +374,12 @@ prefix bytes, source URL или filename. EBML magic не доказывает W
 валидирует точные поля и сочетания; successful result не содержит диагностику.
 Наблюдённый 206, MIME family или container signature не разрешают экспорт,
 повтор input, новый transport, auth reset или ослабление format validation.
+Для container refusal optional `detail` различает `container_structure`,
+`mime_mismatch` и только у MP4: `box_bounds|box_count|box_depth|ftyp_header|
+video_track_present|audio_track_missing|media_data_missing`. Только mismatch
+добавляет `declaredFormat` из закрытых `wav|mpeg|ogg|mp4|aac|flac|other`.
+Это классификация прежнего отказа: metadata/tracks/bytes и фактическое значение
+MIME не возвращаются, допустимость файла и recovery не меняются.
 
 ## Исходящие файлы
 

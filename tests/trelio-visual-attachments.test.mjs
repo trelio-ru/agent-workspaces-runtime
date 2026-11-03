@@ -20,7 +20,7 @@ test('audio refusal diagnostics survive MCP with closed evidence only and never 
   for (const audioDiagnostic of diagnostics) {
     const value = visualStatus('error', 'attachment_unsupported', { audioDiagnostic });
     assert.deepEqual(JSON.parse(visualMcpResult(parseVisualSkillOutput(JSON.stringify(value))).content[0].text).audioDiagnostic, audioDiagnostic);
-    for (const patch of [{ url: 'https://example.test/private' }, { message: 'PRIVATE_HEADER_BODY' }, { format: 'PRIVATE_MIME' }, { httpStatus: 999 }]) {
+    for (const patch of [{ url: 'https://example.test/private' }, { message: 'PRIVATE_HEADER_BODY' }, { format: 'PRIVATE_MIME' }, { httpStatus: 999 }, { detail: 'PRIVATE_DETAIL' }, { declaredFormat: 'PRIVATE_HEADER' }]) {
       assert.throws(() => visualStatus('error', 'attachment_unsupported', { audioDiagnostic: { ...audioDiagnostic, ...patch } }), { code: 'VISUAL_RESULT_INVALID' });
     }
     assert.throws(() => visualStatus('ready', 'none', { audioDiagnostic }), { code: 'VISUAL_RESULT_INVALID' });
@@ -29,7 +29,7 @@ test('audio refusal diagnostics survive MCP with closed evidence only and never 
   let refusal;
   try { visualAudioFormat(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0]), 'application/octet-stream'); } catch (error) { refusal = error; }
   assert.equal(refusal.code, 'attachment_unsupported');
-  assert.deepEqual(refusal.audioDiagnostic, { stage: 'audio_container', code: 'unsupported_container', format: 'ebml' });
+  assert.deepEqual(refusal.audioDiagnostic, { stage: 'audio_container', code: 'unsupported_container', format: 'ebml', detail: 'container_structure' });
 });
 
 test('audio originals require complete containers/frames and a matching MIME, independently of document downloads', async () => {
@@ -44,6 +44,24 @@ test('audio originals require complete containers/frames and a matching MIME, in
   const box = (type, data) => { const value = Buffer.alloc(data.length + 8); value.writeUInt32BE(value.length); value.write(type, 4); data.copy(value, 8); return value; };
   const handler = Buffer.alloc(12); handler.write('soun', 8);
   const m4a = Buffer.concat([box('ftyp', Buffer.from('M4A \0\0\0\0')), box('moov', box('trak', box('mdia', box('hdlr', handler)))), box('mdat', Buffer.from([1]))]);
+  const refusal = (bytes, mime, detail, declaredFormat) => {
+    let failure; try { visualAudioFormat(bytes, mime); } catch (error) { failure = error; }
+    assert.equal(failure?.code, 'attachment_unsupported');
+    assert.equal(failure.audioDiagnostic.detail, detail);
+    assert.equal(failure.audioDiagnostic.declaredFormat, declaredFormat);
+    assert.deepEqual(validateVisualResult(visualStatus('error', 'attachment_unsupported', { audioDiagnostic: failure.audioDiagnostic })).audioDiagnostic, failure.audioDiagnostic);
+  };
+  refusal(m4a, 'audio/mpeg', 'mime_mismatch', 'mpeg');
+  const noAudio = Buffer.from(m4a); noAudio.write('meta', noAudio.indexOf('soun'));
+  refusal(noAudio, 'audio/mp4', 'audio_track_missing');
+  refusal(m4a.subarray(0, -9), 'audio/mp4', 'media_data_missing');
+  const bounds = Buffer.from(m4a); bounds.writeUInt32BE(bounds.length + 1);
+  refusal(bounds, 'audio/mp4', 'box_bounds');
+  const manyBoxes = Buffer.concat([m4a, ...Array.from({ length: 4097 }, () => box('free', Buffer.alloc(0)))]);
+  refusal(manyBoxes, 'audio/mp4', 'box_count');
+  const deep = Buffer.concat([box('ftyp', Buffer.from('M4A \0\0\0\0')),
+    Array.from({ length: 6 }).reduce(child => box('moov', child), Buffer.alloc(0))]);
+  refusal(deep, 'audio/mp4', 'box_depth');
   for (const [bytes, mime, extension] of [[wav,'audio/x-wav','wav'],[ogg,'audio/opus','opus'],[mp3,'audio/mpeg','mp3'],[aac,'audio/aac','aac'],[flac,'audio/flac','flac'],[m4a,'audio/mp4','m4a']]) {
     assert.equal(visualAudioFormat(bytes, mime).extension, extension);
     assert.equal(visualAudioFormat(bytes, 'application/octet-stream').extension, extension);
@@ -55,6 +73,7 @@ test('audio originals require complete containers/frames and a matching MIME, in
   assert.throws(() => visualAudioFormat(Buffer.alloc(MAX_ATTACHMENT_BYTES + 1), 'audio/wav'), { code: 'attachment_too_large' });
   const video = Buffer.from(m4a); video.write('vide', video.indexOf('soun'));
   assert.throws(() => visualAudioFormat(video, 'audio/mp4'), { code: 'attachment_unsupported' });
+  refusal(video, 'audio/mp4', 'video_track_present');
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-audio-receipt-')));
   try {
     const file = { mimeType: 'audio/wav', dataBase64: wav.toString('base64') }, sessionId = randomUUID();

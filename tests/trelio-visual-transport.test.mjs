@@ -40,7 +40,7 @@ test('closed startup diagnostics cross actual worker HTTP and typed MCP unchange
 });
 
 test('closed audio refusal crosses worker HTTP and the real typed action without exposing the response', async () => {
-  const audioDiagnostic = { stage: 'audio_response', code: 'unsupported_status', httpStatus: 206 };
+  const audioDiagnostic = { stage: 'audio_container', code: 'unsupported_container', format: 'mp4', detail: 'mime_mismatch', declaredFormat: 'mpeg' };
   const server = createVisualControlServer({ token: 'a'.repeat(64), dispatch: async () => visualStatus('error', 'attachment_unsupported', { audioDiagnostic }) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
