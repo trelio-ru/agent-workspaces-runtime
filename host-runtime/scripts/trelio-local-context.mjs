@@ -6920,6 +6920,16 @@ const assertMirrorDocumentCompany = (mirror, companySlug) => {
   }
 };
 
+/** One structural task-reference grammar for mirror and fresh source reads.
+ * A locator never grants company/project ACL or resolves historical aliases.
+ */
+const parseMirrorTaskResultId = (resultId) => {
+  const suffix=resultId.slice("task:".length);
+  const parts=(suffix.includes("/")?suffix.split("/"):suffix.split(":")).map(decodeMirrorDocumentIdPart);
+  if(parts.length!==3)throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT","Invalid task result id.");
+  return {companySlug:parts[0],projectSlug:parts[1],taskNumber:Number(parts[2])};
+};
+
 const parseMirrorDocumentUrl = (resultId) => {
   let parsedUrl;
   try {
@@ -7105,18 +7115,9 @@ export const fetchMirrorResult = (mirror, rawResultId, knownInstructionLayerKeys
     };
   }
   if (resultId.startsWith("task:")) {
-    const suffix = resultId.slice("task:".length);
-    const encodedParts = suffix.includes("/") ? suffix.split("/") : suffix.split(":");
-    const [companySlug, projectSlug, taskNumberText] = encodedParts.map(decodeMirrorDocumentIdPart);
-    if (encodedParts.length !== 3) {
-      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Invalid task result id.");
-    }
-    assertMirrorDocumentCompany(mirror, companySlug);
-    return getTaskFromMirror(mirror, {
-      projectSlug,
-      taskNumber: Number(taskNumberText),
-      knownInstructionLayerKeys,
-    });
+    const locator=parseMirrorTaskResultId(resultId);
+    assertMirrorDocumentCompany(mirror, locator.companySlug);
+    return getTaskFromMirror(mirror, { ...locator, knownInstructionLayerKeys });
   }
   if (resultId.startsWith("knowledge-page:")) {
     const encodedParts = resultId.slice("knowledge-page:".length).split(":");
@@ -8459,6 +8460,65 @@ export const usesFreshExactTaskRead = (nativeTool, input) => {
       && Number.isSafeInteger(Number(locator?.taskNumber)) && Number(locator.taskNumber) > 0);
 };
 
+/** Native immutable references already identify the exact source. Parsing
+ * supplies coordinates only; fresh native task/document ACL remains mandatory.
+ * Historical project aliases still require discovery, never a guessed UUID.
+ */
+export const exactCompanyFetchLocator = (rawId) => {
+  if(typeof rawId!=="string")return null;
+  rawId=normalizeBoundedString(rawId,"resultId",4096);
+  let task=null;
+  if(rawId.startsWith("task:")){
+    task=parseMirrorTaskResultId(rawId);
+  }else if(rawId.startsWith("context:")){
+    const parts=rawId.split(":");
+    if(parts.length!==3)return null;
+    const documentType=decodeMirrorDocumentIdPart(parts[1]),documentId=decodeMirrorDocumentIdPart(parts[2]);
+    if(!/^[a-z][a-z_]{0,63}$/u.test(documentType)||!UUID_PATTERN.test(documentId))return null;
+    return {type:"context",documentType,documentId};
+  }else if(/^(?:https?:\/\/|\/)/u.test(rawId)){
+    const locator=parseMirrorDocumentUrl(rawId);
+    if(locator?.type==="task")task=locator;
+  }
+  return task&&usesFreshExactTaskRead("get_task",task)?{...task,type:"task"}:null;
+};
+
+/** The cached encrypted generation provides ONE revision locator, never read
+ * permission or source content. The current native document endpoint rechecks
+ * object ACL/revision; the SAME canonical instructions callback supplies fresh
+ * source rules/profile. A final native document read fences revocation/move.
+ * This keeps an already running old MCP facade out of whole-company refresh
+ * and its 30s callback deadline, without a restart, new cache or permission map.
+ */
+const readFreshManagedContextDocument = async ({origin,companySlug,selection,provider,profile,signal}) => {
+  const paths=resolveMirrorPaths({origin,companyId:provider.companyEncryption.runtime.company.id});
+  const mirror=await readMirrorGeneration({paths,companyEncryption:provider.companyEncryption});
+  const descriptor=mirror?.contextDocuments?.find(document=>document.id===selection.documentId&&document.type===selection.documentType);
+  if(!descriptor)throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND","Select a current exact source through company search.");
+  const read=()=>fetchContextDocumentProjection({origin:provider.requestOrigin,token:provider.token,companySlug,document:descriptor,signal});
+  const raw=await read(),document=raw?.document;
+  if(document?.id!==selection.documentId||document.type!==selection.documentType||document.revisionToken!==descriptor.revisionToken
+    ||document.projectId!==null&&document.projectId!==undefined&&(!UUID_PATTERN.test(document.projectId)
+      ||!/^e-[a-f0-9-]{36}$/u.test(document.projectSlug??"")))
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED","Exact source coordinates changed.");
+  const hydrated=await hydrateAgentCompanyEncryptedJson({value:raw,origin:provider.requestOrigin,token:provider.token,
+    companyEncryption:provider.companyEncryption,signal});
+  const rules=await profile.readCompanyContextExact({nativeTool:"get_agent_instructions",input:{companySlug,
+    ...(document.projectSlug?{projectSlug:document.projectSlug}:{})},signal});
+  if(rules?.company?.id!==provider.companyEncryption.runtime.company.id||rules.company.slug!==companySlug
+    ||(rules.project?.id??null)!==(document.projectId??null)||(rules.project?.slug??null)!==(document.projectSlug??null)
+    ||typeof rules?.effective?.compiledMarkdown!=="string"||typeof rules.personalProfile?.effective?.compiledMarkdown!=="string")
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_HYDRATION","Complete exact source authority is required.");
+  const final=(await read())?.document;
+  if(final?.id!==document.id||final.type!==document.type||final.revisionToken!==document.revisionToken
+    ||final.projectId!==document.projectId||final.projectSlug!==document.projectSlug)
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED","Exact source changed during the read.");
+  signal?.throwIfAborted();
+  return {schemaVersion:1,provider:"local_company_context",sourceRevision:document.revisionToken,document:hydrated.document,
+    sourceScope:{company:rules.company,project:rules.project},
+    effectiveInstructions:rules.effective,personalProfile:rules.personalProfile.effective};
+};
+
 /** Only exact UUID targets bypass discovery; arbitrary fetch/search inputs
  * retain their existing routes. Validate before target HTTP/file reads. */
 export const exactWorkspaceReadId = (nativeTool, input) => {
@@ -8572,6 +8632,15 @@ export const handleTrelioLocalContextOperation = async (
       const selected = ready ? canonicalizeLocalActionProjectSlugs(input, ready.mirror) : input;
       return profile.readCompanyContextExact({ nativeTool, input: selected, signal });
     }
+    // Search already supplied exact coordinates. Current task MVCC and
+    // document revision/ACL readers do not require another company manifest.
+    // This path also works through an old long-lived facade with no v3 hint.
+    const source=profile?.kind==="digital_assistant"&&nativeTool==="fetch"?exactCompanyFetchLocator(input?.id):null;
+    if(source?.type==="task"){
+      if(source.companySlug!==companySlug)throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH","Exact source belongs to another company.");
+      return readFreshExactTaskContext({origin,companySlug,nativeTool,input:{...input,...source},provider,signal});
+    }
+    if(source?.type==="context")return readFreshManagedContextDocument({origin,companySlug,selection:source,provider,profile,signal});
     const workspaceId = exactWorkspaceReadId(nativeTool, input);
     if (workspaceId) {
       const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)

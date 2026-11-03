@@ -32,10 +32,10 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
       stableKey:`synthetic/${projectSlug}/1/task`,referenceValues:[taskId],revisionToken:'b'.repeat(64),
       fields:[{source:'title',values:[marker(taskId,'title')]}],metadata:{projectId,projectSlug,taskNumber:1}}],
     instructions,agentSkills:{company:[],projects:[]},agentProcedures:[]};
-  let managed,envelope,mode='ready',closed=false,healthRevision=1,lastNativeTool=null,slowExactConsumed=false;
+  let managed,envelope,mode='ready',closed=false,healthRevision=1,lastNativeTool=null,slowExactConsumed=false,documentReads=0;
   const workspaceId=randomUUID(),workspaceHead='c'.repeat(40),projectionId=randomUUID(),manifestFileId=randomUUID();
   const containers=new Map(),fileIds=[],hits=new Map();
-  const counts={nativeAdmissions:0,manifests:0,exact:0,current:0,mutations:0,fileReads:0,ciphertextBytes:0,builds:0},proofs=new Set(),failures=[];
+  const counts={nativeAdmissions:0,manifests:0,fetchManifestReads:0,exact:0,current:0,mutations:0,fileReads:0,ciphertextBytes:0,builds:0},proofs=new Set(),failures=[];
   const verifyProof=(proof,toolName)=>{
     assert.equal(proof.schemaVersion,1);assert.ok(!proofs.has(proof.nonce),'one native request consumes one fresh proof');
     const signed=Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,toolName,proof.issuedAt,proof.nonce].join('\n'));
@@ -139,6 +139,7 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
           encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount}}}});return;
       }
       if(selected.pathname.endsWith(`/company-context/${company.slug}/manifest`)){
+        if(lastNativeTool==='fetch')counts.fetchManifestReads++;
         if(slowExact&&lastNativeTool==='fetch'&&!slowExactConsumed){
           slowExactConsumed=true;
           // Real pending native HTTP response: cross the unchanged 30s MCP
@@ -156,6 +157,9 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
             status:{code:'active',name:'Active'},participants:[],controls:[],comments:[],checklists:[]}},connections:{},relatedWorkspaces:[]}});return;
       }
       if(selected.pathname.endsWith(`/company-context/${company.slug}/documents/registry/${registryId}`)){
+        documentReads++;
+        if(mode==='document_revoked'){json(response,{code:'ACCESS_DENIED'},403);return;}
+        if(mode==='document_changed'&&documentReads>1){json(response,{code:'LOCAL_CONTEXT_GENERATION_CHANGED'},409);return;}
         assert.equal(selected.searchParams.get('expectedRevision'),'d'.repeat(64));
         json(response,{schemaVersion:1,encryptedPayloads:payloads,context:{schemaVersion:1,
           document:{...manifest.contextDocuments[0],payload:{rows:[{value:'SYNTHETIC_EXACT_REGISTRY_ROW'}]}}}});return;
@@ -166,6 +170,13 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
           tasks:[{id:taskId,projectId,projectSlug,number:1,revisionToken:'b'.repeat(64),payload:{company,project,task:{id:taskId,title:marker(taskId,'title'),
             descriptionPlainText:marker(taskId,'description'),status:{code:'active',name:'Active'},participants:[],controls:[]}}}],
           instructions,workspaces:[],workspaceEntries:[],contextDocuments:[]}});return;
+      }
+      if(selected.pathname.endsWith('/reads/get_agent_instructions')){
+        assert.deepEqual(body.arguments,{projectSlug,companySlug:company.slug});
+        if(mode==='rules_denied'){json(response,{code:'ACCESS_DENIED'},403);return;}
+        json(response,{schemaVersion:1,encryptedPayloads:payloads,context:{company,project,
+          effective:{schemaVersion:4,compiledMarkdown:mode==='rules_incomplete'?null:marker(projectId,'rules')},
+          personalProfile:{effective:{compiledMarkdown:'Synthetic assistant personal source rules'}}}});return;
       }
       if(selected.pathname.endsWith('/reads/get_task_activity')){
         counts.current++;json(response,{schemaVersion:1,encryptedPayloads:payloads,context:{comments:[{id:randomUUID(),bodyText:marker(taskId,'current')}],pagination:{hasMore:false}}});return;
@@ -209,7 +220,7 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
       }
     },
     fileHits(index){return hits.get(index)??0;},
-    setMode(value){mode=value;},setClosed(value){closed=value;},assertClean(){if(failures.length)throw failures[0];},
+    setMode(value){mode=value;documentReads=0;},setClosed(value){closed=value;},assertClean(){if(failures.length)throw failures[0];},
     async close(){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));},
   };
 };

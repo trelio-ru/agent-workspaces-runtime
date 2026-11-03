@@ -1485,21 +1485,28 @@ and the one owned-timeout resume share a maximum of TWO read children; a changed
 formulation cannot launch a parallel reader or buy a third first sync. It never renews a lease, poll clock or owned read deadline.
 Successful delivery consumes the value: another same-query call must read anew.
 
-ABI v3 applies this SAME owned operation to mirror-backed `fetch`. A completed
-search does not make a subsequent fresh company manifest/sync fit inside the
-native MCP callback's unchanged 30-second clock. The facade requests host-only
-preparation, receives the current native `fetch` descriptor, and returns short
-`state:preparing` responses whose `nextCall.tool` remains `fetch`. The selected
-ID stays in invocation RAM; changing it cannot launch a concurrent reader or
-reset its deadline. The existing ten-minute read child performs sync plus exact
-hydration, with the same two-child ceiling, fresh per-poll proof/admission,
-late generation/pass/recipient checks and consumed-on-delivery result. This is
-not a longer native request, completed-answer cache, permission cache or replay
-of a tool proof. Exact `workspace:` and `workspace-file:` reads keep their
-independent current-ACL/pinned-head path. The composed native fixture delays
-one real exact-read manifest response for 32 seconds: the previous callback
-returns `ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED`; v3 completes under the same
-owned read without a Task/Run or external effect.
+Canonical task references in `fetch` reuse the SAME exact native task MVCC
+reader directly. Canonical `context:type:UUID` reads open the existing encrypted
+mirror only for its revision locator, then read current native ciphertext under
+that object ACL/revision. Fresh source rules/profile use the existing canonical
+`get_agent_instructions` callback; the final native document read fences source
+move/revocation/revision changes. The cached document body is never returned or
+used as evidence/permission. There is no new cache, key source, endpoint or task.
+These current-worker paths work with an already running v3.27.5 facade, which
+forwards fetch without a preparation hint and cannot consume ABI3. Runtime-only
+rollout retains its no-Desktop-restart contract.
+
+ABI3 applies the existing owned operation to remaining mirror-backed discovery
+fetches. Each native MCP callback still has its unchanged 30-second clock;
+short `state:preparing` responses retain `nextCall.tool:fetch` and its original
+selection in RAM. Another ID cannot launch a parallel reader or reset its clock.
+Sync plus exact hydration shares the same ten-minute child/two-child ceiling,
+fresh per-poll proof, late generation/pass/recipient checks and consumed result.
+Exact `workspace:`/`workspace-file:` sources keep their independent native path.
+The composed native fixture offers a genuinely slow 32-second whole-company
+refresh after READY and tests both task/context fetches through the old wire.
+Canonical sources must not touch that refresh at all. ACL denial, changed final
+revision and incomplete source authority return no cached plaintext.
 No result/proof/key is written to a second cache or journal. EOF cancels only
 owned read children and awaits cleanup. Existing ABI v1 facades keep their
 readiness-only preparation and separate fresh query path; both remain strict.

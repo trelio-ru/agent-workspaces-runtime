@@ -14,7 +14,7 @@ import {PassThrough} from 'node:stream';
 // plaintext substitute a native assistant private-store E2E result.
 for(const scenario of [
   {name:'cold',files:3000,stallAttempts:0},
-  {name:'slow-exact',files:16,stallAttempts:0,slowExact:true,nativeCase:'cold'},
+  {name:'slow-exact',files:16,stallAttempts:0,slowExact:true,legacyFetch:true,nativeCase:'cold'},
   {name:'owned-timeout-resume',files:16,stallAttempts:1},
   {name:'second-timeout-hard',files:16,stallAttempts:2},
   {name:'ordinary-refusal-hard',files:16,stallAttempts:0,refuse:true},
@@ -103,6 +103,11 @@ for(const scenario of [
     const operations=[];let legacyFacade=false;
     const request=async(raw,options)=>{
       if(legacyFacade&&raw.operation==='call'&&raw.name==='search')raw={...raw,prepareCompanySearch:true};
+      // Existing v3.27.5 facades forward fetch without a preparation hint and
+      // cannot consume ABI3. Exercise that exact old wire, not a fresh facade.
+      if(scenario.legacyFetch&&raw.operation==='call'&&raw.name==='fetch'){
+        const {prepareCompanySearch:_newHint,...legacy}=raw;raw=legacy;
+      }
       const result=await requestCurrentAssistantRuntime(raw,{...options,environment:process.env,resolveLoader:async()=>loader,
         spawnProcess:(...args)=>{const child=spawn(...args);children.add(child);child.once('close',()=>children.delete(child));return child;}});
       operations.push({operation:raw.operation,completionVersion:result?._meta?.['trelio/assistant-company-read']?.schemaVersion??null});
@@ -194,8 +199,19 @@ for(const scenario of [
       await new Promise(resolve=>setTimeout(resolve,25));
     }
     assert.notEqual(document.result?.isError,true,JSON.stringify(document));
+    if(scenario.legacyFetch)assert.equal(backend.counts.fetchManifestReads,0,'old-facade exact sources never refresh a whole-company manifest');
     assert.match(JSON.stringify(document),/SYNTHETIC_EXACT_REGISTRY_ROW/,
       'a context-document fetch uses the SAME owned reader after the selected task');
+    if(scenario.legacyFetch){
+      for(const mode of ['document_revoked','rules_denied','document_changed','rules_incomplete']){
+        backend.setMode(mode);
+        const refused=await call('fetch',{id:`context:registry:${backend.registryId}`});
+        assert.equal(refused.result?.isError,true,mode);
+        assert.doesNotMatch(JSON.stringify(refused),/SYNTHETIC_EXACT_REGISTRY_ROW|Synthetic complete rules/,
+          'late ACL/revision/incomplete-authority refusal cannot return cached source text');
+      }
+      backend.setMode('ready');
+    }
     const current=await call('get_task_activity',{companySlug:'synthetic',projectSlug:backend.projectSlug,taskNumber:1});
     backend.assertClean();
     assert.match(JSON.stringify(current),/CURRENT_SYNTHETIC_PLAN/);

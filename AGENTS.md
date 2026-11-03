@@ -164,11 +164,15 @@ publication tooling также остаются вне этого публичн
   All local MCP materializers retain closed refusal codes or a fixed local stage,
   never a false endpoint outage. Only the exact native send error retains native
   MCP auth provenance through an arguments adapter; provider errors do not.
-  Mirror-backed fetch uses ABI v3 of the SAME bounded short-wait read engine;
-  never run its fresh whole-company sync inside the 30s native MCP callback.
-  Each poll consumes fresh native admission; original selection/generation,
-  recipient and one-time delivery remain fenced. Exact Workspace/file readers
-  keep their independent immediate path. Owner questions may use already
+  Canonical task fetch reuses native exact-task MVCC without a company sync.
+  Canonical context fetch uses only the encrypted mirror's revision locator,
+  fresh native document ACL/revision, SAME source instructions/profile callback
+  and a final document fence; cached text is never an answer or permission.
+  This works with existing facades that cannot consume ABI3, without restart.
+  Remaining mirror-backed discovery fetch uses ABI3 of the SAME short-wait
+  engine; each poll keeps fresh admission/selection/generation/recipient and
+  one-time delivery. Exact Workspace/file readers stay independent.
+  Owner questions may use already
   authorized external sources/browser sessions without a fictitious Task/Run;
   real source ACL/login and external-change authority remain independent.
   Immediate company fetch/files and search share one explicit common-reader

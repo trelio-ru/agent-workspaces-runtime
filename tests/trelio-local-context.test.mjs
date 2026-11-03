@@ -12,7 +12,7 @@ import { promisify } from "node:util";
 
 import {
   usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
-  exactWorkspaceReadId, readFreshExactWorkspaceContext,
+  exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
   buildStableCompanyMirror,
   createEncryptedSearchFileCache,
   assertLocalAgentInstructionPublicationWithinLimit,
@@ -4978,4 +4978,15 @@ test("complete Workspace checkpoints share encrypted quota and refuse changed bi
   const oversized = [{ ...documents[0], chunks: [{ index: 0, text: "x".repeat(4 * 1024 * 1024), isLast: true }] }];
   await (await createEncryptedSearchFileCache(options)).writeWorkspace(workspace, oversized);
   assert.deepEqual(await fs.readdir(directory), [], "large accepted text stays searchable without duplicating a whole Workspace into scratch");
+});
+
+
+test('canonical exact fetch parsing supplies only native source coordinates without alias discovery',()=>{
+  const projectSlug='e-11111111-1111-4111-8111-111111111111',documentId='22222222-2222-4222-8222-222222222222';
+  const target={type:'task',companySlug:'synthetic',projectSlug,taskNumber:7};
+  for(const locator of [`task:synthetic/${projectSlug}/7`,`task:synthetic:${projectSlug}:7`,
+    `https://trelio.ru/synthetic/${projectSlug}/tasks/7/`])assert.deepEqual(exactCompanyFetchLocator(locator),target);
+  assert.deepEqual(exactCompanyFetchLocator(`context:registry:${documentId}`),{type:'context',documentType:'registry',documentId});
+  for(const value of ['task:synthetic/legacy-alias/7',`task:synthetic/${projectSlug}/0`,
+    'context:registry:bad-id',`workspace:${documentId}`,null])assert.equal(exactCompanyFetchLocator(value),null);
 });

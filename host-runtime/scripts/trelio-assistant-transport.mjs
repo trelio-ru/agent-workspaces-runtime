@@ -1309,7 +1309,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return companyRead?.nativeTool===name&&(name==='get_company_custom_menu'||assistantCompanyContextExactReadTools().includes(name));
     },
     async readCompanyContextExact({nativeTool,input,signal}){
-      if(!companyReadEncryption||companyRead.nativeTool!==nativeTool
+      // A fresh exact context fetch additionally reads its source authority
+      // through this SAME canonical read-only callback. The native endpoint
+      // repeats project/company ACL; no other internal tool/writer is opened.
+      const sourceAuthority=companyRead?.nativeTool==='fetch'&&nativeTool==='get_agent_instructions';
+      if(!companyReadEncryption||companyRead.nativeTool!==nativeTool&&!sourceAuthority
         ||!(nativeTool==='get_company_custom_menu'||assistantCompanyContextExactReadTools().includes(nativeTool)))
         fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       const common=await import('./trelio-workspace.mjs');
@@ -2018,10 +2022,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           // native builders select requested sections; query/path/prose stays
           // in the common local reader and is never a generic HTTP body.
           if(route.routePattern.endsWith('/reads/:nativeTool')){
-            if(url.pathname.split('/').at(-1)!==companyRead.nativeTool)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+            const selectedRead=url.pathname.split('/').at(-1);
+            if(selectedRead!==companyRead.nativeTool&&!(companyRead.nativeTool==='fetch'&&selectedRead==='get_agent_instructions'))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
             let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
             if(!object(input)||Object.keys(input).join(',')!=='arguments')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
-            assistantCompanyContextExactReadArguments(companyRead.nativeTool,input.arguments,companyRead.companySlug);
+            assistantCompanyContextExactReadArguments(selectedRead,input.arguments,companyRead.companySlug);
           }else if(taskRead){
             let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
             const allowed=route.routePattern.endsWith('/tasks/read')?['tasks','recipientDeviceId']:['sections','expectedRevision','commentsPage','recipientDeviceId'];

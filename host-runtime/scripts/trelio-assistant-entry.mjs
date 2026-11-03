@@ -640,7 +640,8 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // materialization error. V3 reuses the existing owned read coordinator;
       // it changes neither per-request clocks nor native pass/recipient ACL.
       // Exact Workspace/file readers retain their immediate independent path.
-      const deferredFetch=prepareCompanySearch===2&&name==='fetch'
+      const exactFetch=name==='fetch'?(await import('./trelio-local-context.mjs')).exactCompanyFetchLocator(args.id):null;
+      const deferredFetch=prepareCompanySearch===2&&name==='fetch'&&!exactFetch
         &&!/^workspace(?:-file)?:/u.test(args.id??'');
       if((prepareCompanySearch&&name==='search')||deferredFetch)return {content:[],
         _meta:{'trelio/assistant-company-read':{schemaVersion:deferredFetch?3:prepareCompanySearch===2?2:1,descriptor,binding:assistantCompanyPreparationBinding(opened)}}};
