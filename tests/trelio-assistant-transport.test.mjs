@@ -4375,6 +4375,44 @@ test('cancelled reply-only continuation keeps its separate strict witness and na
  assert.equal(calls,before,'no mixed/forged certificate reaches HTTP');
 });
 
+test('cancelled context recovery capability survives the real device codec without caller authority or inferred support',async()=>{
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+ const locator={companyId,sourceId,intakeId},input={...locator,sourceRevision:2,eventId:randomUUID(),threadId:randomUUID(),
+  ownerIdentityId:randomUUID(),senderExternalUserId:'123',conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
+ const field='readOnlyCancelledContextRecoveryProtocolVersion';
+ const calls=[];let capability=1,legacy=true;
+ const client=createAssistantDeviceClient({origin,assistantId,deviceId,
+  store:{get:async()=>({assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1})},
+  http:async(operation,body)=>{
+   calls.push(operation);assert.equal(Object.hasOwn(body,field),false,'native capability never becomes an HTTP/model-selected input');
+   assert.deepEqual(body,operation==='intakeBegin'?input:locator);
+   return {schemaVersion:1,id:intakeId,companyId,sourceId,sourceRevision:2,eventId:input.eventId,threadId:input.threadId,
+    state:operation==='intakeCancel'?'cancelled':'leased',taskId:null,receiptId:operation==='intakeCancel'?randomUUID():null,
+    readConfirmed:operation==='intakeCancel',ownerPrivateRead:operation==='intakeCancel',
+    leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},
+    ...(legacy?{readOnlyContinuationProtocolVersion:1}:{}),...(capability===undefined?{}:{[field]:capability})};
+  }});
+ // Exercise the public methods used by the factory, rather than a coordinator
+ // mock that would bypass intakeProjection and hide a dropped response field.
+ for(const method of ['beginSourceIntake','readSourceIntake','cancelSourceIntake']){
+  const arguments_=method==='beginSourceIntake'?input:locator;
+  capability=1;legacy=true;
+  const accepted=await client[method](arguments_);
+  assert.equal(accepted[field],1);assert.equal(accepted.readOnlyContinuationProtocolVersion,1);
+  legacy=false;assert.equal((await client[method](arguments_)).readOnlyContinuationProtocolVersion,undefined,
+   'independent cancelled-context support never manufactures the older continuation capability');
+  capability=undefined;legacy=true;
+  assert.equal((await client[method]({...arguments_,[field]:1}))[field],undefined,
+   'a legacy native response stays unsupported even when the caller claims support');
+  for(const invalid of [null,0,2,'1',true,{}]){
+   capability=invalid;const before=calls.length;
+   await assert.rejects(client[method](arguments_),/ASSISTANT_TRANSPORT_INVALID_RESPONSE/);
+   assert.equal(calls.length,before+1,'one malformed response never retries an intake operation');
+  }
+ }
+ assert.equal(calls.length,27);
+});
+
 test('generation reply correction keeps its separate strict witness and native capability',async()=>{
  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
  const witness={parentIntakeId:randomUUID(),receiptId:randomUUID(),terminalTurnId:randomUUID(),

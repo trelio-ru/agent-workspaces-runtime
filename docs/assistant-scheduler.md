@@ -3610,6 +3610,14 @@ fenced. The SAME begin-before-HTTP and GET-only lost-response reconciliation,
 current source/file ACL, fresh original-body read and one provider attempt remain
 mandatory. A recovered reply still needs its own live original-peer acceptance.
 
+An independent native cancelled-context capability must survive the actual
+device client's `beginSourceIntake`, `readSourceIntake` and `cancelSourceIntake`
+response projection as `readOnlyCancelledContextRecoveryProtocolVersion:1`.
+An absent field remains absent; the older continuation capability and caller
+input never infer support. A present value other than exact numeric 1 refuses
+the response without retry. This response metadata changes no request ABI,
+recovery witness, model authority or provider/SQL admission.
+
 
 A positively delivered generation-only technical reply has one independent
 post-fix certificate, `generationReplyCorrection:true`, requiring native

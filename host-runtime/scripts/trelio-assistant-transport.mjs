@@ -2542,6 +2542,7 @@ const intakeProjection=(value,expected)=>{
     ||value.readOnlyRecoveryProtocolVersion!==undefined&&value.readOnlyRecoveryProtocolVersion!==1
     ||value.readOnlyReplyCorrectionProtocolVersion!==undefined&&value.readOnlyReplyCorrectionProtocolVersion!==1
     ||value.readOnlyContinuationProtocolVersion!==undefined&&value.readOnlyContinuationProtocolVersion!==1
+    ||value.readOnlyCancelledContextRecoveryProtocolVersion!==undefined&&value.readOnlyCancelledContextRecoveryProtocolVersion!==1
     ||value.readOnlyGenerationCorrectionProtocolVersion!==undefined&&value.readOnlyGenerationCorrectionProtocolVersion!==1
     ||value.readOnlyReplyDispatchCorrectionProtocolVersion!==undefined&&value.readOnlyReplyDispatchCorrectionProtocolVersion!==1)
     fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -2553,6 +2554,10 @@ const intakeProjection=(value,expected)=>{
     ...(value.readOnlyRecoveryProtocolVersion===1?{readOnlyRecoveryProtocolVersion:1}:{}),
     ...(value.readOnlyReplyCorrectionProtocolVersion===1?{readOnlyReplyCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyContinuationProtocolVersion===1?{readOnlyContinuationProtocolVersion:1}:{}),
+    // This independent native response capability admits only the separately
+    // certified cancelled-context root. Never infer it from continuation v1 or
+    // a caller field: the coordinator needs the fresh device-codec observation.
+    ...(value.readOnlyCancelledContextRecoveryProtocolVersion===1?{readOnlyCancelledContextRecoveryProtocolVersion:1}:{}),
     ...(value.readOnlyGenerationCorrectionProtocolVersion===1?{readOnlyGenerationCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyReplyDispatchCorrectionProtocolVersion===1?{readOnlyReplyDispatchCorrectionProtocolVersion:1}:{}),
     ...(recovery?{readOnlyRecovery:recovery}:{}),
