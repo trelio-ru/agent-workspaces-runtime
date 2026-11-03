@@ -1061,3 +1061,14 @@ positive read-only reply, only after fresh native receipt/private-read checks,
 durable local provider observation and full exact native context/read/reply
 history. No reply text is persisted or reused. Task-creation and reply proofs
 share the original eight-successor bound; all other modes stay creation-only.
+
+The independent native cancelled-context-read capability also reuses the existing
+strict continuation metadata without a schema change or backfill. A separate
+candidate query selects only a settled, cancelled FIRST owner original with no
+retry/capacity/reply fences. The old continuation query remains unchanged. Its
+atomic append additionally requires a host-only discriminator from the owning
+coordinator; that selector is not persisted or sent as native authority. Native
+capability, current immutable cancellation and complete pre-reservation file-read
+history are checked independently before that append. One consumed parent, the
+same permanent chat/original and the existing global bound remain unchanged;
+begin is durable before HTTP, unknown begin is GET-only, no old row/ACK is reset.

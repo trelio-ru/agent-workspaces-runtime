@@ -1147,6 +1147,9 @@ Public plugin shell для этого клиента не меняется.
   See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).
 
 - Read-only owner recovery: unique consumed parent, whole terminal witness and durable begin fence; no Task/dialogue or old lease renewal. Technical, cancelled, generation and final dispatch-refusal corrections require distinct native capabilities/ancestry. Only dispatch may follow generation; no mode follows dispatch. All share the original bound; confirmed/unknown sends never become absent. See [scheduler](docs/assistant-scheduler.md#one-post-fix-reply-only-owner-question-recovery).
+  An ordinary cancelled file-read root requires its separate native capability
+  and exact pre-reservation whole-turn certificate. Legacy continuation never
+  borrows that root; no provider attempt, ready result or arbitrary action qualifies.
   A later independent task creation may be skipped only with SAME settled local
   original, fresh native created/task/receipt and whole exact completed native
   context/resolve chain. Inventory unknown rows before the eight-row bound;

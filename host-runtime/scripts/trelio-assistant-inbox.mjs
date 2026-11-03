@@ -1060,6 +1060,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND i.readonly_recovery_json IS NOT NULL AND i.source_revision=s.configuration_revision AND s.state='active'
         AND i.retry_ordinal<20 AND i.next_check_at<=? AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    cancelledContextReadIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='cancelled'
+        AND json_extract(s.scope_json,'$.provider')='telegram'
+        AND i.native_started=1 AND i.outcome_receipt IS NOT NULL AND i.outcome_task_id IS NULL
+        AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL AND i.reply_abandon_receipt_id IS NULL
+        AND i.readonly_recovery_json IS NULL AND i.retry_of_id IS NULL AND i.retry_ordinal=0
+        AND i.model_capacity_json IS NULL AND i.intake_prerequisite IS NOT NULL
+        AND i.source_revision=s.configuration_revision AND s.state='active' AND i.next_check_at<=?
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+      ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
     readonlyRecoverySuccessors(id){
       const row=this.ownerIntake(id);
       // Inventory, not eligibility: include unsettled/foreign/attempted rows so
@@ -1078,12 +1089,22 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       run('UPDATE assistant_owner_intakes SET intake_prerequisite=? WHERE id=?',key,row.id);
     });},
     retryReadonlyOwnerIntake(id,witness){return transaction(()=>{
-      const old=this.ownerIntake(id),metadata=assistantReadOnlyRecoveryMetadata({...witness,parentIntakeId:id,beginAttempted:false},{local:true});
+      // This host-only discriminator is deliberately NOT persisted or sent as
+      // native authority. The coordinator needs a separate native capability and
+      // whole-turn certificate before calling this atomic append. Legacy
+      // continuation callers cannot accidentally include an ordinary root.
+      const {cancelledContextRead,...nativeWitness}=witness;
+      if(cancelledContextRead!==undefined&&cancelledContextRead!==true)fail('ASSISTANT_INBOX_CONFLICT');
+      const old=this.ownerIntake(id),metadata=assistantReadOnlyRecoveryMetadata({...nativeWitness,parentIntakeId:id,beginAttempted:false},{local:true});
       const prior=old.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(old.readonly_recovery_json),{local:true}):null;
       if(!metadata||old.readonly_recovery_json&&!prior||old.kind!=='owner_command'||old.state!=='complete'||old.settled!==1
         ||old.native_started!==1||!old.thread_id||old.outcome_receipt!==metadata.receiptId||old.outcome_task_id!==null
         ||old.source_state!=='active'||old.source_revision!==old.configuration_revision||old.retry_ordinal>=20
         ||(old.intake_prerequisite??old.retry_prerequisite)!==metadata.previousPrerequisiteKey)fail('ASSISTANT_INBOX_CONFLICT');
+      const cancelledRoot=cancelledContextRead===true&&metadata.readOnlyContinuation===true&&prior===null
+        &&old.readonly_recovery_json===null&&old.retry_of_id===null&&old.retry_ordinal===0
+        &&old.model_capacity_json===null&&old.scope.provider==='telegram';
+      if(cancelledContextRead!==undefined&&!cancelledRoot)fail('ASSISTANT_INBOX_CONFLICT');
       // These are disjoint certificates. A positive send may only receive one
       // explicitly marked correction, never the old absent-provider recovery.
       // The prior correction flag survives every terminal state/restart, so a
@@ -1104,12 +1125,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           ||old.reply_message_id<1||old.reply_message_id>2147483647||old.reply_abandon_receipt_id!==null
           ||prior&&(!prior.beginAttempted||prior.parentIntakeId!==old.retry_of_id))fail('ASSISTANT_INBOX_CONFLICT');
       }else if(metadata.readOnlyContinuation===true){
-        // Positive native CANCELLED plus this immutable earlier reply-only
-        // binding is different from both a positive send and abandonment.
+        // Positive native CANCELLED plus an immutable earlier reply-only
+        // binding (or the separately certified original file-read root) is
+        // different from both a positive send and abandonment.
         // The coordinator independently verifies native ancestry/whole-turn
         // evidence before this atomic same-original append; no flag resets a
         // provider fence, old marker, receipt or the shared twenty-child bound.
-        if(old.outcome_state!=='cancelled'||!prior?.beginAttempted||prior.parentIntakeId!==old.retry_of_id
+        if(old.outcome_state!=='cancelled'||!cancelledRoot&&(!prior?.beginAttempted||prior.parentIntakeId!==old.retry_of_id)
           ||old.reply_receipt_id!==null||old.reply_message_id!==null||old.reply_abandon_receipt_id!==null)
           fail('ASSISTANT_INBOX_CONFLICT');
       }else if(metadata.technicalReplyCorrection===true){

@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
+import { validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { openBrowser, readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity } from './trelio-workspace.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -607,7 +608,94 @@ const dispatchReplyFailure=(turn,options)=>readonlyOwnerReplyHistory(turn,option
 export const assistantSettledOwnerReply=(turn,witness,options={})=>readonlyOwnerReplyHistory(turn,{
   environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyShell??verifyAssistantPowerShellReadExecutable,
   deliveryId:witness.deliveryId,intakePass:{companyId:witness.companyId,sourceId:witness.sourceId,intakeId:witness.intakeId},settledReply:witness});
-export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection}={})=>{
+/** Separate terminal certificate for an ordinary cancelled owner FILE read.
+ * This does not reopen that intake or admit a model/send. The coordinator must
+ * additionally hold an expired immutable native cancellation, no local provider
+ * fences and a changed trusted prerequisite under the new native capability.
+ * Only the known pre-reservation file-reader refusal is accepted: transport,
+ * provider errors, prose and successful/unknown business actions are ineligible.
+ */
+const cancelledContextReadFailure=async(turn,{deliveryId,intakePass,environment,signal,verifyShell})=>{
+ if(!UUID.test(deliveryId??'')||!intakePass||Object.getPrototypeOf(intakePass)!==Object.prototype
+   ||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+   ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
+   ||turn.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)||turn.items.length<6||turn.items.length>512
+   ||turn.items[0]?.type!=='userMessage')return false;
+ const failed=(item,code)=>item.status==='failed'&&item.result&&item.result.isError!==false
+   &&(item.result.structuredContent===undefined||item.result.structuredContent?.code===code)
+   &&(item.error==null||item.error.message===code)
+   &&(item.result.structuredContent?.code===code||item.error?.message===code
+     ||item.result.content?.length===1&&item.result.content[0]?.type==='text'&&item.result.content[0].text===code);
+ const preparation=item=>{
+  if(item.result?.structuredContent!==undefined)return item.result.structuredContent;
+  // Native Desktop may preserve a structured MCP result as one JSON text
+  // block. Parse only that complete, bounded block, never a substring/prose.
+  // Its entire preparation schema and exact unchanged query are checked below.
+  const blocks=item.result?.content;
+  if(!Array.isArray(blocks)||blocks.length!==1||blocks[0]?.type!=='text'
+    ||typeof blocks[0].text!=='string'||Buffer.byteLength(blocks[0].text)>65_536)return null;
+  try{return JSON.parse(blocks[0].text);}catch{return null;}
+ };
+ let users=0,contexts=0,fetches=0,searches=0,commands=0,timeout=false,resolved=false,query=null;
+ const readCode='ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED';
+ for(const item of turn.items){
+  if(item.type==='userMessage'){
+   if(++users!==1||!Array.isArray(item.content)||item.content.length!==1||item.content[0]?.type!=='text'
+     ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return false;
+  }else if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+  else if(item.type==='commandExecution'){
+   if(++commands>1||contexts||!await publicBootstrapRead(item,environment,verifyShell,signal))return false;
+  }else if(item.type==='mcpToolCall'){
+   const args=item.arguments;
+   if(resolved||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype
+     ||!args.intakePass||Object.getPrototypeOf(args.intakePass)!==Object.prototype
+     ||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+     ||Object.keys(intakePass).some(key=>args.intakePass[key]!==intakePass[key]))return false;
+   const keys=Object.keys(args).sort().join(',');
+   if(item.tool==='get_assistant_intake_context'){
+    if(++contexts!==1||fetches||searches||keys!=='intakePass,runtimeSessionProof'
+      ||item.status!=='completed'||item.error!=null||!item.result||item.result.isError===true)return false;
+   }else if(item.tool==='fetch'){
+    if(contexts!==1||timeout||++fetches>4||keys!=='id,intakePass,runtimeSessionProof'
+      ||typeof args.id!=='string'||!args.id.length||args.id.length>8192||args.id.includes('\0')||!failed(item,readCode))return false;
+   }else if(item.tool==='search'){
+    if(contexts!==1||!fetches||timeout||++searches>100||keys!=='companySlugs,intakePass,queries,runtimeSessionProof'
+      ||!Array.isArray(args.companySlugs)||args.companySlugs.length!==1||typeof args.companySlugs[0]!=='string'
+      ||!Array.isArray(args.queries)||!args.queries.length||args.queries.length>5
+      ||args.queries.some(value=>typeof value!=='string'||!value.trim()))return false;
+    const selected=JSON.stringify({companySlugs:args.companySlugs,queries:args.queries});
+    if(query!==null&&query!==selected)return false;query=selected;
+    if(failed(item,'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT')){timeout=true;continue;}
+    const value=preparation(item);
+    if(item.status!=='completed'||item.error!=null||item.result?.isError===true||value?.schemaVersion!==1
+      ||value.state!=='preparing'||value.readOnly!==true||value.nextCall?.tool!=='search'
+      ||!value.nextCall.arguments||Object.keys(value.nextCall.arguments).sort().join(',')!=='companySlugs,queries'
+      ||JSON.stringify(value.nextCall.arguments.companySlugs)!==JSON.stringify(args.companySlugs)
+      ||JSON.stringify(value.nextCall.arguments.queries)!==JSON.stringify(args.queries))return false;
+   }else if(item.tool==='resolve_assistant_intake'){
+    // With a selected file the entry materializes it BEFORE the native reply
+    // reservation. This exact local-reader code therefore cannot certify a
+    // failed/unknown provider invocation or a plain-text reply with no file.
+    const file=args.replyFile;
+    if(!timeout||keys!=='clientRequestId,decision,intakePass,replyFile,replyText,runtimeSessionProof'
+      ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'
+      ||typeof args.replyText!=='string'||!args.replyText.trim()||args.replyText.length>1024||args.replyText.includes('\0')
+      ||!file||Object.getPrototypeOf(file)!==Object.prototype||Object.keys(file).sort().join(',')!=='name,workspaceHead,workspaceId'
+      ||!failed(item,readCode))return false;
+    // Reuse the SAME pure locator grammar as the real pre-reservation reader;
+    // this validates syntax only and performs no file, network or key access.
+    try{validateWorkspaceFileLocator({...file,filePath:file.name});}catch{return false;}
+    resolved=true;
+   }else return false;
+  }else return false;
+ }
+ return users===1&&contexts===1&&fetches>0&&searches>0&&timeout&&resolved;
+};
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection,cancelledContextRead}={})=>{
+ if(cancelledContextRead!==undefined){
+  if(cancelledContextRead!==true||[technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection].some(value=>value!==undefined))return false;
+  return cancelledContextReadFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell});
+ }
   if(replyDispatchCorrection!==undefined){
     if(replyDispatchCorrection!==true||technicalReplyCorrection!==undefined||readOnlyContinuation!==undefined||generationReplyCorrection!==undefined)return false;
     return dispatchReplyFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell});
@@ -720,6 +808,9 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     if(options.readOnlyPreparation!==undefined){
+      if(options.cancelledContextRead!==undefined&&(options.cancelledContextRead!==true
+        ||[options.technicalReplyCorrection,options.readOnlyContinuation,options.generationReplyCorrection,
+          options.replyDispatchCorrection].some(value=>value!==undefined)))return {state:'uncertain'};
       if(options.technicalReplyCorrection!==undefined&&options.technicalReplyCorrection?.threadId!==threadId
         ||options.generationReplyCorrection!==undefined&&(options.generationReplyCorrection?.threadId!==threadId
           ||options.technicalReplyCorrection!==undefined||options.readOnlyContinuation!==undefined))return {state:'uncertain'};
@@ -768,8 +859,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
         if(response.nextCursor===null){
           if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
             environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable,
-            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection,replyDispatchCorrection:options.replyDispatchCorrection}))return {state:'uncertain'};
-          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.replyDispatchCorrection?'owner_reply_dispatch_refused':options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
+            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection,replyDispatchCorrection:options.replyDispatchCorrection,cancelledContextRead:options.cancelledContextRead}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.cancelledContextRead?'company_context_file_read_cancelled':options.replyDispatchCorrection?'owner_reply_dispatch_refused':options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
             ?'company_context_rate_limited_reply':options.readOnlyContinuation?'company_context_read_cancelled':'company_context_preparation_timeout'};
         }
         if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};

@@ -2497,6 +2497,89 @@ test('an unknown next READY restores ordinary dispatch review, never a repeated 
   }finally{await f.coordinator.close();}
 });
 
+for(const mode of ['success','lost_committed','lost_unknown','legacy_capability','wrong_terminal','unchanged_prerequisite',
+ 'bad_receipt','provider_attempt','unexpired','foreign_owner','capability_revoked','invalid_capability','invalid_lease'])test(`ordinary cancelled file-read recovery uses its own native capability and one begin (${mode})`,async t=>{
+ const f=fixture(t);await f.coordinator.close();
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID();
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,
+  projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ f.options.client.tasks=async()=>({bindings:[],nextCursor:null});f.options.client.sourceAccounts=async()=>[source];
+ f.options.client.sourceRoutes=async()=>[];
+ f.options.client.ownerIdentities=async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]});
+ f.options.workspaceForIntake=async()=>process.cwd();
+ const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+ const scope={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
+ inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+ inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,
+  wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+ const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);
+ inbox.bindOwnerIntakeThread(original.id,threadId);inbox.readyOwnerIntake(original.id);
+ inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);inbox.confirmIntakeModelRead(original.id);
+ const receiptId=randomUUID();inbox.finishOwnerIntake(original.id,{state:'cancelled',receiptId});inbox.settleOwnerIntake(original.id);
+ if(mode==='provider_attempt')f.database.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(randomUUID(),original.id);
+ createAssistantInbox({database:f.database,now:f.options.now});
+ const immutable={...f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)};
+ f.advance(300001);let begins=0,starts=0,sends=0,active=null;
+ const common={schemaVersion:1,companyId:f.companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
+  taskId:null,readConfirmed:true,ownerPrivateRead:true,execution:f.execution.configuration,
+  leaseExpiresAt:new Date(f.options.now()+(mode==='unexpired'?1800000:-1)).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyContinuationProtocolVersion:1,
+  ...(mode==='legacy_capability'?{}:{readOnlyCancelledContextRecoveryProtocolVersion:mode==='invalid_capability'?2:1})};
+ if(mode==='foreign_owner')common.ownerPrivateRead=false;
+ if(mode==='invalid_lease')common.leaseExpiresAt='UNKNOWN';
+ const outcomes=new Map([[original.id,{...common,id:original.id,state:'cancelled',receiptId:mode==='bad_receipt'?randomUUID():receiptId}]]);
+ f.options.passHost={readActivePass:async()=>active,activatePass:async value=>{assert.equal(active,null);active=value;},
+  releasePass:async value=>{assert.equal(value.id,active.passId);active=null;}};
+ let originalReads=0;
+ f.options.client.readSourceIntake=async input=>{
+  const value=outcomes.get(input.intakeId);if(!value)throw Object.assign(new Error('unknown admission'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  const result=structuredClone(value);
+  if(input.intakeId===original.id&&++originalReads>1&&mode==='capability_revoked')delete result.readOnlyCancelledContextRecoveryProtocolVersion;
+  return result;
+ };
+ f.options.client.beginSourceIntake=async input=>{
+  assert.equal(++begins,1,'lost begin never permits another POST');
+  const metadata=JSON.parse(inbox.ownerIntake(input.intakeId).readonly_recovery_json);
+  assert.equal(metadata.beginAttempted,true);assert.equal(input.eventId,original.original_event_id);assert.equal(input.threadId,threadId);
+  assert.equal(input.readOnlyRecovery.readOnlyContinuation,true);assert.equal(input.readOnlyRecovery.cancelledContextRead,undefined);
+  const value={...common,id:input.intakeId,state:'leased',receiptId:null,readConfirmed:false,ownerPrivateRead:false,
+   leaseExpiresAt:new Date(f.options.now()+1800000).toISOString(),readOnlyRecovery:{...input.readOnlyRecovery,replyOnly:true}};
+  if(mode!=='lost_unknown')outcomes.set(input.intakeId,value);
+  if(mode.startsWith('lost_'))throw Object.assign(new Error('lost begin outcome'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  return structuredClone(value);
+ };
+ f.options.native.readPrerequisites=async()=>({fingerprint:(mode==='unchanged_prerequisite'?'a':'b').repeat(64)});
+ f.options.native.provision=async()=>assert.fail('a read recovery retains the permanent owner chat');
+ f.options.native.readDelivery=async(thread,marker,options)=>{
+  assert.equal(thread,threadId);
+  if(marker===original.delivery_id){
+   assert.equal(options.cancelledContextRead,true);assert.equal(options.readOnlyContinuation,undefined);
+   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:'company_context_file_read_cancelled'})};
+  }
+  return f.deliveries.get(marker)??{state:'uncertain'};
+ };
+ f.options.native.run=async(input,options)=>{
+  assert.equal(++starts,1);assert.equal(options.replyOnlyRecovery,true);
+  assert.equal(input.threadId,threadId);assert.equal(input.intakeContext.eventId,original.original_event_id);
+  options.startInvocation();inbox.confirmIntakeModelRead(active.passId);
+  const delivered=randomUUID();inbox.startOwnerReply(active.passId,delivered);sends++;
+  inbox.confirmOwnerReply(active.passId,{receiptId:delivered,messageId:81});
+  Object.assign(outcomes.get(active.passId),{state:'replied',receiptId:delivered,readConfirmed:true,ownerPrivateRead:true});
+  const result={state:'completed',turnId:randomUUID()};f.deliveries.set(input.deliveryId,result);return result;
+ };
+ let coordinator=createAssistantCoordinator(f.options);
+ try{
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/UNAVAILABLE|UNCERTAIN/u));
+  await coordinator.close();f.advance(300001);coordinator=createAssistantCoordinator(f.options);
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/UNAVAILABLE|UNCERTAIN/u));
+  assert.equal(begins,['success','lost_committed','lost_unknown'].includes(mode)?1:0);
+  assert.equal(starts,['success','lost_committed'].includes(mode)?1:0);assert.equal(sends,starts);
+  const {next_check_at:beforeCheck,...before}=immutable;
+  const {next_check_at:afterCheck,...after}=f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id);
+  assert.deepEqual(after,before,'old cancellation, receipt, lease, marker and provider fences remain immutable');
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+  assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+ }finally{await coordinator.close();}
+});
 for(const profile of ['generation','dispatch'])for(const mode of ['success','lost_committed','lost_unknown','no_capability','bad_receipt','foreign_ancestor',
   'attempted','wrong_terminal','unchanged_prerequisite',...(profile==='dispatch'?['later_uncertain','later_unknown_send','later_native_pending']:[])])test(`${profile} positive continuation correction is bounded and durable (${mode})`,async t=>{
  const f=fixture(t);await f.coordinator.close();

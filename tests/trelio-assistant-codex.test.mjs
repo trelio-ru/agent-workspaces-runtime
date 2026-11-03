@@ -800,6 +800,109 @@ const readonlyPreparationFixture=()=>{
    {code:'ASSISTANT_INTAKE_CHANGED'},'failed')]};
  return {turn,deliveryId,threadId,intakePass,environment};
 };
+/** Synthetic reproduction of a terminal, ordinary owner read cancellation.
+ * The two failed fetches and failed file preparation are native MCP results,
+ * not an interpretation of an assistant's explanation. No production message,
+ * locator, answer or company material is used by this regression.
+ */
+const cancelledContextReadFixture=()=>{
+ const f=readonlyPreparationFixture(),code='ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED';
+ f.turn.items=f.turn.items.filter(item=>item.type!=='commandExecution');
+ const failed=(tool,args,failure)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'failed',
+  arguments:{intakePass:f.intakePass,runtimeSessionProof:{},...args},
+  result:{isError:true,content:[{type:'text',text:failure}]}});
+ f.turn.items.splice(2,0,
+  failed('fetch',{id:'task:synthetic/project/1'},code),
+  failed('fetch',{id:`workspace-file:${randomUUID()}:${'a'.repeat(40)}:artifacts%2Fexample.md`},code));
+ // The real native sequence can try the selected file between preparation
+ // polls. Every fetch still failed before reservation; no result or effect is
+ // hidden merely because the model alternated the two read-only operations.
+ const [fileFetch]=f.turn.items.splice(3,1);f.turn.items.splice(4,0,fileFetch);
+ f.turn.items[f.turn.items.length-2]=failed('search',
+  {companySlugs:['synthetic'],queries:['SYNTHETIC_PRIVATE_QUERY']},'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');
+ f.turn.items[f.turn.items.length-1]=failed('resolve_assistant_intake',{
+  clientRequestId:f.intakePass.intakeId,decision:'reply_owner',replyText:'SYNTHETIC_PRIVATE_REPLY',
+  replyFile:{workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),name:'artifacts/example.md'}},code);
+ return f;
+};
+test('cancelled context-read recovery requires its own closed whole-terminal certificate',async()=>{
+ const f=cancelledContextReadFixture();
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,cancelledContextRead:true}),true,
+  'An ordinary cancelled read needs a distinct native classifier; it cannot borrow the old continuation mode');
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,f),false);
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,readOnlyContinuation:true}),false);
+});
+test('cancelled context-read certificate accepts only exact native result projections, never prose',async()=>{
+ for(const shape of ['structured','literal_content','literal_error']){
+  const f=cancelledContextReadFixture();
+  for(const item of f.turn.items.filter(item=>item.type==='mcpToolCall'&&item.status==='failed')){
+   const code=item.result.content[0].text;
+   if(shape==='structured')item.result={isError:true,structuredContent:{code},content:[]};
+   if(shape==='literal_error'){item.error={message:code};item.result={content:[]};}
+  }
+  const preparing=f.turn.items.find(item=>item.tool==='search'&&item.status==='completed');
+  preparing.result={content:[{type:'text',text:JSON.stringify(preparing.result.structuredContent)}]};
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,cancelledContextRead:true}),true,shape);
+ }
+});
+test('cancelled context-read certificate refuses effects, incomplete history, foreign pass and unknown sends',async()=>{
+ const alterations=[
+  t=>{t.status='failed';},t=>{t.error={codexErrorInfo:'serverOverloaded'};},
+  t=>{t.items.push(structuredClone(t.items[0]));},
+  t=>{t.items[2].server='other';},t=>{t.items[2].arguments.intakePass.intakeId=randomUUID();},
+  t=>{t.items[2].arguments.extra=true;},t=>{t.items[2].tool='create_task';},
+  t=>{t.items[2].status='completed';},t=>{t.items[2].result.isError=false;},
+  t=>{t.items[2].result.content[0].text='explanation ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED';},
+  t=>{t.items[2].result.content[0].text='ASSISTANT_TRANSPORT_RATE_LIMITED';},
+  t=>{t.items[2].error={message:'OTHER'};},
+  t=>{t.items[2].result.structuredContent={code:'OTHER'};},
+  t=>{t.items=t.items.filter(item=>item.tool!=='fetch');},
+  t=>{t.items.at(-2).result.content[0].text='ASSISTANT_RUNTIME_REQUEST_CANCELLED';},
+  t=>{t.items.at(-2).arguments.queries=['OTHER_QUERY'];},
+  t=>{t.items.find(i=>i.tool==='search'&&i.status==='completed').result.structuredContent.state='ready';},
+  t=>{const i=t.items.find(i=>i.tool==='search'&&i.status==='completed');i.result={content:[{type:'text',text:'prose '+JSON.stringify(i.result.structuredContent)}]};},
+  t=>{t.items.at(-1).status='completed';},
+  t=>{t.items.at(-1).result.structuredContent={state:'reply_pending'};},
+  t=>{t.items.at(-1).arguments.decision='create_task';},
+  t=>{delete t.items.at(-1).arguments.replyFile;},
+  t=>{t.items.at(-1).arguments.replyFile.name='../outside';},
+  t=>{t.items.at(-1).arguments.replyFile.workspaceHead='UNKNOWN';},
+  t=>{t.items.at(-1).arguments.clientRequestId=randomUUID();},
+  t=>{t.items.at(-1).arguments.replyText='x'.repeat(1025);},
+  t=>{t.items.at(-1).result.content[0].text='ASSISTANT_INTAKE_CHANGED';},
+  t=>{t.items.pop();},t=>{t.items.push(structuredClone(t.items.at(-1)));},
+  t=>{t.items.splice(-1,0,structuredClone(t.items[2]));},
+  t=>{t.items.splice(2,0,{type:'commandExecution',status:'completed',exitCode:0,command:'provider send',commandActions:[]});},
+  t=>{t.items.splice(2,0,{type:'unknown'});},
+ ];
+ for(const change of alterations){
+  const f=cancelledContextReadFixture();change(f.turn);
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,cancelledContextRead:true}),false,String(change));
+ }
+ const f=cancelledContextReadFixture();
+ for(const options of [{cancelledContextRead:false},{cancelledContextRead:true,readOnlyContinuation:true},
+  {cancelledContextRead:true,replyDispatchCorrection:true},{cancelledContextRead:true,technicalReplyCorrection:{}}])
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,...options}),false);
+});
+test('cancelled context-read native adapter preserves complete unique history and returns only the separate witness',async()=>{
+ const f=cancelledContextReadFixture();
+ const read=(pages,extra={})=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{
+  executable:process.execPath,environment:f.environment,readOnlyPreparation:f.intakePass,cancelledContextRead:true,...extra,
+  spawnProcess:nativeRpc(request=>{
+   if(request.method==='thread/read')return {result:{thread:{id:f.threadId,cwd:process.cwd()}}};
+   assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');
+   return {result:pages(request.params)};
+  })});
+ const value=await read(()=>({data:[f.turn],nextCursor:null}));
+ assert.deepEqual(value,{state:'completed',turnId:f.turn.id,receipt:`codex:${f.threadId}:${f.turn.id}`,
+  readOnlyFailure:'company_context_file_read_cancelled'});
+ assert.equal(JSON.stringify(value).includes('SYNTHETIC_PRIVATE'),false);
+ assert.deepEqual(await read(params=>params.cursor?{data:[f.turn],nextCursor:null}
+  :{data:[f.turn],nextCursor:'duplicate'}),{state:'uncertain'});
+ assert.deepEqual(await read(()=>({data:[{id:randomUUID(),status:'completed',items:[]},f.turn],nextCursor:null})),{state:'uncertain'});
+ assert.deepEqual(await read(()=>({data:[f.turn],nextCursor:'loop'})),{state:'uncertain'});
+ assert.deepEqual(await read(()=>({data:[f.turn],nextCursor:null}),{readOnlyContinuation:true}),{state:'uncertain'});
+});
 test('portable PowerShell recovery verifies a signature with the fixed reader, never executes the candidate',async()=>{
  const candidate='C:\\portable\\pwsh.exe',environment={WINDIR:'C:\\Windows'};
  let spawned=0,stdin='',killed=0;

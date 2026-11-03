@@ -1658,6 +1658,35 @@ test('one technical correction preserves a positive original reply and cannot fo
  assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0,'no Task/Run delivery is fabricated');
 });
 
+test('ordinary cancelled file-read candidates require a separate host certificate and preserve their immutable original',t=>{
+ const {database,inbox,advance}=memory(t),source=scope({provider:'telegram'});inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+ page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
+  conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,ownerIdentityId:randomUUID()}]);
+ const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);
+ inbox.bindOwnerIntakeThread(original.id,randomUUID());inbox.readyOwnerIntake(original.id);
+ inbox.rememberIntakePrerequisite(original.id,'a'.repeat(64));inbox.startOwnerIntake(original.id);inbox.confirmIntakeModelRead(original.id);
+ assert.deepEqual(inbox.cancelledContextReadIntakes(),[]);
+ const receiptId=randomUUID();inbox.finishOwnerIntake(original.id,{state:'cancelled',receiptId});inbox.settleOwnerIntake(original.id);
+ advance(300001); // Preserve the production cancellation-inspection backoff.
+ const before={...database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)};
+ assert.deepEqual(inbox.cancelledReadonlyIntakes(),[],'the old continuation candidate query remains narrow');
+ assert.deepEqual(inbox.cancelledContextReadIntakes().map(row=>row.id),[original.id]);
+ const witness={receiptId,terminalTurnId:randomUUID(),previousPrerequisiteKey:'a'.repeat(64),
+  prerequisiteKey:'b'.repeat(64),readOnlyContinuation:true};
+ assert.throws(()=>inbox.retryReadonlyOwnerIntake(original.id,witness),/CONFLICT/,'v1 callers cannot borrow this root');
+ const child=inbox.retryReadonlyOwnerIntake(original.id,{...witness,cancelledContextRead:true});
+ assert.equal(child.thread_id,inbox.ownerIntake(original.id).thread_id);assert.equal(child.original_event_id,original.original_event_id);
+ assert.equal(child.retry_ordinal,1);assert.equal(child.native_started,0);assert.equal(child.reply_receipt_id,null);
+ const metadata=JSON.parse(child.readonly_recovery_json);
+ assert.equal(metadata.readOnlyContinuation,true);assert.equal(metadata.cancelledContextRead,undefined,'host witness is not a new native flag');
+ assert.equal(inbox.retryReadonlyOwnerIntake(original.id,{...witness,cancelledContextRead:true}).id,child.id);
+ assert.deepEqual({...database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)},before);
+ inbox.startReadonlyIntakeBegin(child.id);const reopened=createAssistantInbox({database});
+ assert.equal(JSON.parse(reopened.ownerIntake(child.id).readonly_recovery_json).beginAttempted,true);
+ assert.throws(()=>reopened.startReadonlyIntakeBegin(child.id),/CONFLICT/);
+ assert.deepEqual(reopened.cancelledContextReadIntakes(),[],'unique parent consumption survives reopening');
+ assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+});
 test('schema24 retains a cancelled reply-only child and appends one continuation with a durable begin fence',t=>{
  const {database,inbox}=memory(t),source=scope({provider:'telegram'});inbox.register(source);inbox.observeExternalSourceRevision(source,0);
  page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,

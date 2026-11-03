@@ -3552,8 +3552,10 @@ separate continuation profile, advertised by native
 historical backfill: its strict metadata codec recognises the disjoint
 `readOnlyContinuation:true` discriminator. The parent must be complete/settled,
 private/read-confirmed/task-null with its ORIGINAL lease expired and all local
-provider-attempt/message/abandon fences absent. Ordinary body-confirmed intakes,
-pending/unknown sends and an unchanged trusted prerequisite never qualify.
+provider-attempt/message/abandon fences absent. Ordinary body-confirmed intakes
+cannot borrow this legacy continuation certificate; their independent narrow
+file-read capability is described below. Pending/unknown sends and an unchanged
+trusted prerequisite never qualify.
 
 The whole exact terminal turn permits only context, unchanged preparing
 searches and final structured `ASSISTANT_RUNTIME_REQUEST_CANCELLED`; no resolve,
@@ -3569,6 +3571,44 @@ preparation clock resets. SQLite saves begin-attempt before HTTP; lost admission
 permits exact child read-back only, never a second POST. An eventual positive
 original reply still requires current exact source/comments and the ordinary
 native one-send/receipt/pass-release engine.
+
+An ordinary FIRST private-owner intake that was positively CANCELLED after a
+file-read failure needs the independent native capability
+`readOnlyCancelledContextRecoveryProtocolVersion:1`. The existing continuation
+protocol stays at version1 for old clients. Neither capability is inferred from
+a runtime version, local metadata, error prose, cancellation alone or elapsed
+time. Backend service and SQL must be deployed before runtime activation.
+
+The original must be complete/settled, native-started, read-confirmed and private,
+task-null with its SAME immutable receipt and ORIGINAL expired lease. It has no
+earlier retry/recovery/capacity binding, provider-attempt/message/abandon fence or
+consumed child. A changed trusted prerequisite remains mandatory. The unread
+inspection hands only this due native-positive candidate to a fresh independent
+read-only inspection instead of starving it with its own backoff; no admission
+or result is cached as authority. Failed observation retains ordinary backoff.
+
+The separate whole-terminal certificate accepts exactly one context read, one
+to four failed fetches with literal `ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED`,
+including between unchanged preparing-only searches. Every search retains its
+same original query and the sequence ends in the exact hard preparation timeout,
+then one failed `reply_owner` WITH a valid selected file and that SAME local
+reader code. The entry prepares that file before native reservation. A successful
+or unknown reply, text-only resolve, READY/successful fetch, other tool, foreign
+pass, arbitrary command, mixed mode or incomplete/duplicate history refuses.
+The sole existing verified public-bootstrap shell exception remains unchanged.
+Native Desktop's single bounded JSON-text preparation block is validated as
+the same complete schema; error prose/substrings never qualify.
+
+Only the owning coordinator may then append one normal unread reply-only child
+under the SAME original event/account/owner/source/chat. Its strict persisted
+metadata reuses `readOnlyContinuation:true`; the host-only classifier selector
+never enters native HTTP, model arguments or the journal. This adds no column,
+schema backfill, source ACK, Task/Run, old lease renewal or second retry budget.
+The original row remains immutable. Native service/SQL independently validate
+the distinct root and every later continuation ancestor; unknown sends stay
+fenced. The SAME begin-before-HTTP and GET-only lost-response reconciliation,
+current source/file ACL, fresh original-body read and one provider attempt remain
+mandatory. A recovered reply still needs its own live original-peer acceptance.
 
 
 A positively delivered generation-only technical reply has one independent
