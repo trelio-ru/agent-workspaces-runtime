@@ -23,7 +23,7 @@ import {
 const KEYCHAIN_SERVICE = "ru.trelio.remote-mcp-oauth.v1";
 const MAX_SESSION_BYTES = 32 * 1024;
 
-const sessionAccount = (origin, resolved, namespace = null, nativeClient = null) => crypto.createHash("sha256")
+export const remoteMcpOAuthSessionAccount = (origin, resolved, namespace = null, nativeClient = null) => crypto.createHash("sha256")
   .update(JSON.stringify({
     origin,
     ...(namespace === null ? {} : { managedNamespace: namespace }),
@@ -105,7 +105,7 @@ export const createRemoteMcpOAuthVault = ({
   const file = path.join(path.dirname(credentialFile), "oauth-session.json");
 
   const read = async (origin, resolved) => {
-    const account = sessionAccount(origin, resolved, namespace, nativeClient);
+    const account = remoteMcpOAuthSessionAccount(origin, resolved, namespace, nativeClient);
     let serialized = null;
     if (platform === "darwin") {
       serialized = await keychain.read(KEYCHAIN_SERVICE, account);
@@ -146,7 +146,7 @@ export const createRemoteMcpOAuthVault = ({
   };
 
   const write = async (origin, resolved, session) => {
-    const account = sessionAccount(origin, resolved, namespace, nativeClient);
+    const account = remoteMcpOAuthSessionAccount(origin, resolved, namespace, nativeClient);
     const serialized = JSON.stringify({
       schemaVersion: 1,
       account,
@@ -177,7 +177,7 @@ export const createRemoteMcpOAuthVault = ({
   };
 
   const remove = async (origin, resolved) => {
-    const account = sessionAccount(origin, resolved, namespace, nativeClient);
+    const account = remoteMcpOAuthSessionAccount(origin, resolved, namespace, nativeClient);
     if (platform === "darwin") {
       const existed = Boolean(await keychain.read(KEYCHAIN_SERVICE, account));
       if (existed) await keychain.remove(KEYCHAIN_SERVICE, account);

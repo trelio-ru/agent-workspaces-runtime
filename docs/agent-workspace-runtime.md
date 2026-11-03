@@ -612,6 +612,34 @@ Callback/state/PKCE и очистка дополнительно проверя�
 `tests/trelio-remote-mcp-oauth.test.mjs`. Реальный login провайдера после выпуска
 требует отдельного разрешения и не заменяется synthetic CI.
 
+<a id="remote-mcp-oauth-sessions"></a>
+
+### OAuth-сессии Remote MCP
+
+Вызовы одного local host объединяют обновление только для одной exact ячейки
+OS vault и неизменной декларации. Identity берётся из того же canonical account
+hash, что macOS Keychain/libsecret/DPAPI: origin, company, member, skill и
+managed namespace. Config fingerprint дополнительно разделяет декларации.
+Совпадение provider endpoint, config и member не разрешает вернуть токен
+другого навыка, human-профиля или managed device. Алгоритм account hash и
+формат сохранённой сессии не меняются; миграция и новый login не требуются.
+
+Сначала перечитывается exact сессия и проверяются её наличие и issuer. Только
+существующий in-process promise той же ячейки подтверждает, что
+`refreshInProgress` относится к ещё выполняющемуся обновлению: следующий
+caller ждёт его результат вместо ложного требования переподключиться. Marker
+без такого promise сохраняет прежний uncertain/reconnect отказ; он не даёт
+повторять refresh POST или сбрасывать хранилище.
+
+Перед rotation повторяются все session guards после второго private read.
+Исчезнувшая сессия и изменившийся issuer дают закрытый
+`REMOTE_MCP_OAUTH_RECONNECT_REQUIRED` до записи marker/POST; null не становится
+TypeError. Persisted fence ставится до единственного POST и остаётся после
+неизвестного исхода. Cancelled joiner не получает eventual токен другого
+вызова; его отмена не запускает второй refresh. Проверки используют настоящий
+loader, canonical vault codec и managed AsyncLocalStorage profile с
+синтетическими OS keyring и token endpoint, без рабочих credentials.
+
 ### Восстановление подписанного рантайма
 
 Lifecycle hook сохраняет один внутренний бюджет на весь signed-runtime startup:

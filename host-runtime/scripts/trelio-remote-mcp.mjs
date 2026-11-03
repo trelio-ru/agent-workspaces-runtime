@@ -101,7 +101,7 @@ import {
   oauthHttpJson,
   refreshRemoteMcpOAuth,
 } from "./trelio-remote-mcp-oauth.mjs";
-import { createRemoteMcpOAuthVault } from "./trelio-remote-mcp-oauth-vault.mjs";
+import { createRemoteMcpOAuthVault, remoteMcpOAuthSessionAccount } from "./trelio-remote-mcp-oauth-vault.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   buildCompanyEncryptedJsonMarker,
@@ -1021,7 +1021,9 @@ const useOAuthVault = async (operation) => {
   }
 };
 
-const loadPersonalCredential = async (origin, resolved, { signal } = {}) => {
+export const loadPersonalCredential = async (origin, resolved, {
+  signal, createOAuthVault = createRemoteMcpOAuthVault, refreshOAuth = refreshRemoteMcpOAuth,
+} = {}) => {
   throwIfAborted(signal);
   await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
   if (resolved.remoteMcp.config.authentication.type === "none") {
@@ -1029,51 +1031,64 @@ const loadPersonalCredential = async (origin, resolved, { signal } = {}) => {
   }
 
   if (resolved.remoteMcp.config.authentication.type === "oauth2_pkce") {
-    const vault = createRemoteMcpOAuthVault({
-      namespace: currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null,
+    const namespace = currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null;
+    const vault = createOAuthVault({
+      namespace,
       credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
     });
+    // Share only work on the SAME OS-vault cell and declaration. The old
+    // member+config key joined different skills (or human/managed devices)
+    // pointing at the same provider and returned the first account's token.
+    // Reuse the vault's exact identity hash instead of a second identity grammar;
+    // neither keys nor credentials are exposed outside this in-process map.
+    const key = JSON.stringify([remoteMcpOAuthSessionAccount(origin, resolved, namespace),
+      resolved.remoteMcp.configFingerprint]);
+    const assertSession = (session, activeRefresh = false) => {
+      if (!session) {
+        throw new RemoteMcpHostError(
+          "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
+          "Для Remote MCP нужно персональное OAuth-подключение на этом устройстве.",
+        );
+      }
+      if (session.issuer !== new URL(resolved.remoteMcp.config.endpoint).origin) {
+        throw new RemoteMcpHostError(
+          "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
+          "OAuth issuer изменился. Подключите Remote MCP заново.",
+        );
+      }
+      if (session.refreshInProgress && !activeRefresh) {
+        throw new RemoteMcpHostError(
+          "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
+          "Исход обновления OAuth-сессии неизвестен. Подключите Remote MCP заново.",
+        );
+      }
+    };
     const session = await useOAuthVault(() => vault.read(origin, resolved));
-    if (!session) {
-      throw new RemoteMcpHostError(
-        "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
-        "Для Remote MCP нужно персональное OAuth-подключение на этом устройстве.",
-      );
-    }
-    if (session.refreshInProgress) {
-      throw new RemoteMcpHostError(
-        "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
-        "Исход обновления OAuth-сессии неизвестен. Подключите Remote MCP заново.",
-      );
-    }
-    if (session.issuer !== new URL(resolved.remoteMcp.config.endpoint).origin) {
-      throw new RemoteMcpHostError(
-        "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
-        "OAuth issuer изменился. Подключите Remote MCP заново.",
-      );
-    }
-    if (session.expiresAt > Date.now() + 60_000) return session.accessToken;
+    throwIfAborted(signal);
+    const pending = oauthRefreshes.get(key);
+    // A persisted marker without a live SAME-cell promise remains uncertain.
+    // With that promise it is our normal rotation, so another doctor/call waits
+    // for its result instead of incorrectly starting an interactive reconnect.
+    // Missing/replaced-issuer state still refuses, even while work is pending.
+    assertSession(session, Boolean(pending));
+    if (!pending && session.expiresAt > Date.now() + 60_000) return session.accessToken;
 
-    // Refresh-token rotation is single-flight per exact declaration. Two
-    // concurrent doctor/call requests must never redeem the same refresh token.
-    const key = `${origin}:${resolved.localIdentity.memberId}:${resolved.remoteMcp.configFingerprint}`;
-    if (!oauthRefreshes.has(key)) {
+    if (!pending) {
       const refresh = (async () => {
         const current = await useOAuthVault(() => vault.read(origin, resolved));
-        if (current.refreshInProgress) {
-          throw new RemoteMcpHostError(
-            "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
-            "Исход обновления OAuth-сессии неизвестен. Подключите Remote MCP заново.",
-          );
-        }
+        throwIfAborted(signal);
+        // Forget/reconnect can change the vault after the first read. Repeat
+        // every session guard before returning a token or fencing a POST; null
+        // must be a closed reconnect result, never a TypeError/generic host error.
+        assertSession(current);
         if (current.expiresAt > Date.now() + 60_000) return current.accessToken;
-        // Refresh rotates credentials. Persist an in-progress fence before the
-        // POST so a crash or ambiguous response cannot trigger a blind retry.
+        // Persist before the one rotation POST. Failure/cancellation keeps this
+        // fence: no later caller may replay a token with an unknown outcome.
         await useOAuthVault(() => vault.write(origin, resolved, {
           ...current,
           refreshInProgress: true,
         }));
-        const next = await refreshRemoteMcpOAuth(resolved.remoteMcp.config, current, {
+        const next = await refreshOAuth(resolved.remoteMcp.config, current, {
           resolveEndpoint: resolveSafeRemoteMcpEndpoint,
           signal,
         });
@@ -1089,7 +1104,11 @@ const loadPersonalCredential = async (origin, resolved, { signal } = {}) => {
         if (oauthRefreshes.get(key) === refresh) oauthRefreshes.delete(key);
       }).catch(() => undefined);
     }
-    return oauthRefreshes.get(key);
+    const credential = await (pending ?? oauthRefreshes.get(key));
+    // A joiner has its own invocation cancellation. It never inherits the
+    // first caller's permission to keep using the eventual token after abort.
+    throwIfAborted(signal);
+    return credential;
   }
 
   const credentialFile = resolveRemoteMcpCredentialFile(resolved.localIdentity);

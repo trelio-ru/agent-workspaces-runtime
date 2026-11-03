@@ -12,6 +12,8 @@ import {
   discoverRemoteMcpOAuth,
   oauthHttpJson,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
+import { loadPersonalCredential } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createRemoteMcpOAuthVault } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
 
 const config = {
@@ -329,4 +331,130 @@ test("native OAuth vault cannot borrow an external skill or another namespace", 
   await native.write("https://trelio.ru", id, { issuer, clientId: "synthetic", accessToken: "synthetic-native", expiresAt: Date.now() + 10000 });
   assert.equal(await external.read("https://trelio.ru", id), null);
   assert.equal((await native.read("https://trelio.ru", { remoteMcp: id.remoteMcp })).accessToken, "synthetic-native");
+});
+
+
+// Drive the production credential loader with the real vault identity/codec.
+// Only the OS keyring and remote token endpoint are synthetic; no real user
+// credential, browser, Trelio request or filesystem vault is consulted.
+const refreshFixture = () => {
+  const items = new Map();
+  const keychain = {
+    read: async (service, account) => items.get(service + account) ?? null,
+    write: async (service, account, value) => { items.set(service + account, value); },
+    remove: async (service, account) => { items.delete(service + account); },
+  };
+  const createVault = options => createRemoteMcpOAuthVault({ ...options, platform: "darwin", keychain });
+  const declaration = { ...resolved("e".repeat(64)), remoteMcp: {
+    configFingerprint: "e".repeat(64), config: { ...config, authentication: { type: "oauth2_pkce" } },
+  } };
+  const session = label => ({ issuer, clientId: "synthetic-client", accessToken: "synthetic-old-" + label,
+    refreshToken: "synthetic-refresh-" + label, expiresAt: Date.now() - 1000 });
+  const managedProfile = namespace => ({ kind: "digital_assistant", remoteMcpCredentialNamespace: namespace,
+    requireToken: async () => assert.fail("no native HTTP"), prepareRequest: async () => assert.fail("no native HTTP"),
+    assertRemoteMcpCurrent: async () => {}, resolveRemoteMcpCredentialDirectory: () => "/unused/managed" });
+  return { createVault, declaration, session, managedProfile };
+};
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+for (const variation of ["company", "skill", "managed namespace"]) {
+  test("OAuth refresh never shares tokens across " + variation, async () => {
+    const { createVault, declaration, session, managedProfile } = refreshFixture();
+    const other = { ...declaration, localIdentity: { ...declaration.localIdentity,
+      ...(variation === "company" ? { companyId: "33333333-3333-4333-8333-333333333333" } : {}),
+      ...(variation === "skill" ? { skillId: "other-mcp" } : {}),
+    } };
+    const namespace = variation === "managed namespace" ? "assistant:synthetic:other-device" : null;
+    const firstVault = createVault({ credentialFile: "/unused/first.json", namespace: null });
+    const otherVault = createVault({ credentialFile: "/unused/second.json", namespace });
+    await firstVault.write("https://trelio.ru", declaration, session("first"));
+    await otherVault.write("https://trelio.ru", other, session("second"));
+    const started = deferred(), release = deferred(); let refreshes = 0;
+    const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+      refreshes++; if (current.refreshToken === "synthetic-refresh-first") { started.resolve(); await release.promise; }
+      return { ...current, accessToken: current.refreshToken + "-new", expiresAt: Date.now() + 3600000 };
+    } };
+    const first = loadPersonalCredential("https://trelio.ru", declaration, options);
+    await started.promise;
+    const second = namespace ? withWorkspaceExecutionProfile(managedProfile(namespace),
+      () => loadPersonalCredential("https://trelio.ru", other, options)) : loadPersonalCredential("https://trelio.ru", other, options);
+    // Let the second caller observe the already active first rotation. A single
+    // event-loop boundary is a scheduling barrier, not a timing-based assertion.
+    await new Promise(setImmediate); release.resolve();
+    const result = await Promise.all([first, second]);
+    assert.deepEqual(result, ["synthetic-refresh-first-new", "synthetic-refresh-second-new"]);
+    assert.equal(refreshes, 2);
+    assert.equal((await otherVault.read("https://trelio.ru", other)).accessToken, result[1]);
+  });
+}
+
+test("OAuth caller joins its active refresh instead of reporting false reconnect", async () => {
+  const { createVault, declaration, session } = refreshFixture();
+  await createVault({ credentialFile: "/unused/shared.json" }).write("https://trelio.ru", declaration, session("shared"));
+  const started = deferred(), release = deferred(); let refreshes = 0;
+  const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+    refreshes++; started.resolve(); await release.promise;
+    return { ...current, accessToken: "synthetic-shared-new", expiresAt: Date.now() + 3600000 };
+  } };
+  const first = loadPersonalCredential("https://trelio.ru", declaration, options);
+  await started.promise;
+  const second = loadPersonalCredential("https://trelio.ru", declaration, options);
+  const outcome = Promise.allSettled([first, second]);
+  await new Promise(setImmediate); release.resolve();
+  assert.deepEqual(await outcome, [{ status: "fulfilled", value: "synthetic-shared-new" },
+    { status: "fulfilled", value: "synthetic-shared-new" }]);
+  assert.equal(refreshes, 1);
+});
+
+test("OAuth session removed before rotation returns reconnect without a TypeError or provider call", async () => {
+  const { declaration, session } = refreshFixture(); let reads = 0, writes = 0, refreshes = 0;
+  await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, {
+    createOAuthVault: () => ({ read: async () => ++reads === 1 ? session("removed") : null,
+      write: async () => { writes++; } }),
+    refreshOAuth: async () => { refreshes++; assert.fail("missing session cannot rotate"); },
+  }), error => error.code === "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED");
+  assert.equal(writes, 0); assert.equal(refreshes, 0);
+});
+
+test("OAuth unknown refresh remains fenced and never retries its provider POST", async () => {
+  const { createVault, declaration, session } = refreshFixture();
+  await createVault({ credentialFile: "/unused/fenced.json" }).write("https://trelio.ru", declaration, session("fenced"));
+  let refreshes = 0;
+  const options = { createOAuthVault: createVault, refreshOAuth: async () => {
+    refreshes++; throw new Error("synthetic uncertain refresh");
+  } };
+  await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, options), /synthetic uncertain refresh/);
+  await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, options),
+    error => error.code === "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED");
+  assert.equal(refreshes, 1);
+});
+
+
+test("OAuth issuer changed between reads refuses before returning a replacement token", async () => {
+  const { declaration, session } = refreshFixture(); let reads = 0, writes = 0, refreshes = 0;
+  await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, {
+    createOAuthVault: () => ({ read: async () => ++reads === 1 ? session("before") : {
+      ...session("replacement"), issuer: "https://other.example.test", expiresAt: Date.now() + 3600000,
+    }, write: async () => { writes++; } }),
+    refreshOAuth: async () => { refreshes++; assert.fail("changed issuer cannot rotate"); },
+  }), error => error.code === "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED");
+  assert.equal(writes, 0); assert.equal(refreshes, 0);
+});
+
+test("OAuth cancelled joiner cannot receive another caller's eventual token", async () => {
+  const { createVault, declaration, session } = refreshFixture();
+  await createVault({ credentialFile: "/unused/cancel.json" }).write("https://trelio.ru", declaration, session("cancel"));
+  const started = deferred(), release = deferred(); const controller = new AbortController(); let refreshes = 0;
+  const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+    refreshes++; started.resolve(); await release.promise;
+    return { ...current, accessToken: "synthetic-not-for-cancelled-caller", expiresAt: Date.now() + 3600000 };
+  } };
+  const first = loadPersonalCredential("https://trelio.ru", declaration, options);
+  await started.promise;
+  const second = loadPersonalCredential("https://trelio.ru", declaration, { ...options, signal: controller.signal });
+  const outcomes = Promise.allSettled([first, second]);
+  await new Promise(setImmediate); controller.abort(); release.resolve();
+  const [success, cancelled] = await outcomes;
+  assert.equal(success.status, "fulfilled"); assert.equal(cancelled.status, "rejected");
+  assert.equal(cancelled.reason.name, "AbortError"); assert.equal(refreshes, 1);
 });
