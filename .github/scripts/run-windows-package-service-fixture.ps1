@@ -5,7 +5,8 @@ param(
   [string]$NodeBase64 = '',
   [string]$ControllerBase64 = '',
   [string]$TestTempBase64 = '',
-  [string]$ReferenceGeneration = ''
+  [string]$ReferenceGeneration = '',
+  [string]$ReferenceSequence = ''
 )
 $ErrorActionPreference = 'Stop'
 if ($DiagnosticOnly -and $env:GITHUB_ACTIONS -ceq 'true') { throw 'Diagnostic-only mode cannot satisfy a hosted gate.' }
@@ -48,6 +49,7 @@ if ($Child) {
   $node = Decode $NodeBase64
   $env:TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE = Decode $ControllerBase64
   $env:TRELIO_SERVICE_FIXTURE_REFERENCE = $ReferenceGeneration
+  $env:TRELIO_SERVICE_FIXTURE_SEQUENCE = $ReferenceSequence
   $testTemp = Decode $TestTempBase64
   New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
   $env:TEMP = $testTemp; $env:TMP = $testTemp
@@ -56,21 +58,38 @@ if ($Child) {
   # production path. Bound this own read process; never kill the service.
   $probeOut = Join-Path $testTemp 'resource-probe.json'
   $probeError = Join-Path $testTemp 'resource-probe.stderr'
-  $probe = Start-Process -FilePath $env:TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE -ArgumentList 'probe' -PassThru `
-    -RedirectStandardOutput $probeOut -RedirectStandardError $probeError
+  # Keep the actual CreateProcess handle in our Process object. The earlier
+  # Start-Process wrapper returned null ExitCode despite a complete native frame;
+  # never infer success from that frame or synthesize zero. This is only our
+  # own constant-size read-only fixture, not a production service/process open.
+  $probeInfo = [Diagnostics.ProcessStartInfo]::new()
+  $probeInfo.FileName = $env:TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE
+  $probeInfo.Arguments = 'probe'; $probeInfo.UseShellExecute = $false
+  $probeInfo.CreateNoWindow = $true
+  $probeInfo.RedirectStandardOutput = $true; $probeInfo.RedirectStandardError = $true
+  $probe = [Diagnostics.Process]::new(); $probe.StartInfo = $probeInfo
+  if (!$probe.Start()) { throw 'Owned read-only resource probe did not start.' }
+  $probeOutput = $probe.StandardOutput.ReadToEndAsync()
+  $probeStderr = $probe.StandardError.ReadToEndAsync()
   if (!$probe.WaitForExit(45000)) {
     $probe.Kill()
     if (!$probe.WaitForExit(5000)) { throw 'Owned read-only probe exit is unknown; no replay.' }
     throw 'Owned read-only resource probe timed out; no replay.'
   }
-  # Observe collection separately from native API results. Start-Process may
-  # leave an unavailable ExitCode; null is NEVER zero/success. Preserve a valid
+  $probePipes = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($probeOutput, $probeStderr))
+  if (!$probePipes.Wait(5000)) { throw 'Resource probe pipes did not close; no replay.' }
+  [IO.File]::WriteAllText($probeOut, $probeOutput.Result)
+  [IO.File]::WriteAllText($probeError, $probeStderr.Result)
+  # Observe collection separately from native API results. An unavailable exit
+  # observation is NEVER zero/success. Preserve a valid
   # bounded native diagnostic BEFORE rejecting that transport observation, so
   # a collector failure cannot erase the FILE/SERVICE comparison we need.
   $probe.Refresh()
   $probeExit = $probe.ExitCode
+  $probe.Dispose()
   $probeBytes = (Get-Item $probeOut).Length
-  [ordered]@{ resourceProbeProcess = $true; exitCode = $probeExit; outputBytes = $probeBytes } | ConvertTo-Json -Compress
+  $probeErrorBytes = (Get-Item $probeError).Length
+  [ordered]@{ resourceProbeProcess = $true; exitCode = $probeExit; outputBytes = $probeBytes; errorBytes = $probeErrorBytes } | ConvertTo-Json -Compress
   if ($probeBytes -le 0 -or $probeBytes -gt 8192) { throw 'Bounded resource probe output unavailable.' }
   $record = [IO.File]::ReadAllText($probeOut) | ConvertFrom-Json
   if ($record.fixtureFailure -eq $true) {
@@ -88,8 +107,17 @@ if ($Child) {
     zeroOpenSucceeded = (DiagnosticBoolean $record.zeroOpenSucceeded)
     zeroOpenError = (DiagnosticNumber $record.zeroOpenError -Required)
     file = (ProjectResource $record.file); service = (ProjectResource $record.service)
+    basic = [ordered]@{
+      available = (DiagnosticBoolean $record.basic.available)
+      status = (DiagnosticNumber $record.basic.status)
+      complete = (DiagnosticBoolean $record.basic.complete)
+      pidMatches = (DiagnosticBoolean $record.basic.pidMatches)
+      imageMatches = (DiagnosticBoolean $record.basic.imageMatches)
+      referenceMatches = (DiagnosticBoolean $record.basic.referenceMatches)
+      stableMatches = (DiagnosticBoolean $record.basic.stableMatches)
+    }
   } | ConvertTo-Json -Compress -Depth 5
-  if ($null -eq $probeExit -or $probeExit -ne 0) { throw 'Resource probe process outcome was not successful; no replay.' }
+  if ($null -eq $probeExit -or $probeExit -ne 0 -or $probeErrorBytes -ne 0) { throw 'Resource probe process outcome was not successful; no replay.' }
   if ($DiagnosticOnly) { exit 0 }
   & $node --test '--test-name-pattern=^ordinary packaged service control works without process query or synchronization rights$' (Join-Path $repository 'tests/trelio-windows-native-private.test.mjs')
   exit $LASTEXITCODE
@@ -146,6 +174,10 @@ try {
   $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Child',
     '-RepositoryBase64', (Encode $repository), '-ControllerBase64', (Encode $controller),
     '-TestTempBase64', (Encode $testTemp), '-ReferenceGeneration', $prepared.generation)
+  if ($null -ne $prepared.sequence) {
+    if ($prepared.sequence -cnotmatch '^[1-9]\d{0,19}$') { throw 'Invalid fixture sequence reference.' }
+    $arguments += @('-ReferenceSequence', $prepared.sequence)
+  }
   if ($DiagnosticOnly) { $arguments += '-DiagnosticOnly' } else { $arguments += @('-NodeBase64', (Encode $node)) }
   $shell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
   $childProcess = Start-Process -FilePath $shell -ArgumentList $arguments -Credential $credential -LoadUserProfile -Wait -PassThru `

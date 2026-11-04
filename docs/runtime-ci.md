@@ -116,6 +116,10 @@ and is rejected inside GitHub. It never replaces the mandatory hosted gate.
 The collector projects the bounded native API frame before checking its separately
 observed process exit. A missing exit code remains unknown/failing, never zero;
 collection failures cannot erase an already obtained comparison or allow replay.
+The source-only comparison also checks documented SystemBasicProcessInformation
+against an independent administrative OS sequence read and a fresh ordinary-token
+read. Unavailable APIs/invalid complete inventories stay explicit failures; the
+sequence diagnostic changes no production predicate or positive assertion.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.

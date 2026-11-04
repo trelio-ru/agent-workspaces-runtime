@@ -894,6 +894,9 @@ publication tooling также остаются вне этого публичн
   explicit run decision, never supplies CI evidence and is forbidden in GitHub.
   Its bounded closed native frame precedes the independent process-exit check;
   missing exit codes stay unknown/failing and never erase collected API evidence.
+  A source-only documented SystemBasicProcessInformation comparison may report
+  fixed PID/image/sequence equality only; it is not production identity or CI
+  acceptance. Native handle ownership keeps its actual read-probe exit observable.
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.
