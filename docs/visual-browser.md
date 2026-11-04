@@ -781,6 +781,10 @@ Pure tests: result/MCP projection, loopback auth, AEAD, profile traversal и bou
 Windows regression читает настоящие `GetStartupInfoW` flags внутри собственного
 native child общего GUI launcher и запрещает `STARTF_USESHOWWINDOW/SW_HIDE`;
 готовность extension сама по себе не доказывает видимость OS-окна.
+Его PowerShell child отключает module auto-discovery и импортирует только
+Utility по fixed `$PSHOME` manifest, как существующий native scheduler fixture.
+Исходные 30 секунд и Win32 assertions сохраняются; timeout выдаёт только
+закрытый startup stage, без native output или увеличения бюджета.
 Extension E2E использует synthetic localhost: clicks, русский input, select-all,
 scroll, same-tab target-blank routing, cookies/localStorage restore, window-close,
 ready, explicit logout без восстановления входа и crash сохранение предыдущего snapshot. Headed Mac test независимо

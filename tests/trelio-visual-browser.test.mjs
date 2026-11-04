@@ -5,6 +5,7 @@ import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidenc
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -16,8 +17,14 @@ test('GUI browser launch does not send native Windows SW_HIDE startup presentati
   // Only two numeric Win32 fields from our synthetic child reach the fixture.
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'visual-gui-startup-'));
   const receipt = path.join(directory, 'startup.json');
+  const stagePath = path.join(directory, 'stage.txt');
+  const stageWrite = stage => `[System.IO.File]::WriteAllText('${stagePath.replaceAll("'", "''")}', '${stage}')`;
   const source = `
     $ErrorActionPreference = 'Stop'
+    ${stageWrite('script')}
+    $PSModuleAutoLoadingPreference = 'None'
+    Microsoft.PowerShell.Core\\Import-Module -Name ([System.IO.Path]::Combine($PSHOME, 'Modules', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
+    ${stageWrite('utility_loaded')}
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -39,12 +46,24 @@ public static class VisualGuiStartup {
   }
 }
 '@
+    ${stageWrite('native_loaded')}
     $info = [VisualGuiStartup]::Read()
     [System.IO.File]::WriteAllText('${receipt.replaceAll("'", "''")}', (ConvertTo-Json -Compress -InputObject $info))
+    ${stageWrite('receipt_written')}
   `;
+  // Match the existing native scheduler fixture's fixed-PSHOME import rather
+  // than scanning user/installed modules on the first Add-Type/ConvertTo-Json.
+  // Cold command discovery has already cost 22–35s on hosted ARM64. Keep this
+  // test's original 30s bound and the real GetStartupInfo/SW_HIDE assertion;
+  // a timeout reports only the last closed stage, never paths or native prose.
   const executable = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const child = spawnVisualBrowserProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], process.env);
-  const abort = () => { if (child.exitCode === null && child.signalCode === null) child.kill(); };
+  const abort = () => {
+    let stage = 'not_started';
+    try { stage = readFileSync(stagePath, 'utf8'); } catch {}
+    t.diagnostic(JSON.stringify({ fixture: 'visual-gui-startup', stage: ['script', 'utility_loaded', 'native_loaded', 'receipt_written'].includes(stage) ? stage : 'not_started' }));
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  };
   t.signal.addEventListener('abort', abort, { once: true });
   try {
     const [code, signal] = await once(child, 'close');
@@ -54,7 +73,8 @@ public static class VisualGuiStartup {
     assert.equal(Boolean(flags & 0x00000001) && show === 0, false, 'headed GUI child must not inherit STARTF_USESHOWWINDOW/SW_HIDE');
     assert.equal(child.stdin, null); assert.equal(child.stdout, null); assert.equal(child.stderr, null);
   } finally {
-    t.signal.removeEventListener('abort', abort); abort();
+    t.signal.removeEventListener('abort', abort);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
     await fs.rm(directory, { recursive: true, force: true });
   }
 });

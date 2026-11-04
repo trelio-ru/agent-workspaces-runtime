@@ -456,6 +456,8 @@ publication tooling также остаются вне этого публичн
   GUI Chromium запускается без native `SW_HIDE` (`windowsHide: false`), иначе
   Windows может показать белую поверхность. Не переносить console-hide policy
   на общий GUI launcher; native startup-info regression и ignored stdio обязательны.
+  Startup-info fixture импортирует Utility по fixed PSHOME без module discovery;
+  его closed stage diagnostics не продлевают 30s bound и не заменяют Win32 assertions.
   Новый owned профиль заранее получает обычный continue-session preference;
   одного --restore-last-session недостаточно до первого закрытия Windows/Linux.
   Existing Preferences не перезаписываются; policy ставится до provider URL,
