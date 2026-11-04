@@ -57,6 +57,46 @@ test(`first owner reply distinguishes dispatch uncertainty from a durable effect
  assert.equal(database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
 });
 
+for(const kind of ['owner_command','route_existing'])
+for(const damage of ['none','missing_receipt','malformed_receipt','foreign_outcome','uncertain_state','parallel_uncertain'])
+test(`readonly dispatch status distinguishes confirmed owner waiting from unknown work (${kind}/${damage})`,t=>{
+  const {database,inbox,advance}=memory(t),source=scope({provider:'telegram'});
+  createAssistantScheduler({database});inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+  page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
+    conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,
+    ...(kind==='owner_command'?{ownerIdentityId:randomUUID()}:{})}]);
+  if(kind==='route_existing')inbox.queueExistingTaskIntakes(source,{sourceRevision:0,
+    eventKeys:inbox.pendingExternalRoutes(source).map(value=>value.event_key)});
+  const row=inbox.ownerIntakes()[0];assert.equal(row.kind,kind);
+  inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);
+  inbox.bindOwnerIntakeThread(row.id,randomUUID());inbox.readyOwnerIntake(row.id);inbox.startOwnerIntake(row.id);
+  inbox.finishOwnerIntake(row.id,{state:'waiting_owner',receiptId:randomUUID()});
+  if(damage==='missing_receipt')database.prepare('UPDATE assistant_owner_intakes SET outcome_receipt=NULL WHERE id=?').run(row.id);
+  if(damage==='malformed_receipt')database.prepare('UPDATE assistant_owner_intakes SET outcome_receipt=? WHERE id=?').run('not-a-receipt',row.id);
+  if(damage==='foreign_outcome')database.prepare("UPDATE assistant_owner_intakes SET outcome_state='created' WHERE id=?").run(row.id);
+  if(damage==='uncertain_state')database.prepare("UPDATE assistant_owner_intakes SET state='uncertain' WHERE id=?").run(row.id);
+  if(damage==='parallel_uncertain'){
+    advance(300001);page(inbox,source,[{id:'message:124:2',revision:'b'.repeat(64),taskId:null,wake:false,providerWake:true,
+      conversationKey:`telegram-conversation/v1.${'b'.repeat(64)}`,ownerIdentityId:randomUUID()}],'page-2');
+    const other=inbox.ownerIntakes().find(value=>value.id!==row.id);
+    inbox.prepareOwnerIntake(other.id);inbox.startOwnerIntakeProvision(other.id);inbox.bindOwnerIntakeThread(other.id,randomUUID());
+    inbox.readyOwnerIntake(other.id);inbox.startOwnerIntake(other.id);inbox.uncertainOwnerIntake(other.id);
+  }
+  // The full snapshot includes start/receipt/settlement, event processing and
+  // ACK fences. Repeated diagnostics (including absent company inventory) may
+  // classify the same immutable outcome, but cannot repair or consume a row.
+  const snapshot=()=>Object.fromEntries(['owner_intakes','inbox_events','inbox_sources'].map(name=>
+    [name,database.prepare(`SELECT * FROM assistant_${name} ORDER BY rowid`).all()]));
+  const before=snapshot(),identity={origin:source.origin,assistantId:source.assistantId,deviceId:source.bindingId};
+  for(let repeat=0;repeat<2;repeat++){
+    const result=readAssistantInboxDispatchSummary({database,identity,companies:[]});
+    assert.equal(result.uncertainDeliveries,damage==='none'?0:1);
+    assert.equal(result.failure,null);assert.deepEqual(snapshot(),before);
+  }
+  assert.equal(inbox.ownerIntake(row.id).settled,0,'a question stays pending, including after its answer window expires');
+  assert.equal(database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+});
+
 test('owner readiness verification preserves the original provision and consumes one durable independent marker',t=>{
   const {database,inbox}=memory(t),source=scope({provider:'telegram'});
   inbox.register(source);inbox.observeExternalSourceRevision(source,0);

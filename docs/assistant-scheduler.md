@@ -1867,7 +1867,14 @@ is reported as well as a thrown delivery uncertainty. The CURRENT immutable
 tick worker owns this report, so an older already-running supervisor needs no
 restart/new enum to notify the owner. Duplicate worker/parent observations preserve
 the existing latch rather than post again. A missing model or waiting
-owner does not become this device incident. The independent dispatch latch survives
+owner does not become this device incident. The SELECT-only diagnostic reader
+excludes an unsettled owner intake only when `state` and `outcome_state` both
+remain `waiting_owner` and its original UUID outcome receipt is retained.
+Missing/malformed receipts, other outcomes and started/uncertain rows remain
+uncertain device-wide, including after their company/source disappears. This
+classification changes no intake, processing/ACK marker, retry authority or
+health state; recovery still requires the ordinary confirmed business boundary.
+The independent dispatch latch survives
 metadata-ready reports, a recovered login/hook and tool-free READY provisioning.
 Only a confirmed native/business completion, committed local schedule/inbox and
 released protected pass may clear it, and only when the SAME device-wide journal

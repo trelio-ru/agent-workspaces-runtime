@@ -226,10 +226,20 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // the native operation began. A fresh company inventory cannot erase an
     // uncertain operation. A retained marker is never live-process evidence;
     // expiry/status cannot release it or authorize a retry elsewhere.
+    const retainedIntakes=db.prepare(`SELECT state,outcome_state,outcome_receipt FROM assistant_owner_intakes WHERE settled=0
+      AND (state='uncertain' OR native_started=1 AND state!='complete') LIMIT 50001`).all();
+    if(retainedIntakes.length>50_000)fail('ASSISTANT_INBOX_FULL');
+    // Waiting for the owner is a positively recorded native outcome, although
+    // the intake deliberately remains unsettled until the owner's response.
+    // Exclude only that exact state/outcome pair with its original UUID receipt.
+    // Missing/damaged receipts, foreign outcomes and any started/uncertain row
+    // retain the device-wide diagnostic fence, even after its source disappears.
+    // This SELECT-only classification cannot settle, retry or ACK any work;
+    // health recovery still requires the separate real business completion.
+    const uncertainIntakes=retainedIntakes.filter(row=>row.state!=='waiting_owner'
+      ||row.outcome_state!=='waiting_owner'||!UUID.test(row.outcome_receipt??'')).length;
     result.uncertainDeliveries=get(`SELECT count(*) AS n FROM assistant_inbox_deliveries
-      WHERE state IN ('started','uncertain') OR state='leased' AND native_started=1`).n
-      +get(`SELECT count(*) AS n FROM assistant_owner_intakes WHERE settled=0
-        AND (state='uncertain' OR native_started=1 AND state!='complete')`).n;
+      WHERE state IN ('started','uncertain') OR state='leased' AND native_started=1`).n+uncertainIntakes;
     if(Object.values(result).some(value=>!Number.isSafeInteger(value)||value<0||value>50_000))fail('ASSISTANT_INBOX_FULL');
     const last=versions[0].version>=11?get(`SELECT failure_code,failure_stage FROM assistant_inbox_deliveries
       WHERE state IN ('started','uncertain') AND failure_code IS NOT NULL ORDER BY rowid DESC LIMIT 1`):null;

@@ -113,15 +113,23 @@ for(const scenario of [
       operations.push({operation:raw.operation,completionVersion:result?._meta?.['trelio/assistant-company-read']?.schemaVersion??null});
       return result;
     };
+    let injectedFaultClocks=0;
     if(scenario.stallAttempts){
       // Recovery origin is THIS parent's exact timer/signal, not a public
       // timeout code emitted by a different short private invocation. Shorten
-      // only that original600s timer in this isolated fault process; cold and
-      // legacy volume cases keep real production budgets. No wall clock moves,
-      // and polling never extends or resets a stopped child's timer.
+      // only the original600s timers for the deliberately stalled attempts.
+      // The resumed healthy preparation keeps its ordinary production budget:
+      // shortening that timer too makes native cold I/O a second injected
+      // timeout, contrary to this one-fault scenario. The two-fault case still
+      // shortens both attempts and must refuse a third. No production clock,
+      // polling deadline, outer harness bound or failure assertion changes.
       const originalSetTimeout=globalThis.setTimeout;
-      t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>
-        originalSetTimeout(callback,delay===600000?10000:delay,...args));
+      let faultClocks=scenario.stallAttempts;
+      t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
+        const inject=delay===600000&&faultClocks>0;
+        if(inject){faultClocks--;injectedFaultClocks++;}
+        return originalSetTimeout(callback,inject?10000:delay,...args);
+      });
     }
     const directory=path.join(root,'native-context'),workspace=await createAssistantWorkspaceExecutor({configDirectory:directory,companyPreparationOptions:{waitMs:2}});
     output.on('data',chunk=>{buffer+=chunk;for(;;){const end=buffer.indexOf('\n');if(end<0)break;responses.push(JSON.parse(buffer.slice(0,end)));buffer=buffer.slice(end+1);}});
@@ -150,6 +158,7 @@ for(const scenario of [
       search=result.result;break;
     }
     backend.assertClean();
+    assert.equal(injectedFaultClocks,scenario.stallAttempts,'only the intentionally stalled attempts receive a shortened fault clock');
     if(scenario.stallAttempts===2||scenario.refuse){
       assert.ok(terminal,'an ordinary refusal/second owned deadline is terminal, never an empty search');
       const code=terminal.structuredContent.code;

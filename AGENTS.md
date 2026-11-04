@@ -98,7 +98,11 @@ publication tooling также остаются вне этого публичн
   снимает unknown-outcome fence. [Контракт](docs/assistant-scheduler.md#company-model-selection).
   Existing background status keeps OS state and appends a content-free native
   execution/SELECT-only inbox aggregate: missing model blocks even an empty
-  queue, denied/incomplete reads stay unknown/null. No diagnostic poll, claim,
+  queue, denied/incomplete reads stay unknown/null. Receipt-bound waiting_owner
+  intakes are known outcomes, never uncertain deliveries; missing/damaged receipts
+  and started/uncertain rows keep their global fence. Diagnostics never settle
+  questions or recover health without a real business completion. No diagnostic
+  poll, claim,
   migration, ACK or active-process inference from retained uncertain markers.
   SAME journal v11 retains only closed original delivery code/stage, atomically
   with uncertainty; old causes stay null. Status batches native-selected pairs
