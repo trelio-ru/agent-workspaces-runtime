@@ -2254,7 +2254,7 @@ test("local action protects nested task content and converts Markdown before upl
   assert.match(JSON.stringify(decryptedValues), /bulletList/u);
   assert.match(JSON.stringify(decryptedValues), /Не утечь/u);
 
-  const launchPath = "/Users/Fixture/Private company folder";
+  const launchPath = "/Users/Fixture/Private company folder  ";
   const launch = await protectLocalActionArguments({ nativeTool: "register_codex_folder",
     arguments: { clientRequestId: "44444444-4444-4444-8444-444444444444", folderPath: launchPath }, companyEncryption });
   assert.match(launch.value.folderPath, /^~e1:.*folder_path/u);

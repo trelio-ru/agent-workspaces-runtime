@@ -2275,7 +2275,13 @@ export const protectLocalActionArguments = async ({
     // dedicated entity type so the generic company resolver can enforce the
     // writer's personal ACL even before registration or after row deletion.
     const id = normalizeUuid(normalizedArguments.clientRequestId, "clientRequestId");
-    const folderPath = normalizeBoundedString(normalizedArguments.folderPath, "folderPath", 4096);
+    // A trailing space can belong to a real directory. Content normalization
+    // must never change the native-selected filesystem locator.
+    const folderPath = normalizedArguments.folderPath;
+    if (typeof folderPath !== "string" || !folderPath.length || folderPath.length > 4096
+      || /[\u0000-\u001f\u007f]/u.test(folderPath)) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "A bounded local folder path is required.");
+    }
     const entityId = deriveLocalActionEntityId(companyEncryption, `register_codex_folder\0${id}`);
     const values = { folder_path: folderPath };
     const payload = await buildLocalActionEncryptedPayload({ companyEncryption, entityId,
