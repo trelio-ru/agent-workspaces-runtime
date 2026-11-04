@@ -6,6 +6,8 @@
 #include "../../host-runtime/scripts/native-private-process/PrivateProcess.cpp"
 #undef main
 #include <sddl.h>
+#include <wbemidl.h>
+#include <utility>
 
 namespace {
 constexpr PCWSTR FixtureService=L"TrelioDisposablePackageServiceAccess";
@@ -156,6 +158,96 @@ struct FixtureResourceRecord {
   std::optional<DWORD> count;
   bool pidMatches=false,nameMatches=false,typeMatches=false,generationMatches=false;
 };
+struct FixtureWmiRecord {
+  DWORD stage=0,status=0;
+  bool complete=false,pidMatches=false,nameMatches=false,pathAvailable=false,pathMatches=false;
+  bool creationAvailable=false,creationMatchesMicroseconds=false;
+};
+std::optional<ULONGLONG> fixtureWmiCreation(BSTR value) {
+  // DMTF CreationDate has SIX fractional digits, not FILETIME's seven. Keep
+  // that loss explicit in this diagnostic; never claim exact 100ns identity
+  // or silently substitute a rounded generation in production/legacy receipts.
+  if(!value||SysStringLen(value)!=25||value[14]!=L'.'||(value[21]!=L'+'&&value[21]!=L'-'))return {};
+  for(size_t i=0;i<25;++i)if(i!=14&&i!=21&&(value[i]<L'0'||value[i]>L'9'))return {};
+  const auto number=[&](size_t offset,size_t count){DWORD result=0;
+    for(size_t i=0;i<count;++i)result=result*10+static_cast<DWORD>(value[offset+i]-L'0');return result;};
+  SYSTEMTIME date{};date.wYear=static_cast<WORD>(number(0,4));date.wMonth=static_cast<WORD>(number(4,2));
+  date.wDay=static_cast<WORD>(number(6,2));date.wHour=static_cast<WORD>(number(8,2));
+  date.wMinute=static_cast<WORD>(number(10,2));date.wSecond=static_cast<WORD>(number(12,2));
+  FILETIME file{};if(!SystemTimeToFileTime(&date,&file))return {};
+  ULARGE_INTEGER time{};time.LowPart=file.dwLowDateTime;time.HighPart=file.dwHighDateTime;
+  const auto fraction=static_cast<ULONGLONG>(number(15,6))*10;
+  const auto offset=static_cast<ULONGLONG>(number(22,3))*60*10000000;
+  if(time.QuadPart>std::numeric_limits<ULONGLONG>::max()-fraction)return {};
+  auto utc=time.QuadPart+fraction;
+  if(value[21]==L'+'){if(utc<offset)return {};utc-=offset;}
+  else {if(utc>std::numeric_limits<ULONGLONG>::max()-offset)return {};utc+=offset;}
+  constexpr ULONGLONG epoch=504911232000000000ULL;
+  if(utc>std::numeric_limits<ULONGLONG>::max()-epoch)return {};
+  return utc+epoch;
+}
+template<class T> struct FixtureCom {
+  T* value=nullptr;
+  ~FixtureCom(){if(value)value->Release();}
+};
+struct FixtureBstr {
+  BSTR value;
+  explicit FixtureBstr(const wchar_t* text):value(SysAllocString(text)){require(value!=nullptr);}
+  ~FixtureBstr(){SysFreeString(value);}
+};
+struct FixtureVariant {
+  VARIANT value;
+  FixtureVariant(){VariantInit(&value);}
+  ~FixtureVariant(){VariantClear(&value);}
+};
+FixtureWmiRecord probeFixtureWmi(DWORD pid,const std::string& reference) {
+  // SOURCE-ONLY old-Windows API comparison. Query only our exact inert service
+  // process, using the SAME ordinary caller and no explicit credentials or
+  // privilege adjustments. No WMI method/control endpoint exists in this code.
+  // https://learn.microsoft.com/windows/win32/wmisdk/example--getting-wmi-data-from-the-local-computer
+  FixtureWmiRecord result;result.stage=1;
+  const auto initialized=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+  result.status=static_cast<DWORD>(initialized);if(FAILED(initialized))return result;
+  struct Uninitialize {~Uninitialize(){CoUninitialize();}} uninitialize;
+  result.stage=2;auto hr=CoInitializeSecurity(nullptr,-1,nullptr,nullptr,RPC_C_AUTHN_LEVEL_DEFAULT,
+    RPC_C_IMP_LEVEL_IMPERSONATE,nullptr,EOAC_NONE,nullptr);
+  result.status=static_cast<DWORD>(hr);if(FAILED(hr)&&hr!=RPC_E_TOO_LATE)return result;
+  FixtureCom<IWbemLocator> locator;FixtureCom<IWbemServices> services;FixtureCom<IEnumWbemClassObject> rows;
+  result.stage=3;hr=CoCreateInstance(CLSID_WbemLocator,nullptr,CLSCTX_INPROC_SERVER,IID_IWbemLocator,
+    reinterpret_cast<void**>(&locator.value));result.status=static_cast<DWORD>(hr);if(FAILED(hr))return result;
+  FixtureBstr space(L"ROOT\\CIMV2");result.stage=4;
+  hr=locator.value->ConnectServer(space.value,nullptr,nullptr,nullptr,WBEM_FLAG_CONNECT_USE_MAX_WAIT,nullptr,nullptr,&services.value);
+  result.status=static_cast<DWORD>(hr);if(FAILED(hr))return result;
+  result.stage=5;hr=CoSetProxyBlanket(services.value,RPC_C_AUTHN_WINNT,RPC_C_AUTHZ_NONE,nullptr,
+    RPC_C_AUTHN_LEVEL_CALL,RPC_C_IMP_LEVEL_IMPERSONATE,nullptr,EOAC_NONE);
+  result.status=static_cast<DWORD>(hr);if(FAILED(hr))return result;
+  const auto query=L"SELECT ProcessId,Name,ExecutablePath,CreationDate FROM Win32_Process WHERE ProcessId="+std::to_wstring(pid);
+  FixtureBstr language(L"WQL"),statement(query.c_str());result.stage=6;
+  hr=services.value->ExecQuery(language.value,statement.value,WBEM_FLAG_FORWARD_ONLY|WBEM_FLAG_RETURN_IMMEDIATELY,nullptr,&rows.value);
+  result.status=static_cast<DWORD>(hr);if(FAILED(hr))return result;
+  FixtureCom<IWbemClassObject> row,extra;ULONG count=0;result.stage=7;
+  hr=rows.value->Next(5000,1,&row.value,&count);result.status=static_cast<DWORD>(hr);
+  if(hr!=S_OK||count!=1||!row.value)return result;
+  count=0;hr=rows.value->Next(5000,1,&extra.value,&count);result.status=static_cast<DWORD>(hr);
+  if(hr!=S_FALSE||count!=0)return result;
+  FixtureVariant id,name,path,created;result.stage=8;
+  for(const auto& item:std::array<std::pair<PCWSTR,VARIANT*>,4>{{{L"ProcessId",&id.value},{L"Name",&name.value},
+      {L"ExecutablePath",&path.value},{L"CreationDate",&created.value}}}){
+    hr=row.value->Get(item.first,0,item.second,nullptr,nullptr);result.status=static_cast<DWORD>(hr);if(FAILED(hr))return result;
+  }
+  result.pidMatches=(id.value.vt==VT_I4&&id.value.lVal>0&&static_cast<DWORD>(id.value.lVal)==pid)
+    ||(id.value.vt==VT_UI4&&id.value.ulVal==pid);
+  result.nameMatches=name.value.vt==VT_BSTR&&name.value.bstrVal&&SysStringLen(name.value.bstrVal)<32768
+    &&_wcsicmp(name.value.bstrVal,L"codex-windows-sandbox-service.exe")==0;
+  result.pathAvailable=path.value.vt==VT_BSTR&&path.value.bstrVal&&SysStringLen(path.value.bstrVal)>0&&SysStringLen(path.value.bstrVal)<32768;
+  result.pathMatches=result.pathAvailable&&_wcsicmp(path.value.bstrVal,fixtureExecutable().c_str())==0;
+  const auto time=created.value.vt==VT_BSTR?fixtureWmiCreation(created.value.bstrVal):std::optional<ULONGLONG>{};
+  result.creationAvailable=time.has_value();
+  const auto colon=reference.find(':');require(colon!=std::string::npos&&reference.substr(0,colon)==std::to_string(pid));
+  const auto original=std::stoull(reference.substr(colon+1));
+  result.creationMatchesMicroseconds=time&&*time/10==original/10;
+  result.stage=9;result.status=0;result.complete=true;return result;
+}
 FixtureResourceRecord probeFixtureResource(bool file,DWORD pid,const std::string& reference) {
   PackageServiceImage api(fixtureExecutable());FixtureResourceRecord result;
   DWORD session=0;WCHAR key[CCH_RM_SESSION_KEY+1]{};
@@ -211,6 +303,7 @@ void probeFixtureResources() {
   const auto named=probeFixtureResource(false,status.dwProcessId,std::string(reference,length));
   const auto basic=probeFixtureBasicProcess(status.dwProcessId);
   const auto second=probeFixtureBasicProcess(status.dwProcessId);
+  const auto wmi=probeFixtureWmi(status.dwProcessId,std::string(reference,length));
   char sequence[32]{};const auto sequenceLength=GetEnvironmentVariableA("TRELIO_SERVICE_FIXTURE_SEQUENCE",sequence,32);
   const bool referenceMatches=sequenceLength>0&&sequenceLength<32&&basic.complete&&basic.found&&
     std::to_string(basic.sequence)==std::string(sequence,sequenceLength);
@@ -224,7 +317,11 @@ void probeFixtureResources() {
   write(",\"pidMatches\":");write(basic.found?"true":"false");write(",\"imageMatches\":");write(basic.imageMatches?"true":"false");
   write(",\"referenceMatches\":");write(referenceMatches?"true":"false");write(",\"stableMatches\":");
   write(basic.complete&&basic.found&&second.complete&&second.found&&second.imageMatches&&basic.sequence==second.sequence?"true":"false");
-  write("}}\n");
+  write("},\"wmi\":{\"stage\":");write(std::to_string(wmi.stage));write(",\"status\":");write(std::to_string(wmi.status));
+  write(",\"complete\":");write(wmi.complete?"true":"false");write(",\"pidMatches\":");write(wmi.pidMatches?"true":"false");
+  write(",\"nameMatches\":");write(wmi.nameMatches?"true":"false");write(",\"pathAvailable\":");write(wmi.pathAvailable?"true":"false");
+  write(",\"pathMatches\":");write(wmi.pathMatches?"true":"false");write(",\"creationAvailable\":");write(wmi.creationAvailable?"true":"false");
+  write(",\"creationMatchesMicroseconds\":");write(wmi.creationMatchesMicroseconds?"true":"false");write("}}\n");
 }
 void cleanupFixture() {
   require(administrator());auto manager=fixtureManager(SC_MANAGER_CONNECT);require(manager.value);

@@ -116,6 +116,17 @@ if ($Child) {
       referenceMatches = (DiagnosticBoolean $record.basic.referenceMatches)
       stableMatches = (DiagnosticBoolean $record.basic.stableMatches)
     }
+    wmi = [ordered]@{
+      stage = (DiagnosticNumber $record.wmi.stage -Required)
+      status = (DiagnosticNumber $record.wmi.status -Required)
+      complete = (DiagnosticBoolean $record.wmi.complete)
+      pidMatches = (DiagnosticBoolean $record.wmi.pidMatches)
+      nameMatches = (DiagnosticBoolean $record.wmi.nameMatches)
+      pathAvailable = (DiagnosticBoolean $record.wmi.pathAvailable)
+      pathMatches = (DiagnosticBoolean $record.wmi.pathMatches)
+      creationAvailable = (DiagnosticBoolean $record.wmi.creationAvailable)
+      creationMatchesMicroseconds = (DiagnosticBoolean $record.wmi.creationMatchesMicroseconds)
+    }
   } | ConvertTo-Json -Compress -Depth 5
   if ($null -eq $probeExit -or $probeExit -ne 0 -or $probeErrorBytes -ne 0) { throw 'Resource probe process outcome was not successful; no replay.' }
   if ($DiagnosticOnly) { exit 0 }
@@ -147,7 +158,7 @@ $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.
 if ($LASTEXITCODE -ne 0 -or !$installation) { throw 'Fixture MSVC unavailable.' }
 $vcvars = Join-Path $installation 'VC/Auxiliary/Build/vcvarsall.bat'
 $target = if ($env:PROCESSOR_ARCHITECTURE -ceq 'ARM64') { 'x64_arm64' } else { 'x64' }
-$command = "`"$vcvars`" $target >nul && cl.exe /nologo /utf-8 /std:c++17 /O2 /MT /EHsc /W4 /WX /guard:cf /Brepro /DUNICODE /D_UNICODE `"$source`" /Fo`"$object`" /Fe`"$serviceBinary`" /link advapi32.lib crypt32.lib uuid.lib /DYNAMICBASE /NXCOMPAT /Brepro"
+$command = "`"$vcvars`" $target >nul && cl.exe /nologo /utf-8 /std:c++17 /O2 /MT /EHsc /W4 /WX /guard:cf /Brepro /DUNICODE /D_UNICODE `"$source`" /Fo`"$object`" /Fe`"$serviceBinary`" /link advapi32.lib crypt32.lib uuid.lib ole32.lib oleaut32.lib wbemuuid.lib /DYNAMICBASE /NXCOMPAT /Brepro"
 & $env:ComSpec /d /s /c $command
 if ($LASTEXITCODE -ne 0) { throw 'Source-composed service fixture compilation failed.' }
 # Distinct files are essential: a client mapping the SAME service executable

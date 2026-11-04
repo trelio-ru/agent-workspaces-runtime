@@ -897,6 +897,9 @@ publication tooling также остаются вне этого публичн
   A source-only documented SystemBasicProcessInformation comparison may report
   fixed PID/image/sequence equality only; it is not production identity or CI
   acceptance. Native handle ownership keeps its actual read-probe exit observable.
+  The isolated ordinary-token WMI comparison retains only closed HRESULT/stage
+  and own-process identity booleans. Its microsecond CreationDate is not exact
+  legacy FILETIME evidence; paths/prose and production predicates stay private.
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.
