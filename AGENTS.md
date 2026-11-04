@@ -474,6 +474,7 @@ publication tooling также остаются вне этого публичн
   A failed authentication bootstrap also retains its current browser's numeric
   exit/signal/category and fixed native-log counters, never raw native output.
   Synthetic auth diagnostics distinguish finished POST responses from consumed attempt steps without raw values; the original success assertion and no-replay fence remain strict.
+  Authentication fixtures assert the first native navigation before input, retain only its common validated startup diagnostic and reset evidence for each browser generation; no startup/input retry or deadline extension.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
   Native manual-close regression shares the auth fixture's owned HTTP abort
   helper: abort its failed producer before HTTP-close waits, close listener/sockets

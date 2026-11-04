@@ -14,6 +14,7 @@ import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-ex
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
+import { validateVisualStartupDiagnostic } from '../host-runtime/scripts/trelio-visual-result.mjs';
 
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 
@@ -331,7 +332,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   // Fixed synthetic phases/counters locate a hosted outer deadline without
   // printing forms, credentials, private browser output, URLs or native logs.
   let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;
-  let nativeExit=null,nativeLog=null;const evidence=[];
+  let nativeExit=null,nativeLog=null,startupDiagnostic=null;const evidence=[];
   const record=value=>{
     // The browser already reports these fixture-only closed fields. Retain
     // them for the current browser generation instead of losing its real exit
@@ -355,10 +356,11 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
     passwordSubmits,codeSubmits,codeResponses,methodFollows,mailSubmits,
     consumedSteps:currentFixtureStore?.saved?.attempt?.steps?.length??null,
-    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',nativeExit,nativeLog,evidence})+'\n');};
+    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',startupDiagnostic,nativeExit,nativeLog,evidence})+'\n');};
   const observe=value=>{
     lastState=['ready','error','manual_input_required','saved_unverified'].includes(value?.state)?value.state:'other';
     lastReason=['none','bootstrap_failed','manual_control_active','operation_failed','lease_expired','storage_unavailable'].includes(value?.reason)?value.reason:'other';
+    if(value?.diagnostic)startupDiagnostic=validateVisualStartupDiagnostic(value.diagnostic);
     return value;
   };
   t.signal.addEventListener('abort',diagnose,{once:true});
@@ -413,35 +415,44 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
   const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
-  const make = () => { currentFixtureStore = activeStore;nativeExit=null;nativeLog=null;return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
+  const make = () => { currentFixtureStore = activeStore;nativeExit=null;nativeLog=null;startupDiagnostic=null;evidence.length=0;return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
     mailIdentity: { origin: 'https://trelio.ru', companyId, memberId, scope: 'd'.repeat(64) },
     policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' }); };
   let browser = make();
+  const navigate = async url => {
+    // Navigation starts this exact native browser. Refuse its FIRST startup
+    // error here, before authenticate() can merely repeat a retained terminal
+    // status and mislabel the failure as a password/transition problem. Keep
+    // only the common validated diagnostic, never the image, URL or raw result.
+    action='navigate';const result=observe(await browser.call('navigate',{url}));
+    assert.notEqual(result.state,'error',JSON.stringify({phase,action,state:lastState,reason:lastReason,startupDiagnostic}));
+    return result;
+  };
   // A timed-out fixture must stop only its own live browser handle, rather
   // than leave it running into the next native test. The original timeout
   // remains a failure; this neither repeats an action nor hides its evidence.
   const abortOwned=()=>browser.abort();t.signal.addEventListener('abort',abortOwned,{once:true});
   try {
-    assert.equal((await browser.call('navigate', { url: origin })).reason, 'manual_control_active');
+    phase='initial_navigation';assert.equal((await navigate(origin)).reason, 'manual_control_active');
     assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
     assert.equal((await browser.call('authenticate', { password: 'forbidden' })).reason, 'invalid_input');
     phase='first_auth';const result = await browser.call('authenticate'); assert.equal(result.state, 'saved_unverified', result.reason);
     assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC|GEZDGNBV/);
     assert.equal((await browser.call('screenshot')).state, 'ready');
     phase='session_reuse';await browser.close(); browser = make();
-    assert.equal((await browser.call('navigate', { url: origin })).state, 'ready');
+    assert.equal((await navigate(origin)).state, 'ready');
     assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
     assert.equal(passwordSubmits, 1); assert.equal(codeSubmits, 1);
     await browser.close();
     phase='segmented_totp';const segmented = recipe(origin); segmented.steps[1].fields.totp = Array.from({ length: 6 }, (_, i) => `#d${i}`); segmented.steps[1].submit = null;
     activeDef = normalizeVisualAuthentication(segmented, { origins: [origin], fixtureOnly: true }); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
-    await browser.call('navigate', { url: `${origin}/segmented` });
+    await navigate(`${origin}/segmented`);
     assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
     assert.equal(passwordSubmits, 2); assert.equal(codeSubmits, 2, 'auto-submit OTP has no additional click/submission');
     await browser.close();
     phase='follow_transition';activeDef = withTransition(origin); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
-    await browser.call('navigate', { url: `${origin}/with-follow` });
-    const followedAuthentication = await browser.call('authenticate');
+    await navigate(`${origin}/with-follow`);
+    action='authenticate';const followedAuthentication = observe(await browser.call('authenticate'));
     // Keep the original success requirement. A closed native reason and exact
     // effect counters locate a failed transition without printing credentials,
     // URLs, browser state or private provider output into the hosted log.
@@ -456,7 +467,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       ['popup','/follow-popup'],['download','/follow-download'],['hidden','/follow-hidden'],['ambiguous','/follow-ambiguous'],
       ['sensitive','/follow-sensitive'],['captcha','/follow-captcha']]) {
       variant=selectedVariant;activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
-      action='navigate';observe(await browser.call('navigate', { url: origin + route }));
+      await navigate(origin + route);
       action='authenticate';assert.equal(observe(await browser.call('authenticate')).state, 'manual_input_required', route);
       action='screenshot';assert.equal(observe(await browser.call('screenshot')).reason, 'manual_control_active');
       action='counters';assert.equal(methodFollows, 1, 'an unsafe/ambiguous transition never follows its link');
@@ -467,7 +478,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     await browser.close(); activeDef = def;
     phase='manual_form_loop';for (const route of ['/unsafe', '/ambiguous', '/sms']) {
       activeStore = memoryStore(def); activeStore.directory = directory; browser = make();
-      await browser.call('navigate', { url: origin + route });
+      await navigate(origin + route);
       assert.equal((await browser.call('authenticate')).state, 'manual_input_required');
       assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
       assert.equal(passwordSubmits, 3); assert.equal(codeSubmits, 3, 'untrusted form/SMS never receives stored credentials or TOTP');
@@ -486,7 +497,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     activeStore = memoryStore(def); activeStore.directory = directory; browser = make();
     assert.equal((await browser.call('credentials-status')).state, 'saved_unverified');
     assert.equal(activeStore.saved.schemaVersion, 1, 'status must not migrate the record');
-    await browser.call('navigate', { url: `${origin}/mail-start` });
+    await navigate(`${origin}/mail-start`);
     await browser.call('authenticate-mail', { mailAccountId });
     let status;
     const until = Date.now() + 10000;

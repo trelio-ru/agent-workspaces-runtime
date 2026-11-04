@@ -175,6 +175,9 @@ Authentication fixture сохраняет numeric exit, allowlisted signal и к
 не объявляют причину завершения процесса установленной и не разрешают повтор input/login.
 Та же закрытая диагностика доступна synthetic detached fixture, чтобы его
 startup не оставался скрытым за общим `bootstrap_failed`.
+Authentication fixture проверяет первый `navigate` до входа и сохраняет его
+общую validated startup diagnostic. Evidence очищается при смене browser generation;
+startup refusal не считается попыткой пароля и не разрешает повтор запуска/input.
 
 Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
 Запуск без начального окна остаётся только на macOS с её app lifecycle.
