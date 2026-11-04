@@ -453,6 +453,9 @@ publication tooling также остаются вне этого публичн
   без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
   Windows/Linux startup использует внутреннюю new-tab вкладку без URL в argv;
   background-only lifetime без окна применяется только к macOS.
+  GUI Chromium запускается без native `SW_HIDE` (`windowsHide: false`), иначе
+  Windows может показать белую поверхность. Не переносить console-hide policy
+  на общий GUI launcher; native startup-info regression и ignored stdio обязательны.
   Новый owned профиль заранее получает обычный continue-session preference;
   одного --restore-last-session недостаточно до первого закрытия Windows/Linux.
   Existing Preferences не перезаписываются; policy ставится до provider URL,

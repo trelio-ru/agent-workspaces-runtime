@@ -169,6 +169,11 @@ WebSocket transport также закреплены отдельным npm lockf
 Opera/Chrome и пользовательские профили автоматически не импортируются.
 
 Chromium запускается как обычный headed browser с собственным приватным профилем.
+GUI child запускается с `windowsHide: false`: на Windows `SW_HIDE` в native
+startup info может оставить белую поверхность вместо нормального окна Chromium,
+включая ручной вход. Это общий launcher визуальных навыков для обычных
+пользователей и ассистентов. Его stdio остаётся `ignore`; console helpers,
+lease, закрытие и сохранение профиля сохраняют прежние ограничения.
 Нет Puppeteer launch, remote-debugging port/pipe, `--enable-automation`,
 AutomationControlled override или fingerprint spoof. MV3 extension использует
 внутренний `chrome.debugger`: только фиксированные Page raster/layout/MIME
@@ -773,6 +778,9 @@ Watchdog может завершить только созданный теку�
 ## Проверки и текущие границы
 
 Pure tests: result/MCP projection, loopback auth, AEAD, profile traversal и bounds.
+Windows regression читает настоящие `GetStartupInfoW` flags внутри собственного
+native child общего GUI launcher и запрещает `STARTF_USESHOWWINDOW/SW_HIDE`;
+готовность extension сама по себе не доказывает видимость OS-окна.
 Extension E2E использует synthetic localhost: clicks, русский input, select-all,
 scroll, same-tab target-blank routing, cookies/localStorage restore, window-close,
 ready, explicit logout без восстановления входа и crash сохранение предыдущего snapshot. Headed Mac test независимо

@@ -31,9 +31,14 @@ const fault = code => Object.assign(new Error(code), { code });
  * stdio as an ordinary browser: a diagnostic-only stderr pipe can be inherited
  * by Chromium helpers after the browser exits and manufacture a stop timeout.
  * The original exit/close deadline and profile save/disposal checks stay strict.
+ * This child is a headed GUI application, not a console helper. On Windows,
+ * windowsHide passes STARTF_USESHOWWINDOW/SW_HIDE to Chromium and can leave its
+ * window as an unpainted white surface even during explicit manual login.
+ * Keep the GUI's normal startup presentation; ignored stdio already avoids
+ * diagnostic pipes and does not require hiding the browser window.
  */
 export function spawnVisualBrowserProcess(executable, args, env) {
-  return spawn(executable, args, { env, stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
+  return spawn(executable, args, { env, stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false });
 }
 
 /** ChildProcess 'exit' can precede its 'close'. Keep the original stop budget

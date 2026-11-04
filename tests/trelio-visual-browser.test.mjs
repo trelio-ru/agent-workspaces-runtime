@@ -4,6 +4,60 @@ import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-
 import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+test('GUI browser launch does not send native Windows SW_HIDE startup presentation', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
+  // Read the actual CreateProcess startup contract inside a real native child.
+  // This catches windowsHide:true without mocking spawn or adding a public
+  // production test override. It is independent of Chromium's extension hello:
+  // a live extension/renderer does not prove that its OS window is painted.
+  // Only two numeric Win32 fields from our synthetic child reach the fixture.
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'visual-gui-startup-'));
+  const receipt = path.join(directory, 'startup.json');
+  const source = `
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class VisualGuiStartup {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct StartupInfo {
+    public uint cb;
+    public IntPtr reserved, desktop, title;
+    public uint x, y, width, height, charsX, charsY, fill, flags;
+    public ushort show, reservedSize;
+    public IntPtr reservedBytes, stdin, stdout, stderr;
+  }
+  [DllImport("kernel32.dll", EntryPoint="GetStartupInfoW", ExactSpelling=true)]
+  private static extern void GetStartupInfo(out StartupInfo info);
+  public static uint[] Read() {
+    StartupInfo info;
+    GetStartupInfo(out info);
+    return new uint[] { info.flags, info.show };
+  }
+}
+'@
+    $info = [VisualGuiStartup]::Read()
+    [System.IO.File]::WriteAllText('${receipt.replaceAll("'", "''")}', (ConvertTo-Json -Compress -InputObject $info))
+  `;
+  const executable = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const child = spawnVisualBrowserProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], process.env);
+  const abort = () => { if (child.exitCode === null && child.signalCode === null) child.kill(); };
+  t.signal.addEventListener('abort', abort, { once: true });
+  try {
+    const [code, signal] = await once(child, 'close');
+    assert.equal(code, 0); assert.equal(signal, null);
+    const [flags, show] = JSON.parse(await fs.readFile(receipt, 'utf8'));
+    assert.equal(Number.isInteger(flags) && Number.isInteger(show), true);
+    assert.equal(Boolean(flags & 0x00000001) && show === 0, false, 'headed GUI child must not inherit STARTF_USESHOWWINDOW/SW_HIDE');
+    assert.equal(child.stdin, null); assert.equal(child.stdout, null); assert.equal(child.stderr, null);
+  } finally {
+    t.signal.removeEventListener('abort', abort); abort();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('fixture stage diagnostics retain production browser flags without implicitly creating native.log',async()=>{
   const origins=['http://127.0.0.1:12345'];
