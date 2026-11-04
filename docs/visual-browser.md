@@ -178,6 +178,8 @@ startup не оставался скрытым за общим `bootstrap_failed
 Authentication fixture проверяет первый `navigate` до входа и сохраняет его
 общую validated startup diagnostic. Evidence очищается при смене browser generation;
 startup refusal не считается попыткой пароля и не разрешает повтор запуска/input.
+Штатный `error/manual_control_active` без startup diagnostic сохраняет закрытую
+форму и допускает следующий private authenticate, но сам не доказывает вход/готовность.
 
 Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
 Запуск без начального окна остаётся только на macOS с её app lifecycle.

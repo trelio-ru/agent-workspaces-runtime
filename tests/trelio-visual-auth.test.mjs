@@ -14,9 +14,26 @@ import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-ex
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
-import { validateVisualStartupDiagnostic } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { validateVisualStartupDiagnostic, visualStartupDiagnostic, visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
+
+// The native screenshot command deliberately reports error/manual_control_active
+// while protected authentication hides the login form. That exact gate permits
+// the following private authenticate(), but grants no readiness or input replay.
+// Every startup diagnostic and other error must fail before that private call.
+const nativeAuthenticationNavigationAllowed = value => value?.diagnostic === undefined
+  && (value?.state === 'ready' || value?.state === 'error' && value?.reason === 'manual_control_active');
+
+test('native auth navigation distinguishes its protected observation gate from a startup refusal', () => {
+  assert.equal(nativeAuthenticationNavigationAllowed(visualStatus('error', 'manual_control_active')), true);
+  assert.equal(nativeAuthenticationNavigationAllowed(visualStatus('ready')), true);
+  assert.equal(nativeAuthenticationNavigationAllowed(visualStatus('error', 'bootstrap_failed', {
+    diagnostic: visualStartupDiagnostic('extension_connect', 'extension_not_connected'),
+  })), false);
+  assert.equal(nativeAuthenticationNavigationAllowed(visualStatus('error', 'navigation_blocked')), false);
+  assert.equal(nativeAuthenticationNavigationAllowed(visualStatus('preparing')), false);
+});
 
 test('synthetic auth listener closes active connections on abort even when browser cleanup is never reached', {timeout:3000}, async()=>{
   const controller=new AbortController(),server=http.createServer(()=>{});
@@ -425,7 +442,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     // status and mislabel the failure as a password/transition problem. Keep
     // only the common validated diagnostic, never the image, URL or raw result.
     action='navigate';const result=observe(await browser.call('navigate',{url}));
-    assert.notEqual(result.state,'error',JSON.stringify({phase,action,state:lastState,reason:lastReason,startupDiagnostic}));
+    assert.ok(nativeAuthenticationNavigationAllowed(result),JSON.stringify({phase,action,state:lastState,reason:lastReason,startupDiagnostic}));
     return result;
   };
   // A timed-out fixture must stop only its own live browser handle, rather
