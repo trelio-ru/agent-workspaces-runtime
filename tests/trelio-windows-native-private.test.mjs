@@ -159,6 +159,34 @@ test('native Desktop shutdown rejects malformed or non-Codex generations without
   assert.notEqual(extra.code,0);assert.equal(extra.stdout,'');
 });
 
+test('native package-service discovery and refused control have fixed names, no private protocol and no caller selectors',windows,async()=>{
+  const options=windowsPrivateWorkerOptions();
+  const observed=await run(options.executable,['--codex-service-inspect']);
+  assert.equal(observed.stderr,'');const value=JSON.parse(observed.stdout);
+  assert.deepEqual(Object.keys(value).sort(),['generation','schemaVersion','state']);
+  assert.equal(value.schemaVersion,1);assert.ok(['running','stopped','absent','unavailable'].includes(value.state));
+  if(value.state==='running')assert.match(value.generation,/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u);
+  else assert.equal(value.generation,null);
+  // These can never match a live generation, even on a developer's Windows
+  // machine with the real app installed. Never test an actual stop/start here.
+  for(const generation of ['caller-path','0:1','1:0',`${process.pid}:1`]){
+    const denied=await run(options.executable,['--codex-service-stop',generation]);
+    assert.notEqual(denied.code,0);assert.equal(denied.stderr,'');
+    assert.deepEqual(JSON.parse(denied.stdout),{schemaVersion:1,state:'unavailable',generation:null});
+  }
+  for(const args of [['--codex-service-inspect','foreign'],['--codex-service-start','foreign'],
+    ['--codex-service-stop','1:1','foreign']]){
+    const denied=await run(options.executable,args);assert.notEqual(denied.code,0);assert.equal(denied.stdout,'');
+  }
+  for(const version of ['caller-path','1.2.3','65536.0.0.0','01.2.3.4']){
+    const denied=await run(options.executable,['--codex-package-staged',version]);
+    assert.notEqual(denied.code,0);assert.equal(denied.stderr,'');
+    assert.deepEqual(JSON.parse(denied.stdout),{schemaVersion:1,state:'unavailable',generation:null});
+  }
+  const staged=await run(options.executable,['--codex-package-staged','0.0.0.0']);
+  assert.equal(staged.stderr,'');assert.ok(['absent','unavailable'].includes(JSON.parse(staged.stdout).state));
+});
+
 // x64 Windows can execute x86 too. The separate hosted ARM64 gate exercises
 // the third published binary natively; packaging requires all three hashes.
 for (const arch of process.arch === 'x64' ? ['x64','ia32'] : [process.arch]) {

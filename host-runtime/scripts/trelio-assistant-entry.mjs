@@ -1854,7 +1854,7 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
   // A prior Desktop deployment owns its GUI lifecycle until read-back. Do not
   // start a plugin installation/restart over that unresolved private journal.
   // The ordinary tick proceeds directly to the Desktop recovery below.
-  if(policy.codex&&!['ready','failed','registration_failed'].includes(policy.codex.phase))return {state:'codex_pending'};
+  if(policy.codex&&!['ready','failed','registration_failed','service_failed'].includes(policy.codex.phase))return {state:'codex_pending'};
   const deadline=AbortSignal.timeout(150_000);
   signal=signal?AbortSignal.any([signal,deadline]):deadline;
   return runtime.coordinator.maintainPluginAtIdleBoundary(coordinatorGuard=>context(async (lockedClient,lockedHost)=>lockedHost.withSetupLock(async()=>{
@@ -1953,13 +1953,13 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
  * owner opt-out. It reuses the strict coordinator and setup locks rather
  * than interpreting a quiet UI or an expired delivery as an idle computer. */
 export const runProductionAssistantCodexMaintenance = async (runtime,{context=productionContext,environment=process.env,
-  platform=process.platform,signal,nativeUpdate=runAssistantWindowsCodexUpdate,download=downloadCodexDesktop,desktop,probe}={}) => {
+  platform=process.platform,signal,nativeUpdate=runAssistantWindowsCodexUpdate,download=downloadCodexDesktop,desktop,service,probe}={}) => {
   if(platform!=='win32')return {state:'unsupported'};
   const policy=await context(async(_client,host)=>({enabled:await host.readCodexUpdatesEnabled(),state:await host.readCodexUpdate()}),{signal});
   if(!policy.enabled){
     // Revoking permission cannot silently make an unfinished installation idle.
     // Leave its journal intact and surface the same closed health incident.
-    if(policy.state&&!['ready','failed','registration_failed'].includes(policy.state.phase))fail('ASSISTANT_CODEX_UPDATE_FAILED');
+    if(policy.state&&!['ready','failed','registration_failed','service_failed'].includes(policy.state.phase))fail('ASSISTANT_CODEX_UPDATE_FAILED');
     return {state:'disabled'};
   }
   const deadline=AbortSignal.timeout(15*60_000);signal=signal?AbortSignal.any([signal,deadline]):deadline;
@@ -1979,9 +1979,12 @@ export const runProductionAssistantCodexMaintenance = async (runtime,{context=pr
     const packagePath=await host.codexUpdatePackagePath();
     const update=(operation,extra={})=>nativeUpdate(operation,{environment,signal,guard,packagePath,...extra});
     const desktopEngine=desktop??(await import('./trelio-assistant-setup.mjs')).runAssistantWindowsDesktop;
+    const serviceEngine=service??(await import('./trelio-assistant-setup.mjs')).runAssistantWindowsCodexService;
     return maintainAssistantCodexDesktop({identity:runtime.identity,guard,
       readState:()=>host.readCodexUpdate(),writeState:(expected,value)=>host.writeCodexUpdate(expected,value),
       inspect:()=>update('inspect'),prepare:sha256=>update('prepare',{sha256}),install:(sha256,version)=>update('install',{sha256,version}),
+      register:(sha256,version)=>update('register',{sha256,version}),
+      service:(operation,generation)=>serviceEngine(operation,generation,{environment,signal,guard}),
       download:(architecture,etag,installedVersion)=>download({architecture,etag,installedVersion,packagePath,signal}),
       desktop:(operation,generation)=>desktopEngine(operation,generation,{environment,signal,guard}),
       probe:probe??(async()=>{

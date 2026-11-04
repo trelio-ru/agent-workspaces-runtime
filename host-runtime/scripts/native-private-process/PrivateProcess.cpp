@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <winsvc.h>
 #include <aclapi.h>
 #include <wincrypt.h>
 #include <tlhelp32.h>
@@ -779,8 +780,141 @@ int closeCodexDesktop(std::string_view generation) {
   write("{\"schemaVersion\":1,\"state\":\"stopped\",\"generation\":null}\n");return 0;
 }
 
+// A packaged LocalSystem service can keep AppX in use after every GUI process
+// exits. It is deliberately NOT added to Restart Manager's process resource
+// list: service control has a separate journaled intent and ordinary SCM ACL.
+// Never elevate, change that ACL/configuration, terminate a process, or accept
+// a caller-supplied service/image. The OS-selected current-user package remains
+// the only source of the executable identity, including after registration.
+struct ServiceHandle {
+  SC_HANDLE value;
+  explicit ServiceHandle(SC_HANDLE handle):value(handle){}
+  ~ServiceHandle(){if(value)CloseServiceHandle(value);}
+  ServiceHandle(const ServiceHandle&)=delete;
+};
+SERVICE_STATUS_PROCESS codexServiceStatus(SC_HANDLE service) {
+  SERVICE_STATUS_PROCESS status{};DWORD bytes=0;
+  require(QueryServiceStatusEx(service,SC_STATUS_PROCESS_INFO,
+    reinterpret_cast<BYTE*>(&status),sizeof(status),&bytes)!=FALSE);
+  return status;
+}
+void verifyCodexServiceConfiguration(SC_HANDLE service,const std::wstring& packageRoot) {
+  DWORD bytes=0;
+  require(!QueryServiceConfigW(service,nullptr,0,&bytes)&&GetLastError()==ERROR_INSUFFICIENT_BUFFER
+    &&bytes>=sizeof(QUERY_SERVICE_CONFIGW)&&bytes<65536);
+  std::vector<BYTE> buffer(bytes);
+  auto* config=reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+  require(QueryServiceConfigW(service,config,bytes,&bytes)!=FALSE);
+  require((config->dwServiceType&(SERVICE_WIN32_OWN_PROCESS|SERVICE_WIN32_SHARE_PROCESS))==SERVICE_WIN32_OWN_PROCESS
+    &&config->lpServiceStartName&&_wcsicmp(config->lpServiceStartName,L"LocalSystem")==0
+    &&config->lpBinaryPathName);
+  std::wstring image(config->lpBinaryPathName);
+  if(image.size()>1&&image.front()==L'"'&&image.back()==L'"')image=image.substr(1,image.size()-2);
+  // No arguments, expansions, alternate core, old cached package or prefix
+  // match is accepted. A stale/foreign registration is an explicit refusal.
+  require(_wcsicmp(image.c_str(),(packageRoot+L"\\app\\resources\\codex-windows-sandbox-service.exe").c_str())==0);
+}
+void requireCodexClientsStopped() {
+  require(!currentCodexDesktop().has_value());
+  Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));require(snapshot.value!=INVALID_HANDLE_VALUE);
+  PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);require(Process32FirstW(snapshot.value,&entry)!=FALSE);
+  do {
+    // Be conservative across users/sessions and relocated CLI copies too. A
+    // potentially active client is a refusal, never a new process selector or
+    // permission to stop another user's work. Native registration still rejects
+    // a later resource race because neither force-shutdown option is used.
+    require(_wcsicmp(entry.szExeFile,L"ChatGPT.exe")!=0&&_wcsicmp(entry.szExeFile,L"Codex.exe")!=0
+      &&_wcsicmp(entry.szExeFile,L"codex-windows-sandbox-setup.exe")!=0);
+  }while(Process32NextW(snapshot.value,&entry));
+  require(GetLastError()==ERROR_NO_MORE_FILES);
+}
+void codexServiceReply(std::string_view state,std::string_view generation={}) {
+  write("{\"schemaVersion\":1,\"state\":\"");write(state);write("\",\"generation\":");
+  if(generation.empty())write("null");else{write("\"");write(generation);write("\"");}write("}\n");
+}
+int codexStagedPackage(std::string_view version) {
+  // A retained MSIX is not proof that Windows staged it. Bind a read-only
+  // staging query to the OS-selected exact family/architecture/publisher,
+  // replacing ONLY its four-component numeric version. No path is returned.
+  size_t parts=0,start=0;
+  for(size_t end=0;end<=version.size();++end)if(end==version.size()||version[end]=='.'){
+    require(end>start&&end-start<=5&&(end-start==1||version[start]!='0'));
+    unsigned value=0;for(size_t i=start;i<end;++i){require(version[i]>='0'&&version[i]<='9');value=value*10+version[i]-'0';}
+    require(value<=65535);++parts;start=end+1;
+  }
+  require(parts==4);
+  const auto root=currentCodexPackagePath();require(!root.empty());
+  auto name=root.substr(root.find_last_of(L"\\/")+1);
+  const auto begin=name.find(L'_'),end=name.find(L'_',begin+1);
+  require(begin!=std::wstring::npos&&end!=std::wstring::npos&&name.substr(0,begin)==L"OpenAI.Codex");
+  name.replace(begin+1,end-begin-1,std::wstring(version.begin(),version.end()));
+  UINT32 length=0;const auto status=GetStagedPackagePathByFullName(name.c_str(),&length,nullptr);
+  if(status==ERROR_NOT_FOUND||status==ERROR_PATH_NOT_FOUND){codexServiceReply("absent");return 0;}
+  require(status==ERROR_INSUFFICIENT_BUFFER&&length>1&&length<32768);
+  std::vector<WCHAR> buffer(length);
+  require(GetStagedPackagePathByFullName(name.c_str(),&length,buffer.data())==ERROR_SUCCESS);
+  codexServiceReply("staged");return 0;
+}
+int codexService(std::string_view operation,std::string_view expected={}) {
+  require(operation=="inspect"||operation=="stop"||operation=="start");
+  const auto root=currentCodexPackagePath();require(!root.empty());
+  ServiceHandle manager(OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT));require(manager.value);
+  const DWORD access=SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS
+    |(operation=="stop"?SERVICE_STOP:operation=="start"?SERVICE_START:0);
+  ServiceHandle service(OpenServiceW(manager.value,L"CodexSandboxService.OpenAI.Codex",access));
+  if(!service.value){
+    require(operation=="inspect"&&GetLastError()==ERROR_SERVICE_DOES_NOT_EXIST);
+    codexServiceReply("absent");return 0;
+  }
+  verifyCodexServiceConfiguration(service.value,root);
+  auto status=codexServiceStatus(service.value);
+  if(operation=="start"){
+    // A start has its own durable intent. Unknown/partial starts are observed
+    // by later inspect calls; this mode never waits/retries StartService.
+    require(status.dwCurrentState==SERVICE_STOPPED&&status.dwProcessId==0);
+    verifyCodexServiceConfiguration(service.value,currentCodexPackagePath());
+    require(StartServiceW(service.value,0,nullptr)!=FALSE);
+    codexServiceReply("starting");return 0;
+  }
+  if(status.dwCurrentState==SERVICE_STOPPED){
+    require(operation=="inspect"&&status.dwProcessId==0);codexServiceReply("stopped");return 0;
+  }
+  require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
+  Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,status.dwProcessId));require(process.value);
+  wchar_t image[32768]{};DWORD length=32768;
+  require(QueryFullProcessImageNameW(process.value,0,image,&length)!=FALSE
+    &&_wcsicmp(image,(root+L"\\app\\resources\\codex-windows-sandbox-service.exe").c_str())==0);
+  FILETIME created{},exited{},kernel{},user{};require(GetProcessTimes(process.value,&created,&exited,&kernel,&user));
+  ULARGE_INTEGER time{};time.LowPart=created.dwLowDateTime;time.HighPart=created.dwHighDateTime;
+  const auto generation=std::to_string(status.dwProcessId)+":"+std::to_string(time.QuadPart+504911232000000000ULL);
+  if(operation=="inspect"){codexServiceReply("running",generation);return 0;}
+  require(expected==generation&&(status.dwControlsAccepted&SERVICE_ACCEPT_STOP)!=0);
+  requireCodexClientsStopped();
+  verifyCodexServiceConfiguration(service.value,currentCodexPackagePath());
+  const auto fresh=codexServiceStatus(service.value);
+  require(fresh.dwCurrentState==SERVICE_RUNNING&&fresh.dwProcessId==status.dwProcessId
+    &&WaitForSingleObject(process.value,0)==WAIT_TIMEOUT);
+  SERVICE_STATUS result{};
+  require(ControlService(service.value,SERVICE_CONTROL_STOP,&result)!=FALSE);
+  // A hung or refused normal stop is never killed. Keep the original handle
+  // (PID reuse cannot satisfy it) and bound the wait within the host's budget.
+  require(WaitForSingleObject(process.value,20000)==WAIT_OBJECT_0);
+  status=codexServiceStatus(service.value);
+  require(status.dwCurrentState==SERVICE_STOPPED&&status.dwProcessId==0);
+  codexServiceReply("stopped");return 0;
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 1) {
+    if(argc==3&&std::string_view(argv[1])=="--codex-package-staged"){
+      try{return codexStagedPackage(argv[2]);}
+      catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}
+    }
+    if((argc==2&&(std::string_view(argv[1])=="--codex-service-inspect"||std::string_view(argv[1])=="--codex-service-start"))
+      ||(argc==3&&std::string_view(argv[1])=="--codex-service-stop")){
+      try{return codexService(std::string_view(argv[1]).substr(16),argc==3?std::string_view(argv[2]):std::string_view{});}
+      catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}
+    }
     if (argc == 3 && std::string_view(argv[1]) == "--codex-desktop-close") {
       try { return closeCodexDesktop(argv[2]); }
       catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\",\"generation\":null}\n"); } catch (...) {} return 1; }

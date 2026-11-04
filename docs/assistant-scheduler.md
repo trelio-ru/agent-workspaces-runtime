@@ -2244,6 +2244,71 @@ neither a timer nor configuration/health metadata grants another effect.
 Disabling Desktop updates during an unresolved installation preserves its journal and
 reports the existing closed incident, without making pending work falsely idle.
 
+#### Packaged sandbox service registration recovery
+
+The package may also own `CodexSandboxService.OpenAI.Codex`, a LocalSystem
+service which survives a normal GUI exit. Windows can positively defer
+registration for that active service even after every GUI process disappeared.
+Another GUI restart alone is not evidence that this resource was released.
+
+A terminal `failed` or `registration_failed` receipt can enter ONE independent
+service recovery only after fresh retained MSIX signature/digest/identity/version
+verification, native current-user package/service identity, a healthy new GUI
+generation, native hook/MCP/device readiness and the SAME idle/setup guards.
+Before any GUI/service effect, `GetStagedPackagePathByFullName` must positively
+confirm that exact candidate is already staged. Its full name retains the
+OS-selected current family/architecture/publisher and changes only the validated
+four-part version; no staged path is exposed or accepted from a caller. A missing
+stage preserves the healthy app/service and ordinary newer-candidate discovery.
+The additive `serviceGeneration` receipt pins the originally running service's
+PID/creation time; its absence preserves the legacy journal. A genuinely newer
+candidate alone may clear this receipt for its own separate attempt.
+
+Persist `service_closing` before normal shutdown of that exact GUI generation.
+After its observed exit persist `service_stopping` before ONE normal SCM stop.
+The SAME signed native worker accepts no service name/path from a caller:
+current-user AppModel selects the registered package, SCM configuration and
+the live process image must exactly match its fixed sandbox-service executable,
+and the retained process handle/creation time and fresh SCM PID must agree.
+Require all potential Codex GUI/CLI/setup clients absent across sessions before
+the stop. Access denial, stale/foreign service/configuration, a client race or
+a refused/hung stop never permits elevation, config/ACL edits, termination,
+control of another service or another stop attempt. The twenty-second process
+exit wait stays inside the original bounded host/native invocation.
+
+Only observed stopped service and GUI admit `service_registering`. Revalidate
+the retained candidate through the SAME signature/manifest/file-handle engine,
+then call `Add-AppxPackage -Register -MainPackage` with its exact full package
+name. This registers an already-staged package; it never replays the original
+MSIX install, selects a latest version or stages bytes again. No force-shutdown,
+deferred-success or elevated option is passed: Windows must reject any remaining
+in-use resource. Missing staging or failure remains a failed candidate.
+
+Record `service_restoring` and `service_starting` before restoring the service
+which was positively running at admission. Fresh native SCM/image binding uses
+whichever package Windows actually registered, including the healthy old
+package if registration failed. An absent service in the newly registered
+package needs no start. Never start a foreign/stale binary. A lost start result
+permits observation only, not a second start. Then `service_verifying` fences
+one registered GUI activation and the ordinary exact version/new generation/
+fresh hook/MCP/device probe. The same ten-minute activation bound remains.
+
+Unknown close/stop/register/start phases remain durable and block new work;
+neither timeout, diagnostics nor a new runtime releases them. A definite healthy
+old service/GUI activation ends as `service_failed`, preserving the original
+failed version and service receipt without another attempt on that candidate.
+Later exact native registration plus a fresh running GUI/probe can verify
+recovery. Healthy old work and optional discovery remain available; independent
+task/source/provider receipts and health/trust/login latches are untouched.
+
+Focused tests cover the real journal/production composition, each lost effect
+with and without a positive result, failed-registration restoration, stale
+generation/signature/admission, legacy validation and ordinary discovery.
+Hosted Windows additionally builds the SAME native worker and exercises its
+real read/refusal boundaries without stopping a developer's live service.
+Real SCM/registration activation remains an independent dedicated-computer
+acceptance step; component tests never claim that outcome.
+
 The tests cover orchestration, download bounds, policy/CAS and interrupted
 installation/activation. Native Windows CI parses the actual helper and executes
 its current-user read/refusal boundary. A real dedicated Desktop upgrade remains

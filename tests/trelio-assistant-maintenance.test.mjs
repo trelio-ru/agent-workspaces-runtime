@@ -5,7 +5,8 @@ import { PassThrough, Readable } from 'node:stream';
 import { executeAssistantRuntimeRequest, assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { maintainAssistantCodexDesktop, validateAssistantCodexUpdate, compareCodexDesktopVersions,
-  downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+  downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate,
+  runAssistantWindowsCodexService } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { runProductionAssistantCodexMaintenance, runProductionAssistantPluginMaintenance, runAssistantBackgroundTick } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -25,8 +26,8 @@ const desktopUpdateFixture=()=>{
     prepare:async()=>({version:'26.101.0.0',architecture:'x64'}),install:async()=>{
       assert.equal(state.phase,'installing');effects.push('install');version='26.101.0.0';
     },desktop:async(operation,previous)=>{
-      if(operation==='close'){assert.ok(['closing','registration_closing'].includes(state.phase));assert.equal(previous,generation);effects.push('close');generation=null;}
-      if(operation==='start'){assert.ok(['verifying','registration_verifying'].includes(state.phase));effects.push('start');generation=`${nextPid++}:2`;}
+      if(operation==='close'){assert.ok(['closing','registration_closing','service_closing'].includes(state.phase));assert.equal(previous,generation);effects.push('close');generation=null;}
+      if(operation==='start'){assert.ok(['verifying','registration_verifying','service_verifying'].includes(state.phase));effects.push('start');generation=`${nextPid++}:2`;}
       return {state:generation?'running':'stopped',generation};
     },probe:async()=>{effects.push('probe');},
   };
@@ -41,6 +42,178 @@ test('Desktop updates journal every effect, verify a new native generation and n
   assert.equal(compareCodexDesktopVersions('26.100.0.0','26.99.0.0'),1);
   assert.equal(compareCodexDesktopVersions('26.100.0.0','26.100.0.0'),0);
   for(const value of ['latest','26.100','26.100.0.0-beta','PRIVATE'])assert.throws(()=>compareCodexDesktopVersions(value,'26.100.0.0'));
+});
+
+// Reopen the SAME failed installation journal before adding the native service
+// adapter. The original installer stays permanently unknown and must never be
+// called by service recovery; only an independent full-name registration exists.
+const serviceUpdateFixture=async()=>{
+  const f=desktopUpdateFixture();let installs=0,running=true,generation='500:10';
+  f.options.install=async()=>{installs++;throw Error('lost original installation');};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  const service=async(operation,previous)=>{
+    if(operation==='staged'){assert.equal(previous,'26.101.0.0');return {state:'staged',generation:null};}
+    if(operation==='stop'){
+      assert.equal(f.state.phase,'service_stopping');assert.equal(previous,generation);
+      assert.equal((await f.options.desktop('inspect')).state,'stopped');
+      f.effects.push('service_stop');running=false;
+    }
+    if(operation==='start'){
+      assert.equal(f.state.phase,'service_starting');assert.equal(running,false);
+      f.effects.push('service_start');running=true;generation='501:20';
+      return {state:'starting',generation:null};
+    }
+    return {state:running?'running':'stopped',generation:running?generation:null};
+  };
+  const register=async()=>{
+    assert.equal(f.state.phase,'service_registering');assert.equal(running,false);
+    f.effects.push('register');f.setVersion('26.101.0.0');
+  };
+  Object.assign(f.options,{service,register});f.effects.length=0;
+  return {f,service,register,get installs(){return installs;}};
+};
+
+test('a retained AppX failure quiesces its exact service, registers once and restores service/GUI through the same journal',async()=>{
+  const fixture=await serviceUpdateFixture();const {f}=fixture;
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal(f.state.phase,'service_closing');assert.equal(f.state.serviceGeneration,'500:10');
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'updated',version:'26.101.0.0'});
+  assert.deepEqual(f.effects,['probe','close','service_stop','register','service_start','start','probe']);
+  assert.deepEqual(f.snapshots.slice(-7).map(x=>x.phase),['service_closing','service_stopping','service_registering',
+    'service_restoring','service_starting','service_verifying','ready']);
+  assert.equal(f.state.failedVersion,null);assert.equal(fixture.installs,1);
+  f.advance();f.options.download=async()=>({unchanged:true,etag:'"package-v2"'});
+  const effects=[...f.effects];await maintainAssistantCodexDesktop(f.options);assert.deepEqual(f.effects,effects);
+});
+
+test('production service recovery crosses fresh native guard and the same coordinator/setup journal without replaying install',async()=>{
+  const fixture=await serviceUpdateFixture();const {f}=fixture;let lease=false,setup=false,health=0;
+  const runtime={identity:f.options.identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{
+    lease=true;try{return await action(async()=>assert.equal(lease,true));}finally{lease=false;}
+  }}};
+  const host={readCodexUpdatesEnabled:async()=>true,readCodexUpdate:f.options.readState,writeCodexUpdate:f.options.writeState,
+    readActivation:async()=>null,readActivePass:async()=>null,codexUpdatePackagePath:async()=>'C:\\private\\desktop.msix',
+    withSetupLock:async action=>{setup=true;try{return await action();}finally{setup=false;}}};
+  const effects=[];const options={platform:'win32',context:async action=>action({identity:runtime.identity,
+    readHealth:async()=>{assert.equal(lease,true);assert.equal(setup,true);health++;return {}; }},host),
+    nativeUpdate:async(operation,options)=>{
+      await options.guard();assert.equal(options.packagePath,'C:\\private\\desktop.msix');
+      effects.push(operation);if(operation==='inspect')return f.options.inspect();if(operation==='prepare')return f.options.prepare();
+      assert.equal(operation,'register','the original install is not a recovery operation');return f.options.register(options.sha256,options.version);
+    },service:async(operation,generation,options)=>{await options.guard();return f.options.service(operation,generation);},
+    desktop:async(operation,generation,options)=>{await options.guard();return f.options.desktop(operation,generation);},probe:f.options.probe,
+  };
+  assert.equal((await runProductionAssistantCodexMaintenance(runtime,options)).state,'activating');
+  assert.equal((await runProductionAssistantCodexMaintenance(runtime,options)).state,'updated');
+  assert.deepEqual(effects,['inspect','prepare','inspect','register','inspect']);
+  assert.equal(fixture.installs,1);assert.ok(health>=10);
+});
+
+test('a lost service stop reply only observes its retained generation, including a stop that never completed',async()=>{
+  for(const completed of [true,false]){
+    const {f,service}=await serviceUpdateFixture();let stops=0;
+    f.options.service=async(operation,generation)=>{
+      if(operation==='stop'){stops++;if(completed)await service(operation,generation);throw Error('unknown SCM result');}
+      return service(operation,generation);
+    };
+    await maintainAssistantCodexDesktop(f.options);
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));assert.equal(f.state.phase,'service_stopping');
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,completed?'updated':'activating');
+    if(!completed){f.elapse(10*60_000);await assert.rejects(maintainAssistantCodexDesktop(f.options));assert.ok(!f.effects.includes('register'));}
+    assert.equal(stops,1);
+  }
+});
+
+test('lost full-name registration is never repeated and an unchanged native version restores the healthy old service/GUI',async()=>{
+  for(const completed of [true,false]){
+    const {f,register}=await serviceUpdateFixture();let registrations=0;
+    f.options.register=async(...args)=>{registrations++;if(completed)await register(...args);throw Error('unknown register result');};
+    await maintainAssistantCodexDesktop(f.options);
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));assert.equal(f.state.phase,'service_registering');
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,completed?'updated':'failed');
+    assert.equal(registrations,1);assert.ok(f.effects.includes('service_start'));assert.ok(f.effects.includes('start'));
+    if(!completed){
+      assert.equal(f.state.phase,'service_failed');assert.equal(f.state.failedVersion,'26.101.0.0');
+      const effects=[...f.effects];f.advance();f.options.download=async()=>({unchanged:true,etag:'"package-v2"'});
+      await maintainAssistantCodexDesktop(f.options);assert.deepEqual(f.effects,effects);
+      f.advance();f.options.download=async()=>{throw Error('optional feed outage');};
+      assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');assert.deepEqual(f.effects,effects);
+      assert.equal(f.state.phase,'service_failed');assert.equal(f.state.serviceGeneration,'500:10');
+    }
+  }
+});
+
+test('lost service restoration and GUI activation each have their own one-use intent',async()=>{
+  for(const lost of ['service','gui'])for(const completed of [true,false]){
+    const {f,service}=await serviceUpdateFixture();const desktop=f.options.desktop;let starts=0;
+    if(lost==='service')f.options.service=async(operation,generation)=>{
+      if(operation==='start'){starts++;if(completed)await service(operation,generation);throw Error('unknown service activation');}
+      return service(operation,generation);
+    };
+    else f.options.desktop=async(operation,generation)=>{
+      if(operation==='start'){starts++;if(completed)await desktop(operation,generation);throw Error('unknown GUI activation');}
+      return desktop(operation,generation);
+    };
+    await maintainAssistantCodexDesktop(f.options);await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,completed?'updated':'activating');
+    if(!completed){f.elapse(10*60_000);await assert.rejects(maintainAssistantCodexDesktop(f.options));}
+    assert.equal(starts,1);
+  }
+});
+
+test('service recovery refuses replaced artifacts, malformed service generations, failed readiness and late busy admission before effects',async()=>{
+  for(const refusal of ['artifact','generation','probe','guard']){
+    const {f}=await serviceUpdateFixture();
+    if(refusal==='artifact')f.options.prepare=async()=>({version:'26.999.0.0',architecture:'x64'});
+    if(refusal==='generation')f.options.service=async()=>({state:'running',generation:'private/path'});
+    if(refusal==='probe')f.options.probe=async()=>{throw Error('not ready');};
+    if(refusal==='guard'){
+      let busy=false;f.options.probe=async()=>{busy=true;};f.options.guard=async()=>{if(busy)throw Error('new pass');};
+    }
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    assert.ok(!f.effects.some(effect=>['close','service_stop','register','service_start','start'].includes(effect)));
+    assert.equal(f.state.phase,'failed');
+  }
+});
+
+test('missing native staging preserves the healthy GUI/service and does not starve discovery of a genuinely newer candidate',async()=>{
+  const {f,service}=await serviceUpdateFixture();
+  f.options.service=async(operation,generation)=>operation==='staged'?{state:'absent',generation:null}:service(operation,generation);
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');assert.deepEqual(f.effects,[]);
+  assert.equal(f.state.phase,'failed');assert.equal(Object.hasOwn(f.state,'serviceGeneration'),false);
+  f.advance();let downloads=0;f.options.download=async()=>{downloads++;return {unchanged:true,etag:'"package-v2"'};};
+  await maintainAssistantCodexDesktop(f.options);assert.equal(downloads,1);assert.deepEqual(f.effects,[]);
+});
+
+test('service receipt validation retains legacy bytes and rejects missing, undefined or malformed receipts for service phases',async()=>{
+  const {f}=await serviceUpdateFixture();const legacy=structuredClone(f.state);
+  assert.equal(Object.hasOwn(validateAssistantCodexUpdate(legacy),'serviceGeneration'),false);
+  for(const serviceGeneration of [undefined,null,'bad','0:1','1:0']){
+    assert.throws(()=>validateAssistantCodexUpdate({...legacy,phase:'service_stopping',serviceGeneration}));
+  }
+  assert.throws(()=>validateAssistantCodexUpdate({...legacy,serviceGeneration:undefined}));
+  assert.throws(()=>validateAssistantCodexUpdate({...legacy,phase:'service_stopping',serviceGeneration:'5:10',arbitrary:true}));
+});
+
+test('native service adapter checks admission before spawn and exposes only the fixed SCM modes and closed DTO',async()=>{
+  let launched=0;const native=async(_input,options)=>{
+    launched++;assert.equal(options.nativeCommand.executable,'signed-worker');
+    assert.deepEqual(options.nativeCommand.args,['--codex-service-stop','500:10']);
+    assert.equal(options.timeoutMs,30_000);return options.project({schemaVersion:1,state:'stopped',generation:null});
+  };
+  const options={selectWorker:async()=>({executable:'signed-worker'}),runNative:native};
+  for(const [operation,generation] of [['foreign',null],['stop',null],['stop','caller-path'],['start','500:10']])
+    await assert.rejects(runAssistantWindowsCodexService(operation,generation,options));
+  await assert.rejects(runAssistantWindowsCodexService('stop','500:10',{...options,guard:async()=>{throw Error('revoked');}}));
+  assert.equal(launched,0);await runAssistantWindowsCodexService('stop','500:10',options);assert.equal(launched,1);
+  await runAssistantWindowsCodexService('staged','26.101.0.0',{...options,runNative:async(_p,o)=>{
+    assert.deepEqual(o.nativeCommand.args,['--codex-package-staged','26.101.0.0']);
+    return o.project({schemaVersion:1,state:'staged',generation:null});
+  }});
+  for(const result of [{schemaVersion:1,state:'running',generation:'500:10',raw:'private'},
+    {schemaVersion:1,state:'running',generation:'private'}, {schemaVersion:1,state:'unavailable',generation:null}])
+    await assert.rejects(runAssistantWindowsCodexService('inspect',null,{...options,runNative:async(_p,o)=>o.project(result)}));
 });
 
 test('lost install reply reconciles only native version and reopens the SAME Desktop, never installs again',async()=>{

@@ -850,8 +850,16 @@ publication tooling также остаются вне этого публичн
 - Assistant maintenance: fixed signed worker, no replay/health shortcut; terminal retained-pass updates require the SAME coordinator lease/native evidence. MCP facade survives runtime updates. Check the exact public installable ref before any plugin install intent; pending publication preserves latches. Only legacy hook 0.1.0 admits native directory-only .git metadata. Current hooks require exact immutable git-subdir ./plugin with no installed .git; never prune cache or migrate trust. Plugin hooks live in a separately immutable companion: main-only updates preserve native hashes, real hook/loader changes require native review; never migrate approval or hide mutable bytes. Desktop maintenance defaults on for new/existing paired devices, preserves explicit owner opt-out and uses signed official MSIX under the SAME idle/setup locks; no standalone CLI update, forced exit or uncertain install replay. Plugin maintenance is an explicit per-device setup opt-in: SAME updater/retention, idle coordinator + setup mutex, durable native install/GUI/registered-parent handoff and bounded rollback; never automate hook trust. Installer options must cross both real entry boundaries; unknown commands/values refuse before spawn. Desktop discovery/exit uses SAME native worker, exact AppModel/user/session/process-root/generation, and normal Restart Manager; a tray-hidden process stays running, never force or local compile. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
   A terminal failed Desktop install permits ONE separately journaled idle
   registration-recovery restart after retained-signature and fresh readiness
-  checks. It never repeats Add-AppxPackage, an uncertain original close or a
+  checks. It never repeats the MSIX Add-AppxPackage -Path, an uncertain original close or a
   lost activation; registration_failed exhausts that candidate's restart.
+  A positively identified packaged sandbox service has ONE independent SCM
+  recovery receipt in the SAME journal. Close a healthy new GUI generation,
+  normally stop only the exact OS-package-bound service after all Codex clients
+  are absent, register the retained signed candidate by its already-staged full
+  name once, then restore that service/GUI and verify the actual version/probe.
+  Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
+  process control. Lost stop/register/start results remain read-back-only;
+  service_failed preserves the candidate latch and permits healthy old work.
 - Visible task chats reuse SAME native App Server + system URI opener. Empty bootstrap persists the explicit pair; ONLY the second GUI-queued READY earns provision. No exec/resume/hidden fallback, queue replay or model-mediated reconfiguration of old private history. See scheduler native invocation.
   An owner-private tool-free handoff may earn ONE independent readiness verification
   in that SAME chat after complete, exact, sole PREPARE/READY history. Schema22

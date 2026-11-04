@@ -847,6 +847,33 @@ export const runAssistantWindowsDesktop = async (operation, generation=null, {en
     }});
 };
 
+/** Fixed SCM adapter for the package's own sandbox service. This separate native
+ * mode never expands a Restart Manager shutdown into other processes/services.
+ * The host journals each effect and the worker independently pins OS package,
+ * service configuration, process handle and generation under ordinary SCM ACLs. */
+export const runAssistantWindowsCodexService = async (operation,generation=null,{environment=process.env,
+  signal,guard=async()=>{},runNative=runAssistantWindowsBackgroundNative,selectWorker}={})=>{
+  const validArgument=operation==='stop'?/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u.test(generation??'')
+    :operation==='staged'?CODEX_DESKTOP_VERSION.test(generation??''):generation===null;
+  if(!['inspect','stop','start','staged'].includes(operation)||!validArgument)
+    fail('ASSISTANT_CODEX_UPDATE_FAILED');
+  const worker=await (selectWorker??(async()=>{
+    const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
+  }))();
+  await guard();
+  return runNative({}, {environment,signal,timeoutMs:30_000,
+    nativeCommand:{executable:worker.executable,args:operation==='staged'?['--codex-package-staged',generation]
+      :[`--codex-service-${operation}`,...(operation==='stop'?[generation]:[])]},
+    project:value=>{
+      if(!value||Object.keys(value).sort().join(',')!=='generation,schemaVersion,state'||value.schemaVersion!==1
+        ||!(operation==='staged'?['staged','absent']:['running','stopped','absent','starting']).includes(value.state)
+        ||(value.state==='running'?!/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u.test(value.generation??''):value.generation!==null)
+        ||operation==='inspect'&&value.state==='starting'||operation==='stop'&&value.state!=='stopped'
+        ||operation==='start'&&value.state!=='starting')fail('ASSISTANT_CODEX_UPDATE_FAILED');
+      return value;
+    }});
+};
+
 /** Durable orchestration only. CLI/install/GUI/probe use shared host engines;
  * receipt/journal transitions happen BEFORE the side effect. On restart an
  * unfinished installation is reconciled from native inventory, and a new GUI
@@ -1130,7 +1157,7 @@ try {
   Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($PSHOME,'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
   Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($PSHOME,'Modules\Appx\Appx.psd1')) -ErrorAction Stop
   $p = ConvertFrom-Json ([Console]::In.ReadToEnd())
-  if ($p.operation -notin @('inspect','prepare','install')) { throw 'invalid' }
+  if ($p.operation -notin @('inspect','prepare','install','register')) { throw 'invalid' }
   $packages = @(Appx\Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop)
   if ($p.operation -eq 'inspect' -and $packages.Count -eq 0) {
     [Console]::Out.Write('{"schemaVersion":1,"state":"not_installed"}'); exit 0
@@ -1165,11 +1192,20 @@ try {
       $identity = $xml.Package.Identity
       if ($identity.Name -cne 'OpenAI.Codex' -or $identity.Publisher -cne $installed.Publisher -or $identity.ProcessorArchitecture -cne $architecture) { throw 'identity' }
       $version = [Version]([string]$identity.Version)
-      if ($p.operation -eq 'install' -and $version -le $installed.Version) { throw 'version' }
+      if ($p.operation -in @('install','register') -and $version -le $installed.Version) { throw 'version' }
     } finally { $zip.Dispose() }
     if ($p.operation -eq 'install') {
       if ([string]$version -cne $p.version) { throw 'version' }
       Appx\Add-AppxPackage -Path ([string]$p.packagePath) -DeferRegistrationWhenPackagesAreInUse -ErrorAction Stop
+    }
+    if ($p.operation -eq 'register') {
+      if ([string]$version -cne $p.version -or [string]$identity.ResourceId -ne '' -or [string]$installed.ResourceId -ne '') { throw 'version' }
+      # This is a separate, durably fenced registration of an ALREADY staged
+      # exact full name. It never installs/stages the MSIX again, chooses latest,
+      # forces application shutdown, elevates or changes another user's package.
+      # Windows must reject any remaining or newly raced in-use resource.
+      $fullName = 'OpenAI.Codex_' + [string]$version + '_' + $architecture + '__' + [string]$installed.PublisherId
+      Appx\Add-AppxPackage -Register -MainPackage $fullName -ErrorAction Stop
     }
     [Console]::Out.Write((ConvertTo-Json -Compress @{schemaVersion=1;version=[string]$version;architecture=$architecture}))
   } finally { $file.Dispose() }
@@ -1177,12 +1213,12 @@ try {
 `;
 
 export const runAssistantWindowsCodexUpdate = async (operation,{environment=process.env,signal,packagePath,sha256,version,guard=async()=>{},runNative}={}) => {
-  if(!['inspect','prepare','install'].includes(operation)||operation!=='inspect'&&(!path.win32.isAbsolute(packagePath??'')||!SHA.test(sha256??''))
-    ||operation==='install'&&!VERSION.test(version??''))codexUpdateFail();
+  if(!['inspect','prepare','install','register'].includes(operation)||operation!=='inspect'&&(!path.win32.isAbsolute(packagePath??'')||!SHA.test(sha256??''))
+    ||['install','register'].includes(operation)&&!VERSION.test(version??''))codexUpdateFail();
   if(operation!=='inspect')await assertPrivatePathKind(packagePath,'file');
   await guard();
   const run=runNative??runAssistantWindowsBackgroundNative;
-  return run({operation,...(operation==='inspect'?{}:{packagePath,sha256,...(operation==='install'?{version}:{})})},
+  return run({operation,...(operation==='inspect'?{}:{packagePath,sha256,...(['install','register'].includes(operation)?{version}:{})})},
     {environment,signal,timeoutMs:operation==='inspect'?40_000:5*60_000,script:ASSISTANT_CODEX_UPDATE_SCRIPT,project:value=>{
       if(operation==='inspect'&&value?.schemaVersion===1&&value.state==='not_installed'
         &&Object.keys(value).sort().join(',')==='schemaVersion,state')return value;
@@ -1198,20 +1234,21 @@ export const runAssistantWindowsCodexUpdate = async (operation,{environment=proc
  * write path here. A failed install remains latched. One separately journaled
  * idle restart may finish Windows' already deferred registration; this path
  * never invokes the installer and cannot loop on the same candidate. */
-export const maintainAssistantCodexDesktop = async ({identity,readState,writeState,inspect,download,prepare,install,desktop,probe,guard=async()=>{},now=Date.now}) => {
-  await guard();let state=await readState(),preparedThisTick=false;
+export const maintainAssistantCodexDesktop = async ({identity,readState,writeState,inspect,download,prepare,install,desktop,probe,
+  service,register,guard=async()=>{},now=Date.now}) => {
+  await guard();let state=await readState(),preparedThisTick=false,serviceBlocksRestart=false;
   const save=async patch=>{
     await guard();const next=validateAssistantCodexUpdate({...state,...patch});
     await writeState(state,next);state=next;
   };
   const current=await inspect();
   if(current.state==='not_installed'){
-    if(state&&!['ready','failed','registration_failed'].includes(state.phase))codexUpdateFail();
+    if(state&&!['ready','failed','registration_failed','service_failed'].includes(state.phase))codexUpdateFail();
     return {state:'not_installed'};
   }
   if(!state)await save({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,phase:'ready',checkedAt:0,etag:null,
     previousVersion:current.version,targetVersion:current.version,sha256:null,desktopGeneration:null,failedVersion:null});
-  if(['failed','registration_failed'].includes(state.phase)&&compareCodexDesktopVersions(current.version,state.failedVersion)>=0){
+  if(['failed','registration_failed','service_failed'].includes(state.phase)&&compareCodexDesktopVersions(current.version,state.failedVersion)>=0){
     // Windows may finish a deferred registration after an earlier old-version
     // read-back, or the human may complete recovery. Exact native version AND
     // a fresh running GUI/probe can release the failure; an ETag never can.
@@ -1222,7 +1259,81 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
       return {state:'updated',version:current.version};
     }
   }
-  if(state.phase==='failed'&&compareCodexDesktopVersions(current.version,state.targetVersion)<0&&state.sha256!==null){
+  // A real AppX active-service refusal is not repaired by another GUI restart.
+  // Admit one independent, receipt-bound SERVICE recovery only when the fixed
+  // native service is positively running from this registered package. Legacy
+  // uncertain close/install/start phases cannot acquire this new effect path.
+  if(service&&register&&['failed','registration_failed'].includes(state.phase)&&state.serviceGeneration==null
+    &&compareCodexDesktopVersions(current.version,state.targetVersion)<0&&state.sha256!==null){
+    const active=await service('inspect');
+    if(active.state==='running'){
+      serviceBlocksRestart=true;
+      const retained=await prepare(state.sha256);
+      if(retained.version!==state.targetVersion||retained.architecture!==current.architecture)codexUpdateFail();
+      const staged=await service('staged',state.targetVersion);
+      if(!['staged','absent'].includes(staged.state))codexUpdateFail();
+      if(staged.state==='staged'){
+        const app=await desktop('inspect');
+        if(app.state==='running'&&app.generation!==state.desktopGeneration){
+          await guard();await probe();
+          await save({phase:'service_closing',desktopGeneration:app.generation,serviceGeneration:active.generation,checkedAt:now()});
+          await guard();await desktop('close',app.generation);
+          return {state:'activating',blockBusiness:true};
+        }
+      }
+    }
+  }
+  const awaitingService=()=>{
+    if(now()-state.checkedAt>=10*60_000)codexUpdateFail();
+    return {state:'activating',blockBusiness:true};
+  };
+  if(state.phase==='service_closing'){
+    if((await desktop('inspect')).state!=='stopped')return awaitingService();
+    await save({phase:'service_stopping'});
+    await guard();await service('stop',state.serviceGeneration);
+    // The native reply joins actual process exit and closes its pinned handle.
+    // Reinspect before registration; a lost SCM reply instead exits here and
+    // the next tick takes the SAME read-back-only branch, never another stop.
+  }
+  if(state.phase==='service_stopping'){
+    const active=await service('inspect');
+    if(active.state!=='stopped')return awaitingService();
+    if((await desktop('inspect')).state!=='stopped')return awaitingService();
+    await save({phase:'service_registering'});
+    await guard();await register(state.sha256,state.targetVersion);
+    await save({phase:'service_restoring'});
+  }else if(state.phase==='service_registering'){
+    // The exact registration may have completed even when its reply was lost.
+    // Never replay it or the original MSIX install. Restore the native service
+    // for whichever package Windows actually registered, then verify normally.
+    await save({phase:'service_restoring'});
+  }
+  if(state.phase==='service_restoring'){
+    const active=await service('inspect');
+    if(!['running','stopped','absent'].includes(active.state))return awaitingService();
+    await save({phase:'service_starting'});
+    if(active.state==='stopped'){await guard();await service('start');}
+  }
+  if(state.phase==='service_starting'){
+    const active=await service('inspect');
+    if(!['running','absent'].includes(active.state))return awaitingService();
+    const app=await desktop('inspect');
+    await save({phase:'service_verifying'});
+    if(app.state==='stopped'){await guard();await desktop('start');}
+  }
+  if(state.phase==='service_verifying'){
+    const app=await desktop('inspect');
+    if(app.state!=='running'||app.generation===state.desktopGeneration)return awaitingService();
+    const actual=await inspect();
+    try{await guard();await probe();}catch(error){if(error.code==='ASSISTANT_HOOK_REVIEW_REQUIRED')return {state:'hook_review',blockBusiness:true};throw error;}
+    if(compareCodexDesktopVersions(actual.version,state.targetVersion)<0){
+      await save({phase:'service_failed'});
+      return {state:'failed',failedVersion:state.failedVersion};
+    }
+    await save({phase:'ready',targetVersion:actual.version,desktopGeneration:app.generation,failedVersion:null});
+    return {state:'updated',version:actual.version};
+  }
+  if(!serviceBlocksRestart&&state.phase==='failed'&&compareCodexDesktopVersions(current.version,state.targetVersion)<0&&state.sha256!==null){
     // DeferRegistrationWhenPackagesAreInUse may leave a completely staged
     // package waiting for the next normal activation. Re-running Add-AppxPackage
     // would replay the original uncertain installation. Instead admit ONE new,
@@ -1279,7 +1390,7 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
     await save({phase:'ready',targetVersion:actual.version,failedVersion:null});
     return {state:'updated',version:actual.version};
   }
-  if(['ready','failed','registration_failed'].includes(state.phase)){
+  if(['ready','failed','registration_failed','service_failed'].includes(state.phase)){
     if(now()-state.checkedAt<CODEX_UPDATE_INTERVAL)return {state:'current',failedVersion:state.failedVersion};
     // Discovery and code verification are optional until the intent is saved.
     // An offline feed or an invalid candidate cannot stop the healthy old app.
@@ -1293,9 +1404,10 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
         await save({checkedAt:now(),etag:candidate.etag});return {state:'current',failedVersion:state.failedVersion};
       }
       await save({phase:'prepared',checkedAt:now(),etag:candidate.etag,previousVersion:current.version,
+        ...(Object.hasOwn(state,'serviceGeneration')?{serviceGeneration:null}:{}),
         targetVersion:target.version,sha256:candidate.sha256,desktopGeneration:null,failedVersion:null});
       preparedThisTick=true;
-    }catch(error){await guard();if(state.phase!=='ready'&&state.phase!=='failed')throw error;
+    }catch(error){await guard();if(!['ready','failed','registration_failed','service_failed'].includes(state.phase))throw error;
       await save({checkedAt:now()});return {state:'current',updateDeferred:true,failedVersion:state.failedVersion};}
   }
   if(state.phase==='prepared'){
