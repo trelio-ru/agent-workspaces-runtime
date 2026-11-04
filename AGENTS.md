@@ -92,6 +92,9 @@ publication tooling также остаются вне этого публичн
   private I/O. Native device/owner/assignment/config/recipient and one-attempt
   fences remain independent. Keep this adapter in the existing signed entry
   within the frozen 100-file package bound; test the packaged chain.
+  Ordinary account syntax/setup/selection refusals retain the common parser's
+  static help through the request worker and facade. Only genuine host account
+  errors qualify; provider/lookalike details stay private, with no write replay.
   See [ordinary skills](docs/assistant-scheduler.md#ordinary-owner-chat-skills).
   Public signed human-input setup also selects the bounded setup view without
   pending device consent only on an explicit connection-section read; ordinary

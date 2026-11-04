@@ -686,6 +686,14 @@ their existing engines. A saved window is not verified login. Signed Secret
 setup retains shared recipe/holder/audit and plain-only support; all value-bearing
 provider output is discarded before model delivery.
 
+Ordinary account errors retain the SAME host parser's static usage/help through
+the fresh request worker and long-lived MCP facade. A missing revision/name is
+a syntax refusal, never an unavailable setup service. Missing/ambiguous account,
+invalid selector, missing binding and catalogue CAS conflict retain their closed
+host code with that same static help. Only genuine common account error classes
+qualify; provider/HTTP lookalikes and arbitrary details remain private. No error
+retries a write/provider call or changes the native one-attempt receipt.
+
 This local interactive profile is unavailable while ANY task or source-intake
 pass is active. It does not change unattended task prefixes, source ACK/intake
 or owner-action admission. Device native endpoints read/prepare/begin/compatibility

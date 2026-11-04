@@ -14,7 +14,8 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   process.env[key]=path.join(root,key.toLowerCase());await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {executeAssistantLocalSkillTool,withAssistantLocalSkillProfile,assistantLocalSkillArguments,createAssistantLocalSkillHook,ASSISTANT_SKILL_TOOLS}=
+const {executeAssistantLocalSkillTool,withAssistantLocalSkillProfile,assistantLocalSkillArguments,createAssistantLocalSkillHook,ASSISTANT_SKILL_TOOLS,
+  executeAssistantRuntimeRequest,createForwardingAssistantMcp}=
   await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
 const {withRuntimeHookPrivateSession}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
 const {runAssistantEntry}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
@@ -117,6 +118,52 @@ const use=async(argv,clientRequestId=randomUUID())=>{
   const tool_input={companyId,projectId:null,skillId:'avito',releaseId,clientRequestId,operation:'run',parameters:{arguments:argv}};
   return executeAssistantLocalSkillTool('use_assistant_skill',await observedInput(tool_input),{identity,host,store,client,common});
 };
+
+test('ordinary worker and facade preserve real account syntax/setup recovery before any provider attempt',async()=>{
+  // Exercise the production worker catch and facade together: testing the
+  // account parser alone missed the live loss of its safe help projection.
+  const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.30.0'}),
+    context:action=>action({...client,identity,readHealth:async()=>({code:'ready',revision:1,
+      compatibility:{minimumPluginVersion:'0.0.0',minimumRuntimeVersion:null}}),reportHealth:async()=>{}},
+      {...host,withSetupLock:action=>action()},store),proxyFor:async()=>({})};
+  await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),JSON.stringify(identity));
+  const worker=request=>withRuntimeHookPrivateSession(45000,()=>executeAssistantRuntimeRequest(request,dependencies));
+  const facade=await createForwardingAssistantMcp({configurationDirectory:root,request:worker,createWorkspace:async()=>({})});
+  const call=async argv=>facade.callTool('use_assistant_skill',await observedInput({companyId,projectId:null,skillId:'avito',releaseId,
+    clientRequestId:randomUUID(),operation:'run',parameters:{arguments:argv}}));
+  const before=begins;
+  for(const [argv,code] of [
+    [['account','create','--name','SYNTHETIC_PRIVATE_LABEL'],'ACCOUNT_REVISION_REQUIRED'],
+    [['account','create','--expected-revision','1'],'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account','unknown-private-operation'],'ACCOUNT_OPERATION_INVALID'],
+  ]){
+    const result=await call(argv);
+    assert.equal(result.isError,true);assert.equal(result.structuredContent.code,code);
+    assert.equal(result.structuredContent.details.operation,'account_command');
+    assert.match(JSON.stringify(result.structuredContent.details.usage),/account create --name NAME/);
+    assert.match(JSON.stringify(result.structuredContent.details.usage),/--expected-revision N/);
+    assert.deepEqual(JSON.parse(result.content[0].text),result.structuredContent);
+    assert.doesNotMatch(JSON.stringify(result),/SYNTHETIC_PRIVATE_LABEL|unknown-private-operation|runtimeSessionProof|signature/);
+  }
+  const missing=await call(['status']);
+  assert.equal(missing.structuredContent.code,'ACCOUNT_SETUP_REQUIRED');
+  assert.match(JSON.stringify(missing.structuredContent.details.usage),/account create --name NAME/);
+  const help=await call(['account','help','create']);
+  assert.notEqual(help.isError,true);assert.match(JSON.stringify(help.structuredContent.help.usage),/--expected-revision N/);
+  assert.equal(begins,before,'syntax/help/account selection never spend an account or provider attempt');
+  await assert.rejects(fs.readFile(path.join(root,'calls')),{code:'ENOENT'});
+  assert.equal((await use(['account','list'])).structuredContent.accounts.length,0,'no account was created by a refusal');
+  // An arbitrary provider/HTTP Error with a familiar code is not the common
+  // parser instance. It must retain the original opaque fallback, no details.
+  const request={operation:'call',name:'use_assistant_skill',arguments:{companyId,projectId:null,skillId:'avito',releaseId,
+    clientRequestId:randomUUID(),operation:'run',parameters:{arguments:['status']}}};
+  const foreign=await withRuntimeHookPrivateSession(45000,()=>executeAssistantRuntimeRequest(request,{...dependencies,
+    localSkillTool:async()=>{throw Object.assign(new Error('SYNTHETIC_PRIVATE_ERROR'),
+      {code:'ACCOUNT_REVISION_REQUIRED',details:{credential:'SYNTHETIC_PRIVATE_FACTOR'}});}}));
+  assert.deepEqual(foreign.structuredContent,{code:'ASSISTANT_SETUP_UNAVAILABLE'});
+  assert.doesNotMatch(JSON.stringify(foreign),/SYNTHETIC_PRIVATE|credential/);
+});
 
 test('ordinary published package works without an assistant setup declaration or task policy',async()=>{
   const listed=await use(['account','list']);const catalogue=listed.structuredContent;

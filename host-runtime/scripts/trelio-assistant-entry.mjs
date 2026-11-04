@@ -17,12 +17,12 @@ import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
-import { startLoadedCodexPluginPreservation, TrelioApiError } from './trelio-workspace.mjs';
+import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle } from './trelio-assistant-transport.mjs';
-import { parseAccountCommand } from './trelio-skill-accounts.mjs';
+import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from './trelio-skill-accounts.mjs';
 import { parseVisualSkillOutput, visualMcpResult } from './trelio-visual-result.mjs';
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from './trelio-skill-secret-setup.mjs';
 import { browserControllerEnabled, parseBrowserControllerArguments, runBrowserControllerCommand } from './trelio-browser-session.mjs';
@@ -491,6 +491,21 @@ const assistantFailureCode = code => typeof code==='string' && (assistantHealthF
   || /^ASSISTANT_(?:COMPANY_CONTEXT|MCP_LOCAL_(?:WORKSPACE_ARGUMENTS|SOURCE_READ|SOURCE_REPLY|COMPANY_READ|TASK_READ|SKILL_READ|COMPANY_FILE|ATTACHMENT_READ))_TRELIO_BACKEND_HTTP_(?:400|401|403|404|409|429|5XX|OTHER)$/u.test(code)
   || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(code));
 const safeError = error => assistantFailureCode(error?.code) ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
+
+/** The ordinary account parser already owns safe, static syntax recovery. Do
+ * not collapse its missing revision/name into an unavailable setup service:
+ * that prevents the model from correcting a command before any account write.
+ * Only genuine common-host error instances use this projection. A provider or
+ * HTTP lookalike cannot supply its own details/argv through a matching code.
+ * Keep the global assistant/private-pipe failure vocabulary unchanged. */
+const localSkillAccountFailure = error => {
+  if (error instanceof SkillAccountCommandError)
+    return JSON.parse(formatBridgeCommandError(error));
+  if (error instanceof SkillAccountError && ['ACCOUNT_SETUP_REQUIRED','ACCOUNT_SELECTION_REQUIRED',
+    'ACCOUNT_SELECTOR_INVALID','ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ACCOUNT_CATALOGUE_CONFLICT'].includes(error.code))
+    return {code:error.code,details:{operation:'account_command',...parseAccountCommand(['account','help']).help}};
+  return null;
+};
 
 export const callAssistantSetupTool = async (setup, name, args) => {
   if (!codes.has(name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
@@ -2349,7 +2364,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
             &&['missing','invalid','expired','replayed'].includes(error.payload?.reason)?error.payload.reason:null;
           // Preserve only genuine native admission provenance, not provider
           // prose/a lookalike auth flag. Expiry is never called disabled Hooks.
-          const value={code,...(reason?{reason}:{})};result={isError:true,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+          const value=localSkillAccountFailure(error)??{code,...(reason?{reason}:{})};
+          result={isError:true,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
         }
       }else if(localConnection){
         // A normal task/inbound conversation cannot self-provision new accounts.
