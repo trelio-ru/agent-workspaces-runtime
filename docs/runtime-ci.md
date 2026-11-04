@@ -107,6 +107,12 @@ LocalSystem process, including zero-access opens. A completion sentinel prevents
 all-skipped success. Fixture binaries never enter the native release artifact.
 Failures retain only closed observation stages/numeric results. Owned fixture
 cleanup is independent of the failing reader and preserves its test failure.
+Before that assertion, one bounded source-only probe compares FILE and fixed
+SERVICE resource reads with the same ordinary token and an independent native
+creation-time reference. Nullable counts preserve unavailable data. A separate
+explicitly authorized test-VM diagnostic mode runs only this comparison and
+normal cleanup of its own inert service/account; it never supplies CI evidence
+and is rejected inside GitHub. It never replaces the mandatory hosted gate.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.

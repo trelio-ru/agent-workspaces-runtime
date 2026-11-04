@@ -84,7 +84,81 @@ void prepareFixture() {
     L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCRPWPLORC;;;AU)",SDDL_REVISION_1,&descriptor.value,nullptr)!=FALSE);
   require(SetServiceObjectSecurity(service.value,DACL_SECURITY_INFORMATION,descriptor.value)!=FALSE);
   require(StartServiceW(service.value,0,nullptr)!=FALSE);waitFixtureState(service.value,SERVICE_RUNNING);
-  write("{\"prepared\":true}\n");
+  const auto status=codexServiceStatus(service.value);
+  // Independent administrative reference, using ONLY the query right granted
+  // to Administrators by this fixture's process DACL. The ordinary probe never
+  // receives that handle/privilege; it must recover the same OS generation.
+  Handle reference(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,status.dwProcessId));require(reference.value);
+  FILETIME created{},exited{},kernel{},user{};require(GetProcessTimes(reference.value,&created,&exited,&kernel,&user));
+  require(codexServiceStatus(service.value).dwProcessId==status.dwProcessId);
+  ULARGE_INTEGER time{};time.LowPart=created.dwLowDateTime;time.HighPart=created.dwHighDateTime;
+  write("{\"prepared\":true,\"generation\":\"");write(std::to_string(status.dwProcessId));write(":");
+  write(std::to_string(time.QuadPart+504911232000000000ULL));write("\"}\n");
+}
+
+struct FixtureResourceRecord {
+  DWORD opened=0,registered=0,listed=0,ended=0;
+  std::optional<DWORD> count;
+  bool pidMatches=false,nameMatches=false,typeMatches=false,generationMatches=false;
+};
+FixtureResourceRecord probeFixtureResource(bool file,DWORD pid,const std::string& reference) {
+  PackageServiceImage api(fixtureExecutable());FixtureResourceRecord result;
+  DWORD session=0;WCHAR key[CCH_RM_SESSION_KEY+1]{};
+  result.opened=api.start(&session,0,key);if(result.opened!=ERROR_SUCCESS)return result;
+  LPCWSTR resource=file?api.executable.c_str():FixtureService;
+  result.registered=file?api.add(session,1,&resource,0,nullptr,0,nullptr)
+    :api.add(session,0,nullptr,0,nullptr,1,&resource);
+  if(result.registered==ERROR_SUCCESS){
+    std::array<RM_PROCESS_INFO,16> entries{};UINT needed=0,count=static_cast<UINT>(entries.size());DWORD reboot=0;
+    result.listed=api.list(session,&needed,&count,entries.data(),&reboot);
+    if(result.listed==ERROR_SUCCESS&&count<=entries.size()&&needed<=entries.size()){
+      result.count=count;
+      if(count==1){const auto& info=entries[0];
+        result.pidMatches=info.Process.dwProcessId==pid;
+        result.typeMatches=info.ApplicationType==RmService;
+        result.nameMatches=wcsnlen_s(info.strServiceShortName,CCH_RM_MAX_SVC_NAME+1)<=CCH_RM_MAX_SVC_NAME
+          &&_wcsicmp(info.strServiceShortName,FixtureService)==0;
+        ULARGE_INTEGER created{};created.LowPart=info.Process.ProcessStartTime.dwLowDateTime;
+        created.HighPart=info.Process.ProcessStartTime.dwHighDateTime;
+        result.generationMatches=std::to_string(info.Process.dwProcessId)+":"+
+          std::to_string(created.QuadPart+504911232000000000ULL)==reference;
+      }
+    }
+  }
+  result.ended=api.end(session);return result;
+}
+void writeFixtureResourceRecord(const FixtureResourceRecord& value) {
+  write("{\"open\":");write(std::to_string(value.opened));write(",\"register\":");
+  write(value.opened==ERROR_SUCCESS?std::to_string(value.registered):"null");
+  write(",\"list\":");write(value.opened==ERROR_SUCCESS&&value.registered==ERROR_SUCCESS?std::to_string(value.listed):"null");
+  write(",\"end\":");write(value.opened==ERROR_SUCCESS?std::to_string(value.ended):"null");
+  write(",\"count\":");write(value.count?std::to_string(*value.count):"null");
+  write(",\"pidMatches\":");write(value.pidMatches?"true":"false");
+  write(",\"nameMatches\":");write(value.nameMatches?"true":"false");write(",\"typeMatches\":");write(value.typeMatches?"true":"false");
+  write(",\"generationMatches\":");write(value.generationMatches?"true":"false");write("}");
+}
+void probeFixtureResources() {
+  // SOURCE-ONLY diagnostic, never an alternative production admission. Compare
+  // FILE versus fixed SERVICE metadata under the SAME ordinary token and exact
+  // independently observed generation. A refusal is data, not a passing test,
+  // control authority or permission to weaken the production FILE assertion.
+  require(!administrator());auto manager=fixtureManager(SC_MANAGER_CONNECT);require(manager.value);
+  ServiceHandle service(OpenServiceW(manager.value,FixtureService,SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS));require(service.value);
+  verifyCodexServiceConfiguration(service.value,fixtureRoot());const auto status=codexServiceStatus(service.value);
+  require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
+  const auto queried=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,status.dwProcessId);
+  const DWORD queryError=queried?0:GetLastError();Handle queriedOwner(queried);
+  const auto zero=OpenProcess(0,FALSE,status.dwProcessId);
+  const DWORD zeroError=zero?0:GetLastError();Handle zeroOwner(zero);
+  char reference[64]{};const auto length=GetEnvironmentVariableA("TRELIO_SERVICE_FIXTURE_REFERENCE",reference,64);
+  require(length>0&&length<64);
+  const auto file=probeFixtureResource(true,status.dwProcessId,std::string(reference,length));
+  const auto named=probeFixtureResource(false,status.dwProcessId,std::string(reference,length));
+  require(codexServiceStatus(service.value).dwProcessId==status.dwProcessId);
+  write("{\"diagnosticOnly\":true,\"notCIEvidence\":true,\"originalQuerySucceeded\":");write(queried?"true":"false");
+  write(",\"originalQueryError\":");write(std::to_string(queryError));write(",\"zeroOpenSucceeded\":");write(zero?"true":"false");
+  write(",\"zeroOpenError\":");write(std::to_string(zeroError));write(",\"file\":");writeFixtureResourceRecord(file);
+  write(",\"service\":");writeFixtureResourceRecord(named);write("}\n");
 }
 void cleanupFixture() {
   require(administrator());auto manager=fixtureManager(SC_MANAGER_CONNECT);require(manager.value);
@@ -152,6 +226,7 @@ int main(int argc,char* argv[]) {
     require(argc==2||argc==3);const std::string_view command=argv[1];
     if(command=="prepare"&&argc==2){fixtureStage="prepare";prepareFixture();}
     else if(command=="cleanup"&&argc==2){fixtureStage="cleanup";cleanupFixture();}
+    else if(command=="probe"&&argc==2){fixtureStage="resource_probe";probeFixtureResources();}
     else if((command=="inspect"||command=="start"||command=="refusals")&&argc==2){fixtureStage="ordinary_read";exerciseFixture(command,{});}
     else if(command=="stop"&&argc==3){fixtureStage="ordinary_stop";exerciseFixture(command,argv[2]);}
     else throw Failure{};
