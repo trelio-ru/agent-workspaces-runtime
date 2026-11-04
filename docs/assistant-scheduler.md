@@ -1107,8 +1107,16 @@ After protected identity and the exact OS registration are checked, the SAME
 packaged native worker uses the presentation-only `--assistant-console-icon`
 mode. Its control pipe receives exactly the canonical assistant UUID from that
 verified host. It accepts no executable, command, resource, PID or HWND. The
-helper attaches only to its direct Node parent, verifies the current user and
-parent lifetime, and requires exactly that parent and its helper in the console.
+helper attaches only to its direct Node parent and verifies the current user and
+parent lifetime. Console ownership includes that supervisor and at most two
+direct Node ancestors: the stable plugin loader and runtime entry inherit the
+same console in the registered launch. Every occupant other than the helper
+must belong to this contiguous ancestor chain, use the exact same Node image
+and user, and have a creation time preceding its child. Live process handles
+pin all owners against PID reuse. A sibling, shell, other image, extra ancestor
+or unknown occupant still returns `shared_console`; no PID/window is supplied
+by the caller. Fresh console membership and all owner lifetimes are rechecked
+before applying window icons and Shell properties.
 
 The worker sets `ICON_SMALL` and `ICON_BIG` with
 [WM_SETICON](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-seticon)
@@ -1156,7 +1164,9 @@ HICONs and the window properties live until the supervisor closes its pipe.
 Partial startup and normal EOF restore only values still owned by this attempt,
 leaving later independent changes intact. Branding failure stays cosmetic and
 never blocks or grants business readiness or changes work deadlines.
-Native Windows/ARM fixtures independently inspect the exact owned window's
+Native Windows/ARM fixtures cover both a single parent and the three-Node
+registered-launch topology, reject sibling/over-limit chains, and independently
+inspect the exact owned window's
 Shell properties and fixed display name, extract its PE icon, verify restoration at
 EOF and unchanged foreground, and retain shared/hidden/ConPTY no-op checks.
 The classic-console fixture first proves its own HWND/class/visibility, then

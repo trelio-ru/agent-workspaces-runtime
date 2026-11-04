@@ -356,12 +356,69 @@ bool samePresentationUser(HANDLE parent) {
   Bytes currentUser, parentUser;
   return EqualSid(user(currentToken.value, currentUser), user(parentToken.value, parentUser)) != FALSE;
 }
-bool exclusiveParentConsole(DWORD parent) {
-  DWORD processes[3]{};
-  const DWORD count = GetConsoleProcessList(processes, 3);
-  return count == 2 && ((processes[0] == parent && processes[1] == GetCurrentProcessId())
-    || (processes[1] == parent && processes[0] == GetCurrentProcessId()));
-}
+// The installed launcher is Node loader -> Node runtime entry -> Node
+// supervisor. Those ancestors inherit the SAME classic console: treating them
+// as unrelated occupants made the ordinary registered launch fail every time.
+// Derive ownership from the actual OS ancestry, never caller-supplied PIDs or
+// command lines. Only up to three live, same-user, exact-image Node ancestors
+// qualify; a shell, sibling, other executable or extra occupant still refuses.
+struct AssistantConsoleOwners {
+  static constexpr DWORD MaxParents = 3;
+  std::array<DWORD, MaxParents> ids{};
+  std::array<HANDLE, MaxParents> handles{};
+  DWORD size = 0;
+  ~AssistantConsoleOwners() { for (HANDLE handle : handles) if (handle) CloseHandle(handle); }
+
+  bool prepare(DWORD parent, const std::wstring& nodeImage, FILETIME childCreated) {
+    DWORD occupants[MaxParents + 1]{};
+    const DWORD count = GetConsoleProcessList(occupants, MaxParents + 1);
+    if (count < 2 || count > MaxParents + 1) return false;
+    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (snapshot.value == INVALID_HANDLE_VALUE) return false;
+    for (DWORD index = 0; index < count - 1; ++index) {
+      bool present = false;
+      for (DWORD occupant = 0; occupant < count; ++occupant) present |= occupants[occupant] == parent;
+      if (!parent || !present || parent == GetCurrentProcessId()) return false;
+      for (DWORD previous = 0; previous < size; ++previous) if (ids[previous] == parent) return false;
+      handles[size] = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent);
+      if (!handles[size] || !samePresentationUser(handles[size])) return false;
+      wchar_t image[32768]{}; DWORD length = 32768;
+      FILETIME created{}, exited{}, kernel{}, user{};
+      if (!QueryFullProcessImageNameW(handles[size], 0, image, &length)
+          || _wcsicmp(image, nodeImage.c_str()) != 0
+          || !GetProcessTimes(handles[size], &created, &exited, &kernel, &user)
+          || CompareFileTime(&created, &childCreated) > 0) return false;
+      // Hold every handle for the complete presentation lifetime. PID reuse
+      // cannot turn an exited ancestor into a new console owner at read-back.
+      ids[size++] = parent; childCreated = created;
+      if (index + 1 == count - 1) break;
+      PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry);
+      if (!Process32FirstW(snapshot.value, &entry)) return false;
+      bool found = false;
+      do {
+        if (entry.th32ProcessID == parent) { parent = entry.th32ParentProcessID; found = true; break; }
+      } while (Process32NextW(snapshot.value, &entry));
+      if (!found) return false;
+    }
+    return matches();
+  }
+  bool matches() const {
+    if (!size) return false;
+    DWORD occupants[MaxParents + 1]{};
+    const DWORD count = GetConsoleProcessList(occupants, MaxParents + 1);
+    if (count != size + 1) return false;
+    bool self = false;
+    for (DWORD index = 0; index < count; ++index) {
+      if (occupants[index] == GetCurrentProcessId()) { self = true; continue; }
+      bool owned = false;
+      for (DWORD owner = 0; owner < size; ++owner) owned |= occupants[index] == ids[owner];
+      if (!owned) return false;
+    }
+    for (DWORD owner = 0; owner < size; ++owner)
+      if (WaitForSingleObject(handles[owner], 0) != WAIT_TIMEOUT) return false;
+    return self;
+  }
+};
 void presentationSkipped(std::string_view reason) {
   write("{\"schemaVersion\":1,\"state\":\"skipped\",\"reason\":\"");
   write(reason); write("\"}\n");
@@ -518,7 +575,8 @@ int assistantConsoleIcon() {
   if (!window || !visible(window) || className(window, name, 64) <= 0 || wcscmp(name, L"ConsoleWindowClass") != 0) {
     presentationSkipped("not_visible_classic_console"); FreeLibrary(user32); return 0;
   }
-  if (!exclusiveParentConsole(parentId)) {
+  AssistantConsoleOwners owners;
+  if (!owners.prepare(parentId, image, selfCreated)) {
     presentationSkipped("shared_console"); FreeLibrary(user32); return 0;
   }
   const auto before = foreground();
@@ -531,7 +589,7 @@ int assistantConsoleIcon() {
   auto message = [&](UINT type, WPARAM kind, LPARAM value, DWORD_PTR& result) {
     return send(window, type, kind, value, SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &result) != 0;
   };
-  const bool stillOwned = exclusiveParentConsole(parentId) && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT;
+  const bool stillOwned = owners.matches() && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT;
   const bool smallSet = stillOwned && message(WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon), oldSmall);
   const bool largeSet = smallSet && message(WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon), oldLarge);
   const bool iconsVerified = largeSet && message(WM_GETICON, ICON_SMALL, 0, gotSmall)
@@ -541,7 +599,7 @@ int assistantConsoleIcon() {
   {
     AssistantTaskbarProperties taskbar;
     try {
-      if (iconsVerified && exclusiveParentConsole(parentId) && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT) {
+      if (iconsVerified && owners.matches() && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT) {
         taskbar.apply(window, assistantId); taskbarVerified = true;
       }
     } catch (...) { /* Cosmetic failure still restores this attempt's window icons below. */ }
