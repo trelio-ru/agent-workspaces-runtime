@@ -9,7 +9,7 @@ import path from 'node:path';
 import {randomUUID,webcrypto,verify,createPublicKey,createHash} from 'node:crypto';
 import {hpkeSeal,encryptCompanyPayload,buildCompanyEncryptedTextMarker,encryptFileToCompanyContainer} from '../../../host-runtime/scripts/trelio-company-encryption.mjs';
 
-export const startCompanyScenarioBackend=async({identity,pass,credential,runtimePublicKey,root,fileCount=0,stallAttempts=0,refuse=false,unknownCode=false,slowExact=false})=>{
+export const startCompanyScenarioBackend=async({identity,pass,credential,runtimePublicKey,root,fileCount=0,stallAttempts=0,refuse=false,unknownCode=false,slowExact=false,onStalledBuild=()=>{}})=>{
   assert.ok(Number.isInteger(fileCount)&&fileCount>=0&&fileCount<=3000);
   const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),projectId=randomUUID(),taskId=randomUUID(),registryId=randomUUID();
   const projectSlug=`e-${projectId}`,company={id:pass.companyId,slug:'synthetic',name:'Synthetic fixture company'};
@@ -35,7 +35,8 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
   let managed,envelope,mode='ready',closed=false,healthRevision=1,lastNativeTool=null,slowExactConsumed=false,documentReads=0;
   const workspaceId=randomUUID(),workspaceHead='c'.repeat(40),projectionId=randomUUID(),manifestFileId=randomUUID();
   const containers=new Map(),fileIds=[],hits=new Map();
-  const counts={nativeAdmissions:0,manifests:0,fetchManifestReads:0,exact:0,current:0,mutations:0,fileReads:0,ciphertextBytes:0,builds:0},proofs=new Set(),failures=[];
+  const counts={nativeAdmissions:0,manifests:0,fetchManifestReads:0,exact:0,current:0,mutations:0,fileReads:0,ciphertextBytes:0,builds:0,stalledBuilds:0},proofs=new Set(),failures=[];
+  const stalledBuilds=new Set();
   const verifyProof=(proof,toolName)=>{
     assert.equal(proof.schemaVersion,1);assert.ok(!proofs.has(proof.nonce),'one native request consumes one fresh proof');
     const signed=Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,toolName,proof.issuedAt,proof.nonce].join('\n'));
@@ -123,9 +124,16 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
         const index=fileIds.indexOf(binary[1]);hits.set(index,(hits.get(index)??0)+1);
         if(index>=8&&counts.builds<=stallAttempts){
           // A genuine pending HTTP body is aborted by the SAME original
-          // private-session deadline. Observe disconnect; do not fake a timeout
+          // parent's query deadline. Observe disconnect; do not fake a timeout
           // DTO, replace the operation, or leave an owned listener hanging.
-          await new Promise(resolve=>response.once('close',resolve));return;
+          const first=!stalledBuilds.has(counts.builds);
+          stalledBuilds.add(counts.builds);counts.stalledBuilds=stalledBuilds.size;
+          const closed=new Promise(resolve=>response.once('close',resolve));
+          // Arm the real disconnect observer before expiring the owning
+          // parent's timer. Slow native bootstrap cannot consume the fault
+          // before this pending body actually exists.
+          if(first)await onStalledBuild(counts.builds);
+          await closed;return;
         }
         counts.fileReads++;response.setHeader('content-type','application/octet-stream');
         response.setHeader('x-trelio-workspace-id',workspaceId);response.setHeader('x-trelio-workspace-head',workspaceHead);

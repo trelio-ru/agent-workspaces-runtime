@@ -64,13 +64,11 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
   const identity=configuration.identity;
   const client=createAssistantDeviceClient({...identity,http:createAssistantHttp({origin:identity.origin}),store});
   const context=async(action,options={})=>{
-    // Same invocation-local private session as the production factory. Tests
-    // may cancel an original signal; no clock is extended/replaced on failure.
-    // Only failure fixtures shorten the injected factory's original clock;
-    // the volume case uses the exact production budgets. There is no model
-    // request field/environment override and no resumed clock on one worker.
-    const signal=configuration.caseName==='cold'?assistantProductionContextSignal(options):
-      assistantProductionContextSignal(options,milliseconds=>AbortSignal.timeout(options.companyReadPreparation?10000:milliseconds));
+    // Keep the production private-session clock for EVERY child. The parent
+    // alone injects its planned owned query deadlines and cancels their real
+    // pending HTTP bodies. A second shortened child clock would race that
+    // provenance and incorrectly time out successful recovered/warm reads.
+    const signal=assistantProductionContextSignal(options);
     return withPrivateProcessSession(()=>action(client,host,store),signal);
   };
   const withProfile=(action,options={})=>withProductionAssistantWorkspace(action,{...options,context});
@@ -107,7 +105,7 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
       // No path/content is logged and the ordinary fd/ACL/crypto reader remains
       // unchanged. This catches an accidental second whole-mirror decrypt in
       // the same fresh managed invocation, including legacy facade requests.
-      const originalOpen=fs.open,originalReaddir=fs.readdir;let generationReads=0,scratchInventories=0;
+      const originalOpen=fs.open,originalReaddir=fs.readdir;let generationReads=0,scratchInventories=0,slowWarmReads=0;
       fs.readdir=async(file,...rest)=>{
         if(typeof file==='string'&&file.startsWith(root+path.sep)&&/[/\\]search-files-v1$/u.test(file))scratchInventories++;
         return originalReaddir(file,...rest);
@@ -119,6 +117,14 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
           generationReads++;
           if(request.operation==='company_context_read'&&configuration.slowLegacyGenerationRead===true)
             await new Promise(resolve=>setTimeout(resolve,24000));
+          // Deterministically expose the former blanket ten-second fault
+          // clock on an ordinary warm query. Its genuine reader remains under
+          // the original production deadline and still checks native ACLs.
+          if(generationReads===1&&request.operation==='company_context_search'&&configuration.slowRecoveredWarmSearch===true
+            &&request.arguments?.queries?.[0]?.startsWith('COLD_VOLUME_CANARY_')){
+            slowWarmReads++;
+            await new Promise(resolve=>setTimeout(resolve,12000));
+          }
         }
         return handle;
       };
@@ -140,7 +146,7 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
       }finally{
         fs.open=originalOpen;fs.readdir=originalReaddir;
         if(['company_context_search','company_context_read'].includes(request.operation))
-          await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation:request.operation,generationReads,scratchInventories})+'\n');
+          await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation:request.operation,generationReads,scratchInventories,slowWarmReads})+'\n');
       }
     },
     continuationBeginFaults,

@@ -78,6 +78,14 @@ Its disposable Windows HOME uses the short runner-owned temp root, avoiding an
 artificial MAX_PATH failure from nesting below the runner's full profile TEMP.
 Synthetic filesystem failures retain only closed errno/syscall categories;
 production path validation, private ACLs and request assertions are unchanged.
+Owned-timeout fixtures expire only the planned stalled parent query timers,
+after observing their real pending HTTP responses, independent of runner speed.
+The resumable prefix must have eight atomically published encrypted cache files
+before that fault; a completed network response is not a completed cache write.
+Recovered children and subsequent warm reads use production private-session
+budgets. An independent twelve-second warm-read delay verifies that planned
+faults do not shorten later queries. The second deliberate timeout remains
+terminal without a third attempt.
 
 Windows keeps all eleven assistant suites, the shared Workspace process/finish/
 directory/files boundaries, local context/policy/proof, signed hook chain,

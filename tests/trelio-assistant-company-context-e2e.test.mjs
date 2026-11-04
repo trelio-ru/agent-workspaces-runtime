@@ -76,12 +76,15 @@ for(const scenario of [
   const state={runtimeSessionId:randomUUID(),expiresAt:new Date(Date.now()+30*60_000).toISOString(),
     privateKeyPkcs8:key.privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
     observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}};
+  let expireStalledPreparation=()=>{};
   const backend=await startCompanyScenarioBackend({identity,pass,credential,root,fileCount:scenario.files,
+    onStalledBuild:build=>expireStalledPreparation(build),
     stallAttempts:scenario.stallAttempts,refuse:scenario.refuse===true,unknownCode:scenario.unknownCode===true,slowExact:scenario.slowExact===true,
     runtimePublicKey:key.publicKey.export({type:'spki',format:'pem'})});
   t.after(()=>backend.close());
   const configuration={schema:'trelio.test.company-context/v1',root,server:backend.url,identity,
-    caseName:scenario.nativeCase??scenario.name,...(scenario.legacyWarm?{slowLegacyGenerationRead:true}:{})};
+    caseName:scenario.nativeCase??scenario.name,...(scenario.legacyWarm?{slowLegacyGenerationRead:true}:{}),
+    ...(scenario.name==='owned-timeout-resume'?{slowRecoveredWarmSearch:true}:{})};
   const native=await openNativeCompanyScenario(configuration);
   const configFile=path.join(root,'scenario.json'),loader=path.join(root,'loader.mjs');
   await fs.writeFile(configFile,JSON.stringify(configuration),{mode:0o600});
@@ -113,23 +116,41 @@ for(const scenario of [
       operations.push({operation:raw.operation,completionVersion:result?._meta?.['trelio/assistant-company-read']?.schemaVersion??null});
       return result;
     };
-    let injectedFaultClocks=0;
+    let injectedPreparationTimeouts=0;
     if(scenario.stallAttempts){
       // Recovery origin is THIS parent's exact timer/signal, not a public
       // timeout code emitted by a different short private invocation. Shorten
-      // only the original600s timers for the deliberately stalled attempts.
-      // The resumed healthy preparation keeps its ordinary production budget:
-      // shortening that timer too makes native cold I/O a second injected
-      // timeout, contrary to this one-fault scenario. The two-fault case still
-      // shortens both attempts and must refuse a third. No production clock,
-      // polling deadline, outer harness bound or failure assertion changes.
+      // only the planned stalled attempts' original600s timers. Expire each
+      // exact callback AFTER its real HTTP body is pending, not after an
+      // arbitrary ten seconds of native setup on a loaded runner. Recovered
+      // and later warm queries retain their original production clocks.
       const originalSetTimeout=globalThis.setTimeout;
-      let faultClocks=scenario.stallAttempts;
+      const faults=[];
       t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
-        const inject=delay===600000&&faultClocks>0;
-        if(inject){faultClocks--;injectedFaultClocks++;}
-        return originalSetTimeout(callback,inject?10000:delay,...args);
+        const timer=originalSetTimeout(callback,delay,...args);
+        if(delay===600000&&faults.length<scenario.stallAttempts)faults.push({timer,callback,args,expired:false});
+        return timer;
       });
+      expireStalledPreparation=async build=>{
+        const fault=faults[build-1];
+        assert.ok(fault,'a stalled build must have its own original query timer');
+        if(fault.expired)return;
+        // The scenario asserts reuse of eight COMPLETED encrypted cache
+        // entries. Their network responses alone are insufficient: file
+        // workers may still be publishing them when the next body stalls.
+        // Observe only atomic final filenames in this disposable scope before
+        // cancelling, so the fault cannot erase an in-flight cache write.
+        const wait=AbortSignal.timeout(30000);
+        for(;;){
+          wait.throwIfAborted();
+          const cached=(await fs.readdir(path.join(paths.root,'search-files-v1'))).filter(name=>/^[a-f0-9]{64}\.json$/u.test(name));
+          if(cached.length>=8)break;
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+        fault.expired=true;injectedPreparationTimeouts++;
+        clearTimeout(fault.timer);
+        queueMicrotask(()=>fault.callback(...fault.args));
+      };
     }
     const directory=path.join(root,'native-context'),workspace=await createAssistantWorkspaceExecutor({configDirectory:directory,companyPreparationOptions:{waitMs:2}});
     output.on('data',chunk=>{buffer+=chunk;for(;;){const end=buffer.indexOf('\n');if(end<0)break;responses.push(JSON.parse(buffer.slice(0,end)));buffer=buffer.slice(end+1);}});
@@ -158,7 +179,7 @@ for(const scenario of [
       search=result.result;break;
     }
     backend.assertClean();
-    assert.equal(injectedFaultClocks,scenario.stallAttempts,'only the intentionally stalled attempts receive a shortened fault clock');
+    assert.equal(injectedPreparationTimeouts,scenario.stallAttempts,'only the intentionally stalled attempts expire their original query timer');
     if(scenario.stallAttempts===2||scenario.refuse){
       assert.ok(terminal,'an ordinary refusal/second owned deadline is terminal, never an empty search');
       const code=terminal.structuredContent.code;
@@ -173,6 +194,8 @@ for(const scenario of [
       }
       assert.equal(backend.counts.builds,builds,'a retained refusal cannot admit a third/new preparation');
       assert.equal(builds,scenario.stallAttempts||1);
+      assert.equal(injectedPreparationTimeouts,scenario.stallAttempts);
+      assert.equal(backend.counts.stalledBuilds,scenario.stallAttempts,'each deadline must cancel an actual pending synthetic response');
       await assert.rejects(fs.lstat(paths.pointer),{code:'ENOENT'},'an incomplete/failed generation is never published');
       console.log('NATIVE_OWNER_COMPANY_CHAIN_EXECUTED');return;
     }
@@ -183,6 +206,8 @@ for(const scenario of [
     assert.equal((await fs.lstat(paths.pointer)).isFile(),true,'READY requires a complete published generation');
     if(scenario.files===3000)assert.ok(backend.counts.ciphertextBytes>142*1024*1024,'cold input retains representative encrypted volume');
     assert.equal(backend.counts.builds,scenario.stallAttempts+1);
+    assert.equal(injectedPreparationTimeouts,scenario.stallAttempts);
+    assert.equal(backend.counts.stalledBuilds,scenario.stallAttempts);
     for(let index=0;index<8;index++)assert.equal(backend.fileHits(index),1,'completed exact-head cache survives a bounded failed child');
     console.log(JSON.stringify({fixture:scenario.name,files:scenario.files,elapsedMs:Date.now()-coldStarted,ciphertextBytes:backend.counts.ciphertextBytes}));
     assert.match(JSON.stringify(search),/Synthetic weekend journey/);
@@ -236,6 +261,12 @@ for(const scenario of [
     // a PREPARING response as a false positive. Require actual material data.
     assert.notEqual(second.result?.structuredContent?.state,'preparing');
     assert.match(JSON.stringify(second.result.structuredContent.results),new RegExp(`COLD_VOLUME_CANARY_${scenario.files-1}`));
+    if(scenario.name==='owned-timeout-resume'){
+      const diagnostics=(await fs.readFile(path.join(root,'fixture-diagnostics.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+      assert.ok(diagnostics.some(row=>row.operation==='company_context_search'&&row.slowWarmReads===1),
+        'the recovered warm query must really outlive the fault-only ten-second budget');
+      assert.equal(injectedPreparationTimeouts,1,'ordinary warm search cannot acquire another artificial deadline');
+    }
     assert.ok(operations.filter(value=>value.operation==='company_context_validate').length>=2);
     if(scenario.legacyWarm){
       legacyFacade=true;

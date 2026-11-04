@@ -161,6 +161,9 @@ publication tooling также остаются вне этого публичн
   discussion, warm second question, one own-timeout resume, hard second timeout,
   native ACL refusal and no Task/Run. Original Telegram/model acceptance remains
   separate live evidence, never claimed from the deterministic fixture.
+  Timeout fixtures expire only planned parent timers after a pending HTTP body
+  and the completed encrypted-cache prefix are witnessed, independent of runner
+  speed. Recovered children and a twelve-second warm read keep production clocks.
   The isolated native fixture uses the runner-owned short Windows HOME, not a
   long profile-TEMP nesting; filesystem diagnostics expose closed errno/syscall only.
   Genuine common HTTP errors reuse the closed bridge diagnostic vocabulary,
