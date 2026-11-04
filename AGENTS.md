@@ -889,17 +889,12 @@ publication tooling также остаются вне этого публичн
   and denied process rights under a real standard account, not runner-admin.
   Fixture refusals retain only static stages/numeric results; independent owned
   fixture cleanup never hides the original failed acceptance assertion.
-  Source-only FILE/SERVICE API comparisons use the same ordinary token and an
-  independent OS generation reference; diagnostic-only VM mode needs its own
-  explicit run decision, never supplies CI evidence and is forbidden in GitHub.
-  Its bounded closed native frame precedes the independent process-exit check;
-  missing exit codes stay unknown/failing and never erase collected API evidence.
-  A source-only documented SystemBasicProcessInformation comparison may report
-  fixed PID/image/sequence equality only; it is not production identity or CI
-  acceptance. Native handle ownership keeps its actual read-probe exit observable.
-  The isolated ordinary-token WMI comparison retains only closed HRESULT/stage
-  and own-process identity booleans. Its microsecond CreationDate is not exact
-  legacy FILETIME evidence; paths/prose and production predicates stay private.
+  The fixture matches the packaged service's ordinary SCM AU grant (0x201fd,
+  including ENUMERATE_DEPENDENTS), while independently denying process rights.
+  First ordinary generation must equal an administrator's query-only OS read.
+  Retain the actual owned child handle through exit/pipe close; null exit is not
+  success. Unknown/live children preserve their disposable fixture, never race
+  cleanup or supply a completion sentinel. No fixture ACL is copied to production.
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.

@@ -2344,13 +2344,14 @@ Native fixture refusals preserve a static observation phase and numeric API
 result/count only, never OS prose, paths or identities. Production keeps the
 original unavailable DTO. Cleanup of the exact disposable fixture remains
 independent of the observation under test and cannot hide a failed assertion.
-The source fixture separately compares FILE and fixed SERVICE resource reads
-under that same ordinary account, against an independent administrator's
-query-only OS creation-time reference. Only closed API codes, nullable counts
-and equality booleans are emitted; denied/not-run reads are never empty success.
-This diagnostic neither changes production admission nor authorizes service
-control. Its explicitly authorized test-VM-only mode emits no CI evidence;
-the hosted mode still requires the unchanged real positive assertion/sentinel.
+Its SCM DACL matches the packaged service's ordinary AU grant (0x201fd), including
+ENUMERATE_DEPENDENTS, without config/DACL/owner-write rights. Process-query denial
+is tested independently; a more restrictive synthetic SCM ACL must not substitute
+for the real control boundary. The first standard-user generation must exactly
+equal an independent administrator's query-only GetProcessTimes observation.
+The source-only parent retains its actual child handle through exit and pipe
+close; unknown/null results never become a completion sentinel. An unknown/live
+child retains its disposable resources instead of racing a late control effect.
 Real SCM/registration activation remains an independent dedicated-computer
 acceptance step; component tests never claim that outcome.
 

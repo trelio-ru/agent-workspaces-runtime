@@ -208,6 +208,7 @@ test('ordinary packaged service control works without process query or synchroni
   };
   const first=await call(['inspect']);
   assert.equal(first.state,'running');assert.match(first.generation,/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u);
+  assert.equal(first.generation,process.env.TRELIO_SERVICE_FIXTURE_REFERENCE,'ordinary read must match independent administrator GetProcessTimes');
   assert.deepEqual(await call(['refusals']),{refused:4});
   // A stale generation must refuse BEFORE SCM control. Observe the original
   // still running, then issue exactly one normal stop for its actual generation.

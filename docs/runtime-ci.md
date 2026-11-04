@@ -107,24 +107,17 @@ LocalSystem process, including zero-access opens. A completion sentinel prevents
 all-skipped success. Fixture binaries never enter the native release artifact.
 Failures retain only closed observation stages/numeric results. Owned fixture
 cleanup is independent of the failing reader and preserves its test failure.
-Before that assertion, one bounded source-only probe compares FILE and fixed
-SERVICE resource reads with the same ordinary token and an independent native
-creation-time reference. Nullable counts preserve unavailable data. A separate
-explicitly authorized test-VM diagnostic mode runs only this comparison and
-normal cleanup of its own inert service/account; it never supplies CI evidence
-and is rejected inside GitHub. It never replaces the mandatory hosted gate.
-The collector projects the bounded native API frame before checking its separately
-observed process exit. A missing exit code remains unknown/failing, never zero;
-collection failures cannot erase an already obtained comparison or allow replay.
-The source-only comparison also checks documented SystemBasicProcessInformation
-against an independent administrative OS sequence read and a fresh ordinary-token
-read. Unavailable APIs/invalid complete inventories stay explicit failures; the
-sequence diagnostic changes no production predicate or positive assertion.
-An independent source-only WMI comparison queries only that inert service's PID,
-name, path and CreationDate under the same ordinary token. It emits only closed
-codes/equality booleans, never values or a production fallback. CreationDate's
-microsecond precision is explicit; it cannot silently replace a legacy 100ns
-generation. The owned read child keeps the same deadline and cleanup boundaries.
+The fixture's SCM DACL matches the packaged service's ordinary authenticated-user
+grant (0x201fd), including ENUMERATE_DEPENDENTS, but no config/DACL/owner writes.
+The independent process DACL still denies the original query/synchronization
+request. A stricter synthetic SCM grant must not be confused with that separate
+process boundary. The first ordinary generation must equal an administrator's
+independent query-only GetProcessTimes result, not merely fit a string pattern.
+The source-only parent retains its actual owned child handle through native exit
+and pipe close. Null/nonzero status or an absent executed-flow sentinel fails.
+An unknown/live child preserves its exact disposable fixture/account/files rather
+than racing late control or inventing successful cleanup. Diagnostic comparisons
+and unsupported API experiments are not installed production fallbacks.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
