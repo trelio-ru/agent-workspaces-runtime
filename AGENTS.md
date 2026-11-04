@@ -892,6 +892,8 @@ publication tooling также остаются вне этого публичн
   Source-only FILE/SERVICE API comparisons use the same ordinary token and an
   independent OS generation reference; diagnostic-only VM mode needs its own
   explicit run decision, never supplies CI evidence and is forbidden in GitHub.
+  Its bounded closed native frame precedes the independent process-exit check;
+  missing exit codes stay unknown/failing and never erase collected API evidence.
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.

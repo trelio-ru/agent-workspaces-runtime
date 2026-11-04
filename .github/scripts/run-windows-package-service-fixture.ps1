@@ -11,6 +11,35 @@ $ErrorActionPreference = 'Stop'
 if ($DiagnosticOnly -and $env:GITHUB_ACTIONS -ceq 'true') { throw 'Diagnostic-only mode cannot satisfy a hosted gate.' }
 function Decode([string]$value) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value)) }
 function Encode([string]$value) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value)) }
+function DiagnosticNumber($value, [switch]$Required) {
+  if ($null -eq $value) {
+    if ($Required) { throw 'Missing numeric diagnostic field.' }
+    return $null
+  }
+  if (($value -isnot [int] -and $value -isnot [long]) -or $value -lt 0 -or $value -gt [uint32]::MaxValue) {
+    throw 'Invalid numeric diagnostic field.'
+  }
+  return [long]$value
+}
+function DiagnosticBoolean($value) {
+  if ($value -isnot [bool]) { throw 'Invalid boolean diagnostic field.' }
+  return $value
+}
+function ProjectResource($value) {
+  # Construct the closed frame explicitly. Never forward native stderr, unknown
+  # properties, paths or exception prose merely because JSON parsing succeeded.
+  return [ordered]@{
+    open = (DiagnosticNumber $value.open -Required)
+    register = (DiagnosticNumber $value.register)
+    list = (DiagnosticNumber $value.list)
+    end = (DiagnosticNumber $value.end)
+    count = (DiagnosticNumber $value.count)
+    pidMatches = (DiagnosticBoolean $value.pidMatches)
+    nameMatches = (DiagnosticBoolean $value.nameMatches)
+    typeMatches = (DiagnosticBoolean $value.typeMatches)
+    generationMatches = (DiagnosticBoolean $value.generationMatches)
+  }
+}
 if ($Child) {
   # This is a NEW disposable standard account, not a filtered runner-admin
   # approximation. The fixture itself asserts !administrator and verifies that
@@ -34,10 +63,33 @@ if ($Child) {
     if (!$probe.WaitForExit(5000)) { throw 'Owned read-only probe exit is unknown; no replay.' }
     throw 'Owned read-only resource probe timed out; no replay.'
   }
-  if ($probe.ExitCode -ne 0 -or (Get-Item $probeOut).Length -gt 8192) { throw 'Bounded resource probe failed.' }
+  # Observe collection separately from native API results. Start-Process may
+  # leave an unavailable ExitCode; null is NEVER zero/success. Preserve a valid
+  # bounded native diagnostic BEFORE rejecting that transport observation, so
+  # a collector failure cannot erase the FILE/SERVICE comparison we need.
+  $probe.Refresh()
+  $probeExit = $probe.ExitCode
+  $probeBytes = (Get-Item $probeOut).Length
+  [ordered]@{ resourceProbeProcess = $true; exitCode = $probeExit; outputBytes = $probeBytes } | ConvertTo-Json -Compress
+  if ($probeBytes -le 0 -or $probeBytes -gt 8192) { throw 'Bounded resource probe output unavailable.' }
   $record = [IO.File]::ReadAllText($probeOut) | ConvertFrom-Json
+  if ($record.fixtureFailure -eq $true) {
+    # These are the only exception stages reachable from this source-only probe.
+    # Other stages remain a closed unknown; a native refusal is never CI success.
+    $stage = if ($record.stage -cin @('resource_probe', 'rm_library')) { $record.stage } else { 'unknown' }
+    [ordered]@{ fixtureFailure = $true; stage = $stage; detail = (DiagnosticNumber $record.detail) } | ConvertTo-Json -Compress
+    throw 'Native resource comparison refused.'
+  }
   if ($record.diagnosticOnly -ne $true -or $record.notCIEvidence -ne $true) { throw 'Invalid diagnostic record.' }
-  $record | ConvertTo-Json -Compress -Depth 5
+  [ordered]@{
+    diagnosticOnly = $true; notCIEvidence = $true
+    originalQuerySucceeded = (DiagnosticBoolean $record.originalQuerySucceeded)
+    originalQueryError = (DiagnosticNumber $record.originalQueryError -Required)
+    zeroOpenSucceeded = (DiagnosticBoolean $record.zeroOpenSucceeded)
+    zeroOpenError = (DiagnosticNumber $record.zeroOpenError -Required)
+    file = (ProjectResource $record.file); service = (ProjectResource $record.service)
+  } | ConvertTo-Json -Compress -Depth 5
+  if ($null -eq $probeExit -or $probeExit -ne 0) { throw 'Resource probe process outcome was not successful; no replay.' }
   if ($DiagnosticOnly) { exit 0 }
   & $node --test '--test-name-pattern=^ordinary packaged service control works without process query or synchronization rights$' (Join-Path $repository 'tests/trelio-windows-native-private.test.mjs')
   exit $LASTEXITCODE

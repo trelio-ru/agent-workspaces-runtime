@@ -113,6 +113,9 @@ creation-time reference. Nullable counts preserve unavailable data. A separate
 explicitly authorized test-VM diagnostic mode runs only this comparison and
 normal cleanup of its own inert service/account; it never supplies CI evidence
 and is rejected inside GitHub. It never replaces the mandatory hosted gate.
+The collector projects the bounded native API frame before checking its separately
+observed process exit. A missing exit code remains unknown/failing, never zero;
+collection failures cannot erase an already obtained comparison or allow replay.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
