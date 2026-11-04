@@ -1455,7 +1455,7 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
   // A prior Desktop deployment owns its GUI lifecycle until read-back. Do not
   // start a plugin installation/restart over that unresolved private journal.
   // The ordinary tick proceeds directly to the Desktop recovery below.
-  if(policy.codex&&!['ready','failed'].includes(policy.codex.phase))return {state:'codex_pending'};
+  if(policy.codex&&!['ready','failed','registration_failed'].includes(policy.codex.phase))return {state:'codex_pending'};
   const deadline=AbortSignal.timeout(150_000);
   signal=signal?AbortSignal.any([signal,deadline]):deadline;
   return runtime.coordinator.maintainPluginAtIdleBoundary(coordinatorGuard=>context(async (lockedClient,lockedHost)=>lockedHost.withSetupLock(async()=>{
@@ -1560,7 +1560,7 @@ export const runProductionAssistantCodexMaintenance = async (runtime,{context=pr
   if(!policy.enabled){
     // Revoking permission cannot silently make an unfinished installation idle.
     // Leave its journal intact and surface the same closed health incident.
-    if(policy.state&&!['ready','failed'].includes(policy.state.phase))fail('ASSISTANT_CODEX_UPDATE_FAILED');
+    if(policy.state&&!['ready','failed','registration_failed'].includes(policy.state.phase))fail('ASSISTANT_CODEX_UPDATE_FAILED');
     return {state:'disabled'};
   }
   const deadline=AbortSignal.timeout(15*60_000);signal=signal?AbortSignal.any([signal,deadline]):deadline;

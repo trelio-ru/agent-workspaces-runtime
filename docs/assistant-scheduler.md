@@ -2151,8 +2151,29 @@ updated. Changed hooks/login still require their existing human decisions.
 The update itself clears no login/trust/dispatch latch. Failed deployment may
 resume the prior healthy Desktop after its fresh probe; its failed version stays
 latched and is reported without repeated installation. Only a newer signed
-candidate may be attempted. A later exact native version/fresh GUI/probe may
+candidate may be installed. A later exact native version/fresh GUI/probe may
 also verify an already deferred registration without another installation. Health metadata cannot clear that retained failure.
+
+A terminal `failed` deployment may leave Windows waiting to complete a staged
+registration on the next normal activation. At the SAME idle/setup boundary the
+background updater can make ONE separately journaled registration-recovery
+restart. It revalidates the retained MSIX digest/signature/identity/version and
+the healthy current GUI/MCP/device before recording `registration_closing` and
+the exact newly selected generation. It never recloses the original generation
+or enters this path from an uncertain/refused original `closing` intent.
+`registration_starting` and `registration_verifying` fence one activation after
+a later tick observes the application stopped. No installer invocation exists
+in these phases; a lost close/start response is read-back-only. Original task,
+source and provider receipts remain untouched.
+
+Recovery allows ten minutes for registration/activation. Exact target version,
+a new native GUI generation and a fresh probe alone clear the failed version.
+A positively healthy old activation ends in `registration_failed`; that terminal
+phase preserves the original failure and permits ordinary work/plugin servicing,
+but cannot restart or install that candidate again. A genuinely newer signed
+candidate remains eligible through ordinary discovery. A refused/unknown close
+or activation keeps its unresolved recovery phase and existing owner incident;
+neither a timer nor configuration/health metadata grants another effect.
 Disabling Desktop updates during an unresolved installation preserves its journal and
 reports the existing closed incident, without making pending work falsely idle.
 

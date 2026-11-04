@@ -465,13 +465,14 @@ export const CODEX_DESKTOP_VERSION = /^(?:0|[1-9]\d{0,4})(?:\.(?:0|[1-9]\d{0,4})
 export const validateAssistantCodexUpdate = value => {
   const keys=['schemaVersion','assistantId','deviceId','phase','checkedAt','etag','previousVersion','targetVersion','sha256','desktopGeneration','failedVersion'];
   if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==keys.sort().join(',')
-    ||value.schemaVersion!==1||!['ready','prepared','closing','installing','starting','verifying','failed'].includes(value.phase)
+    ||value.schemaVersion!==1||!['ready','prepared','closing','installing','starting','verifying','failed',
+      'registration_closing','registration_starting','registration_verifying','registration_failed'].includes(value.phase)
     ||!['assistantId','deviceId'].every(key=>/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u.test(value[key]??''))
     ||!Number.isSafeInteger(value.checkedAt)||value.checkedAt<0
     ||value.etag!==null&&(typeof value.etag!=='string'||!/^[\x20-\x7e]{1,256}$/u.test(value.etag))
     ||!CODEX_DESKTOP_VERSION.test(value.previousVersion??'')||!CODEX_DESKTOP_VERSION.test(value.targetVersion??'')
     ||value.failedVersion!==null&&!CODEX_DESKTOP_VERSION.test(value.failedVersion??'')
-    ||value.phase==='failed'&&value.failedVersion===null
+    ||(value.phase==='failed'||value.phase.startsWith('registration_'))&&value.failedVersion!==value.targetVersion
     ||value.sha256!==null&&!/^[a-f0-9]{64}$/u.test(value.sha256??'')
     ||!['ready','failed'].includes(value.phase)&&value.sha256===null
     ||value.desktopGeneration!==null&&!/^[1-9]\d{0,9}:[0-9]{1,20}$/u.test(value.desktopGeneration??''))fail('ASSISTANT_CODEX_UPDATE_FAILED');

@@ -1195,7 +1195,9 @@ export const runAssistantWindowsCodexUpdate = async (operation,{environment=proc
 /** A single install intent is never replayed. After interruption, inspect the
  * native package and GUI, resume the same visible Desktop, then check hooks/MCP.
  * Original task chats, private state, schedules, files and credentials have no
- * write path here. A failed candidate is latched until a newer signed version. */
+ * write path here. A failed install remains latched. One separately journaled
+ * idle restart may finish Windows' already deferred registration; this path
+ * never invokes the installer and cannot loop on the same candidate. */
 export const maintainAssistantCodexDesktop = async ({identity,readState,writeState,inspect,download,prepare,install,desktop,probe,guard=async()=>{},now=Date.now}) => {
   await guard();let state=await readState(),preparedThisTick=false;
   const save=async patch=>{
@@ -1204,12 +1206,12 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
   };
   const current=await inspect();
   if(current.state==='not_installed'){
-    if(state&&!['ready','failed'].includes(state.phase))codexUpdateFail();
+    if(state&&!['ready','failed','registration_failed'].includes(state.phase))codexUpdateFail();
     return {state:'not_installed'};
   }
   if(!state)await save({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,phase:'ready',checkedAt:0,etag:null,
     previousVersion:current.version,targetVersion:current.version,sha256:null,desktopGeneration:null,failedVersion:null});
-  if(state.phase==='failed'&&compareCodexDesktopVersions(current.version,state.failedVersion)>=0){
+  if(['failed','registration_failed'].includes(state.phase)&&compareCodexDesktopVersions(current.version,state.failedVersion)>=0){
     // Windows may finish a deferred registration after an earlier old-version
     // read-back, or the human may complete recovery. Exact native version AND
     // a fresh running GUI/probe can release the failure; an ETag never can.
@@ -1220,7 +1222,64 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
       return {state:'updated',version:current.version};
     }
   }
-  if(['ready','failed'].includes(state.phase)){
+  if(state.phase==='failed'&&compareCodexDesktopVersions(current.version,state.targetVersion)<0&&state.sha256!==null){
+    // DeferRegistrationWhenPackagesAreInUse may leave a completely staged
+    // package waiting for the next normal activation. Re-running Add-AppxPackage
+    // would replay the original uncertain installation. Instead admit ONE new,
+    // explicitly journaled restart of the healthy old Desktop at the same idle
+    // boundary. Re-authenticate the retained candidate before any GUI effect;
+    // an arbitrary failed receipt or replaced download grants no restart.
+    const retained=await prepare(state.sha256);
+    if(retained.version!==state.targetVersion||retained.architecture!==current.architecture)codexUpdateFail();
+    const app=await desktop('inspect');
+    // A refused/unknown original close stays in `closing`, never `failed`.
+    // Also refuse to close its original generation even if a damaged historical
+    // receipt called that phase failed. The original close cannot be replayed.
+    if(app.state==='stopped'||app.generation!==state.desktopGeneration){
+      if(app.state==='running'){await guard();await probe();}
+      await save({phase:'registration_closing',desktopGeneration:app.generation,checkedAt:now()});
+      if(app.state==='running'){await guard();await desktop('close',app.generation);}
+      // Let Windows finish native teardown/registration before activation in a
+      // later ordinary tick. Persisted phase, not a timer or process exit code,
+      // is the no-replay fence after a lost response or supervisor restart.
+      return {state:'activating',blockBusiness:true};
+    }
+  }
+  if(state.phase==='registration_closing'){
+    const app=await desktop('inspect');
+    if(app.state!=='stopped'){
+      if(now()-state.checkedAt>=10*60_000)codexUpdateFail();
+      return {state:'activating',blockBusiness:true};
+    }
+    await save({phase:'registration_starting'});
+  }
+  if(state.phase==='registration_starting'){
+    const app=await desktop('inspect');
+    await save({phase:'registration_verifying'});
+    if(app.state==='stopped'){await guard();await desktop('start');}
+  }
+  if(state.phase==='registration_verifying'){
+    const app=await desktop('inspect');
+    if(app.state!=='running'||app.generation===state.desktopGeneration){
+      if(now()-state.checkedAt>=10*60_000)codexUpdateFail();
+      return {state:'activating',blockBusiness:true};
+    }
+    const actual=await inspect();
+    if(compareCodexDesktopVersions(actual.version,state.targetVersion)<0&&now()-state.checkedAt<10*60_000)
+      return {state:'activating',blockBusiness:true};
+    try{await guard();await probe();}catch(error){if(error.code==='ASSISTANT_HOOK_REVIEW_REQUIRED')return {state:'hook_review',blockBusiness:true};throw error;}
+    if(compareCodexDesktopVersions(actual.version,state.targetVersion)<0){
+      // A definite healthy old activation ends this separate recovery attempt.
+      // Keep the original failed version and a distinct terminal phase: later
+      // polls may discover a NEW signed package but cannot restart/install this
+      // candidate again. No receipt, pending task or login latch is cleared.
+      await save({phase:'registration_failed'});
+      return {state:'failed',failedVersion:state.failedVersion};
+    }
+    await save({phase:'ready',targetVersion:actual.version,failedVersion:null});
+    return {state:'updated',version:actual.version};
+  }
+  if(['ready','failed','registration_failed'].includes(state.phase)){
     if(now()-state.checkedAt<CODEX_UPDATE_INTERVAL)return {state:'current',failedVersion:state.failedVersion};
     // Discovery and code verification are optional until the intent is saved.
     // An offline feed or an invalid candidate cannot stop the healthy old app.

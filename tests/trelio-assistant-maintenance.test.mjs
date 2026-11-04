@@ -16,7 +16,7 @@ import { createAssistantHostState } from '../host-runtime/scripts/trelio-assista
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
 
 const desktopUpdateFixture=()=>{
-  let state=null,version='26.100.0.0',generation='100:1',clock=CODEX_UPDATE_INTERVAL*2;
+  let state=null,version='26.100.0.0',generation='100:1',clock=CODEX_UPDATE_INTERVAL*2,nextPid=101;
   const effects=[],snapshots=[],identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
   const options={identity,now:()=>clock,guard:async()=>{},
     readState:async()=>structuredClone(state),writeState:async(expected,next)=>{
@@ -25,12 +25,12 @@ const desktopUpdateFixture=()=>{
     prepare:async()=>({version:'26.101.0.0',architecture:'x64'}),install:async()=>{
       assert.equal(state.phase,'installing');effects.push('install');version='26.101.0.0';
     },desktop:async(operation,previous)=>{
-      if(operation==='close'){assert.equal(state.phase,'closing');assert.equal(previous,generation);effects.push('close');generation=null;}
-      if(operation==='start'){assert.equal(state.phase,'verifying');effects.push('start');generation='101:2';}
+      if(operation==='close'){assert.ok(['closing','registration_closing'].includes(state.phase));assert.equal(previous,generation);effects.push('close');generation=null;}
+      if(operation==='start'){assert.ok(['verifying','registration_verifying'].includes(state.phase));effects.push('start');generation=`${nextPid++}:2`;}
       return {state:generation?'running':'stopped',generation};
     },probe:async()=>{effects.push('probe');},
   };
-  return {options,effects,snapshots,get state(){return state;},advance:()=>{clock+=CODEX_UPDATE_INTERVAL;},setVersion:v=>{version=v;},setGeneration:v=>{generation=v;}};
+  return {options,effects,snapshots,get state(){return state;},advance:()=>{clock+=CODEX_UPDATE_INTERVAL;},elapse:ms=>{clock+=ms;},setVersion:v=>{version=v;},setGeneration:v=>{generation=v;}};
 };
 
 test('Desktop updates journal every effect, verify a new native generation and never touch task work',async()=>{
@@ -51,7 +51,7 @@ test('lost install reply reconciles only native version and reopens the SAME Des
     assert.equal((await maintainAssistantCodexDesktop(f.options)).state,committed?'updated':'failed');
     assert.equal(installs,1);f.advance();
     f.options.download=async()=>({unchanged:true,etag:'"package-v2"'});
-    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');assert.equal(installs,1);
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,committed?'current':'activating');assert.equal(installs,1);
     if(!committed)assert.equal(f.state.failedVersion,'26.101.0.0');
   }
 });
@@ -92,6 +92,117 @@ test('a deferred Windows registration can recover a failed receipt only from exa
   f.setVersion('26.101.0.0');f.setGeneration('102:3');
   assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'updated');
   assert.equal(installs,1);assert.equal(f.state.failedVersion,null);
+});
+
+test('a failed deferred registration gets one automatic idle restart, never a second installation',async()=>{
+  const f=desktopUpdateFixture();let installs=0;
+  f.options.install=async()=>{installs++;throw Error('unknown original install reply');};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  const native=f.options.desktop;
+  f.options.desktop=async(operation,generation)=>{
+    const result=await native(operation,generation);
+    // Windows completes its previously staged registration on activation. The
+    // recovery has no installer callback: exact version read-back earns success.
+    if(operation==='start'&&f.state.phase==='registration_verifying')f.setVersion('26.101.0.0');
+    return result;
+  };
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'activating',blockBusiness:true});
+  assert.equal(f.state.phase,'registration_closing');
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'updated',version:'26.101.0.0'});
+  assert.equal(installs,1);assert.equal(f.effects.filter(effect=>effect==='close').length,2);
+  assert.equal(f.state.failedVersion,null);
+  assert.deepEqual(f.snapshots.slice(-4).map(value=>value.phase),['registration_closing','registration_starting','registration_verifying','ready']);
+});
+
+test('an unsuccessful registration restart is durably exhausted until a newer signed candidate',async()=>{
+  const f=desktopUpdateFixture();let installs=0;
+  f.options.install=async()=>{installs++;throw Error('unknown');};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  f.elapse(10*60_000);
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'failed',failedVersion:'26.101.0.0'});
+  assert.equal(f.state.phase,'registration_failed');
+  const effects=[...f.effects];f.advance();f.options.download=async()=>({unchanged:true,etag:'"package-v2"'});
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');
+  assert.deepEqual(f.effects,effects);assert.equal(installs,1);
+  f.setVersion('26.101.0.0');f.setGeneration('103:4');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'updated');
+  assert.equal(installs,1);assert.equal(f.state.failedVersion,null);
+});
+
+test('an exhausted registration recovery still admits a genuinely newer signed update',async()=>{
+  const f=desktopUpdateFixture();let installs=0;
+  f.options.install=async()=>{installs++;throw Error('unknown');};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  f.elapse(10*60_000);assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  f.advance();
+  f.options.download=async()=>({etag:'"package-v3"',sha256:'b'.repeat(64)});
+  f.options.prepare=async()=>({version:'26.102.0.0',architecture:'x64'});
+  f.options.install=async()=>{installs++;f.setVersion('26.102.0.0');};
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'updated',version:'26.102.0.0'});
+  assert.equal(installs,2);assert.equal(f.state.failedVersion,null);
+});
+
+test('lost recovery close and activation replies are observed without repeating either effect',async()=>{
+  for(const lost of ['close','start']){
+    const f=desktopUpdateFixture();let installs=0;
+    f.options.install=async()=>{installs++;throw Error('unknown');};
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+    const native=f.options.desktop;let recoveryCloses=0,recoveryStarts=0;
+    f.options.desktop=async(operation,generation)=>{
+      const result=await native(operation,generation);
+      if(operation==='close'){recoveryCloses++;if(lost==='close')throw Error('lost close reply');}
+      if(operation==='start'){recoveryStarts++;f.setVersion('26.101.0.0');if(lost==='start')throw Error('lost start reply');}
+      return result;
+    };
+    if(lost==='close')await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    else assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+    if(lost==='start')await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'updated');
+    assert.equal(recoveryCloses,1);assert.equal(recoveryStarts,1);assert.equal(installs,1);
+  }
+});
+
+test('registration recovery revalidates the retained signature, readiness and final idle fence before closing',async()=>{
+  for(const refusal of ['artifact','readiness','idle']){
+    const f=desktopUpdateFixture();f.options.install=async()=>{throw Error('unknown');};
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+    const effects=[...f.effects];
+    if(refusal==='artifact')f.options.prepare=async()=>({version:'26.102.0.0',architecture:'x64'});
+    if(refusal==='readiness')f.options.probe=async()=>{throw Error('not ready');};
+    if(refusal==='idle'){
+      let busy=false;f.options.probe=async()=>{busy=true;};
+      f.options.guard=async()=>{if(busy)throw Error('new task after the readiness read');};
+    }
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));
+    assert.deepEqual(f.effects,effects);assert.equal(f.state.phase,'failed');
+  }
+});
+
+test('a refused registration-recovery close cannot close another generation or repeat the installer',async()=>{
+  const f=desktopUpdateFixture();let installs=0,closes=0,starts=0;
+  f.options.install=async()=>{installs++;throw Error('unknown');};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  f.options.desktop=async operation=>{
+    if(operation==='close'){closes++;throw Error('refused');}
+    if(operation==='start')starts++;
+    return {state:'running',generation:closes?'200:3':'101:2'};
+  };
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal(f.state.phase,'registration_closing');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  f.elapse(10*60_000);
+  await assert.rejects(maintainAssistantCodexDesktop(f.options),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  assert.equal(closes,1);assert.equal(starts,0);assert.equal(installs,1);
 });
 
 test('feed/signature failures, same versions and downgrades preserve the working Desktop',async()=>{
