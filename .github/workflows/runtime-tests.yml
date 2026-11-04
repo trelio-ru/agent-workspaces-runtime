@@ -419,6 +419,10 @@ jobs:
       - name: Install exact Windows test dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Verify packaged service access and normal stop as a standard user
+        shell: pwsh
+        run: ./.github/scripts/run-windows-package-service-fixture.ps1
+
       # The Python regression relocates a real interpreter into the default
       # per-user layout. PATH alone cannot prove this installation is accepted.
       - name: Set up Python fixture

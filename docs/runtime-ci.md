@@ -96,6 +96,14 @@ diagnostics/onboarding/accounts/Python, unrelated browser/OAuth/Remote MCP and
 slow shared cache/timeout groups run only in full. No production deadline,
 assertion, security admission or native fixture is relaxed.
 
+The standard-user job also compiles a source-only disposable package-service
+fixture with the production SCM/RM identity and exit primitives. A real new
+non-administrator account must read, normally stop and restore an inert
+LocalSystem service whose process DACL denies query/synchronization while its
+SCM DACL grants ordinary control. The old query must actually be refused; stale
+generations/names must refuse without control. A completion sentinel prevents
+all-skipped success. Fixture binaries never enter the native release artifact.
+
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
 Root test dependencies are installed from the committed lock on Windows as

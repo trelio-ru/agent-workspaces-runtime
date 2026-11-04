@@ -814,6 +814,14 @@ void verifyCodexServiceConfiguration(SC_HANDLE service,const std::wstring& packa
   // match is accepted. A stale/foreign registration is an explicit refusal.
   require(_wcsicmp(image.c_str(),(packageRoot+L"\\app\\resources\\codex-windows-sandbox-service.exe").c_str())==0);
 }
+void verifyCurrentCodexServiceConfiguration(SC_HANDLE service,const std::wstring& selectedRoot) {
+  // A concurrent registration must not mix an old RM file identity with the
+  // new package's SCM configuration. One admission uses one unchanged native
+  // package root; a later invocation can observe the new registration normally.
+  const auto current=currentCodexPackagePath();
+  require(_wcsicmp(current.c_str(),selectedRoot.c_str())==0);
+  verifyCodexServiceConfiguration(service,selectedRoot);
+}
 void requireCodexClientsStopped() {
   require(!currentCodexDesktop().has_value());
   Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));require(snapshot.value!=INVALID_HANDLE_VALUE);
@@ -832,6 +840,111 @@ void codexServiceReply(std::string_view state,std::string_view generation={}) {
   write("{\"schemaVersion\":1,\"state\":\"");write(state);write("\",\"generation\":");
   if(generation.empty())write("null");else{write("\"");write(generation);write("\"");}write("}\n");
 }
+
+// A service's ordinary STOP permission is independent of its process DACL.
+// Packaged LocalSystem processes need not grant the interactive task either
+// QUERY_LIMITED_INFORMATION or SYNCHRONIZE. Requiring those rights made even
+// read-only admission fail while an administrator's diagnostic misleadingly
+// passed. Do not repair that DACL, enable debug privileges or elevate instead.
+//
+// Restart Manager supplies the OS file-to-service association and the original
+// PID/creation time without process-query rights. Register ONLY the exact image
+// selected by AppModel + the independently verified SCM configuration. This
+// session never registers a service/process selector and never calls shutdown
+// or restart: normal SCM control remains the separately journaled effect.
+struct PackageServiceImage {
+  HMODULE library=nullptr;
+  std::wstring executable;
+  decltype(&RmStartSession) start=nullptr;
+  decltype(&RmRegisterResources) add=nullptr;
+  decltype(&RmGetList) list=nullptr;
+  decltype(&RmEndSession) end=nullptr;
+  explicit PackageServiceImage(const std::wstring& image):executable(image) {
+    library=LoadLibraryExW(L"rstrtmgr.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);require(library);
+    try {
+      start=presentationFunction<decltype(&RmStartSession)>(library,"RmStartSession");
+      add=presentationFunction<decltype(&RmRegisterResources)>(library,"RmRegisterResources");
+      list=presentationFunction<decltype(&RmGetList)>(library,"RmGetList");
+      end=presentationFunction<decltype(&RmEndSession)>(library,"RmEndSession");
+    } catch (...) { FreeLibrary(library);library=nullptr;throw; }
+  }
+  ~PackageServiceImage(){if(library)FreeLibrary(library);}
+  PackageServiceImage(const PackageServiceImage&)=delete;
+  std::vector<RM_PROCESS_INFO> read() const {
+    // Use a fresh owned observation session each time. A previous inventory or
+    // RM's retained application status is not fresh generation/exit evidence.
+    DWORD session=0;WCHAR key[CCH_RM_SESSION_KEY+1]{};
+    require(start(&session,0,key)==ERROR_SUCCESS);
+    std::vector<RM_PROCESS_INFO> result;
+    try {
+      LPCWSTR file=executable.c_str();require(add(session,1,&file,0,nullptr,0,nullptr)==ERROR_SUCCESS);
+      // A growing/ambiguous inventory is refusal, never truncated success or
+      // an unbounded retry. Reboot reasons concern unused RM control and grant
+      // no authority; the complete metadata read must itself succeed.
+      std::array<RM_PROCESS_INFO,16> items{};
+      UINT needed=0,count=static_cast<UINT>(items.size());DWORD reboot=0;
+      require(list(session,&needed,&count,items.data(),&reboot)==ERROR_SUCCESS
+        &&count<=items.size()&&needed<=items.size());
+      result.assign(items.begin(),items.begin()+static_cast<std::ptrdiff_t>(count));
+    } catch (...) { end(session);throw; }
+    require(end(session)==ERROR_SUCCESS);return result;
+  }
+};
+bool packageServicePidPresent(DWORD pid) {
+  Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));require(snapshot.value!=INVALID_HANDLE_VALUE);
+  PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);require(Process32FirstW(snapshot.value,&entry)!=FALSE);
+  do {if(entry.th32ProcessID==pid)return true;}while(Process32NextW(snapshot.value,&entry));
+  require(GetLastError()==ERROR_NO_MORE_FILES);return false;
+}
+struct PackageServiceProcess {
+  DWORD pid;
+  FILETIME created{};
+  Handle process;
+  PackageServiceImage image;
+  std::wstring serviceName;
+  PackageServiceProcess(DWORD selectedPid,const std::wstring& executable,const std::wstring& name)
+    :pid(selectedPid),process(OpenProcess(0,FALSE,selectedPid)),image(executable),serviceName(name) {
+    // A zero-access handle retains only the original kernel object. It grants
+    // no query/control/synchronization rights. Identity comes independently
+    // from the exact FILE resource and SCM PID, not this numeric handle/PID.
+    require(pid>0&&process.value);
+    created=observation();
+    require(created.dwLowDateTime!=0||created.dwHighDateTime!=0);
+    const auto fresh=observation();
+    require(packageServicePidPresent(pid)&&CompareFileTime(&created,&fresh)==0);
+  }
+  FILETIME observation() const {
+    const auto entries=image.read();require(entries.size()==1);
+    const auto& info=entries.front();
+    require(info.Process.dwProcessId==pid&&info.ApplicationType==RmService
+      &&wcsnlen_s(info.strServiceShortName,CCH_RM_MAX_SVC_NAME+1)<=CCH_RM_MAX_SVC_NAME
+      &&_wcsicmp(info.strServiceShortName,serviceName.c_str())==0);
+    return info.Process.ProcessStartTime;
+  }
+  void verify(DWORD freshPid) const {
+    const auto current=observation();
+    require(freshPid==pid&&CompareFileTime(&created,&current)==0&&packageServicePidPresent(pid));
+  }
+  std::string generation() const {
+    ULARGE_INTEGER time{};time.LowPart=created.dwLowDateTime;time.HighPart=created.dwHighDateTime;
+    return std::to_string(pid)+":"+std::to_string(time.QuadPart+504911232000000000ULL);
+  }
+  void waitForExit(SC_HANDLE service) const {
+    const auto started=GetTickCount64();
+    do {
+      const auto status=codexServiceStatus(service);
+      // STOPPED alone can precede process exit. Join it with positive absence
+      // from the complete OS process snapshot and an empty exact-image RM list.
+      // PID reuse is conservative refusal; neither a new PID/generation nor a
+      // different file user can masquerade as the original process exiting.
+      if(status.dwCurrentState==SERVICE_STOPPED&&status.dwProcessId==0
+        &&!packageServicePidPresent(pid)&&image.read().empty()){
+        require(GetTickCount64()-started<20000);return;
+      }
+      require(GetTickCount64()-started<20000);Sleep(50);
+    }while(true);
+  }
+};
 int codexStagedPackage(std::string_view version) {
   // A retained MSIX is not proof that Windows staged it. Bind a read-only
   // staging query to the OS-selected exact family/architecture/publisher,
@@ -872,33 +985,35 @@ int codexService(std::string_view operation,std::string_view expected={}) {
     // A start has its own durable intent. Unknown/partial starts are observed
     // by later inspect calls; this mode never waits/retries StartService.
     require(status.dwCurrentState==SERVICE_STOPPED&&status.dwProcessId==0);
-    verifyCodexServiceConfiguration(service.value,currentCodexPackagePath());
+    verifyCurrentCodexServiceConfiguration(service.value,root);
+    PackageServiceImage image(root+L"\\app\\resources\\codex-windows-sandbox-service.exe");require(image.read().empty());
     require(StartServiceW(service.value,0,nullptr)!=FALSE);
     codexServiceReply("starting");return 0;
   }
   if(status.dwCurrentState==SERVICE_STOPPED){
-    require(operation=="inspect"&&status.dwProcessId==0);codexServiceReply("stopped");return 0;
+    require(operation=="inspect"&&status.dwProcessId==0);
+    PackageServiceImage image(root+L"\\app\\resources\\codex-windows-sandbox-service.exe");
+    require(image.read().empty());codexServiceReply("stopped");return 0;
   }
   require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
-  Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,status.dwProcessId));require(process.value);
-  wchar_t image[32768]{};DWORD length=32768;
-  require(QueryFullProcessImageNameW(process.value,0,image,&length)!=FALSE
-    &&_wcsicmp(image,(root+L"\\app\\resources\\codex-windows-sandbox-service.exe").c_str())==0);
-  FILETIME created{},exited{},kernel{},user{};require(GetProcessTimes(process.value,&created,&exited,&kernel,&user));
-  ULARGE_INTEGER time{};time.LowPart=created.dwLowDateTime;time.HighPart=created.dwHighDateTime;
-  const auto generation=std::to_string(status.dwProcessId)+":"+std::to_string(time.QuadPart+504911232000000000ULL);
+  PackageServiceProcess process(status.dwProcessId,root+L"\\app\\resources\\codex-windows-sandbox-service.exe",
+    L"CodexSandboxService.OpenAI.Codex");
+  verifyCurrentCodexServiceConfiguration(service.value,root);
+  const auto admission=codexServiceStatus(service.value);
+  require(admission.dwCurrentState==SERVICE_RUNNING);process.verify(admission.dwProcessId);
+  const auto generation=process.generation();
   if(operation=="inspect"){codexServiceReply("running",generation);return 0;}
   require(expected==generation&&(status.dwControlsAccepted&SERVICE_ACCEPT_STOP)!=0);
   requireCodexClientsStopped();
-  verifyCodexServiceConfiguration(service.value,currentCodexPackagePath());
+  verifyCurrentCodexServiceConfiguration(service.value,root);
   const auto fresh=codexServiceStatus(service.value);
-  require(fresh.dwCurrentState==SERVICE_RUNNING&&fresh.dwProcessId==status.dwProcessId
-    &&WaitForSingleObject(process.value,0)==WAIT_TIMEOUT);
+  require(fresh.dwCurrentState==SERVICE_RUNNING);process.verify(fresh.dwProcessId);
   SERVICE_STATUS result{};
   require(ControlService(service.value,SERVICE_CONTROL_STOP,&result)!=FALSE);
-  // A hung or refused normal stop is never killed. Keep the original handle
-  // (PID reuse cannot satisfy it) and bound the wait within the host's budget.
-  require(WaitForSingleObject(process.value,20000)==WAIT_OBJECT_0);
+  // No synchronization right is requested for the LocalSystem process. Join
+  // the same original generation's OS absence with SCM and exact-file reads.
+  // A hung/refused stop still fails under the original twenty-second bound.
+  process.waitForExit(service.value);
   status=codexServiceStatus(service.value);
   require(status.dwCurrentState==SERVICE_STOPPED&&status.dwProcessId==0);
   codexServiceReply("stopped");return 0;

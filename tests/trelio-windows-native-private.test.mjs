@@ -187,6 +187,34 @@ test('native package-service discovery and refused control have fixed names, no 
   assert.equal(staged.stderr,'');assert.ok(['absent','unavailable'].includes(JSON.parse(staged.stdout).state));
 });
 
+test('ordinary packaged service control works without process query or synchronization rights',{
+  skip:process.platform!=='win32'||!process.env.TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE,timeout:90_000,
+},async()=>{
+  // Only the dedicated hosted setup supplies this source-tree-only controller.
+  // Its inert LocalSystem service denies the OLD process rights while granting
+  // ordinary SCM QUERY/START/STOP. The fixture includes the production C++
+  // observation/wait primitives; no live Codex installation is needed or touched.
+  const executable=process.env.TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE;
+  const call=async args=>{
+    const value=await run(executable,args,'',process.env,30_000);
+    assert.equal(value.code,0,`fixture stage failed: ${args[0]}`);
+    assert.equal(value.signal,null);assert.equal(value.stderr,'');
+    return JSON.parse(value.stdout);
+  };
+  const first=await call(['inspect']);
+  assert.equal(first.state,'running');assert.match(first.generation,/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u);
+  assert.deepEqual(await call(['refusals']),{refused:4});
+  // A stale generation must refuse BEFORE SCM control. Observe the original
+  // still running, then issue exactly one normal stop for its actual generation.
+  const stale=await run(executable,['stop','1:1']);assert.notEqual(stale.code,0);
+  assert.deepEqual(await call(['inspect']),first);
+  assert.deepEqual(await call(['stop',first.generation]),{schemaVersion:1,state:'stopped',generation:null});
+  const restored=await call(['start']);assert.equal(restored.state,'running');
+  assert.notEqual(restored.generation,first.generation);
+  assert.deepEqual(await call(['stop',restored.generation]),{schemaVersion:1,state:'stopped',generation:null});
+  console.log('SERVICE_ACCESS_FIXTURE_COMPLETED');
+});
+
 // x64 Windows can execute x86 too. The separate hosted ARM64 gate exercises
 // the third published binary natively; packaging requires all three hashes.
 for (const arch of process.arch === 'x64' ? ['x64','ia32'] : [process.arch]) {

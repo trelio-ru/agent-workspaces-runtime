@@ -2275,14 +2275,28 @@ candidate alone may clear this receipt for its own separate attempt.
 Persist `service_closing` before normal shutdown of that exact GUI generation.
 After its observed exit persist `service_stopping` before ONE normal SCM stop.
 The SAME signed native worker accepts no service name/path from a caller:
-current-user AppModel selects the registered package, SCM configuration and
-the live process image must exactly match its fixed sandbox-service executable,
-and the retained process handle/creation time and fresh SCM PID must agree.
+current-user AppModel selects the registered package and SCM configuration must
+exactly match its fixed sandbox-service executable and LocalSystem own-process
+identity. An owned read-only Restart Manager session registers only that exact
+image FILE. Its complete OS inventory must contain one service with the exact
+short name, fresh SCM PID and original process creation time. Each observation
+uses a fresh session, never a retained inventory as current evidence.
+
+Keep a zero-access handle to the original process object; no process query or
+`SYNCHRONIZE` right is requested. A LocalSystem process may deny these rights
+even though its SCM DACL legitimately grants the ordinary interactive task
+STOP/START. An administrator's successful process probe is not acceptance of
+the least-privilege task. Never enable debug privileges or repair either DACL.
+Restart Manager supplies only identity/resource observations here: no service
+resource selector, shutdown or restart call is used for service control.
 Require all potential Codex GUI/CLI/setup clients absent across sessions before
 the stop. Access denial, stale/foreign service/configuration, a client race or
 a refused/hung stop never permits elevation, config/ACL edits, termination,
 control of another service or another stop attempt. The twenty-second process
-exit wait stays inside the original bounded host/native invocation.
+exit wait joins fresh SCM STOPPED/PID0 with positive absence of the original PID
+from a complete OS process snapshot and an empty fresh exact-file inventory.
+SCM STOPPED alone is insufficient; a new generation or another file user is
+refusal. The wait stays inside the original bounded host/native invocation.
 
 Only observed stopped service and GUI admit `service_registering`. Revalidate
 the retained candidate through the SAME signature/manifest/file-handle engine,
@@ -2314,6 +2328,14 @@ with and without a positive result, failed-registration restoration, stale
 generation/signature/admission, legacy validation and ordinary discovery.
 Hosted Windows additionally builds the SAME native worker and exercises its
 real read/refusal boundaries without stopping a developer's live service.
+Its source-tree-only service fixture includes the production observation/wait
+primitives and creates one disposable inert LocalSystem service. Under a new
+non-administrator account it positively verifies denied original process rights,
+successful exact-image/generation reads, stale/name/generation refusal, ordinary
+SCM stop with actual process/resource exit, restart and a new generation. Only
+this owned CI fixture receives its test ACLs; no production ACL or selector is
+changed and no fixture executable enters the signed package. The hosted step
+requires the executed-flow completion sentinel, never all-skipped exit0.
 Real SCM/registration activation remains an independent dedicated-computer
 acceptance step; component tests never claim that outcome.
 

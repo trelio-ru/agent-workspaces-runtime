@@ -877,6 +877,14 @@ publication tooling также остаются вне этого публичн
   normally stop only the exact OS-package-bound service after all Codex clients
   are absent, register the retained signed candidate by its already-staged full
   name once, then restore that service/GUI and verify the actual version/probe.
+  Service identity joins fresh SCM configuration/PID with Restart Manager's
+  exact-image FILE association, service short name and original creation time;
+  only a zero-access process handle is retained. Ordinary tasks never require
+  LocalSystem process-query/SYNCHRONIZE rights. Stop completion joins fresh SCM,
+  process-snapshot absence and an empty fresh exact-file observation under the
+  original twenty-second bound. RM never controls the service. Hosted acceptance
+  uses a disposable LocalSystem service with independently granted SCM rights
+  and denied process rights under a real standard account, not runner-admin.
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.
