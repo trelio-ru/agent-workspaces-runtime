@@ -89,8 +89,10 @@ slow shared cache/timeout groups run only in full. No production deadline,
 assertion, security admission or native fixture is relaxed.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
-exit; a later passing suite cannot hide an earlier failure. Native background
-registration runs first in that group; transport/accepted inspection runs once
+exit; a later passing suite cannot hide an earlier failure.
+Root test dependencies are installed from the committed lock on Windows as
+well; ordinary-chat schema/token bounds use the same tokenizer on every OS.
+Native background registration runs first in that group; transport/accepted inspection runs once
 before the slower unrelated groups. Synthetic filesystem expectations use
 canonical Windows paths and bounded short fixture homes, not production path
 exceptions. Classic-console readiness shares its original startup deadline;

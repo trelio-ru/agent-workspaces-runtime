@@ -665,6 +665,8 @@ with `list_assistant_skills`, including exact instructions, personal rules and
 effective scope authority. Three background-source setup tools are not a skill
 catalogue. Discovery and execution create no Task/Workspace/Run/source/polling.
 The sole-company selection uses the SAME fresh native inventory.
+The ordinary-chat adapter stays in the existing signed assistant entry module;
+it does not add a payload file or raise the package's fixed 100-file ceiling.
 
 `use_assistant_skill` executes ordinary published argv through the SAME signed
 resolver/cache/account/interpreter/process/visual engine, or delegates

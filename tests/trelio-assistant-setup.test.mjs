@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {ASSISTANT_SKILL_TOOLS,ASSISTANT_SKILL_FAILURE_CODES} from '../host-runtime/scripts/trelio-assistant-local-skills.mjs';
+import {ASSISTANT_SKILL_TOOLS,ASSISTANT_SKILL_FAILURE_CODES} from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';

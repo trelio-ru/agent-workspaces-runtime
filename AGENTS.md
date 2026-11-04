@@ -90,7 +90,9 @@ publication tooling также остаются вне этого публичн
   commands/account/forms via the taskless local profile; no assistant-specific
   provider setup declaration. Active task/intake refuses that profile before
   private I/O. Native device/owner/assignment/config/recipient and one-attempt
-  fences remain independent. See [ordinary skills](docs/assistant-scheduler.md#ordinary-owner-chat-skills).
+  fences remain independent. Keep this adapter in the existing signed entry
+  within the frozen 100-file package bound; test the packaged chain.
+  See [ordinary skills](docs/assistant-scheduler.md#ordinary-owner-chat-skills).
   Public signed human-input setup also selects the bounded setup view without
   pending device consent only on an explicit connection-section read; ordinary
   instructions/execution reads retain task/Run tools. Native pending consent

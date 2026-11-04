@@ -15,7 +15,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
 }
 const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
 const {executeAssistantLocalSkillTool,withAssistantLocalSkillProfile,assistantLocalSkillArguments,createAssistantLocalSkillHook,ASSISTANT_SKILL_TOOLS}=
-  await import('../host-runtime/scripts/trelio-assistant-local-skills.mjs');
+  await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
 const {withRuntimeHookPrivateSession}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
 const {runAssistantEntry}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
 const origin='https://interactive-skill.example.test',companyId=randomUUID(),memberId=randomUUID();
