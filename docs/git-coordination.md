@@ -28,7 +28,12 @@ false dead-owner failure. An unchanged dead ticket still requires exact recovery
 be removed normally between its owner-file read and the process inventory.
 Only fresh no-follow absence or a different directory identity permits a new
 acquisition attempt; an unchanged dead/unknown claim is never removed or stolen.
-Tests force both disappearance and replacement at that exact observation boundary.
+The five-second allowance for an unpublished owner belongs only to that exact
+directory's observed ownerless interval, not the whole preceding live-owner wait.
+Fresh absence/replacement resets the observation, and a published owner ends it;
+an unchanged empty claim still refuses without removal or CI.
+Tests force disappearance/replacement and a late ownerless interval after a long
+live-owner wait; unchanged dead and ownerless claims remain fenced.
 Canonical pre-push checks live process ancestry, exact worktree/branch/SHA/tag
 and verified ticket state. A caller-authored boolean, direct main/tag push or
 old transport wrapper cannot borrow the slot. Required CI remains repository

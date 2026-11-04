@@ -264,6 +264,55 @@ process.stdout.write(JSON.stringify(result));
   } finally { process.env.PATH = originalPath; }
 });
 
+// A long wait for a LIVE owner must not spend the short allowance for a later
+// unpublished owner file. A normal mkdir/write or unlink/rmdir handoff has a
+// brief ownerless interval, independently of how long the queue already waited.
+// Exercise that interval in a disposable real Git repository, not the live lock.
+for (const mode of ['late_publication', 'unchanged_ownerless']) test(`main mutex ownerless allowance belongs to its current directory (${mode})`, {timeout: 25_000}, async t => {
+  const f = fixture(t), cwd = f.branch('ownerless'), directory = path.join(f.main, '.git', 'main.lock');
+  const ready = path.join(f.root, 'ready'), gap = path.join(f.root, 'gap'), release = path.join(f.root, 'release');
+  if (mode === 'late_publication') {
+    const script = path.join(f.root, 'owner.mjs');
+    fs.writeFileSync(script, `import fs from 'node:fs'; import os from 'node:os';
+const directory=${JSON.stringify(directory)}, owner=directory+'/owner';
+const value='operation=synthetic ownerless handoff\\npid='+process.pid+'\\nhost='+os.hostname()+'\\n';
+fs.mkdirSync(directory,{mode:0o700});fs.writeFileSync(owner,value,{mode:0o600});
+fs.writeFileSync(${JSON.stringify(ready)},'ready');
+while(!fs.existsSync(${JSON.stringify(release)}))await new Promise(r=>setTimeout(r,10));
+fs.unlinkSync(owner);fs.writeFileSync(${JSON.stringify(gap)},'gap');
+await new Promise(r=>setTimeout(r,700));
+fs.writeFileSync(owner,value,{mode:0o600});
+await new Promise(r=>setTimeout(r,300));
+fs.unlinkSync(owner);fs.rmdirSync(directory);
+`, {mode: 0o600});
+    const owner = spawn(process.execPath, [script], {stdio: 'ignore'});
+    const done = new Promise(resolve => owner.once('close', resolve));
+    t.after(async () => { owner.kill(); await done; });
+    await until(() => fs.existsSync(ready));
+  } else fs.mkdirSync(directory, {mode: 0o700});
+  const identity = fs.lstatSync(directory, {bigint: true});
+  const worker = f.start(cwd);
+  if (mode === 'late_publication') {
+    // The old implementation compared an ownerless observation against the
+    // WHOLE mutex wait, so this later subsecond interval immediately failed.
+    await delay(5500);fs.writeFileSync(release, 'go');
+    await until(() => fs.existsSync(gap));
+  }
+  const result = await worker.done;
+  if (mode === 'late_publication') {
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(f.events(), ['codex/ownerless']);
+    assert.deepEqual(queue(cwd), []);
+    assert.equal(fs.existsSync(directory), false);
+  } else {
+    assert.notEqual(result.code, 0);assert.match(result.output, /Main mutex has no owner/);
+    const current = fs.lstatSync(directory, {bigint: true});
+    assert.equal(current.ino, identity.ino);assert.equal(current.birthtimeNs, identity.birthtimeNs);
+    assert.equal(fs.existsSync(path.join(directory, 'owner')), false);
+    assert.deepEqual(f.events(), [], 'an unchanged ownerless claim never permits CI or lock removal');
+  }
+});
+
 // The occupied short mutex may disappear normally AFTER its owner file is
 // read but BEFORE the process snapshot. Make that exact observation ordering
 // deterministic; no production process, queue or lock is involved.

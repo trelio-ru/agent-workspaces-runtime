@@ -1049,6 +1049,7 @@ publication tooling также остаются вне этого публичн
   или files ожидающей/работающей ветки. Старые wrappers и boolean-флаги не
   заменяют live owner ancestry и verified exact SHA в canonical pre-push.
   Waiter ticket/process observation shares the same short mutex as predecessor removal; dead/unknown owners still refuse. A disappeared/replaced mutex is freshly reacquired after owner exit; unchanged dead claims are never stolen.
+  The bounded unpublished-owner allowance belongs to the SAME directory's ownerless observation, never the preceding live-owner wait; unchanged empty claims still refuse without removal.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
   При долгом ожидании использовать `git:integrate -- --background` и один

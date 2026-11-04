@@ -140,7 +140,9 @@ export function status(cwd, id) {
  */
 async function mutex(cwd, config, action, cancelled = () => false) {
   const directory = path.join(common(cwd), config.mainMutex), owner = path.join(directory, 'owner');
-  const started = Date.now();
+  const sameDirectory = (left, right) => left.dev === right.dev && left.ino === right.ino
+    && left.birthtimeNs === right.birthtimeNs;
+  let unpublishedOwner;
   for (;;) {
     if (cancelled()) throw Error('Coordination interrupted');
     try { fs.mkdirSync(directory, {mode: 0o700}); break; } catch (error) {
@@ -151,6 +153,7 @@ async function mutex(cwd, config, action, cancelled = () => false) {
       let value;
       try { value = fs.readFileSync(owner, 'utf8'); } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
       if (value) {
+        unpublishedOwner = undefined;
         const pid = +(/^pid=(\d+)$/mu.exec(value)?.[1] ?? 0), host = /^host=(.+)$/mu.exec(value)?.[1];
         if (host !== startHost || !inventory().some(row => row.pid === pid && row.live)) {
           // A normal holder may remove its SAME mutex and exit between our
@@ -161,11 +164,24 @@ async function mutex(cwd, config, action, cancelled = () => false) {
           let current;
           try { current = fs.lstatSync(directory, {bigint: true}); }
           catch (failure) { if (failure.code === 'ENOENT') continue; throw failure; }
-          if (current.dev !== observed.dev || current.ino !== observed.ino
-            || current.birthtimeNs !== observed.birthtimeNs) continue;
+          if (!sameDirectory(current, observed)) continue;
           throw Error('Inspect existing main mutex; owner is not confirmed live');
         }
-      } else if (Date.now() - started > 5000) throw Error('Main mutex has no owner');
+      } else {
+        // mkdir/write and unlink/rmdir have a normal short ownerless interval.
+        // A preceding wait for a LIVE owner must not consume that allowance.
+        // Bind it to this exact, freshly rechecked directory and reset it once
+        // an owner is published; an unchanged empty claim still fails after
+        // five seconds. Never remove a lock or borrow a dead/unknown owner's
+        // authority merely because the queue has waited a long time.
+        let current;
+        try { current = fs.lstatSync(directory, {bigint: true}); }
+        catch (failure) { if (failure.code === 'ENOENT') { unpublishedOwner = undefined; continue; } throw failure; }
+        if (!sameDirectory(current, observed)) { unpublishedOwner = undefined; continue; }
+        if (!unpublishedOwner || !sameDirectory(unpublishedOwner.directory, current)) {
+          unpublishedOwner = {directory: current, since: Date.now()};
+        } else if (Date.now() - unpublishedOwner.since > 5000) throw Error('Main mutex has no owner');
+      }
       await delay(100);
     }
   }
