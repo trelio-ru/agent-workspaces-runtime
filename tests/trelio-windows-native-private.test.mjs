@@ -197,9 +197,14 @@ test('ordinary packaged service control works without process query or synchroni
   const executable=process.env.TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE;
   const call=async args=>{
     const value=await run(executable,args,'',process.env,30_000);
-    assert.equal(value.code,0,`fixture stage failed: ${args[0]}`);
+    let result;try{result=JSON.parse(value.stdout);}catch{}
+    // A native refusal must keep its closed phase, rather than hide the useful
+    // failure behind only exit1. Never print arbitrary native output/error text.
+    const phase=result?.fixtureFailure===true&&/^[a-z_]{1,48}$/u.test(result.stage??'')?result.stage:'unknown';
+    const detail=Number.isSafeInteger(result?.detail)&&result.detail>=0&&result.detail<=0xffffffff?result.detail:0;
+    assert.equal(value.code,0,`fixture stage failed: ${args[0]} (${phase}:${detail})`);
     assert.equal(value.signal,null);assert.equal(value.stderr,'');
-    return JSON.parse(value.stdout);
+    assert.ok(result);return result;
   };
   const first=await call(['inspect']);
   assert.equal(first.state,'running');assert.match(first.generation,/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u);

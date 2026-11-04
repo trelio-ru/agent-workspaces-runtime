@@ -2336,6 +2336,10 @@ SCM stop with actual process/resource exit, restart and a new generation. Only
 this owned CI fixture receives its test ACLs; no production ACL or selector is
 changed and no fixture executable enters the signed package. The hosted step
 requires the executed-flow completion sentinel, never all-skipped exit0.
+Native fixture refusals preserve a static observation phase and numeric API
+result/count only, never OS prose, paths or identities. Production keeps the
+original unavailable DTO. Cleanup of the exact disposable fixture remains
+independent of the observation under test and cannot hide a failed assertion.
 Real SCM/registration activation remains an independent dedicated-computer
 acceptance step; component tests never claim that outcome.
 

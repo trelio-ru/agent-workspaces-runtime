@@ -852,6 +852,17 @@ void codexServiceReply(std::string_view state,std::string_view generation={}) {
 // selected by AppModel + the independently verified SCM configuration. This
 // session never registers a service/process selector and never calls shutdown
 // or restart: normal SCM control remains the separately journaled effect.
+struct ServiceObservationFailure:Failure {
+  const char* stage;
+  DWORD detail;
+  ServiceObservationFailure(const char* value,DWORD number):stage(value),detail(number){}
+};
+void requireServiceObservation(bool value,const char* stage,DWORD detail=0) {
+  // Only static stages/numeric API results enter this exception. Production
+  // still returns its original unavailable DTO; the source-only hosted fixture
+  // can retain a precise refusal without raw OS text, paths or identities.
+  if(!value)throw ServiceObservationFailure(stage,detail);
+}
 struct PackageServiceImage {
   HMODULE library=nullptr;
   std::wstring executable;
@@ -860,7 +871,8 @@ struct PackageServiceImage {
   decltype(&RmGetList) list=nullptr;
   decltype(&RmEndSession) end=nullptr;
   explicit PackageServiceImage(const std::wstring& image):executable(image) {
-    library=LoadLibraryExW(L"rstrtmgr.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);require(library);
+    library=LoadLibraryExW(L"rstrtmgr.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    requireServiceObservation(library!=nullptr,"rm_library",library?0:GetLastError());
     try {
       start=presentationFunction<decltype(&RmStartSession)>(library,"RmStartSession");
       add=presentationFunction<decltype(&RmRegisterResources)>(library,"RmRegisterResources");
@@ -874,20 +886,22 @@ struct PackageServiceImage {
     // Use a fresh owned observation session each time. A previous inventory or
     // RM's retained application status is not fresh generation/exit evidence.
     DWORD session=0;WCHAR key[CCH_RM_SESSION_KEY+1]{};
-    require(start(&session,0,key)==ERROR_SUCCESS);
+    const auto opened=start(&session,0,key);requireServiceObservation(opened==ERROR_SUCCESS,"rm_session",opened);
     std::vector<RM_PROCESS_INFO> result;
     try {
-      LPCWSTR file=executable.c_str();require(add(session,1,&file,0,nullptr,0,nullptr)==ERROR_SUCCESS);
+      LPCWSTR file=executable.c_str();const auto registered=add(session,1,&file,0,nullptr,0,nullptr);
+      requireServiceObservation(registered==ERROR_SUCCESS,"rm_file_register",registered);
       // A growing/ambiguous inventory is refusal, never truncated success or
       // an unbounded retry. Reboot reasons concern unused RM control and grant
       // no authority; the complete metadata read must itself succeed.
       std::array<RM_PROCESS_INFO,16> items{};
       UINT needed=0,count=static_cast<UINT>(items.size());DWORD reboot=0;
-      require(list(session,&needed,&count,items.data(),&reboot)==ERROR_SUCCESS
-        &&count<=items.size()&&needed<=items.size());
+      const auto listed=list(session,&needed,&count,items.data(),&reboot);
+      requireServiceObservation(listed==ERROR_SUCCESS,"rm_file_list",listed);
+      requireServiceObservation(count<=items.size()&&needed<=items.size(),"rm_inventory_bound",count);
       result.assign(items.begin(),items.begin()+static_cast<std::ptrdiff_t>(count));
     } catch (...) { end(session);throw; }
-    require(end(session)==ERROR_SUCCESS);return result;
+    const auto ended=end(session);requireServiceObservation(ended==ERROR_SUCCESS,"rm_end",ended);return result;
   }
 };
 bool packageServicePidPresent(DWORD pid) {
@@ -907,23 +921,24 @@ struct PackageServiceProcess {
     // A zero-access handle retains only the original kernel object. It grants
     // no query/control/synchronization rights. Identity comes independently
     // from the exact FILE resource and SCM PID, not this numeric handle/PID.
-    require(pid>0&&process.value);
+    requireServiceObservation(pid>0&&process.value,"process_handle_zero",process.value?0:GetLastError());
     created=observation();
-    require(created.dwLowDateTime!=0||created.dwHighDateTime!=0);
+    requireServiceObservation(created.dwLowDateTime!=0||created.dwHighDateTime!=0,"creation_time_missing");
     const auto fresh=observation();
-    require(packageServicePidPresent(pid)&&CompareFileTime(&created,&fresh)==0);
+    requireServiceObservation(packageServicePidPresent(pid)&&CompareFileTime(&created,&fresh)==0,"generation_changed");
   }
   FILETIME observation() const {
-    const auto entries=image.read();require(entries.size()==1);
+    const auto entries=image.read();requireServiceObservation(entries.size()==1,"service_inventory_count",static_cast<DWORD>(entries.size()));
     const auto& info=entries.front();
-    require(info.Process.dwProcessId==pid&&info.ApplicationType==RmService
-      &&wcsnlen_s(info.strServiceShortName,CCH_RM_MAX_SVC_NAME+1)<=CCH_RM_MAX_SVC_NAME
-      &&_wcsicmp(info.strServiceShortName,serviceName.c_str())==0);
+    requireServiceObservation(info.Process.dwProcessId==pid,"service_inventory_pid");
+    requireServiceObservation(info.ApplicationType==RmService,"service_inventory_type",static_cast<DWORD>(info.ApplicationType));
+    requireServiceObservation(wcsnlen_s(info.strServiceShortName,CCH_RM_MAX_SVC_NAME+1)<=CCH_RM_MAX_SVC_NAME
+      &&_wcsicmp(info.strServiceShortName,serviceName.c_str())==0,"service_inventory_name");
     return info.Process.ProcessStartTime;
   }
   void verify(DWORD freshPid) const {
     const auto current=observation();
-    require(freshPid==pid&&CompareFileTime(&created,&current)==0&&packageServicePidPresent(pid));
+    requireServiceObservation(freshPid==pid&&CompareFileTime(&created,&current)==0&&packageServicePidPresent(pid),"generation_recheck");
   }
   std::string generation() const {
     ULARGE_INTEGER time{};time.LowPart=created.dwLowDateTime;time.HighPart=created.dwHighDateTime;

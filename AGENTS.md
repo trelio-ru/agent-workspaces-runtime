@@ -885,6 +885,8 @@ publication tooling также остаются вне этого публичн
   original twenty-second bound. RM never controls the service. Hosted acceptance
   uses a disposable LocalSystem service with independently granted SCM rights
   and denied process rights under a real standard account, not runner-admin.
+  Fixture refusals retain only static stages/numeric results; independent owned
+  fixture cleanup never hides the original failed acceptance assertion.
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.

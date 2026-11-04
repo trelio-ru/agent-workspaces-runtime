@@ -93,16 +93,25 @@ void cleanupFixture() {
   verifyCodexServiceConfiguration(service.value,fixtureRoot());
   auto status=codexServiceStatus(service.value);
   if(status.dwCurrentState==SERVICE_RUNNING){
-    PackageServiceProcess process(status.dwProcessId,fixtureExecutable(),FixtureService);
+    // Cleanup of this exact newly-created inert fixture must remain possible
+    // when the production observation UNDER TEST refused. It is not acceptance:
+    // retain the original test failure and never use this branch in production.
+    const DWORD originalPid=status.dwProcessId;require(originalPid>0);
     SERVICE_STATUS reply{};require(ControlService(service.value,SERVICE_CONTROL_STOP,&reply)!=FALSE);
-    process.waitForExit(service.value);
+    const auto started=GetTickCount64();
+    while(true){status=codexServiceStatus(service.value);
+      if(status.dwCurrentState==SERVICE_STOPPED&&status.dwProcessId==0&&!packageServicePidPresent(originalPid))break;
+      require(GetTickCount64()-started<20000);Sleep(50);
+    }
   }else require(status.dwCurrentState==SERVICE_STOPPED);
   require(DeleteService(service.value)!=FALSE);write("{\"cleaned\":true}\n");
 }
 void exerciseFixture(std::string_view operation,std::string_view expected) {
-  require(!administrator());auto manager=fixtureManager(SC_MANAGER_CONNECT);require(manager.value);
+  fixtureStage="ordinary_identity";require(!administrator());
+  fixtureStage="scm_manager";auto manager=fixtureManager(SC_MANAGER_CONNECT);require(manager.value);
   const DWORD access=SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS|(operation=="stop"?SERVICE_STOP:operation=="start"?SERVICE_START:0);
-  ServiceHandle service(OpenServiceW(manager.value,FixtureService,access));require(service.value);
+  fixtureStage="scm_service";ServiceHandle service(OpenServiceW(manager.value,FixtureService,access));require(service.value);
+  fixtureStage="scm_configuration";
   const auto root=fixtureRoot();verifyCodexServiceConfiguration(service.value,root);
   auto status=codexServiceStatus(service.value);
   if(operation=="start"){
@@ -111,10 +120,12 @@ void exerciseFixture(std::string_view operation,std::string_view expected) {
     require(StartServiceW(service.value,0,nullptr)!=FALSE);waitFixtureState(service.value,SERVICE_RUNNING);
     status=codexServiceStatus(service.value);
   }
-  require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
+  fixtureStage="scm_running";require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
+  fixtureStage="old_process_rights_must_refuse";
   Handle denied(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,status.dwProcessId));
   require(!denied.value&&GetLastError()==ERROR_ACCESS_DENIED);
-  PackageServiceProcess process(status.dwProcessId,fixtureExecutable(),FixtureService);
+  fixtureStage="bound_process";PackageServiceProcess process(status.dwProcessId,fixtureExecutable(),FixtureService);
+  fixtureStage="scm_generation_recheck";
   verifyCodexServiceConfiguration(service.value,root);process.verify(codexServiceStatus(service.value).dwProcessId);
   if(operation=="refusals"){
     unsigned refused=0;
@@ -145,5 +156,8 @@ int main(int argc,char* argv[]) {
     else if(command=="stop"&&argc==3){fixtureStage="ordinary_stop";exerciseFixture(command,argv[2]);}
     else throw Failure{};
     return 0;
+  }catch(const ServiceObservationFailure& error){
+    write("{\"fixtureFailure\":true,\"stage\":\"");write(error.stage);write("\",\"detail\":");
+    write(std::to_string(error.detail));write("}\n");return 1;
   }catch(...){write("{\"fixtureFailure\":true,\"stage\":\"");write(fixtureStage);write("\"}\n");return 1;}
 }

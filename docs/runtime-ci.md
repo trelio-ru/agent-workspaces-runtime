@@ -103,6 +103,8 @@ LocalSystem service whose process DACL denies query/synchronization while its
 SCM DACL grants ordinary control. The old query must actually be refused; stale
 generations/names must refuse without control. A completion sentinel prevents
 all-skipped success. Fixture binaries never enter the native release artifact.
+Failures retain only closed observation stages/numeric results. Owned fixture
+cleanup is independent of the failing reader and preserves its test failure.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
