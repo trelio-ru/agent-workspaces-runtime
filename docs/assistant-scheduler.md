@@ -2282,8 +2282,12 @@ image FILE. Its complete OS inventory must contain one service with the exact
 short name, fresh SCM PID and original process creation time. Each observation
 uses a fresh session, never a retained inventory as current evidence.
 
-Keep a zero-access handle to the original process object; no process query or
-`SYNCHRONIZE` right is requested. A LocalSystem process may deny these rights
+Retain the original OS [RM_UNIQUE_PROCESS](https://learn.microsoft.com/en-us/windows/win32/api/restartmanager/ns-restartmanager-rm_unique_process)
+generation (PID plus creation time), not a bare PID or process handle. Admission
+and stop recheck that generation against fresh exact-file/SCM evidence; PID reuse
+cannot satisfy it and is conservative refusal in the exit snapshot. No
+LocalSystem process is opened, including with zero desired access. No process
+query or `SYNCHRONIZE` right is requested. A LocalSystem process may deny these rights
 even though its SCM DACL legitimately grants the ordinary interactive task
 STOP/START. An administrator's successful process probe is not acceptance of
 the least-privilege task. Never enable debug privileges or repair either DACL.

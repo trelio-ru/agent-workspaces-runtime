@@ -101,7 +101,9 @@ fixture with the production SCM/RM identity and exit primitives. A real new
 non-administrator account must read, normally stop and restore an inert
 LocalSystem service whose process DACL denies query/synchronization while its
 SCM DACL grants ordinary control. The old query must actually be refused; stale
-generations/names must refuse without control. A completion sentinel prevents
+generations/names must refuse without control. Production identity uses the OS
+RM_UNIQUE_PROCESS generation and exact-file/SCM proofs without opening the
+LocalSystem process, including zero-access opens. A completion sentinel prevents
 all-skipped success. Fixture binaries never enter the native release artifact.
 Failures retain only closed observation stages/numeric results. Owned fixture
 cleanup is independent of the failing reader and preserves its test failure.

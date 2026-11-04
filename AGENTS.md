@@ -878,9 +878,11 @@ publication tooling также остаются вне этого публичн
   are absent, register the retained signed candidate by its already-staged full
   name once, then restore that service/GUI and verify the actual version/probe.
   Service identity joins fresh SCM configuration/PID with Restart Manager's
-  exact-image FILE association, service short name and original creation time;
-  only a zero-access process handle is retained. Ordinary tasks never require
-  LocalSystem process-query/SYNCHRONIZE rights. Stop completion joins fresh SCM,
+  exact-image FILE association, service short name and original creation time.
+  The OS RM_UNIQUE_PROCESS generation is rechecked for admission/stop, never a
+  bare PID or an opened LocalSystem process (including zero-access handles).
+  Ordinary tasks never require process-query/SYNCHRONIZE rights. Stop completion
+  joins fresh SCM,
   process-snapshot absence and an empty fresh exact-file observation under the
   original twenty-second bound. RM never controls the service. Hosted acceptance
   uses a disposable LocalSystem service with independently granted SCM rights

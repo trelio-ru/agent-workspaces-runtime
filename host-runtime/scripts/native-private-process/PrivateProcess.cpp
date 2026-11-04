@@ -913,15 +913,16 @@ bool packageServicePidPresent(DWORD pid) {
 struct PackageServiceProcess {
   DWORD pid;
   FILETIME created{};
-  Handle process;
   PackageServiceImage image;
   std::wstring serviceName;
   PackageServiceProcess(DWORD selectedPid,const std::wstring& executable,const std::wstring& name)
-    :pid(selectedPid),process(OpenProcess(0,FALSE,selectedPid)),image(executable),serviceName(name) {
-    // A zero-access handle retains only the original kernel object. It grants
-    // no query/control/synchronization rights. Identity comes independently
-    // from the exact FILE resource and SCM PID, not this numeric handle/PID.
-    requireServiceObservation(pid>0&&process.value,"process_handle_zero",process.value?0:GetLastError());
+    :pid(selectedPid),image(executable),serviceName(name) {
+    // RM_UNIQUE_PROCESS supplies the OS PID + original creation time. Never
+    // reduce that identity to a bare PID or open the LocalSystem process, even
+    // with desired access zero (the ordinary-user native fixture refused that
+    // open too). Fresh exact-file/SCM checks fence admission/stop; a later reused
+    // PID cannot satisfy the original creation time, and blocks exit by snapshot.
+    requireServiceObservation(pid>0,"service_pid");
     created=observation();
     requireServiceObservation(created.dwLowDateTime!=0||created.dwHighDateTime!=0,"creation_time_missing");
     const auto fresh=observation();
