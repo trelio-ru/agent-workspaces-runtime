@@ -555,6 +555,10 @@ publication tooling также остаются вне этого публичн
   браузеру либо отдельному навыку сервиса, без чужих recipes в provider/host.
   Generic ARIA menuitem получает
   прежний button DTO, без расширения mutation authority. Empty 204 не кешируется.
+  Native office-viewer fixture retains only fixed action phases, closed result
+  state/reason, control/request counts and frame/title booleans from the original
+  responses. No extra observation, input retry, readiness wait or weaker menu/
+  bytes/single-GET assertion is permitted by that diagnostic evidence.
 - Голосовые плееры требуют отдельный signed `audioDownloads` и API marker:
   [контракт](docs/visual-browser.md#голосовые-сообщения). Только fresh координаты,
   native audio source либо один trusted play; локальный blob того же документа

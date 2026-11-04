@@ -814,6 +814,14 @@ timeout/errno. Используется общий diagnostic parser; Error mess
 descriptor в этот файл не попадают. Это свидетельство причины, не разрешение
 повторить действие, продлить lease или убрать обязательный native gate.
 
+Native office-viewer fixture records fixed action phases/modes, the original
+validated result's closed state/reason, control/request counts and frame/title
+booleans before cleanup. It never prints page text/labels, URLs, frame IDs or
+file paths/receipts. Evidence comes only from the original calls, without an
+extra read, readiness wait or input retry. The unique-menu, exact original bytes,
+single actual GET and foreground assertions and original deadlines stay strict;
+diagnostics do not establish the cause of a missing rendered control.
+
 Fixture logging сохраняет production stdio `ignore`: отдельный диагностический
 stderr pipe не создаётся. Chromium helper может унаследовать такой pipe после
 exit основного процесса и искусственно задержать `ChildProcess.close`.

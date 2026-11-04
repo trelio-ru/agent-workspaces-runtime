@@ -16,7 +16,8 @@ import { syntheticDocx } from './fixtures/visual-docx.mjs';
 
 test('a linked HTML office viewer exposes safe menus and downloads the complete DOCX from one native iframe/same-tab GET', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-docx-viewer-')));
-  const docx = syntheticDocx(), hits = [], evidence = [];
+  const docx = syntheticDocx(), hits = [], evidence = [], observations = [];
+  let mode = 'not_started', phase = 'not_started';
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://fixture.test');
     if (url.pathname === '/original') {
@@ -55,27 +56,48 @@ test('a linked HTML office viewer exposes safe menus and downloads the complete 
     ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
   const control = (view, label) => { const matches = view.controls.filter(c => c.label === label); assert.equal(matches.length, 1, label);
     return { frameId: view.frameId, x: matches[0].x, y: matches[0].y }; };
+  // A missing menu previously left only the browser's lifecycle evidence ([]
+  // when startup itself succeeded). Retain the ORIGINAL action's already
+  // validated response so a failed File click can be distinguished from an
+  // error response, stale frame or incomplete rendered-controls observation.
+  // Only fixed fixture phases, closed public state/reason, counts and boolean
+  // comparisons leave the fixture: never text, labels, URLs, frame IDs, private
+  // paths or file receipts. This adds no browser call, wait, input retry or
+  // readiness inference, and the strict unique-control assertion stays intact.
+  const call = async (nextPhase, operation, args) => {
+    phase = nextPhase;
+    const view = await browser.call(operation, args);
+    const count = label => view.controls?.filter(c => c.label === label).length ?? null;
+    observations.push({ phase, mode, state: view.state, reason: view.reason,
+      textObservation: view.kind === 'trelio.browser-text/v1',
+      controlCount: view.controls?.length ?? null,
+      fileMenuCount: count('File'), downloadMenuCount: count('Download'), wordMenuCount: count('Microsoft Word (.docx)'),
+      disabledMenuCount: count('DISABLED_MENU'), viewerTitle: /\.docx/u.test(view.title || ''),
+      frameChanged: args?.frameId ? typeof view.frameId === 'string' && view.frameId !== args.frameId : null,
+      requestCount: hits.length });
+    return view;
+  };
   try {
-    for (const mode of ['iframe', 'main']) {
-      let view = await browser.call('navigate', { url: origin + '/?mode=' + mode });
+    for (mode of ['iframe', 'main']) {
+      let view = await call('article', 'navigate', { url: origin + '/?mode=' + mode });
       assert.equal(view.state, 'ready', view.reason);
       const before = focus();
-      view = await browser.call('download-attachment', control(view, 'Original DOCX'));
+      view = await call('viewer', 'download-attachment', control(view, 'Original DOCX'));
       assert.equal(view.kind, 'trelio.browser-text/v1', 'an HTML viewer is not a file receipt');
       assert.match(view.title, /\.docx/); assert.equal(view.controls.some(c => c.label === 'DISABLED_MENU'), false);
-      view = await browser.call('click', control(view, 'File'));
-      view = await browser.call('click', control(view, 'Download'));
-      const file = await browser.call('download-attachment', control(view, 'Microsoft Word (.docx)'));
+      view = await call('file_menu', 'click', control(view, 'File'));
+      view = await call('download_menu', 'click', control(view, 'Download'));
+      const file = await call('original', 'download-attachment', control(view, 'Microsoft Word (.docx)'));
       assert.equal(file.state, 'ready', JSON.stringify({ mode, reason: file.reason, requestCount: hits.length }));
       assert.equal(file.kind, 'trelio.browser-file/v1'); assert.equal(path.extname(file.filePath), '.docx');
       assert.deepEqual(await fs.readFile(file.filePath), docx); assert.equal(file.sha256, createHash('sha256').update(docx).digest('hex'));
       assert.doesNotMatch(JSON.stringify(file), /untrusted-original|Content-Disposition|\/original|dataBase64/);
-      view = await browser.call('read-text'); assert.match(view.text, /SYNTHETIC_VIEWER_REMAINS/);
+      view = await call('retained_viewer', 'read-text'); assert.match(view.text, /SYNTHETIC_VIEWER_REMAINS/);
       if (before) assert.equal(focus(), before, 'viewer download never opens Save As or changes foreground');
     }
     assert.deepEqual(hits, ['GET', 'GET'], 'each UI download performs one actual GET; paused originals are not replayed');
-    await browser.close();
-  } catch (error) { t.diagnostic(JSON.stringify(evidence)); throw error; } finally {
+    phase = 'close'; await browser.close();
+  } catch (error) { t.diagnostic(JSON.stringify({ phase, mode, observations, requestCount: hits.length, native: evidence })); throw error; } finally {
     await listener.stop();
     await browser.close().catch(() => browser.abort());
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
