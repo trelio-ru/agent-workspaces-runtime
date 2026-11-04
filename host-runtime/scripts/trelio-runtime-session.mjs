@@ -119,6 +119,11 @@ const loadWorkspaceBridgeModule = () => {
   return workspaceBridgeModulePromise;
 };
 
+const removeLaunchObservation = async (filePath, runtimeSessionId) => {
+  const { removeCodexLaunchObservation } = await import("./trelio-codex-launch.mjs");
+  await removeCodexLaunchObservation(path.dirname(path.dirname(filePath)), runtimeSessionId);
+};
+
 const readStdinJson = async () => {
   const chunks = [];
   let size = 0;
@@ -369,6 +374,7 @@ const removeStaleRuntimeState = async (filePath, nowMilliseconds) => {
     const proofBinding = runtimeProofBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
       runtimeSessionId: state.runtimeSessionId });
     if (proofBinding) await fs.rm(proofBinding, { force: true });
+    await removeLaunchObservation(filePath, state.runtimeSessionId);
     return reason;
   } catch {
     return null;
@@ -677,11 +683,12 @@ export const buildRuntimeSessionProof = ({ state, toolName, now = new Date(), lo
 
 const emitHookOutput = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
-const writeUpdatedInput = (toolInput, proof, emit = emitHookOutput) => {
+const writeUpdatedInput = (toolInput, proof, emit = emitHookOutput, additionalContext = null) => {
   emit({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "allow",
+      ...(additionalContext ? { additionalContext } : {}),
       updatedInput: {
         ...toolInput,
         runtimeSessionProof: proof,
@@ -833,7 +840,19 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
     }
   }
   assertRuntimeHookBudget();
-  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }), emit);
+  let launchContext = null;
+  const launchBudget = Math.min(2_000, runtimeHookRemainingMilliseconds("PreToolUse", {
+    startedAt: resolveRuntimeHookStartedAt(),
+  }) - 1_000);
+  if (launchBudget >= 250 && state.observation?.clientFamily === "codex" && typeof hookInput.cwd === "string") {
+    // The lifecycle event owns the selected folder. Never substitute this
+    // long-lived MCP process's cwd or an agent-authored workingDirectory.
+    const { synchronizeCodexLaunchFolder } = await import("./trelio-codex-launch.mjs");
+    launchContext = await synchronizeCodexLaunchFolder({ hookInput, state, origin, toolInput,
+      signal: AbortSignal.any([runtimeHookSignal(), AbortSignal.timeout(launchBudget)]) });
+  }
+  assertRuntimeHookBudget();
+  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }), emit, launchContext);
 };
 
 /**
@@ -924,6 +943,7 @@ const runSessionStart = async (hookInput) => {
       configDirectory: path.dirname(path.dirname(filePath)), runtimeSessionId: stateToEnd.runtimeSessionId,
     });
     if (proofBinding) await fs.rm(proofBinding, { force: true }).catch(() => undefined);
+    await removeLaunchObservation(filePath, stateToEnd.runtimeSessionId).catch(() => undefined);
     const { endAgentRuntimeHookSession } = await loadWorkspaceBridgeModule();
     await endAgentRuntimeHookSession({
       origin,
@@ -953,6 +973,7 @@ const runSessionEnd = async (hookInput) => {
     const proofBinding = runtimeProofBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
       runtimeSessionId: state.runtimeSessionId });
     if (proofBinding) await fs.rm(proofBinding, { force: true }).catch(() => undefined);
+    await removeLaunchObservation(filePath, state.runtimeSessionId).catch(() => undefined);
     const { endAgentRuntimeHookSession } = await loadWorkspaceBridgeModule();
     await endAgentRuntimeHookSession({
       origin,

@@ -6649,6 +6649,7 @@ const readCompanyEncryptionRuntime = async ({
   token,
   companySlug,
   fingerprint = null,
+  signal,
 }) => {
   const query = new URLSearchParams({ companySlug });
   if (fingerprint) query.set("fingerprint", fingerprint);
@@ -6656,6 +6657,7 @@ const readCompanyEncryptionRuntime = async ({
     origin,
     token,
     `/api/agent-workspaces/encryption/runtime?${query.toString()}`,
+    { signal },
   ));
 
   if (
@@ -6699,6 +6701,8 @@ export const ensureCompanyEncryptionContext = async ({
   collectEncryptionKey = collectCompanyEncryptionKeyThroughLoopback,
   registrationOnly = false,
   allowPendingRegistration = false,
+  existingOnly = false,
+  signal,
 }) => {
   const executionProfile = currentWorkspaceExecutionProfile();
   // Only the internal managed enrollment profile can stop at the public
@@ -6713,6 +6717,7 @@ export const ensureCompanyEncryptionContext = async ({
     origin: encryptedRequestOrigin,
     token,
     companySlug: company.slug,
+    signal,
   });
   if (company.id && initialRuntime.company.id !== company.id) denyWorkspaceExecutionProfile();
   if (executionProfile?.companyEncryptionUserId && initialRuntime.viewer?.userId !== executionProfile.companyEncryptionUserId) {
@@ -6748,6 +6753,7 @@ export const ensureCompanyEncryptionContext = async ({
   }
 
   if (!device) {
+    if (existingOnly) throw new Error("Existing encryption device is required.");
     let encryptionSecret = await collectEncryptionKey({
       companyName: initialRuntime.company.name,
     });
@@ -6774,10 +6780,12 @@ export const ensureCompanyEncryptionContext = async ({
     token,
     companySlug: initialRuntime.company.slug,
     fingerprint: device.fingerprint,
+    signal,
   });
   assertEncryptedCompanyRuntimeState(runtime);
 
   if (runtime.accessState === "registration_required") {
+    if (existingOnly) throw new Error("Existing encryption access is required.");
     await registerCompanyEncryptionDevice({
       origin: encryptedRequestOrigin,
       token,
@@ -12521,7 +12529,7 @@ const withWorkspaceOpenLock = async (workspaceId, handler, kind = "open") => {
   }
 };
 
-const readWorkingFolderInstructionFile = async (filePath) => {
+export const readWorkingFolderInstructionFile = async (filePath) => {
   let fileStat;
 
   try {

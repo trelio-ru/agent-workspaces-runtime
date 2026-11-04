@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath as fsRealpath,
   rm,
   stat,
   utimes,
@@ -1374,8 +1375,10 @@ test("first protected call observes the current model and supported host names i
   const threadId = "019f9fcd-899a-72b3-91f6-fdf3134381bb";
   const runtimeSessionId = "11111111-1111-4111-8111-111111111111";
   let registrationBody = null;
+  let launchBody = null, launchPuts = 0;
+  const launchFolder = path.join(temporaryHome, "company-a");
   const server = createServer(async (request, response) => {
-    assert.equal(request.headers.authorization, "Bearer test-bridge-session");
+    assert.equal(request.headers.authorization, "Bearer twb_launch-fixture");
     assert.equal(request.headers["x-trelio-agent-workspaces-version"], TEST_PLUGIN_VERSION);
     assert.equal(request.headers["x-trelio-host-runtime-version"], TEST_HOST_RUNTIME_VERSION);
     response.setHeader("content-type", "application/json");
@@ -1394,6 +1397,20 @@ test("first protected call observes the current model and supported host names i
       }));
       return;
     }
+    if (request.url === "/api/agent-workspaces/bridge-routing?companySlug=company-a") {
+      response.end(JSON.stringify({ schemaVersion: 1, company: { id: "22222222-2222-4222-8222-222222222222", slug: "company-a" }, encryptionState: "plain" }));
+      return;
+    }
+    if (request.url === "/api/agent-workspaces/companies/company-a/codex-folders") {
+      response.end(JSON.stringify({ folders: [] }));
+      return;
+    }
+    if (request.method === "PUT" && request.url.startsWith("/api/agent-workspaces/companies/company-a/codex-folders/")) {
+      launchPuts++;
+      launchBody = await readRequestBody(request);
+      response.end(JSON.stringify({ registered: true, id: request.url.split("/").at(-1) }));
+      return;
+    }
     response.statusCode = 404;
     response.end(JSON.stringify({ message: "not found" }));
   });
@@ -1406,7 +1423,7 @@ test("first protected call observes the current model and supported host names i
     await mkdir(configDirectory, { recursive: true, mode: 0o700 });
     await writeFile(
       path.join(configDirectory, "credentials.json"),
-      `${JSON.stringify({ [origin]: { bridgeSessionToken: "test-bridge-session" } })}\n`,
+      `${JSON.stringify({ [origin]: { bridgeSessionToken: "twb_launch-fixture" } })}\n`,
       { mode: 0o600 },
     );
     if (process.platform !== "win32") {
@@ -1445,7 +1462,14 @@ test("first protected call observes the current model and supported host names i
       JSON.stringify({ type: "response_item", payload: { output: "synthetic".repeat(350_000) } }),
     ].join("\n") + "\n");
 
+    await mkdir(launchFolder);
+    await writeFile(path.join(launchFolder, "AGENTS.md"), [
+      "<!-- trelio-agent-workspaces:start -->", "## Trelio",
+      "Папка привязана к компании «Company A» (`company-a`). Это контекст работы, а не привязка Git-репозитория.",
+      "<!-- trelio-agent-workspaces:end -->", "",
+    ].join("\n"));
     const guarded = await runHook({
+      cwd: await fsRealpath(launchFolder),
       hook_event_name: "PreToolUse",
       session_id: threadId,
       model: "gpt-5.4",
@@ -1457,6 +1481,9 @@ test("first protected call observes the current model and supported host names i
     assert.equal(guarded.exitCode, 0);
     assert.equal(guarded.stderr, "");
     assert.ok(registrationBody);
+    assert.equal(launchPuts, 1, "The actual admitted hook registers the configured company even while reading another company");
+    assert.equal(launchBody.folderPath, await fsRealpath(launchFolder));
+    assert.equal(launchBody.runtimeSessionId, runtimeSessionId);
     assert.equal(registrationBody.observation.modelId, "gpt-5.4");
     assert.equal(registrationBody.observation.effortLevel, "high");
 
@@ -2079,6 +2106,9 @@ test("SessionEnd removes the local key before a bounded remote cleanup", async (
       .update(`${origin}\n${threadId}`)
       .digest("hex");
     const statePath = path.join(runtimeDirectory, `${stateDigest}.json`);
+    const launchObservation = path.join(configDirectory, "codex-launch-observations", `${runtimeSessionId}.json`);
+    await mkdir(path.dirname(launchObservation), { recursive: true, mode: 0o700 });
+    await writeFile(launchObservation, JSON.stringify({ schemaVersion: 1, observed: ["a".repeat(64)] }), { mode: 0o600 });
     await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
     await writeFile(
       path.join(configDirectory, "credentials.json"),
@@ -2121,6 +2151,7 @@ test("SessionEnd removes the local key before a bounded remote cleanup", async (
     assert.deepEqual(result, { exitCode: 0, stdout: "", stderr: "" });
     assert.ok(Date.now() - startedAt < 2_900);
     await assert.rejects(readFile(statePath, "utf8"), { code: "ENOENT" });
+    await assert.rejects(readFile(launchObservation, "utf8"), { code: "ENOENT" });
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

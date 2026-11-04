@@ -292,7 +292,7 @@ const replaceManagedBlockAtEnd = (text, block, startMarker, endMarker) => {
 // Diagnostics refresh an existing binding, not a newly selected scope. Parse
 // only explicit scope lines inside one complete managed block; arbitrary user
 // instructions, folder names and similar slugs cannot select a company.
-const readManagedBinding = (text) => {
+export const readManagedBinding = (text) => {
   const ranges = findMarkerRanges(text, MANAGED_START, MANAGED_END);
   if (ranges.length === 0) return null;
   // Normalize CRLF for parsing only. CAS and the refresh writer still use the

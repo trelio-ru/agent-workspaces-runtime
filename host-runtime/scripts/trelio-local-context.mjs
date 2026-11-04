@@ -2270,6 +2270,19 @@ export const protectLocalActionArguments = async ({
   const expectedPayloadValues = {};
   let objectSequence = 0;
   let normalizedArguments = normalizeLocalActionRichTextInputs(rawArguments);
+  if (nativeTool === "register_codex_folder") {
+    // A personal filesystem path shares the signed content codec, but has a
+    // dedicated entity type so the generic company resolver can enforce the
+    // writer's personal ACL even before registration or after row deletion.
+    const id = normalizeUuid(normalizedArguments.clientRequestId, "clientRequestId");
+    const folderPath = normalizeBoundedString(normalizedArguments.folderPath, "folderPath", 4096);
+    const entityId = deriveLocalActionEntityId(companyEncryption, `register_codex_folder\0${id}`);
+    const values = { folder_path: folderPath };
+    const payload = await buildLocalActionEncryptedPayload({ companyEncryption, entityId,
+      entityType: "agent_codex.launch_folder", values, source: { kind: "agent_codex.launch_folder" } });
+    return { value: { ...normalizedArguments, folderPath: buildCompanyEncryptedTextMarker(entityId, "folder_path") },
+      payloads: [payload], expectedPayloadValues: { [entityId]: values } };
+  }
   if(nativeTool==='cancel_agent_workspace_run'){
     // The existing audit writer and generic managed protector share exactly
     // one payload/signature codec. Run identity fixes the opaque local intent
@@ -3374,9 +3387,11 @@ export const uploadLocalActionPayloads = async ({
           }
           const expected = expectedPayloadValues[payload.entityId];
           if (!expected || existing.entityType !== payload.entityType
-            || ![LOCAL_ACTION_ENTITY_TYPE,"agent_workspace.cancellation"].includes(existing.entityType)
+            || ![LOCAL_ACTION_ENTITY_TYPE,"agent_workspace.cancellation", "agent_codex.launch_folder"].includes(existing.entityType)
             || existing.entityType === "agent_workspace.cancellation"
-              && Object.keys(expected).sort().join(",") !== "cancellation_reason") throw error;
+              && Object.keys(expected).sort().join(",") !== "cancellation_reason"
+            || existing.entityType === "agent_codex.launch_folder"
+              && Object.keys(expected).sort().join(",") !== "folder_path") throw error;
           const opened = await decryptCompanyPayload({
             encryptedPayload: existing,
             scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,

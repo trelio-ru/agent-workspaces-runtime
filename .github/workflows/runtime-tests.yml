@@ -312,6 +312,7 @@ jobs:
           node tests/trelio-visual-session.test.mjs
           node tests/trelio-codex-routing.test.mjs
           node tests/trelio-codex-conversation.test.mjs
+          node tests/trelio-codex-launch.test.mjs
           node tests/trelio-company-encryption.test.mjs
           node tests/trelio-context-search-matching.test.mjs
           node tests/trelio-context-search-ranking.test.mjs
@@ -465,7 +466,9 @@ jobs:
 
       - name: Run Windows folder diagnostic and instruction refresh regressions
         if: needs.ci-plan.outputs.profile == 'full'
-        run: node tests/trelio-folder-onboarding.test.mjs
+        run: |
+          node tests/trelio-folder-onboarding.test.mjs
+          node tests/trelio-codex-launch.test.mjs
 
       - name: Run Windows personal account catalogue regressions
         if: needs.ci-plan.outputs.profile == 'full'

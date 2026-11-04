@@ -378,6 +378,7 @@ publication tooling также остаются вне этого публичн
   directory aliases, а argv сохраняет исходный путь. Это не меняет запрет
   symlink entries в package/private storage. Проверяй всю signed loader →
   entrypoint → hook цепочку через Windows shells, а не только stub loader.
+- Запуск новых чатов Codex – [личная привязка папки](docs/agent-workspace-runtime.md#codex-new-chat); company задачи не определяет launch root.
 - Синхронизация названия связанного чата – optional механика runtime после Run lifecycle,
   без модели, для task/project/company Workspace, включая unfiled:
   [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).

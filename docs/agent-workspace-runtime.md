@@ -3098,3 +3098,37 @@ policy. Unknown/hidden slug не даёт доступа и не создаёт 
 локально гидратированные private hints через прежний encrypted flow и не создаёт
 plaintext index/cache/outbox. Scope/compaction invalidate verified retention;
 unknown clients получают full authority, без server «уже отправлено» cache.
+
+<a id="codex-new-chat"></a>
+
+## Запуск новых чатов Codex
+
+`trelio-codex-launch.mjs` регистрирует личный launch root через existing
+PreToolUse implementation без изменения stable plugin hook definition.
+Native `hookInput.cwd` задаёт выбранную клиентом папку; cwd MCP и модельный
+`workingDirectory` не являются источниками. Общие `findTrelioWorkingFolderRoot`,
+`readWorkingFolderInstructionFile` и `readManagedBinding` находят родительский
+managed root, effective override и опубликованные legacy формы. Company/project
+берутся из binding, никогда из задачи: запрос компании Б из папки А не создаёт
+Б → А. Symlink/unknown/ambiguous/overshadowed binding не регистрируется.
+
+После live runtime admission optional регистрация использует максимум две
+секунды исходного hook budget. Существующий credential читается без pairing;
+company routing выбирает сервер. GET личного `codex-folders` предшествует PUT
+immutable target и повторяется для read-back после неизвестного результата.
+Opaque UUID – HMAC выбранной папки/scope с device credential, без server plaintext
+digest. Внутреннее E2EE шифрование использует существующий signed payload writer
+с dedicated personal type `agent_codex.launch_folder` и `folderPath → folder_path`; `existingOnly` запрещает unlock/device registration.
+Plaintext fallback, новый Run, model turn, folder edit и вывод путей в logs нет.
+Ошибка optional регистрации сохраняет исходное допущенное действие.
+
+Подтверждённый receipt кешируется только в owner-private session observation,
+не служит ACL/cache authority. Bounded companion удаляется при SessionEnd/устаревании. Старые managed папки регистрируются при обычном
+первом protected обращении после обновления. При genuinely unbound папке generic
+additionalContext один раз за сеанс предлагает после exact business read коротко
+подтвердить exact company name и текущий полный путь; согласие ведёт в existing
+folder_onboarding plan/apply, отказ не пишет binding. Source development/audit/
+diagnostics такой authority не создают. Backend с новым endpoint/content adapter
+публикуется раньше dependent runtime; old backend refusal не запускает fallback.
+Browser кнопка и выбор другого компьютера/папки принадлежат Trelio frontend,
+не local runtime; новая ссылка не создаёт relation задачи с Codex thread.
