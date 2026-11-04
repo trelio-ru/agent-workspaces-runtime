@@ -872,7 +872,10 @@ publication tooling также остаются вне этого публичн
   [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
 - Windows console/taskbar branding uses the SAME signed native binary after
   host/registration checks. Its pipe accepts only that host's assistant UUID;
-  only the direct parent's exclusive visible classic console may change.
+  only the direct parent's owned visible classic console may change. Ownership
+  includes at most three contiguous same-user, exact-image Node ancestors
+  (registered loader/entry/supervisor), pinned by live handles and creation times;
+  every other occupant refuses. Recheck membership/lifetimes before mutation.
   Shell relaunch/name/icon properties precede its version-independent AppID;
   relaunch targets only the SAME registered task, never bare Node/plugin paths.
   Window HICONs and PE taskbar artwork derive from one reviewed PNG array.

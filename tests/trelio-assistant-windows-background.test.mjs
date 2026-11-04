@@ -306,15 +306,27 @@ test('console branding uses one fixed native mode with bounded closed output and
       selectWorker:async()=>assert.fail('invalid identity must precede native selection')}),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
 });
 
-test('the signed worker brands only an isolated visible parent console and verifies its Shell taskbar identity and actual WM_GETICON without changing focus',
+test('the signed worker brands only its owned visible console including the registered Node ancestry and verifies Shell/WM_GETICON without changing focus',
   {skip:process.platform!=='win32'},async()=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-icon-classic-'));
     const fixture=path.join(directory,'fixture.mjs'),receipt=path.join(directory,'receipt.json');
+    const launcher=path.join(directory,'launcher.mjs');
     const ready=path.join(directory,'ready'),release=path.join(directory,'release');
     const assistantId='60000000-0000-4000-8000-000000000001';
     const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
     try{
-      for(const mode of ['visible','shared','hidden']){
+      // Exercise the actual inherited-console topology of stable loader ->
+      // runtime entry -> supervisor. The former single-Node fixture missed
+      // the production shared_console refusal. These wrappers only retain
+      // their child lifetime, with the SAME Node/stdio/windowsHide choices.
+      await fs.writeFile(launcher,`import {spawn} from 'node:child_process';
+        const depth=Number(process.argv[2]);
+        const child=spawn(process.execPath,depth>1?[${JSON.stringify(launcher)},String(depth-1)]:[${JSON.stringify(fixture)}],
+          {stdio:'inherit',windowsHide:true,shell:false});
+        child.once('error',()=>process.exit(128));
+        child.once('exit',code=>process.exit(code??129));`);
+      for(const mode of ['visible','launcher_chain','shared','launcher_chain_shared','too_many_ancestors','hidden']){
+        const applies=mode==='visible'||mode==='launcher_chain';
         await Promise.all([ready,release,receipt,...['branded','inspected','closed','restored'].map(stage=>receipt+'.'+stage)].map(file=>fs.rm(file,{force:true})));
         // libuv's detached:true means DETACHED_PROCESS, not CREATE_NEW_CONSOLE.
         // The test-only native launcher explicitly creates a classic console;
@@ -331,7 +343,7 @@ test('the signed worker brands only an isolated visible parent console and verif
           }
           if(!released)process.exit(126);
           let sibling=null;
-          if(${JSON.stringify(mode)}==='shared'){
+          if(['shared','launcher_chain_shared'].includes(${JSON.stringify(mode)})){
             sibling=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:false,stdio:'ignore'});
             await new Promise((resolve,reject)=>{sibling.once('spawn',resolve);sibling.once('error',reject);});
           }
@@ -372,12 +384,15 @@ test('the signed worker brands only an isolated visible parent console and verif
             if(diagnostic.length>512)diagnostic='';
           });
           child.once('error',reject);child.once('close',resolve);
-          child.stdin.end(JSON.stringify({consoleHost:path.join(process.env.SystemRoot,'System32','conhost.exe'),executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release,receipt,assistantId,inspect:mode==='visible'}));
+          const depth=mode==='launcher_chain'?2:mode==='launcher_chain_shared'?1:mode==='too_many_ancestors'?3:0;
+          child.stdin.end(JSON.stringify({consoleHost:path.join(process.env.SystemRoot,'System32','conhost.exe'),executable:process.execPath,
+            arguments:depth?quoteAssistantWindowsArgument(launcher)+' '+depth:quoteAssistantWindowsArgument(fixture),
+            hidden:mode==='hidden',ready,release,receipt,assistantId,inspect:applies}));
         });
         assert.equal(code,0,`the synthetic native classic-console host must complete (closed precondition stage ${code})`);
         const result=JSON.parse(await fs.readFile(receipt,'utf8'));
-        if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,taskbarVerified:true,foregroundUnchanged:true,keeperAliveBeforeClose:true,shellReadbackVerified:true,shellRestoredAtEof:true,closedAtEof:true});
-        else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
+        if(applies)assert.deepEqual(result,{state:'applied',verified:true,taskbarVerified:true,foregroundUnchanged:true,keeperAliveBeforeClose:true,shellReadbackVerified:true,shellRestoredAtEof:true,closedAtEof:true});
+        else if(['shared','launcher_chain_shared','too_many_ancestors'].includes(mode))assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
         else{assert.equal(result.state,'skipped');assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));}
       }
     }finally{await fs.rm(directory,{recursive:true,force:true});}
