@@ -120,7 +120,7 @@ const loadWorkspaceBridgeModule = () => {
 };
 
 const removeLaunchObservation = async (filePath, runtimeSessionId) => {
-  const { removeCodexLaunchObservation } = await import("./trelio-codex-launch.mjs");
+  const { removeCodexLaunchObservation } = await import("./trelio-codex-conversation.mjs");
   await removeCodexLaunchObservation(path.dirname(path.dirname(filePath)), runtimeSessionId);
 };
 
@@ -847,7 +847,7 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
   if (launchBudget >= 250 && state.observation?.clientFamily === "codex" && typeof hookInput.cwd === "string") {
     // The lifecycle event owns the selected folder. Never substitute this
     // long-lived MCP process's cwd or an agent-authored workingDirectory.
-    const { synchronizeCodexLaunchFolder } = await import("./trelio-codex-launch.mjs");
+    const { synchronizeCodexLaunchFolder } = await import("./trelio-codex-conversation.mjs");
     launchContext = await synchronizeCodexLaunchFolder({ hookInput, state, origin, toolInput,
       signal: AbortSignal.any([runtimeHookSignal(), AbortSignal.timeout(launchBudget)]) });
   }

@@ -3,7 +3,7 @@ import test from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { inspectCodexLaunchFolder, synchronizeCodexLaunchFolder, codexLaunchFolderId } from "../host-runtime/scripts/trelio-codex-launch.mjs";
+import { inspectCodexLaunchFolder, synchronizeCodexLaunchFolder, codexLaunchFolderId } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const managed = line => `<!-- trelio-agent-workspaces:start -->\n## Trelio\n${line}\n<!-- trelio-agent-workspaces:end -->\n`;
@@ -81,7 +81,8 @@ test("an unbound old folder asks once; private read failure and missing client c
   const hint = await synchronizeCodexLaunchFolder(input, { bridge });
   assert.match(hint, /Only an affirmative user answer/u);
   assert.match(hint, /folder_onboarding/u);
-  assert.ok(hint.includes(root));
+  // The context quotes the exact locator as JSON, including Windows escapes.
+  assert.ok(hint.includes(JSON.stringify(root)));
   assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
   assert.equal(writes, 1);
   bridge.readPrivateJsonFile = async () => { throw new Error("private ACL refusal"); };

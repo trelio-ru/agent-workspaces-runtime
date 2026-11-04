@@ -3103,8 +3103,10 @@ unknown clients получают full authority, без server «уже отпр
 
 ## Запуск новых чатов Codex
 
-`trelio-codex-launch.mjs` регистрирует личный launch root через existing
+`trelio-codex-conversation.mjs` регистрирует личный launch root через existing
 PreToolUse implementation без изменения stable plugin hook definition.
+Навигация и title maintenance используют один существующий Codex-модуль,
+сохраняя signed package ceiling 100 файлов; folder parser загружается lazy.
 Native `hookInput.cwd` задаёт выбранную клиентом папку; cwd MCP и модельный
 `workingDirectory` не являются источниками. Общие `findTrelioWorkingFolderRoot`,
 `readWorkingFolderInstructionFile` и `readManagedBinding` находят родительский
