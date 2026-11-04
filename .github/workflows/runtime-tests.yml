@@ -330,6 +330,7 @@ jobs:
           node tests/trelio-assistant-company-context-e2e.test.mjs
           node tests/trelio-assistant-source-reader.test.mjs
           node tests/trelio-assistant-setup.test.mjs
+          node tests/trelio-assistant-local-skills.test.mjs
           node tests/trelio-assistant-windows-background.test.mjs
           node tests/trelio-assistant-maintenance.test.mjs
           node tests/trelio-assistant-hook.test.mjs
@@ -495,6 +496,8 @@ jobs:
           node tests/trelio-assistant-source-reader.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-setup.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-local-skills.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-maintenance.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

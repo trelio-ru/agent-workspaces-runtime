@@ -156,7 +156,7 @@ const id = value => { if (typeof value !== 'string' || !UUID.test(value)) fail('
  * Company/member bindings remain inside the common catalogue. Neither profile
  * may read/import the interactive human's catalogue merely because both run as
  * the same OS user. The caller rechecks its live identity before resolving it. */
-const assistantSkillCatalogueDirectory = (configDirectory, identity) => {
+export const assistantSkillCatalogueDirectory = (configDirectory, identity) => {
   if (!path.isAbsolute(configDirectory ?? '')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   return path.join(configDirectory,'digital-assistants','runtime',id(identity.assistantId),id(identity.deviceId),'accounts');
 };
@@ -437,7 +437,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
   };
 };
 
-const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, store }) => {
+export const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, store }) => {
   const secret = await store.get({ origin, kind: 'device', id: assistantId });
   if (secret && (!UUID.test(secret.assistantId ?? '') || !UUID.test(secret.deviceId ?? '')
     || !/^tda_[A-Za-z0-9_-]{43}$/u.test(secret.credential ?? '') || !Number.isSafeInteger(secret.expiresAt)
@@ -3771,7 +3771,7 @@ const readAssistantEncryptedSnapshotResponse=async(response,common)=>{
   try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
   catch{fail('ASSISTANT_ENCRYPTED_SNAPSHOT_JSON_INVALID');}finally{bytes.fill(0);}
 };
-const readAssistantEncryptedSnapshotBundle=(bundle,companyEncryption,companyId)=>{
+export const readAssistantEncryptedSnapshotBundle=(bundle,companyEncryption,companyId)=>{
   if(!object(bundle) || bundle.schemaVersion!==1 || !object(bundle.context) || !Array.isArray(bundle.encryptedPayloads)
     || bundle.encryptedPayloads.length>4096 || Buffer.byteLength(JSON.stringify(bundle))>32*1024*1024)fail('ASSISTANT_ENCRYPTED_SNAPSHOT_FORMAT_INVALID');
   const payloads=new Map();

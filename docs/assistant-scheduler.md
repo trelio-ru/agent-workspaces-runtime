@@ -658,7 +658,55 @@ local accounts, import sessions, register queue sources, poll providers, dispatc
 chats or ACK messages. Owner device onboarding and production orchestration
 remain separate gates; no model tool or timer is added by this client.
 
-Local-first setup starts in the visible Desktop chat on the paired computer.
+### Ordinary owner chat skills
+
+The visible paired-computer chat discovers all enabled company/project skills
+with `list_assistant_skills`, including exact instructions, personal rules and
+effective scope authority. Three background-source setup tools are not a skill
+catalogue. Discovery and execution create no Task/Workspace/Run/source/polling.
+The sole-company selection uses the SAME fresh native inventory.
+
+`use_assistant_skill` executes ordinary published argv through the SAME signed
+resolver/cache/account/interpreter/process/visual engine, or delegates
+connect/doctor/call to the SAME Remote MCP implementation and exact write UI.
+Existing packages such as Avito require no assistant-specific setup descriptor.
+The host account parser remains canonical; a managed identity never imports a
+human session. Create/update/default/unbind and signed account removal use the
+SAME catalogue/CAS; ordinary managed mutations require the current company
+binding inside that transaction. Rebinding from another company retains its
+independent native review, and deleting other companies' sessions is not granted
+by a model-authored `--all-companies`. All account outputs retain only bound
+entries. Published browser-controller commands use the SAME signed opt-in,
+original runtime/account/session binding, local input files and receipt/lease;
+they are never passed to the provider as ordinary argv.
+Protected forms/factors and company-private code consent retain
+their existing engines. A saved window is not verified login. Signed Secret
+setup retains shared recipe/holder/audit and plain-only support; all value-bearing
+provider output is discarded before model delivery.
+
+This local interactive profile is unavailable while ANY task or source-intake
+pass is active. It does not change unattended task prefixes, source ACK/intake
+or owner-action admission. Device native endpoints read/prepare/begin/compatibility
+repeat BOTH memberships/project ACL, company MCP policy, enabled exact release,
+stored config/declaration and current managed recipient. No human OAuth fallback.
+Provider/Remote arguments stay in local memory, never native request/ledger/logs.
+The ordinary PreToolUse observes the actual model/effort and registers the SAME
+native runtime session without a task. Its key/pending/refresh/expiry lifecycle
+shares `ensureObservedAssistantSession` with task/intake hooks and the existing
+OS store, in a separate origin/chat/device-bound `local_runtime` slot. The hook
+adds a one-use `use_assistant_skill` proof after model authorship; prepare verifies
+it and pins that real session. Every native fence rereads it and evaluates live
+company model policy. No fabricated observation or human admission cache. A
+policy refusal never hides the catalogue. SessionEnd tombstones the local key
+before remote end. Stable hook definitions and approval remain unchanged.
+Native prepare uses the existing structural operation ledger with taskId:null;
+before one account/provider dispatch, begin durably spends its request UUID.
+An attempted request cannot be replayed, and its private attempt token is never
+returned to the model. Materialization/pre-spawn/delivery repeat the SAME fence.
+One original 10-minute interactive or 45-second metadata deadline bounds all
+work. Common visual/text projection and complete bounded pipes remain required.
+
+Local-first source setup starts in the visible Desktop chat on the paired computer.
 `get_assistant_status` includes fresh company UUID/slug references from the SAME
 authenticated runtime inventory; it exports no names, content or execution policy.
 The local connection tool accepts `companyId:null`: one native company is chosen

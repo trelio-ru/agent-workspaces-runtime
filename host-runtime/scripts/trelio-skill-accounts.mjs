@@ -230,7 +230,7 @@ export function splitAccountArguments(args) {
 /** All I/O uses the host's existing owner/ACL-checked primitives. A lock never
  * expires while its process is alive. Unknown ownership fails closed; callers
  * cannot turn an I/O or permission error into an empty catalogue. */
-export function createAccountCatalogue({ directory, scope, io }) {
+export function createAccountCatalogue({ directory, scope, io, boundMutationsOnly = false }) {
   requireThat(path.isAbsolute(directory) && HASH.test(scope.catalogue), 'ACCOUNT_SCOPE_INVALID');
   const root = path.join(directory, 'skill-accounts');
   const file = path.join(root, `${scope.catalogue}.json`);
@@ -355,6 +355,14 @@ export function createAccountCatalogue({ directory, scope, io }) {
       return transaction(async state => {
         requireThat(expectedRevision === state.revision, 'ACCOUNT_CATALOGUE_CONFLICT');
         const account = find(state, id);
+        // A managed company chat sees only its bound entries. Enforce that
+        // SAME scope inside the CAS transaction, not in a stale list/preflight.
+        // Removing other companies' login still needs independent native ACL;
+        // the model's ordinary --all-companies switch cannot supply it.
+        if (boundMutationsOnly) {
+          requireThat(binding(state).accountIds.includes(id), 'ACCOUNT_NOT_BOUND');
+          requireThat(!allCompanies, 'ACCOUNT_USED_BY_OTHER_COMPANIES');
+        }
         const bindingEntries = Object.entries(state.bindings).filter(([, binding]) => binding.accountIds.includes(id));
         const bindings = bindingEntries.map(([, binding]) => binding);
         // A local account can serve several companies. Never silently turn a
@@ -390,6 +398,8 @@ export function createAccountCatalogue({ directory, scope, io }) {
         intentHash:hash([id,accountText(name,120),accountText(comment??'',2000,{empty:true})])};
       return transaction(state => {
         const current = binding(state);
+        if (boundMutationsOnly && operation !== 'create')
+          requireThat(operation !== 'bind' && current.accountIds.includes(id), 'ACCOUNT_NOT_BOUND');
         if(bindingIntent){
           find(state,id);
           requireThat(state.bindings[bindingOriginScope]?.accountIds.includes(id),'ACCOUNT_NOT_BOUND');

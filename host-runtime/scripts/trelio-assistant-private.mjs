@@ -21,13 +21,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SERVICE = 'ru.trelio.digital-assistant.v1';
 const slot = ({ origin, kind, id, deviceId }) => {
   let url; try { url = new URL(origin); } catch { fail('ASSISTANT_PRIVATE_INVALID_INPUT'); }
-  if (url.origin !== origin || url.protocol !== 'https:' || !['device','pairing','pass','runtime','company_encryption'].includes(kind) || !UUID.test(id ?? '')) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
-  // A company UUID alone would share one Keychain account across every managed
-  // device on this OS user. Keep the existing four slot keys byte-identical,
-  // but bind this new purpose to BOTH the enrolled device and company UUID.
-  if (kind === 'company_encryption' ? !UUID.test(deviceId ?? '') : deviceId !== undefined) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
+  if (url.origin !== origin || url.protocol !== 'https:' || !['device','pairing','pass','runtime','company_encryption','local_runtime'].includes(kind) || !UUID.test(id ?? '')) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
+  // Company/chat UUID alone would share a Keychain account across managed
+  // devices on this OS user. Keep old token/task slot keys byte-identical;
+  // company encryption and ordinary-chat keys each bind the enrolled device.
+  const deviceBound=kind==='company_encryption'||kind==='local_runtime';
+  if (deviceBound ? !UUID.test(deviceId ?? '') : deviceId !== undefined) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
   const identity = { origin, kind, id: id.toLowerCase(),
-    ...(kind === 'company_encryption' ? { deviceId: deviceId.toLowerCase() } : {}) };
+    ...(deviceBound ? { deviceId: deviceId.toLowerCase() } : {}) };
   return { ...identity, key: createHash('sha256').update(JSON.stringify(identity)).digest('hex') };
 };
 

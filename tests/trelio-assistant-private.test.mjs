@@ -66,6 +66,19 @@ test('company encryption slots retain separate OS identities for two devices and
   assert.equal(serviceKeys.length,1);
 });
 
+test('ordinary-chat runtime keys share the same OS store but never task or another-device slots',async()=>{
+  const values=new Map();
+  const store=createAssistantPrivateStore({directory:path.resolve(os.tmpdir(),'assistant-local-key-fixture'),platform:'darwin',primitives:{
+    ensurePrivateDirectory:async()=>{},getMacosPrivateKeychainValue:async(service,account)=>values.get(`${service}:${account}`)??null,
+    setMacosPrivateKeychainValue:async(service,account,value)=>{values.set(`${service}:${account}`,value);}}});
+  const key={origin:'https://assistant.test',kind:'local_runtime',id:randomUUID(),deviceId:randomUUID()};
+  await store.put(key,{state:'synthetic observed key'});
+  assert.deepEqual(await store.get(key),{state:'synthetic observed key'});
+  assert.equal(await store.get({...key,deviceId:randomUUID()}),null);
+  assert.equal(await store.get({origin:key.origin,kind:'runtime',id:key.id}),null);
+  await assert.rejects(store.get({...key,deviceId:undefined}),/PRIVATE_INVALID_INPUT/);
+});
+
 test('concurrent encryption preparation and restart reuse one common device and real HPKE/signatures', {timeout:60000}, async t => {
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-crypto-lock-'));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));

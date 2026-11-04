@@ -14,6 +14,36 @@ const fail=code=>{throw Object.assign(new Error(code),{code});};
 const exactObject=(value,keys)=>value && Object.getPrototypeOf(value)===Object.prototype
   && Object.keys(value).length===keys.length && keys.every(key=>Object.hasOwn(value,key));
 const sameObservation=(left,right)=>left && right && ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'].every(key=>left[key]===right[key]);
+
+/** Shared observed-session lifecycle for task, intake and ordinary owner
+ * chats. Callers validate their own binding and hold its SAME private mutex;
+ * this helper owns pending keys, native registration, refresh and original TTL.
+ * It never fabricates a task/pass or falls back to the human runtime journal. */
+export const ensureObservedAssistantSession=async({record,slot,binding,store,observation,register,validateRegistered,now=Date.now})=>{
+  let state=record?.ended?null:record?.state;
+  if(state && (!uuid.test(state.runtimeSessionId??'') || !Number.isFinite(Date.parse(state.expiresAt))
+    ||typeof state.privateKeyPkcs8!=='string'||state.privateKeyPkcs8.length>256||!state.observation))fail('ASSISTANT_HOOK_STATE_INVALID');
+  if(!state||!sameObservation(state.observation,observation)||Date.parse(state.expiresAt)<=now()){
+    const pending=record?.pending;
+    const privateKey=pending&&sameObservation(pending.observation,observation)
+      ?crypto.createPrivateKey({key:Buffer.from(pending.privateKeyPkcs8,'base64url'),format:'der',type:'pkcs8'})
+      :crypto.generateKeyPairSync('ed25519').privateKey;
+    const privateKeyPkcs8=privateKey.export({type:'pkcs8',format:'der'}).toString('base64url');
+    const publicKeySpki=crypto.createPublicKey(privateKey).export({type:'spki',format:'der'}).toString('base64url');
+    // A lost registration reply reuses this exact key; no business operation
+    // is repeated and a refresh may never renew the original session expiry.
+    await store.put(slot,{...binding,...(state?{state}:{}),pending:{observation,privateKeyPkcs8}});
+    const registered=await register({observation,publicKeySpki,
+      ...(state&&Date.parse(state.expiresAt)>now()?{previousRuntimeSessionId:state.runtimeSessionId}:{})});
+    if(!validateRegistered(registered)||!uuid.test(registered.runtimeSessionId??'')
+      ||!sameObservation(registered.observation,observation)||!Number.isFinite(Date.parse(registered.expiresAt))
+      ||Date.parse(registered.expiresAt)<=now()||registered.runtimeRefreshSupported!==true
+      ||state&&Date.parse(state.expiresAt)>now()&&Date.parse(registered.expiresAt)>Date.parse(state.expiresAt))fail('ASSISTANT_HOOK_REGISTRATION_INVALID');
+    state={runtimeSessionId:registered.runtimeSessionId,expiresAt:registered.expiresAt,privateKeyPkcs8,observation:registered.observation};
+    await store.put(slot,{...binding,state});
+  }
+  assertRuntimeHookBudget();return state;
+};
 const passKeys=['schemaVersion','assistantId','deviceId','companyId','taskId','passId','deliveryId','threadId','bindingId','bindingRevision'];
 const intakeKeys=['schemaVersion','kind','assistantId','deviceId','companyId','sourceId','sourceRevision','passId','deliveryId','eventId','threadId'];
 export const validateAssistantActivePass=(value,identity)=>{
@@ -88,30 +118,10 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       const observation=await observe({hookInput:event});assertRuntimeHookBudget();
       if(observation?.schemaVersion!==1 || observation.clientFamily!=='codex' || observation.source!=='codex_hook'
         || observation.evidenceLevel!=='local_observed' || !observation.modelId) fail('ASSISTANT_HOOK_OBSERVATION_REQUIRED');
-      let state=record?.ended?null:record?.state;
-      if(state && (!uuid.test(state.runtimeSessionId??'') || !Number.isFinite(Date.parse(state.expiresAt))
-        || typeof state.privateKeyPkcs8!=='string' || state.privateKeyPkcs8.length>256 || !state.observation)) fail('ASSISTANT_HOOK_STATE_INVALID');
-      if(!state || !sameObservation(state.observation,observation) || Date.parse(state.expiresAt)<=now()) {
-        // Save the one pending key before HTTP. A lost reply reuses that exact
-        // key instead of replacing sessions or replaying a business operation.
-        const pending=record?.pending;
-        const privateKey=pending && sameObservation(pending.observation,observation)
-          ? crypto.createPrivateKey({key:Buffer.from(pending.privateKeyPkcs8,'base64url'),format:'der',type:'pkcs8'})
-          : crypto.generateKeyPairSync('ed25519').privateKey;
-        const privateKeyPkcs8=privateKey.export({type:'pkcs8',format:'der'}).toString('base64url');
-        const publicKeySpki=crypto.createPublicKey(privateKey).export({type:'spki',format:'der'}).toString('base64url');
-        record={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,...(state?{state}:{}),pending:{observation,privateKeyPkcs8}};
-        await store.put(slot,record);
-        const registered=await client[intake?'registerIntakeRuntime':'registerRuntime']({...locator,clientSessionId:pass.threadId,observation,publicKeySpki,
-          ...(state && Date.parse(state.expiresAt)>now()?{previousRuntimeSessionId:state.runtimeSessionId}:{})},runtimeHookSignal());
-        if(registered.passId!==pass.passId || !uuid.test(registered.runtimeSessionId??'')
-          || !sameObservation(registered.observation,observation) || !Number.isFinite(Date.parse(registered.expiresAt))
-          || Date.parse(registered.expiresAt)<=now() || registered.runtimeRefreshSupported!==true
-          || (state && Date.parse(state.expiresAt)>now() && Date.parse(registered.expiresAt)>Date.parse(state.expiresAt))) fail('ASSISTANT_HOOK_REGISTRATION_INVALID');
-        state={runtimeSessionId:registered.runtimeSessionId,expiresAt:registered.expiresAt,
-          privateKeyPkcs8,observation:registered.observation};
-        await store.put(slot,{schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state});
-      }
+      const state=await ensureObservedAssistantSession({record,slot,store,observation,now,
+        binding:{schemaVersion:1,passId:pass.passId,threadId:pass.threadId},
+        register:fields=>client[intake?'registerIntakeRuntime':'registerRuntime']({...locator,clientSessionId:pass.threadId,...fields},runtimeHookSignal()),
+        validateRegistered:registered=>registered.passId===pass.passId});
       // Every call gets a fresh ordinary v1 nonce. Replace any model-authored
       // pass/proof; private signing keys never appear in the updated input.
       assertRuntimeHookBudget();

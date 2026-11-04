@@ -19,6 +19,23 @@ async function fixture(t) {
     scope: accountScope({ ...identity, ...overrides }), io }) };
 }
 
+test('ordinary managed account mutations check the current binding inside the same CAS transaction',async t=>{
+  const {directory,make}=await fixture(t),catalogue=make(),accountId=crypto.randomUUID();
+  await catalogue.change({operation:'create',id:accountId,name:'Own account',expectedRevision:0});
+  const foreignId=crypto.randomUUID(),other=make({companyId:crypto.randomUUID()});
+  await other.change({operation:'create',id:foreignId,name:'Other scope',expectedRevision:1});
+  const managed=createAccountCatalogue({directory,scope:accountScope(identity),io,boundMutationsOnly:true});
+  await assert.rejects(managed.change({operation:'update',id:foreignId,name:'Wrong scope',expectedRevision:2}),error=>error.code==='ACCOUNT_NOT_BOUND');
+  await assert.rejects(managed.change({operation:'bind',id:foreignId,expectedRevision:2}),error=>error.code==='ACCOUNT_NOT_BOUND');
+  await managed.change({operation:'update',id:accountId,name:'Renamed',expectedRevision:2});
+  await managed.change({operation:'default',id:accountId,expectedRevision:3});
+  let cleanups=0;
+  await assert.rejects(managed.remove({id:foreignId,expectedRevision:3,confirmed:true,cleanup:async()=>{cleanups++;}}),error=>error.code==='ACCOUNT_NOT_BOUND');
+  await assert.rejects(managed.remove({id:accountId,expectedRevision:3,confirmed:true,allCompanies:true,cleanup:async()=>{cleanups++;}}),error=>error.code==='ACCOUNT_USED_BY_OTHER_COMPANIES');
+  await managed.remove({id:accountId,expectedRevision:3,confirmed:true,cleanup:async()=>{cleanups++;}});
+  assert.equal(cleanups,1);assert.equal((await other.select(foreignId)).name,'Other scope');
+});
+
 test('native empty-account intent is atomic with creation and survives a lost write response without duplication',async t=>{
   const {directory,make}=await fixture(t),accountId=crypto.randomUUID(),requestId=crypto.randomUUID();
   let writes=0,published=null;

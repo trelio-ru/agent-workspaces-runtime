@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {ASSISTANT_SKILL_TOOLS,ASSISTANT_SKILL_FAILURE_CODES} from '../host-runtime/scripts/trelio-assistant-local-skills.mjs';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -396,7 +397,8 @@ test('request worker and parent share closed refusal codes without borrowing set
   // as a refusal, without paths/details or native endpoint auth provenance.
   const codes=[...new Set(['ASSISTANT_PASS_REVIEW_REQUIRED','TRELIO_RUNTIME_HOOK_REQUIRED',
     'LOCAL_WORKSPACE_OUTDATED','RUN_NOT_ACTIVE','LEASE_EXPIRED','STALE_REVISION',
-    'REMOTE_MCP_AUTH_REJECTED','REMOTE_MCP_INSUFFICIENT_SCOPE',...ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES,
+    'REMOTE_MCP_AUTH_REJECTED','REMOTE_MCP_INSUFFICIENT_SCOPE','AGENT_RUNTIME_POLICY_NOT_SATISFIED',
+    'AGENT_SKILL_RELEASE_CHANGED','AGENT_SKILL_SETUP_PROTECTION_UNSUPPORTED',...ASSISTANT_SKILL_FAILURE_CODES,...ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES,
     ...ASSISTANT_SOURCE_MONITOR_ERROR_CODES,...PROCESS_DIAGNOSTIC_CODES])];
   for(const [code,expected] of [...codes.map(code=>[code,code]),
     ['PRIVATE_FRAME_CANARY','ASSISTANT_SETUP_UNAVAILABLE'],[23,'ASSISTANT_SETUP_UNAVAILABLE'],[null,'ASSISTANT_SETUP_UNAVAILABLE']]){
@@ -537,7 +539,7 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
       return {sourceId,state:'prepared',loginVerified:false};
     }};
   const tools=await executeAssistantRuntimeRequest({operation:'list'},dependencies);
-  assert.deepEqual(tools,[ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL],'the current worker owns setup discovery');
+  assert.deepEqual(tools,[ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL,...ASSISTANT_SKILL_TOOLS],'the current worker owns setup discovery');
   const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
   const blocked=await executeAssistantRuntimeRequest({operation:'health_check'},{...dependencies,
@@ -1853,6 +1855,25 @@ test('local connection is taskless, validates before private I/O and reuses the 
   assert.equal(prepares,2,'an active task cannot create a local setup reservation');
   const before=contexts;
   await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:{...request.arguments,localAccountId:randomUUID()}},dependencies),/ASSISTANT_SETUP_INVALID_INPUT/);
+  assert.equal(contexts,before);
+});
+
+test('ordinary skill calls use current worker, preserve MCP visual blocks and refuse during task/intake',async()=>{
+  const companyId=randomUUID(),request={operation:'call',name:'use_assistant_skill',arguments:{companyId,projectId:null,
+    skillId:'avito',releaseId:randomUUID(),clientRequestId:randomUUID(),operation:'run',parameters:{arguments:['account','list']}}};
+  let contexts=0,locks=0,calls=0,active=null;
+  const result={content:[{type:'text',text:'{"state":"manual_input_required"}'}]};
+  const client={identity:{origin:'https://local-skills.test',assistantId:randomUUID(),deviceId:randomUUID()},
+    readHealth:async()=>({code:'ready',revision:0,compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),reportHealth:async()=>{}};
+  const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.29.0'}),
+    context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,true);return action(client,
+      {readActivePass:async()=>active,withSetupLock:async action=>{locks++;return action();}},{});},
+    proxyFor:async()=>({callTool:()=>assert.fail('not a task/human proxy alias')}),
+    localSkillTool:async(name,args)=>{calls++;assert.equal(name,request.name);assert.deepEqual(args,request.arguments);return result;}};
+  assert.deepEqual(await executeAssistantRuntimeRequest(request,dependencies),result);assert.equal(locks,1);
+  for(const kind of ['task','source_intake']){active={kind};assert.equal((await executeAssistantRuntimeRequest(request,dependencies)).structuredContent.code,'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');}
+  assert.equal(calls,1);const before=contexts;
+  await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:{...request.arguments,taskId:randomUUID()}},dependencies),/INVALID_INPUT/);
   assert.equal(contexts,before);
 });
 

@@ -20,6 +20,7 @@ import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindow
 import { startLoadedCodexPluginPreservation, TrelioApiError } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
+import { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLocalSkillArguments, executeAssistantLocalSkillTool, createAssistantLocalSkillHook } from './trelio-assistant-local-skills.mjs';
 
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
 const enrollment = { type: 'string', pattern: UUID };
@@ -52,9 +53,9 @@ export const ASSISTANT_ENCRYPTION_SETUP_TOOL=Object.freeze({name:'prepare_assist
   description:'Prepare this managed device for one exact encrypted company through the SAME native registration and local key-opening workflow. The company owner separately grants access. Only an opened recipient key and successful TRELIOE1 round-trip return key_verified; no task/source execution or business-readiness claim. Private material stays in the existing OS store or process memory. After an uncertain result read back the same identity; never reset or replace it.',
   inputSchema:schema({companyId:enrollment,companySlug:{type:'string',minLength:1,maxLength:120}}),annotations:{idempotentHint:true}});
 const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name];
-const hostSetupToolNames=()=>[ASSISTANT_LOCAL_CONNECTION_TOOL.name,...sourceToolNames(),ASSISTANT_ENCRYPTION_SETUP_TOOL.name];
+const hostSetupToolNames=()=>[ASSISTANT_LOCAL_CONNECTION_TOOL.name,...sourceToolNames(),ASSISTANT_ENCRYPTION_SETUP_TOOL.name,...ASSISTANT_SKILL_TOOLS.map(tool=>tool.name)];
 const interactiveSourceTool=name=>[ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name].includes(name);
-const interactiveAssistantTool=name=>interactiveSourceTool(name)||name==='connect_remote_agent_skill';
+const interactiveAssistantTool=name=>interactiveSourceTool(name)||name==='connect_remote_agent_skill'||name==='use_assistant_skill';
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
     || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
@@ -78,7 +79,7 @@ const assistantSourceSettings = (identity,companyId,sourceId,skillId) => {
 export const assistantWorkerToolCatalogue=tools=>{
   if(!Array.isArray(tools)||tools.some(tool=>hostSetupToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
-  return [...tools,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL];
+  return [...tools,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL,...ASSISTANT_SKILL_TOOLS];
 };
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
@@ -101,6 +102,8 @@ const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
 // refusal after the native pipe, not malformed JSON or a new recovery grant.
 // Auth provenance is validated separately; a bare auth code never supplies it.
 const assistantFailureCode = code => typeof code==='string' && (assistantHealthFailure({code})
+  || ASSISTANT_SKILL_FAILURE_CODES.includes(code)
+  || ['AGENT_RUNTIME_POLICY_NOT_SATISFIED','AGENT_SKILL_RELEASE_CHANGED','AGENT_SKILL_SETUP_PROTECTION_UNSUPPORTED'].includes(code)
   || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(code) || PROCESS_DIAGNOSTIC_CODES.includes(code)
   || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(code)
   // Numeric tails are limited to the SAME reviewed HTTP buckets, never an
@@ -311,8 +314,12 @@ const productionSourceReads=async({common,identity,client,host,signal})=>{
 /** The host identity is selected by completed protected pairing, never tool
  * arguments or an inherited human thread. Every invocation gets its own native
  * ACL/DPAPI lifetime and the common non-sliding hook clock. */
-export const createProductionAssistantHook = async ({context=productionContext}={}) => context(async(client,hostState,store)=>{
+export const createProductionAssistantLocalSkillHook = async ({context=productionContext}={}) => context(async(client,host,store)=>
+  createAssistantLocalSkillHook({identity:client.identity,client,host,store,common:await import('./trelio-workspace.mjs')}));
+
+export const createProductionAssistantHook = async ({context=productionContext,allowLocal=false}={}) => context(async(client,hostState,store)=>{
   const common=await import('./trelio-workspace.mjs');
+  if(allowLocal&&!await hostState.readActivePass())return createAssistantLocalSkillHook({identity:client.identity,client,host:hostState,store,common});
   const {createAssistantTaskHook}=await import('./trelio-assistant-hook.mjs');
   const identity=client.identity;
   const directory=path.join(hostState.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
@@ -803,7 +810,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
       initialized = true;
       const response=respond({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true } },
         serverInfo: { name: 'trelio-assistant', version: '1.0.0' },
-        instructions: 'This computer uses assistant device pairing, not human OAuth. Setup/contact alone does not authorize task work.' });
+        instructions: 'This computer uses assistant device pairing, not human OAuth. Read enabled company skills with list_assistant_skills, then use_assistant_skill in this ordinary chat; no task or Run is required. Use the SAME skill instructions and commands as human users. Telegram/email/MAX source tools are background-source setup, not the skill catalogue. External actions still need their user authority.' });
       // SAME immutable-shell preservation as the human MCP, after writing
       // initialize and outside the request queue. A marketplace update must not
       // delete the exact already trusted hook/loader paths of this live client.
@@ -969,7 +976,19 @@ export const runAssistantEntry = async (args, options = {}) => {
   const name = tool.split(/__|[:./-]/u).at(-1);
   const assistantTool = /^(?:mcp__)?trelio[-_]assistant__|^mcp__plugin_trelio-digital-assistant_trelio-assistant__|^(?:mcp[:./-])?trelio-assistant[:./-]/u.test(tool);
   let decision = {};
-  if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name)
+  if (event.hook_event_name === 'PreToolUse' && assistantTool && name==='use_assistant_skill') {
+    const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
+    const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
+    try {
+      decision=await withRuntimeHookPrivateSession(runtimeHookRemainingMilliseconds('PreToolUse',
+        {startedAt:resolveRuntimeHookStartedAt()}),async()=>{
+        const hook=await(options.createLocalSkillHook??createProductionAssistantLocalSkillHook)();return hook(event);
+      });
+    }catch(error){
+      const code=/^(?:ASSISTANT_|TRELIO_|AGENT_RUNTIME_)[A-Z_]{1,100}$/u.test(error?.code??'')?error.code:'ASSISTANT_HOOK_UNAVAILABLE';
+      decision={hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'deny',permissionDecisionReason:code}};
+    }
+  } else if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name)
     && !hostSetupToolNames().includes(name) && name !== 'get_assistant_status') {
     const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
     const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
@@ -993,7 +1012,7 @@ export const runAssistantEntry = async (args, options = {}) => {
     const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
     try { await withRuntimeHookPrivateSession(runtimeHookRemainingMilliseconds('SessionEnd',
       { startedAt: resolveRuntimeHookStartedAt() }), async () => {
-      const hook = await (options.createHook ?? createProductionAssistantHook)(); await hook(event);
+      const hook = await (options.createHook ?? (()=>createProductionAssistantHook({allowLocal:true})))(); await hook(event);
     }); } catch { /* No grant or retry is issued by a failed end notification. */ }
   }
 
@@ -1835,6 +1854,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   createRuntimeHost=createAssistantRuntimeHost,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
   prepareLocalConnection=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantLocalConnection(input),
+  localSkillTool=executeAssistantLocalSkillTool,
   prepareEncryption=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantCompanyEncryption(input),
   configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
   configureTelegramSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantTelegramSource(input),
@@ -1901,13 +1921,15 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   // Validate the exact tool before any credential read, as in ordinary MCP.
   const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
   const localConnection=request.operation==='call'&&request.name===ASSISTANT_LOCAL_CONNECTION_TOOL.name;
+  const localSkill=request.operation==='call'&&ASSISTANT_SKILL_TOOLS.some(tool=>tool.name===request.name);
+  const localSkillArguments=localSkill?assistantLocalSkillArguments(request.name,request.arguments):null;
   if(localConnection&&(!request.arguments||Object.getPrototypeOf(request.arguments)!==Object.prototype
     ||Object.keys(request.arguments).sort().join(',')!=='clientRequestId,companyId,skillId'
     ||request.arguments.companyId!==null&&!new RegExp(UUID,'u').test(request.arguments.companyId??'')
     ||!new RegExp(UUID,'u').test(request.arguments.clientRequestId??'')
     ||!['telegram-mtproto','email-imap-smtp','max-web'].includes(request.arguments.skillId)))fail('ASSISTANT_SETUP_INVALID_INPUT');
   const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
-  const interactiveSourceSetup=sourceSetup&&interactiveSourceTool(request.name);
+  const interactiveSourceSetup=sourceSetup&&interactiveSourceTool(request.name)||localSkill&&request.name==='use_assistant_skill';
   const sourceVerification=sourceSetup&&[ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name].includes(request.name);
   const encryptionSetup=request.operation==='call'&&request.name===ASSISTANT_ENCRYPTION_SETUP_TOOL.name;
   const encryptionArguments=encryptionSetup?request.arguments:null;
@@ -1917,8 +1939,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
     ||!encryptionArguments.companySlug.length||encryptionArguments.companySlug.length>120
     ||/[\x00-\x20\x7f]/u.test(encryptionArguments.companySlug)))fail('ASSISTANT_SETUP_INVALID_INPUT');
   const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
-  if((interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
-  if(request.operation==='call' && !sourceSetup && !localConnection && !encryptionSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(sourceSetup&&(interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
+  if(request.operation==='call' && !sourceSetup && !localConnection && !localSkill && !encryptionSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
     const current=await client.readHealth();
     const blocked=assistantHealthCompatibility(current,versions());
@@ -1931,7 +1953,22 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
     if(!proxy)return request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED');
     try {
       let result;
-      if(localConnection){
+      if(localSkill){
+        try{
+          if(await host.readActivePass())fail('ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');
+          const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+          const perform=()=>localSkillTool(request.name,localSkillArguments,{identity:client.identity,client,host,store,signal:runtimeHookSignal()});
+          const value=request.name==='use_assistant_skill'?await host.withSetupLock(perform):await perform();
+          result=request.name==='use_assistant_skill'&&Array.isArray(value?.content)?value:
+            {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+        }catch(error){
+          const code=safeError(error),reason=error instanceof TrelioApiError&&code==='TRELIO_RUNTIME_HOOK_REQUIRED'
+            &&['missing','invalid','expired','replayed'].includes(error.payload?.reason)?error.payload.reason:null;
+          // Preserve only genuine native admission provenance, not provider
+          // prose/a lookalike auth flag. Expiry is never called disabled Hooks.
+          const value={code,...(reason?{reason}:{})};result={isError:true,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+        }
+      }else if(localConnection){
         // A normal task/inbound conversation cannot self-provision new accounts.
         // This settings action is taskless; the human supplies factors only in
         // the SAME protected local form, and native rows remain non-polling.

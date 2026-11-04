@@ -9082,6 +9082,16 @@ export const runMaterializedAgentSkill = async ({
   const taskCapture = captureMode === 'assistant_task';
   const sourceSetupCapture = captureMode === 'assistant_source_setup';
   const taskSetupCapture = captureMode === 'assistant_skill_setup';
+  // An explicit owner chat uses ordinary published skill commands, rather
+  // than the narrower background-task command policy. The private local
+  // profile must independently fence device/owner/scope and ONE invocation;
+  // a model-selected captureMode or an active task profile cannot grant it.
+  const interactiveCapture = captureMode === 'assistant_interactive';
+  // The SAME signed Secret setup may run in an explicit owner chat. Its value
+  // still comes only from the native ACL/audit endpoint and the existing
+  // process-only environment filter; successful stdout is never observable.
+  const interactiveSecretSetup = interactiveCapture && prepareSetupEnvironment !== null
+    ? readSkillSecretSetupCommand(artifact.parsedPackage, runtimeArguments) : null;
   const sourceAckCapture = captureMode === 'assistant_source_ack';
   const sourceIntakeCapture = captureMode === 'assistant_source_intake';
   const sourceReplyCapture = captureMode === 'assistant_source_reply';
@@ -9092,15 +9102,20 @@ export const runMaterializedAgentSkill = async ({
     || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
     || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
     throw Object.assign(new Error('Private setup requires its exact task profile.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-  if (accountRemovalCapture && (!captureOutput || profile || !executionContext.account
+  const interactiveRemoval=accountRemovalCapture&&profile?.kind==='digital_assistant'&&profile.interactiveLocal===true
+    &&typeof profile.authorizeAccountRemovalCommand==='function'&&typeof profile.assertInteractiveSkillCurrent==='function';
+  if (accountRemovalCapture && (!captureOutput || profile&&!interactiveRemoval || !executionContext.account
     || JSON.stringify(runtimeArguments) !== '["__trelio_account_remove"]' || !supportsSkillAccountRemoval(artifact)))
     throw Object.assign(new Error('ACCOUNT_REMOVAL_UNSUPPORTED'), { code: 'ACCOUNT_REMOVAL_UNSUPPORTED' });
-  if (!['monitor','assistant_task','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake','assistant_source_reply','account_removal'].includes(captureMode)
+  if (!['monitor','assistant_task','assistant_interactive','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake','assistant_source_reply','account_removal'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
     || taskSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.authorizeHumanInputSkillSetup !== 'function'
       || typeof profile.assertHumanInputSkillSetupCurrent !== 'function')
+    || interactiveCapture && (!captureOutput || profile?.kind !== 'digital_assistant' || profile.interactiveLocal !== true
+      || typeof profile.authorizeInteractiveSkillCommand !== 'function'
+      || typeof profile.assertInteractiveSkillCurrent !== 'function')
     || sourceSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
       || typeof profile.authorizeInteractiveSourceSetup !== 'function'
       || typeof profile.assertInteractiveSourceSetupCurrent !== 'function')
@@ -9114,10 +9129,10 @@ export const runMaterializedAgentSkill = async ({
       || typeof profile.readSourceReplyInput !== 'function' || runtimeArguments?.[0]!=='reply-reference')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !accountRemovalCapture && !taskCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && !sourceReplyCapture && runtimeArguments[0] !== 'monitor'
-    || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
-    || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup
-    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture || taskSetupCapture ? 10 * 60_000 : 180_000)
+    || captureOutput && (!Array.isArray(runtimeArguments) || !accountRemovalCapture && !taskCapture && !interactiveCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && !sourceReplyCapture && runtimeArguments[0] !== 'monitor'
+    || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture || interactiveCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
+    || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup && !interactiveSecretSetup
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture || taskSetupCapture || interactiveCapture ? 10 * 60_000 : 180_000)
     || signal !== null && !(signal instanceof AbortSignal))) {
     throw Object.assign(new Error('Invalid private monitor invocation.'), { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
   }
@@ -9137,6 +9152,13 @@ export const runMaterializedAgentSkill = async ({
       throw Object.assign(new Error('Invalid protected setup budget.'), {code:'ASSISTANT_SKILL_SETUP_REQUIRED'});
     timeoutMs = Math.min(timeoutMs, remaining);
   }
+  if (interactiveCapture) {
+    const remaining = await profile.authorizeInteractiveSkillCommand({artifact, executionContext, runtimeArguments});
+    if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 600000)
+      throw Object.assign(new Error('Interactive skill invocation expired.'), {code:'ASSISTANT_SKILL_SCOPE_DENIED'});
+    timeoutMs = Math.min(timeoutMs, remaining);
+  }
+  if (interactiveRemoval) await profile.authorizeAccountRemovalCommand({artifact,executionContext,runtimeArguments});
   if (sourceSetupCapture) {
     const remaining = await profile.authorizeInteractiveSourceSetup({artifact, executionContext, runtimeArguments});
     if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 10 * 60_000)
@@ -9212,6 +9234,7 @@ export const runMaterializedAgentSkill = async ({
   });
   if (sourceSetupCapture) await profile.assertInteractiveSourceSetupCurrent();
   if (taskSetupCapture) await profile.assertHumanInputSkillSetupCurrent();
+  if (interactiveCapture || interactiveRemoval) await profile.assertInteractiveSkillCurrent();
   const browserSessionDeadlineAt = Number(
     runtimeEnvironment.TRELIO_BROWSER_SESSION_DEADLINE_AT || 0,
   );
@@ -9253,7 +9276,7 @@ export const runMaterializedAgentSkill = async ({
     try {
       const pending = execFileAsync(executable, args, {
         cwd: runtimeDirectory, env: runtimeEnvironment, shell: false, windowsHide: true,
-        encoding: 'buffer', maxBuffer: (taskCapture ? 3 : 1) * 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
+        encoding: 'buffer', maxBuffer: (taskCapture || interactiveCapture ? 3 : 1) * 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
         killSignal: 'SIGKILL', ...(signal ? { signal } : {}),
       });
       // Only the exact native-admitted owner reply has bounded private input.
@@ -9292,7 +9315,7 @@ export const runMaterializedAgentSkill = async ({
       // or turn invalid UTF-8 into a success.
       const failedPrivatePipe=result.exitCode!==0 && (sourceAckCapture || sourceSetupCapture
         || captureMode==='monitor' && profile?.kind==='digital_assistant_source' && result.stderr.length>0);
-      const stdout = privateSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
+      const stdout = privateSetup || interactiveSecretSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
         : new TextDecoder('utf-8', { fatal: true }).decode(failedPrivatePipe ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
     } catch (error) {
@@ -9495,7 +9518,7 @@ export const hydrateEncryptedAgentSkillRuntimeResolution = async ({
   };
 };
 
-const prepareEncryptedAgentSkillDeviceConsent = async ({
+export const prepareEncryptedAgentSkillDeviceConsent = async ({
   origin,
   token,
   companyId,
@@ -9504,8 +9527,9 @@ const prepareEncryptedAgentSkillDeviceConsent = async ({
   releaseId,
   rawResolution,
   collectConsentFn,
+  hydrateRuntime = null,
 }) => {
-  const hydrated = await hydrateEncryptedAgentSkillRuntimeResolution({
+  const hydrated = hydrateRuntime ? await hydrateRuntime(rawResolution) : await hydrateEncryptedAgentSkillRuntimeResolution({
     rawResolution,
     origin,
     token,
@@ -10016,6 +10040,10 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
         throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"),{code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
       const bindingOriginScope=accountScope({origin,skillId:artifact.skillId,...accountCreation.bindingOrigin}).company;
       accountCreation={bindingRequestId:accountCreation.bindingRequestId,bindingOriginScope};
+    }else if(profile.interactiveLocal===true&&command.operation!=='create'){
+      if(!accountCreation||Object.keys(accountCreation).join(',')!=='mutationRequestId'||!uuid.test(accountCreation.mutationRequestId))
+        throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"),{code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+      accountCreation=null;
     }else if(!accountCreation||Object.keys(accountCreation).join(',')!=='creationRequestId'||!uuid.test(accountCreation.creationRequestId))
       throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"),{code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
   }
@@ -10032,7 +10060,8 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     if (typeof profile.resolveSkillCatalogueDirectory !== "function") denyWorkspaceExecutionProfile();
     catalogueDirectory = await profile.resolveSkillCatalogueDirectory(catalogueDirectory);
   }
-  const catalogue = createAccountCatalogue({ directory: catalogueDirectory, scope, io: {
+  const catalogue = createAccountCatalogue({ directory: catalogueDirectory, scope,
+    boundMutationsOnly: assistant && profile.interactiveLocal===true, io: {
     ensureDirectory: ensurePrivateDirectory, read: readPrivateJsonFile, write: writePrivateJsonFile,
     checkDirectory: directory => assertPrivatePathKind(directory, "directory"),
   } });
@@ -10059,7 +10088,8 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
           throw Object.assign(new Error('ACCOUNT_REMOVAL_UNVERIFIED'), { code: 'ACCOUNT_REMOVAL_UNVERIFIED' });
       } })
       : await catalogue.change({ ...command, ...(accountCreation??{}), id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });
-    output({ ok: true, ...result, ...await catalogue.list() }); return { handled: true };
+    const listed=await catalogue.list();
+    output({ ok: true, ...result, ...listed, ...(assistant?{accounts:listed.accounts.filter(account=>account.bound)}:{}) }); return { handled: true };
   }
   const account = await catalogue.select(parsed.accountId);
   return { handled: false, account, runtimeArguments: parsed.providerArguments };

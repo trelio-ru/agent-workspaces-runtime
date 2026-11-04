@@ -854,7 +854,11 @@ export const resolveRemoteMcpDeclaration = async (
         signal: operationSignal,
       });
       admissionToken = token;
-      admissionKey = skillAdmissionKey({ origin, token,
+      // Managed invocations have an opaque, non-exportable credential handle.
+      // They always resolve live and never derive/read the human 12h cache key.
+      // forceRefresh alone is insufficient: HMAC-ing that handle fails before
+      // declaration resolution and would mix independent admission profiles.
+      admissionKey = executionProfile?.kind === "digital_assistant" ? null : skillAdmissionKey({ origin, token,
         sessionId: remoteAdmissionSessionId, kind: "remote_mcp",
         ...input, hostVersion: HOST_RUNTIME_VERSION });
       // A write approval can remain open for minutes. Its final authorization
@@ -6130,7 +6134,11 @@ export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal 
         toolName,
         toolArguments,
         { signal,
-          ...(currentWorkspaceExecutionProfile()?.kind === "digital_assistant" ? {
+          // Explicit owner chat retains the ordinary exact-argument browser
+          // confirmation. Background task profiles still require their separate
+          // sealed native owner decision; presentation alone grants neither.
+          ...(currentWorkspaceExecutionProfile()?.kind === "digital_assistant"
+            && currentWorkspaceExecutionProfile()?.interactiveLocal !== true ? {
             confirmWrite: async () => { if (typeof currentWorkspaceExecutionProfile()?.authorizeRemoteMcpWrite !== "function")
               throw new RemoteMcpHostError("REMOTE_MCP_OWNER_DECISION_REQUIRED", "Exact owner decision required."); },
             beforeWrite: (fresh, selectedName, selectedArguments, options) => currentWorkspaceExecutionProfile().authorizeRemoteMcpWrite(

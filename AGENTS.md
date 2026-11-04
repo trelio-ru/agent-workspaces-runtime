@@ -86,6 +86,11 @@ publication tooling также остаются вне этого публичн
   startInvocation обязательны, queue/exit code не являются завершением.
 
 - Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login. Local setup/status resolve native company UUID/slug references; a sole company is selected in code, without browser/UUID questions. See the local-first scheduler contract.
+  Ordinary owner chat uses the complete scoped catalogue and SAME published
+  commands/account/forms via the taskless local profile; no assistant-specific
+  provider setup declaration. Active task/intake refuses that profile before
+  private I/O. Native device/owner/assignment/config/recipient and one-attempt
+  fences remain independent. See [ordinary skills](docs/assistant-scheduler.md#ordinary-owner-chat-skills).
   Public signed human-input setup also selects the bounded setup view without
   pending device consent only on an explicit connection-section read; ordinary
   instructions/execution reads retain task/Run tools. Native pending consent
