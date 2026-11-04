@@ -547,8 +547,10 @@ publication tooling также остаются вне этого публичн
   с quota/unsafe-path guards, без исполнения, извлечения архива или auth reset.
   Обычные non-HTML navigate остаются запрещены; native fixtures проверяют
   anchor/button, bytes, сохранение чата и отсутствие focus на всех OS.
-  HTML viewer возвращает обычную observation, никогда file receipt. Его
-  read-only download menu принадлежит provider; generic ARIA menuitem получает
+  HTML viewer возвращает обычную observation, никогда file receipt. Внешний
+  сайт не расширяет исходный provider: дальнейшая UI-работа принадлежит общему
+  браузеру либо отдельному навыку сервиса, без чужих recipes в provider/host.
+  Generic ARIA menuitem получает
   прежний button DTO, без расширения mutation authority. Empty 204 не кешируется.
 - Голосовые плееры требуют отдельный signed `audioDownloads` и API marker:
   [контракт](docs/visual-browser.md#голосовые-сообщения). Только fresh координаты,
@@ -580,6 +582,12 @@ publication tooling также остаются вне этого публичн
   Явные contenteditable=false документы читаются вне form/label; editable-
   предки, false-вставки в редакторе и ARIA textboxes остаются закрытыми.
   Полнота bounded rendered text проверяется пагинацией, не скриншотами.
+  Signed external-navigation opt-in дополнительно выдаёт только видимые anchor
+  URL для общего browser handoff: SAME self-contained validator в reader/MCP,
+  без field/draft/credential/callback values, сетевого разрешения ссылки или
+  site-specific logic. Optional URLs сохраняют прежний legacy DTO; 2048 chars
+  на адрес и 8192 JSON bytes суммарно, whole-target omission с явным
+  linkTargetsLimited. Ссылка не передаёт session/credentials или mutation authority.
   Один completion-based pacing controller живёт в browser worker: те же 2–15с
   от готового результата, что в поисковых навыках, с зачётом размышлений.
   Учёт пяти вкладок включает blank/login popups, не сбрасывается tool calls

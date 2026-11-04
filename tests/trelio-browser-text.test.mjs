@@ -4,8 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
-import { TEXT_KIND, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
+import { TEXT_KIND, installTextObserver, readableLinkUrl, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
 const sample = () => ({ kind: TEXT_KIND, state: 'ready', reason: 'none', sessionId: '12345678-1234-4234-8234-123456789012', frameId: '12345678-1234-4234-8234-123456789013', width: 1440, height: 1000, scroll: { up: false, down: true, left: false, right: false }, title: 'Fixture', text: 'Объявление', controls: [{ role: 'button', label: 'Найти', x: 200, y: 100 }], nextOffset: null, scanLimited: false });
 
 // Synthetic published-document markup, not a copy of any provider page. The
@@ -34,16 +35,59 @@ test('text projection rejects extra data, excessive content and invalid coordina
   assert.equal(validateTextResult(sample()).kind, TEXT_KIND);
   for (const change of [{ html: '<div>' }, { text: 'a'.repeat(6001) }, { controls: [{ ...sample().controls[0], x: 1440 }] }, { controls: [{ ...sample().controls[0], value: 'SECRET' }] }, { scanLimited: 'false' }, { nextOffset: -1 }, { sessionId: 'invalid' }]) assert.throws(() => validateTextResult({ ...sample(), ...change }), /VISUAL_RESULT_INVALID/);
 });
+test('visible link handoff is generic, canonical and excludes credential/callback references', () => {
+  for (const url of ['https://documents.example/contract.docx?download=1', 'https://social.example/post/123#section',
+    'http://127.0.0.1:1234/document']) assert.equal(readableLinkUrl(url), url);
+  for (const url of [null, '', 'javascript:alert(1)', 'data:text/plain,content', 'file:///private/source',
+    'https://user:password@example.test/doc', 'https://example.test/doc?code=SECRET',
+    'https://example.test/doc?access_token=SECRET', 'https://example.test/doc?%63ode=SECRET',
+    'https://example.test/doc#id_token=SECRET', 'https://example.test/doc#/callback?state=SECRET',
+    'https://example.test/doc?returnUrl=https%3A%2F%2Fexample.test%2Fcallback%3Fcode%3DSECRET',
+    'https://example.test/doc?SAMLResponse=SECRET', 'https://example.test/' + 'x'.repeat(2048)]) {
+    assert.equal(readableLinkUrl(url), null);
+  }
+  const link = { role: 'link', label: 'Original', x: 10, y: 20, url: 'https://documents.example/contract.docx' };
+  assert.equal(validateTextResult({ ...sample(), controls: [link] }).controls[0].url, link.url);
+  for (const change of [{ role: 'button' }, { url: null }, { url: 'https://example.test/doc?code=SECRET' },
+    { url: 'https://documents.example:443/contract.docx' }, { href: 'https://other.example/' }]) {
+    assert.throws(() => validateTextResult({ ...sample(), controls: [{ ...link, ...change }] }), /VISUAL_RESULT_INVALID/);
+  }
+  assert.equal(validateTextResult({ ...sample(), linkTargetsLimited: true }).linkTargetsLimited, true);
+  assert.throws(() => validateTextResult({ ...sample(), linkTargetsLimited: false }), /VISUAL_RESULT_INVALID/);
+  assert.throws(() => validateTextResult({ ...sample(), controls: Array.from({ length: 10 }, (_, i) => ({ ...link,
+    url: 'https://documents.example/' + i + 'x'.repeat(1000) })) }), /VISUAL_RESULT_INVALID/);
+});
+test('the actual fixed observer does not read href without signed external-navigation opt-in', () => {
+  let handler, result, hrefReads = 0;
+  const anchor = { tagName: 'A', parentElement: null,
+    get href() { hrefReads++; return 'https://documents.example/original.docx'; },
+    getAttribute(name) { return name === 'aria-label' ? 'Original' : null; },
+    closest() { return null; }, getClientRects() { return [{}]; },
+    getBoundingClientRect() { return { left: 10, top: 10, right: 110, bottom: 30, width: 100, height: 20 }; },
+    contains(value) { return value === this; } };
+  const context = vm.createContext({ URL, URLSearchParams, TextEncoder, innerWidth: 1440, innerHeight: 900,
+    NodeFilter: { SHOW_TEXT: 4 }, getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    chrome: { runtime: { id: 'synthetic-extension', onMessage: { addListener(value) { handler = value; } } } },
+    document: { title: 'Synthetic source', body: {}, createTreeWalker: () => ({ nextNode: () => null }),
+      querySelectorAll: selector => selector.includes('input[type="password"]') ? [] : [anchor], elementFromPoint: () => anchor } });
+  for (const includeTargets of [false, true]) {
+    vm.runInContext(`(${installTextObserver.toString()})(${readableLinkUrl.toString()},${includeTargets});`, context);
+    handler({ kind: 'read_rendered_text' }, { id: 'synthetic-extension' }, value => { result = value; });
+    assert.equal(result.controls[0].url, includeTargets ? anchor.href : undefined);
+    if (!includeTargets) assert.equal(hrefReads, 0, 'legacy observation must not even inspect the link destination');
+  }
+});
 test('text crosses the actual typed MCP action handler without generic stdout truncation', async () => {
   const { handleToolCall } = await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
   const { handleTrelioWorkspaceActionOperation } = await import('../host-runtime/scripts/trelio-local-context.mjs');
-  const value = { ...sample(), text: 'Описание услуги '.repeat(350) };
+  const value = { ...sample(), text: 'Описание услуги '.repeat(350), controls: [
+    { role: 'link', label: 'Original', x: 20, y: 30, url: 'https://documents.example/original.docx?download=1' }] };
   const result = await handleToolCall('https://example.test', 'continue_trelio_workspace_action', { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: value.sessionId, skillId: 'synthetic-visual-fixture', releaseId: value.frameId, arguments: ['read-text'] } }, {
     workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, { runBridge: async () => ({ stdout: JSON.stringify(value), stderr: '' }) }),
   });
   assert.equal(result.content.length, 1);
   assert.equal(JSON.parse(result.content[0].text).text, value.text);
-  assert.equal(JSON.parse(result.content[0].text).controls[0].label, 'Найти');
+  assert.deepEqual(JSON.parse(result.content[0].text).controls, value.controls);
   assert.doesNotMatch(result.content[0].text, /stdout|stderr|html/);
 });
 
@@ -65,8 +109,9 @@ test('both closed variants cross MCP; default image mode rejects text commands b
 test('native fixed text reader: read-only documents, paging, secrets, stale frame and manual gate', { skip: process.env.TRELIO_TEXT_NATIVE_TEST !== '1', timeout: 120_000 }, async () => {
   const directory = new URL('../host-runtime/scripts/', import.meta.url);
   const fixture = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-text-fixture-')));
-  let received, window;
+  let received, window, externalRequests = 0;
   const externalServer = http.createServer((req, res) => {
+    externalRequests++;
     if (req.url === '/redirect') { res.writeHead(302, { Location: '/contract' }); res.end(); return; }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end('<!doctype html><title>External contract</title><h1>EXTERNAL_CONTRACT_TEXT</h1><p>Linked document body</p>');
@@ -77,7 +122,12 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/submitted') received = url.searchParams.get('q');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(`<!doctype html><title>Синтетическое объявление</title><body style="font:20px sans-serif"><h1>Объявление для проверки</h1><form action="/submitted"><input name="q" placeholder="Поиск" value="INPUT_SECRET"><button>Найти</button></form><a target="_blank" href="/detail">Подробности</a><a target="_blank" href="${externalOrigin}/redirect">Внешний договор</a><div hidden>HIDDEN_SECRET</div><script>const secret='SCRIPT_SECRET';</script><label>Комментарий<textarea>TEXTAREA_SECRET</textarea></label><div contenteditable="plaintext-only" role="textbox" aria-label="Текст сообщения">DRAFT_SECRET</div><input type="password" hidden value="HIDDEN_PASSWORD_SECRET">${url.pathname === '/password' ? '<input type="password" value="PASSWORD_SECRET">' : ''}${url.pathname === '/otp' ? '<input autocomplete="ONE-TIME-CODE" value="OTP_SECRET">' : ''}${url.pathname === '/readonly' ? readonlyDocumentFixture() : ''}<p>Редкая фраза: проверка фильтра</p>${url.pathname === '/long' ? '<div>' + 'Длинное описание '.repeat(800) + '</div>' : ''}${Array.from({ length: 200 }, (_, i) => `<p>Строка ${i} – ${'Описание услуги '.repeat(5)}</p>`).join('')}</body>`);
+    if (url.pathname === '/links') {
+      res.end('<!doctype html><title>Link budget</title>' + Array.from({ length: 25 }, (_, i) =>
+        `<a href="${externalOrigin}/long/${i}/${'x'.repeat(600)}">Long link ${i}</a> `).join(''));
+      return;
+    }
+    res.end(`<!doctype html><title>Синтетическое объявление</title><body style="font:20px sans-serif"><h1>Объявление для проверки</h1><form action="/submitted"><input name="q" placeholder="Поиск" value="INPUT_SECRET"><button>Найти</button></form><a target="_blank" href="/detail">Подробности</a><a target="_blank" href="${externalOrigin}/redirect">Внешний договор</a><a href="${externalOrigin}/callback?code=URL_TOKEN_SECRET">Callback</a><a href="${externalOrigin}/#/callback?access_token=FRAGMENT_TOKEN_SECRET">Fragment callback</a><a hidden href="${externalOrigin}/HIDDEN_URL_SECRET">Hidden URL</a><div hidden>HIDDEN_SECRET</div><script>const secret='SCRIPT_SECRET';</script><label>Комментарий<textarea>TEXTAREA_SECRET</textarea></label><div contenteditable="plaintext-only" role="textbox" aria-label="Текст сообщения">DRAFT_SECRET</div><input type="password" hidden value="HIDDEN_PASSWORD_SECRET">${url.pathname === '/password' ? '<input type="password" value="PASSWORD_SECRET">' : ''}${url.pathname === '/otp' ? '<input autocomplete="ONE-TIME-CODE" value="OTP_SECRET">' : ''}${url.pathname === '/readonly' ? readonlyDocumentFixture() : ''}<p>Редкая фраза: проверка фильтра</p>${url.pathname === '/long' ? '<div>' + 'Длинное описание '.repeat(800) + '</div>' : ''}${Array.from({ length: 200 }, (_, i) => `<p>Строка ${i} – ${'Описание услуги '.repeat(5)}</p>`).join('')}</body>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -102,9 +152,11 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
     assert.equal(tabs.open, 5); assert.equal(tabs.actualOpen, 5, 'real Chromium popup overflow has been removed');
     if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
     let frame = ready(await browser.call('read-text'));
+    assert.equal(frame.controls.find(c => c.label === 'Внешний договор')?.url, `${externalOrigin}/redirect`);
+    assert.equal(externalRequests, 0, 'reading a source URL must not fetch or resolve its destination');
     const firstPageText = frame.text;
     assert.equal(frame.text.length, 6000); assert.ok(frame.nextOffset);
-    assert.doesNotMatch(JSON.stringify(frame), /INPUT_SECRET|HIDDEN_SECRET|SCRIPT_SECRET|TEXTAREA_SECRET|DRAFT_SECRET/);
+    assert.doesNotMatch(JSON.stringify(frame), /INPUT_SECRET|HIDDEN_SECRET|SCRIPT_SECRET|TEXTAREA_SECRET|DRAFT_SECRET|URL_TOKEN_SECRET|FRAGMENT_TOKEN_SECRET|HIDDEN_URL_SECRET/);
     const stale = frame.frameId;
     frame = ready(await browser.call('click', control(frame, 'Поиск')));
     frame = ready(await browser.call('key', { frameId: frame.frameId, key: process.platform === 'darwin' ? 'Meta+A' : 'Control+A' }));
@@ -131,6 +183,12 @@ test('native fixed text reader: read-only documents, paging, secrets, stale fram
     frame = ready(await browser.call('read-text', { offset: 6000, includeControls: false }));
     assert.match(frame.text, /Длинное описание/);
     assert.equal(frame.scanLimited, false, 'a long single text node remains pageable instead of losing its suffix');
+    frame = ready(await browser.call('navigate', { url: `${origin}/links` }));
+    frame = ready(await browser.call('read-text'));
+    assert.equal(frame.linkTargetsLimited, true);
+    assert.ok(frame.controls.some(c => c.url) && frame.controls.some(c => !c.url));
+    for (const c of frame.controls.filter(c => c.url)) assert.ok(c.url.endsWith('x'.repeat(600)), 'targets are omitted whole, never shortened');
+    assert.equal(externalRequests, 0, 'budget handling does not inspect external responses');
     // Read the whole rendered document in ordinary 6000-character pages. No
     // screenshot, page script, scrolling or model-supplied selector is used.
     frame = ready(await browser.call('navigate', { url: `${origin}/readonly` }));

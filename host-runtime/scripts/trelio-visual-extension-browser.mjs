@@ -1,5 +1,5 @@
 import { createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
-import { installTextObserver, validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
+import { installTextObserver, readableLinkUrl, validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -379,7 +379,8 @@ export class ExtensionVisualBrowser {
       await fs.writeFile(path.join(extension, 'audio-receiver.js'), `(${visualAudioReceiver.toString()})();`, { mode: 0o600 });
       await fs.writeFile(path.join(extension, 'audio-router.js'), `(${visualAudioRouter.toString()})();`, { mode: 0o600 });
     }
-    if (this.observationMode === 'text') await fs.writeFile(path.join(extension, 'text-observer.js'), `(${installTextObserver.toString()})();`, { mode: 0o600 });
+    if (this.observationMode === 'text') await fs.writeFile(path.join(extension, 'text-observer.js'),
+      `(${installTextObserver.toString()})(${readableLinkUrl.toString()},${this.externalNavigation === true});`, { mode: 0o600 });
     this.#startupStage = 'browser_install';
     const executable = await ensureVisualChromium(this.dependencies, { signal: this.#launchAbort.signal });
     // A download/native vault wait does not grant a fresh launch budget. Do

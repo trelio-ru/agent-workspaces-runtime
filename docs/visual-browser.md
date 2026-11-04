@@ -121,6 +121,29 @@ scanLimited означает неполноту. Lazy loaded, iframe/canvas и �
 проходят closed validation в host/private HTTP/реальном typed MCP transport;
 страница и labels всегда untrusted data, не authority.
 
+При signed `externalNavigation: true` видимый hit-tested HTML anchor может
+дополнительно вернуть `control.url`: точный HTTP(S) адрес для передачи обычному
+браузеру, цитирования или выбора другого подходящего инструмента. Это общий
+примитив ссылки, без распознавания Google/других сайтов и их меню. URL не
+сокращается, не переписывается и не запрашивается по сети при чтении. У кнопок,
+полей, скрытых узлов и ссылок в редактируемом содержимом этого поля нет.
+Default image mode и text providers без external opt-in сохраняют прежний DTO.
+
+Общий self-contained URL validator применяется в isolated reader и повторно
+на private HTTP/MCP границе. Он исключает userinfo, специальные схемы,
+управляющие символы и известные credential/OAuth/SAML параметры в query/fragment;
+отказанный URL не превращается в другой адрес удалением токена. Callback,
+headers, auth state и signed download destinations по-прежнему не выдаются.
+Обычная private навигация проверяется независимо и не получает запрета по домену
+из-за отсутствия URL в наблюдении.
+
+Один URL ограничен 2048 символами, совокупные JSON-поля URL — 8192 байтами
+внутри прежнего complete-result bound. При исчерпании бюджета следующий адрес
+опускается целиком и возвращается `linkTargetsLimited: true`. Поле `url`
+необязательно: его отсутствие не доказывает отсутствия самой ссылки. Старые
+наблюдения без URL/флага остаются валидными. Получение ссылки не передаёт
+credentials/session другому инструменту и не разрешает внешнюю mutation.
+
 `submit` оборачивает одну отправку нового логического поиска: navigate, click
 или key Enter. `request-ready` отмечает завершённый результат по exact последнему
 frameId. Классификация «новый поиск» и смысловая готовность остаются модели:
@@ -335,8 +358,11 @@ URL policy; XHR/subresources, headers/body и POST не читаются и не
 Ссылка может вести в HTML-просмотрщик, а не сразу в binary. Обычный 200 HTML без
 Content-Disposition attachment рендерится штатно и возвращает fresh text/image
 observation; HTML/source не сохраняется как файл. File receipt появляется
-только после отдельного проверенного binary ответа. Signed provider владеет
-закрытым read-only меню скачивания конкретного viewer. Rendered ARIA menuitem
+только после отдельного проверенного binary ответа. Внешний viewer не расширяет
+исходный provider поддержкой чужого сервиса: дальнейшая работа передаётся общему
+браузерному инструменту либо отдельному подходящему навыку. Чужие menu/export
+recipes не накапливаются в исходном provider и не переносятся в generic host.
+Rendered ARIA menuitem
 проецируется в существующий `button` перед toolbar controls в прежних scan/output
 bounds; hidden/disabled/aria-disabled и поля
 сохраняют прежние ограничения. Метка меню сама не разрешает edit/share/input.

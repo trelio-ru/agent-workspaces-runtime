@@ -3,7 +3,7 @@
  * input values, attributes inventories, HTML, storage or network responses.
  * Requests contain a literal text filter and offset, never a selector/script.
  */
-export function installTextObserver() {
+export function installTextObserver(linkUrl, includeLinkTargets = false) {
   const clean = (value, limit) => String(value || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, limit);
   const hidden = element => {
     for (let node = element; node; node = node.parentElement) {
@@ -70,6 +70,7 @@ export function installTextObserver() {
     if (needle) for (let i = 0; i < lines.length; i++) if (lines[i].toLocaleLowerCase().includes(needle)) for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) selected.add(j);
     const all = (needle ? lines.filter((_, i) => selected.has(i)) : lines).join('\n'), text = all.slice(offset, offset + 6000);
     const controls = [];
+    let linkTargetBytes = 0, linkTargetsLimited = false;
     // Coordinates refer to this viewport, like the image API. Do not scroll or
     // focus controls to discover them, and omit obscured/disabled elements.
     // Read-only document viewers expose File/Download as ARIA menu items,
@@ -93,10 +94,53 @@ export function installTextObserver() {
       const label = clean(element.getAttribute('aria-label') || fieldLabel(element) || element.getAttribute('placeholder') || (!field && element.innerText) || element.getAttribute('title'), 120);
       const role = element.tagName === 'A' ? 'link' : ['INPUT', 'TEXTAREA'].includes(element.tagName) || element.isContentEditable || element.getAttribute('role') === 'textbox' ? 'textbox' : element.tagName === 'SELECT' ? 'select' : 'button';
       if (!label) continue;
-      if (!controls.some(c => c.role === role && c.label === label && c.x === x && c.y === y)) controls.push({ role, label, x, y });
+      if (controls.some(c => c.role === role && c.label === label && c.x === x && c.y === y)) continue;
+      const control = { role, label, x, y };
+      // A rendered link is a source reference, not a recipe for operating its
+      // destination. Expose only this already-visible anchor's ordinary URL
+      // under the signed external-navigation opt-in. Never inspect field or
+      // draft descendants, follow the link, resolve a redirect or read headers.
+      // The SAME reviewed URL function is injected with this fixed observer
+      // and reused by the outer validator; page/model input cannot replace it.
+      if (includeLinkTargets && role === 'link' && !privateText(element)) {
+        const url = linkUrl(element.href);
+        if (url) {
+          const bytes = new TextEncoder().encode(JSON.stringify({ url })).length;
+          // Keep the existing complete-result bound even on link-heavy pages.
+          // Omit an entire target rather than fabricate a shortened URL; the
+          // explicit flag distinguishes resource omission from no such link.
+          if (linkTargetBytes + bytes <= 8192) { control.url = url; linkTargetBytes += bytes; }
+          else linkTargetsLimited = true;
+        }
+      }
+      controls.push(control);
     }
-    respond({ title: clean(document.title, 240), text, controls, nextOffset: offset + text.length < all.length ? offset + text.length : null, scanLimited });
+    respond({ title: clean(document.title, 240), text, controls, nextOffset: offset + text.length < all.length ? offset + text.length : null, scanLimited,
+      ...(linkTargetsLimited ? { linkTargetsLimited: true } : {}) });
   });
+}
+
+/** Read-only handoff of a visible source link, shared by the isolated reader
+ * and host/MCP validation. This self-contained function is materialized from
+ * signed host source, never evaluated from a provider/model/page string.
+ * Refuse credential/callback-bearing references without rewriting their URL;
+ * ordinary private browser navigation retains its independent policy. No
+ * domain or foreign-service UI behavior belongs in this generic primitive. */
+export function readableLinkUrl(value) {
+  if (typeof value !== 'string' || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/u.test(value)) return null;
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return null;
+  // These are authentication/credential parameters, not document references.
+  // Inspect keys only; never copy a refused value into diagnostics or strip a
+  // token and pretend that the resulting different URL is the original link.
+  const sensitiveKey = /^(?:code|state|nonce|token|accesstoken|idtoken|refreshtoken|clientsecret|password|passwd|otp|totp|authorization|authcode|sessionid|sessiontoken|ticket|csrf|csrftoken|xsrf|xsrftoken|samlrequest|samlresponse|relaystate|returnurl|returnto|redirect|redirecturl|redirecturi)$/iu;
+  const fragment = url.hash.slice(1);
+  for (const params of [url.searchParams, new URLSearchParams(fragment),
+    new URLSearchParams(fragment.includes('?') ? fragment.slice(fragment.indexOf('?') + 1) : '')]) {
+    for (const key of params.keys()) if (sensitiveKey.test(key.replace(/[-_]/gu, ''))) return null;
+  }
+  return url.href;
 }
 
 /** Closed rendered-text boundary for signed providers that explicitly opt in.
@@ -108,13 +152,24 @@ const fail = () => { throw new Error('VISUAL_RESULT_INVALID'); };
 const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const string = (v, max) => typeof v === 'string' && v.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(v);
 export function validateTextResult(v) {
-  if (!exact(v, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'title', 'text', 'controls', 'nextOffset', 'scanLimited']) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
+  if (!exact(v, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'title', 'text', 'controls', 'nextOffset', 'scanLimited',
+    ...(Object.hasOwn(v || {}, 'linkTargetsLimited') ? ['linkTargetsLimited'] : [])]) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
+  if (Object.hasOwn(v, 'linkTargetsLimited') && v.linkTargetsLimited !== true) fail();
   for (const key of ['sessionId', 'frameId']) if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(v[key])) fail();
   for (const key of ['width', 'height']) if (!Number.isInteger(v[key]) || v[key] < 1 || v[key] > 8192) fail();
   if (!exact(v.scroll, ['up', 'down', 'left', 'right']) || Object.values(v.scroll).some(x => typeof x !== 'boolean')) fail();
   if (!string(v.title, 240) || !string(v.text, 6000) || typeof v.scanLimited !== 'boolean' || (v.nextOffset !== null && (!Number.isInteger(v.nextOffset) || v.nextOffset < 1 || v.nextOffset > 106_000))) fail();
   if (!Array.isArray(v.controls) || v.controls.length > 40) fail();
-  for (const c of v.controls) if (!exact(c, ['role', 'label', 'x', 'y']) || !['link', 'button', 'textbox', 'select'].includes(c.role) || !string(c.label, 120) || !Number.isInteger(c.x) || !Number.isInteger(c.y) || c.x < 0 || c.x >= v.width || c.y < 0 || c.y >= v.height) fail();
+  let linkTargetBytes = 0;
+  for (const c of v.controls) {
+    const hasUrl = Object.hasOwn(c || {}, 'url');
+    if (!exact(c, ['role', 'label', 'x', 'y', ...(hasUrl ? ['url'] : [])]) || !['link', 'button', 'textbox', 'select'].includes(c.role) || !string(c.label, 120) || !Number.isInteger(c.x) || !Number.isInteger(c.y) || c.x < 0 || c.x >= v.width || c.y < 0 || c.y >= v.height) fail();
+    if (hasUrl) {
+      if (c.role !== 'link' || typeof c.url !== 'string' || readableLinkUrl(c.url) !== c.url) fail();
+      linkTargetBytes += Buffer.byteLength(JSON.stringify({ url: c.url }));
+      if (linkTargetBytes > 8192) fail();
+    }
+  }
   if (Buffer.byteLength(JSON.stringify(v)) > 40_000) fail();
   return v;
 }
