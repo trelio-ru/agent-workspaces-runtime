@@ -12,6 +12,75 @@ import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-ex
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
+import { syntheticDocx } from './fixtures/visual-docx.mjs';
+
+test('a linked HTML office viewer exposes safe menus and downloads the complete DOCX from one native iframe/same-tab GET', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-docx-viewer-')));
+  const docx = syntheticDocx(), hits = [], evidence = [];
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://fixture.test');
+    if (url.pathname === '/original') {
+      hits.push(request.method);
+      response.writeHead(200, { 'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'Content-Disposition': 'attachment; filename=untrusted-original.docx', 'Content-Length': docx.length });
+      response.end(docx); return;
+    }
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (url.pathname === '/preview') {
+      const action = url.searchParams.get('mode') === 'iframe'
+        ? "const f=document.createElement('iframe');f.hidden=true;document.body.append(f);f.src='/original'"
+        : "location.href='/original'";
+      response.end(`<!doctype html><title>Synthetic original.docx - Google Docs</title><body style="font:24px sans-serif">
+        <h1>SYNTHETIC_VIEWER_REMAINS</h1>
+        ${Array.from({ length: 45 }, (_, i) => `<button style="position:absolute;left:${500 + i % 10 * 70}px;top:${350 + Math.floor(i / 10) * 40}px">Tool ${i}</button>`).join('')}
+        <div role="menuitem" style="position:absolute;left:20px;top:100px" onclick="document.getElementById('download').hidden=false">File</div>
+        <div role="menuitem" aria-disabled="true" style="position:absolute;left:300px;top:100px">DISABLED_MENU</div>
+        <div id="download" role="menuitem" hidden style="position:absolute;left:20px;top:150px" onclick="document.getElementById('word').hidden=false">Download</div>
+        <div id="word" role="menuitem" hidden style="position:absolute;left:20px;top:200px" onclick="${action}">Microsoft Word (.docx)</div>`); return;
+    }
+    response.end(`<!doctype html><title>Synthetic article</title><body style="font:24px sans-serif">
+      <a href="/preview?mode=${url.searchParams.get('mode') || 'iframe'}" style="position:absolute;left:20px;top:80px">Original DOCX</a>`);
+  });
+  const listener = ownFixtureHttpServer(server, t.signal);
+  t.after(() => listener.stop());
+  await listener.listen();
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const browser = new ExtensionVisualBrowser({ dependencies, observationMode: 'text', attachmentDownloads: true,
+    testDiagnostics: value => evidence.push(value),
+    store: { directory, async read() {}, async prepare() {}, async write() {}, close() {} },
+    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin],
+    lease: { deadlineAt: Date.now() + 165_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+  const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1'
+    ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
+  const control = (view, label) => { const matches = view.controls.filter(c => c.label === label); assert.equal(matches.length, 1, label);
+    return { frameId: view.frameId, x: matches[0].x, y: matches[0].y }; };
+  try {
+    for (const mode of ['iframe', 'main']) {
+      let view = await browser.call('navigate', { url: origin + '/?mode=' + mode });
+      assert.equal(view.state, 'ready', view.reason);
+      const before = focus();
+      view = await browser.call('download-attachment', control(view, 'Original DOCX'));
+      assert.equal(view.kind, 'trelio.browser-text/v1', 'an HTML viewer is not a file receipt');
+      assert.match(view.title, /\.docx/); assert.equal(view.controls.some(c => c.label === 'DISABLED_MENU'), false);
+      view = await browser.call('click', control(view, 'File'));
+      view = await browser.call('click', control(view, 'Download'));
+      const file = await browser.call('download-attachment', control(view, 'Microsoft Word (.docx)'));
+      assert.equal(file.state, 'ready', JSON.stringify({ mode, reason: file.reason, requestCount: hits.length }));
+      assert.equal(file.kind, 'trelio.browser-file/v1'); assert.equal(path.extname(file.filePath), '.docx');
+      assert.deepEqual(await fs.readFile(file.filePath), docx); assert.equal(file.sha256, createHash('sha256').update(docx).digest('hex'));
+      assert.doesNotMatch(JSON.stringify(file), /untrusted-original|Content-Disposition|\/original|dataBase64/);
+      view = await browser.call('read-text'); assert.match(view.text, /SYNTHETIC_VIEWER_REMAINS/);
+      if (before) assert.equal(focus(), before, 'viewer download never opens Save As or changes foreground');
+    }
+    assert.deepEqual(hits, ['GET', 'GET'], 'each UI download performs one actual GET; paused originals are not replayed');
+    await browser.close();
+  } catch (error) { t.diagnostic(JSON.stringify(evidence)); throw error; } finally {
+    await listener.stop();
+    await browser.close().catch(() => browser.abort());
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
 
 test('voice players deliver the complete HTTP/blob original through the audio-only path without replacing the chat or replay', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-voice-browser-')));
@@ -442,10 +511,10 @@ test('document guard follows headerless redirects and blocks final files includi
   }
 });
 
-test('explicit incoming attachment uses browser transport, preserves the chat and delivers only verified local bytes', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 150_000 }, async () => {
+test('explicit incoming attachment uses browser transport, preserves the chat and delivers only verified local bytes', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 150_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-attachment-')));
   const pdf = Buffer.from('%PDF-1.7\nSYNTHETIC_ATTACHMENT_NOT_MCP_TEXT\n%%EOF\n'), text = Buffer.from('Synthetic incoming document\n');
-  const received = [];
+  const received = [], evidence = [];
   const server = http.createServer((request, response) => {
     received.push(request.url);
     if (request.url === '/redirect') { response.writeHead(302, { Location: '/file' }); response.end(); return; }
@@ -459,7 +528,7 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
-  const browser = new ExtensionVisualBrowser({ dependencies, store: { directory, async read() {}, async prepare() {}, async write() {}, close() {} }, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], observationMode: 'text', attachmentDownloads: true, lease: { deadlineAt: Date.now() + 140_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+  const browser = new ExtensionVisualBrowser({ dependencies, testDiagnostics: value => evidence.push(value), store: { directory, async read() {}, async prepare() {}, async write() {}, close() {} }, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], observationMode: 'text', attachmentDownloads: true, lease: { deadlineAt: Date.now() + 140_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
   const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1' ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
   try {
     let f = await browser.call('navigate', { url: origin + '/' }); assert.equal(f.state, 'ready');
@@ -486,7 +555,7 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
     if (before) assert.equal(focus(), before, 'script-open attachment never activates a popup');
     assert.equal(received.filter(url => url === '/file').length, 2, 'each of the two deliberate reads fetches once');
     await browser.close(); assert.deepEqual(await fs.readFile(file.filePath), pdf, 'browser close does not remove the delivered original');
-  } finally {
+  } catch (error) { t.diagnostic(JSON.stringify(evidence)); throw error; } finally {
     await browser.close().catch(() => browser.abort()); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }

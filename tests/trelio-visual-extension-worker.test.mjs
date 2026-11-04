@@ -60,6 +60,92 @@ test('lost file-selection acknowledgement consumes the original frame and never 
   assert.equal(JSON.stringify(sent).includes('PRIVATE_NATIVE_LOST_REPLY'), false);
 });
 
+test('one file-menu click routes only a fresh native GET and never queries a paused main frame', async () => {
+  const events = { addListener() {} }, sent = [], routed = [], stages = [];
+  let socket, nativeEvent, currentUrl = 'about:blank', mode = 'main', paused = false, clicks = 0, reads = 0;
+  const context = { URL, Date, TextEncoder, Uint8Array, performance, atob, btoa, setTimeout, clearTimeout,
+    crypto: { randomUUID }, chrome: {
+      runtime: { id: 'fixture', onMessage: events },
+      debugger: { onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
+        async sendCommand(_source, method, args) {
+          if (method === 'Page.getFrameTree') {
+            assert.ok(!paused || mode !== 'main', 'native main-frame metadata can wait on the paused GET itself');
+            return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl },
+              childFrames: [{ frame: { id: 'child' } }] } };
+          }
+          if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 },
+            cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
+          if (method === 'Fetch.enable') stages.push(args.patterns.map(p => p.requestStage).join(','));
+          if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
+            clicks++; paused = true;
+            if (mode === 'navigate') nativeEvent({ tabId: 1 }, 'Page.navigatedWithinDocument', { frameId: 'main' });
+            queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
+              requestId: 'original-click', frameId: mode === 'iframe' ? 'child' : 'main', resourceType: 'Document',
+              request: { method: mode === 'post' ? 'POST' : 'GET', url: mode === 'foreign' ? 'https://foreign.test/original' : 'https://example.test/original' },
+            }));
+          }
+          if (method === 'Fetch.fulfillRequest' || method === 'Fetch.failRequest') {
+            paused = false;
+            if (method === 'Fetch.fulfillRequest') {
+              assert.equal(args.responseCode, 204);
+              assert.deepEqual(JSON.parse(JSON.stringify(args.responseHeaders)), [{ name: 'Cache-Control', value: 'no-store' }]);
+            }
+          }
+          if (method === 'Fetch.takeResponseBodyAsStream') { reads++; return { stream: 'synthetic' }; }
+          if (method === 'IO.read') return { data: 'AQID', base64Encoded: true, eof: true };
+          return {};
+        } },
+      webRequest: { onBeforeRequest: events, onHeadersReceived: events }, cookies: { onChanged: events, async getAll() { return []; } },
+      declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
+      windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
+      tabs: { onCreated: events, onRemoved: events,
+        async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
+        async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
+        async update(_id, input) {
+          currentUrl = input.url || currentUrl;
+          if (currentUrl === 'https://example.test/original') {
+            routed.push(currentUrl);
+            queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
+              requestId: 'guarded-original', frameId: 'main', resourceType: 'Document',
+              request: { url: currentUrl, method: 'GET' }, responseStatusCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/octet-stream' }],
+            }));
+          }
+          return { id: 1, url: currentUrl, status: 'complete' };
+        },
+        async sendMessage(_id, message) {
+          if (message.kind === 'authentication-guard') return { blocked: false };
+          if (message.kind === 'resolve_attachment_link') return null;
+          if (message.kind === 'arm_attachment_click') return { ready: true };
+          return { text: 'synthetic', controls: [], nextOffset: null, scanLimited: false };
+        } },
+    }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
+  startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
+    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text',
+    attachmentDownloads: true, deadlineAt: Date.now() + 10_000 }, context);
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick(); socket.onopen(); let sequence = 0;
+  const dispatch = async (operation, args = {}) => {
+    const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
+    for (let i = 0; i < 40; i++) { await tick(); const result = sent.find(value => value.id === id); if (result) return result.result; }
+    throw Error('synthetic_command_timeout');
+  };
+  await dispatch('restore-session-auth', { cookies: [], replace: false });
+  for (const [next, reason] of [['main', null], ['iframe', null], ['post', 'attachment_link_required'],
+    ['foreign', 'attachment_link_required'], ['navigate', 'stale_frame']]) {
+    mode = next;
+    const frame = await dispatch('read-text'), args = { frameId: frame.frameId, x: 10, y: 20 };
+    assert.equal(frame.state, 'ready', JSON.stringify({ mode, reason: frame.reason }));
+    const result = await dispatch('download-attachment', args);
+    if (reason) { assert.equal(result.reason, reason); assert.equal(result.file, undefined); }
+    else { assert.equal(result.state, 'ready', JSON.stringify({ mode, reason: result.reason, clicks, reads, routedCount: routed.length, stages })); assert.equal(result.file.dataBase64, 'AQID'); }
+    assert.equal(stages.at(-1), 'Response', 'request-stage routing is revoked after every result/refusal');
+    assert.equal((await dispatch('download-attachment', args)).reason, 'stale_frame', 'the original click token cannot replay');
+  }
+  assert.equal(clicks, 5); assert.equal(reads, 2); assert.equal(routed.length, 2, 'POST/foreign/stale requests never reach the receiver');
+  assert.doesNotMatch(JSON.stringify(sent), /foreign\.test|original-click|PRIVATE/);
+});
+
 test('document response guard distinguishes redirects from final resources without revealing headers', () => {
   const header = (name, value) => ({ name, value });
   for (const status of [301, 302, 303, 307, 308]) assert.equal(visualDocumentResponsePolicy(status, [header('Location', '/detail')]), 'redirect');

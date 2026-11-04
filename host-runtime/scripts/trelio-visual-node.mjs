@@ -25,12 +25,14 @@ export function resolveVisualWorkerNode({
 } = {}) {
   if (platform !== 'darwin') return executable;
   const deadline = now() + 5000;
-  const probe = (file, args) => {
+  const probe = (file, args, maximumMs = 1500) => {
     const remaining = deadline - now();
     if (remaining <= 0) throw unavailable();
-    return run(file, args, { shell: false, windowsHide: true, timeout: Math.min(1500, remaining),
+    const result = run(file, args, { shell: false, windowsHide: true, timeout: Math.min(maximumMs, remaining),
       encoding: 'utf8', maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
       env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } });
+    if (now() >= deadline) throw unavailable();
+    return result;
   };
   const compatibleSignature = file => {
     const result = probe('/usr/bin/codesign', ['-dvv', '--entitlements', ':-', file]);
@@ -63,7 +65,12 @@ export function resolveVisualWorkerNode({
       if (!info.isFile() || !(info.mode & 0o111) || (info.mode & 0o022)
         || (Number.isInteger(uid) && info.uid !== uid && info.uid !== 0)) continue;
       if (!compatibleSignature(resolved)) continue;
-      const version = probe(resolved, ['-e', 'process.stdout.write(JSON.stringify({major:Number(process.versions.node.split(".")[0]),platform:process.platform,arch:process.arch}))']);
+      // A verified standalone Node can take over 1.5s to start on a busy
+      // desktop. Timing out that public identity probe and then launching a
+      // second candidate misreports an installed compatible Node as absent.
+      // Let this ONE probe use the original remaining five-second budget;
+      // signatures, ownership, architecture and the total deadline stay strict.
+      const version = probe(resolved, ['-e', 'process.stdout.write(JSON.stringify({major:Number(process.versions.node.split(".")[0]),platform:process.platform,arch:process.arch}))'], 5000);
       if (version.error || version.status !== 0) continue;
       const value = JSON.parse(version.stdout);
       if (!Number.isSafeInteger(value.major) || value.major < 22 || value.platform !== 'darwin' || value.arch !== arch) continue;

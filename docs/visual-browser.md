@@ -316,6 +316,26 @@ DOM/source/site state и не исполняет model-selected JS. В оста�
 не считаются поддержанными. Page messages – недоверенные кандидаты, не authority.
 Нельзя обещать отсутствие focus для сайта, который заменил этот router.
 
+В ту же однократную file-button операцию входит native Document GET,
+инициированный текущим документом либо его прямым iframe. Только на время
+reviewed click Fetch дополнительно останавливает Document на Request stage:
+проверяет прежний main frame/generation, parent loader для iframe, GET и signed
+URL policy; XHR/subresources, headers/body и POST не читаются и не переигрываются.
+Локальный пустой 204 отменяет исходный запрос до сети, сохраняет viewer и
+передаёт destination тому же main-document receiver. Request interception
+отзывается до единственного фактического GET и при любом выходе. Синтетические
+204 всегда `Cache-Control: no-store`: пустая отмена не должна кешироваться
+вместо оригинала при следующем явном скачивании.
+
+Ссылка может вести в HTML-просмотрщик, а не сразу в binary. Обычный 200 HTML без
+Content-Disposition attachment рендерится штатно и возвращает fresh text/image
+observation; HTML/source не сохраняется как файл. File receipt появляется
+только после отдельного проверенного binary ответа. Signed provider владеет
+закрытым read-only меню скачивания конкретного viewer. Rendered ARIA menuitem
+проецируется в существующий `button` перед toolbar controls в прежних scan/output
+bounds; hidden/disabled/aria-disabled и поля
+сохраняют прежние ограничения. Метка меню сама не разрешает edit/share/input.
+
 Browser сам делает один authenticated main-document GET по выбранной ссылке.
 Каждый redirect следует той же signed navigation policy: origins/domains
 либо явному externalNavigation. Только exact pending main frame
@@ -651,7 +671,9 @@ Service. AAD привязывает snapshot к Trelio origin, skill и personal
 из fixed Codex cache/Homebrew/local roots для signed protected-session CLI и
 worker, включая vault-only команды без открытого браузера. Binary должен быть обычным executable
 файлом текущего пользователя/root без group/world write; version/platform/arch
-и signing policy проверяются под общим пятисекундным deadline. Нет изменения
+и signing policy проверяются под общим пятисекундным deadline. Public identity
+probe использует оставшийся исходный бюджет без отдельного cutoff 1.5с; late
+result не разрешает запуск или новый probe после deadline. Нет изменения
 подписи приложения, OS policy, shell или caller-selected executable. При
 отсутствии совместимого Node запуск закрывается как `bootstrap_failed`, до
 создания worker claim и доступа к vault; нужен standalone Node.js 22+.

@@ -184,12 +184,30 @@ test('restricted embedded Node selects an owner-checked compatible standalone wi
   assert.equal(resolveVisualWorkerNode(nodeFixture({ run: (file, args, options) => {
     calls.push([file, args]); assert.equal(options.shell, false);
     assert.deepEqual(options.env, { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
-    assert.ok(options.timeout > 0 && options.timeout <= 1500);
+    assert.ok(options.timeout > 0 && options.timeout <= (file === '/usr/bin/codesign' ? 1500 : 5000));
     if (file === '/usr/bin/codesign') return signingPolicy(args.at(-1) !== '/app/node');
     assert.equal(file, selected);
     return { status: 0, stdout: JSON.stringify({ major: 26, platform: 'darwin', arch: 'arm64' }) };
   } })), selected);
   assert.equal(calls.length, 3);
+});
+
+test('slow public Node identity uses the original remaining budget without another candidate or late acceptance', () => {
+  for (const duration of [2000, 5000]) {
+    let clock = 0, identities = 0;
+    const invoke = () => resolveVisualWorkerNode(nodeFixture({ now: () => clock,
+      run: (file, args, options) => {
+        if (file === '/usr/bin/codesign') { clock += 100; return signingPolicy(args.at(-1) !== '/app/node'); }
+        identities++;
+        assert.equal(options.timeout, 4800, 'both signature probes consume the SAME five-second deadline');
+        clock += duration;
+        return { status: 0, stdout: JSON.stringify({ major: 24, platform: 'darwin', arch: 'arm64' }) };
+      },
+    }));
+    if (duration === 2000) assert.equal(invoke(), '/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node');
+    else assert.throws(invoke, { code: 'VISUAL_BOOTSTRAP_NODE_REQUIRED' });
+    assert.equal(identities, 1, 'an exhausted deadline never spawns a second identity probe');
+  }
 });
 
 for (const refusal of ['writable', 'foreign-owner', 'not-file', 'old-node', 'wrong-arch', 'wrong-platform', 'unknown-signature', 'failed-probe']) {

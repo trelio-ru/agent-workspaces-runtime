@@ -72,9 +72,17 @@ export function installTextObserver() {
     const controls = [];
     // Coordinates refer to this viewport, like the image API. Do not scroll or
     // focus controls to discover them, and omit obscured/disabled elements.
-    for (const element of includeControls ? [...document.querySelectorAll('a[href],button,input,textarea,select,[role="button"],[role="link"],[role="textbox"]')].slice(0, 1200) : []) {
+    // Read-only document viewers expose File/Download as ARIA menu items,
+    // rather than buttons. Project only their visible labels/coordinates in
+    // the existing button shape; this does not grant a provider permission to
+    // click edits, sharing or any other menu action. Visible menu controls
+    // precede toolbar buttons within the SAME scan/output bounds: a viewer's
+    // long toolbar must not hide an already-open Download menu past item 40.
+    const candidates = includeControls ? [...document.querySelectorAll('a[href],button,input,textarea,select,[role="button"],[role="link"],[role="textbox"],[role="menuitem"]')].slice(0, 1200) : [];
+    candidates.sort((a, b) => Number(b.getAttribute('role') === 'menuitem') - Number(a.getAttribute('role') === 'menuitem'));
+    for (const element of candidates) {
       if (controls.length >= 40) break;
-      if (hidden(element) || element.disabled || ['hidden', 'password', 'file'].includes(element.type)) continue;
+      if (hidden(element) || element.disabled || element.getAttribute('aria-disabled') === 'true' || ['hidden', 'password', 'file'].includes(element.type)) continue;
       const r = element.getBoundingClientRect(), x = Math.round(Math.max(0, r.left) + (Math.min(innerWidth, r.right) - Math.max(0, r.left)) / 2), y = Math.round(Math.max(0, r.top) + (Math.min(innerHeight, r.bottom) - Math.max(0, r.top)) / 2);
       if (r.width < 2 || r.height < 2 || r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) continue;
       const hit = document.elementFromPoint(x, y);

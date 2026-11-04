@@ -487,13 +487,18 @@ publication tooling также остаются вне этого публичн
   macOS protected-session CLI/worker проверяет library-validation policy своего Node. При несовместимом
   embedded Node выбирается проверенный standalone Node >=22 той же архитектуры
   из fixed host roots под общим deadline; signatures/OS policy не меняются.
+  Public identity probe использует оставшийся исходный бюджет 5с, без отдельного
+  1.5с cutoff или принятия late result; нет повторного запуска после deadline.
   Нет plaintext vault fallback, model executable override или запуска shell.
   Native vault deadline подтверждается JS-границей, а не только N-API signal:
   late result обнуляется и не продолжает preflight; неизвестный set не повторяется.
   Его отдельная input copy живёт до native settle, чтобы caller cleanup не менял
   ещё выполняющуюся запись OS. Secret delivery идёт только после выбора Node.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
-  Debugger adapter имеет только fixed Page/Input и response-only Fetch guard,
+  Debugger adapter имеет только fixed Page/Input и response-only Fetch guard;
+  отдельный reviewed file-button click временно маршрутизирует native Document
+  GET на Request stage по [контракту вложений](docs/visual-browser.md#входящие-вложения),
+  без чтения request headers/body, XHR или POST replay. В остальном guard остаётся response-only,
   без чтения body/headers в MCP. Headerless HTTP redirects разрешаются по status;
   конечный main document требует HTML и не может стать download. MIME exception
   DNR даётся exact tab только после включения Fetch; новые popups и subframes
@@ -531,6 +536,9 @@ publication tooling также остаются вне этого публичн
   с quota/unsafe-path guards, без исполнения, извлечения архива или auth reset.
   Обычные non-HTML navigate остаются запрещены; native fixtures проверяют
   anchor/button, bytes, сохранение чата и отсутствие focus на всех OS.
+  HTML viewer возвращает обычную observation, никогда file receipt. Его
+  read-only download menu принадлежит provider; generic ARIA menuitem получает
+  прежний button DTO, без расширения mutation authority. Empty 204 не кешируется.
 - Голосовые плееры требуют отдельный signed `audioDownloads` и API marker:
   [контракт](docs/visual-browser.md#голосовые-сообщения). Только fresh координаты,
   native audio source либо один trusted play; локальный blob того же документа

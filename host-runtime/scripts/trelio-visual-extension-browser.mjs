@@ -740,7 +740,11 @@ export class ExtensionVisualBrowser {
         ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
       if (value.state !== 'ready') throw fault('operation_failed');
       this.#state = 'ready';
-      if (operation === 'download-attachment' || operation === 'download-audio') {
+      // An ordinary HTML viewer is an observation, not a downloaded original.
+      // Preserve the same strict text/image validators and credential guard;
+      // only the file-shaped branch below may mint a local file receipt.
+      if ((operation === 'download-attachment' || operation === 'download-audio')
+        && !(operation === 'download-attachment' && (value.kind === TEXT_KIND || value.image))) {
         if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
         if (Object.keys(value).sort().join() !== 'file,state') throw fault('attachment_unsupported');
         return await saveVisualAttachment(this.store.directory, value.file, this.sessionId, { audioOnly: operation === 'download-audio' });

@@ -189,6 +189,53 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       return;
     }
     if (method === 'Fetch.requestPaused') {
+      // Only one reviewed file-button click enables Document request-stage
+      // routing. Some viewers use a same-tab navigation or a download iframe
+      // instead of window.open. Cancel that exact GET before network dispatch,
+      // then reuse the ordinary main-document file receiver. Never inspect an
+      // XHR/body, replay a POST, or leave Request interception enabled at rest.
+      if (params.responseStatusCode === undefined && params.responseHeaders === undefined && params.responseErrorReason === undefined) {
+        const originalPending = pendingFileLink;
+        void (async () => {
+          const pending = originalPending;
+          if (!pending || pending.claimed || source.tabId !== pending.tabId || params.resourceType !== 'Document') {
+            await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId }); return;
+          }
+          const main = params.frameId === pending.mainFrameId;
+          // Chromium may defer Page.getFrameTree while this very main-frame
+          // request is paused. Its native frame ID and the pre-click generation
+          // already bind it to the selected document; do not deadlock the GET
+          // behind a layout read. A child request needs a fresh parent tree.
+          const tree = main ? null : await command(source.tabId, 'Page.getFrameTree');
+          const directChild = !main && (tree.frameTree.childFrames || []).some(child => child.frame.id === params.frameId);
+          if (!main && !directChild) {
+            await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId }); return;
+          }
+          if (pendingFileLink !== pending) {
+            await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }); return;
+          }
+          pending.claimed = true;
+          // A paused main-frame GET already owns a provisional loader. Its
+          // frame/generation must still be the clicked document, but comparing
+          // that new loader with the pre-click loader would reject every real
+          // location-based download. A child-frame request cannot replace the
+          // parent loader and retains the stronger unchanged-loader check.
+          const stale = Date.now() >= pending.until || pending.generation !== navigationGeneration
+            || !main && (tree.frameTree.frame.id !== pending.mainFrameId || tree.frameTree.frame.loaderId !== pending.loaderId)
+            || manual || authenticating;
+          if (stale || params.request?.method !== 'GET' || !allowed(params.request?.url)) {
+            await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' });
+            pending.reject(Error(stale ? 'stale_frame' : 'attachment_link_required')); return;
+          }
+          // An aborted main navigation can replace the viewer with Chrome's
+          // error page. A local empty 204 prevents network dispatch and keeps
+          // the original loader/document available for the SAME file receiver.
+          await command(source.tabId, 'Fetch.fulfillRequest', { requestId: params.requestId,
+            responseCode: 204, responseHeaders: [{ name: 'Cache-Control', value: 'no-store' }], body: '' });
+          pending.resolve(params.request.url);
+        })().catch(() => originalPending?.reject(Error('operation_failed')));
+        return;
+      }
       // Fixed response-stage Document interception only; never request a body,
       // evaluate site code or return headers/URLs through the pixels/text API.
       // DNR still bounds every main-frame destination and blocks attachments.
@@ -199,6 +246,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
             if (!allowed(params.request?.url)) throw Error('navigation_blocked');
             if (documentPolicy(params.responseStatusCode, params.responseHeaders) === 'redirect') {
               await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId }); return;
+            }
+            // A file link can lead to an HTML viewer. Let the browser render
+            // it normally and return a fresh observation, never HTML bytes or
+            // a counterfeit file receipt. Signed providers own any subsequent
+            // read-only download-menu workflow in that viewer.
+            if (!download.audioOnly && params.responseStatusCode === 200
+              && documentPolicy(params.responseStatusCode, params.responseHeaders) === 'html') {
+              await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
+              download.resolve({ viewer: true }); return;
             }
             await receiveAttachment(download, params);
           } catch (error) {
@@ -290,7 +346,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       check();
       // 204 cancels document replacement while preserving the current chat.
       // Browser-native downloads never receive the original attachment body.
-      await command(download.tabId, 'Fetch.fulfillRequest', { requestId: params.requestId, responseCode: 204, responseHeaders: [], body: '' });
+      // This local cancellation must never become a cached empty original:
+      // the next explicit download still needs the real source response.
+      await command(download.tabId, 'Fetch.fulfillRequest', { requestId: params.requestId, responseCode: 204,
+        responseHeaders: [{ name: 'Cache-Control', value: 'no-store' }], body: '' });
       check();
       download.resolve({ state: 'ready', file: { mimeType, dataBase64 } });
     } finally {
@@ -317,7 +376,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       guardUpdate = guardUpdate.then(() => installRules()); await guardUpdate;
       if (guardFailed || Date.now() >= until) throw Error('operation_failed');
       await chrome.tabs.update(f.tabId, { url: url.href });
-      return await promise;
+      const result = await promise;
+      return result.viewer === true ? captureDefault() : result;
     } finally {
       clearTimeout(timer); pendingAttachment = undefined;
       guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
@@ -637,6 +697,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'download-attachment') {
       if (config.attachmentDownloads !== true || pendingAttachment) throw Error('invalid_input');
+      const generation = navigationGeneration;
       const link = await chrome.tabs.sendMessage(f.tabId, { kind: 'resolve_attachment_link', x, y }, { frameId: 0 });
       let candidate = link?.url;
       if (!candidate) {
@@ -645,22 +706,34 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         // locally before Chrome can activate a popup. No site code is read or
         // evaluated, and a timeout never falls back to opening a native window.
         const nonce = crypto.randomUUID(); let linkTimer;
-        const destination = new Promise((resolve, reject) => { pendingFileLink = { tabId: f.tabId, nonce, resolve }; linkTimer = setTimeout(() => reject(Error('attachment_link_required')), 5000); });
+        const tree = await command(f.tabId, 'Page.getFrameTree');
+        const destination = new Promise((resolve, reject) => {
+          pendingFileLink = { tabId: f.tabId, mainFrameId: f.mainFrameId, loaderId: f.loaderId,
+            generation: navigationGeneration, nonce, resolve, reject, claimed: false,
+            until: Math.min(Date.now() + 5000, config.deadlineAt) };
+          linkTimer = setTimeout(() => reject(Error('attachment_link_required')), 5000);
+        });
         destination.catch(() => {});
         try {
+          if (tree.frameTree.frame.id !== f.mainFrameId || tree.frameTree.frame.loaderId !== f.loaderId) throw Error('stale_frame');
           const ack = await chrome.tabs.sendMessage(f.tabId, { kind: 'arm_attachment_click', nonce, x, y }, { frameId: 0 });
           if (!ack?.ready) throw Error('attachment_link_required');
+          await command(f.tabId, 'Fetch.enable', { patterns: [
+            { resourceType: 'Document', requestStage: 'Request' },
+            { resourceType: 'Document', requestStage: 'Response' },
+          ] });
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
           candidate = await destination;
         } finally {
           clearTimeout(linkTimer); pendingFileLink = undefined;
+          await command(f.tabId, 'Fetch.enable', { patterns: [{ resourceType: 'Document', requestStage: 'Response' }] });
           await chrome.tabs.sendMessage(f.tabId, { kind: 'cancel_attachment_click' }, { frameId: 0 }).catch(() => {});
         }
       }
       if (typeof candidate !== 'string' || !candidate || candidate.length > 4096) throw Error('attachment_link_required');
-      return downloadOriginal(f, new URL(candidate, tab.url).href, false, Math.min(Date.now() + 30_000, config.deadlineAt));
+      return downloadOriginal({ ...f, generation }, new URL(candidate, tab.url).href, false, Math.min(Date.now() + 30_000, config.deadlineAt));
     }
     if (op === 'click') {
       // Arm a fixed, isolated content adapter before this exact trusted click.
