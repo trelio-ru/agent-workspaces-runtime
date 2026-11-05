@@ -121,6 +121,13 @@ and unsupported API experiments are not installed production fallbacks.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
+The pinned public Codex archive GET permits only two bounded transient retries;
+hash/member verification still precedes extraction and the real Windows MCP test.
+The positive instruction-retention fixture permits at most three separate real
+hooks against its unchanged synthetic transcript: every hook must produce a
+valid method-bound proof, and at least one must inject the exact verified hints.
+No MCP operation is dispatched by those probes. The optional 250ms inspection
+budget, full-read fallback and production no-replay boundaries remain unchanged.
 Root test dependencies are installed from the committed lock on Windows as
 well; ordinary-chat schema/token bounds use the same tokenizer on every OS.
 Native background registration runs first in that group; transport/accepted inspection runs once

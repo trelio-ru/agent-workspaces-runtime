@@ -1533,11 +1533,33 @@ test("first protected call observes the current model and supported host names i
     const reuseInput = { hook_event_name: "PreToolUse", session_id: threadId,
       transcript_path: transcriptPath, tool_use_id: "current", tool_name: "mcp__trelio__get_task",
       tool_input: locator };
-    const reused = await runHook(reuseInput, environment);
-    assert.equal(reused.exitCode, 0, reused.stderr);
-    const reusedArgs = JSON.parse(reused.stdout).hookSpecificOutput.updatedInput;
+    // Optional receipt inspection includes a cold worker inside its unchanged
+    // 250ms production budget. A loaded native runner may correctly choose a
+    // FULL read instead of hints. Probe at most three separate real hooks on
+    // this immutable synthetic transcript; none dispatches an MCP operation.
+    // Every attempt must still admit and sign the exact native method, and at
+    // least one must prove real worker-to-hook hint injection. A broken parser
+    // that always falls back therefore still fails this positive integration.
+    const runRetainedHook = async (input, selectKeys) => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const result = await runHook(input, environment);
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(result.stderr, "");
+        const args = JSON.parse(result.stdout).hookSpecificOutput.updatedInput;
+        const candidateProof = args.runtimeSessionProof;
+        assert.equal(crypto.verify(null, Buffer.from([
+          "trelio-runtime-proof-v1", candidateProof.runtimeSessionId, "get_task",
+          candidateProof.issuedAt, candidateProof.nonce,
+        ].join("\n")), publicKey, Buffer.from(candidateProof.signature, "base64url")), true);
+        const keys = selectKeys(args);
+        if (keys === undefined) continue;
+        assert.deepEqual(keys, [layer.key]);
+        return args;
+      }
+      assert.fail("Three bounded real hook inspections produced no verified instruction hints");
+    };
+    const reusedArgs = await runRetainedHook(reuseInput, args => args.knownInstructionLayerKeys);
     assert.deepEqual(reusedArgs.knownInstructionLayerKeys, [layer.key]);
-    assert.ok(reusedArgs.runtimeSessionProof.signature);
     // The same real hook must inject mirror-read hints into the nested typed
     // slot and still sign the exact native method, not the facade tool name.
     const localEnvelope = { schemaVersion: 1, route: "context", parameters: {
@@ -1556,10 +1578,9 @@ test("first protected call observes the current model and supported host names i
         }) }] } },
       localCall("current"),
     ].map((item) => JSON.stringify(item)).join("\n") + "\n");
-    const localReused = await runHook({ ...reuseInput,
-      tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action", tool_input: localEnvelope }, environment);
-    assert.equal(localReused.exitCode, 0, localReused.stderr);
-    const localArgs = JSON.parse(localReused.stdout).hookSpecificOutput.updatedInput;
+    const localArgs = await runRetainedHook({ ...reuseInput,
+      tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action", tool_input: localEnvelope },
+    args => args.parameters.arguments.knownInstructionLayerKeys);
     assert.deepEqual(localArgs.parameters.arguments, { ...locator, knownInstructionLayerKeys: [layer.key] });
     assert.equal(localArgs.knownInstructionLayerKeys, undefined);
     assert.equal(localArgs.parameters.nativeTool, "get_task");

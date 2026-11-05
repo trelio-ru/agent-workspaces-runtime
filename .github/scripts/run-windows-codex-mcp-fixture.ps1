@@ -12,7 +12,12 @@ try {
   )
   foreach ($inputFile in $inputs) {
     $archive = Join-Path $fixtureRoot ($inputFile.Name + '.tar.gz')
-    Invoke-WebRequest -Uri ('https://github.com/openai/codex/releases/download/rust-v0.164.0/' + $inputFile.Name + '.tar.gz') -OutFile $archive -TimeoutSec 120
+    # This is an immutable public GET, independent of every protected runtime
+    # action. Retry transient HTTP failures (including GitHub's occasional 504)
+    # at most twice; retain the original archive hash and member verification.
+    # Each attempt has a real deadline, and a failed download never reaches tar.
+    & curl.exe --fail --location --silent --show-error --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 120 --output $archive ('https://github.com/openai/codex/releases/download/rust-v0.164.0/' + $inputFile.Name + '.tar.gz')
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned public Codex archive download failed' }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $inputFile.Sha) {
       throw 'Pinned public Codex archive hash mismatch'
     }
