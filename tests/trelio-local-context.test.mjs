@@ -721,6 +721,8 @@ test("stale fencing stops renewal without claiming over another host", async () 
       && error.details?.requiredAction === "resolve_run_owner_before_takeover"
     ),
   );
+  await assert.rejects(manager.beginAction(actionWorkingDirectory, "open"),
+    (error) => error?.code === "TRELIO_WORKSPACE_RUN_FENCED");
   await assert.rejects(handleTrelioWorkspaceActionOperation("https://trelio.example", {
     schemaVersion: 1,
     operation: "checkpoint",
@@ -731,6 +733,56 @@ test("stale fencing stops renewal without claiming over another host", async () 
     runHeartbeatManager: manager,
   }), (error) => error?.code === "TRELIO_WORKSPACE_RUN_FENCED");
   assert.equal(classifyWorkspaceRunLeaseFailure({ stderr: "prefix LEASE_EXPIRED: suffix" }), "LEASE_EXPIRED");
+});
+
+test("a prepared open recovers a stopped same-directory Run without restarting MCP", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-stopped-open-"));
+  const directory = path.join(root, "workspace");
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(directory);
+  await fs.writeFile(path.join(root, ".trelio-run.json"), JSON.stringify({
+    schemaVersion: 3, origin: "https://trelio.example",
+    workspaceId: actionWorkspaceId, runId: actionRunId, workspaceDirectory: directory,
+  }), { mode: 0o600 });
+  const scheduled = [];
+  const manager = createWorkspaceRunHeartbeatManager({
+    runBridge: async (_origin, args) => {
+      throw Object.assign(new Error("synthetic failure"), {
+        stderr: args[0] === "heartbeat" ? "LEASE_EXPIRED" : "claim did not complete",
+      });
+    },
+    resolveOpenedDirectory: async () => directory,
+    scheduleTimer: (callback) => { const timer = { callback }; scheduled.push(timer); return timer; },
+    cancelTimer: () => {},
+  });
+  manager.start({ origin: "https://trelio.example", workspaceId: actionWorkspaceId,
+    runId: actionRunId, workspaceDirectory: directory,
+    openArguments: ["open", "--workspace", actionWorkspaceId, "--run", actionRunId] });
+  await scheduled[0].callback();
+  assert.equal(manager.inspect(directory).recovery.reasonCode, "CLAIM_FAILED");
+  let children = 0;
+  const action = { schemaVersion: 1, operation: "open", workingDirectory: directory,
+    parameters: { workspaceId: actionWorkspaceId, runId: actionRunId, runtimeSessionId: actionReleaseId } };
+
+  // A failed explicit open must retain the old stop. Only the completed native
+  // claim/materialisation may replace the entry; merely preparing it is not proof.
+  await assert.rejects(handleTrelioWorkspaceActionOperation("https://trelio.example", action, {
+    runHeartbeatManager: manager,
+    runBridge: async () => { children++; throw new Error("synthetic open failure"); },
+  }), (error) => error?.code === "TRELIO_WORKSPACE_ACTION_FAILED");
+  assert.equal(children, 1);
+  assert.equal(manager.inspect(directory).recovery.reasonCode, "CLAIM_FAILED");
+  await handleTrelioWorkspaceActionOperation("https://trelio.example", action, {
+    runHeartbeatManager: manager,
+    runBridge: async () => { children++; return { stdout: directory + "\n", stderr: "" }; },
+  });
+  assert.equal(children, 2);
+  assert.equal(manager.inspect(directory).recovery, null);
+  assert.equal(manager.inspect(directory).stopped, false);
+  const entry = await manager.beginAction(directory, "checkpoint");
+  assert.ok(entry, "the same MCP manager must admit the next save");
+  manager.endAction(entry);
+  manager.stop(directory);
 });
 
 test("successful open registers exact persisted Run identity with the renewer", async (t) => {

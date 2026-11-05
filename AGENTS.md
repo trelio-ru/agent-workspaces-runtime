@@ -349,6 +349,10 @@ publication tooling также остаются вне этого публичн
   ограничен 60 секундами; transport failure не запускает sleep/replay.
   Human/provider lifetimes и зарегистрированный finish сохраняют отдельные
   границы: [контракт](docs/agent-workspace-runtime.md#call-time-budget).
+  Best-effort retention после lifecycle ограничен пятью секундами и не блокирует
+  успешный open; late cleanup не начинает deletion/publication после отмены.
+  Prepared exact open может восстановить собственный stopped renewer в той же
+  папке, сохраняя hard fencing/terminal refusals; см. Agent Run и cleanup там же.
 - Долгий `finish` возвращает bounded operation/poll по [контракту](docs/agent-workspace-runtime.md#finish-progress).
   Повтор не создаёт второго writer; прогресс содержит только стадии/счётчики,
   а timeout ожидания не означает принятия candidate или отмены сохранения.

@@ -1554,6 +1554,11 @@ clean Git и принятый head проверяются обычным preflig
    `RUN_NOT_ACTIVE` запускает один повторный `open`/claim того же Run; stale
    fencing и terminal Run не перехватываются автоматически. После restart
    первый успешный workspace action снова подключает Run к renewer.
+   Остановленный после `CLAIM_FAILED`/истечения lease renewer пропускает явно
+   подготовленный `open` даже из самой папки Workspace. Старый stop заменяется
+   только после полного успешного native claim/materialization; неудачный open
+   его сохраняет. Stale fencing и terminal refusal по-прежнему не допускают
+   этот recovery. Исходное сохранение автоматически не повторяется.
 6. Агент завершает работу одной `trelio-workspace finish`: bridge проверяет и
    печатает changed paths, сначала продлевает lease, создаёт handoff с итогом,
    evidence, материалами, вопросами и одним следующим действием, создаёт одну
@@ -2062,6 +2067,15 @@ exact пути с повторно подтверждённым `ENOENT`; пов
 неизвестные roots остаются fail-closed. Статусы разных Workspace читаются
 bounded пулом до четырёх запросов, поэтому большой локальный индекс не превращает
 каждый cleanup в длинную последовательную проверку.
+
+Автоматический retention имеет отдельный непродлеваемый бюджет пять секунд
+внутри исходного invocation, используя общий abort/HTTP механизм. Он не может
+удерживать уже успешно открытый Run до внешнего минутного timeout: local MCP
+регистрирует renewer после завершения bridge child, а не после строки пути в
+stdout. При отмене pending response body закрывается; позднее продолжение
+проверяет тот же aborted signal перед удалением и публикацией registry/суточного
+marker. Неуспешный проход не ставит marker. Ручной `clean` сохраняет прежний
+маршрут, fresh terminal/Git/lock проверки и transport bounds.
 
 Object cache очищается по возрасту/LRU/лимиту, signed runtime packages – только
 целыми проверенными digest-каталогами. Очистка удаляет лишь локальную копию;

@@ -10729,6 +10729,14 @@ export const createWorkspaceRunHeartbeatManager = ({
     // command from racing a fencing-token rotation after laptop wake.
     if (entry.renewalPromise) await entry.renewalPromise;
     if (entry.recovery) {
+      // A freshly prepared open is the prescribed recovery action, not a
+      // replay of the failed save. When its cwd is the stopped Workspace,
+      // blocking it here makes recovery impossible until MCP is restarted.
+      // Keep the stop until the native open has completely succeeded and
+      // start() replaces it. Fencing/terminal refusals still need their own
+      // owner decision and must never become an automatic takeover.
+      if (operation === "open" && ["CLAIM_FAILED", "LEASE_EXPIRED", "RUN_NOT_ACTIVE"]
+        .includes(entry.recovery.reasonCode)) return null;
       throw createWorkspaceRunStoppedError(entry, operation);
     }
     entry.activeActionCount += 1;

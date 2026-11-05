@@ -18569,6 +18569,7 @@ const discoverRegisteredRunRoots = async () => {
         }
       }
       const surviving = new Set(retainedRoots);
+      trelioCallSignal()?.throwIfAborted();
       await writeRunRegistry(currentState.roots.filter((item) => surviving.has(item)),
         currentState.retainedRoots.filter((item) => surviving.has(item)));
     });
@@ -19169,6 +19170,7 @@ const planWorkspaceCleanup = async ({
 
 const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
   const settings = await readLocalSettings();
+  trelioCallSignal()?.throwIfAborted();
   let cleanupPlan;
 
   try {
@@ -19183,6 +19185,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
   }
 
   const registeredRoots = new Set((await readRunRegistry({ includeRetained: true })).map((item) => path.resolve(item)));
+  trelioCallSignal()?.throwIfAborted();
   const cacheCandidates = await planObjectCachePrune({
     roots: cleanupPlan.roots,
     settings,
@@ -19190,6 +19193,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
   const skillRuntimeCacheCandidates = await planSkillRuntimeCachePrune({
     settings,
   });
+  trelioCallSignal()?.throwIfAborted();
   const reclaimableBytes = [
     ...cleanupPlan.candidates,
     ...cacheCandidates,
@@ -19241,6 +19245,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
     // который защищает materialization, затем полностью перечитываем backend,
     // metadata и Git. Ни один root не удаляется по устаревшему плану.
     for (const candidate of cleanupPlan.candidates) {
+      trelioCallSignal()?.throwIfAborted();
       const workspaceId = candidate.metadata.workspaceId;
 
       if (workspaceLocks.has(workspaceId)) continue;
@@ -19276,6 +19281,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
     ));
 
     for (const candidate of deletionCandidates) {
+      trelioCallSignal()?.throwIfAborted();
       assertSafeRegisteredRunRoot(candidate, registeredRoots);
       // Only a freshly authorised, clean, terminal root reaches this point.
       // Materialised related snapshots deliberately use 0555 directories;
@@ -19284,6 +19290,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
       // whole checkout (Git objects may be hard-linked outside this root).
       // Planning and every skipped/active/dirty root retain their permissions.
       await removeBridgeOwnedContextEntry(path.join(candidate.rootDirectory, "context"));
+      trelioCallSignal()?.throwIfAborted();
       await fs.rm(candidate.rootDirectory, { recursive: true, force: true });
     }
   } finally {
@@ -19293,10 +19300,12 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
   }
 
   for (const candidate of cacheCandidates) {
+    trelioCallSignal()?.throwIfAborted();
     await fs.rm(candidate.filePath, { force: true });
   }
 
   for (const candidate of skillRuntimeCacheCandidates) {
+    trelioCallSignal()?.throwIfAborted();
     const resolvedDirectory = path.resolve(candidate.directoryPath);
 
     if (!isLocalPathInside(SKILL_RUNTIME_CACHE_DIRECTORY, resolvedDirectory)) {
@@ -19312,6 +19321,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
   );
   await withRunRegistryLock(async () => {
     const state = await readRunRegistryState();
+    trelioCallSignal()?.throwIfAborted();
     await writeRunRegistry(
       state.roots.filter((item) => !deletedRootSet.has(path.resolve(item))),
       state.retainedRoots.filter((item) => !deletedRootSet.has(path.resolve(item))),
@@ -19331,8 +19341,16 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
 };
 
 const AUTOMATIC_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const AUTOMATIC_CLEANUP_BUDGET_MS = 5_000;
 
-export const runAutomaticLocalCleanup = async ({ origin, token }) => {
+export const runAutomaticLocalCleanup = ({ origin, token }) => withTrelioCallBudget(async () => {
+  // Retention spans every registered Workspace, including unrelated companies.
+  // It must not consume the whole foreground minute AFTER open has claimed the
+  // Run and printed its directory: execFile waits for exit, so that previously
+  // left a fresh lease on disk and an old CLAIM_FAILED in the MCP renewer.
+  // Use the same abort/HTTP engine under a shorter, non-sliding budget. A late
+  // local continuation checks that signal before deletion/registry publication;
+  // timeout never earns the daily success marker or a retry of the Run action.
   let state = {};
 
   try {
@@ -19365,6 +19383,7 @@ export const runAutomaticLocalCleanup = async ({ origin, token }) => {
   // Backend outage и любое недоказанное состояние остаются no-op без marker:
   // следующий подходящий запуск сможет безопасно повторить проверку.
   if (!result.skipped) {
+    trelioCallSignal()?.throwIfAborted();
     await writePrivateJsonFile(AUTOMATIC_CLEANUP_STATE_FILE, {
       schemaVersion: 1,
       lastSuccessfulAtByOrigin: {
@@ -19377,7 +19396,7 @@ export const runAutomaticLocalCleanup = async ({ origin, token }) => {
   }
 
   return result;
-};
+}, { timeoutMs: AUTOMATIC_CLEANUP_BUDGET_MS });
 
 const runAutomaticLocalCleanupForCurrentRun = async () => {
   const { metadata } = await findRunMetadata();
