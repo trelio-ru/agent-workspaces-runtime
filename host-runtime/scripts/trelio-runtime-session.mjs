@@ -683,12 +683,11 @@ export const buildRuntimeSessionProof = ({ state, toolName, now = new Date(), lo
 
 const emitHookOutput = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
-const writeUpdatedInput = (toolInput, proof, emit = emitHookOutput, additionalContext = null) => {
+const writeUpdatedInput = (toolInput, proof, emit = emitHookOutput) => {
   emit({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "allow",
-      ...(additionalContext ? { additionalContext } : {}),
       updatedInput: {
         ...toolInput,
         runtimeSessionProof: proof,
@@ -840,7 +839,6 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
     }
   }
   assertRuntimeHookBudget();
-  let launchContext = null;
   const launchBudget = Math.min(2_000, runtimeHookRemainingMilliseconds("PreToolUse", {
     startedAt: resolveRuntimeHookStartedAt(),
   }) - 1_000);
@@ -848,11 +846,11 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
     // The lifecycle event owns the selected folder. Never substitute this
     // long-lived MCP process's cwd or an agent-authored workingDirectory.
     const { synchronizeCodexLaunchFolder } = await import("./trelio-codex-conversation.mjs");
-    launchContext = await synchronizeCodexLaunchFolder({ hookInput, state, origin, toolInput,
+    await synchronizeCodexLaunchFolder({ hookInput, state, origin,
       signal: AbortSignal.any([runtimeHookSignal(), AbortSignal.timeout(launchBudget)]) });
   }
   assertRuntimeHookBudget();
-  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }), emit, launchContext);
+  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }), emit);
 };
 
 /**

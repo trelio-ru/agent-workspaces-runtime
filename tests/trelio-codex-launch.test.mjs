@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import test from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { inspectCodexLaunchFolder, synchronizeCodexLaunchFolder, codexLaunchFolderId } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const managed = line => `<!-- trelio-agent-workspaces:start -->\n## Trelio\n${line}\n<!-- trelio-agent-workspaces:end -->\n`;
 const canonical = managed("Папка привязана к компании «Company A» (`company-a`). Это контекст работы, а не привязка Git-репозитория.");
 const localBridge = { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile };
+const execFileAsync = promisify(execFile);
 const state = { runtimeSessionId: "11111111-1111-4111-8111-111111111111",
   observation: { clientFamily: "codex" }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
 
@@ -63,32 +66,55 @@ test("a chat about B in A registers only A; a lost PUT is reconciled through GET
   assert.equal(puts, 1);
   await synchronizeCodexLaunchFolder(input, { bridge });
   assert.equal(puts, 1);
+  assert.equal(await synchronizeCodexLaunchFolder({ ...input, state: { ...state,
+    runtimeSessionId: "22222222-2222-4222-8222-222222222222" } }, { bridge }), null);
+  assert.equal(puts, 1, "A new chat reuses the registered binding without another write or setup prompt");
   const folder = await inspectCodexLaunchFolder(root, { bridge });
   assert.equal(codexLaunchFolderId("twb_one", input.origin, folder), codexLaunchFolderId("twb_one", input.origin, folder));
   assert.notEqual(codexLaunchFolderId("twb_one", input.origin, folder), codexLaunchFolderId("twb_two", input.origin, folder));
 });
 
-test("an unbound old folder asks once; private read failure and missing client cwd perform no write", async t => {
+test("unbound selected projects stay silent across chats, including folders with real Git history", async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "trelio-codex-launch-unbound-")));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  let memo = {}, writes = 0;
-  const bridge = { ...localBridge, resolveWorkspaceBridgeConfigDirectory: () => root,
-    readPrivateJsonFile: async () => memo,
-    writePrivateJsonFile: async (_file, value) => { writes++; memo = value; },
-    loadToken: () => assert.fail("Unbound folders must not read credentials"),
-  };
-  const input = { hookInput: { cwd: root }, state, origin: "https://trelio.ru", toolInput: { companySlug: "company-b" } };
-  const hint = await synchronizeCodexLaunchFolder(input, { bridge });
-  assert.match(hint, /Only an affirmative user answer/u);
-  assert.match(hint, /folder_onboarding/u);
-  // The context quotes the exact locator as JSON, including Windows escapes.
-  assert.ok(hint.includes(JSON.stringify(root)));
-  assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
-  assert.equal(writes, 1);
-  bridge.readPrivateJsonFile = async () => { throw new Error("private ACL refusal"); };
-  await synchronizeCodexLaunchFolder(input, { bridge });
-  await synchronizeCodexLaunchFolder({ ...input, hookInput: {} }, { bridge });
-  assert.equal(writes, 1);
+  for (const withGit of [false, true]) {
+    await t.test(withGit ? "ordinary Git project" : "ordinary folder", async () => {
+      const folder = path.join(root, withGit ? "git-project" : "plain-project");
+      await fs.mkdir(folder);
+      const instructions = "# Personal project instructions\n\nKeep this selected project as it is.\n";
+      await fs.writeFile(path.join(folder, "AGENTS.md"), instructions);
+      const git = (...args) => execFileAsync("git", args, { cwd: folder, encoding: "utf8" });
+      if (withGit) {
+        await git("init", "--initial-branch=main");
+        await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+          "-c", `core.hooksPath=${path.join(root, "no-hooks")}`, "commit", "--allow-empty", "-m", "Fixture history");
+      }
+      const refsBefore = withGit ? (await git("show-ref")).stdout : null;
+      const configBefore = withGit ? await fs.readFile(path.join(folder, ".git", "config")) : null;
+      let privateCalls = 0;
+      const unexpected = () => { privateCalls++; throw new Error("Unbound navigation must stop before private state or setup"); };
+      const bridge = { ...localBridge, resolveWorkspaceBridgeConfigDirectory: unexpected,
+        readPrivateJsonFile: unexpected, writePrivateJsonFile: unexpected,
+        loadToken: unexpected, resolveBridgeDataPlaneRouting: unexpected, request: unexpected };
+      // A per-session reminder used to ask again in each new chat. Exercise
+      // distinct runtime identities as well as repeated reads in the same chat;
+      // task company metadata never authorizes onboarding the selected project.
+      for (const runtimeSessionId of [state.runtimeSessionId, "22222222-2222-4222-8222-222222222222"]) {
+        const input = { hookInput: { cwd: folder }, state: { ...state, runtimeSessionId },
+          origin: "https://trelio.ru", toolInput: { companySlug: "company-b" } };
+        assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
+        assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
+        assert.equal(await synchronizeCodexLaunchFolder({ ...input, hookInput: {} }, { bridge }), null);
+      }
+      assert.equal(privateCalls, 0, "No consent memo, credentials, registration or onboarding for an unbound folder");
+      assert.equal(await fs.readFile(path.join(folder, "AGENTS.md"), "utf8"), instructions);
+      assert.deepEqual((await fs.readdir(folder)).sort(), withGit ? [".git", "AGENTS.md"] : ["AGENTS.md"]);
+      if (withGit) {
+        assert.equal((await git("show-ref")).stdout, refsBefore);
+        assert.deepEqual(await fs.readFile(path.join(folder, ".git", "config")), configBefore);
+      }
+    });
+  }
 });
 
 test("encryption failure never uploads plaintext or starts a different transport", async t => {

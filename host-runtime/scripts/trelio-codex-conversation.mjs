@@ -342,12 +342,19 @@ export const codexLaunchFolderId = (token, origin, folder) => {
 /** Best effort under the original hook deadline. Missing/unknown state never
  * triggers pairing, unlock, device registration, local file edits or logging.
  * GET precedes each uncertain PUT; a lost mutation response earns no replay. */
-export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, toolInput, signal }, dependencies = {}) => {
+export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, signal }, dependencies = {}) => {
   if (state.observation?.clientFamily !== "codex" || !hookInput.cwd) return null;
   try {
     const bridge = dependencies.bridge ?? await import("./trelio-workspace.mjs");
     const folder = await inspectCodexLaunchFolder(hookInput.cwd, { ...dependencies, bridge });
-    if (!folder) return null;
+    // Navigation may reuse an explicit managed binding, but reading a task
+    // does not request initial folder setup. A selected Codex project can be
+    // an ordinary Git repository, which the onboarding classifier correctly
+    // refuses to adopt. Asking from this hook sent every new chat through that
+    // unrelated setup failure; a session memo only hid repeats in one chat.
+    // Stop before private state, credentials or network access. Explicit setup
+    // keeps the existing consent/Git/CAS flow; do not infer scope from a task.
+    if (folder?.state !== "bound") return null;
     const memoKey = crypto.createHash("sha256").update(JSON.stringify([
       origin, state.runtimeSessionId, folder.folderPath, folder.company?.slug, folder.project?.slug,
     ])).digest("hex");
@@ -364,11 +371,6 @@ export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, t
     const remember = () => bridge.writePrivateJsonFile(memoPath, {
       schemaVersion: 1, expiresAt: state.expiresAt, observed: [...observed, memoKey],
     });
-    if (folder.state === "unbound") {
-      if (!toolInput?.companySlug) return null;
-      await remember();
-      return `Only during explicitly requested Trelio business work: the client-selected folder ${JSON.stringify(folder.folderPath)} has no confirmed company binding. After a successful exact read of company ${JSON.stringify(toolInput.companySlug)}, ask once in the user's language whether to use this folder for that company's new Codex chats. Show the complete company name and absolute folder path. Only an affirmative user answer authorizes the existing folder_onboarding plan/apply for this exact folder and company. A refusal writes nothing. Repository development, audit and diagnostics do not authorize business folder binding. Never create a Run just to register a folder.`;
-    }
     // loadToken only reads the already paired credential. requireToken would
     // be wrong here: an optional navigation feature must not initiate setup.
     const token = await bridge.loadToken(origin, { signal });

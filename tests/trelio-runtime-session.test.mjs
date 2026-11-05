@@ -1488,6 +1488,7 @@ test("first protected call observes the current model and supported host names i
     assert.equal(registrationBody.observation.effortLevel, "high");
 
     const hookOutput = JSON.parse(guarded.stdout);
+    assert.equal(hookOutput.hookSpecificOutput.additionalContext, undefined);
     const updatedInput = hookOutput.hookSpecificOutput.updatedInput;
     const proof = updatedInput.runtimeSessionProof;
     assert.equal(updatedInput.taskNumber, 2);
@@ -1509,6 +1510,22 @@ test("first protected call observes the current model and supported host names i
       publicKey,
       Buffer.from(proof.signature, "base64url"),
     ), true);
+
+    // An ordinary selected project is not a request to bind its folder. The
+    // actual hook must still admit/sign the original read without injecting
+    // setup instructions or registering another launch path.
+    const unbound = await runHook({
+      cwd: await fsRealpath(temporaryHome), hook_event_name: "PreToolUse",
+      session_id: threadId, model: "gpt-5.4", transcript_path: transcriptPath,
+      tool_name: "mcp__trelio__get_task",
+      tool_input: { companySlug: "vkus", projectSlug: "first", taskNumber: 2 },
+    }, environment);
+    assert.equal(unbound.exitCode, 0, unbound.stderr);
+    const unboundOutput = JSON.parse(unbound.stdout).hookSpecificOutput;
+    assert.equal(unboundOutput.additionalContext, undefined);
+    assert.ok(unboundOutput.updatedInput.runtimeSessionProof.signature);
+    assert.equal(unboundOutput.updatedInput.taskNumber, 2);
+    assert.equal(launchPuts, 1, "An unbound folder never starts navigation setup");
 
     // Exercise the real PreToolUse process, private boundary and worker, not
     // only the pure parser. The synthetic rollout has the same public wire

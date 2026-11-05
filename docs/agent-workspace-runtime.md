@@ -3126,11 +3126,14 @@ Plaintext fallback, новый Run, model turn, folder edit и вывод пут
 
 Подтверждённый receipt кешируется только в owner-private session observation,
 не служит ACL/cache authority. Bounded companion удаляется при SessionEnd/устаревании. Старые managed папки регистрируются при обычном
-первом protected обращении после обновления. При genuinely unbound папке generic
-additionalContext один раз за сеанс предлагает после exact business read коротко
-подтвердить exact company name и текущий полный путь; согласие ведёт в existing
-folder_onboarding plan/apply, отказ не пишет binding. Source development/audit/
-diagnostics такой authority не создают. Backend с новым endpoint/content adapter
+первом protected обращении после обновления. Без existing effective managed
+binding hook молчит и останавливается до private observation, credentials и
+network: выбранный Codex project и чтение задачи не являются запросом настройки.
+Новый чат не повторяет вопрос о папке, не запускает Git-классификацию/onboarding
+и не предлагает другую папку из-за Git-истории текущего проекта. Первоначальная
+привязка выполняется только по явному setup-запросу через existing
+folder_onboarding plan/apply с прежними consent/Git/CAS guards. Source
+development/audit/diagnostics такой authority не создают. Backend с новым endpoint/content adapter
 публикуется раньше dependent runtime; old backend refusal не запускает fallback.
 Browser кнопка и выбор другого компьютера/папки принадлежат Trelio frontend,
 не local runtime; новая ссылка не создаёт relation задачи с Codex thread.
