@@ -9,7 +9,7 @@ import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHand
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { trelioCallSignal, withTrelioCallBudget } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 
 const pending = () => { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; };
@@ -153,7 +153,9 @@ test("a rejected CLI finish exits nonzero after cleanup despite a lingering depe
   // any credential or HTTP read. Its error must settle the child, never turn
   // into a timeout or a successful save merely because the process is alive.
   await assert.rejects(promisify(execFile)(process.execPath,
-    ["--import", preload, fileURLToPath(bridge), "finish"], {
+    // --import takes a module specifier, so a Windows drive path must be a
+    // file URL. The executable's entrypoint still takes an ordinary OS path.
+    ["--import", pathToFileURL(preload).href, fileURLToPath(bridge), "finish"], {
       cwd: home, timeout: 5000, env: { ...process.env, HOME: home, USERPROFILE: home,
         LOCALAPPDATA: path.join(home, "AppData", "Local"), XDG_CONFIG_HOME: path.join(home, ".config"),
         CODEX_HOME: path.join(home, ".codex"), TRELIO_CONFIG_HOME: path.join(home, "trelio"),

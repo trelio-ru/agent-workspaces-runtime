@@ -4583,7 +4583,8 @@ for (const recovery of ["clean", "lingering_handles", "before_acceptance", "afte
       // finish child forever; its complete piped output must still be drained.
       const preloadPath = path.join(temporaryDirectory, "lingering-handles.mjs");
       await writeFile(preloadPath, 'process.stdout.write("x".repeat(256 * 1024) + "\\n"); setInterval(() => {}, 1000);');
-      finishArguments.unshift("--import", preloadPath);
+      // A drive path is not an ESM module specifier on Windows.
+      finishArguments.unshift("--import", pathToFileURL(preloadPath).href);
     }
     const finishOptions = { cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: fixtureEnv };
     if (interrupted) {
