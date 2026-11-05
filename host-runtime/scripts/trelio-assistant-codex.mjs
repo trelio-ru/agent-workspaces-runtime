@@ -1,5 +1,6 @@
 /** Native Codex adapter: exact IDs, stdio-only prompts, no transcript cache. */
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -257,8 +258,11 @@ export const validateAssistantCodexUsage = value => {
  * read failures preserve the last accepted observation and every block fence.
  * A CAS/report failure never repeats a POST or changes business execution.
  */
-export const maintainAssistantCodexUsage = async ({client,readUsage,signal}) => {
+export const maintainAssistantCodexUsage = async ({client,readUsage,signal,now=Date.now}) => {
   const current=await client.readCodexUsage(signal);
+  // Minute computer sampling must not multiply native account/RPC metering.
+  // Preserve the existing five-minute cadence and every retained quota fence.
+  if(current.checkedAt&&now()-Date.parse(current.checkedAt)>=0&&now()-Date.parse(current.checkedAt)<300_000)return current;
   let snapshot;
   try{snapshot=validateAssistantCodexUsage(await readUsage(signal));}catch{return current;}
   try{return await client.reportCodexUsage({expectedRevision:current.revision,clientRequestId:randomUUID(),snapshot},signal);}
@@ -1292,4 +1296,125 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       ? 'This is ONE corrective reply to the SAME original private owner question after its prior technical limitation reply was positively delivered. Preserve that history and never repeat the prior send. Read the exact original and fresh current sources yourself. Recheck previously failed exact selections that are relevant to this question using current read-only tools; prior locators grant no access. Then answer the original question from the verified current source. Prior technical replies are not the answer. Only reply_owner is permitted; no Task, Workspace, Run, dialogue, route, ignore, redirect or direct provider sending. The host retains the original peer and fences this one corrective response.\n'
       : 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only execution failure. This negative recovery does not establish that a prior response was delivered. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
   return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${replyOnly}${instruction}\n${conversationTracking}${scheduled}`;
+};
+
+// Windows telemetry is deliberately a fixed native read, never model-authored
+// PowerShell. Only reviewed counts/booleans cross the existing bounded pipe.
+export const ASSISTANT_HOST_HEALTH_SCRIPT = String.raw`
+$ErrorActionPreference='Stop'
+[Console]::InputEncoding=[Text.Encoding]::UTF8
+$null=[Console]::In.ReadToEnd()
+function Events($filter) {
+  try { @(Get-WinEvent -FilterHashtable $filter -MaxEvents 1000 -ErrorAction Stop) }
+  catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { @() } else { throw } }
+}
+$codex='error'
+try { $running=@(Get-Process -Name Codex -ErrorAction SilentlyContinue); $codex=if($running.Count -gt 0){'running'}else{'not_running'} } catch {}
+$events=@{status='error'}
+try {
+  $since=(Get-Date).AddMinutes(-15)
+  $system=@(Events @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Power';Id=41;StartTime=$since})
+  $apps=@(Events @{LogName='Application';ProviderName='Application Error';Id=1000;StartTime=$since})
+  if($system.Count -lt 1000 -and $apps.Count -lt 1000){
+    $crashes=@($apps | Where-Object { $_.Properties.Count -gt 0 -and [string]$_.Properties[0].Value -ieq 'Codex.exe' }).Count
+    $events=@{status='available';value=@{systemCritical=$system.Count;applicationCrashes=$crashes}}
+  }
+} catch [System.UnauthorizedAccessException] { $events=@{status='access_denied'} } catch {}
+@{codex=$codex;events=$events}|ConvertTo-Json -Compress -Depth 5
+`;
+const healthObject=value=>value&&Object.getPrototypeOf(value)===Object.prototype;
+const healthExact=(value,keys)=>healthObject(value)&&Object.keys(value).sort().join(',')===[...keys].sort().join(',');
+const healthNumber=(value,max=Number.MAX_SAFE_INTEGER)=>Number.isFinite(value)&&value>=0&&value<=max;
+const healthInteger=(value,max=Number.MAX_SAFE_INTEGER)=>Number.isSafeInteger(value)&&healthNumber(value,max);
+const healthDate=value=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/u.test(value)&&Number.isFinite(Date.parse(value));
+const healthInvalid=()=>fail('ASSISTANT_HOST_HEALTH_INVALID');
+const healthMetric=(metric,check)=>{
+  if(!healthObject(metric))healthInvalid();
+  if(metric.status==='available'){
+    if(!healthExact(metric,['status','value'])||!check(metric.value))healthInvalid();
+  }else if(!healthExact(metric,['status'])||!['unsupported','access_denied','error'].includes(metric.status))healthInvalid();
+  return metric;
+};
+export const validateAssistantHostSnapshot=value=>{
+  if(!healthExact(value,['schemaVersion','measuredAt','cpu','memory','disk','windows','processes','events','network'])||value.schemaVersion!==1||!healthDate(value.measuredAt))healthInvalid();
+  healthMetric(value.cpu,v=>healthNumber(v,100));
+  healthMetric(value.memory,v=>healthExact(v,['totalBytes','availableBytes'])&&healthInteger(v.totalBytes)&&v.totalBytes>0&&healthInteger(v.availableBytes,v.totalBytes));
+  healthMetric(value.disk,v=>healthExact(v,['totalBytes','freeBytes'])&&healthInteger(v.totalBytes)&&v.totalBytes>0&&healthInteger(v.freeBytes,v.totalBytes));
+  healthMetric(value.windows,v=>healthExact(v,['release','uptimeSeconds'])&&typeof v.release==='string'&&/^\d{1,6}(\.\d{1,6}){1,3}$/u.test(v.release)&&healthInteger(v.uptimeSeconds));
+  healthMetric(value.processes,v=>healthExact(v,['supervisor','codex','supervisorRestarts'])&&(v.supervisorRestarts===null||healthInteger(v.supervisorRestarts,1000000))&&v.supervisor==='running'&&['running','not_running','maintenance'].includes(v.codex));
+  healthMetric(value.events,v=>healthExact(v,['systemCritical','applicationCrashes'])&&healthInteger(v.systemCritical,1000)&&healthInteger(v.applicationCrashes,1000));
+  healthMetric(value.network,v=>healthExact(v,['latencyMs'])&&healthInteger(v.latencyMs,60_000));
+  return structuredClone(value);
+};
+export const validateAssistantHostJournal=value=>{
+  if(!healthExact(value,['schemaVersion','settingsRevision','lastSampleAt','lastSentAt','cpu','samples','supervisorGeneration','supervisorRestarts'])||value.schemaVersion!==1
+    ||!healthInteger(value.settingsRevision)||!healthInteger(value.lastSampleAt)||!healthInteger(value.lastSentAt)
+    ||value.supervisorGeneration!==null&&!UUID.test(value.supervisorGeneration)||!healthInteger(value.supervisorRestarts,1000000)
+    ||value.cpu!==null&&(!healthExact(value.cpu,['idle','total'])||!healthInteger(value.cpu.idle)||!healthInteger(value.cpu.total)||value.cpu.idle>value.cpu.total)
+    ||!Array.isArray(value.samples)||value.samples.length>5)healthInvalid();
+  return {...value,samples:value.samples.map(validateAssistantHostSnapshot)};
+};
+export const validateAssistantHostState=value=>{
+  if(!healthExact(value,['enabled','settingsRevision','revision'])||typeof value.enabled!=='boolean'
+    ||!healthInteger(value.settingsRevision)||!healthInteger(value.revision))healthInvalid();
+  return {...value};
+};
+
+/** One bounded measurement per minute, at most five private samples. Every
+ * invocation rereads the native preference; toggling off invalidates in-flight
+ * reports at the server too. Failure never gates polling, model work or health.
+ * Dependencies below are trusted test seams, not tool/CLI parameters. */
+export const maintainAssistantHostHealth=async({client,readJournal,writeJournal,maintenance=false,supervisorGeneration=null,signal,
+  platform=process.platform,environment=process.env,now=Date.now,osApi=os,statfs=fs.statfs,readNative}={})=>{
+  if(platform!=='win32')return {enabled:false};
+  const started=performance.now(),current=validateAssistantHostState(await client.readHostHealth(signal));
+  if(!current.enabled){await writeJournal(null);return current;}
+  const at=now();
+  let old=await readJournal();
+  if(old)old=validateAssistantHostJournal(old);
+  if(!old||old.settingsRevision!==current.settingsRevision)old={schemaVersion:1,settingsRevision:current.settingsRevision,lastSampleAt:0,lastSentAt:0,cpu:null,samples:[],supervisorGeneration:null,supervisorRestarts:0};
+  if(at-old.lastSampleAt<55_000)return current;
+  const supervisorRestarts=Math.min(1000000,old.supervisorRestarts+(supervisorGeneration&&old.supervisorGeneration&&old.supervisorGeneration!==supervisorGeneration?1:0));
+  const unknown=()=>({status:'error'}),available=value=>({status:'available',value});
+  const snapshot={schemaVersion:1,measuredAt:new Date(at).toISOString(),cpu:unknown(),memory:unknown(),disk:unknown(),windows:unknown(),processes:unknown(),events:unknown(),
+    network:available({latencyMs:Math.min(60_000,Math.max(0,Math.round(performance.now()-started)))})};
+  let cpu=null;
+  try{
+    cpu=osApi.cpus().reduce((sum,core)=>({idle:sum.idle+core.times.idle,total:sum.total+Object.values(core.times).reduce((a,b)=>a+b,0)}),{idle:0,total:0});
+    const total=cpu.total-(old.cpu?.total??cpu.total),idle=cpu.idle-(old.cpu?.idle??cpu.idle);
+    if(total>0&&idle>=0&&idle<=total&&at-old.lastSampleAt<=120_000)snapshot.cpu=available(Math.round((1-idle/total)*10000)/100);
+  }catch{cpu=null;}
+  try{snapshot.memory=available({totalBytes:osApi.totalmem(),availableBytes:osApi.freemem()});}catch{}
+  try{snapshot.windows=available({release:osApi.release(),uptimeSeconds:Math.floor(osApi.uptime())});}catch{}
+  try{
+    const root=environment.SystemRoot??environment.SYSTEMROOT;
+    if(typeof root==='string'&&/^[a-z]:\\/iu.test(root)){
+      const disk=await statfs(path.win32.parse(root).root);snapshot.disk=available({totalBytes:disk.blocks*disk.bsize,freeBytes:disk.bavail*disk.bsize});
+    }
+  }catch(error){snapshot.disk={status:['EACCES','EPERM'].includes(error?.code)?'access_denied':'error'};}
+  try{
+    const native=readNative??(async()=>{
+      const {runAssistantWindowsBackgroundNative}=await import('./trelio-assistant-setup.mjs');
+      return runAssistantWindowsBackgroundNative({}, {environment,signal,timeoutMs:5000,script:ASSISTANT_HOST_HEALTH_SCRIPT,project:value=>{
+        if(!healthExact(value,['codex','events'])||!['running','not_running','error'].includes(value.codex))healthInvalid();
+        healthMetric(value.events,v=>healthExact(v,['systemCritical','applicationCrashes'])&&healthInteger(v.systemCritical,1000)&&healthInteger(v.applicationCrashes,1000));
+        return value;
+      }});
+    });
+    const result=await native(signal);snapshot.events=result.events;
+    if(result.codex!=='error')snapshot.processes=available({supervisor:'running',codex:maintenance?'maintenance':result.codex,
+      supervisorRestarts:supervisorGeneration===null?null:supervisorRestarts});
+  }catch{}
+  validateAssistantHostSnapshot(snapshot);
+  // A gap invalidates transient evidence. Persist BEFORE reporting so a lost
+  // result cannot recreate the same sample under a new request after restart.
+  const samples=[...(at-old.lastSampleAt<=120_000?old.samples:[]),snapshot].slice(-5);
+  const next={...old,cpu,lastSampleAt:at,samples,supervisorGeneration,supervisorRestarts};await writeJournal(next);
+  const critical=snapshot.disk.status==='available'&&snapshot.disk.value.freeBytes<1024**3;
+  if(old.lastSentAt&&at-old.lastSentAt<300_000&&!critical)return current;
+  // Drop the attempted batch before POST. An ambiguous response is never
+  // automatically replayed; the next native GET obtains the authoritative CAS.
+  await writeJournal({...next,lastSentAt:at,samples:[]});
+  return validateAssistantHostState(await client.reportHostHealth({clientRequestId:randomUUID(),expectedRevision:current.revision,
+    settingsRevision:current.settingsRevision,samples},signal));
 };

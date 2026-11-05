@@ -1,4 +1,4 @@
-import { validateAssistantCodexUsage } from './trelio-assistant-codex.mjs';
+import { validateAssistantHostSnapshot, validateAssistantHostState, validateAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
 import { setTimeout as waitForTimer } from 'node:timers/promises';
@@ -348,6 +348,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
   if (typeof fetchImpl !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const routes = new Map([
     ['pair', ['POST','/pairings']], ['exchange',['POST','/pairings/exchange']],
+    ['hostHealthRead',['GET','/runtime/host-health']], ['hostHealthReport',['POST','/runtime/host-health']],
     ['usageRead',['GET','/runtime/codex-usage']], ['usageReport',['POST','/runtime/codex-usage']],
     ['healthRead',['GET','/runtime/health']], ['healthReport',['POST','/runtime/health']],
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
@@ -2673,6 +2674,16 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // This projection is diagnostic, never an ACK receipt or write admission.
       if(result.revision!==body.expectedRevision+1||result.sourceRevision!==body.sourceRevision||result.code==='not_checked')
         fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return result;
+    },
+    async readHostHealth(signal){return validateAssistantHostState(await call('hostHealthRead',undefined,signal));},
+    async reportHostHealth(input,signal){
+      if(!object(input)||Object.keys(input).sort().join(',')!=='clientRequestId,expectedRevision,samples,settingsRevision'
+        ||!Array.isArray(input.samples)||!input.samples.length||input.samples.length>5)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={clientRequestId:id(input.clientRequestId),expectedRevision:revision(input.expectedRevision),
+        settingsRevision:revision(input.settingsRevision),samples:input.samples.map(validateAssistantHostSnapshot)};
+      const result=validateAssistantHostState(await call('hostHealthReport',body,signal));
+      if(!result.enabled||result.settingsRevision!==body.settingsRevision||result.revision!==body.expectedRevision+1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return result;
     },
     async readCodexUsage(signal) {

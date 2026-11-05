@@ -739,3 +739,49 @@ test('the signed tick returns a paced capacity wait without an old-parent generi
   assert.equal(f.state.code,'codex_capacity_wait');
   await reportAssistantDispatchRecovery(f.client);assert.equal(f.state.code,'ready');assert.equal(f.reports.at(-1).clearedReason,'codex_capacity_wait');
 });
+
+test('Windows computer sampler persists bounded minute evidence and never retries an ambiguous report',async()=>{
+  const {maintainAssistantHostHealth,validateAssistantHostSnapshot}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+  let at=Date.now(),journal=null,revision=0,enabled=true,total=100,idle=20,posts=0,failed=false;
+  const bodies=[];
+  const dependencies={platform:'win32',supervisorGeneration:randomUUID(),environment:{SystemRoot:'C:\\Windows'},now:()=>at,
+    client:{readHostHealth:async()=>({enabled,revision,settingsRevision:0}),reportHostHealth:async body=>{
+      posts++;bodies.push(body);revision++;if(failed)throw new Error('transport');return {enabled,revision,settingsRevision:0};}},
+    readJournal:async()=>journal,writeJournal:async value=>{journal=structuredClone(value);},
+    osApi:{cpus:()=>[{times:{idle,user:total-idle}}],freemem:()=>4*1024**3,totalmem:()=>8*1024**3,release:()=> '10.0.26100',uptime:()=>3600},
+    statfs:async root=>{assert.equal(root,'C:\\');return {blocks:100*1024,bavail:20*1024,bsize:1024**2};},
+    readNative:async()=>({codex:'running',events:{status:'available',value:{systemCritical:0,applicationCrashes:0}}})};
+  await maintainAssistantHostHealth(dependencies);assert.equal(posts,1);assert.equal(bodies[0].samples[0].cpu.status,'error','no first-sample invented CPU');
+  for(let minute=1;minute<=5;minute++){at+=60_000;total+=100;idle+=5;await maintainAssistantHostHealth(dependencies);}
+  assert.equal(posts,2);assert.equal(bodies[1].samples.length,5);assert.equal(bodies[1].samples[0].cpu.value,95);
+  for(const sample of bodies[1].samples)assert.deepEqual(validateAssistantHostSnapshot(sample),sample);
+  dependencies.supervisorGeneration=randomUUID();at+=60_000;await maintainAssistantHostHealth(dependencies);
+  assert.equal(journal.supervisorRestarts,1,'native supervisor generation survives worker replacement without counting each tick');
+  failed=true;at+=300_000;await assert.rejects(maintainAssistantHostHealth(dependencies));assert.equal(posts,3);
+  await maintainAssistantHostHealth(dependencies);assert.equal(posts,3,'lost POST result never resends its attempted batch');
+  enabled=false;at+=60_000;await maintainAssistantHostHealth(dependencies);assert.equal(journal,null);assert.equal(posts,3);
+  await assert.rejects(Promise.resolve().then(()=>validateAssistantHostSnapshot({...bodies[0].samples[0],hostname:'PRIVATE'})));
+});
+
+test('sampler failures stay outside business readiness and maintain a minute cadence even behind quota blocks',async()=>{
+  const {runAssistantBackgroundTick}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  let samples=0,closed=0,polled=0;
+  const createHost=async()=>({hostHealth:async()=>{samples++;return {enabled:true};},codexUsage:async()=>({blocked:true}),
+    coordinator:{pollOnce:async()=>{polled++;}},close:async()=>{closed++;}});
+  const result=await runAssistantBackgroundTick({createHost,pluginMaintenance:async()=>({state:'disabled'}),codexMaintenance:async()=>({state:'disabled'})});
+  assert.equal(samples,1);assert.equal(polled,1);assert.equal(closed,1);assert.equal(result.reason,'codex_usage_limited');assert.equal(result.nextPollMs,60_000);
+  const failed=await runAssistantBackgroundTick({createHost:async()=>({...await createHost(),hostHealth:async()=>{throw new Error('no telemetry');}}),
+    pluginMaintenance:async()=>({state:'disabled'}),codexMaintenance:async()=>({state:'disabled'})});
+  assert.equal(failed.reason,'codex_usage_limited','telemetry never invents or clears a quota block');
+});
+
+test('Windows executes the actual bounded telemetry pipe without privileged changes', {skip:process.platform!=='win32'},async()=>{
+  const {maintainAssistantHostHealth,validateAssistantHostSnapshot}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+  let journal=null,snapshot=null;
+  await maintainAssistantHostHealth({readJournal:async()=>journal,writeJournal:async value=>{journal=value;},
+    client:{readHostHealth:async()=>({enabled:true,settingsRevision:0,revision:0}),reportHostHealth:async body=>{
+      snapshot=body.samples[0];return {enabled:true,settingsRevision:0,revision:1};}}});
+  assert.ok(snapshot);validateAssistantHostSnapshot(snapshot);
+  assert.equal(snapshot.windows.status,'available');assert.equal(snapshot.memory.status,'available');assert.equal(snapshot.disk.status,'available');
+  assert.doesNotMatch(JSON.stringify(snapshot),/hostname|USERPROFILE|commandLine|Message|\\\\Windows/iu);
+});

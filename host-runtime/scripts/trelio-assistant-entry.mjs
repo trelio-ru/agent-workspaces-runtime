@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { maintainAssistantCodexUsage } from './trelio-assistant-codex.mjs';
+import { maintainAssistantHostHealth, maintainAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-host-runtime-recovery.mjs';
@@ -1859,6 +1859,14 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       ...(dependencies.now?{now:dependencies.now}:{}),...(dependencies.notify?{notify:dependencies.notify}:{}),
     });
     return {identity:stableIdentity,coordinator,
+      async hostHealth(signal){
+        return invoke(async(live,host)=>{
+          const plugin=await host.readPluginUpdate(),codex=await host.readCodexUpdate();
+          const maintenance=!!(plugin&&!['ready','failed'].includes(plugin.stage)||codex&&!['ready','failed','registration_failed','service_failed'].includes(codex.phase));
+          return maintainAssistantHostHealth({client:live,signal,maintenance,supervisorGeneration:(await host.readPluginSupervisor())?.generation??null,
+            readJournal:()=>host.readHostHealthJournal(),writeJournal:value=>host.writeHostHealthJournal(value)});
+        });
+      },
       async codexUsage(signal){
         return invoke(live=>maintainAssistantCodexUsage({client:live,signal,
           readUsage:()=>nativeRuntime.readAssistantCodexUsage({signal})}));
@@ -2072,6 +2080,19 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
   if(signal?.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
   const startedAt=now();
   const host=await createHost();
+  // Sampling runs alongside native work, independently of quota/model readiness.
+  // Only its own timer is cancelled here; it never aborts the business pass.
+  const monitorStop=new AbortController(),monitorSignal=signal?AbortSignal.any([signal,monitorStop.signal]):monitorStop.signal;
+  let hostMetricsEnabled=false;
+  const sample=async()=>{try{hostMetricsEnabled=(await host.hostHealth?.(monitorSignal))?.enabled===true;}catch{}};
+  const firstSample=sample();
+  const monitor=(async()=>{
+    await firstSample;
+    while(!monitorSignal.aborted){
+      await waitForAssistantPoll(60_000,monitorSignal);
+      if(!monitorSignal.aborted)await sample();
+    }
+  })();
   const reportDispatch=async(dispatch,error=null)=>{
     const failure=dispatch?.failure?.code==='ASSISTANT_CODEX_MODEL_CAPACITY'
       && (!error||['ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN','ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED'].includes(error.code))
@@ -2082,6 +2103,7 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
     // cause, advances a cursor, clears the fence or repeats native work.
     if(failure&&host.reportDispatchFailure)try{await host.reportDispatchFailure(failure);}catch{}
   };
+  const runOnce=async()=>{
   try {
     // The already-running stable supervisor selects this fresh signed worker;
     // enabling maintenance needs no extra plugin ABI or manual parent restart.
@@ -2149,7 +2171,12 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
       &&['ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN','ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED'].includes(error.code))
       return {schemaVersion:1,state:'blocked',dispatch,...(host.coordinator.modelCapacityRetryDelay?.()?{nextPollMs:host.coordinator.modelCapacityRetryDelay()}:{})};
     throw error;
-  } finally {await host.close();}
+  }
+  };
+  let tickResult;
+  try {tickResult=await runOnce();}
+  finally {await firstSample;monitorStop.abort();await monitor;await host.close();}
+  return hostMetricsEnabled?{...tickResult,nextPollMs:Math.min(tickResult.nextPollMs??60_000,60_000)}:tickResult;
 };
 
 /** The old plugin cache can disappear while this facade is still alive. A

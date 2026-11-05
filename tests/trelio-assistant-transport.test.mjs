@@ -4441,3 +4441,20 @@ test('generation reply correction keeps its separate strict witness and native c
   await assert.rejects(client.beginSourceIntake({...input,readOnlyRecovery:{...witness,...patch}}),/INVALID_INPUT/);
  assert.equal(calls,before,'no mixed/forged certificate reaches HTTP');
 });
+
+test('computer health exposes only fixed device transport and closed telemetry, never a model command',async()=>{
+  const {maintainAssistantHostHealth}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore(),credential=`tda_${'x'.repeat(43)}`;
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  let revision=0,journal=null,posts=0,body;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    assert.equal(url,origin+'/api/digital-assistants/runtime/host-health');assert.equal(options.headers.authorization,`Bearer ${credential}`);
+    if(options.method==='POST'){posts++;body=JSON.parse(options.body);revision++;}
+    return new Response(JSON.stringify({enabled:true,settingsRevision:0,revision}),{headers:{'content-type':'application/json'}});
+  }})});
+  await maintainAssistantHostHealth({client,platform:'win32',environment:{},readJournal:async()=>journal,writeJournal:async value=>{journal=value;},readNative:async()=>{throw new Error('PRIVATE');}});
+  assert.equal(posts,1);assert.equal(body.samples.length,1);
+  await assert.rejects(client.reportHostHealth({...body,message:'PRIVATE'}));
+  await assert.rejects(client.reportHostHealth({...body,samples:[{...body.samples[0],hostname:'PRIVATE'}]}));
+  assert.equal(posts,1,'malformed content never reaches HTTP and reports never retry');
+});

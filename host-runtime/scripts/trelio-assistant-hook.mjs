@@ -343,6 +343,22 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       if(JSON.stringify(await this.readPluginUpdate())!==JSON.stringify(next))fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
       return next;
     },
+    // Identity-bound, owner-private minute evidence only. Never store raw OS
+    // output or expose this host-only journal through model/MCP methods.
+    async readHostHealthJournal(){
+      const target=await maintenanceFile('host-health');
+      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
+      const envelope=await ops.readPrivateJsonFile(target,{maximumBytes:16_384}),current=await readIdentity();
+      if(!exactObject(envelope,['assistantId','deviceId','value'])||!current||envelope.assistantId!==current.assistantId||envelope.deviceId!==current.deviceId)
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      if(envelope.value===null)return null;
+      return (await import('./trelio-assistant-codex.mjs')).validateAssistantHostJournal(envelope.value);
+    },
+    async writeHostHealthJournal(value){
+      const current=await readIdentity();if(!current)fail('ASSISTANT_HOST_NOT_CONFIGURED');
+      if(value!==null)(await import('./trelio-assistant-codex.mjs')).validateAssistantHostJournal(value);
+      await ops.writePrivateJsonFile(await maintenanceFile('host-health'),{assistantId:current.assistantId,deviceId:current.deviceId,value});
+    },
     async readPluginSupervisor(){
       const target=await maintenanceFile('supervisor');
       try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}

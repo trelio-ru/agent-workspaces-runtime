@@ -3934,3 +3934,39 @@ reply-only child may reread current source/comments and perform its FIRST signed
 original-peer send. Backend expansion/deploy precedes runtime activation; an old
 backend fails closed. No model tool, old lease renewal, Task/Run, ACK or health
 shortcut is introduced.
+
+
+<a id="computer-health"></a>
+
+## Computer health
+
+The signed Windows worker samples CPU deltas, RAM, system-volume space, numeric
+OS release/uptime, fixed Trelio control-read latency, supervisor restarts and
+Codex/process/event counts without a model. The same bounded native PowerShell
+pipe reads only Kernel-Power/41 and Application Error/1000 (Codex.exe); no raw
+event, paths, usernames, machine names, command lines or credentials leave it.
+Unprivileged refusals are typed unknown, never zero. First/gapped CPU is unknown.
+The paired identity-bound private journal stores at most five minute snapshots,
+CPU counters, native supervisor generation/restart count and cadence, with no
+model/CLI method. It survives workers/restarts and is cleared when disabled.
+
+Fixed device GET/POST `/runtime/host-health` advertises the independent settings
+and report revisions. Collection defaults on for existing/new devices; the owner
+can disable this exact computer. Fresh native settings precede every sample;
+settings revision fences in-flight reports. Every nested field is closed and
+bounded; 1–5 samples/report, schemaVersion=1, one POST attempt and no retry after
+uncertain transport. The server rechecks time/order/CAS/owner/lifecycle/expiry.
+No company key/scope, model proof, business minimum, task/Run or human profile is
+borrowed. Backend/migration must precede activation; stable plugin/hooks/minimum
+remain unchanged. An old backend refusal is not permission for another route.
+
+Sampling runs alongside work, including quota waits; no failure changes work
+readiness, health latches, source ACK or delivery receipts. Enabled idle workers
+request a one-minute next tick; busy workers sample every minute in the same
+lifecycle. Ordinary reports flush every five minutes, critical disk may flush
+earlier; the attempted buffer is retired before POST. Missing minutes invalidate
+sustained-load evidence. Current native maintenance suppresses stopped-Codex
+classification without declaring repaired business work. The server owns durable
+threshold/recovery hysteresis and separate per-code incidents/notices, seven-day
+metric retention and thirty-day closed-incident history. Native Windows CI runs
+the actual read-only pipe; synthetic tests do not claim production rollout.

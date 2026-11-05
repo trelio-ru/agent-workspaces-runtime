@@ -964,6 +964,8 @@ publication tooling также остаются вне этого публичн
   properties/resources and EOF restoration, not only WM_GETICON receipts.
   See [contract](docs/assistant-scheduler.md#owned-windows-console-and-taskbar-identity).
 
+- Windows computer diagnostics: owner/device default-on, closed typed samples, private minute buffer and independent server incidents. See [host health](docs/assistant-scheduler.md#computer-health). Never gate/replay business work or expose raw native output.
+
 ## Граница plugin/runtime
 
 - Human Codex main и его immutable hook-компонент используют тот же verifier и
