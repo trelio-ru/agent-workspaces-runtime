@@ -2898,6 +2898,97 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
   }
 });
 
+test("open completes after an unrelated retention read stalls, without another claim", {
+  timeout: 30_000,
+}, async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-open-retention-"));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const environment = workspaceFixtureEnvironment(homeDirectory);
+  const configDirectory = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory });
+  const workspaceId = "41414141-4141-4141-8141-414141414141";
+  const otherWorkspaceId = "42424242-4242-4242-8242-424242424242";
+  const otherRoot = path.join(temporaryDirectory, "retained-root");
+  const exported = await createExportBundle(path.join(temporaryDirectory, "export"), {
+    "WORKSPACE_CONTEXT.md": "# Opened before optional retention\n",
+  });
+  const run = { id: runId, workspaceId, status: "running", leaseId: relatedWorkspaceId,
+    fencingToken: 2, baseHead: exported.head, draftHead: null, contextHeadsJson: {},
+    agentInstructionsSnapshotJson: { compiledMarkdown: "# Pinned instructions\n" },
+    userProfileSnapshotJson: { compiledMarkdown: "# Pinned profile\n" } };
+  let claims = 0;
+  let stalledReads = 0;
+  let heartbeats = 0;
+  let serverError;
+  const sockets = new Set();
+  const server = createServer((request, response) => {
+    try {
+      response.setHeader("content-type", "application/json");
+      if (respondToPlainTestBridgeRouting(request, response)) return;
+      if (request.url === "/api/agent-workspaces/bridge-compatibility") {
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request))); return;
+      }
+      if (request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
+        response.end(JSON.stringify({ suite: "trelio-e2ee-v1", state: "plain", company: testCompany })); return;
+      }
+      if (request.url === `/api/agent-workspaces/workspaces/${otherWorkspaceId}`) {
+        // The request actually reached the unrelated cleanup read. Never finish
+        // its body; the production retention budget must abort it, not replay
+        // the successfully materialised Run or wait for the outer CLI timeout.
+        stalledReads++;
+        response.write("{\"runs\":["); return;
+      }
+      if (request.url === `/api/agent-workspaces/workspaces/${workspaceId}`) {
+        response.end(JSON.stringify({ workspace: { id: workspaceId, acceptedHead: exported.head },
+          company: testCompany, runs: [run], checkpoints: [] })); return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${runId}/claim`) {
+        claims++; response.end(JSON.stringify(run)); return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${runId}/bundle`) {
+        response.setHeader("content-type", "application/vnd.git.bundle");
+        response.end(exported.bundle); return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${runId}/heartbeat`) {
+        heartbeats++; response.end(JSON.stringify(run)); return;
+      }
+      response.statusCode = 404; response.end();
+    } catch (error) { serverError = error; response.statusCode = 500; response.end(); }
+  });
+  server.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    if (process.platform !== "win32") await execFileAsync("chmod", ["-R", "u+w", temporaryDirectory]);
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await writeTestCredential(homeDirectory, origin, environment);
+  await mkdir(path.join(otherRoot, "workspace"), { recursive: true });
+  const originalMetadata = JSON.stringify({ schemaVersion: 3, origin,
+    workspaceId: otherWorkspaceId, runId: companyWorkspaceId,
+    workspaceDirectory: path.join(otherRoot, "workspace") });
+  await writeFile(path.join(otherRoot, ".trelio-run.json"), originalMetadata);
+  await writePrivateJsonFile(path.join(configDirectory, "runs.json"), { schemaVersion: 1, roots: [otherRoot] });
+  const executionOptions = { cwd: temporaryDirectory, encoding: "utf8", env: environment,
+    timeout: 12_000, windowsHide: true };
+  const opened = await execFileAsync(process.execPath, [bridgePath, "open", "--origin", origin,
+    "--workspace", workspaceId, "--run", runId], executionOptions);
+  const directory = opened.stdout.trim();
+  assert.equal(opened.stderr, "");
+  assert.equal(claims, 1);
+  assert.equal(stalledReads, 1, "the real retention HTTP body must have stalled");
+  assert.equal(await readFile(path.join(directory, "WORKSPACE_CONTEXT.md"), "utf8"),
+    "# Opened before optional retention\n");
+  assert.equal(await readFile(path.join(otherRoot, ".trelio-run.json"), "utf8"), originalMetadata);
+  assert.equal(await pathExists(path.join(configDirectory, "automatic-cleanup.json")), false,
+    "an aborted retention pass must not publish its daily success marker");
+  await execFileAsync(process.execPath, [bridgePath, "heartbeat"], { ...executionOptions, cwd: directory });
+  assert.equal(heartbeats, 1, "the opened lease is usable without another open or plugin toggle");
+  assert.equal(claims, 1);
+  assert.ifError(serverError);
+});
+
 // The recovery variant runs at most sixteen sequential real bridge children.
 // Budget their unchanged individual deadlines plus fixture setup/cleanup;
 // a slow Windows process start must not cancel valid later recovery evidence.
