@@ -4452,7 +4452,11 @@ test('computer health exposes only fixed device transport and closed telemetry, 
     if(options.method==='POST'){posts++;body=JSON.parse(options.body);revision++;}
     return new Response(JSON.stringify({enabled:true,settingsRevision:0,revision}),{headers:{'content-type':'application/json'}});
   }})});
-  await maintainAssistantHostHealth({client,platform:'win32',environment:{},readJournal:async()=>journal,writeJournal:async value=>{journal=value;},readNative:async()=>{throw new Error('PRIVATE');}});
+  await maintainAssistantHostHealth({client,platform:'win32',environment:{},readJournal:async()=>journal,writeJournal:async value=>{journal=value;},
+    // This is a Windows protocol fixture on every CI OS, not the runner's
+    // actual kernel release (Linux legitimately includes nonnumeric suffixes).
+    osApi:{cpus:()=>[],freemem:()=>2*1024**3,totalmem:()=>4*1024**3,release:()=> '10.0.26100',uptime:()=>100},
+    readNative:async()=>{throw new Error('PRIVATE');}});
   assert.equal(posts,1);assert.equal(body.samples.length,1);
   await assert.rejects(client.reportHostHealth({...body,message:'PRIVATE'}));
   await assert.rejects(client.reportHostHealth({...body,samples:[{...body.samples[0],hostname:'PRIVATE'}]}));
