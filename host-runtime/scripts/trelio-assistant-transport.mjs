@@ -258,7 +258,7 @@ export const projectAssistantOwnerIdentities = (value, assistantId) => {
  * Bind even an empty response to the exact device/company before it could be
  * used as an inventory. Never retain private labels, selectors or credentials
  * from an extended server response, and never interpret an error as absence. */
-const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyId }) => {
+export const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyId }) => {
   const invalid = () => fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   const responseId = candidate => {
     if (typeof candidate !== 'string' || !UUID.test(candidate)) invalid();

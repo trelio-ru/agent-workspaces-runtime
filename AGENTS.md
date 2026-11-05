@@ -96,6 +96,11 @@ publication tooling также остаются вне этого публичн
   static help through the request worker and facade. Only genuine host account
   errors qualify; provider/lookalike details stay private, with no write replay.
   See [ordinary skills](docs/assistant-scheduler.md#ordinary-owner-chat-skills).
+  `set_background` uses that SAME observed taskless intent and signed bound
+  account selection for Telegram/email/MAX desired polling. Native source CAS
+  and its receipt commit atomically; no provider/login process, intake grant,
+  cursor reset, owner impersonation or second poller. Reconcile lost responses
+  through the original prepare key and current source state, never replay apply.
   Public signed human-input setup also selects the bounded setup view without
   pending device consent only on an explicit connection-section read; ordinary
   instructions/execution reads retain task/Run tools. Native pending consent

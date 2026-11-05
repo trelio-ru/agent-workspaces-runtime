@@ -713,6 +713,34 @@ Native prepare uses the existing structural operation ledger with taskId:null;
 before one account/provider dispatch, begin durably spends its request UUID.
 An attempted request cannot be replayed, and its private attempt token is never
 returned to the model. Materialization/pre-spawn/delivery repeat the SAME fence.
+`use_assistant_skill(operation=set_background)` is the narrow explicit-user
+command for an EXISTING bound `telegram-mtproto`, `email-imap-smtp` or `max-web`
+account. Parameters are its exact `localAccountId`, `enabled`, `maxChatUrl:null`
+for the whole account (or one canonical numeric MAX chat URL), and literal
+`userExplicitlyRequestedChange:true`. That declaration is not owner identity:
+the SAME genuine device, observed ordinary session/proof, BOTH memberships,
+project/release/config/recipient and native no-task/intake fences remain required.
+No active local pass and no current/historical native task/intake session may
+acquire this delegation. The human-only owner-management API is unchanged. Each call targets this exact
+company/project and MAX selector; other references to the account stay unchanged.
+
+Native prepare pins the existing source UUID/revision or its absence in the
+SAME structural ledger. The host materializes the current signed package and
+selects ONLY the exact already-bound account through the common catalogue;
+it launches no provider command, login, Secret setup or account mutation.
+POST `/skills/background` atomically commits desired active/paused state plus
+the original request receipt. It reuses an available registration or creates one
+reference to that existing account, with no new setup/intake flags. A stale
+snapshot conflicts without automatic refresh/apply. Its intent cannot call begin.
+After a lost response, prepare with the SAME key reads the committed result and
+current source state (`configurationChangedSinceApply`), never another write.
+Sessions, account binding/catalogue revision, private inbox/cursors/ACK fences and
+other companies remain unchanged. `executionVerified:false` is mandatory: actual
+incoming/login readiness and polling still belong to the existing supervisor,
+its SAME journal and normal forward-only baseline. No second timer or history
+backfill. Backend must support the optional plan/route before runtime publication;
+old invocations and all compatibility minima remain unchanged.
+
 One original 10-minute interactive or 45-second metadata deadline bounds all
 work. Common visual/text projection and complete bounded pipes remain required.
 
@@ -735,8 +763,9 @@ An active task pass refuses this taskless settings action. No human OAuth,
 account UUID override, import, credentials, second vault or executor is involved.
 
 The native row starts `available`, with polling/intake disabled. It appears in
-owner settings, not the private SQLite inbox. Only the direct owner's first CAS
-activation selects polling and optionally verified-owner task intake. Existing
+owner settings, not the private SQLite inbox. The direct owner's first CAS
+activation selects polling and optionally verified-owner task intake; the narrow
+ordinary-chat command above selects polling only, preserving intake permission. Existing
 active/paused/revoked rows and their immutable flags are unchanged. Supported
 connections may be explicitly reused in another independently readable company;
 that decision binds the SAME account/session and never enables the origin.

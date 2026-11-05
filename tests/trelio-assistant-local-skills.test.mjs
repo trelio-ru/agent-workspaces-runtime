@@ -22,7 +22,7 @@ const {runAssistantEntry}=await import('../host-runtime/scripts/trelio-assistant
 const origin='https://interactive-skill.example.test',companyId=randomUUID(),memberId=randomUUID();
 const identity={schemaVersion:1,origin,assistantId:randomUUID(),deviceId:randomUUID()};
 const credential='tda_'+'s'.repeat(43),prefix='/api/digital-assistants/runtime/source-skills/skills';
-let active=null,privateReads=0,begins=0,downloads=0,remoteMode=false,loseBegin=false;
+let active=null,privateReads=0,begins=0,downloads=0,remoteMode=false,loseBegin=false,selectedSkill='avito',backgroundWrites=0,loseBackground=false,claimBackgroundReady=false;
 const host={configurationDirectory:root,readIdentity:async()=>identity,readActivePass:async()=>active};
 const privateRecords=new Map();
 const store={get:async slot=>{
@@ -43,13 +43,16 @@ await fs.writeFile(path.join(source,'main.mjs'),`const fs=await import('node:fs'
   process.stdout.write(JSON.stringify(args[0]==='__trelio_account_remove'?{schemaVersion:1,removed:true,accountId:account.id}:
     {state:args[0]==='setup'?'manual_input_required':'saved_unverified',accountId:account.id}));`);
 await fs.writeFile(path.join(source,'trelio-account-removal.json'),'{"schemaVersion":1}');
-const packageBytes=await common.buildAgentSkillPackage({skillId:'avito',runtimeVersion:'0.99.0',sourceDirectory:source,
-  entrypointPath:'main.mjs',interpreter:'node',capabilities:['local-session','local-accounts-v1']});
+const packages=new Map();
+for(const skillId of ['avito','telegram-mtproto','email-imap-smtp','max-web'])packages.set(skillId,
+  await common.buildAgentSkillPackage({skillId,runtimeVersion:'0.99.0',sourceDirectory:source,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['local-session','local-accounts-v1']}));
+let packageBytes=packages.get(selectedSkill);
 const resolution=()=>({releaseId,company:{id:companyId,slug:'synthetic',name:'Synthetic'},
-  localIdentity:{companyId,projectId:null,skillId:'avito',memberId,connectionId:null},companyConnection:null,
+  localIdentity:{companyId,projectId:null,skillId:selectedSkill,memberId,connectionId:null},companyConnection:null,
   trust:{level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null},
-  packageUrl:'/api/agent-skills/runtime/package?'+new URLSearchParams({companyId,skillId:'avito',expectedReleaseId:releaseId,artifactId}),
-  artifact:{id:artifactId,skillId:'avito',runtimeVersion:'0.99.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
+  packageUrl:'/api/agent-skills/runtime/package?'+new URLSearchParams({companyId,skillId:selectedSkill,expectedReleaseId:releaseId,artifactId}),
+  artifact:{id:artifactId,skillId:selectedSkill,runtimeVersion:'0.99.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
     packageSha256:createHash('sha256').update(packageBytes).digest('hex'),packageSizeBytes:packageBytes.length,
     packageSignature:sign(null,packageBytes,privateKey).toString('base64'),signingKeyId:'fixture',
     signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.7.0',manifest:{}}});
@@ -71,7 +74,7 @@ globalThis.fetch=async(url,options)=>{
   assert.equal(options.headers.get('authorization'),'Bearer '+credential);
   assert.equal(options.headers.get('cookie'),null);assert.equal(options.headers.get('x-trelio-assistant-pass'),null);
   const body=options.body?JSON.parse(options.body):null;
-  if(url.pathname===prefix+'/read')return Response.json({companyId,skill:{id:'avito',instructionsMarkdown:'Use ordinary account list/create, setup, wait. No assistant-only descriptor.',
+  if(url.pathname===prefix+'/read')return Response.json({companyId,skill:{id:selectedSkill,instructionsMarkdown:'Use ordinary account list/create, setup, wait. No assistant-only descriptor.',
     currentReleaseId:releaseId,runtimeRelease:remoteMode?null:{releaseId},remoteMcp:remoteMode?{minimumHostVersion:'1.4.3'}:null}});
   if(url.pathname===prefix+'/runtime/register'){
     let session=[...sessions.values()].find(row=>row.publicKeySpki===body.publicKeySpki);
@@ -85,13 +88,24 @@ globalThis.fetch=async(url,options)=>{
     assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,'use_assistant_skill',proof.issuedAt,proof.nonce].join('\n')),
       createPublicKey({key:Buffer.from(session.publicKeySpki,'base64url'),type:'spki',format:'der'}),Buffer.from(proof.signature,'base64url')),true);
     let plan=intents.get(body.clientRequestId);
-    if(!plan){plan={schemaVersion:1,companyId,projectId:null,skillId:'avito',requestId:body.clientRequestId,deviceId:identity.deviceId,
-      memberId,releaseId,runtimeSessionId:session.runtimeSessionId,state:'prepared',taskRequired:false,backgroundEnabled:false};intents.set(plan.requestId,plan);}
+    if(!plan){plan={schemaVersion:1,companyId,projectId:null,skillId:selectedSkill,requestId:body.clientRequestId,deviceId:identity.deviceId,
+      memberId,releaseId,runtimeSessionId:session.runtimeSessionId,state:'prepared',taskRequired:false,backgroundEnabled:false,
+      ...(body.sourceBackground?{sourceBackground:{...body.sourceBackground,sourceId:null,expectedRevision:null}}:{})};intents.set(plan.requestId,plan);}
     const {attemptId,...modelPlan}=plan;return Response.json({...modelPlan,reconcileOnly:plan.state==='attempted'});
   }
   if(url.pathname===prefix+'/begin'){
     begins++;const plan=intents.get(body.clientRequestId);assert.equal(plan.state,'prepared');
     plan.state='attempted';plan.attemptId=randomUUID();if(loseBegin){loseBegin=false;throw new Error('synthetic lost native reply');}return Response.json(plan);
+  }
+  if(url.pathname===prefix+'/background'){
+    const plan=intents.get(body.clientRequestId);assert.equal(plan.state,'prepared');assert.ok(plan.sourceBackground);
+    backgroundWrites++;plan.state='attempted';plan.commandId='source-background';
+    plan.backgroundResult={source:{id:randomUUID(),companyId,deviceId:identity.deviceId,projectId:null,executionVerified:false,
+      localAccountId:plan.sourceBackground.localAccountId,revision:0,privateField:'SYNTHETIC_PRIVATE_FIELD',
+      skillId:selectedSkill,state:plan.sourceBackground.enabled?'active':'paused'},backgroundEnabled:plan.sourceBackground.enabled,executionVerified:false};
+    if(loseBackground){loseBackground=false;throw Error('synthetic response lost after SQL commit');}
+    if(claimBackgroundReady){claimBackgroundReady=false;return Response.json({...plan.backgroundResult,executionVerified:true});}
+    return Response.json(plan.backgroundResult);
   }
   const binding=JSON.parse(options.headers.get('x-trelio-assistant-local-skill-setup'));
   const plan=intents.get(binding.requestId);assert.ok(plan);assert.equal(binding.companyId,companyId);
@@ -115,7 +129,7 @@ const observedInput=tool_input=>withRuntimeHookPrivateSession(45000,async()=>{
   const observed=await hook({hook_event_name:'PreToolUse',session_id:threadId,tool_input});return observed.hookSpecificOutput.updatedInput;
 });
 const use=async(argv,clientRequestId=randomUUID())=>{
-  const tool_input={companyId,projectId:null,skillId:'avito',releaseId,clientRequestId,operation:'run',parameters:{arguments:argv}};
+  const tool_input={companyId,projectId:null,skillId:selectedSkill,releaseId,clientRequestId,operation:'run',parameters:{arguments:argv}};
   return executeAssistantLocalSkillTool('use_assistant_skill',await observedInput(tool_input),{identity,host,store,client,common});
 };
 
@@ -191,6 +205,50 @@ test('invalid arguments and active background/intake reject before private stora
     assert.throws(()=>assistantLocalSkillArguments('use_assistant_skill',bad),/INVALID_INPUT/);
   const before=privateReads;active={kind:'source_intake'};
   await assert.rejects(use(['status']),/TASK_ACTIVE/);assert.equal(privateReads,before);active=null;
+});
+
+test('all supported existing accounts change polling through the same signed catalogue without a provider call or a second login',async()=>{
+  const beforeCalls=await fs.readFile(path.join(root,'calls'),'utf8');
+  try{
+    for(const skillId of ['telegram-mtproto','email-imap-smtp','max-web']){
+      selectedSkill=skillId;packageBytes=packages.get(skillId);
+      const empty=(await use(['account','list'])).structuredContent;
+      const created=(await use(['account','create','--name','Already connected fixture','--expected-revision',String(empty.revision)])).structuredContent;
+      const accountId=created.accounts[0].id;
+      const input={companyId,projectId:null,skillId,releaseId,clientRequestId:randomUUID(),operation:'set_background',
+        parameters:{localAccountId:accountId,enabled:true,maxChatUrl:null,userExplicitlyRequestedChange:true}};
+      const toggle=async value=>executeAssistantLocalSkillTool('use_assistant_skill',await observedInput(value),{identity,host,store,client,common});
+      const before=backgroundWrites;
+      const result=await toggle(input);
+      assert.equal(result.backgroundEnabled,true);assert.equal(result.executionVerified,false);
+      assert.equal(result.source.localAccountId,accountId);assert.equal(backgroundWrites,before+1);
+      assert.doesNotMatch(JSON.stringify(result),/SYNTHETIC_PRIVATE_FIELD|privateField/,'the SAME source projector drops unknown native fields');
+      const after=(await use(['account','list'])).structuredContent;
+      assert.deepEqual(after.accounts,created.accounts,'activation preserves the exact account catalogue and session reference');
+      assert.equal(after.revision,created.revision);
+      const repeat=await toggle(input);assert.equal(repeat.replayed,true);assert.equal(backgroundWrites,before+1);
+      const disable=await toggle({...input,clientRequestId:randomUUID(),parameters:{...input.parameters,enabled:false}});
+      assert.equal(disable.backgroundEnabled,false);
+      await assert.rejects(toggle({...input,clientRequestId:randomUUID(),parameters:{...input.parameters,localAccountId:randomUUID()}}),/ACCOUNT_NOT_BOUND/);
+      assert.equal(backgroundWrites,before+2,'unbound account cannot reach native activation');
+      active={kind:'source_intake'};const reads=privateReads;
+      await assert.rejects(toggle({...input,clientRequestId:randomUUID()}),/TASK_ACTIVE/);
+      assert.equal(privateReads,reads);active=null;
+      for(const parameters of [{...input.parameters,userExplicitlyRequestedChange:false},
+        {...input.parameters,allowOwnerTaskIntake:true},{...input.parameters,maxChatUrl:'https://evil.test/1'}])
+        assert.throws(()=>assistantLocalSkillArguments('use_assistant_skill',{...input,parameters}),/INVALID_INPUT/);
+      assert.equal(await fs.readFile(path.join(root,'calls'),'utf8'),beforeCalls,'configuration never invokes the signed provider/login/send process');
+      const lost={...input,clientRequestId:randomUUID()};loseBackground=true;
+      await assert.rejects(toggle(lost));const writes=backgroundWrites;
+      const recovered=await toggle(lost);assert.equal(recovered.replayed,true);assert.equal(recovered.backgroundEnabled,true);
+      assert.equal(backgroundWrites,writes,'lost SQL response recovers the original receipt, never toggles twice');
+      const misleading={...input,clientRequestId:randomUUID()};claimBackgroundReady=true;
+      await assert.rejects(toggle(misleading),/ASSISTANT_TRANSPORT_INVALID_RESPONSE/);
+      const afterBadResponse=backgroundWrites,reconciled=await toggle(misleading);
+      assert.equal(reconciled.executionVerified,false);assert.equal(reconciled.replayed,true);
+      assert.equal(backgroundWrites,afterBadResponse,'a false readiness claim does not authorize another write');
+    }
+  }finally{selectedSkill='avito';packageBytes=packages.get(selectedSkill);active=null;}
 });
 
 test('host browser-controller commands require the same signed opt-in before any provider invocation',async()=>{

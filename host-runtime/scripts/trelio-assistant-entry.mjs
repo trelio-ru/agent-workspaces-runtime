@@ -21,7 +21,7 @@ import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommand
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
-  readAssistantEncryptedSnapshotBundle } from './trelio-assistant-transport.mjs';
+  readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
 import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from './trelio-skill-accounts.mjs';
 import { parseVisualSkillOutput, visualMcpResult } from './trelio-visual-result.mjs';
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from './trelio-skill-secret-setup.mjs';
@@ -43,6 +43,21 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
   const schema=properties=>({type:'object',properties,required:Object.keys(properties),additionalProperties:false});
   const nullableId={anyOf:[{type:'string',pattern:UUID.source},{type:'null'}]};
   const skill={type:'string',pattern:SKILL.source,maxLength:120};
+  // Reuse the canonical native source projector rather than copying its DTO
+  // grammar or echoing unbounded native metadata. A saved setting never upgrades
+  // executionVerified; a bad/lost response is recovered through its SAME intent.
+  const backgroundResult=(value,args,identity,companyId)=>{
+    if(!object(value)||typeof value.backgroundEnabled!=='boolean'||value.executionVerified!==false
+      ||value.configurationChangedSinceApply!==undefined&&typeof value.configurationChangedSinceApply!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    const source=value.source===null?null:projectAssistantSourceAccounts({schemaVersion:1,companyId,
+      assistantUserId:identity.assistantId,deviceId:identity.deviceId,sources:[value.source]},
+      {assistantId:identity.assistantId,deviceId:identity.deviceId,companyId})[0];
+    if(source&&(source.localAccountId!==args.parameters.localAccountId||source.skillId!==args.skillId
+      ||source.projectId!==args.projectId||(source.maxChatUrl??null)!==args.parameters.maxChatUrl)
+      ||value.backgroundEnabled!==(source?.state==='active'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    return {source,backgroundEnabled:value.backgroundEnabled,executionVerified:false,
+      ...(value.configurationChangedSinceApply!==undefined?{configurationChangedSinceApply:value.configurationChangedSinceApply}:{})};
+  };
   // Closed shared-controller refusals may reach the model; private owner files,
   // input data and arbitrary provider exceptions may not become diagnostics.
   const ASSISTANT_SKILL_FAILURE_CODES=Object.freeze(['BROWSER_CONTROLLER_ARGUMENTS_INVALID','BROWSER_CONTROLLER_POLICY_INVALID',
@@ -52,12 +67,15 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
     {name:'list_assistant_skills',description:'Read the complete enabled Trelio company/project skill catalogue in this ordinary chat, without a task or Run. This is the skill inventory, unlike the three Telegram/email/MAX background-source setup tools. Use companyId:null for native company selection; paginate while hasMore. Set skillId for the exact published instructions/connection guidance before setup. Do this before searching for a separate plugin. No credentials or provider execution.',
       inputSchema:schema({companyId:nullableId,projectId:nullableId,skillId:{anyOf:[skill,{type:'null'}]},
         offset:{type:'integer',minimum:0,maximum:10000},limit:{type:'integer',minimum:1,maximum:50}}),annotations:{readOnlyHint:true,idempotentHint:true}},
-    {name:'use_assistant_skill',description:'Use or configure an enabled skill in this ordinary owner chat without a task or Run. Read its exact list_assistant_skills instructions first and pass skill.currentReleaseId as releaseId. Uses the SAME signed package, commands, account selector and protected forms as human users; no assistant-specific setup declaration is required. For run, parameters.arguments is the literal argv from those instructions, including ordinary account list/create/--local-account. Human credentials stay in the protected form. Other operations use the SAME Remote MCP connect/doctor/call and exact write approval; doctor_remote accepts optional parameters.schemaToolName for its exact input schema. External changes still require the user request. Reuse clientRequestId after uncertainty; never replay an attempted command. Background task/intake tools retain their independent restrictions.',
+    {name:'use_assistant_skill',description:'Use or configure an enabled skill in this ordinary owner chat without a task or Run. Read its exact list_assistant_skills instructions first and pass skill.currentReleaseId as releaseId. Uses the SAME signed package, commands, account selector and protected forms as human users; no assistant-specific setup declaration is required. For run, parameters.arguments is the literal argv, including ordinary account list/create/--local-account. Human credentials stay in the protected form. set_background enables/disables automatic checking of one EXISTING bound Telegram/email/MAX account in this exact company/project only on the user’s direct command: pass its exact localAccountId, enabled, maxChatUrl:null for the whole account and userExplicitlyRequestedChange:true. It preserves login/session/checkpoints and grants no new owner-task intake. It saves desired configuration; executionVerified:false is not proof of successful polling. Remote operations retain SAME connect/doctor/call and exact write approval; doctor_remote accepts parameters.schemaToolName. Reuse clientRequestId after uncertainty; never replay an attempted command. Background task/intake tools retain independent restrictions.',
       inputSchema:schema({companyId:nullableId,projectId:nullableId,skillId:skill,releaseId:nullableId,clientRequestId:{type:'string',pattern:UUID.source},
-        operation:{type:'string',enum:['run','connect_remote','doctor_remote','call_remote']},
+        operation:{type:'string',enum:['run','connect_remote','doctor_remote','call_remote','set_background']},
         parameters:{anyOf:[schema({arguments:{type:'array',minItems:1,maxItems:128,items:{type:'string',maxLength:16384}}}),
           {type:'object',properties:{},additionalProperties:false},schema({schemaToolName:{type:'string',minLength:1,maxLength:200}}),
-          schema({toolName:{type:'string',minLength:1,maxLength:200},arguments:{type:'object'}})]}}),annotations:{idempotentHint:false}},
+          schema({toolName:{type:'string',minLength:1,maxLength:200},arguments:{type:'object'}}),
+          schema({localAccountId:{type:'string',pattern:UUID.source},enabled:{type:'boolean'},
+            maxChatUrl:{anyOf:[{type:'string',pattern:'^https://web\\.max\\.ru/-?(0|[1-9][0-9]{0,18})$'},{type:'null'}]},
+            userExplicitlyRequestedChange:{const:true}})]}}),annotations:{idempotentHint:false}},
   ]);
   const assistantLocalSkillArguments=(name,input)=>{
     // The trusted PreToolUse hook adds the SAME v1 proof AFTER the model authors
@@ -89,6 +107,13 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
         if(keys!=='arguments'||!Array.isArray(args)||!args.length||args.length>128
           ||args.some(value=>typeof value!=='string'||value.length>16384||value.includes('\0')))
           fail('ASSISTANT_SETUP_INVALID_INPUT');
+      }else if(input.operation==='set_background'){
+        const p=input.parameters;
+        if(keys!=='enabled,localAccountId,maxChatUrl,userExplicitlyRequestedChange'
+          ||!['telegram-mtproto','email-imap-smtp','max-web'].includes(input.skillId)
+          ||typeof p.enabled!=='boolean'||p.userExplicitlyRequestedChange!==true)fail('ASSISTANT_SETUP_INVALID_INPUT');
+        result.parameters={...p,localAccountId:id(p.localAccountId)};
+        if(p.maxChatUrl!==null&&(input.skillId!=='max-web'||!assistantMaxChatUrl(p.maxChatUrl)))fail('ASSISTANT_SETUP_INVALID_INPUT');
       }else if(input.operation==='doctor_remote'){
         if(keys&&(keys!=='schemaToolName'||typeof input.parameters.schemaToolName!=='string'
           ||!input.parameters.schemaToolName.length||input.parameters.schemaToolName.length>200))fail('ASSISTANT_SETUP_INVALID_INPUT');
@@ -211,7 +236,7 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
       await assertCurrent();return hydrated;
     };
     const begin=async commandId=>{
-      await assertCurrent();if(!plan||processUsed)fail();
+      await assertCurrent();if(!plan||processUsed||plan.sourceBackground)fail();
       // One native receipt covers one invocation. Account changes, local provider
       // commands and Remote MCP use this SAME pre-dispatch fence. A lost reply
       // never reopens the invocation, even though its actual outcome is unknown.
@@ -240,9 +265,10 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
         const url=new URL(pathname,origin),method=String(options.method??'GET').toUpperCase();
         if(url.origin!==origin||url.hash)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         let body;if(method==='POST'){try{body=JSON.parse(options.body);}catch{fail('ASSISTANT_SETUP_INVALID_INPUT');}}
-        const metadata=method==='POST'&&['/read','/prepare','/begin','/runtime/register','/runtime/end'].some(suffix=>url.pathname===PREFIX+suffix)&&!url.search;
+        const metadata=method==='POST'&&['/read','/prepare','/begin','/background','/runtime/register','/runtime/end'].some(suffix=>url.pathname===PREFIX+suffix)&&!url.search;
         if(metadata){
           if(!object(body)||body.companyId!==companyId||!configure&&url.pathname!==PREFIX+'/read')fail();
+          if(url.pathname===PREFIX+'/background'&&(!plan?.sourceBackground||processUsed||body.clientRequestId!==plan.requestId))fail();
         }else if(method==='GET'&&url.pathname==='/api/agent-workspaces/encryption/runtime'&&options.body===undefined){
           if(!companySlug||url.searchParams.get('companySlug')!==companySlug
             ||[...url.searchParams.keys()].some(key=>!['companySlug','fingerprint'].includes(key))
@@ -335,13 +361,19 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
       if(!args.runtimeSessionProof)fail('ASSISTANT_HOOK_OBSERVATION_REQUIRED');
       if(!args.releaseId)fail('AGENT_SKILL_RELEASE_CHANGED');
       const plan=await requestJson('/prepare',{companyId,projectId:args.projectId,skillId:args.skillId,clientRequestId:args.clientRequestId,
-        expectedReleaseId:args.releaseId,runtimeSessionProof:args.runtimeSessionProof});
-      if(plan.reconcileOnly||plan.state!=='prepared')return {state:'attempt_already_recorded',loginVerified:false,replayAllowed:false};
+        expectedReleaseId:args.releaseId,runtimeSessionProof:args.runtimeSessionProof,
+        ...(args.operation==='set_background'?{sourceBackground:args.parameters}:{})});
+      if(plan.reconcileOnly||plan.state!=='prepared')return plan.backgroundResult&&args.operation==='set_background'
+        ?{...backgroundResult(plan.backgroundResult,args,identity,companyId),replayed:true,replayAllowed:false}
+        :{state:'attempt_already_recorded',loginVerified:false,replayAllowed:false};
       if(!plan.releaseId)fail('ASSISTANT_SKILL_OPERATION_UNAVAILABLE');
       if(plan.releaseId!==args.releaseId||detail.skill.currentReleaseId!==args.releaseId)
         return {content:[{type:'text',text:JSON.stringify({state:'skill_release_changed',instructions:detail})}]};
+      if(args.operation==='set_background'&&(!plan.sourceBackground
+        ||Object.keys(args.parameters).some(key=>plan.sourceBackground[key]!==args.parameters[key])))fail('ASSISTANT_LOCAL_SKILL_SETUP_CHANGED');
+      if(args.operation!=='set_background'&&plan.sourceBackground)fail('ASSISTANT_LOCAL_SKILL_SETUP_CHANGED');
       context.setPlan(plan);
-      if(args.operation!=='run'){
+      if(!['run','set_background'].includes(args.operation)){
         if(!detail.skill?.remoteMcp)fail('ASSISTANT_SKILL_OPERATION_UNAVAILABLE');
         await context.beginRemote();
         const {executeRemoteMcpTool}=await import('./trelio-remote-mcp.mjs');
@@ -360,13 +392,25 @@ export const { ASSISTANT_SKILL_TOOLS, ASSISTANT_SKILL_FAILURE_CODES, assistantLo
       // The ordinary host parser/catalogue chooses accounts. A provider without
       // local-accounts-v1 needs no artificial account or assistant-only manifest.
       // Managed storage remains separate from the logged-in human's sessions.
-      let runtimeArguments=args.parameters.arguments,accountOutput;
+      // Background configuration selects the SAME exact bound account, but
+      // never executes a provider command, login, account mutation or secret
+      // recipe. Signed materialization and native config/recipient fences still
+      // precede catalogue access; no model-selected filesystem/session path.
+      const background=args.operation==='set_background';
+      let runtimeArguments=background?['--local-account',args.parameters.localAccountId]:args.parameters.arguments,accountOutput;
       context.setExecution({artifact:materialized.artifact,accountCommand:parseAccountCommand(runtimeArguments)});
       if(materialized.artifact.parsedPackage.capabilities.includes('local-accounts-v1')){
         const account=await common.prepareSkillAccount({origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,executionContext,
           runtimeArguments,output:value=>{accountOutput=value;}});
         if(account.handled){await context.nativeFence();return {content:[{type:'text',text:JSON.stringify(accountOutput)}],structuredContent:accountOutput};}
         executionContext.account=account.account;runtimeArguments=account.runtimeArguments;
+      }
+      if(background){
+        if(!plan.sourceBackground||executionContext.account?.id!==args.parameters.localAccountId
+          ||!materialized.artifact.parsedPackage.capabilities.includes('local-accounts-v1'))fail('ASSISTANT_SKILL_OPERATION_UNAVAILABLE');
+        await context.nativeFence();
+        const result=await requestJson('/background',{companyId,clientRequestId:plan.requestId});
+        return {...backgroundResult(result,args,identity,companyId),replayed:false};
       }
       context.setExecution({artifact:materialized.artifact,runtimeArguments});
       const controller=parseBrowserControllerArguments(runtimeArguments);
