@@ -28,7 +28,11 @@ test('startup diagnostic holds stdin open for baseline, closes it only for the E
   const held = await probeProcess(options);
   assert.equal(held.status, 'timeout');
   assert.ok(child.exitCode !== null || child.signalCode !== null);
-  const ended = await probeProcess({...options,endInput:true});
+  // The short budget above belongs only to the deliberately never-ready child.
+  // The positive EOF control must include real Node startup on a loaded runner;
+  // use the same 3s budget as the production diagnostic's nodePipe probe.
+  // Keep the timeout/reaping assertions and production deadlines unchanged.
+  const ended = await probeProcess({...options,timeoutMs:3_000,endInput:true});
   assert.equal(ended.status, 'ready'); assert.equal(ended.exitCode, 0);
 });
 
