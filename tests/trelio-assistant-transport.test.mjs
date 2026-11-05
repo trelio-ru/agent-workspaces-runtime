@@ -107,7 +107,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
   const client={companies:async()=>available?[{companyId,companySlug:'encrypted',encryptionState:'encrypted'}]:[],
     readTaskPass:async()=>({...pass,state:'leased',leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
   const mentionMemberId=randomUUID(),mentionGroupId=randomUUID();
-  const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null,commentFileDefinition=null;
+  const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null,commentFileDefinition=null,operationDefinition=null;
   const input={identity,host,client,
     store,companyId,companySlug:'encrypted',lockDirectory:root,lock:async(_file,action)=>action()};
   const previousFetch=globalThis.fetch;
@@ -139,8 +139,13 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         ...(preparation.commentFiles?{commentFiles:preparation.commentFiles}:{}),
         ...(preparation.commentMentions?{commentMentions:preparation.commentMentions}:{}),
         ...(preparation.secretRecipe?{secretRecipe:preparation.secretRecipe}:{}),
-        ...(preparation.commentDefinition?{action:{commentDefinition:true}}:preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
+        ...(preparation.operationDefinition?{action:{operationDefinition:true}}:preparation.commentDefinition?{action:{commentDefinition:true}}:preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
       assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY|PRIVATE_RECIPE_ARGV_CANARY|CANCEL_REASON_CANARY|CANCEL_DIFFERENT_CANARY/);
+      if(preparation.operationDefinition){
+        assert.equal(body.payloads.length,0);assert.ok(operationDefinition);
+        assert.doesNotMatch(options.body,/REGISTRY_PRIVATE_KEY|REGISTRY_PRIVATE_TEXT/);
+        return json(await operationDefinition(preparation.arguments));
+      }
       if(preparation.commentFileDefinition){
         assert.equal(preparation.nativeTool,'create_comment');
         assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt']);
@@ -405,6 +410,30 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     await assert.rejects(withAssistantManagedContentArguments({...input,name:'update_task_custom_field',args:{fieldId,value:'PRIVATE_UNKNOWN_FIELD',
       clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()}},async()=>assert.fail('foreign field reached MCP')),
       {code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+    const registryId=randomUUID(),columnId=randomUUID(),rowIds=[randomUUID(),randomUUID()],keyIds=[randomUUID(),randomUUID()];
+    const sourcePayload=async(entityId,values)=>{const aad={companyId,scopeId,scopeEpoch:1,entityType:'api.browser_mutation',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+      return {...aad,...await encryptCompanyPayload({scopePublicEncryptionJwk,aad,payload:{values}})};};
+    const labels=await sourcePayload(columnId,{label:'Text'}),keys=await Promise.all(keyIds.map((id,index)=>sourcePayload(id,{row_key:`REGISTRY_PRIVATE_KEY_${index}`})));
+    const registryUpdatedAt=new Date().toISOString();let definitionPages=0;
+    operationDefinition=async args=>{
+      const offset=args.offset??0;assert.ok(offset===0||offset===1);definitionPages++;
+      if(offset)assert.equal(args.expectedRegistryUpdatedAt,registryUpdatedAt);
+      const row={id:rowIds[offset],rowKey:buildCompanyEncryptedTextMarker(keyIds[offset],'row_key')};
+      return {schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
+        context:{schemaVersion:1,operationDefinition:{registryUpdatedAt,nextOffset:offset===0?1:null,
+          registryDocument:{id:registryId,type:'registry',projectSlug:null,projectId:null,payload:{registry:{slug:`e-${registryId}`,
+            columns:[{key:'text',label:buildCompanyEncryptedTextMarker(columnId,'label'),type:'text'}]},rows:[row]}},
+          registryRowLocators:{[registryId]:{[row.id]:row.rowKey}}}},encryptedPayloads:[labels,keys[offset]]};
+    };
+    await withAssistantManagedContentArguments({...input,name:'execute_assistant_operation',args:{operation:'upsert_registry_rows',
+      arguments:{registrySlug:`e-${registryId}`,rows:[{rowKey:'REGISTRY_PRIVATE_KEY_1',expectedRevision:1,values:{text:'REGISTRY_PRIVATE_TEXT'}}],changeSummary:'Update'},
+      clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()}},async wire=>{
+      assert.equal(wire.arguments.rows[0].rowKey,buildCompanyEncryptedTextMarker(keyIds[1],'row_key'),'the second page retains its original source locator after hydration');
+      assert.doesNotMatch(JSON.stringify(wire),/REGISTRY_PRIVATE_KEY|REGISTRY_PRIVATE_TEXT/);
+      const marker=wire.arguments.rows[0].values.text,opened=await decryptCompanyPayload({encryptedPayload:staged.get(marker.split(':')[1]),scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+      assert.equal(Object.values(opened.values)[0],'REGISTRY_PRIVATE_TEXT');return {content:[],structuredContent:{recorded:true}};
+    });
+    assert.equal(definitionPages,2);operationDefinition=null;
     const vector=['send','--account',randomUUID(),'--chat','123','--text','ARGV_TEXT_CANARY \n exact spacing'];
     const vectorArgs={schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId:'signed-fixture',releaseId:randomUUID(),
       runtimeSessionId:randomUUID(),arguments:vector}};
@@ -4461,4 +4490,64 @@ test('computer health exposes only fixed device transport and closed telemetry, 
   await assert.rejects(client.reportHostHealth({...body,message:'PRIVATE'}));
   await assert.rejects(client.reportHostHealth({...body,samples:[{...body.samples[0],hostname:'PRIVATE'}]}));
   assert.equal(posts,1,'malformed content never reaches HTTP and reports never retry');
+});
+
+
+test('delegated domain schema is fetched in the same MCP session before any business content or staging',async()=>{
+  const f=await workspaceProfileFixture();let contracts=0,effects=0,staging=0;
+  const schema={type:'object',properties:{displayName:{type:'string',minLength:1,maxLength:300}},required:['displayName'],additionalProperties:false};
+  const client=createAssistantMcpClient({...f.identity,store:f.store,
+    withWorkspaceArguments:async({args},send)=>{staging++;return send(args);},
+    httpRequest:async input=>{
+      const reply=result=>({sessionId:'delegated-schema',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'execute_assistant_operation',description:'Native wrapper',inputSchema:{type:'object'}}]});
+      const {name,arguments:args}=input.payload.params;
+      if(name==='get_assistant_operation_contract'){
+        contracts++;assert.deepEqual(Object.keys(args),['operation']);
+        assert.equal(JSON.stringify(args).includes('PRIVATE_DELEGATION_CANARY'),false);
+        return reply({content:[],structuredContent:{schemaVersion:1,operation:args.operation,inputSchema:schema}});
+      }
+      assert.equal(name,'execute_assistant_operation');effects++;
+      assert.deepEqual(args.arguments,{displayName:'PRIVATE_DELEGATION_CANARY'});
+      return reply({content:[],structuredContent:{confirmed:true}});
+    }});
+  const input={operation:'create_contact',arguments:{displayName:'PRIVATE_DELEGATION_CANARY'},clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  try{
+    for(const extra of [{confirmed:true},{clientRequestId:randomUUID()},{runtimeSessionProof:{}},{unexpected:'PRIVATE_DELEGATION_CANARY'}])
+      await assert.rejects(client.callTool('execute_assistant_operation',{...input,arguments:{...input.arguments,...extra}}));
+    assert.equal(contracts,4);assert.equal(effects,0);assert.equal(staging,0);
+    await client.callTool('execute_assistant_operation',input);
+    assert.equal(contracts,5);assert.equal(effects,1);assert.equal(staging,1);
+  }finally{f.close();}
+});
+
+
+test('production receipt recovery uses only the retained native host pass after a lifecycle action',async()=>{
+  const f=await workspaceProfileFixture();const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  let reads=0;const requestId=randomUUID();
+  const proxy=await createProductionAssistantMcp({context:async action=>action({...f.client,identity:f.identity},f.host,f.store),
+    withProfile:async()=>assert.fail('a historical structural receipt must not reopen task/crypto authority'),
+    httpRequest:async input=>{
+      const reply=result=>({sessionId:'receipt',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'get_assistant_status',description:'Native receipt',inputSchema:{type:'object'}}]});
+      assert.equal(input.payload.params.name,'get_assistant_status');reads++;
+      assert.deepEqual(input.payload.params.arguments,{operationReceipt:requestId,taskPass:{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId}});
+      return reply({content:[],structuredContent:{state:'committed',clientRequestId:requestId}});
+    }});
+  try{const result=await proxy.callTool('get_assistant_status',{operationReceipt:requestId});assert.equal(result.structuredContent.state,'committed');assert.equal(reads,1);}
+  finally{f.close();}
+});
+
+
+test('operation contract metadata strips host fields and refuses prose before HTTP',async()=>{
+  const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');let calls=0;
+  const invoke=args=>withAssistantEncryptedWorkspaceArguments({name:'get_assistant_operation_contract',args},async value=>{calls++;return value;});
+  for(const operation of ['PRIVATE CONTRACT QUERY','Личный запрос','create_workspace;run'])await assert.rejects(invoke({operation}));
+  assert.equal(calls,0);
+  assert.deepEqual(await invoke({operation:'create_workspace',taskPass:{private:true},runtimeSessionProof:{private:true}}),{operation:'create_workspace'});
+  assert.equal(calls,1);
 });

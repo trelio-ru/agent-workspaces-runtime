@@ -847,15 +847,16 @@ publication tooling также остаются вне этого публичн
   Encrypted public source/task skill uses SAME managed keys/native builders and
   injected exact ciphertext hydration, not human payload resolve or a second
   executor. See [contract](docs/assistant-scheduler.md#encrypted-source-and-exact-public-task-skill).
+- Delegated native operations: [contract](docs/assistant-scheduler.md#delegated-native-operations). Exact live schemas/coverage, same protector and independent owner decisions; no human identity or domain-schema copy.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
-  Encrypted comment files reuse native-selected signed own-Run manifests and the SAME local human link composer before whole-body sealing; native atomic references/receipts remain authoritative, never server append to opaque JSON.
+  Encrypted comment files reuse native-selected signed same-task accepted manifests and the SAME local human link composer before whole-body sealing; native atomic references/receipts remain authoritative, never server append to opaque JSON.
   Structural encrypted own-error retraction uses the SAME native authority; correct files through an ordinary encrypted Run and verify before correction attachment.
   Content-bearing calls also require the SAME fresh managed company-mode
   preflight before remote MCP; unsupported encrypted content refuses locally,
   never after exposing prose to HTTP. Native ACL/CAS and sealed adapters remain
   independent; failed/missing mode is not plain and no mode cache is authority.
-  Independent task creation uses the SAME proxy/native creator with a sealed
-  owner decision and project ACL; no inherited pass/chat/route or sender proof.
+  Supporting task creation uses the SAME proxy/native creator with independent
+  project ACL and exact disclosure/absence decisions; no inherited pass/chat/route or sender proof.
 
 - Terminal continuation: SAME pass/ledger, native trusted-hook preflight and indexed history. Twenty attempts per actual hook/signed-worker fingerprint still bound generic completion repair. Native failed model-capacity turns use separate unlimited paced continuations (1/5/15/30 minutes), SAME chat/pass and schema19 episode clock; no quota/network/prose inference or uncertain-action replay. Empty READY retries keep their original provision/thread. Health v3 notifies after fifteen minutes and preserves independent latches. See scheduler contract.
   Unread owner questions use the SAME clock and original event/chat in schema21;

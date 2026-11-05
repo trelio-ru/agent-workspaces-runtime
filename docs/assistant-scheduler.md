@@ -398,6 +398,12 @@ observed proof and accepted evidence. The host's fixed
 uncertainty. Receipt lookup does not retry the model/action and exposes no
 arbitrary HTTP. A closed pass accepts SessionEnd cleanup only, no new signature.
 
+Owner cancellation has an executable native flow: exact sealed
+cancel_assistant_goal decision, accepted material and complete_assistant_pass with
+goalState=cancelled/ownerDecisionId. Only that assistant's goal/cadence stops;
+archive/status are independent. Archived tasks, like done tasks, permit only
+existing own canonical Run settlement and original outcome reconciliation.
+
 Positive native read-back and the exact backend receipt must both exist.
 Continuation, inbox processing, completion timestamps and next-run are committed
 inside the same SQLite transaction. Changed cadence resets its anchor to this
@@ -2410,6 +2416,44 @@ service or businessReady. Source/CI tests do not replace the Windows update and
 notification E2E acceptance gate before product activation.
 
 
+## Delegated native operations
+
+The task profile forwards `get_assistant_operation_contract` and
+`execute_assistant_operation` on the SAME bounded MCP/session/proof engine.
+The first returns static capability coverage or the exact live native business
+schema. Before any generic content/staging, the proxy fetches that schema in the
+same session and validates nested closed fields. No native domain schema is
+copied into the host. Human consent/transport fields remain unavailable.
+
+The accepted assignment delegates ordinary structured work: contacts, registries,
+meetings, knowledge pages, procedure drafts, regular work and named Workspaces.
+Archive/restore/move, publication/disclosure/deletion and other sensitive effects
+use `request_assistant_action(operation=execute_assistant_operation)` with the
+same `{operation,arguments}` and request UUID, then its persisted ownerDecisionId.
+Native callbacks, both principals' independent target ACL, source CAS and atomic
+receipt/decision retain authority. Static availability is never task authority;
+unknown/denied/pending/changed/uncertain are distinct outcomes, not missing tools.
+
+Encrypted generic calls reuse SAME local native argument protector, canonical
+field inventory and managed preparation/signature/current recipient. Typed
+registry writes obtain source definitions/keys through the original signed
+managed cell, 100 keys per native revision-bound page, at most 10 000, under the
+original deadline/signal. Changed revisions refuse rather than splicing pages.
+Existing source keys retain their original ciphertext provenance. The SAME
+hydrator/protector uses these definitions; no new payload resolver, plaintext
+index/cache or human fallback. Opaque source locators are required before HTTP.
+Workspace deletion similarly reads exact native protected title/revision for its
+tombstone; no model-supplied source title.
+
+After an unknown result, `get_assistant_status` with operationReceipt=request UUID
+and exact taskPass reads only the original structural receipt. This remains
+possible after source archive/move and never revives write authority; no automatic
+retry follows a not_recorded response. Host without these native tools retains
+its old catalogue; no plugin/minimum-version change is required. Supporting
+fixed host heartbeat advertises operation protocol 1, allowing the backend's
+monotonic standard v2→v3 upgrade on the SAME device/token with old receipt history.
+Narrowed/revoked/expired grants are never restored by this capability.
+
 ## Task-local domain actions
 
 The current signed worker forwards the dedicated backend's task-local comment,
@@ -2427,8 +2471,9 @@ unchanged. The backend retains source-file ACL, validation, action policy and
 receipt authority. The host does not fetch file bytes, select an answer or create
 its own domain schema; the owner UI always supplies the free-text Other option.
 
-Encrypted accepted-file publication opens only the native-selected own accepted
-Run's signed manifest, through the SAME managed preparation cell and common
+Encrypted accepted-file publication opens only the native-selected accepted
+Run's signed manifest from the exact same task, regardless of its author,
+through the SAME managed preparation cell and common
 TRELIOE1 codec. Original paths remain local; the common human manifest selector
 rejects context/worklog files and the assistant additionally excludes its state
 directory. Structural Run/ordinal/request IDs select native attachment IDs/URLs.
@@ -2440,13 +2485,16 @@ No general file endpoint, plaintext path/digest, human proposal/approval alias,
 second blob copy, vault or replay is introduced. Legacy plain forwarding is unchanged.
 
 Independent `create_task` and fresh `get_task_create_meta` use that SAME proxy
-and the backend's current schemas. The metadata target is the protected pass's
-project; creation needs an exact persisted owner decision, explicit status and
-executor/participant sets, plus BOTH actors' native project-create ACL. Ordinary
-task-only edit access does not grant project creation. The host neither creates
-a second task service nor synthesizes human flags/owner commands or external
-sender proof. The new task does not inherit a pass, chat, source route or cycle.
-An older backend simply omits these names from its live catalogue.
+and backend schemas. Metadata may select another accessible project in the same
+company; source pass/locator stays unchanged. Encrypted `targetProjectSlug`
+selects only native creation metadata and its authority, never a writable task.
+Ordinary supporting-task creation is delegated by the accepted assignment;
+explicit status/executor/participant sets and BOTH native project-create ACLs
+remain required. Cross-audience disclosure and an exact absence-conflict override
+need a sealed owner decision. The native final writer compares the complete
+current absence snapshot, so a changed absence invalidates the decision.
+No human flags/owner credentials or external sender proof are synthesized.
+New tasks inherit no pass, chat, route or cycle.
 
 Each action still uses observed task-pass proof, native task permissions, snapshot
 CAS and a durable request UUID. The shared backend transaction commits effects

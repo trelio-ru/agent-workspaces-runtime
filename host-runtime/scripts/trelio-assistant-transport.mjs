@@ -401,6 +401,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
         // Native discussion rollout gates it before reserving a chat/pass; it
         // never substitutes device authorization, task ACL or observed proof.
         headers: { accept: 'application/json', 'x-trelio-host-runtime-version':getHostRuntimeVersion(),
+          ...(operation==='heartbeat'?{'x-trelio-assistant-operation-protocol':'1'}:{}),
           ...(['healthRead','healthReport'].includes(operation)?{'x-trelio-assistant-health-protocol':'3'}:{}),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           ...(credential ? { authorization: `Bearer ${credential}` } : {}) },
@@ -682,7 +683,7 @@ const validateAssistantEncryptedSkillRead = (value,pass=null) => {
 /** Closed content surface implemented with the SAME local protector, payload
  * collision comparison, managed OS identity and native data-plane routes. This
  * list is a transport capability, never a replacement domain schema or ACL. */
-const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['call_remote_agent_skill_tool','cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
+const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['execute_assistant_operation','call_remote_agent_skill_tool','cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
   'create_task','create_comment','update_comment','update_task_title','update_task_description','create_task_control',
   'update_task_control','create_checklist','update_checklist','create_subtask','create_task_relation','update_task_status',
   'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',
@@ -808,6 +809,13 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
     business.parameters={...business.parameters,encryptedArguments:business.parameters.arguments,arguments:[]};
   }
 
+  const delegatedInput=name==='execute_assistant_operation'?business:
+    name==='request_assistant_action'&&business.operation==='execute_assistant_operation'?business.fields:null;
+  if(delegatedInput){
+    for(const key of ['projectSlug','targetProjectSlug','sourceProjectSlug','registrySlug'])
+      if(delegatedInput.arguments?.[key]!==undefined&&!/^e-[0-9a-f-]{36}$/u.test(delegatedInput.arguments[key]))
+        fail('ASSISTANT_ENCRYPTED_SOURCE_LOCATOR_REQUIRED');
+  }
   if(Object.hasOwn(business,'encryptedFiles')||Object.hasOwn(business,'acceptedFiles')&&name!=='create_comment'
     ||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
     ||name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)&&!assistantNeutralPrivateInput(business.fields)
@@ -1026,12 +1034,60 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       // Keep the human publication order: canonicalize the actual message,
       // then append file links. A filename containing @username is not a ping.
       if(commentAttachmentLinks.length)business.bodyJson=local.appendLocalTaskCommentAttachmentLinks(business.bodyJson,commentAttachmentLinks);
+      let operationMirror=null;
+      const delegated=name==='execute_assistant_operation'?business:
+        name==='request_assistant_action'&&business.operation==='execute_assistant_operation'?business.fields:null;
+      if(delegated&&['upsert_registry_rows','archive_registry_rows','delete_workspace'].includes(delegated.operation)){
+        // The shared protector needs current native column types/row locators
+        // or a deletion title. Send only source coordinates, never business
+        // prose, before reading this independently ACL-checked definition.
+        const coordinates=Object.fromEntries(Object.entries(delegated.arguments)
+          .filter(([key])=>['projectSlug','registrySlug','workspaceId'].includes(key)));
+        let offset=0,expectedRegistryUpdatedAt;
+        do{
+          const args={operation:delegated.operation,arguments:coordinates,clientRequestId:business.clientRequestId,
+            expectedTaskUpdatedAt:business.expectedTaskUpdatedAt,...(offset?{offset,expectedRegistryUpdatedAt}:{})};
+          await current();
+          const signature=await crypto.signCompanyEncryptionRecord(context.device.privateKeys.signingPrivateKey,
+            {protocol:'assistant-managed-content/v1',phase:'preparation',companyId:pass.companyId,target,nativeTool:name,
+              arguments:args,action:{operationDefinition:true}});
+          const response=await requestPayloads(context.requestOrigin,token,'/api/agent-workspaces/encryption/payloads',{
+            method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({companySlug:company.companySlug,
+              writerDeviceId:context.runtime.device.id,payloads:[],preparation:{nativeTool:name,arguments:args,operationDefinition:true,signature}}),
+            managedTarget:target,assertPass:current,signal});
+          const bytes=await common.readBoundedResponseBuffer(response,3*1024*1024,'Assistant native operation definition');
+          let bundle;try{bundle=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+          catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}finally{bytes.fill(0);}
+          const definition=await hydrate(bundle),page=definition.operationDefinition;
+          if(definition.schemaVersion!==1||!object(page))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          if(!page.registryDocument){if(offset)fail('ASSISTANT_MCP_INVALID_RESPONSE');operationMirror=page;break;}
+          const document=page.registryDocument;
+          if(!object(document)||!Array.isArray(document.payload?.rows)||document.payload.rows.length>100
+            ||typeof page.registryUpdatedAt!=='string'||!Number.isFinite(Date.parse(page.registryUpdatedAt))
+            ||expectedRegistryUpdatedAt!==undefined&&expectedRegistryUpdatedAt!==page.registryUpdatedAt
+            ||page.nextOffset!==null&&(!Number.isSafeInteger(page.nextOffset)||page.nextOffset!==offset+document.payload.rows.length
+              ||page.nextOffset<=offset||page.nextOffset>=10000))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          const sourceLocators=bundle.context?.operationDefinition?.registryRowLocators;
+          if(!object(sourceLocators?.[document.id]))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          if(!operationMirror){
+            expectedRegistryUpdatedAt=page.registryUpdatedAt;
+            operationMirror={...page,contextDocuments:[document],registryRowLocators:sourceLocators};
+          }else{
+            const first=operationMirror.contextDocuments[0];
+            if(first.id!==document.id)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+            first.payload.rows.push(...document.payload.rows);
+            Object.assign(operationMirror.registryRowLocators[document.id],sourceLocators[document.id]);
+          }
+          offset=page.nextOffset;
+        }while(offset!==null);
+        await current();
+      }
       const readonly=secretMetadata||['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
         if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)&&!assistantNeutralPrivateInput(business.fields)
           ||name==='request_assistant_action'&&business.operation==='create_company_secret'&&!assistantNeutralCompanySecret(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-        const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,
+        const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,mirror:operationMirror,
           ...(customField?{customFieldTypeForId:id=>id===customField.id?customField.fieldType:null}:{})});
         // All new host metadata stays inside the ALREADY hidden envelope.
         // Older model-schema projectors know that envelope; a new root field
@@ -3033,13 +3089,13 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "download_attachment", "get_task_create_meta", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
+const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_assistant_operation_contract", "download_attachment", "get_task_create_meta", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS,
   // Native task-local mapping only. Live schema/proof/CAS remain backend-owned;
   // exposing the name does not read a provider body or create a new task.
-  'bind_assistant_source_conversation',
+  'bind_assistant_source_conversation','execute_assistant_operation',
   'connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool',
   'ask_assistant_owner', 'request_assistant_action', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
   // Native server cancellation needs no local file/CLI adapter. Its live
@@ -3449,7 +3505,25 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(name==='continue_assistant_workspace_action'&&argumentsSnapshot.operation==='external_account_admit'){
           if(!assistantExternalAccountAdmission(argumentsSnapshot.parameters))fail('ASSISTANT_MCP_INPUT_INVALID');
         }
-        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='create_external_account'){
+        const delegated=name==='execute_assistant_operation'?argumentsSnapshot:
+          name==='request_assistant_action'&&argumentsSnapshot.operation==='execute_assistant_operation'?argumentsSnapshot.fields:null;
+        if(delegated){
+          // Native schema metadata is taskless and content-free. Fetch only the
+          // chosen domain schema, within this SAME device session/deadline,
+          // before plaintext send or encrypted staging. Never copy schemas.
+          if(!object(delegated)||typeof delegated.operation!=='string'||!/^[a-z][a-z0-9_]{0,99}$/u.test(delegated.operation)||!object(delegated.arguments))fail('ASSISTANT_MCP_INPUT_INVALID');
+          const response=await request({config,credential,sessionId:session.sessionId,payload:{jsonrpc:'2.0',id:session.nextRequestId(),
+            method:'tools/call',params:{name:'get_assistant_operation_contract',arguments:{operation:delegated.operation}}}},{signal});
+          const contract=protocol.assertJsonRpcResult(response,'tools/call');
+          if(contract?.isError||contract?.structuredContent?.schemaVersion!==1
+            ||contract.structuredContent.operation!==delegated.operation||!object(contract.structuredContent.inputSchema))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          validateAssistantNativeInputShape(contract.structuredContent.inputSchema,delegated.arguments,{omittedRootFields:[],ignoredRootFields:[]});
+        }
+        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='cancel_assistant_goal'){
+          if(!object(argumentsSnapshot.fields)||Object.keys(argumentsSnapshot.fields).length)fail('ASSISTANT_MCP_INPUT_INVALID');
+        }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='execute_assistant_operation'){
+          // The selected native domain schema was checked above.
+        }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='create_external_account'){
           if(!assistantExternalAccountPlan(argumentsSnapshot.fields))fail('ASSISTANT_MCP_INPUT_INVALID');
         }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='setup_skill_account'){
           normalizeAssistantSkillAccountSetupFields(argumentsSnapshot.fields);
@@ -3576,6 +3650,8 @@ export const validateAssistantEncryptedTaskRead = async ({descriptor,identity,pa
   let requestOrigin;try{requestOrigin=common.resolveEncryptedDataPlaneOrigin(identity.origin,descriptor.requestOrigin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
   if(requestOrigin!==descriptor.requestOrigin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
   const args=structuredClone(descriptor.arguments);
+  if(args.targetProjectSlug!==undefined&&(descriptor.nativeTool!=='get_task_create_meta'
+    ||!/^e-[0-9a-f-]{36}$/u.test(args.targetProjectSlug)))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   const locators=descriptor.nativeTool==='get_task_instruction_page'?args.tasks:[args];
   if(!Array.isArray(locators) || locators.length!==1 || !object(locators[0]))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   const {companySlug,projectSlug,taskNumber}=locators[0];

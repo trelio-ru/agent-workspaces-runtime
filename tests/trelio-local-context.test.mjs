@@ -2274,6 +2274,15 @@ test("local action protects nested task content and converts Markdown before upl
       privateJwk: device.privateBundle.encryptionPrivateJwk,
     },
   };
+  const delegated={operation:'create_workspace',arguments:{unfiled:true,title:'DELEGATED_LOCAL_TITLE',description:'DELEGATED_LOCAL_DESCRIPTION'},clientRequestId:'delegated-local-test'};
+  const native=await protectLocalActionArguments({nativeTool:'execute_assistant_operation',arguments:delegated,companyEncryption});
+  const reviewed=await protectLocalActionArguments({nativeTool:'request_assistant_action',companyEncryption,
+    arguments:{operation:'execute_assistant_operation',fields:{operation:delegated.operation,arguments:delegated.arguments},
+      reason:'DELEGATED_LOCAL_REASON',clientRequestId:delegated.clientRequestId}});
+  assert.deepEqual(native.value.arguments,reviewed.value.fields.arguments,'owner planning and execution protect the identical native content identity');
+  assert.equal(native.value.arguments.clientRequestId,undefined);
+  assert.equal(JSON.stringify(native.value).includes('DELEGATED_LOCAL_'),false);
+  assert.equal(JSON.stringify(reviewed.value).includes('DELEGATED_LOCAL_'),false);
   const protectedRequest = await protectLocalActionArguments({
     nativeTool: "create_task",
     arguments: {

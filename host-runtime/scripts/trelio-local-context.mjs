@@ -2270,6 +2270,28 @@ export const protectLocalActionArguments = async ({
   const expectedPayloadValues = {};
   let objectSequence = 0;
   let normalizedArguments = normalizeLocalActionRichTextInputs(rawArguments);
+  if (nativeTool === 'execute_assistant_operation') {
+    const operation=normalizedArguments.operation,fields=normalizedArguments.arguments;
+    if(typeof operation!=='string'||!fields||typeof fields!=='object'||Array.isArray(fields))
+      throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','An exact native operation is required.');
+    // The proxy already checked the live native schema. This is only content
+    // formatting under the SAME protector, not an approval/execution alias.
+    // Deletion's local assertion selects tombstone formatting; the server
+    // independently consumes the sealed owner decision before any effect.
+    const protectedValue=await protectLocalActionArguments({nativeTool:operation,companyEncryption,mirror,
+      customFieldTypeForId,arguments:{...fields,clientRequestId:normalizedArguments.clientRequestId,
+        ...(operation==='delete_workspace'?{userRequestedDeletion:true}:{})}});
+    const {clientRequestId:_id,userRequestedDeletion:_deletion,...business}=protectedValue.value;
+    return {...protectedValue,value:{...normalizedArguments,arguments:business}};
+  }
+  if (nativeTool === 'request_assistant_action' && normalizedArguments.operation === 'execute_assistant_operation') {
+    const protectedValue=await protectLocalActionArguments({nativeTool:'execute_assistant_operation',companyEncryption,mirror,
+      customFieldTypeForId,arguments:{...normalizedArguments.fields,clientRequestId:normalizedArguments.clientRequestId}});
+    const {clientRequestId:_id,...business}=protectedValue.value;
+    normalizedArguments={...normalizedArguments,fields:business};
+    payloads.push(...protectedValue.payloads);
+    Object.assign(expectedPayloadValues,protectedValue.expectedPayloadValues);
+  }
   if (nativeTool === "register_codex_folder") {
     // A personal filesystem path shares the signed content codec, but has a
     // dedicated entity type so the generic company resolver can enforce the
@@ -8615,7 +8637,8 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
   }
   const raw = await requestJson(`/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/tasks/read`, {
     tasks: locators.map(locator => ({ projectSlug: locator.projectSlug, taskNumber: Number(locator.taskNumber) })),
-    ...(contextRead?{contextRead,...(nativeTool==='get_agent_procedure'?{procedureId:input.procedureId}:{})}:{}),
+    ...(contextRead?{contextRead,...(nativeTool==='get_agent_procedure'?{procedureId:input.procedureId}:{}),
+      ...(nativeTool==='get_task_create_meta'&&input.targetProjectSlug?{targetProjectSlug:input.targetProjectSlug}:{})}:{}),
   });
   if (raw.company?.id !== provider.companyEncryption.runtime.company.id || raw.company?.slug !== companySlug) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact task context belongs to another company.");
@@ -8623,7 +8646,8 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
   const mirror = await hydrate(raw);
   // Include live context before choosing inline/pages. Appending it after the
   // schema-v3 budget check could overflow a borderline instruction page.
-  const localInput=contextRead?.endsWith('_company')?{...input,projectSlug:undefined}:input;
+  const localInput=contextRead?.endsWith('_company')?{...input,projectSlug:undefined}
+    :contextRead==='task_create_meta'&&input.targetProjectSlug?{...input,projectSlug:input.targetProjectSlug}:input;
   return handleNativeLocalContextRead(unfiledQueue ? { ...mirror, unfiledQueue } : mirror, nativeTool, localInput);
 };
 

@@ -901,6 +901,16 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // get_task retains its existing adapter; only the protected owner intake
       // selects other company reads implicitly. Names never select authority.
       const active=typeof host.readActivePass==='function'?await host.readActivePass():null;
+      if(request.name==='get_assistant_status'&&request.args.operationReceipt!==undefined){
+        // A lifecycle action may have closed/moved the source task. Read only
+        // its committed structural ledger entry with the SAME retained host
+        // pass; do not demand a new business proof or reopen a writable profile.
+        const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+        const pass=validateAssistantActivePass(active,identity);
+        if(pass.kind==='source_intake')fail('ASSISTANT_ACTIVE_PASS_REQUIRED');
+        const {taskPass:_pass,intakePass:_intake,runtimeSessionProof:_proof,...metadata}=request.args;
+        return send({...metadata,taskPass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId}});
+      }
       if(request.name==='resolve_assistant_intake'&&request.args.decision==='reply_owner'){
         // Plain and encrypted modes share the exact outgoing codec BEFORE
         // native reservation or any file read. A refused body stays editable
@@ -2583,6 +2593,15 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
 export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs'),
     withManagedContent=withProductionAssistantManagedContent,companyContextRead=false}={})=>{
+  // Constant native schema metadata contains no company content or grant.
+  // Do not require company keys or consume a task proof merely to inspect it.
+  if(name==='get_assistant_operation_contract'){
+    const {taskPass:_pass,intakePass:_intake,runtimeSessionProof:_proof,...metadata}=args;
+    if(Object.keys(metadata).some(key=>!['operation','includeCoverage'].includes(key))
+      ||metadata.operation!==undefined&&(typeof metadata.operation!=='string'||!/^[a-z][a-z0-9_]{0,99}$/u.test(metadata.operation))
+      ||metadata.includeCoverage!==undefined&&metadata.includeCoverage!==true)fail('ASSISTANT_MCP_INPUT_INVALID');
+    return send(metadata);
+  }
   if (['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)) {
     // Live native schema was checked before this local composition. All three
     // operations reuse the SAME resolver/credential UI/vault/doctor/HTTP engine.
