@@ -785,3 +785,18 @@ test('Windows executes the actual bounded telemetry pipe without privileged chan
   assert.equal(snapshot.windows.status,'available');assert.equal(snapshot.memory.status,'available');assert.equal(snapshot.disk.status,'available');
   assert.doesNotMatch(JSON.stringify(snapshot),/hostname|USERPROFILE|commandLine|Message|\\\\Windows/iu);
 });
+
+
+test('an observed critical Windows event flushes before the ordinary five-minute report',async()=>{
+  const {maintainAssistantHostHealth}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+  let at=Date.now(),journal=null,revision=0,critical=0,posts=0;
+  const dependencies={platform:'win32',environment:{},now:()=>at,readJournal:async()=>journal,writeJournal:async value=>{journal=value;},
+    osApi:{cpus:()=>[],freemem:()=>2*1024**3,totalmem:()=>4*1024**3,release:()=> '10.0.26100',uptime:()=>100},
+    readNative:async()=>({codex:'running',events:{status:'available',value:{systemCritical:critical,applicationCrashes:0}}}),
+    client:{readHostHealth:async()=>({enabled:true,settingsRevision:0,revision}),reportHostHealth:async body=>{
+      posts++;revision++;assert.equal(body.samples.at(-1).events.value.systemCritical,critical);
+      return {enabled:true,settingsRevision:0,revision};}}};
+  await maintainAssistantHostHealth(dependencies);assert.equal(posts,1);
+  at+=60_000;critical=1;
+  await maintainAssistantHostHealth(dependencies);assert.equal(posts,2,'critical evidence does not wait another four minutes');
+});

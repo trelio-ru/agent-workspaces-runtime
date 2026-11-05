@@ -3963,8 +3963,8 @@ remain unchanged. An old backend refusal is not permission for another route.
 Sampling runs alongside work, including quota waits; no failure changes work
 readiness, health latches, source ACK or delivery receipts. Enabled idle workers
 request a one-minute next tick; busy workers sample every minute in the same
-lifecycle. Ordinary reports flush every five minutes, critical disk may flush
-earlier; the attempted buffer is retired before POST. Missing minutes invalidate
+lifecycle. Ordinary reports flush every five minutes; critical disk or a newly observed
+critical Windows event flushes immediately; the attempted buffer is retired before POST. Missing minutes invalidate
 sustained-load evidence. Current native maintenance suppresses stopped-Codex
 classification without declaring repaired business work. The server owns durable
 threshold/recovery hysteresis and separate per-code incidents/notices, seven-day

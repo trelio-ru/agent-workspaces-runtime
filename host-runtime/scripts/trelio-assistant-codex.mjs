@@ -1410,7 +1410,10 @@ export const maintainAssistantHostHealth=async({client,readJournal,writeJournal,
   // result cannot recreate the same sample under a new request after restart.
   const samples=[...(at-old.lastSampleAt<=120_000?old.samples:[]),snapshot].slice(-5);
   const next={...old,cpu,lastSampleAt:at,samples,supervisorGeneration,supervisorRestarts};await writeJournal(next);
-  const critical=snapshot.disk.status==='available'&&snapshot.disk.value.freeBytes<1024**3;
+  // Observed critical Windows events have the same immediate delivery bound
+  // as a critically full disk; neither waits for the ordinary five-minute batch.
+  const critical=snapshot.disk.status==='available'&&snapshot.disk.value.freeBytes<1024**3
+    ||snapshot.events.status==='available'&&snapshot.events.value.systemCritical>0;
   if(old.lastSentAt&&at-old.lastSentAt<300_000&&!critical)return current;
   // Drop the attempted batch before POST. An ambiguous response is never
   // automatically replayed; the next native GET obtains the authoritative CAS.
