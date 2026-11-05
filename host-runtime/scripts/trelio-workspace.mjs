@@ -19878,5 +19878,19 @@ if (isDirectModuleInvocation(import.meta.url) && process.argv[2] === "local-form
     process.stdout.write(html);
   })().catch(() => { process.stderr.write("LOCAL_FORM_INVALID\n"); process.exitCode = 1; });
 } else if (isDirectModuleInvocation(import.meta.url)) {
-  runEntrypoint().catch((error) => fail(formatBridgeCommandError(error, process.argv[2])));
+  runEntrypoint()
+    .catch((error) => fail(formatBridgeCommandError(error, process.argv[2])))
+    .then(async () => {
+      if (process.argv[2] !== "finish") return;
+      // finish is a one-shot writer owned by the MCP operation registry.
+      // Only AFTER its promise settles (including lock/private-session cleanup)
+      // may this exact child exit. Waiting for unrelated referenced dependency
+      // handles can otherwise leave a server-accepted Run "running" forever.
+      // Drain both pipes before exit so a large receipt or failure frame is
+      // never truncated. This does not time out, cancel or replay a live save;
+      // rejected work preserves its original nonzero exit and recovery state.
+      await Promise.all([process.stdout, process.stderr].map((output) =>
+        new Promise((resolve) => output.write("", resolve))));
+      process.exit(process.exitCode ?? 0);
+    });
 }

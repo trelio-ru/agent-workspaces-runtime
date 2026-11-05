@@ -812,6 +812,34 @@ test("successful open registers exact persisted Run identity with the renewer", 
   });
   assert.deepEqual(marked, [adoptedEntry, "status", {}]);
 
+  // A turnCheck after acceptance is a read, not proof of an active lease.
+  // Re-adopting this receipt would later reclaim an already accepted Run.
+  const metadataPath = path.join(rootDirectory, ".trelio-run.json");
+  const activeMetadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  for (const terminalStatus of ["accepted", "cancelled"]) {
+    await fs.writeFile(metadataPath, JSON.stringify({ ...activeMetadata, terminalStatus }));
+    const timers = [];
+    const terminalManager = createWorkspaceRunHeartbeatManager({
+      runBridge: async () => assert.fail("terminal Run must not heartbeat or reclaim"),
+      resolveOpenedDirectory: async () => workspaceDirectory,
+      scheduleTimer: () => { const timer = { cancelled: false }; timers.push(timer); return timer; },
+      cancelTimer: (timer) => { timer.cancelled = true; },
+    });
+    const oldEntry = terminalManager.start({ origin: "https://trelio.example",
+      workspaceId: actionWorkspaceId, runId: actionRunId, workspaceDirectory });
+    await terminalManager.recoverActionFailure(oldEntry, { code: "STALE_FENCING_TOKEN" });
+    await handleTrelioWorkspaceActionOperation("https://trelio.example", {
+      schemaVersion: 1, operation: "status", parameters: {}, workingDirectory: workspaceDirectory,
+    }, {
+      runBridge: async () => ({ stdout: "Terminal Run read\n", stderr: "" }),
+      runHeartbeatManager: terminalManager,
+    });
+    assert.equal(terminalManager.inspect(workspaceDirectory), null);
+    assert.equal(timers.length, 1, "terminal status must not restart a renewal timer");
+    assert.equal(timers[0].cancelled, true);
+  }
+  await fs.writeFile(metadataPath, JSON.stringify(activeMetadata));
+
   await assert.rejects(handleTrelioWorkspaceActionOperation("https://trelio.example", {
     schemaVersion: 1,
     operation: "checkpoint",
@@ -836,6 +864,33 @@ test("successful open registers exact persisted Run identity with the renewer", 
     && error.details?.runId === actionRunId
     && error.details?.requiredAction === "prepare_and_open_existing_run"
   ));
+});
+
+test("an explicit guarded open is not blocked by the previous Run's stopped renewer", async () => {
+  const calls = [];
+  const manager = createWorkspaceRunHeartbeatManager({
+    runBridge: async (_origin, args) => {
+      calls.push(args);
+      throw Object.assign(new Error("old lease fenced"), { code: "STALE_FENCING_TOKEN" });
+    },
+    resolveOpenedDirectory: async () => actionWorkingDirectory,
+    scheduleTimer: () => ({}), cancelTimer: () => undefined,
+  });
+  const entry = manager.start({ origin: "https://trelio.example",
+    workspaceId: actionWorkspaceId, runId: actionRunId, workspaceDirectory: actionWorkingDirectory });
+  await manager.recoverActionFailure(entry, { code: "STALE_FENCING_TOKEN" });
+  await assert.rejects(manager.beginAction(actionWorkingDirectory, "checkpoint"),
+    { code: "TRELIO_WORKSPACE_RUN_FENCED" });
+  await assert.rejects(manager.beginAction(actionWorkingDirectory, "open", {
+    workspaceId: actionWorkspaceId, runId: actionRunId,
+  }), { code: "TRELIO_WORKSPACE_RUN_FENCED" }, "same-Run fencing is not bypassed");
+  // The explicit open still runs its own server ACL/claim/local-root preflight;
+  // this only retires obsolete in-memory renewal, never a file or server Run.
+  assert.equal(await manager.beginAction(actionWorkingDirectory, "open", {
+    workspaceId: actionWorkspaceId, runId: actionReleaseId,
+  }), null);
+  assert.equal(manager.inspect(actionWorkingDirectory), null);
+  assert.deepEqual(calls, [], "a new open must not automatically reclaim the old Run");
 });
 
 test("encrypted local rule publications enforce company/project UTF-8 limits before encryption", () => {

@@ -9,6 +9,7 @@ import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHand
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { trelioCallSignal, withTrelioCallBudget } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 
 const pending = () => { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; };
@@ -140,6 +141,29 @@ test("real finish child exposes progress before exit and survives output beyond 
   assert.equal(lastProgress.completedFiles, 34);
   assert.equal(result.stdout, "accepted");
   assert.ok(result.stderr.length <= 1024 * 1024);
+});
+
+test("a rejected CLI finish exits nonzero after cleanup despite a lingering dependency handle", { timeout: 10_000 }, async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-finish-exit-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const preload = path.join(home, "linger.mjs");
+  await fs.writeFile(preload, "setInterval(() => {}, 1000);");
+  const bridge = new URL("../host-runtime/scripts/trelio-workspace.mjs", import.meta.url);
+  // No metadata exists in this isolated home, so the real CLI refuses before
+  // any credential or HTTP read. Its error must settle the child, never turn
+  // into a timeout or a successful save merely because the process is alive.
+  await assert.rejects(promisify(execFile)(process.execPath,
+    ["--import", preload, fileURLToPath(bridge), "finish"], {
+      cwd: home, timeout: 5000, env: { ...process.env, HOME: home, USERPROFILE: home,
+        LOCALAPPDATA: path.join(home, "AppData", "Local"), XDG_CONFIG_HOME: path.join(home, ".config"),
+        CODEX_HOME: path.join(home, ".codex"), TRELIO_CONFIG_HOME: path.join(home, "trelio"),
+        TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
+    }), (error) => {
+      assert.equal(error.code, 1);
+      assert.equal(error.killed, false);
+      assert.match(error.stderr, /Ошибка:/u);
+      return true;
+    });
 });
 
 

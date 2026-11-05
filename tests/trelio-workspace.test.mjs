@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, sign, webcrypto } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -4362,7 +4363,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
   }
 });
 
-for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied"]) test(
+for (const recovery of ["clean", "lingering_handles", "before_acceptance", "after_acceptance", "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied"]) test(
   `bridge finish recovers saved handoff: ${recovery}`, {
   timeout: 30_000,
 }, async () => {
@@ -4375,7 +4376,7 @@ for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accep
     CODEX_HOME: path.join(homeDirectory, ".codex"), TRELIO_CONFIG_HOME: path.join(homeDirectory, "trelio"),
     TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" };
   let baseHead, draftHead, latestCheckpoint = null;
-  const interrupted = recovery !== "clean";
+  const interrupted = !["clean", "lingering_handles"].includes(recovery);
   let serverAccepted = false, serverCandidateHead = null, denyRecoveryRead = recovery === "read_denied";
   let handoffAttempts = 0;
   let handoffPayload = null;
@@ -4576,6 +4577,14 @@ for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accep
       "Завершён уже сохранённый переносимый draft без искусственной правки.", "--evidence",
       "Проверен полный candidate delta относительно pinned base.", "--next-action",
       "Используйте принятый итоговый материал."];
+    if (recovery === "lingering_handles") {
+      // Exercise the actual CLI through server acceptance, metadata and lock
+      // cleanup. A referenced dependency handle must not retain a settled
+      // finish child forever; its complete piped output must still be drained.
+      const preloadPath = path.join(temporaryDirectory, "lingering-handles.mjs");
+      await writeFile(preloadPath, 'process.stdout.write("x".repeat(256 * 1024) + "\\n"); setInterval(() => {}, 1000);');
+      finishArguments.unshift("--import", preloadPath);
+    }
     const finishOptions = { cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: fixtureEnv };
     if (interrupted) {
       await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), (error) => {
@@ -4624,6 +4633,13 @@ for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accep
       }
     }
     const finished = await execFileAsync(process.execPath, finishArguments, finishOptions);
+    if (recovery === "lingering_handles") {
+      assert.ok(finished.stdout.startsWith("x".repeat(256 * 1024) + "\n"), "stdout must drain before exit");
+      const lockDirectory = path.join(resolveWorkspaceBridgeConfigDirectory({
+        environment: fixtureEnv, homeDirectory,
+      }), "workspace-open-locks", `finish-${runId}.lock`);
+      await assert.rejects(lstat(lockDirectory), { code: "ENOENT" }, "finish must release its owned lock before exit");
+    }
 
     if (recovery === "after_acceptance") {
       assert.match(finished.stdout, /Run уже принят; повторная загрузка не требуется/u);
@@ -4636,7 +4652,7 @@ for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accep
     assert.equal(handoffAttempts, ["changed_input", "changed_draft"].includes(recovery) ? 2 : 1,
       "reuse only the exact live handoff, preserving changed semantic input/draft");
     assert.equal(candidateAttempts, ["before_acceptance", "changed_input", "changed_draft", "read_denied"].includes(recovery) ? 2 : 1);
-    assert.equal(heartbeatAttempts, recovery === "clean" || recovery === "after_acceptance" ? 3 : recovery === "lost_checkpoint" ? 4 : 6);
+    assert.equal(heartbeatAttempts, ["clean", "lingering_handles", "after_acceptance"].includes(recovery) ? 3 : recovery === "lost_checkpoint" ? 4 : 6);
     const receipt = JSON.parse(await readFile(metadataPath, "utf8"));
     assert.equal(receipt.terminalStatus, "accepted");
     assert.equal(receipt.finishRecovery, undefined, "confirmed acceptance retires the local recovery marker");

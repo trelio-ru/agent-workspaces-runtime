@@ -10721,13 +10721,24 @@ export const createWorkspaceRunHeartbeatManager = ({
     return entry;
   };
 
-  const beginAction = async (workspaceDirectory, operation) => {
+  const beginAction = async (workspaceDirectory, operation, openingIdentity = null) => {
     const entry = entries.get(entryKey(workspaceDirectory));
     if (!entry) return null;
     // If the timer already entered heartbeat/claim, wait for that exact
     // renewal before the child reads metadata. This prevents a foreground
     // command from racing a fencing-token rotation after laptop wake.
     if (entry.renewalPromise) await entry.renewalPromise;
+    if (operation === "open" && openingIdentity?.workspaceId === entry.workspaceId
+      && UUID_PATTERN.test(String(openingIdentity.runId || ""))
+      && openingIdentity.runId !== entry.runId) {
+      // A prepared open for a DIFFERENT exact Run must reach the CLI's own
+      // live ACL/claim/terminal-state/clean-tree preflight. A stopped renewer
+      // for this reused directory is not authority over that new Run. Join
+      // any old renewal first, then retire only this process-local entry;
+      // same-Run fencing and every ordinary mutation remain fail-closed.
+      stopEntry(entry);
+      return null;
+    }
     if (entry.recovery) {
       throw createWorkspaceRunStoppedError(entry, operation);
     }
@@ -10875,9 +10886,16 @@ const executeTrelioWorkspaceActionOperation = async (
       resolveRunRootDirectory,
     );
     if (heartbeatManager && workingDirectory && !invocation.parameters.nativeInput) {
+      // A retained stopped entry can predate another host's accepted save.
+      // Read only the exact origin/path-bound local receipt before consulting
+      // it. Retiring renewal changes no files, lease or server permissions;
+      // missing/invalid metadata still follows the ordinary guarded child.
+      const identity = await readOpenedWorkspaceRunIdentity(workingDirectory, origin).catch(() => null);
+      if (identity?.terminalStatus) heartbeatManager.stop(path.resolve(workingDirectory));
       activeHeartbeatEntry = await heartbeatManager.beginAction(
         workingDirectory,
         invocation.operation,
+        invocation.operation === "open" ? invocation.parameters : undefined,
       );
     }
     const result = await runBridge(origin, invocation.argumentsList, {
@@ -10898,7 +10916,8 @@ const executeTrelioWorkspaceActionOperation = async (
         openWorkingDirectory: invocation.workingDirectory,
       });
     } else if (heartbeatManager) {
-      if (!activeHeartbeatEntry && workingDirectory) {
+      let terminalReceipt = false;
+      if (workingDirectory) {
         // A host may restart while the local Run and lease remain valid. The
         // first successful foreground action proves that metadata is usable;
         // adopt it for future heartbeat even though the old proof-bearing open
@@ -10910,18 +10929,26 @@ const executeTrelioWorkspaceActionOperation = async (
             path.resolve(workingDirectory),
             origin,
           );
-          activeHeartbeatEntry = heartbeatManager.start({
-            origin,
-            workspaceId: identity.workspaceId,
-            runId: identity.runId,
-            workspaceDirectory: path.resolve(workingDirectory),
-          });
+          // Successful status is also valid for an accepted/cancelled Run.
+          // Its persisted terminal receipt stops renewal; it must never be
+          // mistaken for evidence of a live lease after host restart or finish.
+          terminalReceipt = Boolean(identity.terminalStatus);
+          if (terminalReceipt) {
+            heartbeatManager.stop(path.resolve(workingDirectory));
+          } else if (!activeHeartbeatEntry) {
+            activeHeartbeatEntry = heartbeatManager.start({
+              origin,
+              workspaceId: identity.workspaceId,
+              runId: identity.runId,
+              workspaceDirectory: path.resolve(workingDirectory),
+            });
+          }
         } catch {
           // The completed foreground action remains authoritative; absence of
           // adoptable metadata only disables background renewal for this cwd.
         }
       }
-      heartbeatManager.markActionSuccess(
+      if (!terminalReceipt) heartbeatManager.markActionSuccess(
         activeHeartbeatEntry,
         invocation.operation,
         invocation.actionParameters ?? rawInput.parameters,
@@ -11801,6 +11828,8 @@ export const readOpenedWorkspaceRunIdentity = async (workspaceDirectory, expecte
   return {
     workspaceId: metadata.workspaceId,
     runId: metadata.runId,
+    ...(["accepted", "cancelled"].includes(metadata.terminalStatus)
+      ? { terminalStatus: metadata.terminalStatus } : {}),
   };
 };
 

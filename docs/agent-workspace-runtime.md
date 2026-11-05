@@ -1553,7 +1553,14 @@ clean Git и принятый head проверяются обычным preflig
    Если компьютер проснулся уже после срока, exact `LEASE_EXPIRED` либо
    `RUN_NOT_ACTIVE` запускает один повторный `open`/claim того же Run; stale
    fencing и terminal Run не перехватываются автоматически. После restart
-   первый успешный workspace action снова подключает Run к renewer.
+   первый успешный workspace action снова подключает активный Run к renewer.
+   Origin/path-bound local terminal receipt (`accepted`/`cancelled`) прекращает
+   продление, в том числе при `status` после restart/сохранения. Успешное чтение
+   terminal Run не доказывает действующую lease и не запускает её восстановление.
+   Подготовленный `open` другого exact Run того же Workspace дожидается уже
+   начатого renewal и снимает только прежнюю in-memory запись. Он проходит
+   обычные server ACL/claim/fencing, terminal-state и clean-tree проверки CLI;
+   файлы, серверный Run и same-Run fencing этим переходом не меняются.
 6. Агент завершает работу одной `trelio-workspace finish`: bridge проверяет и
    печатает changed paths, сначала продлевает lease, создаёт handoff с итогом,
    evidence, материалами, вопросами и одним следующим действием, создаёт одну
@@ -1579,6 +1586,14 @@ Local MCP ждёт `finish` не более 10 секунд за вызов. Е�
 завершить работу или менять файлы. Отмена отдельного MCP-ожидания не отменяет
 само сохранение. После child exit возвращаются исходный результат либо ошибка;
 `completed` не подменяет server-side проверку acceptance внутри CLI.
+
+Standalone CLI `finish` завершает свой процесс после settlement всей команды,
+включая release exact process lock и private-session cleanup. Перед выходом
+он дожидается записи обоих stdout/stderr pipes и сохраняет исходный exit code.
+Оставшийся referenced handle зависимости не удерживает уже завершённый writer.
+Progress frame, истечение времени либо один server receipt не являются этим
+условием: работающий/неоднозначный finish не завершается и не повторяется
+родителем автоматически. Остальные CLI-команды сохраняют собственный lifetime.
 
 Реестр живёт в текущем MCP-host, ограничен 64 операциями и хранит завершённые
 результаты 30 минут. Одновременные одинаковые `finish` присоединяются к одной

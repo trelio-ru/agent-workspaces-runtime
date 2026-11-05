@@ -354,6 +354,9 @@ publication tooling также остаются вне этого публичн
   а timeout ожидания не означает принятия candidate или отмены сохранения.
   После прерванного finish exact read-back переиспользует только совпавший
   handoff; lost acceptance восстанавливается лишь при совпадении clean tree/head.
+  Settled CLI finish drains output and exits after cleanup, never on a progress
+  frame. Terminal receipts never restart renewal; obsolete renewal cannot gate
+  a different exact prepared Run before its normal guarded open preflight.
 - Сохранение после 429, immutable upload streams и совместимость старого backend
   проверяй по [transport-контракту](docs/agent-workspace-runtime.md#saving-rate-limit-retry).
 - Агентские public-feedback screenshots используют plain-only local binary
