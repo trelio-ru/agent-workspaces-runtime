@@ -15,6 +15,10 @@ import { assistantSourceProcessingReferences, assistantConversationKeyMatches, a
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
+// The existing assistant native MCP wire ceiling also bounds final hydrated
+// intake delivery. Skill/task-specific paging budgets remain independent.
+const ASSISTANT_MCP_RESULT_MAX_BYTES=512*1024;
+
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
 }
@@ -3149,15 +3153,15 @@ export const ASSISTANT_MCP_READ_TOOLS = Object.freeze([...new Set([
 // profile narrows execution. Advertising them without this boundary stranded
 // real Desktop intake calls; this global names set grants no task/source ACL.
 export const ASSISTANT_INTAKE_MCP_TOOLS=Object.freeze(['get_assistant_intake_context','resolve_assistant_intake']);
-/** The new source-message envelope has a narrow budget; owner commands still
- * carry their existing complete scoped rules and task-creation metadata. Never
- * apply the routing-only limit to that older authority contract or truncate it.
+/** Both source routing and owner commands carry complete scoped authority.
+ * Preserve their existing native MCP ceiling rather than applying a skill-
+ * specific 40KB limit to these larger intake results or truncating the rules.
  * Serialize and validate BEFORE committing model-read evidence: a refused
  * envelope was read by the provider, but was never delivered to the model. */
 export const completeAssistantSourceIntakeDelivery=async({value,kind,confirmModelRead})=>{
   if(!['owner_command','route_existing'].includes(kind)||typeof confirmModelRead!=='function')fail('ASSISTANT_SOURCE_READ_INVALID');
   const delivered={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
-  if(kind==='route_existing'&&Buffer.byteLength(JSON.stringify(delivered))>40000)fail('ASSISTANT_SOURCE_CONTEXT_LIMIT');
+  if(Buffer.byteLength(JSON.stringify(delivered))>ASSISTANT_MCP_RESULT_MAX_BYTES)fail('ASSISTANT_SOURCE_CONTEXT_LIMIT');
   await confirmModelRead();
   return delivered;
 };
@@ -3600,7 +3604,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || value.content.some(item => !object(item) || item.type !== "text" || typeof item.text !== "string")
           || (value.structuredContent !== undefined && !object(value.structuredContent))
           || (value.isError !== undefined && typeof value.isError !== "boolean")
-          || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+          || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > ASSISTANT_MCP_RESULT_MAX_BYTES) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         if(name==='get_assistant_intake_context'&&value.isError!==true){
           if(typeof materializeSourceIntake!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           return localOperation('source_read',()=>materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal}));

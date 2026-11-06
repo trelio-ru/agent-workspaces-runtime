@@ -925,12 +925,13 @@ they do not establish a live Windows/business messenger acceptance.
 
 ### Autonomous email unsubscribe
 
-The 40,000-byte complete model envelope cap applies to `route_existing` source
-messages, not the existing `owner_command` response with complete scoped rules
-and task-creation metadata. Preserve that authority without truncation. Validate
-the complete delivery before committing model-read slots; rejected context may
-not earn ACK or unsubscribe evidence. Native confirmation of a provider read
-remains separate from successful model delivery.
+Both `route_existing` and `owner_command` context carry complete scoped rules
+and may exceed a skill-specific 40,000-byte budget. Preserve that authority
+without truncation under the existing 512-KiB assistant native MCP result ceiling,
+also applied to the final hydrated model envelope. Validate complete delivery
+before committing model-read slots; rejected context may not earn ACK or
+unsubscribe evidence. Native provider-read confirmation remains separate from
+successful model delivery. Skill/task-specific delivery budgets are unchanged.
 
 Email sources expose native `autoUnsubscribe`, enabled by default. Every new
 INBOX original still receives full semantic triage; neither sender/domain nor a

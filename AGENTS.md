@@ -39,8 +39,8 @@ publication tooling также остаются вне этого публичн
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; read ACK follows
   complete native-confirmed model delivery, separately from business processing.
   Exact body reads reuse the SAME signed executor and private inbox; encrypted intake/read/reply retains exact native source/revision package selectors.
-  Routing-only envelope limits never reject complete owner-command authority;
-  validate final delivery before model-read evidence. See the inbox contract.
+  Both intake routes preserve complete authority under the existing native MCP
+  ceiling; validate final delivery before model-read evidence. See inbox contract.
   Encrypted metadata/guidance use the SAME scoped task reader; queries stay local.
   Structural read-reference syntax shares one pure parser with pre-send privacy
   admission; reuse the common account selector, never a second CLI grammar.

@@ -12,12 +12,11 @@ const memoryStore = () => {
     put:async(input,value)=>values.set(key(input),structuredClone(value)),remove:async input=>values.delete(key(input)) };
 };
 
-test('source routing budget preserves complete owner authority and refuses before model-read evidence',async()=>{
+test('native intake budget preserves full authority in both routes and refuses before model-read evidence',async()=>{
   const {completeAssistantSourceIntakeDelivery}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   let confirmations=0;
-  // The real backend question stand returns complete rules/metadata above the
-  // narrow routing cap. Preserve BOTH representations byte-for-byte rather
-  // than making a command from the owner depend on unrelated email limits.
+  // Both real backend intake routes include complete scoped authority above
+  // the skill-specific cap. Preserve BOTH representations byte-for-byte.
   const owner={effectiveInstructions:{compiledMarkdown:'SYNTHETIC_RULE '.repeat(5000)},
     metadata:{project:{id:randomUUID()}},ownerMessage:{text:'Synthetic question',verifiedNativeOwner:true}};
   const delivered=await completeAssistantSourceIntakeDelivery({value:owner,kind:'owner_command',confirmModelRead:async()=>{confirmations++;}});
@@ -25,13 +24,18 @@ test('source routing budget preserves complete owner authority and refuses befor
   assert.deepEqual(delivered.structuredContent,owner);
   assert.deepEqual(JSON.parse(delivered.content[0].text),owner);
   assert.equal(confirmations,1);
-  const large={sourceMessages:[{eventId:randomUUID(),text:'я'.repeat(15000)}]};
-  await assert.rejects(completeAssistantSourceIntakeDelivery({value:large,kind:'route_existing',confirmModelRead:async()=>{confirmations++;}}),
-    error=>error.code==='ASSISTANT_SOURCE_CONTEXT_LIMIT');
-  assert.equal(confirmations,1,'a refused response cannot enable ACK or unsubscribe');
+  const routing={effectiveInstructions:owner.effectiveInstructions,sourceMessages:[{eventId:randomUUID(),text:'Synthetic marketing'}]};
+  const full=await completeAssistantSourceIntakeDelivery({value:routing,kind:'route_existing',confirmModelRead:async()=>{confirmations++;}});
+  assert.ok(Buffer.byteLength(JSON.stringify(full))>40000);assert.deepEqual(JSON.parse(full.content[0].text),routing);
+  for(const kind of ['owner_command','route_existing']){
+    const large={effectiveInstructions:{compiledMarkdown:'я'.repeat(150000)}};
+    await assert.rejects(completeAssistantSourceIntakeDelivery({value:large,kind,confirmModelRead:async()=>{confirmations++;}}),
+      error=>error.code==='ASSISTANT_SOURCE_CONTEXT_LIMIT');
+    assert.equal(confirmations,2,'a refused response cannot enable ACK or unsubscribe');
+  }
   const small={sourceMessages:[{eventId:randomUUID(),text:'Synthetic marketing'}]};
   const routed=await completeAssistantSourceIntakeDelivery({value:small,kind:'route_existing',confirmModelRead:async()=>{confirmations++;}});
-  assert.deepEqual(JSON.parse(routed.content[0].text),small);assert.equal(confirmations,2);
+  assert.deepEqual(JSON.parse(routed.content[0].text),small);assert.equal(confirmations,3);
 });
 
 test('cold company admission pacing preserves a finite minute budget without caching or retrying native authority',async()=>{
