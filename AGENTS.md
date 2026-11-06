@@ -1265,6 +1265,10 @@ compatibility range, exact qualification fixture и границы описан�
 Folder planner и apply dispatcher используют общий exact client predicate;
 проверяй returned action целиком для setup и refresh, а не только file writer.
 Public plugin shell для этого клиента не меняется.
+Node children reconstruct `ELECTRON_RUN_AS_NODE=1` only for the currently observed
+Electron executable, after environment sanitization. Standalone fallbacks,
+Python/executable packages and Secret bindings cannot select that mode; see the
+same runtime contract. Cover actual skill/import/bootstrap child processes.
 Потерянная MCP-сессия восстанавливается только по полному pre-dispatch отказу
 из этого же контракта: один handshake/retry, без OAuth и blind mutation replay.
 

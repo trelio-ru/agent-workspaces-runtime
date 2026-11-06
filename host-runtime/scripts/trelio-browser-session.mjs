@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import fsp from "node:fs/promises";
 import { randomUUID, createHash, randomBytes } from "node:crypto";
-import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
+import { isDirectModuleInvocation, nodeChildEnvironment } from "./trelio-local-path.mjs";
 export { createDocumentHttpObserver, safeHttpFailure } from "./trelio-browser-http.mjs";
 
 // Keep the pure admission/parser beside the existing shared browser API. The
@@ -390,6 +390,7 @@ export const bootstrapPlaywright = ({
   try {
     result = spawn(invocation.executable, [invocation.npmCliPath, ...argv], {
       cwd: root,
+      env: nodeChildEnvironment(process.env, invocation.executable),
       encoding: "utf8",
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],

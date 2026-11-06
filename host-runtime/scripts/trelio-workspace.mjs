@@ -61,7 +61,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { isDirectModuleInvocation, isLocalPathInside, sameLocalPath } from "./trelio-local-path.mjs";
+import { isDirectModuleInvocation, isLocalPathInside, sameLocalPath, nodeChildEnvironment } from "./trelio-local-path.mjs";
 import {
   buildEncryptedWorkspaceProjectionRecord, materializeEncryptedWorkspaceChain,
   prepareCachedEncryptedWorkspaceFile, uploadEncryptedWorkspaceFile,
@@ -8946,6 +8946,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
       || /^(?:LD_|DYLD_|_RLD_|LDR_|NODE_|NPM_|PYTHON|OPENSSL_|GIT_|SSH_)/u.test(key)
       || [
         "BASH_ENV",
+        "ELECTRON_RUN_AS_NODE",
         "ENV",
         "GCONV_PATH",
         "GLIBC_TUNABLES",
@@ -9225,13 +9226,17 @@ export const runMaterializedAgentSkill = async ({
   if(privateSetup && (signal?.aborted || performance.now()-runtimeStartedClock>=timeoutMs))
     throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED','Private setup expired before checkout.',{operation:'skill_run'});
   if (prepareSetupEnvironment) grantedEnvironment = await prepareSetupEnvironment();
-  const runtimeEnvironment = buildAgentSkillRuntimeEnvironment({
+  let runtimeEnvironment = buildAgentSkillRuntimeEnvironment({
     artifact,
     runtimeDirectory,
     executionContext,
     grantedEnvironment,
     now: runtimeStartedAt,
   });
+  // Node mode belongs to the selected interpreter, not the inherited shell or
+  // granted Secret. Apply after the closed environment builder and only for
+  // Node packages; Python/executable entrypoints retain their existing ABI.
+  if (interpreter === "node") runtimeEnvironment = nodeChildEnvironment(runtimeEnvironment, executable);
   if (sourceSetupCapture) await profile.assertInteractiveSourceSetupCurrent();
   if (taskSetupCapture) await profile.assertHumanInputSkillSetupCurrent();
   if (interactiveCapture || interactiveRemoval) await profile.assertInteractiveSkillCurrent();
@@ -9978,8 +9983,10 @@ const discoverSkillAccounts = async ({ artifact, runtimeDirectory, executionCont
   }
   let result;
   try {
+    const environment = buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory, executionContext });
     result = await execFileAsync(executable, args, { cwd: runtimeDirectory, shell: false,
-      env: buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory, executionContext }),
+      env: artifact.parsedPackage.entrypoint.interpreter === 'node'
+        ? nodeChildEnvironment(environment, executable) : environment,
       // Match the catalogue's byte bound: 64 valid Unicode comments plus names
       // can exceed 512 KiB even though every field meets its character limit.
       timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, encoding: 'utf8', windowsHide: true });

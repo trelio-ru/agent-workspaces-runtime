@@ -4,6 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { accountScope, accountText, createAccountCatalogue, splitAccountArguments, SkillAccountImportError } from '../host-runtime/scripts/trelio-skill-accounts.mjs';
 import { prepareSkillAccount, runMaterializedAgentSkill, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment, formatBridgeCommandError } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
@@ -500,6 +503,71 @@ async function monitorFixture(t, source, interpreter = 'node') {
       companyConnection: { id: connection, config: {} } } };
   return { input, run: overrides => runMaterializedAgentSkill({ ...input, ...overrides }) };
 }
+
+test('Electron Node mode survives real skill, account-import and visual-bootstrap children', { timeout: 60000 }, async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-electron-node-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const entry = path.join(directory, 'provider.mjs'), journal = path.join(directory, 'calls.jsonl');
+  // The disposable parent observes Electron through process.versions, just as
+  // Desktop Harness does. Real child pipes must carry JSON; an exit-zero empty
+  // response cannot satisfy these assertions. No account, browser or network is
+  // involved: the provider only records its own synthetic invocation and mode.
+  await fs.writeFile(entry, `import fs from 'node:fs/promises';
+    const command=process.argv[2],mode=process.env.ELECTRON_RUN_AS_NODE??null;
+    const value={command,mode,loader:process.env.NODE_OPTIONS??null};
+    await fs.appendFile(${JSON.stringify(journal)},JSON.stringify(value)+'\\n');
+    if(mode!=='1') process.exitCode=7;
+    else process.stdout.write(JSON.stringify(command==='__trelio_accounts_import'
+      ? {schemaVersion:1,accounts:[]} : value)+'\\n');`);
+  const workspace = pathToFileURL(path.resolve('host-runtime/scripts/trelio-workspace.mjs')).href;
+  const bootstrap = pathToFileURL(path.resolve('host-runtime/scripts/trelio-visual-bootstrap.mjs')).href;
+  const browser = pathToFileURL(path.resolve('host-runtime/scripts/trelio-browser-session.mjs')).href;
+  const npm = path.join(directory, 'npm-cli.mjs');
+  await fs.writeFile(npm, `import fs from 'node:fs/promises';import path from 'node:path';
+    const mode=process.env.ELECTRON_RUN_AS_NODE??null;
+    await fs.appendFile(${JSON.stringify(journal)},JSON.stringify({command:'npm-bootstrap',mode,loader:process.env.NODE_OPTIONS??null})+'\\n');
+    if(mode!=='1') process.exitCode=7;
+    else {const root=process.argv[process.argv.indexOf('--prefix')+1];
+      const directory=path.join(root,'node_modules','playwright-core');await fs.mkdir(directory,{recursive:true});
+      const version=process.argv.at(-1).slice('playwright-core@'.length);
+      await fs.writeFile(path.join(directory,'package.json'),JSON.stringify({version}));}`);
+  const parent = path.join(directory, 'parent.mjs');
+  await fs.writeFile(parent, `import fs from 'node:fs/promises';
+    import {runMaterializedAgentSkill,prepareSkillAccount} from ${JSON.stringify(workspace)};
+    import {runVisualChild} from ${JSON.stringify(bootstrap)};
+    import {bootstrapPlaywright} from ${JSON.stringify(browser)};
+    if(!process.versions.electron) Object.defineProperty(process.versions,'electron',{value:'44.0.0-fixture'});
+    process.env.ELECTRON_RUN_AS_NODE='0';
+    process.env.NODE_OPTIONS='--require=PRIVATE_LOADER_CANARY';
+    const input={artifact:{skillId:'synthetic-electron',runtimeVersion:'1.0.0',parsedPackage:{
+      entrypoint:{path:'provider.mjs',interpreter:'node'},capabilities:[]}},
+      runtimeDirectory:${JSON.stringify(directory)},executionContext:{
+        companyId:${JSON.stringify(company)},releaseId:${JSON.stringify(crypto.randomUUID())},
+        localIdentity:{memberId:${JSON.stringify(member)},connectionId:${JSON.stringify(connection)}}}};
+    await runMaterializedAgentSkill({...input,runtimeArguments:['guides']});
+    await runMaterializedAgentSkill({...input,runtimeArguments:['protected-guides'],
+      artifact:{...input.artifact,parsedPackage:{...input.artifact.parsedPackage,
+        browserSession:{apiVersion:1,sessionClass:'protected-snapshot',leaseMs:180000,manualAssist:true}}}});
+    const captured=await runMaterializedAgentSkill({...input,runtimeArguments:['monitor'],captureOutput:true});
+    await prepareSkillAccount({origin:'https://example.test',...input,
+      artifact:{...input.artifact,parsedPackage:{...input.artifact.parsedPackage,capabilities:['local-session','local-accounts-v1']}},
+      catalogueDirectory:${JSON.stringify(directory)},runtimeArguments:['account','list'],output:()=>{}});
+    await runVisualChild(process.execPath,[${JSON.stringify(entry)},'visual-bootstrap']);
+    delete process.env.NODE_OPTIONS;
+    bootstrapPlaywright({root:${JSON.stringify(path.join(directory, 'browser'))},
+      npmInvocation:{executable:process.execPath,npmCliPath:${JSON.stringify(npm)}}});
+    process.stdout.write(JSON.stringify({captured:JSON.parse(captured.stdout),
+      calls:(await fs.readFile(${JSON.stringify(journal)},'utf8')).trim().split('\\n').map(JSON.parse)})+'\\n');`);
+  const result = await promisify(execFile)(process.execPath, [parent], {
+    cwd: directory, encoding: 'utf8', timeout: 45000, maxBuffer: 64 * 1024,
+  });
+  const lines = result.stdout.trim().split('\n').map(JSON.parse);
+  assert.deepEqual(lines[0], { command: 'guides', mode: '1', loader: null });
+  assert.deepEqual(lines[1], { command: 'protected-guides', mode: '1', loader: null });
+  assert.deepEqual(lines[2].captured, { command: 'monitor', mode: '1', loader: null });
+  assert.deepEqual(lines[2].calls, ['guides', 'protected-guides', 'monitor', '__trelio_accounts_import', 'visual-bootstrap', 'npm-bootstrap']
+    .map(command => ({ command, mode: '1', loader: null })));
+});
 
 test('private monitor uses ordinary bound identity, literal argv and EOF without inheriting a Codex chat', async t => {
   const previous = process.env.CODEX_THREAD_ID;

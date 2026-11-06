@@ -13,6 +13,7 @@ import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
+import { nodeChildEnvironment } from './trelio-local-path.mjs';
 import { withMirrorRetentionLock } from './trelio-mirror-retention.mjs';
 import { normalizeBrowserMailSpec, validateBrowserMailJournal } from './trelio-browser-session.mjs';
 export { BROWSER_MAIL_AUTH_API } from './trelio-browser-session.mjs';
@@ -233,7 +234,8 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
     await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
     startupStage = 'worker_spawn';
     const child = spawn(workerExecutable, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
-      detached: true, shell: false, windowsHide: true, stdio: 'ignore', env: visualChildEnvironment(),
+      detached: true, shell: false, windowsHide: true, stdio: 'ignore',
+      env: nodeChildEnvironment(visualChildEnvironment(), workerExecutable),
     });
     let spawnError;
     child.once('error', error => { spawnError = error; });

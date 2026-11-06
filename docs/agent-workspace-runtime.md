@@ -3046,6 +3046,20 @@ stable shell `selectHostRuntime` и shell version по постоянному pl
 сохраняет frozen 100-file limit без изменения verifier. Public plugin ABI/manifests/hooks не меняются. Загруженный native
 module обновляется при reload; signed runtime selection остаётся общей.
 
+Desktop Harness использует Electron в режиме Node: `process.execPath` остаётся
+executable приложения. Общий host строит `ELECTRON_RUN_AS_NODE=1` из observed
+`process.versions.electron` только при запуске этого же exact executable после
+обычной очистки окружения. Унаследованные значения/варианты регистра удаляются;
+Secret checkout не может подменять это служебное поле. Для выбранного standalone
+Node флаг не передаётся, Python/executable entrypoints сохраняют прежний ABI.
+Это один helper для interactive/captured skill execution, account discovery,
+package-manager/bootstrap и detached visual worker; подпись, architecture,
+ownership, сроки и прежний выбор interpreter сохраняются. Без режима Electron
+мог бы открыть вторую GUI-копию и завершиться с пустым успешным stdout, не
+исполнив entrypoint. Регрессия проверяет реальные дочерние pipes и JSON команд,
+включая protected-session selection, при изолированной observed identity;
+проверка установленного Desktop executable остаётся отдельным локальным smoke.
+
 `trelio_connect` использует общий DCR/S256/loopback OAuth с resource Trelio,
 read-back OS vault и отдельной native ячейкой. Grant fingerprint содержит
 endpoint/protocol/scopes, не текущую версию runtime. Bearer не входит в model

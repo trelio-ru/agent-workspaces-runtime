@@ -9355,6 +9355,7 @@ test("connection-free skill runtime receives member identity without synthetic c
     "NODE_OPTIONS",
     "HOME",
     "BASH_ENV",
+    "ELECTRON_RUN_AS_NODE",
   ]) {
     assert.throws(
       () => buildAgentSkillRuntimeEnvironment({

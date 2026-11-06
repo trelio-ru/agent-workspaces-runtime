@@ -38,6 +38,34 @@ export const sameLocalPath = (left, right, pathApi = path) => (
   && pathApi.relative(pathApi.resolve(left), pathApi.resolve(right)) === ""
 );
 
+/** Build the mode of an already selected Node executable, never an executable
+ * override. Desktop Harness runs its Node host through Electron: execPath is
+ * the application binary, which otherwise starts a second GUI and may exit
+ * zero without executing the script. Reconstruct its fixed Node-mode flag from
+ * the running host's public identity AFTER ordinary environment sanitization.
+ *
+ * Ambient flags (including Windows case aliases) and Secret bindings cannot
+ * choose this mode. A standalone fallback must not inherit Electron's mode;
+ * signature/architecture/ownership checks still belong to its existing selector.
+ * The optional identity inputs are an in-process test seam, not tool fields.
+ */
+export const nodeChildEnvironment = (environment, executable = process.execPath, {
+  currentExecutable = process.execPath,
+  electronVersion = process.versions.electron,
+  pathApi = path,
+} = {}) => {
+  const result = Object.fromEntries(Object.entries(environment).filter(([key]) => (
+    key.toUpperCase() !== "ELECTRON_RUN_AS_NODE"
+  )));
+  if (typeof electronVersion === "string" && electronVersion.length > 0
+    && typeof executable === "string" && pathApi.isAbsolute(executable)
+    && typeof currentExecutable === "string" && pathApi.isAbsolute(currentExecutable)
+    && sameLocalPath(executable, currentExecutable, pathApi)) {
+    result.ELECTRON_RUN_AS_NODE = "1";
+  }
+  return result;
+};
+
 /**
  * Require a strict descendant, including on Windows when drive or directory
  * letters differ in case. The separator check keeps sibling prefixes out and

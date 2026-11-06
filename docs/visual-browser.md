@@ -713,6 +713,10 @@ result не разрешает запуск или новый probe после d
 подписи приложения, OS policy, shell или caller-selected executable. При
 отсутствии совместимого Node запуск закрывается как `bootstrap_failed`, до
 создания worker claim и доступа к vault; нужен standalone Node.js 22+.
+Если совместимый текущий interpreter — Electron в режиме Node, host восстанавливает
+его фиксированный Node-mode флаг из observed runtime identity для CLI, bootstrap
+и worker по [общему контракту](agent-workspace-runtime.md#native-deepseek-harness-connection).
+Унаследованное окружение не выбирает этот режим; standalone fallback его не получает.
 Неверный формат старого экспериментального snapshot, повреждение и потеря ключа
 не создают гостевой замены. Нет plaintext fallback. Active OS user/admin и
 компрометация устройства остаются вне этой модели защиты; API не является

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { browserCacheHome, resolveNpmInvocation } from './trelio-browser-session.mjs';
 import { ensurePrivateDirectory } from './trelio-workspace.mjs';
 import { visualStartupDiagnostic, visualStartupFault, visualStartupPhase } from './trelio-visual-result.mjs';
+import { nodeChildEnvironment } from './trelio-local-path.mjs';
 
 export const VISUAL_BROWSER_API_VERSION = 1;
 export const VISUAL_PLAYWRIGHT_VERSION = '1.64.1';
@@ -28,7 +29,8 @@ export function visualChildEnvironment(extra = {}) {
 export async function runVisualChild(executable, args, { timeout = 180_000, env = visualChildEnvironment(), cwd, signal, startupStage = 'dependency_install' } = {}) {
   signal?.throwIfAborted();
   await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'] });
+    const child = spawn(executable, args, { cwd, env: nodeChildEnvironment(env, executable),
+      shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'] });
     let failed = false;
     const error = (exitCode, signalCode, native) => Object.assign(visualStartupFault({
       ...visualStartupDiagnostic(startupStage, undefined, native),

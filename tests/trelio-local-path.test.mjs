@@ -9,7 +9,24 @@ import {
   isLocalPathInside,
   isDirectModuleInvocation,
   sameLocalPath,
+  nodeChildEnvironment,
 } from "../host-runtime/scripts/trelio-local-path.mjs";
+
+test("Node child mode comes only from the observed Electron interpreter, never ambient flags", () => {
+  const environment = { HOME: "/home/test", ELECTRON_RUN_AS_NODE: "0", electron_run_as_node: "forged" };
+  const identity = { currentExecutable: "/app/Harness", electronVersion: "44.7.0", pathApi: path.posix };
+  assert.deepEqual(nodeChildEnvironment(environment, "/app/Harness", identity), {
+    HOME: "/home/test", ELECTRON_RUN_AS_NODE: "1",
+  });
+  for (const [executable, electronVersion] of [["/standalone/node", "44.7.0"], ["/app/Harness", null],
+    ["/app/Harness", ""], ["Harness", "44.7.0"]]) {
+    assert.deepEqual(nodeChildEnvironment(environment, executable, { ...identity, electronVersion }), { HOME: "/home/test" });
+  }
+  assert.equal(environment.ELECTRON_RUN_AS_NODE, "0", "parent environment is never mutated");
+  assert.deepEqual(nodeChildEnvironment({ electron_run_as_node: "0" }, "c:\\app\\HARNESS.exe", {
+    currentExecutable: "C:\\App\\Harness.exe", electronVersion: "44.7.0", pathApi: path.win32,
+  }), { ELECTRON_RUN_AS_NODE: "1" });
+});
 
 test("Windows path comparisons accept letter-case differences without widening containment", () => {
   const root = "C:\\Users\\Alice\\Trelio\\Run";
