@@ -7,6 +7,10 @@ import test from "node:test";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import http from "node:http";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { crc32, deflateSync } from "node:zlib";
 import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "../host-runtime/scripts/trelio-component-versions.mjs";
 import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuations,
   harnessToolName, observeHarnessRuntime, projectHarnessMcpResult, AGENT_SKILL_ROUTING_INSTRUCTIONS,
@@ -14,8 +18,8 @@ import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuation
 
 const require = createRequire(new URL("./fixtures/deepseek-native/package.json", import.meta.url));
 const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)).href);
-const [{ Context }, { default: Tools }, { default: Prompt }, { Session }] = await Promise.all(
-  ["cordis", "dsh-tools", "dsh-system-prompt", "dsh-session"].map(load));
+const [{ Context }, { default: Tools }, { default: Prompt }, { Session }, { default: Attachments }] = await Promise.all(
+  ["cordis", "dsh-tools", "dsh-system-prompt", "dsh-session", "dsh-attachment-local"].map(load));
 assert.equal(require("@deepseek-ai/dsh-tools/package.json").version, DEEPSEEK_HARNESS_QUALIFIED_VERSION);
 const signal = () => new AbortController().signal;
 const agent = (id = "native-test") => {
@@ -103,6 +107,126 @@ test("native observation refuses missing request header; binary and hidden metad
   assert.ok(!JSON.stringify(projected).includes("private-binary"));
   assert.ok(!JSON.stringify(projected).includes("hidden-test"));
   assert.equal(harnessToolName("trelio", "x".repeat(100)).length, 64);
+});
+
+// A genuine raster goes through the published Harness registry AND its durable
+// attachment store. A mocked successful save alone would miss invalid reference
+// rendering, lost image content or a buffer erased before native publication.
+const imageData = (() => {
+  const chunk = (name, bytes) => {
+    const type = Buffer.from(name), size = Buffer.alloc(4), crc = Buffer.alloc(4);
+    size.writeUInt32BE(bytes.length); crc.writeUInt32BE(crc32(Buffer.concat([type, bytes])));
+    return Buffer.concat([size, type, bytes, crc]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(1); header.writeUInt32BE(1, 4);
+  header[8] = 8; header[9] = 6;
+  return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.from([0, 255, 0, 0, 255]))), chunk("IEND", Buffer.alloc(0))]).toString("base64");
+})();
+const imageBlock = () => ({ type: "image", mimeType: "image/png", data: imageData });
+const imageFixture = async (t, { content = [{ type: "text", text: "before" }, imageBlock(),
+  { type: "text", text: "after" }], modelInfo, store, absentStore = false, errorResult = false } = {}) => {
+  const ctx = new Context(); new Prompt(ctx, {}); new Tools(ctx);
+  t.after(() => ctx.fiber.dispose());
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-harness-images-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const attachments = absentStore ? undefined : new Attachments(ctx, { dshHome: home });
+  let reads = 0, saves = 0;
+  const nativeSave = attachments?.saveImages.bind(attachments);
+  if (attachments) attachments.saveImages = async inputs => {
+    saves++; return store ? store(inputs, nativeSave) : nativeSave(inputs);
+  };
+  ctx.provide("llm", { resolveModelInfo: async (...args) => modelInfo ? modelInfo(...args) : { inputModalities: ["text", "image"] } });
+  await applyHarnessAdapter(ctx, {
+    connection: { listTools: async () => [tool("image_probe")], instructions: () => "",
+      call: async () => { reads++; return { content, ...(errorResult ? { isError: true } : {}), _meta: { private: "hidden-image-grant" } }; } },
+    localMessage: async () => ({ result: { tools: [] } }), prepare: async input => input.input,
+  });
+  const a = agent(), controller = new AbortController();
+  return { ctx, home, attachments, a, controller, counts: () => ({ reads, saves }),
+    run: () => ctx.tools.execute({ name: harnessToolName("trelio", "image_probe"), callId: "image-1",
+      arguments: {}, agent: a, signal: controller.signal }) };
+};
+
+test("real Harness pipeline durably renders ordered images without inline bytes or hidden metadata", async t => {
+  const f = await imageFixture(t, { content: [{ type: "text", text: "first" }, imageBlock(),
+    { type: "text", text: "middle" }, imageBlock(), { type: "text", text: "last" }] });
+  const output = await f.run();
+  assert.equal(output.isError, false);
+  assert.deepEqual(output.content.map(x => x.type), ["text", "image", "text", "image", "text"]);
+  assert.deepEqual(output.value.content, output.content, "PTC and native receive the same durable, byte-free references");
+  assert.deepEqual(f.counts(), { reads: 1, saves: 1 });
+  const serialized = JSON.stringify(output);
+  assert.ok(!serialized.includes(imageData) && !serialized.includes("hidden-image-grant") && !serialized.includes(f.home));
+  const ref = output.content[1].attachment;
+  assert.equal(ref.width, 1); assert.equal(ref.height, 1); assert.equal(ref.mediaType, "image/png");
+  const reopenedContext = new Context();
+  t.after(() => reopenedContext.fiber.dispose());
+  const reopened = new Attachments(reopenedContext, { dshHome: f.home });
+  const saved = await reopened.readImage(ref);
+  assert.ok(saved.data.length > 0, "reference survives reopening the real native store");
+});
+
+test("image admission refuses missing APIs, text models, malformed batches and private errors without replay", async t => {
+  const cases = [
+    { absentStore: true, expected: "attachment_store_unavailable" },
+    { modelInfo: async () => ({ inputModalities: ["text"] }), expected: "model_image_input_unavailable" },
+    { modelInfo: async () => ({}), expected: "model_image_input_unavailable" },
+    { modelInfo: async () => ({ inputModalities: "image" }), expected: "model_image_input_unavailable" },
+    { modelInfo: async () => { throw Error("private-model-credential"); }, expected: "image_admission_failed" },
+    { content: [imageBlock(), { ...imageBlock(), data: "YWJj=" }], expected: "image_result_invalid" },
+    { content: [{ ...imageBlock(), data: "Zh==" }], expected: "image_result_invalid" },
+    { content: [{ ...imageBlock(), mimeType: "image/svg+xml" }], expected: "image_result_invalid" },
+    { content: Array.from({ length: 9 }, imageBlock), expected: "image_result_limit" },
+    { content: [{ ...imageBlock(), data: Buffer.alloc(4 * 1024 * 1024 + 1).toString("base64") }], expected: "image_result_limit" },
+    { content: Array.from({ length: 2 }, () => ({ ...imageBlock(), data: Buffer.alloc(3 * 1024 * 1024).toString("base64") })), expected: "image_result_limit" },
+  ];
+  for (const [index, entry] of cases.entries()) await t.test(String(index), async child => {
+    const f = await imageFixture(child, entry); const output = await f.run();
+    assert.equal(output.isError, false, "a display refusal does not convert the completed browser operation to a replayable failure");
+    assert.ok(output.content.every(x => x.type === "text"));
+    assert.ok(JSON.stringify(output).includes(entry.expected));
+    assert.ok(!JSON.stringify(output).includes(imageData) && !JSON.stringify(output).includes("private-model-credential"));
+    assert.deepEqual(f.counts(), { reads: 1, saves: 0 });
+  });
+  await t.test("native image validation and storage refusal", async child => {
+    const f = await imageFixture(child, { content: [{ ...imageBlock(), data: Buffer.from("not a raster").toString("base64") }] });
+    const output = await f.run();
+    assert.ok(JSON.stringify(output).includes("image_admission_failed"));
+    assert.deepEqual(f.counts(), { reads: 1, saves: 1 });
+  });
+  await t.test("MCP errors never start image storage", async child => {
+    const f = await imageFixture(child, { errorResult: true }); const output = await f.run();
+    assert.equal(output.isError, true); assert.deepEqual(f.counts(), { reads: 1, saves: 0 });
+    assert.ok(!JSON.stringify(output).includes(imageData));
+  });
+  await t.test("native storage errors do not disclose paths or retry", async child => {
+    const f = await imageFixture(child, { store: async () => { throw Error("private-image-storage-path"); } });
+    const output = await f.run();
+    assert.equal(output.isError, false);
+    assert.ok(JSON.stringify(output).includes("image_admission_failed"));
+    assert.ok(!JSON.stringify(output).includes("private-image-storage-path"));
+    assert.deepEqual(f.counts(), { reads: 1, saves: 1 });
+  });
+});
+
+test("native image capability and storage awaits retain current route and cancellation fences", async t => {
+  for (const phase of ["capability", "storage"]) for (const action of ["model_change", "cancel"]) {
+    await t.test(`${phase}/${action}`, async child => {
+      let f;
+      const change = () => action === "cancel" ? f.controller.abort()
+        : f.a.session.append("request/header", { reason: "change", header: { config: {
+          provider: "custom", model: "text-only", reasoningEffort: "off" } } });
+      f = await imageFixture(child, {
+        modelInfo: async () => { if (phase === "capability") change(); return { inputModalities: ["image"] }; },
+        store: async (inputs, save) => { const refs = await save(inputs); if (phase === "storage") change(); return refs; },
+      });
+      const output = await f.run();
+      assert.ok(output.content.every(x => x.type !== "image"));
+      assert.deepEqual(f.counts(), { reads: 1, saves: phase === "capability" ? 0 : 1 });
+      assert.ok(!JSON.stringify(output).includes(imageData));
+    });
+  }
 });
 
 const receipt = input => ({ structuredContent: { code: "MCP_LOCAL_CONTEXT_REQUIRED", providerSelection: { automatic: true,

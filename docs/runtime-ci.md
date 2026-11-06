@@ -197,7 +197,10 @@ node scripts/runtime-ci-plan.test.mjs
 
 Full gate также выполняет `trelio-deepseek-native.test.mjs` с exact npm-ci
 fixture core 0.2.1-rc.3 (Tools/Session) на Linux/macOS и Windows, без account/model
-или network provider. `trelio-deepseek-install.test.mjs` проверяет immutable
+или network provider. Тот же exact fixture содержит native attachment-local:
+MCP image проходит реальный registry и durable store, затем читается заново;
+malformed/bounded input, text-only/unknown model и late route/cancellation
+refusals не повторяют исходный вызов. `trelio-deepseek-install.test.mjs` проверяет immutable
 bundle и реальный shared proof engine. Fixture lockfile не входит в artifact.
 SemVer boundary tests используют те же includePrerelease options, что upstream:
 разрешены все новые версии от 0.2.1-rc.2, включая prerelease и следующие minor/major;

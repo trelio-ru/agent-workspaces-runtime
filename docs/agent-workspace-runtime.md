@@ -3086,7 +3086,20 @@ method proof сохраняются. Повторный session rejection зав
 
 Remote и local tools исполняют общий transport/dispatcher. Native prefix сохраняет remote и local MCP инструкции; text содержит
 полный structured authority/routes, PTC получает тот же public envelope;
-`_meta` и rich binary не сериализуются. Local continuation использует общий
+`_meta` и inline binary не сериализуются. MCP image blocks проходят через штатный
+Harness `attachments.saveImages`: не более восьми raster images и суммарно 4 МиБ
+decoded bytes, canonical base64 и PNG/JPEG/WebP/GIF до единственной batch-записи.
+Native store самостоятельно проверяет фактический формат, pixels, нормализацию,
+private storage и retention. В native renderer и PTC возвращаются только durable
+attachment refs, без base64, local paths, hidden metadata или второго file cache.
+Перед записью требуется `llm.resolveModelInfo` actual request provider/model с
+явным image input. Missing API/header, text-only/unknown model, malformed batch,
+отмена и смена route до/после await не дают image delivery. Ошибка отображения
+сохраняет исходный успешный tool result с закрытой причиной и никогда не
+повторяет browser/MCP operation. MCP error не начинает image storage. Реальный
+qualification fixture проверяет registry → native store → reopen/read и поздние
+route/cancellation fences; эти проверки не являются live чтением сайта.
+Local continuation использует общий
 receipt/scope/seed/Run validator и per-Agent WeakMap: до 16 записей, 2 MiB,
 15 минут. Content generation mismatch после compaction закрывает recovery.
 Credentials/key/grant не являются correlation state. Explicit полные args

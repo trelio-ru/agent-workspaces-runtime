@@ -7097,22 +7097,95 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       : `${full.slice(0, 51)}_${crypto.createHash("sha256").update(full).digest("hex").slice(0, 12)}`;
   };
 
-  /** Project full structured authority into Native text without exposing hidden
-   * App grants. PTC receives the same public envelope. Rich binary blocks stay
-   * outside model text; original files use Trelio's existing local-file route.
+  /** Project full structured authority without exposing hidden App grants or
+   * inline binary. Only the execution-owned image admission below supplies
+   * durable native attachment blocks; ordinary callers retain text fallback.
+   * PTC receives the same byte-free public envelope as the native renderer.
    */
-  const projectHarnessMcpResult = (result, nativeTool) => {
+  const projectHarnessMcpResult = (result, nativeTool, admittedImages) => {
     if (!record(result) || !Array.isArray(result.content)) {
       throw fail("TRELIO_HARNESS_RESULT_INVALID", "Trelio вернул несовместимый MCP-ответ.");
     }
     const projected = deliverLocalMcpResult(result, true, nativeTool);
+    let imageIndex = 0;
     return {
       content: projected.content.map(block => block.type === "text" ? { type: "text", text: block.text }
         : block.type === "resource_link" ? { type: "text", text: `Resource: ${block.name} (${block.uri})` }
+          : block.type === "image" && admittedImages ? admittedImages[imageIndex++]
           : { type: "text", text: `[MCP ${block.type} is unavailable in this adapter; use original local-file delivery]` }),
       ...(projected.structuredContent === undefined ? {} : { structuredContent: projected.structuredContent }),
       ...(projected.isError === true ? { isError: true } : {}),
     };
+  };
+
+  /** Use Harness's own durable attachment service, not a second file cache or
+   * base64-in-text workaround. Its saveImages batch validates actual image
+   * format/pixels and owns storage/retention. Current route capability, bounded
+   * canonical input and cancellation are checked before that single write.
+   * A failed projection never retries the underlying MCP/browser operation.
+   */
+  const admitHarnessImages = async (ctx, execution, result) => {
+    const images = result.content.filter(block => block.type === "image");
+    if (!images.length) return undefined;
+    const unavailable = reason => images.map(() => ({ type: "text",
+      text: `[MCP image unavailable: ${reason}; image bytes were not delivered to model context]` }));
+    const decoded = [];
+    try {
+      // The transport already bounds remote bodies; local visual results use
+      // the same finite batch bound here before decoding any untrusted bytes.
+      if (images.length > 8) return unavailable("image_result_limit");
+      let totalBytes = 0;
+      for (const block of images) {
+        if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(block.mimeType)
+          || typeof block.data !== "string" || !block.data.length
+          || block.data.length > Math.ceil(MAX_REMOTE_RESPONSE_BYTES / 3) * 4
+          || block.data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/u.test(block.data)) {
+          return unavailable("image_result_invalid");
+        }
+        const data = Buffer.from(block.data, "base64");
+        decoded.push({ data, mediaType: block.mimeType });
+        totalBytes += data.length;
+        if (totalBytes > MAX_REMOTE_RESPONSE_BYTES) return unavailable("image_result_limit");
+        if (data.toString("base64") !== block.data) return unavailable("image_result_invalid");
+      }
+      const attachments = typeof ctx.get === "function" ? ctx.get("attachments") : undefined;
+      const llm = typeof ctx.get === "function" ? ctx.get("llm") : undefined;
+      if (typeof attachments?.saveImages !== "function") return unavailable("attachment_store_unavailable");
+      if (typeof llm?.resolveModelInfo !== "function") return unavailable("model_image_input_unavailable");
+      const route = () => {
+        // Do not borrow UI defaults/agent options when the actual request
+        // header is absent. Model changes during capability/storage awaits
+        // withdraw delivery, independently of the original tool's success.
+        const header = execution.agent?.session?.requestHeader?.()?.config;
+        return record(header) && identifier.test(header.provider ?? "") && identifier.test(header.model ?? "")
+          && `${header.provider}/${header.model}`.length <= 255
+          ? { provider: header.provider, model: header.model } : null;
+      };
+      const selected = route();
+      if (!selected || execution.signal.aborted) return unavailable("current_model_route_unavailable");
+      const info = await llm.resolveModelInfo(selected.provider, selected.model, execution.signal);
+      if (!Array.isArray(info?.inputModalities) || !info.inputModalities.includes("image")) return unavailable("model_image_input_unavailable");
+      if (execution.signal.aborted || !isDeepStrictEqual(route(), selected)) return unavailable("current_model_route_changed");
+      const refs = await attachments.saveImages(decoded);
+      if (execution.signal.aborted || !isDeepStrictEqual(route(), selected)) return unavailable("current_model_route_changed");
+      if (!Array.isArray(refs) || refs.length !== images.length || refs.some(ref => !record(ref)
+        || typeof ref.attachmentId !== "string" || !ref.attachmentId
+        || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(ref.mediaType)
+        || !Number.isSafeInteger(ref.bytes) || ref.bytes <= 0
+        || !Number.isSafeInteger(ref.width) || ref.width <= 0 || !Number.isSafeInteger(ref.height) || ref.height <= 0)) {
+        return unavailable("image_storage_failed");
+      }
+      // Project only the native reference vocabulary, never arbitrary future
+      // store metadata, local paths or a second copy of the encoded payload.
+      return refs.map(({ attachmentId, mediaType, bytes, width, height }) => ({ type: "image",
+        attachment: { attachmentId, mediaType, bytes, width, height } }));
+    } catch {
+      // Native storage/model errors may contain private paths or provider
+      // details. Expose a fixed refusal only, without a second write/dispatch.
+      return unavailable("image_admission_failed");
+    } finally {
+      for (const image of decoded) image.data.fill(0);
+    }
   };
 
   /** Correlation is per actual Agent object and bounded RAM only. A continuation
@@ -7357,7 +7430,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
           if (server === "trelio") continuations.remember(execution.agent, tool.name, raw, result);
           const value = projectHarnessMcpResult(result, server === "trelio" ? tool.name : input.parameters?.nativeTool);
           if (value.isError) throw fail("TRELIO_MCP_ERROR", value.content.map(block => block.text).join("\n"));
-          return value;
+          const images = await admitHarnessImages(ctx, execution, result);
+          return images ? projectHarnessMcpResult(result, server === "trelio" ? tool.name : input.parameters?.nativeTool, images) : value;
         } catch (error) { throw nativeError(error); }
       },
     });
