@@ -925,6 +925,13 @@ they do not establish a live Windows/business messenger acceptance.
 
 ### Autonomous email unsubscribe
 
+The 40,000-byte complete model envelope cap applies to `route_existing` source
+messages, not the existing `owner_command` response with complete scoped rules
+and task-creation metadata. Preserve that authority without truncation. Validate
+the complete delivery before committing model-read slots; rejected context may
+not earn ACK or unsubscribe evidence. Native confirmation of a provider read
+remains separate from successful model delivery.
+
 Email sources expose native `autoUnsubscribe`, enabled by default. Every new
 INBOX original still receives full semantic triage; neither sender/domain nor a
 previous unsubscribe creates a skip filter. Only confidently unwanted marketing

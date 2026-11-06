@@ -10,7 +10,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,completeAssistantSourceIntakeDelivery,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
@@ -1033,14 +1033,13 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // This metadata-only pass runs no provider, download, decoder or ACK.
       await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,
         reference:references[0],verifyDeliveryOnly:true,signal,sourcePackage});
-      const readState=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
-      try{const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
-        createAssistantInbox({database:readState.database}).confirmIntakeModelRead(pass.passId,
-          messages.map(({eventId,originalSha256})=>({eventId,...(originalSha256?{originalSha256}:{})})));
-      }finally{await readState.close();}
-      const delivered={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
-      if(Buffer.byteLength(JSON.stringify(delivered))>40000)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_CONTEXT_LIMIT'});
-      return delivered;
+      return completeAssistantSourceIntakeDelivery({value,kind:routing?'route_existing':'owner_command',confirmModelRead:async()=>{
+        const readState=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
+        try{const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
+          createAssistantInbox({database:readState.database}).confirmIntakeModelRead(pass.passId,
+            messages.map(({eventId,originalSha256})=>({eventId,...(originalSha256?{originalSha256}:{})})));
+        }finally{await readState.close();}
+      }});
     },
     materializeSourceUnsubscribe:async({result,arguments:args,signal})=>{
       const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox}]=await Promise.all([

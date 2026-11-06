@@ -3149,6 +3149,18 @@ export const ASSISTANT_MCP_READ_TOOLS = Object.freeze([...new Set([
 // profile narrows execution. Advertising them without this boundary stranded
 // real Desktop intake calls; this global names set grants no task/source ACL.
 export const ASSISTANT_INTAKE_MCP_TOOLS=Object.freeze(['get_assistant_intake_context','resolve_assistant_intake']);
+/** The new source-message envelope has a narrow budget; owner commands still
+ * carry their existing complete scoped rules and task-creation metadata. Never
+ * apply the routing-only limit to that older authority contract or truncate it.
+ * Serialize and validate BEFORE committing model-read evidence: a refused
+ * envelope was read by the provider, but was never delivered to the model. */
+export const completeAssistantSourceIntakeDelivery=async({value,kind,confirmModelRead})=>{
+  if(!['owner_command','route_existing'].includes(kind)||typeof confirmModelRead!=='function')fail('ASSISTANT_SOURCE_READ_INVALID');
+  const delivered={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+  if(kind==='route_existing'&&Buffer.byteLength(JSON.stringify(delivered))>40000)fail('ASSISTANT_SOURCE_CONTEXT_LIMIT');
+  await confirmModelRead();
+  return delivered;
+};
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...new Set([
   ...ASSISTANT_INTAKE_MCP_TOOLS, ...ASSISTANT_TASK_MCP_TOOLS, ...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, 'download_registry_document', 'download_knowledge_base_attachment', 'get_trelio_tool_contract'])]);
 /** Hook-owned admission fields never belong to the model's tool arguments.
