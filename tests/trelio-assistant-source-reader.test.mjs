@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {rethrowAssistantSourceError,projectAssistantSourceSetupResult}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+const {rethrowAssistantSourceError,projectAssistantSourceSetupResult,projectAssistantSourceMessageMedia,assistantSourceOriginalAudioCapability}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 
 test('source setup keeps only closed provider failure codes and the original process exit',()=>{
   const read=(stdout,exitCode=2,skillId='telegram-mtproto')=>projectAssistantSourceSetupResult({stdout,exitCode},{skillId});
@@ -80,7 +80,8 @@ const baseAdmission=()=>{
     ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
       localAccountId:setupFixture.localAccountId,operation:operation??(setupFixture.bindFromSourceId?'bind':'create'),...(setupFixture.bindingOrigin?{bindingOrigin:setupFixture.bindingOrigin}:{})}}:{})};
 };
-const admission=()=>({...baseAdmission(),...(maxAccountFixture?{maxAccountDiscovery:true}:{})});
+const admission=()=>({...baseAdmission(),...(maxAccountFixture?{maxAccountDiscovery:true}:{}),
+  ...(processorFixture?.enableAutomatic?{audioProcessorProtocolVersion:1}:{})});
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
 const event={id:'message:123:5',revision:'a'.repeat(64),kind:'new',chatId:'123',messageId:'5',topicId:null,
   senderUserId:'123',senderNamespace:'telegram_user_id',outgoing:false,forwarded:false,viaBot:false};
@@ -109,7 +110,7 @@ const resolution=()=>{
   raw.packageUrl=`${prefix}/package?${query}`;return raw;
 };
 const originalFetch=globalThis.fetch;
-let resolveCalls=0,downloadCalls=0,resolveOverride=null,downloadOverride=null;
+let resolveCalls=0,downloadCalls=0,resolveOverride=null,downloadOverride=null,processorFixture=null;
 globalThis.fetch=async(url,options)=>{
   assert.equal(url.origin,origin);assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');
   assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
@@ -117,12 +118,16 @@ globalThis.fetch=async(url,options)=>{
   assert.equal(options.headers.get('cookie'),null);assert.equal(options.headers.get('x-trelio-assistant-pass'),null);
   assert.ok(options.headers.get('x-trelio-host-runtime-version'));
   if(url.pathname===`${prefix}/resolve`){
-    resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null,
+    const body=JSON.parse(options.body),processor=body.sourceProcessor;
+    resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(body,{...scope,expectedReleaseId:null,
       ...(sourceSelectionFixture?{sourceSelection:sourceSelectionFixture}:{}),...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
-        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{}),...(intakeFixture?{sourceIntake:intakeFixture.intent}:{})});
+        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{}),...(intakeFixture?{sourceIntake:intakeFixture.intent}:{}),
+      ...(processor?{sourceProcessor:'audio-transcription'}:{})});
+    if(processor){assert.ok(processorFixture);return new Response(JSON.stringify(processorFixture.resolve()),{headers:{'content-type':'application/json'}});}
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
   assert.equal(url.pathname,`${prefix}/package`);downloadCalls++;
+  if(url.searchParams.has('sourceProcessor')){assert.ok(processorFixture);return new Response(processorFixture.packageBytes);}
   return downloadOverride?.()??new Response(packageBytes);
 };
 test.after(async()=>{globalThis.fetch=originalFetch;await fs.rm(directory,{recursive:true,force:true});});
@@ -394,12 +399,13 @@ const encryptedSetupFixture=async(t,encrypted)=>{
     const selected=setupFixture?{id:setupFixture.id,revision:setupFixture.revision}
       :{id:intakeFixture.intent.sourceId,revision:intakeFixture.intent.expectedRevision};
     query.searchParams.set('sourceId',selected.id);query.searchParams.set('sourceRevision',String(selected.revision));
-    raw.packageUrl=query.pathname+query.search;raw.localIdentity.connectionId=connectionId;
-    raw.companyConnection={id:connectionId,status:'configured',configured:true,
+    const processor=JSON.parse(options.body).sourceProcessor==='audio-transcription';
+    raw.packageUrl=query.pathname+query.search;raw.localIdentity.connectionId=processor?null:connectionId;
+    raw.companyConnection=processor?null:{id:connectionId,status:'configured',configured:true,
       config:buildCompanyEncryptedTextMarker(entityId,'config_json'),secretBindings:[]};
-    raw.sourceEncryption={schemaVersion:1,companyId,recipientDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,encryptedPayloads:[payload]};
+    raw.sourceEncryption={schemaVersion:1,companyId,recipientDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,encryptedPayloads:processor?[]:[payload]};
     if(mode==='recipient')raw.sourceEncryption.recipientDeviceId=randomUUID();
-    if(mode==='missing')raw.sourceEncryption.encryptedPayloads=[];
+    if(mode==='missing')raw.sourceEncryption.encryptedPayloads=processor?[payload]:[];
     if(mode==='selection'){query.searchParams.set('sourceId',randomUUID());raw.packageUrl=query.pathname+query.search;}
     assert.doesNotMatch(JSON.stringify(raw),/ENCRYPTED_SETUP_CONFIG_CANARY|scopePrivateEncryptionJwk/);
     return new Response(JSON.stringify(raw));
@@ -1759,7 +1765,7 @@ test('MAX native projection binds exact numeric chat, native identity and unchan
 
 for(const encrypted of [false,true])test(`owner intake rereads one exact signed original, rechecks native owner and never acknowledges or imports (encrypted=${encrypted})`,async t=>{
  const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
- const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;maxAccountFixture=false;});
+ const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;maxAccountFixture=false;processorFixture=null;});
  for(const [provider,accountWide] of [['telegram-mtproto',false],['max-web',false],['max-web',true]]){
   scope.skillId=provider;maxAccountFixture=accountWide;const max=provider==='max-web',sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),ownerIdentityId=randomUUID();
   const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,ownerTaskIntakeAllowed:true,...(max?{maxChatUrl:accountWide?null:'https://web.max.ru/77'}:{})};
@@ -1768,12 +1774,31 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
   intakeFixture={intent:{intakeId,sourceId,expectedRevision:0},admission:{schemaVersion:1,intakeId,sourceId,sourceRevision:0,localAccountId:accountId,
     eventId,threadId,ownerIdentityId,ownerExternalUserId:'123456',...(max?{maxChatUrl:source.maxChatUrl,...(accountWide?{maxAccountDiscovery:true}:{})}:{})}};
   const dir=path.join(directory,`intake-${provider}-${accountWide}-${encrypted}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
-  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';
     assert.deepEqual(process.argv.slice(2),${JSON.stringify(['read-reference','--chat',max?'https://web.max.ru/77':'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey])});
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);
     if(${encrypted})assert.equal(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON).setup,'ENCRYPTED_SETUP_CONFIG_CANARY');
-    fs.appendFileSync(${JSON.stringify(marker)},'read;');process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
+    fs.appendFileSync(${JSON.stringify(marker)},'read;');const value=JSON.parse(fs.readFileSync(${JSON.stringify(output)},'utf8'));
+    if(process.env.TRELIO_ASSISTANT_SOURCE_MEDIA==='1'){
+      const chunks=[];for await(const chunk of process.stdin)chunks.push(chunk);
+      const input=JSON.parse(Buffer.concat(chunks));assert.deepEqual(Object.keys(input).sort(),['directory','maxBytes','requestId','schemaVersion']);
+      assert.equal(input.maxBytes,20*1024*1024);assert.equal(input.schemaVersion,1);
+      value.originalAudio={schemaVersion:1,requestId:input.requestId,state:'not_audio'};
+      if(['voice','audio'].includes(value.message.mediaType)){
+        const body=Buffer.alloc(value.message.fileSize,42);body.write('OggS');
+        fs.writeFileSync(path.join(input.directory,'original.bin'),body,{flag:'wx',mode:0o600});
+        value.originalAudio={...value.originalAudio,state:'saved',sizeBytes:body.length,sha256:createHash('sha256').update(body).digest('hex')};
+        const target=path.join(input.directory,'original.bin');
+        if(value.fixtureAudioMode==='wrong_request')value.originalAudio.requestId='11111111-2222-4333-8444-555555555555';
+        if(value.fixtureAudioMode==='wrong_hash')value.originalAudio.sha256='0'.repeat(64);
+        if(value.fixtureAudioMode==='short_file')fs.truncateSync(target,1);
+        if(value.fixtureAudioMode==='trailing_bytes')fs.appendFileSync(target,'X');
+        if(value.fixtureAudioMode==='extra_path')value.originalAudio.path='PRIVATE_PROVIDER_PATH';
+        if(value.fixtureAudioMode==='false_no_audio')value.originalAudio={schemaVersion:1,requestId:input.requestId,state:'not_audio'};
+      }
+    }
+    process.stdout.write(JSON.stringify(value));`);
   artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:provider,runtimeVersion:'2.99.42',sourceDirectory:dir,
     entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
   const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
@@ -1786,7 +1811,187 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
     coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false,nativeMessageVerified:true},readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}};
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store:selectedStore,pass,source,reference:ref};
-  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,ownerIdentityId,ownerExternalUserId:'123456',privateOwnerConversation:false});
+  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,
+    media:{status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false},ownerIdentityId,ownerExternalUserId:'123456',privateOwnerConversation:false});
+  // A captionless voice is a real original, not an empty incoming message.
+  // Exercise the signed provider/private account path in BOTH content modes;
+  // preserving only a fabricated MCP callback would miss the first loss here.
+  const voice={...message,message:{...message.message,text:'',hasMedia:true,mediaType:'voice',fileName:null,fileSize:12345}};
+  await fs.writeFile(output,JSON.stringify(voice));
+  const readVoice=await readAssistantOwnerIntakeMessage(input);
+  assert.equal(readVoice.text,'','the original caption stays unchanged');
+  assert.deepEqual(readVoice.media,{status:'present',kind:'voice',fileName:null,sizeBytes:12345,contentRead:false});
+  if(!max){
+    // Upgrade this SAME signed fixture after proving the legacy metadata ABI.
+    // A new signed declaration is separate from a high package version: only
+    // it admits private stdin and bounded original bytes, never task commands.
+    await fs.writeFile(path.join(dir,'trelio-source-media.json'),JSON.stringify({schemaVersion:1,protocol:'source-original-audio/v1',maximumBytes:20*1024*1024}));
+    artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:provider,runtimeVersion:'2.99.42',sourceDirectory:dir,
+      entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+    const withAudio=await readAssistantOwnerIntakeMessage(input);
+    assert.equal(withAudio.media.contentRead,false);
+    assert.equal(withAudio.media.original.state,'local_file');
+    const original=await fs.readFile(withAudio.media.original.localFilePath);
+    assert.equal(original.length,12345);assert.equal(original.subarray(0,4).toString(),'OggS');
+    assert.equal(createHash('sha256').update(original).digest('hex'),withAudio.media.original.sha256);
+    for(const fixtureAudioMode of ['wrong_request','wrong_hash','short_file','trailing_bytes','extra_path','false_no_audio']){
+      await fs.writeFile(output,JSON.stringify({...voice,fixtureAudioMode}));
+      await assert.rejects(readAssistantOwnerIntakeMessage(input),error=>{
+        assert.equal(error.code,'ASSISTANT_SOURCE_READ_INVALID');
+        assert.doesNotMatch(error.message+JSON.stringify(error),/PRIVATE_PROVIDER_PATH|original\.bin/);return true;
+      });
+    }
+    await fs.writeFile(output,JSON.stringify(voice));
+    // Cross the second production boundary as well: native context -> actual
+    // materializer -> SAME signed child/account -> native read confirmation ->
+    // final model-visible MCP result. No Task, user account or model turn.
+    const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    const {openAssistantDatabase}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+    const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+    const configurationDirectory=engine.resolveWorkspaceBridgeConfigDirectory();
+    const inboxDirectory=path.join(configurationDirectory,'digital-assistants','runtime',assistantId,deviceId);
+    const opened=await openAssistantDatabase(inboxDirectory);
+    let local;
+    try{
+      const inbox=createAssistantInbox({database:opened.database});
+      const localSource={origin,assistantId,companyId,provider:'telegram',accountId,bindingId:sourceId};
+      inbox.register(localSource);inbox.observeExternalSourceRevision(localSource,0);
+      inbox.commitPage(localSource,{...inbox.claimPoll(localSource),nextCursor:'voice-context',hasMore:false,events:[{
+        id:ref.id,revision:ref.revision,taskId:null,wake:false,providerWake:true,conversationKey:ref.conversationKey,ownerIdentityId}]});
+      local=inbox.ownerIntakes().find(row=>row.scope.bindingId===sourceId);
+      inbox.prepareOwnerIntake(local.id);inbox.startOwnerIntakeProvision(local.id);inbox.bindOwnerIntakeThread(local.id,threadId);
+      inbox.readyOwnerIntake(local.id);inbox.startOwnerIntake(local.id);
+    }finally{await opened.close();}
+    const priorPass={...pass},priorEvent=ref.eventId,priorFixture=structuredClone(intakeFixture);
+    Object.assign(pass,{passId:local.id,eventId:local.original_event_id,deliveryId:local.delivery_id});ref.eventId=pass.eventId;
+    intakeFixture.intent.intakeId=pass.passId;
+    Object.assign(intakeFixture.admission,{intakeId:pass.passId,eventId:pass.eventId});
+    let runtimeRecord={schemaVersion:1,passId:pass.passId,threadId,state:{runtimeSessionId:randomUUID(),
+      expiresAt:new Date(Date.now()+300000).toISOString(),privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url')}};
+    const contextStore={...selectedStore,get:slot=>slot.kind==='runtime'&&slot.id===pass.passId?runtimeRecord:selectedStore.get(slot),
+      put:async(slot,value)=>{if(slot.kind==='runtime'&&slot.id===pass.passId){runtimeRecord=structuredClone(value);return;}
+        return selectedStore.put(slot,value);}};
+    let confirmations=0;
+    const contextClient={...client,readSourceIntake:async()=>({state:'leased',readConfirmed:confirmations>0,threadId,eventId:pass.eventId,sourceRevision:0,
+      leaseExpiresAt:new Date(Date.now()+60000).toISOString()}),confirmIntakeRead:async input=>{
+      confirmations++;assert.equal(input.intakePass.intakeId,pass.passId);
+      assert.equal(input.ownerIdentityId,ownerIdentityId);assert.equal(input.senderExternalUserId,'123456');
+      assert.equal(typeof input.runtimeSessionProof.signature,'string');
+    }};
+    const contextHost={...host,configurationDirectory,readActivePass:async()=>pass};
+    const contextProxy=await createProductionAssistantMcp({context:action=>action(contextClient,contextHost,contextStore),
+      withProfile:action=>action({readCompanyContentMode:async()=>encrypted?'encrypted':'plain'}),
+      withManagedContent:async({args},send)=>send(args),httpRequest:async wire=>{
+        const reply=result=>({sessionId:'voice-context',message:{jsonrpc:'2.0',id:wire.payload?.id,result}});
+        if(wire.method==='DELETE'||wire.payload.method==='notifications/initialized')return reply({});
+        if(wire.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+        if(wire.payload.method==='tools/list')return reply({tools:[{name:'get_assistant_intake_context',inputSchema:{type:'object'},description:'Synthetic native context'}]});
+        assert.equal(wire.payload.method,'tools/call');assert.equal(wire.payload.params.name,'get_assistant_intake_context');
+        return reply({content:[],structuredContent:{sourceRead:{companyId,sourceId,sourceRevision:0,intakeId:pass.passId,
+          eventId:pass.eventId,threadId,localAccountId:accountId}}});
+      }});
+    try{
+      const delivered=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
+      assert.equal(delivered.structuredContent.ownerMessage.text,'');
+      const {original:deliveredOriginal,transcription,...deliveredMedia}=delivered.structuredContent.ownerMessage.media;
+      assert.deepEqual(deliveredMedia,readVoice.media);
+      assert.equal(transcription.state,'unavailable');
+      assert.equal(transcription.code,'ASSISTANT_SOURCE_PROCESSOR_CAPABILITY_REQUIRED');
+      assert.equal(transcription.originalPreserved,true);
+      assert.equal(deliveredOriginal.state,'local_file');
+      assert.equal(deliveredOriginal.sha256,withAudio.media.original.sha256);
+      assert.deepEqual(await fs.readFile(deliveredOriginal.localFilePath),original);
+      assert.equal(JSON.parse(delivered.content[0].text).ownerMessage.media.kind,'voice');
+      assert.equal(delivered.structuredContent.sourceRead,undefined,'host-only selectors stay private');
+      assert.doesNotMatch(JSON.stringify(delivered),/ownerExternalUserId|senderExternalUserId|replyText|UNTRUSTED_QUOTE/);
+      assert.equal(confirmations,1);
+      // Ready ASR crosses the SAME real production MCP materializer, source
+      // admission/signature/cache/process engine and durable runtime binding.
+      // Only external decoder/native HTTP responses are synthetic here; real
+      // inference remains a separate mandatory provider/native CI assertion.
+      const processorDirectory=path.join(directory,`source-asr-${encrypted}`);await fs.mkdir(processorDirectory);
+      const processorMarker=path.join(processorDirectory,'calls');
+      const processorFault=path.join(processorDirectory,'fault');
+      const words='проверенное тестовое голосовое';
+      await fs.writeFile(path.join(processorDirectory,'main.mjs'),`import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';
+        assert.deepEqual(process.argv.slice(2),['source-original']);assert.equal(process.env.TRELIO_ASSISTANT_SOURCE_AUDIO,'1');
+        assert.equal(process.env.TRELIO_ASSISTANT_SOURCE_MEDIA,undefined);assert.equal(process.env.TRELIO_SKILL_ACCOUNT_JSON,undefined);
+        assert.equal(process.env.TRELIO_SECRET_FILE,undefined);assert.equal(process.env.CODEX_THREAD_ID,undefined);
+        const chunks=[];for await(const chunk of process.stdin)chunks.push(chunk);const input=JSON.parse(Buffer.concat(chunks));
+        assert.equal(input.schemaVersion,1);const original=fs.readFileSync(input.original.filePath);
+        assert.equal(original.length,input.original.sizeBytes);assert.equal(createHash('sha256').update(original).digest('hex'),input.original.sha256);
+        const parent=path.dirname(input.outputDirectory),claim=path.join(parent,'.source-attempt.json');
+        const result={schemaVersion:1,protocol:'assistant-source-audio/v1',requestId:input.requestId,contentRead:false};
+        const fault=fs.existsSync(${JSON.stringify(processorFault)})?fs.readFileSync(${JSON.stringify(processorFault)},'utf8'):'';
+        if(['unknown','setup_required'].includes(fault)){result.state=fault;process.stdout.write(JSON.stringify(result));process.exit(0);}
+        if(fault==='unsupported'){process.stdout.write(JSON.stringify({ok:false,errorCode:'AUDIO_PLATFORM_UNSUPPORTED',error:'PRIVATE_PATH'}));process.exit(1);}
+        if(!fs.existsSync(claim)){
+          fs.writeFileSync(claim,'ONE START',{flag:'wx',mode:0o600});fs.mkdirSync(input.outputDirectory,{mode:0o700});
+          fs.appendFileSync(${JSON.stringify(processorMarker)},'start;');result.state='queued';
+        }else{
+          const text=fault==='invalid-utf8'?Buffer.concat([Buffer.alloc(65537,97),Buffer.from([255])]):Buffer.from(fault==='large-text'?'я'.repeat(15000):${JSON.stringify(words)});fs.writeFileSync(path.join(input.outputDirectory,'transcript.txt'),text,{mode:0o600});
+          fs.appendFileSync(${JSON.stringify(processorMarker)},'status;');Object.assign(result,{state:'completed',model:'v3_rnnt',text:{sizeBytes:text.length,sha256:createHash('sha256').update(text).digest('hex')}});
+          if(fault==='false-hash')result.text.sha256='0'.repeat(64);
+        }
+        process.stdout.write(JSON.stringify(result));`);
+      const processorBytes=await engine.buildAgentSkillPackage({skillId:'audio-transcription',runtimeVersion:'1.2.0',sourceDirectory:processorDirectory,
+        entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session']});
+      const processorArtifact=randomUUID(),processorRelease=randomUUID();
+      processorFixture={enableAutomatic:true,packageBytes:processorBytes,resolve:()=>{
+        const raw=payload();raw.releaseId=processorRelease;raw.localIdentity={...raw.localIdentity,skillId:'audio-transcription',connectionId:null};
+        raw.companyConnection=null;raw.artifact={...raw.artifact,id:processorArtifact,skillId:'audio-transcription',runtimeVersion:'1.2.0',
+          packageSha256:createHash('sha256').update(processorBytes).digest('hex'),packageSizeBytes:processorBytes.length,
+          packageSignature:sign(null,processorBytes,privateKey).toString('base64')};
+        raw.sourceAdmission={...baseAdmission(),provider:'audio',protocol:'assistant-source-audio/v1',command:'source-original'};
+        raw.packageUrl=prefix+'/package?'+new URLSearchParams({companyId,skillId:scope.skillId,expectedReleaseId:processorRelease,artifactId:processorArtifact,
+          sourceId,sourceRevision:'0',sourceProcessor:'audio-transcription',processorIntakeId:pass.passId});return raw;
+      }};
+      const started=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
+      assert.equal(started.structuredContent.ownerMessage.media.transcription.state,'queued');
+      assert.equal(started.structuredContent.ownerMessage.media.contentRead,false);
+      const completed=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
+      assert.equal(completed.structuredContent.ownerMessage.text,'','caption is never replaced by a guessed transcript');
+      assert.equal(completed.structuredContent.ownerMessage.media.contentRead,true);
+      assert.equal(completed.structuredContent.ownerMessage.media.transcription.text,words);
+      assert.equal(completed.structuredContent.ownerMessage.media.transcription.machineGenerated,true);
+      assert.equal(completed.structuredContent.ownerMessage.media.transcription.complete,true);
+      assert.equal(await fs.readFile(processorMarker,'utf8'),'start;status;','repeated context never starts a second decoder');
+      assert.equal(confirmations,3);
+      assert.doesNotMatch(JSON.stringify(completed),/sourceAudio|processorIntakeId|ownerExternalUserId|privateKeyPkcs8/);
+      assert.ok(runtimeRecord.sourceAudio.processor.releaseId,'package pin survives in SAME protected runtime record');
+      await fs.writeFile(processorFault,'large-text');
+      const large=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
+      assert.ok(Buffer.byteLength(JSON.stringify(large))<=40000);
+      assert.equal(large.structuredContent.ownerMessage.media.transcription.text,undefined);
+      assert.equal(await fs.readFile(large.structuredContent.ownerMessage.media.transcription.file.localFilePath,'utf8'),'я'.repeat(15000));
+      for(const fault of ['unknown','setup_required','unsupported']){
+        await fs.writeFile(processorFault,fault);
+        const observed=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
+        const media=observed.structuredContent.ownerMessage.media;
+        assert.equal(media.contentRead,false);assert.equal(media.original.state,'local_file');
+        assert.equal(media.transcription.state,fault==='unsupported'?'unavailable':fault);
+        if(fault==='unknown'){
+          assert.equal(media.transcription.automaticRetryAllowed,false);
+          assert.equal(media.transcription.nextRead,undefined);
+        }else if(fault==='setup_required')assert.equal(media.transcription.consentRequired,true);
+        else assert.equal(media.transcription.code,'AUDIO_PLATFORM_UNSUPPORTED');
+        assert.doesNotMatch(JSON.stringify(observed),/PRIVATE_PATH/);
+      }
+      for(const fault of ['invalid-utf8','false-hash']){
+        await fs.writeFile(processorFault,fault);
+        await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}),
+          error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
+      }
+      await fs.unlink(processorFault);
+      const originalResolution=processorFixture.resolve;
+      processorFixture.resolve=()=>({...originalResolution(),releaseId:randomUUID()});
+      await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}));
+      processorFixture.resolve=originalResolution;
+      assert.equal((await fs.readFile(processorMarker,'utf8')).split('start;').length-1,1,'faults/release drift cannot start another decoder');
+      processorFixture=null;
+    }finally{processorFixture=null;await contextProxy.close?.();Object.assign(pass,priorPass);ref.eventId=priorEvent;intakeFixture=priorFixture;}
+  }
+  await fs.writeFile(output,JSON.stringify(message));
   for(const patch of [{senderUserId:'654321'},{outgoing:true},{forwarded:true},...(!max?[{viaBot:true}]:[])]){
     await fs.writeFile(output,JSON.stringify({...message,reference:{...message.reference,...patch}}));
     await assert.rejects(readAssistantOwnerIntakeMessage(input),/OWNER_UNVERIFIED/);
@@ -2228,7 +2433,8 @@ test('existing-task triage reads exact signed Telegram/email/MAX bodies without 
   const live={kind:'route_existing',eventIds,state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({...live})};
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
-  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text,...(skillId==='email-imap-smtp'?{originalSha256:message.originalSha256}:{})});
+  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text,
+    media:{status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false},...(skillId==='email-imap-smtp'?{originalSha256:message.originalSha256}:{})});
   assert.equal(await fs.readFile(marker,'utf8'),'r','SAME selected-account signed child, one exact read');
   intakeFixture.admission={...intakeFixture.admission,ownerIdentityId:randomUUID(),ownerExternalUserId:'654321'};
   await assert.rejects(readAssistantOwnerIntakeMessage(input),/INVALID_RESPONSE/);
@@ -2253,4 +2459,49 @@ test('MAX account projector requires complete native scope/chain and never treat
     {...raw,nextCursor:position(200,'b'.repeat(64))},{...raw,coverage:{...raw.coverage,complete:false}},
     {...raw,coverage:{...raw.coverage,unreadOnly:true}},{...raw,coverage:{...raw.coverage,newMessagesOnly:undefined}},
     {...raw,coverage:{...raw.coverage,newMessagesOnly:false}},{...raw,readState:{readReceiptsSent:true}}])assert.throws(()=>project(value),/INVALID_RESPONSE/);
+});
+
+test('original audio requires one exact signed declaration, never a version/name guess',()=>{
+  const declaration={schemaVersion:1,protocol:'source-original-audio/v1',maximumBytes:20*1024*1024};
+  const file=value=>({path:'trelio-source-media.json',bytes:Buffer.from(JSON.stringify(value))});
+  assert.equal(assistantSourceOriginalAudioCapability({files:[]}),false);
+  assert.equal(assistantSourceOriginalAudioCapability({files:[file(declaration)]}),true);
+  for(const value of [{...declaration,schemaVersion:2},{...declaration,maximumBytes:20*1024*1024+1},
+    {...declaration,protocol:'other'},{...declaration,command:'download'},null]){
+    assert.throws(()=>assistantSourceOriginalAudioCapability({files:[file(value)]}),error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
+  }
+  for(const files of [[file(declaration),file(declaration)],[{path:'trelio-source-media.json',bytes:Buffer.from([0xff])}],
+    [{path:'trelio-source-media.json',bytes:Buffer.alloc(513)}]]){
+    assert.throws(()=>assistantSourceOriginalAudioCapability({files}),error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
+  }
+});
+
+test('original media projection distinguishes absent, present and legacy unknown without private fields',()=>{
+  const project=projectAssistantSourceMessageMedia;
+  const unknown={status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false};
+  assert.deepEqual(project({text:''}),unknown);
+  assert.deepEqual(project({text:'',mediaType:'text'}),unknown);
+  assert.deepEqual(project({text:'',hasMedia:false,mediaType:'text'}),{...unknown,status:'none'});
+  assert.deepEqual(project({text:'',hasMedia:true,mediaType:'voice',fileName:'voice.ogg',fileSize:42,
+    document:{id:'PRIVATE_NATIVE',accessHash:'PRIVATE_HASH'},url:'PRIVATE_URL',path:'PRIVATE_PATH'}),
+  {status:'present',kind:'voice',fileName:'voice.ogg',sizeBytes:42,contentRead:false});
+  assert.deepEqual(project({mediaType:'voice'}),{...unknown,status:'present',kind:'voice'});
+  assert.deepEqual(project({hasMedia:true,mediaType:'future-format'}),{...unknown,status:'present',kind:'other'});
+  // A signed filename remains untrusted display metadata, never a path. Its
+  // complete bounded value is preserved; native selectors and delivery data
+  // cannot hitchhike through a nested provider object or an extra root key.
+  assert.equal(project({hasMedia:true,fileName:'../voice.ogg'}).fileName,'../voice.ogg');
+  assert.doesNotMatch(JSON.stringify(project({hasMedia:true,document:{id:'PRIVATE_NATIVE'}})),/PRIVATE/);
+});
+
+test('original media projection refuses contradictory, malformed and oversized metadata',()=>{
+  for(const message of [null,[],{hasMedia:1},{hasMedia:'true'},{hasMedia:false,mediaType:'voice'},
+    {hasMedia:false,fileName:'voice.ogg'},{hasMedia:false,fileSize:0},
+    {mediaType:{}},{mediaType:'x'.repeat(33)},{fileName:{}},{fileName:'\u0000voice.ogg'},
+    {fileName:'voice\n.ogg'},{fileName:'\u007fvoice.ogg'},{fileName:'\ud800'},
+    {fileName:'я'.repeat(257)},{fileSize:-1},{fileSize:1.5},{fileSize:'42'},
+    {fileSize:Number.MAX_SAFE_INTEGER+1}]){
+    assert.throws(()=>projectAssistantSourceMessageMedia(message),error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
+  }
+  assert.equal(projectAssistantSourceMessageMedia({hasMedia:true,fileName:'я'.repeat(256),fileSize:0}).sizeBytes,0);
 });

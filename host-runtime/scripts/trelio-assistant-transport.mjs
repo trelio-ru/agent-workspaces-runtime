@@ -1,11 +1,13 @@
 import { validateAssistantHostSnapshot, validateAssistantHostState, validateAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { setTimeout as waitForTimer } from 'node:timers/promises';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
 import { validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
@@ -4505,7 +4507,7 @@ const validateAssistantAcknowledgementArguments=(args,skillId)=>{
  * pass/model observation, human vault or renewal cache. The server rechecks the
  * live device, MCP grant, scope, assignment, current release and package on each
  * fixed endpoint. A local format header and a callback are not authorization. */
-export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,sourceSelection=null,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,
+export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,sourceSelection=null,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,sourceProcessor=null,
   monotonic=()=>performance.now(),startedAt=monotonic()}) => {
   scope=sourceScope(scope);
   if(sourceSelection!==null){
@@ -4589,6 +4591,9 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       ...(replyDocument?{replyDocument}:{}),
       runtimeArguments:Object.freeze([...args]),beforeInvoke:intakeExecution.beforeInvoke});
   }else if(intakeExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  if(sourceProcessor!==null&&(sourceProcessor!=='audio-transcription'||!sourceIntake||scope.skillId!=='telegram-mtproto'
+    ||sourceIntake.replyReceiptId||intakeExecution.kind))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  const executionSkillId=sourceProcessor??scope.skillId;
   const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
   // The closed setup operation also admits one independent MAX probe after
   // the human handoff. Probe retains the short read budget; it cannot reopen
@@ -4604,7 +4609,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     || typeof monotonic!=='function' || !Number.isFinite(startedAt)) fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const expected={schemaVersion:1,origin,assistantId,deviceId};
   let active=true,resolveSent=false,packageSent=false,packagePath=null,budgetMs=maximumBudgetMs;
-  let creation=null,creationUsed=false,intakeAdmission=null,intakeUsed=false,intakeStarted=false;
+  let creation=null,creationUsed=false,intakeAdmission=null,intakeUsed=false,intakeStarted=false,sourceMediaInput=null,audioProcessorProtocolVersion=0;
   let encryptedCompany=null,managedEncryptionDevice=null,encryptionFingerprint=null,maxAccountDiscovery=false;
   let interactiveSetup=null,interactiveUsed=false,acknowledgement=null,acknowledgementUsed=false,acknowledgementStarted=false;
   const handle=Object.freeze(Object.create(null));
@@ -4622,6 +4627,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   await assertCurrent();
   return Object.freeze({
     kind:'digital_assistant_source',
+    sourceIntakeInputKind:sourceProcessor?'assistant-source-audio/v1':'source-original-audio/v1',
     companyEncryptionUserId:assistantId,
     async resolveCompanyEncryptionDevice({origin:requestOrigin,companyId}){
       if(!encryptedCompany||requestOrigin!==origin||companyId!==scope.companyId)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
@@ -4703,11 +4709,11 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     },
     async authorizeSourceIntake({artifact,executionContext:context,runtimeArguments}){
       await assertCurrent();const approved=intakeAdmission;
-      if(!approved||intakeUsed||artifact?.id!==approved.artifactId||artifact.skillId!==scope.skillId
+      if(!approved||intakeUsed||artifact?.id!==approved.artifactId||artifact.skillId!==executionSkillId
         ||context?.companyId!==scope.companyId||(context.projectId??null)!==scope.projectId||context.releaseId!==approved.releaseId
-        ||context.account?.id!==intakeExecution.accountId||context.localIdentity?.memberId!==approved.memberId
+        ||(sourceProcessor?context.account!==undefined:context.account?.id!==intakeExecution.accountId)||context.localIdentity?.memberId!==approved.memberId
         ||(context.localIdentity?.connectionId??null)!==approved.connectionId
-        ||JSON.stringify(runtimeArguments)!==JSON.stringify(intakeExecution.runtimeArguments))fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+        ||JSON.stringify(runtimeArguments)!==JSON.stringify(sourceProcessor?['source-original']:intakeExecution.runtimeArguments))fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       intakeUsed=true;return Math.floor(Math.min(60000,budgetMs-(monotonic()-startedAt)));
     },
     async startSourceIntake(){
@@ -4716,6 +4722,41 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     },
     async readIntakeOwner(){await assertCurrent();if(!intakeStarted||intakeAdmission.kind==='route_existing')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       return {ownerIdentityId:intakeAdmission.ownerIdentityId,ownerExternalUserId:intakeAdmission.ownerExternalUserId};},
+    async prepareSourceMediaInput(input){
+      await assertCurrent();
+      // Host-owned scratch only, after the SAME signed package/admission has
+      // been verified. This does not extend the native command or accept a
+      // model-selected filename/URL/selector. Reply/ACK/setup cannot borrow it.
+      if(!intakeAdmission||intakeUsed||sourceMediaInput||sourceProcessor||scope.skillId!=='telegram-mtproto'
+        ||intakeExecution.runtimeArguments[0]!=='read-reference'||!object(input)
+        ||Object.keys(input).sort().join(',')!=='directory,maxBytes,requestId'
+        ||!UUID.test(input.requestId??'')||typeof input.directory!=='string'
+        ||!path.isAbsolute(input.directory)||Buffer.byteLength(input.directory)>4096||input.directory.includes('\0')
+        ||input.maxBytes!==20*1024*1024)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      sourceMediaInput=Object.freeze({schemaVersion:1,...input});
+    },
+    async prepareSourceProcessorInput(input){
+      await assertCurrent();
+      const original=input?.original;
+      if(!sourceProcessor||!intakeAdmission||intakeUsed||sourceMediaInput||!object(input)
+        ||Object.keys(input).sort().join(',')!=='original,outputDirectory,requestId,schemaVersion'||input.schemaVersion!==1
+        ||!UUID.test(input.requestId??'')||!object(original)
+        ||Object.keys(original).sort().join(',')!=='filePath,sha256,sizeBytes'
+        ||!Number.isSafeInteger(original.sizeBytes)||original.sizeBytes<1||original.sizeBytes>20*1024*1024
+        ||typeof original.sha256!=='string'||!/^[a-f0-9]{64}$/u.test(original.sha256)
+        ||[original.filePath,input.outputDirectory].some(value=>typeof value!=='string'||!path.isAbsolute(value)
+          ||value.includes('\0')||Buffer.byteLength(value)>4096)
+        ||Buffer.byteLength(JSON.stringify(input))>8192)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      // Internal host-owned file/job references only, never model argv. The
+      // native read-confirmed original and signed no-setup processor remain
+      // separate authority; this private pipe cannot grant a model download.
+      sourceMediaInput=Object.freeze({...input,original:Object.freeze({...original})});
+    },
+    async readSourceIntakeInput(){
+      await assertCurrent();if(!intakeStarted||intakeExecution.runtimeArguments[0]!=='read-reference')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      if(sourceProcessor&&sourceMediaInput===null)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      return sourceMediaInput===null?null:Buffer.from(JSON.stringify(sourceMediaInput),'utf8');
+    },
     async readSourceReplyInput(){
       await assertCurrent();
       if(!intakeStarted||!['reply_owner','verify_owner_reply'].includes(intakeExecution?.kind)||intakeAdmission?.kind!==intakeExecution.kind||intakeExecution.kind==='verify_owner_reply'&&sourceIntake.replyProtocolVersion!==2)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
@@ -4737,7 +4778,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       if(pathname===`${ASSISTANT_SOURCE_PREFIX}/resolve` && method==='POST' && !resolveSent){
         let body;try{body=JSON.parse(options.body);}catch{fail('ASSISTANT_SOURCE_ORIGIN_DENIED');}
         if(!object(body) || JSON.stringify(body)!==JSON.stringify({...scope,expectedReleaseId:null,
-          ...(sourceSelection?{sourceSelection}:{}),...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+          ...(sourceSelection?{sourceSelection}:{}),...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{}),...(sourceProcessor?{sourceProcessor}:{})})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
         // Fence dispatch even when a local read/network response fails. Another
         // poll needs a fresh profile, not an implicit retry under this lease.
         resolveSent=true;
@@ -4778,19 +4819,23 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(sourceIntake?(intakeExecution.kind==='reply_owner'?`telegram-owner-reply/v${sourceIntake.replyProtocolVersion??1}`:intakeExecution.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${sourceIntake.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
+        || admission.provider!==(sourceProcessor?'audio':protocol.provider) || admission.protocol!==(sourceProcessor?'assistant-source-audio/v1':sourceIntake?(intakeExecution.kind==='reply_owner'?`telegram-owner-reply/v${sourceIntake.replyProtocolVersion??1}`:intakeExecution.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${sourceIntake.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
           ?(scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1'):setupCommand?interactiveProtocol:protocol.protocol)
-        || admission.command!==(sourceIntake?(intakeExecution.kind==='reply_owner'?'reply-reference':intakeExecution.kind==='verify_owner_reply'?(sourceIntake.replyProtocolVersion===2?'reply-reference':'read'):'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
+        || admission.command!==(sourceProcessor?'source-original':sourceIntake?(intakeExecution.kind==='reply_owner'?'reply-reference':intakeExecution.kind==='verify_owner_reply'?(sourceIntake.replyProtocolVersion===2?'reply-reference':'read'):'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.expiresAt)
         || !Number.isFinite(issued) || !Number.isFinite(expires) || ((sourceAcknowledgement||sourceIntake)?expires-issued<=0||expires-issued>maximumBudgetMs:expires-issued!==maximumBudgetMs)
         || resolution.localIdentity?.companyId!==scope.companyId || resolution.localIdentity?.projectId!==scope.projectId
-        || resolution.artifact.skillId!==scope.skillId || resolution.artifact.contentProtection!=='plain'
+        || resolution.artifact.skillId!==executionSkillId || resolution.artifact.contentProtection!=='plain'
         || resolution.trust.level!=='platform_verified' || resolution.trust.artifactLevel!=='platform_verified'
         || resolution.trust.requiresDeviceConsent || resolution.companyConnection?.secretBindings.length
-        || resolution.companyConnection && !resolution.companyConnection.configured) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+        || resolution.companyConnection && !resolution.companyConnection.configured
+        || sourceProcessor&&resolution.companyConnection!==null) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      if(admission.audioProcessorProtocolVersion!==undefined&&(sourceProcessor||!sourceIntake||scope.skillId!=='telegram-mtproto'
+        ||admission.audioProcessorProtocolVersion!==1))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      audioProcessorProtocolVersion=admission.audioProcessorProtocolVersion??0;
       const url=new URL(resolution.packageUrl,origin);
       // The native encrypted setup adapter binds its exact registration as
       // well as the immutable owner account intent. Reuse the same selected
@@ -4798,11 +4843,12 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       // Native encrypted intake read/reply selects its source exactly like
       // monitor/ACK. Keep those query coordinates in the strict URL equality
       // check; rejecting them breaks intake, ignoring them would widen scope.
-      const packageSelection=sourceSelection??(encryptedCompany&&sourceIntake?{sourceId:sourceIntake.sourceId,expectedRevision:sourceIntake.expectedRevision}
+      const packageSelection=sourceSelection??((encryptedCompany||sourceProcessor)&&sourceIntake?{sourceId:sourceIntake.sourceId,expectedRevision:sourceIntake.expectedRevision}
         :encryptedCompany&&sourceAcknowledgement?{sourceId:sourceAcknowledgement.sourceId,expectedRevision:sourceAcknowledgement.sourceRevision}
         :encryptedCompany&&accountSetup?{sourceId:accountSetup.sourceId,expectedRevision:accountSetup.expectedRevision}:null);
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
+        ...(sourceProcessor?{sourceProcessor,processorIntakeId:sourceIntake.intakeId}:{}),
         ...(packageSelection?{sourceId:packageSelection.sourceId,sourceRevision:String(packageSelection.expectedRevision)}:{}),
         ...(accountSetup?{accountSetupSourceId:accountSetup.sourceId,accountSetupRevision:String(accountSetup.expectedRevision),
           ...(setupCommand?{accountSetupOperation:accountSetup.operation}:{})}:{})};
@@ -4869,6 +4915,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       budgetMs=Math.min(budgetMs,expires-issued);packagePath=resolution.packageUrl;
       await assertCurrent();
     },
+    allowsSourceAudioProcessor:()=>audioProcessorProtocolVersion===1,
     async remainingMs(){await assertCurrent();return Math.floor(budgetMs-(monotonic()-startedAt));},
     close(){active=false;},
   });
@@ -5063,7 +5110,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
  * owner's empty-account setup. It is not an executor or an admission cache.
  * Setup refreshes native authority after materialization, charging both reads
  * to the ORIGINAL monotonic budget; no account/provider mutation is retried. */
-export const withAssistantSourcePackage = async ({identity,host,store,scope,sourceSelection=null,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,signal},action) => {
+export const withAssistantSourcePackage = async ({identity,host,store,scope,sourceSelection=null,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,sourceProcessor=null,signal},action) => {
   scope=sourceScope(scope);
   if(sourceAcknowledgement!==null)sourceAcknowledgement=normalizeAssistantSourceAcknowledgement(sourceAcknowledgement);
   if(typeof action!=='function')fail('ASSISTANT_SOURCE_INVALID_INPUT');
@@ -5083,7 +5130,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
       if(combined.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
       const token=await profile.requireToken(identity.origin);
       const response=await engine.request(identity.origin,token,`${ASSISTANT_SOURCE_PREFIX}/resolve`,{
-        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,...(sourceSelection?{sourceSelection}:{}),...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})}),
+        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,...(sourceSelection?{sourceSelection}:{}),...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{}),...(sourceProcessor?{sourceProcessor}:{})}),
         headers:{'content-type':'application/json'},signal:combined,maximumErrorResponseBytes:16_384});
       const bytes=await engine.readBoundedResponseBuffer(response,512*1024,'Source resolution');
       let raw;try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}finally{bytes.fill(0);}
@@ -5092,14 +5139,14 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
       await profile.bindResolution(resolution,raw.sourceAdmission);raw=null;
       return {resolution,token,companyEncryption:hydrated.companyEncryption};
     };
-    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,sourceProcessor,startedAt});
     const initial=await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const {resolution,token,companyEncryption}=await resolve();
       const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,companyEncryption,
         requestOptions:{signal:combined,maximumErrorResponseBytes:16_384}});
       await profile.remainingMs();
       const capabilities=materialized.artifact.parsedPackage.capabilities;
-      if(!['network','local-session','local-accounts-v1'].every(value=>capabilities.includes(value))
+      if(!(sourceProcessor?['local-session']:['network','local-session','local-accounts-v1']).every(value=>capabilities.includes(value))
         || capabilities.includes('secret-checkout'))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       const refresh=Boolean(accountSetup||sourceAcknowledgement||sourceIntake||companyEncryption);
       if(!refresh)return {result:await action({engine,profile,materialized,resolution,signal:combined})};
@@ -5110,7 +5157,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
     // engine deliberately refuses nested profile replacement; retain that
     // device/human-isolation guard and its closed tombstone semantics.
     profile.close();
-    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,sourceProcessor,startedAt});
     return await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const fresh=await resolve();
       if(JSON.stringify(fresh.resolution.companyConnection)!==JSON.stringify(initial.resolution.companyConnection)
@@ -5545,6 +5592,97 @@ export const acknowledgeAssistantSource=async({identity,host,store,client,source
   }catch(error){rethrowAssistantSourceError(error,{signal});}
 };
 
+/** Preserve only bounded semantic media metadata from the SAME original read.
+ * The caption is independent of media: an empty string cannot prove absence
+ * of a voice/file. Legacy providers without this metadata remain UNKNOWN.
+ * Never forward native document IDs, access hashes, URLs or a provider path;
+ * this description grants neither file access nor completed media coverage. */
+export const projectAssistantSourceMessageMedia=message=>{
+  if(!object(message))fail('ASSISTANT_SOURCE_READ_INVALID');
+  const kinds=new Set(['voice','round-video','photo','video','audio','document','url','other']);
+  if(message.hasMedia!==undefined&&typeof message.hasMedia!=='boolean')fail('ASSISTANT_SOURCE_READ_INVALID');
+  if(message.mediaType!==undefined&&(typeof message.mediaType!=='string'||Buffer.byteLength(message.mediaType)>32))
+    fail('ASSISTANT_SOURCE_READ_INVALID');
+  const suppliedKind=typeof message.mediaType==='string'&&message.mediaType!=='text';
+  if(message.hasMedia===false&&suppliedKind)fail('ASSISTANT_SOURCE_READ_INVALID');
+  const status=message.hasMedia===false?'none':message.hasMedia===true||suppliedKind?'present':'unknown';
+  const fileName=message.fileName??null,sizeBytes=message.fileSize??null;
+  if(fileName!==null&&(typeof fileName!=='string'||!fileName.isWellFormed()||Buffer.byteLength(fileName)>512||/[\u0000-\u001f\u007f]/u.test(fileName))
+    ||sizeBytes!==null&&(!Number.isSafeInteger(sizeBytes)||sizeBytes<0)
+    ||status==='none'&&(fileName!==null||sizeBytes!==null))fail('ASSISTANT_SOURCE_READ_INVALID');
+  return {status,kind:status==='present'?(kinds.has(message.mediaType)?message.mediaType:'other'):null,
+    fileName,sizeBytes,contentRead:false};
+};
+
+/** Fixed private original/derived file under an already owned directory. Both
+ * source audio and its transcript use one bounded handle/EOF/hash check; a
+ * concurrent grow/replace must not become allocation or delivered content. */
+const readAssistantSourcePrivateBytes=async({engine,file,sizeBytes,sha256,maximumBytes,signal})=>{
+  if(!Number.isSafeInteger(sizeBytes)||sizeBytes<0||sizeBytes>maximumBytes||typeof sha256!=='string'||!/^[a-f0-9]{64}$/u.test(sha256))
+    fail('ASSISTANT_SOURCE_READ_INVALID');
+  const directory=path.dirname(file);
+  await engine.assertPrivatePathKind(directory,'directory');await engine.assertPrivatePathKind(file,'file');
+  const handle=await fs.open(file,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW??0));
+  let bytes,delivered=false;
+  try{
+    const before=await handle.stat();
+    if(!before.isFile()||before.size!==sizeBytes||before.nlink!==1)fail('ASSISTANT_SOURCE_READ_INVALID');
+    bytes=Buffer.alloc(before.size);let offset=0;
+    while(offset<bytes.length){signal?.throwIfAborted();const read=await handle.read(bytes,offset,bytes.length-offset,offset);
+      if(!read.bytesRead)fail('ASSISTANT_SOURCE_READ_INVALID');offset+=read.bytesRead;}
+    const extra=await handle.read(Buffer.alloc(1),0,1,offset),after=await handle.stat();
+    if(extra.bytesRead||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ctimeMs!==after.ctimeMs
+      ||createHash('sha256').update(bytes).digest('hex')!==sha256)fail('ASSISTANT_SOURCE_READ_INVALID');
+    await engine.assertPrivatePathKind(directory,'directory');await engine.assertPrivatePathKind(file,'file');
+    const current=await fs.lstat(file);
+    if(current.ino!==after.ino||current.dev!==after.dev||current.size!==after.size||current.mtimeMs!==after.mtimeMs
+      ||current.ctimeMs!==after.ctimeMs)fail('ASSISTANT_SOURCE_READ_INVALID');
+    delivered=true;return bytes;
+  }finally{if(!delivered)bytes?.fill(0);await handle.close();}
+};
+
+/** One bounded original audio, never a provider-selected path. Keep the SAME
+ * private attachment engine/retention as exact Workspace originals. A file
+ * receipt proves bytes only: it cannot claim ASR, body processing or ACK. */
+const materializeAssistantSourceAudio=async({engine,scratch,receipt,media,signal,assertCurrent})=>{
+  if(!object(receipt)||receipt.schemaVersion!==1||receipt.requestId!==scratch.requestId
+    ||!['not_audio','too_large','unavailable','saved'].includes(receipt.state))fail('ASSISTANT_SOURCE_READ_INVALID');
+  if(receipt.state!=='saved'){
+    if(Object.keys(receipt).sort().join(',')!=='requestId,schemaVersion,state'
+      ||receipt.state==='not_audio'&&['voice','audio'].includes(media.kind)
+      ||receipt.state==='too_large'&&!(media.sizeBytes>20*1024*1024))fail('ASSISTANT_SOURCE_READ_INVALID');
+    return {...media,...(receipt.state==='not_audio'?{}:{original:{state:receipt.state}})};
+  }
+  if(Object.keys(receipt).sort().join(',')!=='requestId,schemaVersion,sha256,sizeBytes,state'
+    ||!['voice','audio'].includes(media.kind)||!Number.isSafeInteger(receipt.sizeBytes)||receipt.sizeBytes<1
+    ||receipt.sizeBytes>20*1024*1024||receipt.sizeBytes!==media.sizeBytes
+    ||typeof receipt.sha256!=='string'||!/^[a-f0-9]{64}$/u.test(receipt.sha256))fail('ASSISTANT_SOURCE_READ_INVALID');
+  const file=path.join(scratch.directory,'original.bin');
+  const bytes=await readAssistantSourcePrivateBytes({engine,file,sizeBytes:receipt.sizeBytes,sha256:receipt.sha256,
+    maximumBytes:20*1024*1024,signal});
+  try{
+    await assertCurrent();
+    const {materializeLocalAttachment}=await import('./trelio-local-attachments.mjs');
+    const original=await materializeLocalAttachment({bytes,originalName:media.fileName??'voice.ogg',signal,root:scratch.root});
+    await assertCurrent();
+    return {...media,original:{state:'local_file',...original}};
+  }finally{bytes.fill(0);}
+};
+
+/** Additive provider opt-in from its verified immutable package, never native
+ * resolve prose, a model flag or an unsigned runtime-version assumption. */
+export const assistantSourceOriginalAudioCapability=parsedPackage=>{
+  const files=parsedPackage?.files?.filter(file=>file.path==='trelio-source-media.json')??[];
+  if(!files.length)return false;
+  if(files.length!==1||!Buffer.isBuffer(files[0].bytes)||files[0].bytes.length>512)fail('ASSISTANT_SOURCE_READ_INVALID');
+  let value;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(files[0].bytes));}
+  catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+  if(!object(value)||Object.keys(value).sort().join(',')!=='maximumBytes,protocol,schemaVersion'
+    ||value.schemaVersion!==1||value.protocol!=='source-original-audio/v1'||value.maximumBytes!==20*1024*1024)
+    fail('ASSISTANT_SOURCE_READ_INVALID');
+  return true;
+};
+
 /** One original incoming owner command, through the SAME signed package,
  * account selector and process engine. This taskless read grants no task pass,
  * neighboring history, provider sending, read-state mutation or human vault.
@@ -5586,6 +5724,24 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
       executionContext,runtimeArguments:['read-reference','--local-account',source.localAccountId,...args.slice(1)]});
     if(selected.handled||selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
     executionContext.account=selected.account;
+    // Only the new SIGNED provider version understands this private input.
+    // Legacy packages retain their complete metadata and never receive a new
+    // flag, a guessed downloader command or a model-selected native ID.
+    let scratch=null;
+    try{
+    if(source.skillId==='telegram-mtproto'&&assistantSourceOriginalAudioCapability(materialized.artifact.parsedPackage)){
+      if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.17.0'))fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
+      const selectedRoot=path.join(host.configurationDirectory??engine.resolveWorkspaceBridgeConfigDirectory(),'attachment-downloads');
+      await engine.ensurePrivateDirectory(selectedRoot);
+      // macOS /var aliases are canonicalized before the provider independently
+      // rejects symbolic/reparse ancestors. Never canonicalize a model path.
+      const root=await fs.realpath(selectedRoot);
+      const directory=await fs.mkdtemp(path.join(root,'download-'));
+      scratch={root,directory,requestId:randomUUID()};
+      await engine.ensurePrivateDirectory(directory);
+      await engine.writePrivateJsonFile(path.join(directory,'.expires.json'),{schemaVersion:1,expiresAtMs:Date.now()+60*60_000});
+      await profile.prepareSourceMediaInput({directory,requestId:scratch.requestId,maxBytes:20*1024*1024});
+    }
     const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
       executionContext,runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,
       timeoutMs:Math.min(60_000,await profile.remainingMs()),signal:combined});
@@ -5595,7 +5751,9 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
       validateAssistantSourceReadResult({value,provider:parsed.provider,reference});
       const text=email?value.message.body:value.message.text;
       if(typeof text!=='string'||Buffer.byteLength(text)>262144)fail('ASSISTANT_SOURCE_READ_INVALID');
-      await check();return {text,...(email?{originalSha256:value.originalSha256}:{})};
+      let media=projectAssistantSourceMessageMedia(value.message);
+      if(scratch)media=await materializeAssistantSourceAudio({engine,scratch,receipt:value.originalAudio,media,signal:combined,assertCurrent:check});
+      await check();return {text,media,...(email?{originalSha256:value.originalSha256}:{})};
     }
     const owner=await profile.readIntakeOwner(),ref=value?.reference;
     if(result.exitCode!==0||!object(value)||value.schemaVersion!==1||value.protocol!==(source.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1')
@@ -5615,9 +5773,175 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
     // linked sender in a group can issue a direct work command, but may never
     // grant owner-private reply authority. Do not infer this from display text,
     // the opaque conversation hash, forwarding metadata or a model assertion.
-    return {text:value.message.text,...owner,
+    let media=projectAssistantSourceMessageMedia(value.message);
+    if(scratch)media=await materializeAssistantSourceAudio({engine,scratch,receipt:value.originalAudio,media,signal:combined,assertCurrent:check});
+    return {text:value.message.text,media,...owner,
+      ...(profile.allowsSourceAudioProcessor()?{sourceAudioProcessorAvailable:true}:{}),
       privateOwnerConversation:!max&&pieces[1]===owner.ownerExternalUserId};
+    }finally{
+      // The signed child has settled. Remove only our fixed scratch entries,
+      // never recursive/foreign content. Crash leftovers have the SAME private
+      // attachment lease and are pruned by the ordinary attachment engine.
+      if(scratch){
+        await fs.unlink(path.join(scratch.directory,'original.bin')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+        await fs.unlink(path.join(scratch.directory,'.expires.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+        await fs.rmdir(scratch.directory);
+      }
+    }
   });
+};
+
+/** Decode only the SAME original after independent native read confirmation.
+ * Job references live in the existing OS-protected runtime record, not SQLite
+ * or model arguments. Each call freshly admits the same source and reviewed
+ * signed processor. Its exclusive local attempt survives a lost start result;
+ * later context reads can observe it, never launch a replacement decoder. */
+export const processAssistantOwnerIntakeAudio=async({identity,client,host,store,pass,source,reference,media,
+  available=false,signal,sourcePackage=withAssistantSourcePackage})=>{
+  if(!['voice','audio'].includes(media?.kind))return media;
+  const unavailable=code=>({...media,transcription:{state:'unavailable',code,originalPreserved:true}});
+  if(media.original?.state!=='local_file')return unavailable('ASSISTANT_SOURCE_AUDIO_ORIGINAL_REQUIRED');
+  if(!available)return unavailable('ASSISTANT_SOURCE_PROCESSOR_CAPABILITY_REQUIRED');
+  pass=validateAssistantActivePass(pass,identity);
+  if(pass.kind!=='source_intake'||pass.intakeKind||source?.skillId!=='telegram-mtproto'||source.id!==pass.sourceId
+    ||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision||source.state!=='active'
+    ||reference.eventId!==pass.eventId)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const parts=reference.id?.split(':')??[];
+  const args=['read-reference','--chat',parts[1],'--message-id',parts[2],'--expected-revision',reference.revision,
+    '--expected-conversation-key',reference.conversationKey];
+  if(parts.length!==3||parts[0]!=='message'||!parseAssistantSourceReadReference({skillId:source.skillId,arguments:args}))
+    fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const current=async()=>{
+    signal?.throwIfAborted();
+    if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_INTAKE_CHANGED');
+    const live=await client.readSourceIntake({companyId:pass.companyId,sourceId:source.id,intakeId:pass.passId},signal);
+    if(live.state!=='leased'||live.readConfirmed!==true||live.threadId!==pass.threadId||live.eventId!==pass.eventId
+      ||live.sourceRevision!==source.revision||Date.parse(live.leaseExpiresAt)<=Date.now())fail('ASSISTANT_INTAKE_CHANGED');
+    if(!sameAssistantSourceRegistration(source,(await client.sourceAccounts(pass.companyId,signal)).find(row=>row.id===source.id)))
+      fail('ASSISTANT_INTAKE_CHANGED');
+  };
+  await current();
+  const engine=await import('./trelio-workspace.mjs');
+  const configuration=host.configurationDirectory??engine.resolveWorkspaceBridgeConfigDirectory();
+  const selectedRoot=path.join(configuration,'attachment-downloads');await engine.ensurePrivateDirectory(selectedRoot);
+  const root=await fs.realpath(selectedRoot),slot={origin:identity.origin,kind:'runtime',id:pass.passId};
+  const original=media.original;
+  if(typeof original.localFilePath!=='string'||path.dirname(path.dirname(original.localFilePath))!==root
+    ||!/^download-[A-Za-z0-9]{6}$/u.test(path.basename(path.dirname(original.localFilePath)))
+    ||!Number.isSafeInteger(original.sizeBytes)||original.sizeBytes<1||original.sizeBytes>20*1024*1024
+    ||typeof original.sha256!=='string'||!/^[a-f0-9]{64}$/u.test(original.sha256)
+    ||!Number.isFinite(Date.parse(original.expiresAt)))fail('ASSISTANT_SOURCE_READ_INVALID');
+  if(Date.parse(original.expiresAt)<=Date.now())return unavailable('ASSISTANT_SOURCE_AUDIO_ORIGINAL_EXPIRED');
+  const lock=path.join(configuration,'digital-assistants','runtime-locks',`${pass.passId}.json`);
+  let binding;
+  await withRuntimeStateLock(lock,async()=>{
+    await current();const record=await store.get(slot);
+    if(!record?.state||record.ended||record.threadId!==pass.threadId)fail('ASSISTANT_INTAKE_CHANGED');
+    binding=record.sourceAudio??null;
+    if(binding!==null){
+      if(!object(binding)||Object.keys(binding).sort().join(',')!=='directory,eventId,originalSha256,originalSize,processor,requestId,schemaVersion,sourceRevision'
+        ||binding.schemaVersion!==1||binding.eventId!==pass.eventId||binding.sourceRevision!==pass.sourceRevision
+        ||binding.originalSha256!==original.sha256||binding.originalSize!==original.sizeBytes||!UUID.test(binding.requestId??'')
+        ||typeof binding.directory!=='string'||path.dirname(binding.directory)!==root
+        ||!/^download-[A-Za-z0-9]{6}$/u.test(path.basename(binding.directory))
+        ||binding.processor!==null&&(!object(binding.processor)||Object.keys(binding.processor).sort().join(',')!=='artifactId,releaseId,sha256'
+          ||!UUID.test(binding.processor.artifactId??'')||!UUID.test(binding.processor.releaseId??'')
+          ||!/^[a-f0-9]{64}$/u.test(binding.processor.sha256??'')))fail('ASSISTANT_SOURCE_READ_INVALID');
+      await engine.assertPrivatePathKind(binding.directory,'directory');
+    }else{
+      // No expiry until the existing decoder is terminal. The attachment
+      // pruner must not recursively remove an active/unknown local job.
+      binding={schemaVersion:1,eventId:pass.eventId,sourceRevision:pass.sourceRevision,
+        originalSha256:original.sha256,originalSize:original.sizeBytes,requestId:randomUUID(),
+        directory:await fs.mkdtemp(path.join(root,'download-')),processor:null};
+      await engine.ensurePrivateDirectory(binding.directory);
+      await store.put(slot,{...record,sourceAudio:binding});
+    }
+  });
+  let result;
+  try{
+    result=await sourcePackage({identity,host,store,scope:sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId}),
+      sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision},sourceProcessor:'audio-transcription',
+      intakeExecution:{accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,runtimeArguments:args,beforeInvoke:current},signal},
+    async({engine:executor,profile,materialized,resolution,signal:combined})=>{
+      if(materialized.artifact.skillId!=='audio-transcription'||!executor.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'1.2.0'))
+        fail('ASSISTANT_SOURCE_PROCESSOR_UNAVAILABLE');
+      const selected={releaseId:resolution.releaseId,artifactId:materialized.artifact.id,sha256:materialized.artifact.packageSha256};
+      await withRuntimeStateLock(lock,async()=>{
+        await current();const record=await store.get(slot);
+        if(record?.ended||record?.threadId!==pass.threadId||JSON.stringify(record.sourceAudio)!==JSON.stringify(binding))fail('ASSISTANT_INTAKE_CHANGED');
+        if(binding.processor!==null&&JSON.stringify(binding.processor)!==JSON.stringify(selected))fail('AGENT_SKILL_RELEASE_CHANGED');
+        if(binding.processor===null){binding={...binding,processor:selected};await store.put(slot,{...record,sourceAudio:binding});}
+      });
+      await profile.prepareSourceProcessorInput({schemaVersion:1,requestId:binding.requestId,
+        original:{filePath:media.original.localFilePath,sizeBytes:binding.originalSize,sha256:binding.originalSha256},
+        outputDirectory:path.join(binding.directory,'job')});
+      // A prior setup-required observation could have given this still-empty
+      // job an expiry. Once a ready decoder can start, ordinary attachment
+      // cleanup must not remove its files during an unknown/pending attempt.
+      await fs.unlink(path.join(binding.directory,'.expires.json')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+      const captured=await executor.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+        executionContext:{companyId:source.companyId,projectId:source.projectId,skillId:'audio-transcription',releaseId:resolution.releaseId,
+          localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection},runtimeArguments:['source-original'],
+        captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,timeoutMs:Math.min(60000,await profile.remainingMs()),signal:combined});
+      let value;try{value=JSON.parse(captured.stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+      if(captured.exitCode!==0){
+        // Preserve a useful closed cause without returning arbitrary provider
+        // stderr, model text, filesystem paths or a false "empty message".
+        const safe=['AUDIO_PLATFORM_UNSUPPORTED','AUDIO_JOB_MODEL_MISMATCH','AUDIO_MODEL_INTEGRITY_FAILED',
+          'AUDIO_SOURCE_INPUT_INVALID','AUDIO_SETUP_REQUIRED'];
+        value={schemaVersion:1,protocol:'assistant-source-audio/v1',requestId:binding.requestId,contentRead:false,
+          state:safe.includes(value?.errorCode)?'unavailable':'unknown',
+          code:safe.includes(value?.errorCode)?value.errorCode:'AUDIO_SOURCE_START_UNKNOWN'};
+      }
+      await profile.remainingMs();
+      return value;
+    });
+  }catch(error){
+    // A missing/unsupported processor does not erase the genuine incoming
+    // media or authorize setup/another service. ACL/revocation/unknown errors
+    // remain hard; never deliver an old original after a changed source.
+    if(!['ASSISTANT_SOURCE_PROCESSOR_UNAVAILABLE','ASSISTANT_SOURCE_SKILL_UNAVAILABLE'].includes(error?.code))throw error;
+    if(binding.processor===null)await engine.writePrivateJsonFile(path.join(binding.directory,'.expires.json'),
+      {schemaVersion:1,expiresAtMs:Date.now()+60*60_000});
+    await current();return unavailable(error.code);
+  }
+  await current();
+  const states=['setup_required','unknown','unavailable','queued','validating','loading','transcribing','completed','cancelled','interrupted','failed'];
+  if(!object(result)||result.schemaVersion!==1||result.protocol!=='assistant-source-audio/v1'||result.requestId!==binding.requestId
+    ||result.contentRead!==false||!states.includes(result.state))fail('ASSISTANT_SOURCE_READ_INVALID');
+  if(result.state!=='completed'){
+    const codes=['AUDIO_PLATFORM_UNSUPPORTED','AUDIO_JOB_MODEL_MISMATCH','AUDIO_MODEL_INTEGRITY_FAILED',
+      'AUDIO_SOURCE_INPUT_INVALID','AUDIO_SETUP_REQUIRED','AUDIO_SOURCE_PROCESSING_UNAVAILABLE'];
+    if(result.state==='unavailable'&&!codes.includes(result.code))fail('ASSISTANT_SOURCE_READ_INVALID');
+    if(['setup_required','unavailable','cancelled','interrupted','failed'].includes(result.state)){
+      await engine.writePrivateJsonFile(path.join(binding.directory,'.expires.json'),{schemaVersion:1,expiresAtMs:Date.now()+60*60_000});
+    }
+    return {...media,transcription:{state:result.state,machineGenerated:true,
+    ...(result.state==='unavailable'?{code:result.code,originalPreserved:true}:{}),
+    ...(result.state==='setup_required'?{code:'AUDIO_SETUP_REQUIRED',consentRequired:true}:{}),
+    ...(result.state==='unknown'?{readOnlyReconciliation:true,automaticRetryAllowed:false}:{}),
+    ...(['queued','validating','loading','transcribing'].includes(result.state)?{nextRead:{tool:'get_assistant_intake_context',minimumWaitSeconds:5}}:{})}};
+  }
+  if(typeof result.model!=='string'||!/^[a-z0-9_]{1,64}$/u.test(result.model)||!object(result.text)
+    ||Object.keys(result.text).sort().join(',')!=='sha256,sizeBytes')fail('ASSISTANT_SOURCE_READ_INVALID');
+  const file=path.join(binding.directory,'job','transcript.txt');
+  const bytes=await readAssistantSourcePrivateBytes({engine,file,sizeBytes:result.text.sizeBytes,sha256:result.text.sha256,maximumBytes:24*1024*1024,signal});
+  try{
+    let text;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+    let transcript;
+    // Budget the escaped JSON, not only UTF-8 bytes. The final MCP envelope
+    // carries this projection twice; larger transcripts stay in the SAME
+    // private TXT delivery instead of overflowing the shared 40k boundary.
+    if(Buffer.byteLength(JSON.stringify(text))<=8192)transcript={text};
+    else{const {materializeLocalAttachment}=await import('./trelio-local-attachments.mjs');
+      transcript={file:await materializeLocalAttachment({bytes,originalName:'transcript.txt',signal,root})};}
+    await current();
+    // Only terminal completed output earns a normal private file expiry.
+    // The SAME generic attachment pruner owns subsequent crash cleanup.
+    await engine.writePrivateJsonFile(path.join(binding.directory,'.expires.json'),{schemaVersion:1,expiresAtMs:Date.now()+60*60_000});
+    return {...media,contentRead:true,transcription:{state:'completed',complete:true,machineGenerated:true,model:result.model,...transcript}};
+  }finally{bytes.fill(0);}
 };
 
 /** A conversational response uses the SAME signed source/account executor.

@@ -679,6 +679,34 @@ An older host never supplies this new private-peer fact, so it cannot accidental
 commit a reply it cannot execute. The new host requires provider >=2.14.0 before
 confirming the owner-body read; passive/triage readers retain their prior ABI.
 
+Original-media reads preserve bounded semantic metadata through BOTH signed
+provider and production MCP projections. Empty caption does not mean no media;
+legacy missing metadata stays `unknown`. Telegram >=2.17.0 additionally needs its
+signed `trelio-source-media.json` opt-in before the SAME exact read receives a
+private <=8KiB stdin request for ONE <=20MiB original audio. Fixed host directory,
+nonce, exclusive file, full size/EOF/digest and post-download original revision
+checks precede SAME one-hour private local-file delivery. No native ID/path/URL
+from a model, Telegram transcription quota, read ACK or new account is admitted.
+
+After genuine native body confirmation, `audioProcessorProtocolVersion:1` may
+admit the SAME original to fixed signed local ASR 1.x >=1.2.0. Backend retains
+original source/intake scope and all current ACL/mode/recipient fences; host
+passes only bounded private stdin to fixed `source-original`, without Telegram
+account, Secret, task/Run or setup authority. Its already ready official model
+uses the ordinary asynchronous job engine. The existing protected runtime slot
+pins source event/revision, original size/hash, request and exact processor bytes
+before a durable one-attempt claim. Repeated context observes that SAME job;
+release drift, changed original and uncertain start never create a second decoder.
+
+Original caption remains intact. Only completed source-bound, full-hash/EOF and
+strict UTF-8 verified ASR earns `contentRead:true`, explicitly machine-generated.
+Large output uses the same bounded private TXT primitive. Pending/unknown files
+are not expired under an active worker; terminal results return to ordinary
+attachment retention. Setup/capability/platform failure preserves the original
+and its concrete closed cause, without claiming no attachment or requesting resend.
+First model/environment download still needs its exact plan and real consent;
+there is no automatic Telegram quota, cloud fallback, installer or replay.
+
 Schema16 adds only nullable `reply_receipt_id` and positive `reply_message_id`
 to the SAME private SQLite journal; migration preserves old refs/cursors/fences.
 Text is transient RAM/private child stdin, never SQLite/argv/env. The ordinary

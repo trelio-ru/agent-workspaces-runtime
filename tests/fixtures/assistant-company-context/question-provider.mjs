@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import * as nativeEngine from '../../../host-runtime/scripts/trelio-workspace.mjs';
 import {isStableVersionAtLeast} from '../../../host-runtime/scripts/trelio-workspace.mjs';
 import {assistantOwnerReplyInput} from '../../../host-runtime/scripts/trelio-assistant-transport.mjs';
 
@@ -44,7 +46,8 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
     'x-trelio-host-runtime-version':'999.0.0','x-trelio-assistant-source-protocol':'1',
     ...(configuration.managedFingerprint?{'x-trelio-assistant-source-encryption-fingerprint':configuration.managedFingerprint}:{})};
   const response=await fetch(configuration.identity.origin+'/api/digital-assistants/runtime/source-skills/resolve',{
-    method:'POST',headers,body:JSON.stringify({...input.scope,expectedReleaseId:null,sourceIntake:input.sourceIntake}),
+    method:'POST',headers,body:JSON.stringify({...input.scope,expectedReleaseId:null,sourceIntake:input.sourceIntake,
+      ...(input.sourceProcessor?{sourceProcessor:input.sourceProcessor}:{})}),
     signal:input.signal,redirect:'error'});
   assert.equal(response.status,200,'the genuine native package/owner/recipient admission must succeed');
   const resolved=await response.json(),admission=resolved.sourceAdmission.intake;
@@ -53,7 +56,17 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
   assert.equal(admission.threadId,input.intakeExecution.threadId);
   assert.equal(admission.localAccountId,configuration.source.localAccountId);
   const reference=configuration.reference;
+  let mediaInput=null,processorInput=null,parsedPackage;
+  if(configuration.originalVoice){
+    // Real native package bytes and parser; only external audio/ASR I/O below
+    // is synthetic. A guessed provider version cannot opt in to media reads.
+    const downloaded=await fetch(configuration.identity.origin+resolved.packageUrl,{headers,signal:input.signal,redirect:'error'});
+    assert.equal(downloaded.status,200);const bytes=Buffer.from(await downloaded.arrayBuffer());
+    assert.equal(createHash('sha256').update(bytes).digest('hex'),resolved.artifact.packageSha256);
+    parsedPackage=nativeEngine.parseAndValidateAgentSkillPackage(bytes);
+  }
   const engine={
+    ...nativeEngine,
     isStableVersionAtLeast,
     async prepareSkillAccount({runtimeArguments}){
       assert.equal(runtimeArguments[2],configuration.source.localAccountId);
@@ -65,11 +78,38 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
       // durable beforeInvoke fence, exactly as the signed executor does.
       await input.intakeExecution.beforeInvoke();
       if(captureMode==='assistant_source_intake'){
+        if(input.sourceProcessor){
+          assert.equal(runtimeArguments[0],'source-original');assert.ok(processorInput);
+          assert.equal(resolved.artifact.skillId,'audio-transcription');
+          const bytes=await fs.readFile(processorInput.original.filePath);
+          assert.equal(createHash('sha256').update(bytes).digest('hex'),processorInput.original.sha256);
+          const claim=path.join(path.dirname(processorInput.outputDirectory),'.source-attempt.json');
+          const result={schemaVersion:1,protocol:'assistant-source-audio/v1',requestId:processorInput.requestId,contentRead:false};
+          if(!await fs.stat(claim).catch(()=>null)){
+            await fs.writeFile(claim,'ONE SYNTHETIC DECODER START',{flag:'wx',mode:0o600});
+            await fs.appendFile(path.join(configuration.root,'source-asr-starts'),'start;');
+            return {exitCode:0,stdout:JSON.stringify({...result,state:'queued'})};
+          }
+          await nativeEngine.ensurePrivateDirectory(processorInput.outputDirectory);
+          const words=Buffer.from('synthetic weekend journey plan');
+          await fs.writeFile(path.join(processorInput.outputDirectory,'transcript.txt'),words,{mode:0o600});
+          return {exitCode:0,stdout:JSON.stringify({...result,state:'completed',model:'v3_rnnt',
+            text:{sizeBytes:words.length,sha256:createHash('sha256').update(words).digest('hex')}})};
+        }
         assert.equal(runtimeArguments[0],'read-reference');
+        let originalAudio;
+        if(configuration.originalVoice){
+          assert.ok(mediaInput);const bytes=Buffer.from('OggS SYNTHETIC ORIGINAL VOICE');
+          await fs.writeFile(path.join(mediaInput.directory,'original.bin'),bytes,{flag:'wx',mode:0o600});
+          originalAudio={schemaVersion:1,requestId:mediaInput.requestId,state:'saved',sizeBytes:bytes.length,
+            sha256:createHash('sha256').update(bytes).digest('hex')};
+        }
         return {exitCode:0,stdout:JSON.stringify({schemaVersion:1,protocol:'telegram-message-read/v1',
           reference:{...reference,senderNamespace:'telegram_user_id',senderUserId:admission.ownerExternalUserId,
             outgoing:false,forwarded:false,viaBot:false},
-          message:{text:configuration.originalText,textTruncated:false,replyContext:null},
+          message:{text:configuration.originalText,textTruncated:false,replyContext:null,
+            ...(configuration.originalVoice?{hasMedia:true,mediaType:'voice',fileName:null,fileSize:Buffer.byteLength('OggS SYNTHETIC ORIGINAL VOICE')}:{})},
+          ...(originalAudio?{originalAudio}:{}),
           coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false},
           readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}})};
       }
@@ -85,8 +125,10 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
       return {exitCode:0,stdout:JSON.stringify({ok:true,...value})};
     },
   };
-  return action({engine,profile:{remainingMs:async()=>60000,readIntakeOwner:async()=>admission},
-    materialized:{artifact:resolved.artifact,runtimeDirectory:configuration.root},
+  return action({engine,profile:{remainingMs:async()=>60000,readIntakeOwner:async()=>admission,
+    allowsSourceAudioProcessor:()=>configuration.originalVoice===true,
+    prepareSourceMediaInput:async value=>{mediaInput=value;},prepareSourceProcessorInput:async value=>{processorInput=value;}},
+    materialized:{artifact:{...resolved.artifact,...(parsedPackage?{parsedPackage}:{})},runtimeDirectory:configuration.root},
     resolution:{releaseId:resolved.releaseId,localIdentity:resolved.localIdentity,companyConnection:resolved.companyConnection},
     signal:input.signal});
 };

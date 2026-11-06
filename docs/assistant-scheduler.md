@@ -3200,6 +3200,14 @@ settlement removes it. Lost results verify actual native text/entities plus
 filename/size/streamed digest, without local file, upload or another send.
 The completed native-call witness preserves original text byte-for-byte,
 including legacy plain leading/trailing whitespace; it is never trimmed as an edit.
+Captionless voice keeps its original media metadata/file through the SAME
+intake context. After genuine read confirmation, only the fixed signed ready
+local-ASR processor may supply machine-generated text; its one-attempt durable
+claim and protected runtime binding prevent duplicate starts on context reads.
+Missing setup/unsupported platform preserves audio and reports the cause. No
+source replay, business Task/Run, automatic installation or Telegram quota.
+See assistant-inbox original-media contract for bounds and failure behavior.
+
 The required question stand pins BOTH public runtime and provider source and
 uses real native PostgreSQL/HTTP/OS storage/crypto/SQLite with actual SDK parser
 and original bytes; only external Telegram and model choices are synthetic.

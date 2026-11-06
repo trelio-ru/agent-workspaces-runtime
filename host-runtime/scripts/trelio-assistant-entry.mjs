@@ -889,7 +889,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
   // cross-repository synthetic stand replaces the external provider package).
   // No request/MCP field can select it. Native intake checks, the production
   // reply materializer and durable SQLite/provider fences still execute here.
-  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake,assistantOwnerReplyInput}=await import('./trelio-assistant-transport.mjs');
+  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,processAssistantOwnerIntakeAudio,replyAssistantOwnerIntake,assistantOwnerReplyInput}=await import('./trelio-assistant-transport.mjs');
   return context(async(sourceClient,host,store)=>{
   const identity=sourceClient.identity;
   const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
@@ -1010,15 +1010,30 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
             ...(message.privateOwnerConversation?{privateOwnerConversation:true}:{})}),runtimeSessionProof:buildRuntimeSessionProof({state:saved.state,
             toolName:'confirm_assistant_intake_read',now:new Date()})},signal);
       });
-      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text})=>({eventId,text}))}
-        :{ownerMessage:{text:message.text,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
+      if(!routing&&['voice','audio'].includes(message.media.kind)){
+        // Decoder access follows native original/owner read confirmation, not
+        // source polling or the model's claim that a voice exists. The SAME
+        // private signed engine reports readiness/progress/complete output;
+        // empty captions never become an absent-message/resend conclusion.
+        message.media=await processAssistantOwnerIntakeAudio({identity,client:sourceClient,host,store,pass,source,
+          reference:references[0],media:message.media,available:message.sourceAudioProcessorAvailable===true,signal,sourcePackage});
+      }
+      // Keep the independently verified original's semantic media description.
+      // Dropping it here would turn the correctly read captionless voice back
+      // into an apparently empty message after native confirmation. Media bytes
+      // are unprocessed until the independently verified decoder completes;
+      // do not copy private owner identity or native document fields.
+      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text,media})=>({eventId,text,media}))}
+        :{ownerMessage:{text:message.text,media:message.media,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
       delete value.sourceRead;
       const readState=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
       try{const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
         createAssistantInbox({database:readState.database}).confirmIntakeModelRead(pass.passId,
           messages.map(({eventId,originalSha256})=>({eventId,...(originalSha256?{originalSha256}:{})})));
       }finally{await readState.close();}
-      return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+      const delivered={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+      if(Buffer.byteLength(JSON.stringify(delivered))>40000)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_CONTEXT_LIMIT'});
+      return delivered;
     },
     materializeSourceReply:async({result,arguments:args,signal})=>{
       const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox,assistantOwnerReplyAttemptReady}]=await Promise.all([

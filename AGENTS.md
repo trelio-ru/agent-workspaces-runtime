@@ -1219,6 +1219,8 @@ publication tooling также остаются вне этого публичн
   content modes; malformed text must not consume an irreversible send intent.
   Never replay unknown sends or borrow task ACK. Native
   incoming/original linked sender ID is separate from model command assessment.
+  Original media and ready local ASR follow assistant-inbox: empty text never
+  proves absent media; unknown starts never restart the decoder.
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an
   explicit source generation remains the normal retry. Schema17 permits only a

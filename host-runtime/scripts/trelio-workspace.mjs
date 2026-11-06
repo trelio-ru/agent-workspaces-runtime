@@ -9275,17 +9275,31 @@ export const runMaterializedAgentSkill = async ({
       if(signal?.aborted||remaining<=0)throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED','Owner intake expired.',{operation:'skill_run'});
     }
     let result;
-    const replyInput=sourceReplyCapture?await profile.readSourceReplyInput():null;
+    const replyInput=sourceReplyCapture?await profile.readSourceReplyInput():
+      sourceIntakeCapture&&typeof profile.readSourceIntakeInput==='function'?await profile.readSourceIntakeInput():null;
     if(sourceReplyCapture&&(!Buffer.isBuffer(replyInput)||replyInput.length<1||replyInput.length>16384))
       throw Object.assign(new Error('Invalid private reply input.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
+    if(sourceIntakeCapture&&replyInput!==null&&(!Buffer.isBuffer(replyInput)||replyInput.length<1||replyInput.length>8192))
+      throw Object.assign(new Error('Invalid private original-media input.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
+    // This process-only marker never carries paths/content and is never
+    // inherited from the caller. Only the native-admitted exact read receives
+    // the host-created scratch destination through its bounded private pipe.
+    delete runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_MEDIA;
+    delete runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_AUDIO;
+    if(sourceIntakeCapture&&replyInput!==null){
+      if(profile.sourceIntakeInputKind==='assistant-source-audio/v1')runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_AUDIO='1';
+      else if(profile.sourceIntakeInputKind==='source-original-audio/v1')runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_MEDIA='1';
+      else throw Object.assign(new Error('Invalid private original input protocol.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
+    }
     try {
       const pending = execFileAsync(executable, args, {
         cwd: runtimeDirectory, env: runtimeEnvironment, shell: false, windowsHide: true,
         encoding: 'buffer', maxBuffer: (taskCapture || interactiveCapture ? 3 : 1) * 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
         killSignal: 'SIGKILL', ...(signal ? { signal } : {}),
       });
-      // Only the exact native-admitted owner reply has bounded private input.
-      // All passive reads still close stdin immediately. The body never enters
+      // Only exact native-admitted owner reply/original media reads have
+      // bounded private input. Passive monitors still close stdin immediately.
+      // The body and media destination never enter
       // argv/env/a temporary file, and the common process/deadline is unchanged.
       pending.child.stdin.on('error', () => {});
       pending.child.stdin.end(replyInput??undefined,()=>replyInput?.fill(0));
