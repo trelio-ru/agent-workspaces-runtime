@@ -5192,6 +5192,11 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
         ||fresh.resolution.releaseId!==baseline.resolution.releaseId)fail('AGENT_SKILL_RELEASE_CHANGED');
     };
     profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,sourceProcessor,startedAt});
+    // Positively select the validated original-read grammar, not a growing
+    // list of effects to exclude. ASR borrows that SAME read-reference scope;
+    // replies, ACK, setup and one-click unsubscribe never become late reads.
+    const readOnlyIntake=sourceIntake!==null&&intakeExecution?.runtimeArguments?.[0]==='read-reference'
+      &&(intakeExecution.kind===undefined||intakeExecution.kind==='route_existing');
     const initial=await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const {resolution,token,companyEncryption,deliveryBinding}=await resolve();
       const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,companyEncryption,
@@ -5215,12 +5220,12 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
       assertSameResolution(fresh,initial);
       return action({engine,profile,materialized:initial.materialized,resolution:fresh.resolution,signal:combined});
     });
-    if(!sourceIntake||sourceIntake.replyReceiptId)return result;
+    if(!readOnlyIntake)return result;
     // Original/ASR reads may spend time in local file/decoder I/O AFTER their
     // initial native admission. Re-admit through the SAME resolver before
     // delivery, including current grant, company mode and recipient. Exit the
     // old async profile first; never nest/replace one live execution profile.
-    // Replies, ACK and setup are excluded: a late refusal must never erase a
+    // Other profiles are excluded: a late refusal must never erase a
     // verified irreversible effect or turn it into permission to repeat it.
     profile.close();
     profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,

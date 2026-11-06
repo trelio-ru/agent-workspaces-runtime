@@ -1223,7 +1223,8 @@ publication tooling также остаются вне этого публичн
   proves absent media; unknown starts never restart the decoder.
   Read-only delivery rechecks native admission after local I/O and again at
   final MCP output; structural source status never substitutes for recipient ACL.
-  Preserve the original deadline and exclude irreversible reply/ACK/setup.
+  Positively select original read-reference/ASR; preserve the original deadline
+  and exclude irreversible reply/ACK/setup/unsubscribe.
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an
   explicit source generation remains the normal retry. Schema17 permits only a

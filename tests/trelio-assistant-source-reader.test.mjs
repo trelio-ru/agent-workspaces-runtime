@@ -2577,7 +2577,9 @@ test('email unsubscribe composes the SAME signed account child with exact origin
   const live={state:'ignored',threadId,sourceRevision:0,readConfirmed:true,leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({...live})};
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference,attemptId};
+  const resolvesBeforeWrite=resolveCalls;
   assert.deepEqual(await unsubscribeAssistantIntakeEmail(input),{outcome:'requested'});
+  assert.equal(resolveCalls-resolvesBeforeWrite,2,'a positive irreversible result has no late read-only admission or second dispatch');
   assert.equal(await fs.readFile(marker,'utf8'),'u');
   await assert.rejects(unsubscribeAssistantIntakeEmail({...input,source:{...source,autoUnsubscribe:false}}),/ACCESS_DENIED/);
   intakeFixture.admission.attemptId=randomUUID();await assert.rejects(unsubscribeAssistantIntakeEmail(input),/INVALID_RESPONSE/);

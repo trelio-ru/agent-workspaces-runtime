@@ -715,8 +715,10 @@ readable for settlement after recipient revocation and cannot authorize plaintex
 After transcript bytes/private-file verification, the production MCP materializer
 also performs a metadata-only source/account admission before model-read evidence
 or final output. That check starts no provider, download, decoder or ACK. These
-late fences never wrap irreversible replies, ACK or setup: a positive external
-effect must not be hidden by a later refusal or acquire permission to replay.
+late fences positively select the validated original `read-reference` profile
+(also used by ASR). They never wrap replies, ACK, setup or email unsubscribe:
+a positive external effect must not be hidden by a later refusal or acquire
+permission to replay.
 
 Schema16 adds only nullable `reply_receipt_id` and positive `reply_message_id`
 to the SAME private SQLite journal; migration preserves old refs/cursors/fences.
