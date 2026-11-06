@@ -501,7 +501,9 @@ publication tooling также остаются вне этого публичн
   before browser-queue cleanup, retain the original assertion, and emit only
   fixed phase/completion/state/reason/errno/syscall/stage counts before cleanup.
   Stopped, already persisted profile disposal has bounded transient rm retries;
-  snapshot/auth/ACL/persist/input never replay. Native fixtures retain strict failure.
+  snapshot/auth/ACL/persist/input never replay. Detached-worker fixture disposal
+  preserves the original assertion if final removal also fails; claim absence
+  remains mandatory before removing its disposable directory. Native fixtures retain strict failure.
   Browser stop joins native stdio close as well as main exit under the SAME
   stop budget; failed fixtures retain their profile without recursive rm retries.
   Cleanup diagnostics expose only closed owned-file categories, never paths.

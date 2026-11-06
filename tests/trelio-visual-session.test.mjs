@@ -314,7 +314,15 @@ test('detached worker keeps its original lease and encrypted storage across shor
       server.closeAllConnections();
       await new Promise(resolve => server.close(resolve));
       if (failure) diagnostic = await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '');
-      if (stopped) await fs.rm(directory, { recursive: true, force: true });
+      if (stopped && !failure) {
+        // The exact worker claim is gone and this directory belongs only to
+        // the fixture. Windows may briefly retain a just-closed file handle;
+        // use the same bounded disposal policy as the other native fixtures.
+        // This retries removal only, never close/authentication/provider work,
+        // and failed assertions retain their original evidence without disposal.
+        try { await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+        catch (error) { failure ||= error; }
+      }
     }
     if (failure) {
       // This synthetic worker writes only closed, allowlisted stages. Never
