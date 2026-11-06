@@ -1191,6 +1191,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const originals=all('SELECT original_event_id,event_key,native_event_id,native_revision,ordinal FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',row.id);
       return {...row,eventIds:originals.map(event=>event.original_event_id),originals,scope:scopeInputWithoutKey(JSON.parse(row.scope_json))};
     },
+    emailUnsubscribeReference(intakeId,eventId){
+      const row=this.ownerIntake(intakeId);eventId=uuid(eventId);
+      if(row.kind!=='route_existing'||row.scope.provider!=='email'||row.source_state!=='active'
+        ||row.source_revision!==row.configuration_revision||!row.frozen)fail('ASSISTANT_INBOX_CONFLICT');
+      const original=get(`SELECT b.native_event_id,b.native_revision,e.read_original_sha256,e.model_read_intake_id
+        FROM assistant_source_intake_events b JOIN assistant_inbox_events e ON e.event_key=b.event_key
+        WHERE b.intake_id=? AND b.original_event_id=?`,row.id,eventId);
+      // A classifier's selection is not proof of body delivery. Reuse the
+      // original private RFC822 witness instead of reading a new mail for it.
+      if(!original||original.model_read_intake_id!==row.id||!(/^[0-9a-f]{64}$/u).test(original.read_original_sha256??''))fail('ASSISTANT_INBOX_CONFLICT');
+      return {eventId,id:original.native_event_id,revision:original.native_revision,originalSha256:original.read_original_sha256};
+    },
     prepareOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='pending'||row.source_state!=='active'||row.source_revision!==row.configuration_revision)
         fail('ASSISTANT_INBOX_CONFLICT');

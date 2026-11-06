@@ -276,6 +276,7 @@ export const projectAssistantSourceAccounts = (value, { assistantId, deviceId, c
       || !['available','active','paused','revoked'].includes(row.state) || row.executionVerified !== false
       || row.bindFromSourceId!=null&&!UUID.test(row.bindFromSourceId)
       || row.provisionLocalAccount !== undefined && typeof row.provisionLocalAccount !== 'boolean'
+      || row.autoUnsubscribe !== undefined && typeof row.autoUnsubscribe !== 'boolean'
       || row.ownerTaskIntakeAllowed !== undefined && typeof row.ownerTaskIntakeAllowed !== 'boolean'
       || row.ownerTaskIntakeAllowed === true && !(row.skillId==='telegram-mtproto'||row.skillId==='max-web'&&(row.maxChatUrl==null||assistantMaxChatUrl(row.maxChatUrl)))
       || row.interactiveSetupAllowed !== undefined && typeof row.interactiveSetupAllowed !== 'boolean'
@@ -287,7 +288,7 @@ export const projectAssistantSourceAccounts = (value, { assistantId, deviceId, c
     seen.add(sourceId);
     return Object.freeze({ id:sourceId, companyId, deviceId, localAccountId:responseId(row.localAccountId),
       projectId:row.projectId === null ? null : responseId(row.projectId), skillId:row.skillId,
-      state:row.state, revision:row.revision, provisionLocalAccount:row.provisionLocalAccount === true,
+      state:row.state, revision:row.revision, ...(row.skillId==='email-imap-smtp'&&typeof row.autoUnsubscribe==='boolean'?{autoUnsubscribe:row.autoUnsubscribe}:{}), provisionLocalAccount:row.provisionLocalAccount === true,
       ...(row.interactiveSetupAllowed===true?{interactiveSetupAllowed:true}:{}),
       ...(row.ownerTaskIntakeAllowed===true?{ownerTaskIntakeAllowed:true}:{}),
       ...(row.maxChatUrl!=null?{maxChatUrl:row.maxChatUrl}:{}),...(row.bindFromSourceId!=null?{bindFromSourceId:row.bindFromSourceId}:{}),executionVerified:false });
@@ -356,6 +357,8 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['ownerIdentities',['GET','/runtime/owner-identities']],
     ['sourceAccounts',['GET','/runtime/source-skills/accounts']],
+    ['intakeUnsubscribeStart',['POST','/runtime/source-skills/intake/unsubscribe/start']],
+    ['intakeUnsubscribeFinish',['POST','/runtime/source-skills/intake/unsubscribe/finish']],
     ['prepareLocalConnection',['POST','/runtime/source-skills/accounts/prepare']],
     ['sourceRoutes',['POST','/runtime/source-skills/routing']],
     ['sourceHealthRead',['GET','/runtime/source-skills/health']],['sourceHealthReport',['POST','/runtime/source-skills/health']],
@@ -2926,6 +2929,20 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call('intakeEnd',{...intakeLocator(input),runtimeSessionId:id(input.runtimeSessionId)},signal);
       if(value.ended!==true)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');return {ended:true};
     },
+    async startEmailUnsubscribe(input,signal){
+      const body={...intakeLocator(input),eventId:id(input.eventId),receiptId:id(input.receiptId)};
+      const value=await call('intakeUnsubscribeStart',body,signal);
+      if(value?.schemaVersion!==1||!UUID.test(value.attemptId??'')||value.eventId!==body.eventId
+        ||typeof value.dispatchGranted!=='boolean'||!['started','requested','skipped','unknown'].includes(value.state))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {attemptId:value.attemptId,dispatchGranted:value.dispatchGranted,state:value.state};
+    },
+    async finishEmailUnsubscribe(input,signal){
+      const body={...intakeLocator(input),eventId:id(input.eventId),receiptId:id(input.receiptId),attemptId:id(input.attemptId),outcome:input.outcome};
+      if(!['requested','skipped','unknown'].includes(body.outcome))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const value=await call('intakeUnsubscribeFinish',body,signal);
+      if(value?.schemaVersion!==1||value.attemptId!==body.attemptId||value.eventId!==body.eventId||value.state!==body.outcome)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {state:value.state};
+    },
     async confirmIntakeRead(input,signal){
       const value=await call('intakeReadConfirm',input,signal);
       if(value.schemaVersion!==1||value.intakeId!==input.intakePass?.intakeId||value.readConfirmed!==true)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -3348,7 +3365,7 @@ export const validateAssistantNativeInputShape=(nativeSchema,raw,{omittedRootFie
   if(!walk(root,input))fail('ASSISTANT_MCP_INPUT_INVALID');
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, materializeCompanyFile,
-  materializeEncryptedTask, materializeEncryptedSkill, materializeEncryptedCompanyContext, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, materializeSourceReply=null, presentationProfile='task', timeoutMs = 30_000 }) => {
+  materializeEncryptedTask, materializeEncryptedSkill, materializeEncryptedCompanyContext, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, materializeSourceReply=null, materializeSourceUnsubscribe=null, presentationProfile='task', timeoutMs = 30_000 }) => {
   if (!['task','remote_mcp','skill_setup','company_context'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
@@ -3359,7 +3376,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   // used by Workspace arguments; unknown local failures retain a fixed stage,
   // never their message, path, cause, response or retry authority.
   const localFailureCodes=Object.freeze({workspace_arguments:'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_FAILED',
-    source_read:'ASSISTANT_MCP_LOCAL_SOURCE_READ_FAILED',source_reply:'ASSISTANT_MCP_LOCAL_SOURCE_REPLY_FAILED',
+    source_unsubscribe:'ASSISTANT_MCP_LOCAL_SOURCE_UNSUBSCRIBE_FAILED',source_read:'ASSISTANT_MCP_LOCAL_SOURCE_READ_FAILED',source_reply:'ASSISTANT_MCP_LOCAL_SOURCE_REPLY_FAILED',
     company_read:'ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED',task_read:'ASSISTANT_MCP_LOCAL_TASK_READ_FAILED',
     skill_read:'ASSISTANT_MCP_LOCAL_SKILL_READ_FAILED',company_file:'ASSISTANT_MCP_LOCAL_COMPANY_FILE_FAILED',
     attachment_read:'ASSISTANT_MCP_LOCAL_ATTACHMENT_READ_FAILED'});
@@ -3575,6 +3592,10 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(name==='get_assistant_intake_context'&&value.isError!==true){
           if(typeof materializeSourceIntake!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           return localOperation('source_read',()=>materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal}));
+        }
+        if(name==='resolve_assistant_intake'&&argumentsSnapshot.unsubscribeEventIds?.length&&value.isError!==true){
+          if(typeof materializeSourceUnsubscribe!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          return localOperation('source_unsubscribe',()=>materializeSourceUnsubscribe({result:value,arguments:argumentsSnapshot,signal}));
         }
         if(name==='resolve_assistant_intake'&&argumentsSnapshot.decision==='reply_owner'&&value.isError!==true){
           if(typeof materializeSourceReply!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
@@ -4553,13 +4574,15 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       fail('ASSISTANT_SOURCE_ACK_REQUIRED');
   }else if(acknowledgementExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   if(sourceIntake!==null){
+    const unsubscribing=intakeExecution?.kind==='email_unsubscribe';
     const routing=intakeExecution?.kind==='route_existing';
     const replying=intakeExecution?.kind==='reply_owner',verifying=intakeExecution?.kind==='verify_owner_reply';
     if(accountSetup||sourceAcknowledgement||!['telegram-mtproto','email-imap-smtp','max-web'].includes(scope.skillId)||!object(sourceIntake)
-      ||Object.keys(sourceIntake).sort().join(',')!==['expectedRevision','intakeId','sourceId',...((replying||verifying)?['replyReceiptId',...(sourceIntake.replyProtocolVersion!==undefined?['replyProtocolVersion']:[])]:[]),...(verifying?['replyVerificationMessageId']:[])].sort().join(',')||!object(intakeExecution)
-      ||Object.keys(intakeExecution).sort().join(',')!==['accountId','beforeInvoke','eventId','runtimeArguments','threadId',...(routing?['kind','eventIds']:replying||verifying&&sourceIntake.replyProtocolVersion===2?['kind','replyText']:verifying?['kind']:[]),...(intakeExecution.replyDocument!==undefined?['replyDocument']:[])].sort().join(',')
-      ||typeof intakeExecution.beforeInvoke!=='function'||!routing&&scope.skillId==='email-imap-smtp')fail('ASSISTANT_SOURCE_INVALID_INPUT');
+      ||Object.keys(sourceIntake).sort().join(',')!==['expectedRevision','intakeId','sourceId',...(unsubscribing?['unsubscribeAttemptId','unsubscribeEventId']:[]),...((replying||verifying)?['replyReceiptId',...(sourceIntake.replyProtocolVersion!==undefined?['replyProtocolVersion']:[])]:[]),...(verifying?['replyVerificationMessageId']:[])].sort().join(',')||!object(intakeExecution)
+      ||Object.keys(intakeExecution).sort().join(',')!==['accountId','beforeInvoke','eventId','runtimeArguments','threadId',...(routing?['kind','eventIds']:replying||verifying&&sourceIntake.replyProtocolVersion===2?['kind','replyText']:verifying||unsubscribing?['kind']:[]),...(intakeExecution.replyDocument!==undefined?['replyDocument']:[])].sort().join(',')
+      ||typeof intakeExecution.beforeInvoke!=='function'||!routing&&!unsubscribing&&scope.skillId==='email-imap-smtp'||unsubscribing&&scope.skillId!=='email-imap-smtp')fail('ASSISTANT_SOURCE_INVALID_INPUT');
     sourceIntake=Object.freeze({intakeId:id(sourceIntake.intakeId),sourceId:id(sourceIntake.sourceId),expectedRevision:revision(sourceIntake.expectedRevision),
+      ...(unsubscribing?{unsubscribeAttemptId:id(sourceIntake.unsubscribeAttemptId),unsubscribeEventId:id(sourceIntake.unsubscribeEventId)}:{}),
       ...((replying||verifying)?{replyReceiptId:id(sourceIntake.replyReceiptId),...(sourceIntake.replyProtocolVersion!==undefined?{replyProtocolVersion:(()=>{if(sourceIntake.replyProtocolVersion!==2)fail('ASSISTANT_SOURCE_INVALID_INPUT');return 2;})()}:{} )}:{}),
       ...(verifying?{replyVerificationMessageId:(()=>{const value=sourceIntake.replyVerificationMessageId;if(!Number.isSafeInteger(value)||value<1||value>=2147483648)fail('ASSISTANT_SOURCE_INVALID_INPUT');return value;})()}:{} )});
     const args=intakeExecution.runtimeArguments;
@@ -4581,11 +4604,16 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         :args.length!==5||args[0]!=='read'||args[1]!=='--chat'||args[3]!=='--message-id'||args[4]!==String(sourceIntake.replyVerificationMessageId))
         ||!/^[1-9]\d{0,18}$/u.test(args[2]??''))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     }
-    const parsed=verifying?null:parseAssistantSourceReadReference({skillId:scope.skillId,arguments:replying?['read-reference',...args.slice(1,9)]:args});
-    if(!verifying&&(!parsed||parsed.accountId!==null))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    if(unsubscribing&&(!Array.isArray(args)||args.length!==10||args[0]!=='unsubscribe-reference'
+      ||args[1]!=='--uid'||!(/^[1-9]\d{0,9}$/u).test(args[2]??'')||args[3]!=='--uid-validity'||!(/^[1-9]\d{0,9}$/u).test(args[4]??'')
+      ||args[5]!=='--expected-revision'||!(/^[0-9a-f]{64}$/u).test(args[6]??'')||args[7]!=='--expected-original-sha256'
+      ||!(/^[0-9a-f]{64}$/u).test(args[8]??'')||args[9]!=='--confirm'||sourceIntake.unsubscribeEventId!==intakeExecution.eventId))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    const parsed=verifying||unsubscribing?null:parseAssistantSourceReadReference({skillId:scope.skillId,arguments:replying?['read-reference',...args.slice(1,9)]:args});
+    if(!verifying&&!unsubscribing&&(!parsed||parsed.accountId!==null))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     if(routing&&(!Array.isArray(intakeExecution.eventIds)||!intakeExecution.eventIds.length||intakeExecution.eventIds.length>100
       ||new Set(intakeExecution.eventIds).size!==intakeExecution.eventIds.length||intakeExecution.eventIds[0]!==intakeExecution.eventId))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     intakeExecution=Object.freeze({accountId:id(intakeExecution.accountId),eventId:id(intakeExecution.eventId),threadId:id(intakeExecution.threadId),
+      ...(unsubscribing?{kind:'email_unsubscribe'}:{}),
       ...(routing?{kind:'route_existing',eventIds:Object.freeze(intakeExecution.eventIds.map(id))}:{}),
       ...(replying?{kind:'reply_owner',replyText:intakeExecution.replyText}:verifying?{kind:'verify_owner_reply',...(sourceIntake.replyProtocolVersion===2?{replyText:intakeExecution.replyText}:{})}:{}),
       ...(replyDocument?{replyDocument}:{}),
@@ -4720,7 +4748,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       await assertCurrent();if(!intakeAdmission||!intakeUsed||intakeStarted)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       intakeStarted=true;await intakeExecution.beforeInvoke();await assertCurrent();
     },
-    async readIntakeOwner(){await assertCurrent();if(!intakeStarted||intakeAdmission.kind==='route_existing')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+    async readIntakeOwner(){await assertCurrent();if(!intakeStarted||['route_existing','email_unsubscribe'].includes(intakeAdmission.kind))fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       return {ownerIdentityId:intakeAdmission.ownerIdentityId,ownerExternalUserId:intakeAdmission.ownerExternalUserId};},
     async prepareSourceMediaInput(input){
       await assertCurrent();
@@ -4753,6 +4781,14 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       sourceMediaInput=Object.freeze({...input,original:Object.freeze({...original})});
     },
     async readSourceIntakeInput(){
+      // The shared child engine asks every non-reply intake for its private
+      // input. Unsubscribe has none: its closed native attempt/UID/hash are
+      // already bound to argv, and must never borrow an audio/file capability.
+      if(intakeExecution?.kind==='email_unsubscribe'){
+        await assertCurrent();
+        if(!intakeStarted||intakeAdmission?.kind!=='email_unsubscribe'||sourceMediaInput!==null||sourceProcessor)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+        return null;
+      }
       await assertCurrent();if(!intakeStarted||intakeExecution.runtimeArguments[0]!=='read-reference')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       if(sourceProcessor&&sourceMediaInput===null)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       return sourceMediaInput===null?null:Buffer.from(JSON.stringify(sourceMediaInput),'utf8');
@@ -4819,9 +4855,9 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==(sourceProcessor?'audio':protocol.provider) || admission.protocol!==(sourceProcessor?'assistant-source-audio/v1':sourceIntake?(intakeExecution.kind==='reply_owner'?`telegram-owner-reply/v${sourceIntake.replyProtocolVersion??1}`:intakeExecution.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${sourceIntake.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
+        || admission.provider!==(sourceProcessor?'audio':protocol.provider) || admission.protocol!==(sourceProcessor?'assistant-source-audio/v1':sourceIntake?(intakeExecution.kind==='email_unsubscribe'?'email-unsubscribe/v1':intakeExecution.kind==='reply_owner'?`telegram-owner-reply/v${sourceIntake.replyProtocolVersion??1}`:intakeExecution.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${sourceIntake.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
           ?(scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1'):setupCommand?interactiveProtocol:protocol.protocol)
-        || admission.command!==(sourceProcessor?'source-original':sourceIntake?(intakeExecution.kind==='reply_owner'?'reply-reference':intakeExecution.kind==='verify_owner_reply'?(sourceIntake.replyProtocolVersion===2?'reply-reference':'read'):'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
+        || admission.command!==(sourceProcessor?'source-original':sourceIntake?(intakeExecution.kind==='email_unsubscribe'?'unsubscribe-reference':intakeExecution.kind==='reply_owner'?'reply-reference':intakeExecution.kind==='verify_owner_reply'?(sourceIntake.replyProtocolVersion===2?'reply-reference':'read'):'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
@@ -4879,20 +4915,21 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
           ...(approved.verifyOnly?{verifyOnly:true}:{})});
       }else if(admission.acknowledgement!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(sourceIntake){
-        const approved=admission.intake,routing=intakeExecution.kind==='route_existing',replying=intakeExecution.kind==='reply_owner',verifying=intakeExecution.kind==='verify_owner_reply';
-        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId',...(routing?['kind','eventIds']:['ownerExternalUserId','ownerIdentityId',...((replying||verifying)?['kind','receiptId']:[]),...(verifying?['verificationMessageId']:[])]),'schemaVersion','sourceId','sourceRevision','threadId',...(intakeExecution.replyDocument?['replyFile']:[]),...(scope.skillId==='max-web'?['maxChatUrl',...(maxAccountDiscovery?['maxAccountDiscovery']:[])]:[])].sort().join(',')
+        const approved=admission.intake,unsubscribing=intakeExecution.kind==='email_unsubscribe',routing=intakeExecution.kind==='route_existing',replying=intakeExecution.kind==='reply_owner',verifying=intakeExecution.kind==='verify_owner_reply';
+        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId',...(unsubscribing?['kind','receiptId','attemptId']:routing?['kind','eventIds']:['ownerExternalUserId','ownerIdentityId',...((replying||verifying)?['kind','receiptId']:[]),...(verifying?['verificationMessageId']:[])]),'schemaVersion','sourceId','sourceRevision','threadId',...(intakeExecution.replyDocument?['replyFile']:[]),...(scope.skillId==='max-web'?['maxChatUrl',...(maxAccountDiscovery?['maxAccountDiscovery']:[])]:[])].sort().join(',')
           ||approved.schemaVersion!==1||approved.intakeId!==sourceIntake.intakeId||approved.sourceId!==sourceIntake.sourceId
           ||approved.sourceRevision!==sourceIntake.expectedRevision||approved.localAccountId!==intakeExecution.accountId
           ||approved.eventId!==intakeExecution.eventId||approved.threadId!==intakeExecution.threadId
+          ||unsubscribing&&(approved.kind!=='email_unsubscribe'||approved.attemptId!==sourceIntake.unsubscribeAttemptId||!UUID.test(approved.receiptId??''))
           ||intakeExecution.replyDocument&&JSON.stringify(assistantReplyFileSelection(approved.replyFile))!==JSON.stringify({workspaceId:intakeExecution.replyDocument.workspaceId,workspaceHead:intakeExecution.replyDocument.workspaceHead})
           ||(replying||verifying)&&(approved.kind!==(verifying?'verify_owner_reply':'reply_owner')||approved.receiptId!==sourceIntake.replyReceiptId
             ||verifying&&approved.verificationMessageId!==sourceIntake.replyVerificationMessageId
             ||approved.ownerExternalUserId!==intakeExecution.runtimeArguments[2])
           ||scope.skillId==='max-web'&&(maxAccountDiscovery?approved.maxChatUrl!==null||approved.maxAccountDiscovery!==true:!assistantMaxChatUrl(approved.maxChatUrl)||approved.maxChatUrl!==intakeExecution.runtimeArguments[2])
-          ||(routing?approved.kind!=='route_existing'||JSON.stringify(approved.eventIds)!==JSON.stringify(intakeExecution.eventIds)
-            :!UUID.test(approved.ownerIdentityId??'')||!(/^[1-9]\d{0,18}$/u).test(approved.ownerExternalUserId??'')))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+          ||(!unsubscribing&&(routing?approved.kind!=='route_existing'||JSON.stringify(approved.eventIds)!==JSON.stringify(intakeExecution.eventIds)
+            :!UUID.test(approved.ownerIdentityId??'')||!(/^[1-9]\d{0,18}$/u).test(approved.ownerExternalUserId??''))))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
         intakeAdmission=Object.freeze({artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId),memberId:id(resolution.localIdentity.memberId),
-          connectionId:resolution.localIdentity.connectionId??null,...(routing?{kind:'route_existing'}:{...(replying?{kind:'reply_owner'}:verifying?{kind:'verify_owner_reply'}:{}),ownerIdentityId:approved.ownerIdentityId,ownerExternalUserId:approved.ownerExternalUserId})});
+          connectionId:resolution.localIdentity.connectionId??null,...(unsubscribing?{kind:'email_unsubscribe'}:routing?{kind:'route_existing'}:{...(replying?{kind:'reply_owner'}:verifying?{kind:'verify_owner_reply'}:{}),ownerIdentityId:approved.ownerIdentityId,ownerExternalUserId:approved.ownerExternalUserId})});
       }else if(admission.intake!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
@@ -5352,7 +5389,8 @@ export const sameAssistantSourceRegistration = (left,right) => Boolean(left && r
   && ['id','companyId','deviceId','localAccountId','projectId','skillId','state','revision'].every(key=>left[key]===right[key])
   &&(left.maxChatUrl??null)===(right.maxChatUrl??null)
   &&(left.bindFromSourceId??null)===(right.bindFromSourceId??null)
-  &&(left.ownerTaskIntakeAllowed===true)===(right.ownerTaskIntakeAllowed===true);
+  &&(left.ownerTaskIntakeAllowed===true)===(right.ownerTaskIntakeAllowed===true)
+  &&(left.autoUnsubscribe===true)===(right.autoUnsubscribe===true);
 
 /** Independently verify incoming access AFTER a saved local configuration.
  * This reuses the exact passive reader and normal native/account/signature
@@ -5753,7 +5791,7 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
       if(typeof text!=='string'||Buffer.byteLength(text)>262144)fail('ASSISTANT_SOURCE_READ_INVALID');
       let media=projectAssistantSourceMessageMedia(value.message);
       if(scratch)media=await materializeAssistantSourceAudio({engine,scratch,receipt:value.originalAudio,media,signal:combined,assertCurrent:check});
-      await check();return {text,media,...(email?{originalSha256:value.originalSha256}:{})};
+      await check();return {text,media,...(email?{originalSha256:value.originalSha256,...(typeof value.message.from==='string'&&typeof value.message.subject==='string'?{mail:{from:value.message.from,subject:value.message.subject}}:{}),...(typeof value.unsubscribe?.available==='boolean'?{unsubscribeEligible:value.unsubscribe.available}:{})}: {})};
     }
     const owner=await profile.readIntakeOwner(),ref=value?.reference;
     if(result.exitCode!==0||!object(value)||value.schemaVersion!==1||value.protocol!==(source.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1')
@@ -5942,6 +5980,51 @@ export const processAssistantOwnerIntakeAudio=async({identity,client,host,store,
     await engine.writePrivateJsonFile(path.join(binding.directory,'.expires.json'),{schemaVersion:1,expiresAtMs:Date.now()+60*60_000});
     return {...media,contentRead:true,transcription:{state:'completed',complete:true,machineGenerated:true,model:result.model,...transcript}};
   }finally{bytes.fill(0);}
+};
+
+/** Provider execution for ONE original selected by the native immutable triage
+ * receipt. Native start has already consumed the sole dispatch, so no failure
+ * can recreate it. Account/signature/recipient and final-spawn checks use the
+ * existing signed source profile, without a browser, task or human credential. */
+export const unsubscribeAssistantIntakeEmail=async({identity,client,host,store,pass,source,reference,attemptId,signal,sourcePackage=withAssistantSourcePackage})=>{
+  pass=validateAssistantActivePass(pass,identity);
+  if(pass.kind!=='source_intake'||pass.intakeKind!=='route_existing'||source?.skillId!=='email-imap-smtp'
+    ||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.deviceId!==identity.deviceId
+    ||source.revision!==pass.sourceRevision||source.state!=='active'||source.autoUnsubscribe!==true
+    ||!pass.eventIds.includes(reference.eventId)||!(/^[0-9a-f]{64}$/u).test(reference.originalSha256??''))fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const pieces=reference.id?.split(':')??[];
+  if(pieces.length!==3||pieces[0]!=='uid')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const args=['unsubscribe-reference','--uid',pieces[2],'--uid-validity',pieces[1],
+    '--expected-revision',reference.revision,'--expected-original-sha256',reference.originalSha256,'--confirm'];
+  const check=async()=>{
+    if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_INTAKE_CHANGED');
+    const live=await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal);
+    if(!['ignored','routed'].includes(live.state)||live.threadId!==pass.threadId||live.sourceRevision!==pass.sourceRevision
+      ||!live.readConfirmed||Date.parse(live.leaseExpiresAt)<=Date.now())fail('ASSISTANT_INTAKE_CHANGED');
+    if(!sameAssistantSourceRegistration(source,(await client.sourceAccounts(pass.companyId,signal)).find(row=>row.id===source.id)))fail('ASSISTANT_INTAKE_CHANGED');
+  };
+  await check();let started=false;
+  const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
+  return sourcePackage({identity,host,store,scope,signal,
+    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,unsubscribeAttemptId:attemptId,unsubscribeEventId:reference.eventId},
+    intakeExecution:{kind:'email_unsubscribe',accountId:source.localAccountId,eventId:reference.eventId,threadId:pass.threadId,runtimeArguments:args,
+      beforeInvoke:async()=>{if(started)fail('ASSISTANT_INTAKE_CHANGED');started=true;await check();}}},
+    async({engine,profile,materialized,resolution,signal:combined})=>{
+      if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.8.0'))fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
+      const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection};
+      const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+        executionContext,runtimeArguments:['unsubscribe-reference','--local-account',source.localAccountId,...args.slice(1)]});
+      if(selected.handled||selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
+      executionContext.account=selected.account;
+      const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,executionContext,
+        runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,
+        timeoutMs:Math.min(60_000,await profile.remainingMs()),signal:combined});
+      let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+      if(result.exitCode!==0||value?.schemaVersion!==1||value.protocol!=='email-unsubscribe/v1'||value.automaticRetryAllowed!==false
+        ||!['requested','skipped','unknown'].includes(value.outcome)||typeof value.writeAttempted!=='boolean'
+        ||value.outcome==='requested'&&!value.writeAttempted)fail('ASSISTANT_SOURCE_READ_INVALID');
+      return {outcome:value.outcome};
+    });
 };
 
 /** A conversational response uses the SAME signed source/account executor.

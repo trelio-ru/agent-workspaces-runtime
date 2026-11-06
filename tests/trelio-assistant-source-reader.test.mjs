@@ -46,7 +46,7 @@ test('source setup preserves the SAME actual Python prerequisite, without privat
     return true;
   });
 });
-const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake,verifyAssistantOwnerReply}=
+const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake,verifyAssistantOwnerReply,unsubscribeAssistantIntakeEmail}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 // Exercise the SAME source/config/ACK engine against a non-production HTTPS
@@ -64,7 +64,7 @@ const store={get:async slot=>{
 let setupFixture=null,ackFixture=null,intakeFixture=null,maxAccountFixture=false,sourceSelectionFixture=null;
 const baseAdmission=()=>{
   if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
-    protocol:intakeFixture.admission.kind==='reply_owner'?`telegram-owner-reply/v${intakeFixture.intent.replyProtocolVersion??1}`:intakeFixture.admission.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${intakeFixture.intent.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?(intakeFixture.intent.replyProtocolVersion===2?'reply-reference':'read'):'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    protocol:intakeFixture.admission.kind==='email_unsubscribe'?'email-unsubscribe/v1':intakeFixture.admission.kind==='reply_owner'?`telegram-owner-reply/v${intakeFixture.intent.replyProtocolVersion??1}`:intakeFixture.admission.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${intakeFixture.intent.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='email_unsubscribe'?'unsubscribe-reference':intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?(intakeFixture.intent.replyProtocolVersion===2?'reply-reference':'read'):'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
@@ -2504,4 +2504,37 @@ test('original media projection refuses contradictory, malformed and oversized m
     assert.throws(()=>projectAssistantSourceMessageMedia(message),error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
   }
   assert.equal(projectAssistantSourceMessageMedia({hasMedia:true,fileName:'я'.repeat(256),fileSize:0}).sizeBytes,0);
+});
+
+test('email unsubscribe composes the SAME signed account child with exact original hash and one spawn',async t=>{
+  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
+  scope.skillId='email-imap-smtp';
+  const sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),attemptId=randomUUID(),receiptId=randomUUID();
+  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,autoUnsubscribe:true};
+  const pass={schemaVersion:1,kind:'source_intake',intakeKind:'route_existing',eventIds:[eventId],assistantId,deviceId,companyId,sourceId,sourceRevision:0,
+    passId:intakeId,deliveryId:randomUUID(),eventId,threadId};
+  const reference={eventId,id:'uid:77:8',revision:'b'.repeat(64),originalSha256:'c'.repeat(64)};
+  intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,unsubscribeAttemptId:attemptId,unsubscribeEventId:eventId},
+    admission:{schemaVersion:1,kind:'email_unsubscribe',intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,attemptId,receiptId}};
+  const dir=path.join(directory,'email-unsubscribe');await fs.mkdir(dir);const marker=path.join(dir,'calls');
+  const args=['unsubscribe-reference','--uid','8','--uid-validity','77','--expected-revision',reference.revision,
+    '--expected-original-sha256',reference.originalSha256,'--confirm'];
+  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    fs.appendFileSync(${JSON.stringify(marker)},'u');process.stdout.write(JSON.stringify({ok:true,schemaVersion:1,protocol:'email-unsubscribe/v1',outcome:'requested',writeAttempted:true,automaticRetryAllowed:false}));`);
+  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:dir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  const passive=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await passive.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());passive.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),io:{ensureDirectory:engine.ensurePrivateDirectory,
+    read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  await catalogue.change({operation:'create',id:accountId,name:'Synthetic unsubscribe account',expectedRevision:(await catalogue.list()).revision});
+  const live={state:'ignored',threadId,sourceRevision:0,readConfirmed:true,leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
+  const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({...live})};
+  const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference,attemptId};
+  assert.deepEqual(await unsubscribeAssistantIntakeEmail(input),{outcome:'requested'});
+  assert.equal(await fs.readFile(marker,'utf8'),'u');
+  await assert.rejects(unsubscribeAssistantIntakeEmail({...input,source:{...source,autoUnsubscribe:false}}),/ACCESS_DENIED/);
+  intakeFixture.admission.attemptId=randomUUID();await assert.rejects(unsubscribeAssistantIntakeEmail(input),/INVALID_RESPONSE/);
+  assert.equal(await fs.readFile(marker,'utf8'),'u','wrong native attempt/disabled setting never starts another provider');
 });

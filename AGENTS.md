@@ -1253,6 +1253,9 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   partitioned by original UUID across tasks before delivery. Permanent task
   routing and material processing remain independent. See the
   schema v10 section in `docs/assistant-inbox.md`; no per-message chats or new executor.
+  Autonomous email unsubscribe uses the same signed source engine and native
+  one-attempt receipt, never owner approval per list or a mail skip filter;
+  see [contract](docs/assistant-inbox.md#autonomous-email-unsubscribe).
 
 - MAX account roots require native selected `maxChatUrl:null`, fresh
   `maxAccountDiscovery:true` admission and signed provider >=2.13.0. Observe only

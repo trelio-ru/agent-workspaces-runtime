@@ -1146,6 +1146,7 @@ test('all trusted materializers preserve local refusal provenance without claimi
     ['workspace_arguments','get_task','withWorkspaceArguments',{}, {content:[]}],
     ['source_read','get_assistant_intake_context','materializeSourceIntake',{}, {content:[]}],
     ['source_reply','resolve_assistant_intake','materializeSourceReply',{decision:'reply_owner'}, {content:[]}],
+    ['source_unsubscribe','resolve_assistant_intake','materializeSourceUnsubscribe',{decision:'ignore',unsubscribeEventIds:[randomUUID()]}, {content:[]}],
     ['company_read','search','materializeEncryptedCompanyContext',{},refusal('ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',company)],
     ['company_read','fetch','materializeEncryptedCompanyContext',{id:'task:synthetic/project/1'},refusal('ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',{...company,nativeTool:'fetch'})],
     ['task_read','get_task','materializeEncryptedTask',{},refusal('ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED',f.descriptor)],

@@ -910,6 +910,43 @@ independent native guards: read ACK uses complete model delivery, business proce
 Synthetic SQLite, hook, signed-child and coordinator tests cover this composition;
 they do not establish a live Windows/business messenger acceptance.
 
+### Autonomous email unsubscribe
+
+Email sources expose native `autoUnsubscribe`, enabled by default. Every new
+INBOX original still receives full semantic triage; neither sender/domain nor a
+previous unsubscribe creates a skip filter. Only confidently unwanted marketing
+with signed-provider `unsubscribeEligible:true` may enter `unsubscribeEventIds`,
+an exact subset of ignored original UUIDs in the immutable native receipt.
+Spam/phishing, account/login codes, bills, payment/expiry/block/security alerts
+and uncertain mail retain ordinary handling. Classification never requires an
+owner decision per list. The source setting is the narrow delegated authority;
+it does not authorize generic SMTP, browser links or task commands.
+
+After the SAME native resolve, the trusted materializer retrieves the original
+model-read RFC822 hash from the SAME private inbox and consumes native
+`assistant:email_unsubscribe` start once, before package/provider I/O. Only the
+original atomic response grants dispatch. Lost responses and repeated calls
+read a receipt without another POST. The SAME signed source/account/process
+engine (email provider >=2.8.0) admits only `email-unsubscribe/v1` and fixed
+`unsubscribe-reference` arguments: UIDVALIDITY, UID, revision and original hash.
+Native package delivery and final spawn recheck the enabled source generation,
+device, recipient, original selection and live lease. No URL, token, address or
+Authentication-Results header crosses this capability or native result.
+
+The provider privately verifies receiver-owned authentication and signed unique
+RFC8058 headers. V1 supports only Gmail and Mail.ru, with an HTTPS endpoint on
+the sender domain/subdomains; unsupported receivers/endpoints simply skip. It
+pins public DNS to TLS, sends one fixed one-click POST and never follows
+redirects, borrows cookies/authentication, or falls back to mailto/browser/SMTP.
+Closed `requested|skipped|unknown` outcomes contain no content. A 2xx confirms
+request acceptance only. The native structural journal retains the attempt
+across conversion/restart; the owner can disable future attempts or inspect its
+last 50 dates/outcomes without per-attempt notifications. A late known outcome
+may settle an already consumed attempt after opt-out, without new execution.
+No new inbox schema, queue, model chat, credential store or runtime executor is
+introduced. Synthetic tests verify parser/POST, native receipt and signed-child
+boundaries; no live mailbox acceptance is claimed.
+
 ## Schema v11: closed delivery diagnostics
 
 The SAME delivery row gains nullable `failure_code` and `failure_stage`. The

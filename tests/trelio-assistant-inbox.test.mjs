@@ -1525,6 +1525,8 @@ for(const provider of ['telegram','email','max'])test(`${provider} schema18 ACK 
   assert.equal(inbox.claimAcknowledgements(source),null,'metadata, queued model turn and provisioning are not a body delivery');
   if(provider==='email')assert.throws(()=>inbox.confirmIntakeModelRead(row.id),/SOURCE_READ_REQUIRED/);
   const originals=row.eventIds.map(eventId=>({eventId,...(provider==='email'?{originalSha256:'f'.repeat(64)}:{})}));
+  if(provider==='email')assert.throws(()=>inbox.emailUnsubscribeReference(row.id,row.eventIds[0]),/CONFLICT/,
+    'frozen selection without full model delivery never grants an unsubscribe reference');
   // A SQLite failure cannot leave a partially readable frozen batch.
   database.exec(`CREATE TRIGGER synthetic_read_failure BEFORE UPDATE OF model_read_intake_id ON assistant_inbox_events
     WHEN NEW.event_key='${eventKeys[1]}' BEGIN SELECT RAISE(ABORT,'fixture'); END`);
@@ -1533,6 +1535,11 @@ for(const provider of ['telegram','email','max'])test(`${provider} schema18 ACK 
   database.exec('DROP TRIGGER synthetic_read_failure');
   inbox.confirmIntakeModelRead(row.id,originals);
   const restored=createAssistantInbox({database,now:()=>1000000});
+  if(provider==='email'){
+    assert.deepEqual(restored.emailUnsubscribeReference(row.id,row.eventIds[0]),{eventId:row.eventIds[0],
+      id:row.originals[0].native_event_id,revision:row.originals[0].native_revision,originalSha256:'f'.repeat(64)});
+    assert.throws(()=>restored.emailUnsubscribeReference(row.id,randomUUID()),/CONFLICT/);
+  }
   assert.notEqual(restored.externalAcknowledgementDue(source),null);
   const ack=restored.claimAcknowledgements(source);assert.equal(ack.reconcileOnly,false);
   const refs=restored.externalAcknowledgementReferences(source,{token:ack.token,sourceRevision:1});

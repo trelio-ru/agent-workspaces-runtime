@@ -889,7 +889,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
   // cross-repository synthetic stand replaces the external provider package).
   // No request/MCP field can select it. Native intake checks, the production
   // reply materializer and durable SQLite/provider fences still execute here.
-  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,processAssistantOwnerIntakeAudio,replyAssistantOwnerIntake,assistantOwnerReplyInput}=await import('./trelio-assistant-transport.mjs');
+  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,processAssistantOwnerIntakeAudio,replyAssistantOwnerIntake,assistantOwnerReplyInput,unsubscribeAssistantIntakeEmail}=await import('./trelio-assistant-transport.mjs');
   return context(async(sourceClient,host,store)=>{
   const identity=sourceClient.identity;
   const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
@@ -996,7 +996,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // Partial reads never earn confirmation, owner proof, processing or ACK.
       for(const reference of references){
         const message=await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal,sourcePackage});
-        bytes+=Buffer.byteLength(message.text);if(bytes>262144)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_READ_INVALID'});
+        bytes+=Buffer.byteLength(JSON.stringify(message));if(bytes>262144)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_READ_INVALID'});
         messages.push({...message,eventId:reference.eventId});
       }
       const message=messages[0];
@@ -1023,7 +1023,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // into an apparently empty message after native confirmation. Media bytes
       // are unprocessed until the independently verified decoder completes;
       // do not copy private owner identity or native document fields.
-      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text,media})=>({eventId,text,media}))}
+      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text,media,mail,unsubscribeEligible})=>({eventId,text,media,...(mail?{mail,unsubscribeEligible:source.autoUnsubscribe===true&&unsubscribeEligible===true}:{})}))}
         :{ownerMessage:{text:message.text,media:message.media,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
       delete value.sourceRead;
       const readState=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
@@ -1034,6 +1034,45 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       const delivered={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
       if(Buffer.byteLength(JSON.stringify(delivered))>40000)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_CONTEXT_LIMIT'});
       return delivered;
+    },
+    materializeSourceUnsubscribe:async({result,arguments:args,signal})=>{
+      const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox}]=await Promise.all([
+        import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs')]);
+      const pass=validateAssistantActivePass(await host.readActivePass(),identity),receipt=result.structuredContent;
+      if(pass.kind!=='source_intake'||pass.intakeKind!=='route_existing'||args.intakePass?.intakeId!==pass.passId
+        ||receipt?.id!==pass.passId||receipt.sourceId!==pass.sourceId||receipt.sourceRevision!==pass.sourceRevision
+        ||receipt.threadId!==pass.threadId||!['ignored','routed'].includes(receipt.state)
+        ||JSON.stringify(receipt.unsubscribeEventIds)!==JSON.stringify(args.unsubscribeEventIds))fail('ASSISTANT_INTAKE_CHANGED');
+      const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(row=>row.id===pass.sourceId);
+      if(source?.skillId!=='email-imap-smtp'||!source.autoUnsubscribe)fail('ASSISTANT_INTAKE_CHANGED');
+      const outcomes=[];
+      for(const eventId of receipt.unsubscribeEventIds){
+        const locator={companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId,eventId,receiptId:receipt.receiptId};
+        let attempt=null,outcome='unknown';
+        try{
+          // Recover the exact model-read RFC822 witness from the SAME private
+          // inbox. Native start commits before package/provider I/O and can
+          // grant dispatch once; a retry/lost response never grants it again.
+          const opened=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
+          let reference;try{reference=createAssistantInbox({database:opened.database}).emailUnsubscribeReference(pass.passId,eventId);}
+          finally{await opened.close();}
+          attempt=await sourceClient.startEmailUnsubscribe(locator,signal);
+          if(!attempt.dispatchGranted){outcome=attempt.state==='started'?'unknown':attempt.state;}
+          else{
+            ({outcome}=await unsubscribeAssistantIntakeEmail({identity,client:sourceClient,host,store,pass,source,reference,
+              attemptId:attempt.attemptId,signal,sourcePackage}));
+            await sourceClient.finishEmailUnsubscribe({...locator,attemptId:attempt.attemptId,outcome},signal);
+          }
+        }catch{
+          // The classifier is already terminal. Preserve its native decision
+          // and report bounded uncertainty; never reopen it or ask the owner
+          // to authorize this mailing list. A committed start cannot replay.
+          if(attempt?.dispatchGranted)try{await sourceClient.finishEmailUnsubscribe({...locator,attemptId:attempt.attemptId,outcome},signal);}catch{}
+        }
+        outcomes.push({eventId,outcome});
+      }
+      const value={...receipt,unsubscribeOutcomes:outcomes};
+      return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
     },
     materializeSourceReply:async({result,arguments:args,signal})=>{
       const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox,assistantOwnerReplyAttemptReady}]=await Promise.all([
