@@ -25,6 +25,7 @@ import {
   parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
+  parseWorkspaceMergeError,
   workspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import {
@@ -191,6 +192,7 @@ const WORKSPACE_RUN_LEASE_FAILURE_CODES = [
   "STALE_FENCING_TOKEN",
 ];
 const TRELIO_WORKSPACE_ACTION_OPERATIONS = new Set([
+  "merge",
   TRELIO_FOLDER_ONBOARDING_OPERATION,
   "doctor",
   "login",
@@ -230,6 +232,7 @@ const TRELIO_WORKSPACE_ACTION_OPERATION_HINTS = new Map([
   ["prepare_agent_secret_browser_fill", ["secret_browser_fill", "bridge.action.arguments"]],
 ]);
 const TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS = new Set([
+  "merge",
   "status",
   "heartbeat",
   "context_sync",
@@ -10204,6 +10207,12 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
         ? null
         : normalizeWorkspaceActionUuid(parameters.runtimeSessionId, "parameters.runtimeSessionId"),
     );
+  } else if (operation === "merge") {
+    assertWorkspaceActionKeys(parameters, new Set(["sourceRunId", "sourceHead"]));
+    const sourceHead = normalizeWorkspaceActionString(parameters.sourceHead, "parameters.sourceHead");
+    if (!GIT_OBJECT_PATTERN.test(sourceHead)) throw workspaceInputError("sourceHead must be an exact Git head.", "sourceHead");
+    argumentsList = ["merge", "--source-run", normalizeWorkspaceActionUuid(parameters.sourceRunId, "parameters.sourceRunId"),
+      "--source-head", sourceHead];
   } else if (operation === "status" || operation === "heartbeat") {
     assertWorkspaceActionKeys(parameters, new Set(operation === "status" ? ["finishOperationId"] : []));
     if (parameters.finishOperationId !== undefined) normalizeWorkspaceActionUuid(parameters.finishOperationId, "parameters.finishOperationId");
@@ -10997,6 +11006,9 @@ const executeTrelioWorkspaceActionOperation = async (
     };
   } catch (error) {
     if (signal?.aborted) throw error;
+    const mergeError = ["finish", "submit", "merge"].includes(invocation.operation)
+      ? parseWorkspaceMergeError(error?.stderr) : null;
+    if (mergeError) throw new TrelioLocalContextError(mergeError.code, mergeError.message, mergeError.details);
     const runRecovery = activeHeartbeatEntry
       ? await heartbeatManager.recoverActionFailure(activeHeartbeatEntry, error)
       : { status: "not_applicable" };

@@ -1993,7 +1993,14 @@ returned `open` и повторяет исходное действие один
 доказательством старой структуры. Настоящая migration blocker по-прежнему
 обязана содержать exact `rootDirectory` и `blockingEntries`.
 
-Если persistent root хранит другой незавершённый Run либо его server state
+Если default root занят другим exact `running`, `waiting_for_human` либо `review`
+Run, независимый подготовленный Run открывается в отдельном `p-<digest>` root.
+Digest связывает parent/Workspace/Run; повторный exact open использует свою копию.
+Source files, lease и registry не меняются; explicit directory не перенаправляется.
+Один последовательный Run переиспользует существующий checkout. Parallel roots
+имеют те же 3 дня retention и terminal/clean/idle guards, что recovery copies.
+
+Если persistent root требует восстановления незавершённого Run либо его server state
 не удалось подтвердить, preflight возвращает тот же structured
 `TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED` с
 `reasonCode=LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW` и exact прежним `runId`.
@@ -2002,6 +2009,30 @@ returned `open` и повторяет исходное действие один
 состояние. Bridge не повторяет новый open, не отменяет Run, не захватывает
 чужую lease и не заменяет source root; сервер заново проверяет ACL и fencing.
 Неизвестный статус не объявляется истечением или завершением.
+
+### Слияние параллельных результатов
+
+Exact native `WORKSPACE_OUTDATED` после submit означает подтверждённый отказ
+публикации. Bridge сохраняет полный portable draft даже при устаревшем base и
+возвращает `TRELIO_WORKSPACE_MERGE_REQUIRED`: source Run/head, исходный/current
+heads, native prepare nextCall и typed `merge` recipe. Source base и правила
+immutable. Transport failure/unknown outcome не разрешают replay/replacement.
+Агент продолжает в том же ходе: prepare fresh Run → open → read pinned authority
+→ `merge` с target runIdentity и sourceRunId/sourceHead → finish. Новые Runs
+не создаются повторно вместо разбора одного конфликта.
+
+Merge проверяет fresh native own-Run identities/ACL, exact source draft и clean
+локальные snapshots; Git объединяет base/source/current в private temporary
+repository. User drivers/filters выключены, external pointers атомарны. До
+разрешения всех конфликтов target остаётся нетронутым. Конфликт возвращает bounded
+`TRELIO_WORKSPACE_MERGE_CONFLICT` с путями и сохранёнными обеими версиями; вопрос
+человеку нужен только для содержательного решения. Совместимый результат проходит
+обычные draft/checkpoint/finish и acceptance CAS. Никакого server plaintext для
+E2EE, force, takeover или публикации комментария этот helper не разрешает.
+После проверенного объединённого acceptance агент разбирает source как уже
+сохранённый собственный Run и завершает его обычным cancel flow; source не
+отменяется до проверки. Typed operation входит в существующий generic workspace
+dispatcher; public plugin/новый hook не нужны.
 
 Если persistent root хранит другой `expired` Run, preflight сначала отделяет
 реальное незавершённое состояние от пустого остатка. Свежий Run, server draft,

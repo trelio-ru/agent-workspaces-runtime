@@ -14,6 +14,7 @@ import {
   resolveRegisteredWorkspaceRootDirectory,
   resolveWorkspaceBridgeConfigDirectory,
   runGit as runBridgeGit,
+  mergeWorkspaceSnapshots,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -36,6 +37,9 @@ import {
   parseWorkspaceRunReclaimRequiredError,
   workspaceRecoveryDirectory,
   isWorkspaceRecoveryDirectory,
+  workspaceParallelDirectory,
+  WorkspaceMergeRequiredError,
+  parseWorkspaceMergeError,
 } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   TRELIO_WORKSPACE_ACTION_TOOL,
@@ -45,6 +49,191 @@ import {
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 
+test("parallel branches have stable independent locators and a closed merge continuation", () => {
+  const source = path.resolve(os.tmpdir(), "parallel", workspaceId);
+  const runId = "22222222-2222-4222-8222-222222222222";
+  const parallel = workspaceParallelDirectory(source, workspaceId, runId);
+  assert.equal(workspaceParallelDirectory(parallel, workspaceId, runId), parallel);
+  assert.equal(path.basename(parallel).length, 45);
+  assert.notEqual(parallel, workspaceRecoveryDirectory(source, workspaceId, runId));
+  const error = new WorkspaceMergeRequiredError({ workspaceId, sourceRunId: runId,
+    sourceHead: "a".repeat(40), baseHead: "b".repeat(40), acceptedHead: "c".repeat(40) });
+  const parsed = parseWorkspaceMergeError("Ошибка: " + JSON.stringify(error));
+  assert.equal(parsed.details.nextCall.tool, "prepare_agent_workspace_run");
+  assert.equal(parsed.details.nextCall.arguments.startNewRun, true);
+  const tampered = JSON.parse(JSON.stringify(error));
+  tampered.details.nextCall = { tool: "arbitrary_mutation" };
+  assert.equal(parseWorkspaceMergeError(JSON.stringify(tampered)).details.nextCall.tool, "prepare_agent_workspace_run");
+  tampered.details.sourceHead = "unknown";
+  assert.equal(parseWorkspaceMergeError(JSON.stringify(tampered)), null);
+  const invocation = buildTrelioWorkspaceActionInvocation({ schemaVersion: 1, operation: "merge",
+    runIdentity: { workspaceId, runId }, parameters: { sourceRunId: workspaceId, sourceHead: "a".repeat(40) } });
+  assert.deepEqual(invocation.argumentsList, ["merge", "--source-run", workspaceId, "--source-head", "a".repeat(40)]);
+});
+
+const mergeFixture = async (t, { base, ours, theirs }) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-three-way-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const initial = path.join(root, "initial");
+  await fs.mkdir(initial);
+  const git = (cwd, args) => runBridgeGit(args, { cwd });
+  await git(initial, ["init", "--initial-branch=trelio-candidate"]);
+  await git(initial, ["config", "user.name", "Synthetic"]);
+  await git(initial, ["config", "user.email", "test@trelio.invalid"]);
+  const write = async (directory, files) => {
+    for (const [name, bytes] of Object.entries(files)) {
+      const target = path.join(directory, name);
+      if (bytes === null) { await fs.unlink(target); continue; }
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, bytes);
+    }
+    await git(directory, ["add", "--all"]);
+    await git(directory, ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Synthetic branch"]);
+    return (await git(directory, ["rev-parse", "HEAD"])).stdout.trim();
+  };
+  const baseHead = await write(initial, { "WORKSPACE_CONTEXT.md": "# Synthetic context\n", ...base });
+  const metadata = [];
+  for (const [name, files] of [["source", theirs], ["target", ours]]) {
+    const directory = path.join(root, name, "workspace");
+    await fs.mkdir(path.dirname(directory));
+    await git(root, ["clone", "--no-hardlinks", initial, directory]);
+    await git(directory, ["config", "user.name", "Synthetic"]);
+    await git(directory, ["config", "user.email", "test@trelio.invalid"]);
+    const head = await write(directory, files);
+    metadata.push({ workspaceDirectory: directory, baseHead: name === "source" ? baseHead : head,
+      draftHead: head, objects: [] });
+  }
+  return { source: metadata[0], target: metadata[1] };
+};
+
+test("three-way merge preserves both branches, literal paths, deletions and disjoint text edits", async t => {
+  const lines = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n") + "\n";
+  const fixture = await mergeFixture(t, { base: { "shared.md": lines, "delete.md": "old\n" },
+    ours: { "shared.md": lines.replace("line 10", "accepted line 10"), "accepted.md": "accepted\n" },
+    theirs: { "shared.md": lines.replace("line 1\n", "source line 1\n"), "delete.md": null, "[new] файл.md": "source\n" } });
+  const sourceBefore = await runBridgeGit(["status", "--porcelain"], { cwd: fixture.source.workspaceDirectory });
+  const result = await mergeWorkspaceSnapshots(fixture);
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(await fs.readFile(path.join(fixture.target.workspaceDirectory, "shared.md"), "utf8"),
+    lines.replace("line 10", "accepted line 10").replace("line 1\n", "source line 1\n"));
+  assert.equal(await fs.readFile(path.join(fixture.target.workspaceDirectory, "accepted.md"), "utf8"), "accepted\n");
+  assert.equal(await fs.readFile(path.join(fixture.target.workspaceDirectory, "[new] файл.md"), "utf8"), "source\n");
+  await assert.rejects(fs.stat(path.join(fixture.target.workspaceDirectory, "delete.md")), { code: "ENOENT" });
+  assert.equal((await runBridgeGit(["status", "--porcelain"], { cwd: fixture.source.workspaceDirectory })).stdout, sourceBefore.stdout);
+  assert.equal((await runBridgeGit(["rev-parse", "HEAD"], { cwd: fixture.target.workspaceDirectory })).stdout.trim(), fixture.target.baseHead);
+});
+
+test("real content conflicts preserve complete source and target without honoring merge=union", async t => {
+  const fixture = await mergeFixture(t, { base: { "shared.md": "base\n", ".gitattributes": "* merge=union\n" },
+    ours: { "shared.md": "accepted\n" }, theirs: { "shared.md": "source\n", "other.md": "source addition\n" } });
+  const result = await mergeWorkspaceSnapshots(fixture);
+  assert.deepEqual(result.conflicts, ["shared.md"]);
+  assert.equal(await fs.readFile(path.join(fixture.target.workspaceDirectory, "shared.md"), "utf8"), "accepted\n");
+  assert.equal(await fs.readFile(path.join(fixture.source.workspaceDirectory, "shared.md"), "utf8"), "source\n");
+  await assert.rejects(fs.stat(path.join(fixture.target.workspaceDirectory, "other.md")), { code: "ENOENT" });
+});
+
+test("merge refuses dirty targets and conflicting binary edits", async t => {
+  const fixture = await mergeFixture(t, { base: { "data.bin": Buffer.from([0, 1, 2]) },
+    ours: { "data.bin": Buffer.from([0, 3, 2]) }, theirs: { "data.bin": Buffer.from([0, 1, 4]) } });
+  assert.deepEqual((await mergeWorkspaceSnapshots(fixture)).conflicts, ["data.bin"]);
+  await fs.writeFile(path.join(fixture.target.workspaceDirectory, "unsaved.md"), "preserve\n");
+  await assert.rejects(mergeWorkspaceSnapshots(fixture), /changed during merge/u);
+  assert.equal(await fs.readFile(path.join(fixture.target.workspaceDirectory, "unsaved.md"), "utf8"), "preserve\n");
+});
+
+test("late merge admission refusal preserves the target and external object pointers stay atomic", async t => {
+  const fixture = await mergeFixture(t, { base: { "result.md": "base\n" },
+    ours: { "accepted.md": "accepted\n" }, theirs: { "result.md": "source\n" } });
+  await assert.rejects(mergeWorkspaceSnapshots({ ...fixture, beforeApply: async () => { throw new Error("Synthetic revoked fence"); } }), /revoked fence/u);
+  assert.equal(await fs.readFile(path.join(fixture.target.workspaceDirectory, "result.md"), "utf8"), "base\n");
+  const bytes = [Buffer.from([0, 1, 2]), Buffer.from([0, 3, 2]), Buffer.from([0, 1, 4])];
+  const objects = bytes.map(value => ({ filePath: "object.bin", sha256: createHash("sha256").update(value).digest("hex"),
+    sizeBytes: value.length, contentType: "application/octet-stream" }));
+  const pointer = object => `version https://trelio.ru/spec/workspace-object/v1\noid sha256:${object.sha256}\nsize ${object.sizeBytes}\ncontent-type ${object.contentType}\n`;
+  const pointers = await mergeFixture(t, { base: { "object.bin": pointer(objects[0]) },
+    ours: { "object.bin": pointer(objects[1]) }, theirs: { "object.bin": pointer(objects[2]) } });
+  for (const [row, index] of [[pointers.source, 2], [pointers.target, 1]]) {
+    row.objects = [objects[index]];
+    await fs.writeFile(path.join(row.workspaceDirectory, "object.bin"), bytes[index]);
+    await runBridgeGit(["update-index", "--skip-worktree", "object.bin"], { cwd: row.workspaceDirectory });
+  }
+  assert.deepEqual((await mergeWorkspaceSnapshots(pointers)).conflicts, ["object.bin"]);
+});
+
+test("native merge command rechecks the target fence and checkpoints the combined draft through real pipes", { timeout: 30_000 }, async t => {
+  const f = await mergeFixture(t, { base: { "result.md": "base\n" },
+    ours: { "accepted.md": "accepted\n" }, theirs: { "result.md": "source\n" } });
+  const sourceRunId = "22222222-2222-4222-8222-222222222222";
+  const targetRunId = "33333333-3333-4333-8333-333333333333";
+  const memberId = "44444444-4444-4444-8444-444444444444";
+  const company = { id: workspaceId, slug: "synthetic-merge" };
+  let targetReads = 0, revoke = true, savedHead = null, checkpoints = 0;
+  let serverError = null;
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks = []; for await (const chunk of request) chunks.push(chunk);
+      const bytes = Buffer.concat(chunks);
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/agent-workspaces/bridge-compatibility") return response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+      if (request.url.startsWith("/api/agent-workspaces/bridge-routing?")) return response.end(JSON.stringify({ schemaVersion: 1, company, encryptionState: "plain" }));
+      if (request.url.startsWith("/api/agent-workspaces/encryption/runtime?")) return response.end(JSON.stringify({ suite: "trelio-e2ee-v1", state: "plain", company }));
+      if (request.url.endsWith("/heartbeat")) return response.end(JSON.stringify({ leaseExpiresAt: new Date(Date.now() + 3600_000).toISOString() }));
+      const match = request.url.match(/\/workspaces\/[^/]+\/runs\/([^/]+)$/u);
+      if (match) {
+        const target = match[1] === targetRunId;
+        if (target) targetReads++;
+        return response.end(JSON.stringify({ run: { id: match[1], workspaceId, status: "running", initiatedByMemberId: memberId,
+          baseHead: target ? f.target.baseHead : f.source.baseHead, draftHead: target ? savedHead : f.source.draftHead,
+          leaseId: targetRunId, fencingToken: target && revoke && targetReads > 1 ? 2 : 1,
+          leaseExpiresAt: new Date(Date.now() + 3600_000).toISOString() }, latestCheckpoint: null }));
+      }
+      if (request.url.endsWith("/draft")) {
+        assert.ok(bytes.length > 0);
+        savedHead = (await runBridgeGit(["rev-parse", "HEAD"], { cwd: f.target.workspaceDirectory })).stdout.trim();
+        return response.end(JSON.stringify({ run: { draftHead: savedHead }, draft: { head: savedHead } }));
+      }
+      if (request.url.endsWith("/checkpoints")) {
+        assert.equal(JSON.parse(bytes).checkpointType, "draft"); checkpoints++;
+        return response.end(JSON.stringify({ id: memberId, createdAt: new Date().toISOString() }));
+      }
+      response.statusCode = 404; response.end();
+    } catch (error) { serverError = error; response.statusCode = 500; response.end(); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const home = path.join(path.dirname(path.dirname(f.source.workspaceDirectory)), "home");
+  const environment = { ...process.env, HOME: home, USERPROFILE: home, LOCALAPPDATA: path.join(home, "AppData", "Local"),
+    TRELIO_CONFIG_HOME: path.join(home, "trelio"), TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" };
+  const config = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory: home });
+  await fs.mkdir(config, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(config, "credentials.json"), JSON.stringify({ [origin]: { accessToken: "synthetic-merge-token" } }), { mode: 0o600 });
+  const metadata = (row, runId) => ({ ...row, schemaVersion: 3, origin, company, workspaceId, runId,
+    leaseId: targetRunId, fencingToken: 1, scopeType: "project", contexts: [], contextHeads: {} });
+  await fs.writeFile(path.join(path.dirname(f.source.workspaceDirectory), ".trelio-run.json"), JSON.stringify(metadata(f.source, sourceRunId)));
+  await fs.writeFile(path.join(path.dirname(f.target.workspaceDirectory), ".trelio-run.json"), JSON.stringify(metadata(f.target, targetRunId)));
+  await fs.writeFile(path.join(config, "runs.json"), JSON.stringify({ schemaVersion: 1,
+    roots: [path.dirname(f.source.workspaceDirectory), path.dirname(f.target.workspaceDirectory)] }));
+  const bridge = fileURLToPath(new URL("../host-runtime/scripts/trelio-workspace.mjs", import.meta.url));
+  const invoke = () => promisify(execFile)(process.execPath, [bridge, "merge", "--origin", origin,
+    "--source-run", sourceRunId, "--source-head", f.source.draftHead], {
+    cwd: f.target.workspaceDirectory, env: environment, encoding: "utf8", timeout: 10_000 });
+  await assert.rejects(invoke(), /lost its active lease or fence/u);
+  assert.equal(checkpoints, 0);
+  assert.equal(await fs.readFile(path.join(f.target.workspaceDirectory, "result.md"), "utf8"), "base\n");
+  revoke = false; targetReads = 0;
+  await invoke();
+  assert.equal(checkpoints, 1);
+  assert.ok(savedHead);
+  assert.equal(await fs.readFile(path.join(f.target.workspaceDirectory, "result.md"), "utf8"), "source\n");
+  assert.equal(await fs.readFile(path.join(f.target.workspaceDirectory, "accepted.md"), "utf8"), "accepted\n");
+  assert.equal((await runBridgeGit(["status", "--porcelain"], { cwd: f.source.workspaceDirectory })).stdout, "");
+  await invoke();
+  assert.equal(checkpoints, 1, "reopening the exact merge never overwrites or re-checkpoints its result");
+  assert.ifError(serverError);
+});
+
 test("recovery retention recognizes exact historical and compact roots without adopting custom names", () => {
   const runId = "22222222-2222-4222-8222-222222222222";
   const parent = path.resolve(os.tmpdir(), "recovery-retention");
@@ -53,6 +242,7 @@ test("recovery retention recognizes exact historical and compact roots without a
     workspaceId + "-recovery-22222222-recovery-22222222",
     "recovery-" + runId,
     path.basename(workspaceRecoveryDirectory(path.join(parent, workspaceId), workspaceId, runId)),
+    path.basename(workspaceParallelDirectory(path.join(parent, workspaceId), workspaceId, runId)),
   ]) assert.equal(isWorkspaceRecoveryDirectory(path.join(parent, name), workspaceId, runId), true);
   for (const name of [workspaceId, "my-recovery", workspaceId + "-recovery-unknown", "r-short",
     runId + "-recovery-22222222", "recovery-" + workspaceId]) {
@@ -168,6 +358,20 @@ test("directory recovery keeps ambiguity without choosing a root or exposing pri
     return true;
   });
   assert.equal(await fs.readFile(path.join(f.first, ".trelio-run.json"), "utf8"), before);
+});
+
+test("generated parallel roots keep custom selection deterministic after the old anchor is cleaned", async t => {
+  const f = await fixture(t);
+  f.roots.splice(1, 1);
+  const thirdRun = "55555555-5555-4555-8555-555555555555";
+  const second = await f.add(path.basename(workspaceParallelDirectory(f.first, workspaceId, secondRun)), secondRun);
+  const third = await f.add(path.basename(workspaceParallelDirectory(f.first, workspaceId, thirdRun)), thirdRun);
+  assert.equal(await f.resolve(), f.first, "only the proven original anchor is reusable");
+  f.roots.splice(0, 1);
+  assert.equal(await f.resolve(), workspaceParallelDirectory(second, workspaceId, newRun),
+    "derive a new independent locator when all remaining roots are proven siblings");
+  assert.notEqual(await f.resolve(), second);
+  assert.notEqual(await f.resolve(), third);
 });
 
 test("directory recovery prefers exact Run over another root's cwd and preserves legacy single-root reuse", async (t) => {
@@ -837,7 +1041,11 @@ test("real bridge reports ambiguity before claim and cwd selection still rejects
     "/api/agent-workspaces/bridge-compatibility",
     `/api/agent-workspaces/bridge-routing?workspaceId=${workspaceId}`,
   ]);
-  for (const invoke of [() => run(path.join(f.second, "workspace")), () => run(f.root, f.second)]) {
+  // A default path may branch only after the exact source status is known.
+  // This fixture deliberately refuses that read: never infer authority from
+  // the overview or hide its 500 by taking over/starting another Run.
+  await assert.rejects(run(path.join(f.second, "workspace")), { code: "TRELIO_WORKSPACE_ACTION_FAILED" });
+  for (const invoke of [() => run(f.root, f.second)]) {
     await assert.rejects(invoke(), (error) => {
       assert.equal(error.code, WORKSPACE_RUN_RECLAIM_REQUIRED);
       assert.equal(error.details.reasonCode, "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW");

@@ -22,6 +22,19 @@ export const workspaceRecoveryDirectory = (sourceDirectory, workspaceId, runId) 
   return path.join(path.dirname(source), "r-" + createHash("sha256").update(identity).digest("base64url"));
 };
 
+/** Independent Runs share history, never a writable checkout. Unlike a
+ * recovery this directory does not supersede the source registry entry: both
+ * workers must keep their own metadata, authority snapshot and lease. Derive
+ * the locator from the parent and exact Run so opening a third branch cannot
+ * grow paths or depend on which sibling happened to be selected first. */
+export const workspaceParallelDirectory = (sourceDirectory, workspaceId, runId) => {
+  const parent = path.dirname(workspaceRecoveryDirectory(sourceDirectory, workspaceId, runId));
+  const identity = JSON.stringify(["trelio-workspace-parallel-v1",
+    process.platform === "win32" ? parent.toLowerCase() : parent,
+    workspaceId.toLowerCase(), runId.toLowerCase()]);
+  return path.join(parent, "p-" + createHash("sha256").update(identity).digest("base64url"));
+};
+
 /** Classify only the host's historical/compact recovery names. This is a
  * retention policy hint, never permission to delete: callers must still prove
  * registry ownership, exact native terminal state, clean Git and idle locks.
@@ -33,7 +46,7 @@ export const isWorkspaceRecoveryDirectory = (directory, workspaceId, runId) => {
   if (!UUID_PATTERN.test(String(workspaceId || "")) || !UUID_PATTERN.test(String(runId || ""))) return false;
   const name = path.basename(directory);
   const workspacePrefix = String(workspaceId).toLowerCase() + "-recovery-";
-  return /^r-[A-Za-z0-9_-]{43}$/u.test(name)
+  return /^[rp]-[A-Za-z0-9_-]{43}$/u.test(name)
     || name.toLowerCase() === "recovery-" + String(runId).toLowerCase()
     || (name.toLowerCase().startsWith(workspacePrefix)
       && /^[0-9a-f]{8}(?:-recovery-[0-9a-f]{8})*$/iu.test(name.slice(workspacePrefix.length)));
@@ -45,6 +58,54 @@ export const WORKSPACE_DRAFT_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_DRAFT_RECOVER
 export const WORKSPACE_LAYOUT_MIGRATION_BLOCKED = "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED";
 export const WORKSPACE_RUN_RECLAIM_REQUIRED = "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED";
 export const WORKSPACE_ACTIVE_RUN_REQUIRED = "TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED";
+export const WORKSPACE_MERGE_REQUIRED = "TRELIO_WORKSPACE_MERGE_REQUIRED";
+export const WORKSPACE_MERGE_CONFLICT = "TRELIO_WORKSPACE_MERGE_CONFLICT";
+
+/** A rejected stale publication is safe to reconcile, not to replay. The
+ * portable source stays under its immutable Run/base; the next ordinary Run
+ * supplies fresh authority and the accepted base. Only the local merge helper
+ * combines files, including encrypted content. No error authorizes takeover. */
+export class WorkspaceMergeRequiredError extends Error {
+  constructor({ workspaceId, sourceRunId, sourceHead, baseHead, acceptedHead, conflicts = null }) {
+    super(conflicts
+      ? "Исходный draft сохранён. Разберите конфликты слияния в новом Run; обе версии сохранены, целевые файлы не изменены."
+      : "Исходный draft сохранён. Подготовьте независимый Run от текущей принятой версии, откройте его, прочитайте закреплённые правила и выполните merge с сохранённым sourceRunId/sourceHead, затем продолжите finish в том же ходе. Не отменяйте исходный Run до проверенного сохранения объединённого результата. Вопрос нужен только при содержательном конфликте.");
+    this.code = conflicts ? WORKSPACE_MERGE_CONFLICT : WORKSPACE_MERGE_REQUIRED;
+    const visible = [];
+    let conflictBytes = 0;
+    for (const filePath of conflicts || []) {
+      const bytes = Buffer.byteLength(JSON.stringify(filePath), "utf8");
+      if (visible.length === 200 || conflictBytes + bytes > 16 * 1024) break;
+      visible.push(filePath); conflictBytes += bytes;
+    }
+    this.details = { workspaceId, sourceRunId, sourceHead, baseHead, acceptedHead,
+      ...(conflicts ? { conflicts: visible, omittedConflictCount: conflicts.length - visible.length }
+        : { nextCall: { server: "trelio", tool: "prepare_agent_workspace_run",
+          arguments: { workspaceId, startNewRun: true } },
+          afterOpen: { schemaVersion: 1, operation: "merge", parameters: { sourceRunId, sourceHead },
+            runIdentitySource: "prepared Run bridge.actions.finish.arguments.runIdentity" } }) };
+  }
+  toJSON() { return { code: this.code, message: this.message, details: this.details }; }
+}
+
+// Process stderr is untrusted. Accept just this closed structural envelope;
+// never turn an arbitrary child-supplied nextCall/path into execution authority.
+export const parseWorkspaceMergeError = (stderr) => {
+  const output = String(stderr || "").trim();
+  if (Buffer.byteLength(output) > 64 * 1024) return null;
+  const raw = output.split("\n").at(-1).replace(/^Ошибка: /u, "");
+  let value; try { value = JSON.parse(raw); } catch { return null; }
+  const d = value?.details;
+  if (![WORKSPACE_MERGE_REQUIRED, WORKSPACE_MERGE_CONFLICT].includes(value?.code)
+    || ![d?.workspaceId, d?.sourceRunId].every(x => typeof x === "string" && UUID_PATTERN.test(x))
+    || ![d?.sourceHead, d?.baseHead, d?.acceptedHead].every(x => typeof x === "string" && GIT_HEAD_PATTERN.test(x))) return null;
+  const conflicts = value.code === WORKSPACE_MERGE_CONFLICT ? d.conflicts : null;
+  if (conflicts && (!Array.isArray(conflicts) || conflicts.length > 200
+    || conflicts.some(x => typeof x !== "string" || x.length > 4096 || x.includes("\0")))) return null;
+  if (value.code === WORKSPACE_MERGE_CONFLICT && !conflicts) return null;
+  return new WorkspaceMergeRequiredError({ workspaceId: d.workspaceId, sourceRunId: d.sourceRunId,
+    sourceHead: d.sourceHead, baseHead: d.baseHead, acceptedHead: d.acceptedHead, conflicts }).toJSON();
+};
 const MAX_CANDIDATES = 10;
 const MAX_MIGRATION_BLOCKING_ENTRIES = 20;
 const MAX_RECOVERY_CHANGES = 200;

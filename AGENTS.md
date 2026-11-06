@@ -697,7 +697,10 @@ publication tooling также остаются вне этого публичн
   encrypted accepted bundle с ephemeral private Git по тому же контракту;
   unknown/ACL/crypto/stale ошибки не разрешают fallback или пропуск Workspace.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
-- Recovery roots имеют собственные 3 дня retention; sibling Runs не продлевают срок.
+- Recovery и parallel roots имеют собственные 3 дня retention; sibling Runs не продлевают срок.
+  Последовательный Run переиспользует checkout; prepared независимый Run получает
+  отдельный root без takeover. Stale publication сохраняет portable source и
+  направляет в fresh Run + typed local merge; base остаётся immutable.
   Human open автоматически открывает exact LOCAL/DRAFT recovery sibling один раз;
   bounded evidence остаётся модели для сравнения и продолжения сохранения.
   Старый каталог не архивируется; вопрос человеку – только о содержательном конфликте.

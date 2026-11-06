@@ -177,7 +177,7 @@ import {
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { saveRuntimeChatBinding } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
-import { parseWorkspaceDraftRecoveryRequiredError, parseWorkspaceLocalRecoveryRequiredError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
+import { parseWorkspaceDraftRecoveryRequiredError, parseWorkspaceLocalRecoveryRequiredError, parseWorkspaceMergeError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   createAgentEncryptionDevice,
@@ -3442,12 +3442,12 @@ for (const recoverDirtyLegacy of [false, true]) test(`legacy layout migration ig
   }
 });
 
-// This fixture opens real Git workspaces twelve times, including the deliberate
+// This fixture opens real Git workspaces fifteen times, including the deliberate
 // concurrent-lock refusal. Preserve every 10s child deadline and budget their
 // full chain plus setup/cleanup instead of cancelling valid Windows work at 20s.
 const portableWorkspaceChildTimeoutMs = 10_000;
 test("future Runs reuse one persistent Workspace folder and sync accepted head before start", {
-  timeout: 12 * portableWorkspaceChildTimeoutMs + 20_000,
+  timeout: 15 * portableWorkspaceChildTimeoutMs + 20_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-persistent-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
@@ -3456,6 +3456,7 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
   const secondRunId = "55555555-5555-4555-8555-555555555555";
   const thirdRunId = "66666666-6666-4666-8666-666666666666";
   const fourthRunId = "12121212-1212-4212-8212-121212121212";
+  const parallelRunId = "13131313-1313-4313-8313-131313131313";
   let thirdRunStatus = "running";
   const firstExport = await createExportBundle(path.join(temporaryDirectory, "first"), {
     "WORKSPACE_CONTEXT.md": "# Persistent workspace\n",
@@ -3652,6 +3653,22 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
         return;
       }
 
+      if (request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${parallelRunId}`) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ run: { ...serializeRun(parallelRunId, firstExport.head, "running"), workspaceId }, latestCheckpoint: null }));
+        return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${parallelRunId}/claim`) {
+        events.push("claim-parallel");
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(serializeRun(parallelRunId, firstExport.head, "running")));
+        return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${parallelRunId}/bundle`) {
+        response.setHeader("content-type", "application/vnd.git.bundle");
+        response.end(firstExport.bundle);
+        return;
+      }
       if (request.url === `/api/agent-workspaces/runs/${runId}/bundle`) {
         response.setHeader("content-type", "application/vnd.git.bundle");
         response.end(firstExport.bundle);
@@ -3773,6 +3790,24 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
     assert.equal(await readFile(metadataPath, "utf8"), beforeMetadata);
     assert.equal(await readFile(path.join(expectedWorkspaceDirectory, "shared.md"), "utf8"), beforeMaterial);
     assert.equal(startCount, 1, "one local Workspace root permits only one active Run");
+
+    // A prepared independent branch is different from an unqualified CLI
+    // start/recovery. It gets its own checkout while even dirty live source
+    // work and its exact lease metadata remain byte-for-byte untouched.
+    await writeFile(path.join(expectedWorkspaceDirectory, "live-design.md"), "unfinished design\n");
+    const parallel = await execFileAsync(process.execPath, [...command, "--run", parallelRunId], executionOptions);
+    const parallelWorkspace = parallel.stdout.trim();
+    assert.notEqual(parallelWorkspace, expectedWorkspaceDirectory);
+    assert.match(path.basename(path.dirname(parallelWorkspace)), /^p-[A-Za-z0-9_-]{43}$/u);
+    assert.equal(await readFile(metadataPath, "utf8"), beforeMetadata);
+    assert.equal(await readFile(path.join(expectedWorkspaceDirectory, "live-design.md"), "utf8"), "unfinished design\n");
+    assert.equal(await pathExists(path.join(parallelWorkspace, "live-design.md")), false);
+    const reopened = await execFileAsync(process.execPath, [...command, "--run", parallelRunId], executionOptions);
+    assert.equal(reopened.stdout.trim(), parallelWorkspace, "exact reopen must reuse its own branch");
+    await assert.rejects(execFileAsync(process.execPath, [...command, "--run", parallelRunId,
+      "--dir", path.dirname(expectedWorkspaceDirectory)], executionOptions), /TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED/u);
+    assert.equal(startCount, 1, "opening a prepared parallel Run must not start or take over another Run");
+    await rm(path.join(expectedWorkspaceDirectory, "live-design.md"));
 
     firstRunStatus = "expired";
     firstRunActivityAt = new Date().toISOString();
@@ -4463,7 +4498,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
   }
 });
 
-for (const recovery of ["clean", "lingering_handles", "before_acceptance", "after_acceptance", "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied"]) test(
+for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles", "before_acceptance", "after_acceptance", "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied"]) test(
   `bridge finish recovers saved handoff: ${recovery}`, {
   timeout: 30_000,
 }, async () => {
@@ -4476,7 +4511,8 @@ for (const recovery of ["clean", "lingering_handles", "before_acceptance", "afte
     CODEX_HOME: path.join(homeDirectory, ".codex"), TRELIO_CONFIG_HOME: path.join(homeDirectory, "trelio"),
     TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" };
   let baseHead, draftHead, latestCheckpoint = null;
-  const interrupted = !["clean", "lingering_handles"].includes(recovery);
+  const outdated = ["outdated", "outdated_task"].includes(recovery);
+  const interrupted = !["clean", "outdated", "outdated_task", "lingering_handles"].includes(recovery);
   let serverAccepted = false, serverCandidateHead = null, denyRecoveryRead = recovery === "read_denied";
   let handoffAttempts = 0;
   let handoffPayload = null;
@@ -4521,6 +4557,11 @@ for (const recovery of ["clean", "lingering_handles", "before_acceptance", "afte
       }
 
       if (request.url?.endsWith("/checkpoints")) {
+        if (outdated && JSON.parse(body.toString("utf8")).checkpointType === "draft") {
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ id: "88888888-8888-4888-8888-888888888888", createdAt: new Date().toISOString() }));
+          return;
+        }
         handoffAttempts += 1;
         handoffPayload = JSON.parse(body.toString("utf8"));
         assert.equal(handoffPayload.checkpointType, "handoff");
@@ -4540,9 +4581,27 @@ for (const recovery of ["clean", "lingering_handles", "before_acceptance", "afte
         return;
       }
 
+      if (outdated && request.url === "/api/agent-workspaces/workspaces/44444444-4444-4444-8444-444444444444") {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ workspace: { acceptedHead: "d".repeat(40) } }));
+        return;
+      }
+      if (outdated && request.url?.endsWith("/draft")) {
+        assert.ok(body.byteLength > 0);
+        draftHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ run: { draftHead }, draft: { head: draftHead } }));
+        return;
+      }
       if (request.url?.endsWith("/candidate")) {
         candidateAttempts += 1;
         assert.ok(body.byteLength > 0, "saved draft candidate bundle must reach the server");
+        if (outdated) {
+          response.statusCode = 409;
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ code: "WORKSPACE_OUTDATED", message: "Synthetic competing acceptance" }));
+          return;
+        }
         if (interrupted && recovery !== "lost_checkpoint" && candidateAttempts === 1) {
           // The handoff was committed already. A later connection loss must
           // not make a new bridge process append the same immutable record.
@@ -4607,7 +4666,7 @@ for (const recovery of ["clean", "lingering_handles", "before_acceptance", "afte
       origin,
       pluginVersion: PLUGIN_VERSION,
       hostRuntimeVersion: HOST_RUNTIME_VERSION,
-      scopeType: "project",
+      scopeType: recovery === "outdated_task" ? "task" : "project",
       workspaceId: "44444444-4444-4444-8444-444444444444",
       runId,
       leaseId: "55555555-5555-4555-8555-555555555555",
@@ -4686,7 +4745,25 @@ for (const recovery of ["clean", "lingering_handles", "before_acceptance", "afte
       // A drive path is not an ESM module specifier on Windows.
       finishArguments.unshift("--import", pathToFileURL(preloadPath).href);
     }
+    if (recovery === "outdated_task") finishArguments.push("--task-outcome", "no_status_change");
     const finishOptions = { cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: fixtureEnv };
+    if (outdated) {
+      await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), error => {
+        const envelope = parseWorkspaceMergeError(error.stderr);
+        assert.equal(envelope?.code, "TRELIO_WORKSPACE_MERGE_REQUIRED");
+        assert.equal(envelope.details.sourceHead, draftHead);
+        assert.equal(envelope.details.acceptedHead, "d".repeat(40));
+        assert.equal(envelope.details.nextCall.arguments.startNewRun, true);
+        return true;
+      });
+      const retained = JSON.parse(await readFile(metadataPath, "utf8"));
+      assert.equal(retained.baseHead, baseHead, "the losing Run keeps its immutable base");
+      assert.equal(retained.draftHead, draftHead, "the complete losing result remains portable");
+      assert.notEqual(retained.terminalStatus, "accepted");
+      assert.equal(candidateAttempts, 1, "a CAS refusal never replays publication");
+      assert.ifError(serverError);
+      return;
+    }
     if (interrupted) {
       await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), (error) => {
         assert.match(error.stderr, /TRELIO_BRIDGE_TRANSPORT_FAILED/u);

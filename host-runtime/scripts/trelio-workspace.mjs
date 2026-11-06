@@ -41,6 +41,8 @@ import {
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
   workspaceRecoveryDirectory,
+  workspaceParallelDirectory,
+  WorkspaceMergeRequiredError,
   isWorkspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
@@ -839,7 +841,7 @@ const execFileWithInput = async (executable, args, options, input) => (
 );
 
 const run = async (executable, args, options = {}) => {
-  const { input, ...execFileOptions } = options;
+  const { input, allowedExitCodes = [], ...execFileOptions } = options;
   const commandOptions = {
     ...execFileOptions,
     // Default text callers retain their existing ABI. The internal immutable
@@ -860,6 +862,10 @@ const run = async (executable, args, options = {}) => {
       ? await execFileAsync(executable, args, commandOptions)
       : await execFileWithInput(executable, args, commandOptions, input);
   } catch (error) {
+    // An explicitly selected native protocol (Git merge) can have a complete
+    // nonzero result. Output limits, signals and pipe failures never qualify.
+    if (Number.isInteger(error.code) && allowedExitCodes.includes(error.code)
+      && !error.killed && !error.signal) return { stdout: error.stdout, stderr: error.stderr, exitCode: error.code };
     const detail = String(error.stderr || error.stdout || error.message).trim();
     throw new Error(`${executable} завершился с ошибкой: ${detail}`);
   }
@@ -1550,6 +1556,7 @@ export const formatBridgeCommandError = (error, command = "") => {
     || error instanceof WorkspaceLayoutMigrationBlockedError
     || error instanceof WorkspaceLocalRecoveryRequiredError
     || error instanceof WorkspaceRunReclaimRequiredError
+    || error instanceof WorkspaceMergeRequiredError
   ) {
     return JSON.stringify(error);
   }
@@ -11023,13 +11030,19 @@ const materializeWorkspaceObjects = async ({
   return objects;
 };
 
-const materializeBundle = async ({ bundlePath, directory, head, branch }) => {
+const materializeBundle = async ({ bundlePath, directory, head, branch, temporary = false }) => {
   if (!GIT_OBJECT_PATTERN.test(head)) {
     throw new Error("Сервер вернул некорректный Git head.");
   }
 
   await fs.mkdir(directory, { recursive: true });
   await runGit(["init", "--initial-branch=main"], { cwd: directory });
+  if (temporary) {
+    // A throwaway merge repository has no maintenance lifetime. A detached
+    // auto-GC child can outlive fetch and race destruction of its pack files.
+    await runGit(["config", "maintenance.auto", "false"], { cwd: directory });
+    await runGit(["config", "gc.auto", "0"], { cwd: directory });
+  }
   // Ни checkout, ни последующие commit не должны исполнять hooks, которые
   // могли попасть из пользовательского Git template/config на этой машине.
   await runGit(
@@ -12736,6 +12749,24 @@ export const resolveRegisteredWorkspaceRootDirectory = async (
     ? exactRunCandidates
     : candidates;
 
+  if (!exactRunOnly && exactRunCandidates.length === 0 && selectedCandidates.length > 1) {
+    const anchors = selectedCandidates.filter(candidate => !/^p-[A-Za-z0-9_-]{43}$/u.test(path.basename(candidate.rootDirectory)));
+    // Generated independent branches do not make the original custom root
+    // ambiguous. Prove each complete parent/Workspace/Run digest, rather than
+    // accepting a prefix or choosing the first/newest arbitrary directory.
+    if (anchors.length === 1 && selectedCandidates.every(candidate => candidate === anchors[0]
+      || sameLocalPath(candidate.rootDirectory,
+        workspaceParallelDirectory(anchors[0].rootDirectory, workspaceId, candidate.runId)))) return anchors[0].rootDirectory;
+    if (runId && anchors.length === 0 && selectedCandidates.every(candidate =>
+      sameLocalPath(path.dirname(candidate.rootDirectory), path.dirname(selectedCandidates[0].rootDirectory))
+      && sameLocalPath(candidate.rootDirectory, workspaceParallelDirectory(candidate.rootDirectory, workspaceId, candidate.runId)))) {
+      // The old terminal anchor may already have been garbage-collected.
+      // All remaining locators prove the same parent and independent branch
+      // grammar, so derive the NEW exact path; never select one worker's files.
+      return workspaceParallelDirectory(selectedCandidates[0].rootDirectory, workspaceId, runId);
+    }
+  }
+
   if (selectedCandidates.length > 1) {
     // Запуск внутри конкретного уже зарегистрированного root даёт точный
     // локальный выбор; общий onboarding root или похожий prefix его не дают.
@@ -12808,6 +12839,16 @@ const resolveWorkspaceRootDirectory = async ({
     };
   }
 
+  // An exact branch already opened beside a live worker must win over the
+  // canonical Workspace checkout. Otherwise every reopen rediscovers that
+  // other Run and can accidentally claim it through lifecycle recovery.
+  if (runId) {
+    const exactRoot = await resolveRegisteredWorkspaceRootDirectory({
+      workspaceId, runId, origin, startDirectory, exactRunOnly: true,
+    });
+    if (exactRoot) return { rootDirectory: exactRoot, layout: "registered", workingFolderRoot: null };
+  }
+
   const legacyPersistentRoot = path.join(LEGACY_DEFAULT_WORKSPACES_DIRECTORY, workspaceId);
   const registryState = await readRunRegistryState();
   // A canonical source can remain physically present with unsaved changes
@@ -12863,7 +12904,8 @@ const resolveWorkspaceRootDirectory = async ({
   if (registeredRoot) {
     return {
       rootDirectory: registeredRoot,
-      layout: "registered",
+      layout: runId && sameLocalPath(registeredRoot, workspaceParallelDirectory(registeredRoot, workspaceId, runId))
+        ? "parallel" : "registered",
       workingFolderRoot: null,
     };
   }
@@ -13368,7 +13410,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     directoryOption: options.dir,
     origin,
   });
-  const { rootDirectory } = rootResolution;
+  let { rootDirectory } = rootResolution;
+  let parallelOpen = rootResolution.layout === "parallel";
 
   // Проверяем (и при первом open создаём) только общий folder-local container
   // до server start/claim. Небезопасный `workspaces` должен остановить команду
@@ -13470,16 +13513,36 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     return (await loadRunSnapshot(runId))?.run ?? null;
   };
 
-  const directoryPreflight = await preflightWorkspaceDirectory({
+  const preflight = (directory, explicit = options.dir) => preflightWorkspaceDirectory({
     workspaceId,
     origin,
     requestedRunId,
-    rootDirectory,
-    directoryOption: options.dir,
+    rootDirectory: directory,
+    directoryOption: explicit,
     overview: runOverview,
     loadRunState,
     loadRunSnapshot,
   });
+  let directoryPreflight;
+  try {
+    directoryPreflight = await preflight(rootDirectory);
+  } catch (error) {
+    // The server has already prepared an independent Run. A known live Run
+    // occupying the default checkout is not a content conflict and must not
+    // force a takeover/cancellation of its worker. Keep every source byte and
+    // registry entry; open ONLY the requested branch in its deterministic
+    // sibling. Explicit paths, unknown/expired state and unsafe roots retain
+    // their ordinary refusal. Exact native claim below still checks the target.
+    const sourceRunId = error?.details?.runId;
+    if (options.dir || !requestedRunId || error?.code !== "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED"
+      || error.details?.reasonCode !== "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW"
+      || sourceRunId === requestedRunId
+      || !["running", "waiting_for_human", "review"].includes((await loadRunSnapshot(sourceRunId))?.run?.status)) throw error;
+    rootDirectory = workspaceParallelDirectory(rootDirectory, workspaceId, requestedRunId);
+    parallelOpen = true;
+    directoryPreflight = await preflight(rootDirectory, true);
+    rootDirectoryExists = directoryPreflight.rootDirectoryExists;
+  }
   const registerOpenedRoot = () => registerRunRoot(rootDirectory, {
     loadSourceRun: async (sourceRunId) => (await loadExactWorkspaceRun({
       origin: workspaceOrigin, token, workspaceId, runId: sourceRunId, companyEncryption,
@@ -13805,6 +13868,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       automaticWorklogPath: continuingSameRun
         ? existingMetadata.automaticWorklogPath
         : undefined,
+      mergedFrom: continuingSameRun ? existingMetadata.mergedFrom : undefined,
       claimedAt: now,
       lastUsedAt: now,
     };
@@ -13849,10 +13913,10 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   }
 
   if (!rootDirectoryExists) {
-    if (rootResolution.layout === "working-folder") {
+    if (rootResolution.layout === "working-folder" || parallelOpen) {
       // Повторная проверка непосредственно перед mkdir закрывает обычную гонку
       // между network preflight и локальной материализацией.
-      await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
+      if (!parallelOpen) await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
       // Parent уже проверен, поэтому exact non-recursive mkdir не последует по
       // внезапно появившемуся root-symlink и не присвоит существующий каталог.
       await fs.mkdir(rootDirectory, { mode: 0o700 });
@@ -15985,6 +16049,229 @@ const pause = async (options) => {
 export const withWorkspaceFinishLock = (runId, handler) =>
   withWorkspaceOpenLock(requireUuid(runId, "run"), handler, "finish");
 
+// Publication and preservation have different fences. A stale Run must still
+// upload its own validated portable draft; only acceptance requires the live
+// Workspace head. Never mutate its pinned base or replay the rejected submit.
+const preserveOutdatedWorkspaceRun = async (options) => {
+  const state = await withRun(async context => {
+    const overview = await readJsonResponse(await request(context.workspaceOrigin, context.token,
+      `/api/agent-workspaces/workspaces/${context.metadata.workspaceId}`));
+    const acceptedHead = overview?.workspace?.acceptedHead;
+    if (!GIT_OBJECT_PATTERN.test(String(acceptedHead || ""))) throw new Error("Workspace returned no accepted head.");
+    return { metadata: context.metadata, acceptedHead };
+  });
+  if (state.acceptedHead === state.metadata.baseHead) return;
+  // A prior coherent checkpoint may already contain the complete result.
+  // Requiring a new edit here would block the very common clean-draft finish.
+  const head = (await runGit(["rev-parse", "HEAD"], { cwd: state.metadata.workspaceDirectory })).stdout.trim();
+  if (state.metadata.draftHead !== head || await getGitStatus(state.metadata.workspaceDirectory, state.metadata.objects || [])) {
+    const { "task-outcome": _handoffOutcome, ...draftOptions } = options;
+    await checkpoint({ ...draftOptions, type: "draft",
+      summary: String(options.summary || "Сохранены изменения перед слиянием параллельных результатов Workspace") });
+  }
+  const saved = (await findRunMetadata()).metadata;
+  throw new WorkspaceMergeRequiredError({ workspaceId: saved.workspaceId, sourceRunId: saved.runId,
+    sourceHead: saved.draftHead, baseHead: saved.baseHead, acceptedHead: state.acceptedHead });
+};
+
+/** Build a normal three-way Git merge in an isolated private repository.
+ * No source/target worktree is changed until Git has resolved every path.
+ * Native merge drivers/filters cannot come from company files or user config;
+ * external-object pointers are atomic values, never mergeable JSON text. */
+export const mergeWorkspaceSnapshots = async ({ source, target, beforeApply = async () => {} }) => {
+  const sourceHead = source.draftHead;
+  const targetHead = target.baseHead;
+  for (const head of [sourceHead, source.baseHead, targetHead]) {
+    if (!GIT_OBJECT_PATTERN.test(String(head || ""))) throw new Error("Invalid Workspace merge head.");
+  }
+  const unchanged = async () => {
+    for (const [metadata, head] of [[source, sourceHead], [target, targetHead]]) {
+      if ((await runGit(["rev-parse", "HEAD"], { cwd: metadata.workspaceDirectory })).stdout.trim() !== head
+        || await getGitStatus(metadata.workspaceDirectory, metadata.objects || [])) {
+        throw new Error("Workspace changed during merge preparation; no automatic overwrite is allowed.");
+      }
+    }
+  };
+  await unchanged();
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-merge-"));
+  await ensurePrivateDirectory(temporaryDirectory);
+  try {
+    const sourceBundle = path.join(temporaryDirectory, "source.bundle");
+    const targetBundle = path.join(temporaryDirectory, "target.bundle");
+    const directory = path.join(temporaryDirectory, "workspace");
+    await runGit(["bundle", "create", sourceBundle, "refs/heads/trelio-candidate"], { cwd: source.workspaceDirectory });
+    await runGit(["bundle", "create", targetBundle, "refs/heads/trelio-candidate"], { cwd: target.workspaceDirectory });
+    await materializeBundle({ bundlePath: targetBundle, directory, head: targetHead, branch: "trelio-candidate", temporary: true });
+    await runGit(["fetch", "--no-tags", sourceBundle, "refs/heads/trelio-candidate:refs/trelio/merge-source"], { cwd: directory });
+    if ((await runGit(["rev-parse", "refs/trelio/merge-source"], { cwd: directory })).stdout.trim() !== sourceHead) {
+      throw new Error("Source draft changed before its merge snapshot was read.");
+    }
+    await runGit(["merge-base", "--is-ancestor", source.baseHead, targetHead], { cwd: directory });
+    await fs.mkdir(path.join(directory, ".git", "info"), { recursive: true });
+    await fs.writeFile(path.join(directory, ".git", "info", "attributes"), "* -filter -text merge=text\n", { mode: 0o600 });
+    const readTree = async head => {
+      const raw = (await runGit(["ls-tree", "-r", "-z", head], { cwd: directory })).stdout;
+      if (raw && !raw.endsWith("\0")) throw new Error("Incomplete merge tree inventory.");
+      const entries = new Map();
+      for (const record of raw ? raw.slice(0, -1).split("\0") : []) {
+        const match = /^(100644|100755) blob ([0-9a-f]{40,64})\t(.+)$/u.exec(record);
+        if (!match || entries.has(match[3])) throw new Error("Unsafe or duplicate merge tree entry.");
+        assertSafeDerivedManifestPath(match[3], "merge tree");
+        entries.set(match[3], `${match[1]}:${match[2]}`);
+      }
+      return entries;
+    };
+    // Read each complete snapshot once. Per-object Git subprocesses would
+    // make a Workspace with thousands of binaries need tens of thousands of
+    // process launches before a merge that is otherwise linear in its paths.
+    const [baseTree, targetTree, sourceTree] = await Promise.all([source.baseHead, targetHead, sourceHead].map(readTree));
+    const conflicts = new Set();
+    for (const object of [...source.objects || [], ...target.objects || []]) {
+      const base = baseTree.get(object.filePath), ours = targetTree.get(object.filePath), theirs = sourceTree.get(object.filePath);
+      if (ours !== base && theirs !== base && ours !== theirs) conflicts.add(object.filePath);
+    }
+    const merge = await runGit(["-c", "merge.renames=false", "merge", "--no-commit", "--no-ff", "refs/trelio/merge-source"],
+      { cwd: directory, allowedExitCodes: [1] });
+    if (merge.exitCode === 1) {
+      // Exit 1 is a merge conflict only when the complete native unmerged
+      // index confirms it. I/O, corrupt objects and incomplete reads remain
+      // hard failures, never a guessed conflict or a retry permission.
+      const unmerged = (await runGit(["ls-files", "-u", "-z"], { cwd: directory })).stdout;
+      if (!unmerged || !unmerged.endsWith("\0")) throw new Error("Git merge failed without a complete conflict inventory.");
+      for (const record of unmerged.slice(0, -1).split("\0")) conflicts.add(record.slice(record.indexOf("\t") + 1));
+    }
+    if (conflicts.size) return { conflicts: [...conflicts].sort(), changedPaths: [] };
+    const diff = (await runGit(["diff", "--cached", "--name-only", "--no-renames", "-z", targetHead], { cwd: directory })).stdout;
+    if (diff && !diff.endsWith("\0")) throw new Error("Incomplete Workspace merge manifest.");
+    const changedPaths = diff ? diff.slice(0, -1).split("\0") : [];
+    const plan = [];
+    for (const filePath of changedPaths) {
+      assertSafeDerivedManifestPath(filePath, "merge path");
+      if (isProtectedWorkspaceControlPath(filePath)) throw new Error("Merge cannot change protected Workspace controls.");
+      const stagedPath = path.join(directory, filePath);
+      let fileStat;
+      try { fileStat = await fs.lstat(stagedPath); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (fileStat && (!fileStat.isFile() || fileStat.isSymbolicLink())) throw new Error("Merge contains a non-regular file.");
+      if (fileStat && fileStat.size <= POINTER_MAX_BYTES) {
+        const pointer = parseWorkspaceObjectPointer(await fs.readFile(stagedPath));
+        if (pointer) {
+          const owner = [source, target].find(metadata => (metadata.objects || []).some(object =>
+            object.filePath === filePath && object.sha256 === pointer.sha256 && object.sizeBytes === pointer.sizeBytes));
+          if (!owner) throw new Error("Merge references an unknown Workspace object.");
+          const original = path.join(owner.workspaceDirectory, filePath);
+          const matches = value => value.sha256 === pointer.sha256 && value.sizeBytes === pointer.sizeBytes;
+          if (!matches(await hashFile(original))) throw new Error("Merge object changed after its draft was saved.");
+          await fs.copyFile(original, stagedPath);
+          if (!matches(await hashFile(stagedPath))) throw new Error("Merge object changed while being frozen.");
+        }
+      }
+      plan.push({ filePath, stagedPath, exists: Boolean(fileStat) });
+    }
+    await beforeApply();
+    await unchanged();
+    for (const item of plan) {
+      // Git ignores are not overwrite authority. A source addition must not
+      // replace an ignored local file that was absent from the target base.
+      if (!targetTree.has(item.filePath)) {
+        try {
+          await fs.lstat(path.join(target.workspaceDirectory, item.filePath));
+          throw new Error("Merge would overwrite an untracked local path.");
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+      let ancestor = path.dirname(path.join(target.workspaceDirectory, item.filePath));
+      while (!sameLocalPath(ancestor, target.workspaceDirectory)) {
+        try {
+          const info = await fs.lstat(ancestor);
+          if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe merge parent directory.");
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+        ancestor = path.dirname(ancestor);
+      }
+    }
+    // Every input is frozen before the first edit. A failed local write is
+    // ordinary unfinished target work, never acceptance; the full source draft
+    // remains portable on the server and neither source nor accepted head moves.
+    for (const item of plan.filter(item => !item.exists).sort((a, b) => b.filePath.length - a.filePath.length)) {
+      await fs.unlink(path.join(target.workspaceDirectory, item.filePath));
+      let parent = path.dirname(path.join(target.workspaceDirectory, item.filePath));
+      while (!sameLocalPath(parent, target.workspaceDirectory)) {
+        try { await fs.rmdir(parent); } catch (error) {
+          if (["ENOTEMPTY", "EEXIST", "ENOENT"].includes(error.code)) break;
+          throw error;
+        }
+        parent = path.dirname(parent);
+      }
+    }
+    for (const item of plan.filter(item => item.exists)) {
+      const destination = path.join(target.workspaceDirectory, item.filePath);
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      const pending = path.join(path.dirname(destination), `.trelio-merge-${crypto.randomUUID()}`);
+      try { await fs.copyFile(item.stagedPath, pending); await fs.rename(pending, destination); }
+      finally { await fs.rm(pending, { force: true }); }
+    }
+    return { conflicts: [], changedPaths };
+  } finally { await fs.rm(temporaryDirectory, { recursive: true, force: true }); }
+};
+
+const mergeWorkspaceRunUnlocked = async (options) => {
+  const sourceRunId = requireUuid(options["source-run"], "source-run");
+  const sourceHead = String(options["source-head"] || "");
+  if (!GIT_OBJECT_PATTERN.test(sourceHead)) throw new Error("Invalid merge source head.");
+  await heartbeat();
+  await withRun(async context => {
+    const target = context.metadata;
+    if (target.runId === sourceRunId) throw new Error("Merge requires an independent target Run.");
+    const snapshot = await loadExactWorkspaceRun({ origin: context.workspaceOrigin, token: context.token,
+      workspaceId: target.workspaceId, runId: sourceRunId, companyEncryption: context.companyEncryption });
+    const current = await loadExactWorkspaceRun({ origin: context.workspaceOrigin, token: context.token,
+      workspaceId: target.workspaceId, runId: target.runId, companyEncryption: context.companyEncryption });
+    const assertTarget = run => {
+      if (!["running", "waiting_for_human"].includes(run.status) || run.leaseId !== target.leaseId
+        || run.fencingToken !== target.fencingToken || run.baseHead !== target.baseHead
+        || !(Date.parse(run.leaseExpiresAt) > Date.now())) throw new Error("Target merge Run lost its active lease or fence.");
+    };
+    assertTarget(current.run);
+    if (snapshot.run.draftHead !== sourceHead || snapshot.run.initiatedByMemberId !== current.run.initiatedByMemberId
+      || !snapshot.run.initiatedByMemberId) throw new Error("Merge requires the exact own portable source draft.");
+    if (target.mergedFrom?.runId === sourceRunId && target.mergedFrom?.head === sourceHead) {
+      process.stdout.write("Этот исходный draft уже объединён; локальные правки сохранены.\n"); return;
+    }
+    const root = await resolveRegisteredWorkspaceRootDirectory({ workspaceId: target.workspaceId,
+      runId: sourceRunId, origin: context.origin, exactRunOnly: true });
+    if (!root) throw new Error("Open the exact source Run before its local merge.");
+    const source = await readOptionalRunMetadata(root);
+    await assertValidMaterializedRoot(root, source, target.workspaceId, context.origin);
+    if (source.runId !== sourceRunId || source.draftHead !== sourceHead || source.baseHead !== snapshot.run.baseHead) {
+      throw new Error("Local source does not match the portable draft.");
+    }
+    const result = await mergeWorkspaceSnapshots({ source, target, beforeApply: async () => {
+      // Preparing the Git merge can outlive a claim/revocation. Recheck native
+      // ACL/lease and the exact local generation immediately before editing;
+      // never write an earlier lease back over metadata from a newer open.
+      assertTarget((await loadExactWorkspaceRun({ origin: context.workspaceOrigin, token: context.token,
+        workspaceId: target.workspaceId, runId: target.runId, companyEncryption: context.companyEncryption })).run);
+      const local = await readOptionalRunMetadata(path.dirname(context.metadataPath));
+      if (local?.runId !== target.runId || local?.workspaceId !== target.workspaceId
+        || local?.leaseId !== target.leaseId || local?.fencingToken !== target.fencingToken
+        || local?.baseHead !== target.baseHead) throw new Error("Local merge Run generation changed.");
+    } });
+    if (result.conflicts.length) throw new WorkspaceMergeRequiredError({ workspaceId: target.workspaceId,
+      sourceRunId, sourceHead, baseHead: source.baseHead, acceptedHead: target.baseHead, conflicts: result.conflicts });
+    await writeRunMetadata(context.metadataPath, { ...target, mergedFrom: { runId: sourceRunId, head: sourceHead } });
+    process.stdout.write(`${JSON.stringify({ merged: true, ...result,
+      ...(result.changedPaths.length === 0 ? { alreadyInAcceptedBase: true,
+        nextAction: "The source is already represented in this accepted base. Verify it and review the own source/unused target through the ordinary cancel flow; do not fabricate a change for finish." } : {}) })}\n`);
+  });
+  const metadata = (await findRunMetadata()).metadata;
+  if (await getGitStatus(metadata.workspaceDirectory, metadata.objects || [])) {
+    await checkpoint({ type: "draft", summary: "Объединены совместимые параллельные изменения Workspace" });
+  }
+};
+
+const mergeWorkspaceRun = async options => {
+  const { metadata } = await findRunMetadata();
+  return withWorkspaceFinishLock(requireUuid(metadata.runId, "run"), () => mergeWorkspaceRunUnlocked(options));
+};
+
 const finish = async (options) => {
   const { metadata } = await findRunMetadata();
   const runId = requireUuid(metadata.runId, "run");
@@ -16059,7 +16346,7 @@ const finish = async (options) => {
       reportFinishProgress("checkpoint");
       await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
       reportFinishProgress("preparing");
-      await submit(options);
+      await submitWithMergeRecovery(options);
       reportFinishProgress("cleanup");
       // Cleanup cannot turn confirmed acceptance into a failed save.
       await runAutomaticLocalCleanupForCurrentRun().catch(() => undefined);
@@ -17454,6 +17741,17 @@ const submit = async (options) => withRun(async ({
     },
   );
 });
+
+const submitWithMergeRecovery = async (options) => {
+  try { return await submit(options); } catch (error) {
+    // Only an explicit native CAS refusal establishes non-publication. A
+    // timeout/lost response may already be accepted and stays read-back-only.
+    if (error instanceof TrelioApiError && error.statusCode === 409 && error.code === "WORKSPACE_OUTDATED") {
+      await preserveOutdatedWorkspaceRun(options);
+    }
+    throw error;
+  }
+};
 
 const spawnSecretCommand = async ({
   commandArguments,
@@ -19866,7 +20164,9 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2)) 
   } else if (command === "finish") {
     await finish(options);
   } else if (command === "submit") {
-    await submit(options);
+    await submitWithMergeRecovery(options);
+  } else if (command === "merge") {
+    await mergeWorkspaceRun(options);
   } else if (command === "skill") {
     await skillCommand(origin, options, positional);
   } else if (command === "secret") {
