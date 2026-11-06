@@ -707,6 +707,17 @@ and its concrete closed cause, without claiming no attachment or requesting rese
 First model/environment download still needs its exact plan and real consent;
 there is no automatic Telegram quota, cloud fallback, installer or replay.
 
+Read-only original/processor calls obtain fresh native content admission AFTER
+local provider I/O, under their original monotonic deadline. The same resolver
+must retain the exact connection, local identity, signed release/artifact and
+current recipient/envelope/scope epoch. Structural source/intake status remains
+readable for settlement after recipient revocation and cannot authorize plaintext.
+After transcript bytes/private-file verification, the production MCP materializer
+also performs a metadata-only source/account admission before model-read evidence
+or final output. That check starts no provider, download, decoder or ACK. These
+late fences never wrap irreversible replies, ACK or setup: a positive external
+effect must not be hidden by a later refusal or acquire permission to replay.
+
 Schema16 adds only nullable `reply_receipt_id` and positive `reply_message_id`
 to the SAME private SQLite journal; migration preserves old refs/cursors/fences.
 Text is transient RAM/private child stdin, never SQLite/argv/env. The ordinary

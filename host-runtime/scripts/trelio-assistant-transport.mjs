@@ -5173,12 +5173,27 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
       let raw;try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}finally{bytes.fill(0);}
       const hydrated=await profile.hydrateResolution(raw,engine,combined);
       const resolution=engine.normalizeResolvedSkillRuntimeArtifact(hydrated.rawResolution,{transportProfile:'assistant_source'});
-      await profile.bindResolution(resolution,raw.sourceAdmission);raw=null;
-      return {resolution,token,companyEncryption:hydrated.companyEncryption};
+      await profile.bindResolution(resolution,raw.sourceAdmission);
+      // A structural source inventory intentionally remains readable after
+      // encryption-device revocation. It cannot authorize later plaintext.
+      // Retain only this native recipient/envelope identity in transient RAM;
+      // no payload, key, audio/transcript or new private ledger is introduced.
+      const deliveryBinding=raw.sourceEncryption?Object.fromEntries(
+        ['recipientDeviceId','envelopeId','scopeId','scopeEpoch'].map(key=>[key,raw.sourceEncryption[key]])):null;
+      raw=null;
+      return {resolution,token,companyEncryption:hydrated.companyEncryption,deliveryBinding};
+    };
+    const assertSameResolution=(fresh,baseline)=>{
+      if(JSON.stringify(fresh.resolution.companyConnection)!==JSON.stringify(baseline.resolution.companyConnection)
+        ||JSON.stringify(fresh.resolution.localIdentity)!==JSON.stringify(baseline.resolution.localIdentity)
+        ||JSON.stringify(fresh.deliveryBinding)!==JSON.stringify(baseline.deliveryBinding))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+      if(fresh.resolution.artifact.id!==baseline.resolution.artifact.id
+        ||fresh.resolution.artifact.packageSha256!==baseline.resolution.artifact.packageSha256
+        ||fresh.resolution.releaseId!==baseline.resolution.releaseId)fail('AGENT_SKILL_RELEASE_CHANGED');
     };
     profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,sourceProcessor,startedAt});
     const initial=await engine.withWorkspaceExecutionProfile(profile,async()=>{
-      const {resolution,token,companyEncryption}=await resolve();
+      const {resolution,token,companyEncryption,deliveryBinding}=await resolve();
       const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,companyEncryption,
         requestOptions:{signal:combined,maximumErrorResponseBytes:16_384}});
       await profile.remainingMs();
@@ -5187,7 +5202,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
         || capabilities.includes('secret-checkout'))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       const refresh=Boolean(accountSetup||sourceAcknowledgement||sourceIntake||companyEncryption);
       if(!refresh)return {result:await action({engine,profile,materialized,resolution,signal:combined})};
-      return {materialized,resolution,refresh};
+      return {materialized,resolution,deliveryBinding,refresh};
     });
     if(!initial.refresh)return initial.result;
     // Exit the first async profile before entering the fresh one. The common
@@ -5195,15 +5210,27 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
     // device/human-isolation guard and its closed tombstone semantics.
     profile.close();
     profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,sourceProcessor,startedAt});
-    return await engine.withWorkspaceExecutionProfile(profile,async()=>{
+    const result=await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const fresh=await resolve();
-      if(JSON.stringify(fresh.resolution.companyConnection)!==JSON.stringify(initial.resolution.companyConnection)
-        ||JSON.stringify(fresh.resolution.localIdentity)!==JSON.stringify(initial.resolution.localIdentity))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
-      if(fresh.resolution.artifact.id!==initial.resolution.artifact.id
-        || fresh.resolution.artifact.packageSha256!==initial.resolution.artifact.packageSha256
-        || fresh.resolution.releaseId!==initial.resolution.releaseId)fail('AGENT_SKILL_RELEASE_CHANGED');
+      assertSameResolution(fresh,initial);
       return action({engine,profile,materialized:initial.materialized,resolution:fresh.resolution,signal:combined});
     });
+    if(!sourceIntake||sourceIntake.replyReceiptId)return result;
+    // Original/ASR reads may spend time in local file/decoder I/O AFTER their
+    // initial native admission. Re-admit through the SAME resolver before
+    // delivery, including current grant, company mode and recipient. Exit the
+    // old async profile first; never nest/replace one live execution profile.
+    // Replies, ACK and setup are excluded: a late refusal must never erase a
+    // verified irreversible effect or turn it into permission to repeat it.
+    profile.close();
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,
+      sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,sourceProcessor,startedAt});
+    await engine.withWorkspaceExecutionProfile(profile,async()=>{
+      assertSameResolution(await resolve(),initial);
+      await intakeExecution.beforeInvoke();
+      await profile.remainingMs();
+    });
+    return result;
   }catch(error){if(combined.aborted)fail('ASSISTANT_SOURCE_DEADLINE');throw error;}
   finally{clearTimeout(timer);profile?.close();}
 };
@@ -5725,7 +5752,9 @@ export const assistantSourceOriginalAudioCapability=parsedPackage=>{
  * account selector and process engine. This taskless read grants no task pass,
  * neighboring history, provider sending, read-state mutation or human vault.
  * The private journal ref is selected by the trusted host, never tool text. */
-export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,pass,source,reference,signal,sourcePackage=withAssistantSourcePackage})=>{
+export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,pass,source,reference,signal,
+  verifyDeliveryOnly=false,sourcePackage=withAssistantSourcePackage})=>{
+  if(typeof verifyDeliveryOnly!=='boolean')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
   pass=validateAssistantActivePass(pass,identity);
   const routing=pass.intakeKind==='route_existing',email=source?.skillId==='email-imap-smtp',max=source?.skillId==='max-web';
   if(pass.kind!=='source_intake'||!source||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision
@@ -5762,6 +5791,10 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
       executionContext,runtimeArguments:['read-reference','--local-account',source.localAccountId,...args.slice(1)]});
     if(selected.handled||selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
     executionContext.account=selected.account;
+    // Internal final-delivery admission, after all original/derived local I/O.
+    // It uses the SAME current native source/recipient and exact account guard,
+    // but executes no provider and proves no new body read/ACK/model action.
+    if(verifyDeliveryOnly){await check();return;}
     // Only the new SIGNED provider version understands this private input.
     // Legacy packages retain their complete metadata and never receive a new
     // flag, a guessed downloader command or a model-selected native ID.

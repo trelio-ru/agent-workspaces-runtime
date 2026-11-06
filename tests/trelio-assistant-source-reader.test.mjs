@@ -123,7 +123,12 @@ globalThis.fetch=async(url,options)=>{
       ...(sourceSelectionFixture?{sourceSelection:sourceSelectionFixture}:{}),...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
         ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{}),...(intakeFixture?{sourceIntake:intakeFixture.intent}:{}),
       ...(processor?{sourceProcessor:'audio-transcription'}:{})});
-    if(processor){assert.ok(processorFixture);return new Response(JSON.stringify(processorFixture.resolve()),{headers:{'content-type':'application/json'}});}
+    if(processor){
+      assert.ok(processorFixture);
+      if(await processorFixture.deliveryDenied?.())return new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ENCRYPTION_UNAVAILABLE'}),
+        {status:403,headers:{'content-type':'application/json'}});
+      return new Response(JSON.stringify(processorFixture.resolve()),{headers:{'content-type':'application/json'}});
+    }
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
   assert.equal(url.pathname,`${prefix}/package`);downloadCalls++;
@@ -1773,7 +1778,7 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
   const ref={eventId,id:'message:77:8',revision:'b'.repeat(64),conversationKey:`${max?'max':'telegram'}-conversation/v1.${'a'.repeat(64)}`};
   intakeFixture={intent:{intakeId,sourceId,expectedRevision:0},admission:{schemaVersion:1,intakeId,sourceId,sourceRevision:0,localAccountId:accountId,
     eventId,threadId,ownerIdentityId,ownerExternalUserId:'123456',...(max?{maxChatUrl:source.maxChatUrl,...(accountWide?{maxAccountDiscovery:true}:{})}:{})}};
-  const dir=path.join(directory,`intake-${provider}-${accountWide}-${encrypted}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
+  const dir=path.join(directory,`intake-${provider}-${accountWide}-${encrypted}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls'),revoked=path.join(dir,'revoked');
   await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';
     assert.deepEqual(process.argv.slice(2),${JSON.stringify(['read-reference','--chat',max?'https://web.max.ru/77':'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey])});
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
@@ -1796,6 +1801,7 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
         if(value.fixtureAudioMode==='trailing_bytes')fs.appendFileSync(target,'X');
         if(value.fixtureAudioMode==='extra_path')value.originalAudio.path='PRIVATE_PROVIDER_PATH';
         if(value.fixtureAudioMode==='false_no_audio')value.originalAudio={schemaVersion:1,requestId:input.requestId,state:'not_audio'};
+        if(value.fixtureAudioMode==='late_revoke')fs.writeFileSync(${JSON.stringify(revoked)},'NATIVE RECIPIENT REVOKED',{mode:0o600});
       }
     }
     process.stdout.write(JSON.stringify(value));`);
@@ -1842,6 +1848,18 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
       });
     }
     await fs.writeFile(output,JSON.stringify(voice));
+    // Revocation happens in the actual signed child AFTER a successful native
+    // admission/download. Structural source status remains readable; only a
+    // fresh content resolver may refuse the finished original's delivery.
+    const priorResolve=resolveOverride;
+    resolveOverride=async()=>await fs.stat(revoked).catch(()=>null)
+      ?new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ENCRYPTION_UNAVAILABLE'}),{status:403})
+      :priorResolve?.()??new Response(JSON.stringify(resolution()));
+    try{
+      await fs.writeFile(output,JSON.stringify({...voice,fixtureAudioMode:'late_revoke'}));
+      await assert.rejects(readAssistantOwnerIntakeMessage(input),error=>error.code==='ASSISTANT_SOURCE_ENCRYPTION_UNAVAILABLE');
+      assert.ok(await fs.stat(revoked),'the signed original reader actually reached the late-revocation boundary');
+    }finally{resolveOverride=priorResolve;await fs.rm(revoked,{force:true});await fs.writeFile(output,JSON.stringify(voice));}
     // Cross the second production boundary as well: native context -> actual
     // materializer -> SAME signed child/account -> native read confirmation ->
     // final model-visible MCP result. No Task, user account or model turn.
@@ -1891,7 +1909,9 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
           eventId:pass.eventId,threadId,localAccountId:accountId}}});
       }});
     try{
+      const readsBeforeContext=await fs.readFile(marker,'utf8');
       const delivered=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
+      assert.equal(await fs.readFile(marker,'utf8'),readsBeforeContext+'read;','final metadata admission never invokes the original provider twice');
       assert.equal(delivered.structuredContent.ownerMessage.text,'');
       const {original:deliveredOriginal,transcription,...deliveredMedia}=delivered.structuredContent.ownerMessage.media;
       assert.deepEqual(deliveredMedia,readVoice.media);
@@ -1932,12 +1952,14 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
           const text=fault==='invalid-utf8'?Buffer.concat([Buffer.alloc(65537,97),Buffer.from([255])]):Buffer.from(fault==='large-text'?'я'.repeat(15000):${JSON.stringify(words)});fs.writeFileSync(path.join(input.outputDirectory,'transcript.txt'),text,{mode:0o600});
           fs.appendFileSync(${JSON.stringify(processorMarker)},'status;');Object.assign(result,{state:'completed',model:'v3_rnnt',text:{sizeBytes:text.length,sha256:createHash('sha256').update(text).digest('hex')}});
           if(fault==='false-hash')result.text.sha256='0'.repeat(64);
+          if(fault==='late-revoke')fs.writeFileSync(${JSON.stringify(processorFault+'.revoked')},'NATIVE RECIPIENT REVOKED',{mode:0o600});
         }
         process.stdout.write(JSON.stringify(result));`);
       const processorBytes=await engine.buildAgentSkillPackage({skillId:'audio-transcription',runtimeVersion:'1.2.0',sourceDirectory:processorDirectory,
         entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session']});
       const processorArtifact=randomUUID(),processorRelease=randomUUID();
-      processorFixture={enableAutomatic:true,packageBytes:processorBytes,resolve:()=>{
+      processorFixture={enableAutomatic:true,packageBytes:processorBytes,
+        deliveryDenied:async()=>Boolean(await fs.stat(processorFault+'.revoked').catch(()=>null)),resolve:()=>{
         const raw=payload();raw.releaseId=processorRelease;raw.localIdentity={...raw.localIdentity,skillId:'audio-transcription',connectionId:null};
         raw.companyConnection=null;raw.artifact={...raw.artifact,id:processorArtifact,skillId:'audio-transcription',runtimeVersion:'1.2.0',
           packageSha256:createHash('sha256').update(processorBytes).digest('hex'),packageSizeBytes:processorBytes.length,
@@ -1987,6 +2009,29 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
       processorFixture.resolve=()=>({...originalResolution(),releaseId:randomUUID()});
       await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}));
       processorFixture.resolve=originalResolution;
+      // The processor callback has already returned when its TXT is opened.
+      // Revoke at that real filesystem boundary, after its own late resolver,
+      // to exercise the OUTER production MCP delivery fence independently.
+      const open=fs.open,priorDeliveryResolve=resolveOverride;
+      let transcriptOpened=false;
+      const openMock=t.mock.method(fs,'open',async function(file,...args){
+        const handle=await open.call(this,file,...args);
+        if(typeof file==='string'&&file.endsWith(path.join('job','transcript.txt'))){
+          transcriptOpened=true;await fs.writeFile(revoked,'NATIVE RECIPIENT REVOKED',{mode:0o600});
+        }
+        return handle;
+      });
+      resolveOverride=async()=>await fs.stat(revoked).catch(()=>null)
+        ?new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ENCRYPTION_UNAVAILABLE'}),{status:403})
+        :priorDeliveryResolve?.()??new Response(JSON.stringify(resolution()));
+      try{
+        await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}),
+          error=>error.code==='ASSISTANT_MCP_LOCAL_SOURCE_READ_TRELIO_BACKEND_HTTP_403');
+        assert.equal(transcriptOpened,true,'revocation followed real decoder output verification, not initial admission');
+      }finally{openMock.mock.restore();resolveOverride=priorDeliveryResolve;await fs.rm(revoked,{force:true});}
+      await fs.writeFile(processorFault,'late-revoke');
+      await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}),
+        'a recipient revoked during local ASR I/O must refuse plaintext delivery, even while structural source metadata stays readable');
       assert.equal((await fs.readFile(processorMarker,'utf8')).split('start;').length-1,1,'faults/release drift cannot start another decoder');
       processorFixture=null;
     }finally{processorFixture=null;await contextProxy.close?.();Object.assign(pass,priorPass);ref.eventId=priorEvent;intakeFixture=priorFixture;}

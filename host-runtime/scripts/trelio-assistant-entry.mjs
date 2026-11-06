@@ -1026,6 +1026,13 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text,media,mail,unsubscribeEligible})=>({eventId,text,media,...(mail?{mail,unsubscribeEligible:source.autoUnsubscribe===true&&unsubscribeEligible===true}:{})}))}
         :{ownerMessage:{text:message.text,media:message.media,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
       delete value.sourceRead;
+      // ASR/file verification may have continued after the original source
+      // package call returned. Structural intake/source status deliberately
+      // survives key revocation; obtain current native content admission at
+      // this final plaintext boundary instead of treating that status as ACL.
+      // This metadata-only pass runs no provider, download, decoder or ACK.
+      await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,
+        reference:references[0],verifyDeliveryOnly:true,signal,sourcePackage});
       const readState=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
       try{const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
         createAssistantInbox({database:readState.database}).confirmIntakeModelRead(pass.passId,
