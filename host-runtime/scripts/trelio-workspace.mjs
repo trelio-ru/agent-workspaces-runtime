@@ -1593,7 +1593,7 @@ export const formatBridgeCommandError = (error, command = "") => {
     // validation and access from an actual process failure. Existing lease and
     // storage recovery branches above/below retain their specific instructions.
     if (error instanceof TrelioApiError) {
-      return JSON.stringify(buildBridgeHttpErrorFrame(error.statusCode, error.code, error.message));
+      return JSON.stringify(buildBridgeHttpErrorFrame(error.statusCode, error.code, error.message, error.payload));
     }
     return error instanceof Error ? error.message : String(error);
   }

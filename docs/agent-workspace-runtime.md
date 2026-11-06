@@ -2116,6 +2116,28 @@ Child parser читает только последний complete `Ошибка
 
 ### HTTP-отказ через дочерний bridge
 
+Runtime admission использует тот же общий frame для Run, навыков и Secret:
+allowlisted `reason`, `expiredCause`, optional integer `proofAgeMs` и boolean
+`beforeDispatch` сохраняются до MCP без session/proof IDs, ключей и raw payload.
+Parser заново применяет тот же projector; legacy prose не восстанавливает
+утраченную причину. Ошибка больше не теряет независимые proof/session/bridge/
+source-grant clocks за общим CLI exit. Telemetry по-прежнему получает только
+исходный закрытый code, без новых dimensions.
+
+Для `skill_run` только `runtime_session_ended|runtime_session_expired` ведут к
+`reload_agent_skill_in_current_chat`: свежий native `get_agent_skill` с
+`instructions,execution` для той же компании/проекта/навыка, затем использование
+его exact execution declaration. Generic host не выбирает новую identity,
+не переписывает старый Run/skill snapshot и не продлевает TTL. Этот context read
+требует обычного нового approved hook; старый descriptor нельзя чинить вручную.
+Остальные причины ведут к exact admission diagnosis. Completed HTTP admission
+refusal сам по себе не является failed MCP startup и не требует plugin toggle,
+restart, OAuth/pairing или смены hook trust. Local MCP возвращает эту развилку
+типизированно и без raw stderr, не повторяя provider/Secret/Run action. Fresh
+skill read — восстановление контекста, а не разрешение повторить неизвестную
+отправку. Lease/fencing, transport, missing plugin и legacy ошибки сохраняют
+собственные recovery и не превращаются в skill-context expiry.
+
 Владелец проекции – generic runtime. Typed `TrelioApiError` после специальных
 lease/storage recovery branches сериализуется final JSON frame
 `TRELIO_BRIDGE_HTTP_ERROR` с прежним bounded локальным message, numeric

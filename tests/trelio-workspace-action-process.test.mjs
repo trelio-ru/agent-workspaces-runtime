@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { workspaceActionFailureCode } from "../host-runtime/scripts/trelio-local-context.mjs";
 import {
-  bridgeHttpDiagnosticCode, buildBridgeHttpErrorFrame, parseBridgeHttpDiagnostic,
+  bridgeHttpDiagnosticCode, buildBridgeHttpErrorFrame, parseBridgeHttpDiagnostic, projectRuntimeAdmissionFailure, runtimeAdmissionRecovery,
 } from "../host-runtime/scripts/trelio-bridge-http-diagnostics.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -95,6 +95,7 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
   process.stderr.write("Ошибка: " + JSON.stringify(buildBridgeHttpErrorFrame(
     Number(process.env.TRELIO_TEST_HTTP_STATUS), process.env.TRELIO_TEST_HTTP_CODE,
     "PRIVATE_CANARY original local explanation",
+    process.env.TRELIO_TEST_RUNTIME_PAYLOAD ? JSON.parse(process.env.TRELIO_TEST_RUNTIME_PAYLOAD) : null,
   )) + "\\n");
   process.exitCode = 1;
 } else if (process.env.TRELIO_TEST_PROVIDER_FAILURE) {
@@ -188,7 +189,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, transportStyle = "", runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", httpStatus = "", httpCode = "", ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, transportStyle = "", runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", httpStatus = "", httpCode = "", runtimePayload = null, ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -202,6 +203,7 @@ const createFixture = async (t) => {
         TRELIO_TEST_INNER_EXIT: String(innerExit),
         TRELIO_TEST_HTTP_STATUS: String(httpStatus),
         TRELIO_TEST_HTTP_CODE: httpCode,
+        TRELIO_TEST_RUNTIME_PAYLOAD: JSON.stringify(runtimePayload),
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
         TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
@@ -479,4 +481,60 @@ test("Workspace bridge preserves runtime recovery through the subprocess boundar
   });
   assert.equal(outcome.executions, "started\n");
   assert.doesNotMatch(JSON.stringify(outcome), /PRIVATE_CANARY/u);
+});
+
+// Exercise the complete child -> final frame -> MCP path for every admission
+// clock. A legacy/missing diagnosis remains unknown; no text-shaped error may
+// earn context replacement, provider replay, plugin toggle or a new Run.
+test("runtime admission clocks survive the real child boundary with bounded same-chat recovery", async (t) => {
+  const causes = ["proof_age", "proof_clock_skew", "runtime_session_unavailable",
+    "runtime_session_ended", "runtime_session_expired", "bridge_session_revoked",
+    "bridge_session_expired", "source_grant_revoked", "source_grant_expired"];
+  for (const expiredCause of causes) {
+    const fixture = await createFixture(t);
+    const runtimePayload = { reason: "expired", expiredCause, proofAgeMs: 245000,
+      beforeDispatch: expiredCause === "proof_age", runtimeSessionProof: "PRIVATE_CANARY", token: "PRIVATE_CANARY" };
+    const outcome = await fixture.run({ httpStatus: 409,
+      httpCode: "TRELIO_RUNTIME_HOOK_REQUIRED", runtimePayload });
+    assert.equal(outcome.error.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+    assert.equal(outcome.error.diagnosticCode, "TRELIO_RUNTIME_HOOK_REQUIRED");
+    assert.deepEqual(outcome.error.details.http.runtime, {
+      reason: "expired", expiredCause, proofAgeMs: 245000, beforeDispatch: expiredCause === "proof_age",
+    });
+    assert.deepEqual(outcome.error.details.recovery,
+      runtimeAdmissionRecovery(outcome.error.details.http.runtime, "skill_run"));
+    assert.equal(outcome.error.details.recovery.requiredAction,
+      ["runtime_session_ended", "runtime_session_expired"].includes(expiredCause)
+        ? "reload_agent_skill_in_current_chat" : "diagnose_runtime_admission");
+    assert.equal(outcome.executions, "started\n", "a refused provider action is never replayed");
+    assert.doesNotMatch(JSON.stringify(outcome.error), /PRIVATE_CANARY|token|runtimeSessionProof/u);
+    assert.match(outcome.error.message, new RegExp(expiredCause, "u"));
+  }
+});
+
+test("runtime projection keeps unknown evidence unknown and cannot change Run/Secret recovery", () => {
+  assert.equal(projectRuntimeAdmissionFailure("PRIVATE_CANARY", { reason: "expired" }), null);
+  assert.equal(projectRuntimeAdmissionFailure("TRELIO_RUNTIME_HOOK_REQUIRED", { reason: "PRIVATE_CANARY" }), null);
+  const projected = projectRuntimeAdmissionFailure("TRELIO_RUNTIME_HOOK_REQUIRED", {
+    reason: "expired", expiredCause: "PRIVATE_CANARY", proofAgeMs: "245000",
+    beforeDispatch: "true", runtimeSessionId: "PRIVATE_CANARY", recovery: { automaticRetry: true },
+  });
+  assert.deepEqual(projected, { reason: "expired" });
+  assert.equal(parseBridgeHttpDiagnostic("Ошибка: " + JSON.stringify({
+    code: "TRELIO_BRIDGE_HTTP_ERROR", details: { httpStatus: 503,
+      backendCode: "TRELIO_RUNTIME_HOOK_REQUIRED", runtime: { reason: "expired", expiredCause: "runtime_session_expired" } },
+  })).runtime, undefined, "a non-admission status cannot earn runtime recovery");
+  const runtime = { reason: "expired", expiredCause: "runtime_session_expired" };
+  for (const operation of ["open", "finish", "checkpoint", "secret_skill_run"]) {
+    assert.deepEqual(runtimeAdmissionRecovery(runtime, operation), {
+      requiredAction: "diagnose_runtime_admission", diagnosticSkill: "trelio-diagnostics",
+      automaticRetry: false, pluginToggleRequired: false, restartRequired: false,
+    });
+  }
+  for (const reason of ["missing", "invalid", "replayed"]) {
+    assert.deepEqual(projectRuntimeAdmissionFailure("TRELIO_RUNTIME_HOOK_REQUIRED", {
+      reason, expiredCause: "runtime_session_expired", proofAgeMs: 20,
+    }), { reason });
+    assert.equal(runtimeAdmissionRecovery({ reason }, "skill_run").requiredAction, "diagnose_runtime_admission");
+  }
 });

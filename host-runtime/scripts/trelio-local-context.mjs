@@ -9,7 +9,7 @@ import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-ta
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
-import { parseBridgeHttpDiagnostic } from "./trelio-bridge-http-diagnostics.mjs";
+import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery } from "./trelio-bridge-http-diagnostics.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
@@ -11163,16 +11163,30 @@ const executeTrelioWorkspaceActionOperation = async (
     const failureCode = workspaceActionFailureCode(error, invocation.operation);
     const processDiagnostic = parseProcessDiagnostic(error?.stderr);
     const httpDiagnostic = parseBridgeHttpDiagnostic(error?.stderr);
+    const runtime = httpDiagnostic?.runtime;
+    const recovery = runtimeAdmissionRecovery(runtime, invocation.operation);
+    // A completed admission refusal must not masquerade as a broken MCP host.
+    // Preserve the wrapper ABI, but surface the exact closed cause and a native
+    // context-read route. Never restart the plugin, replace a Run binding or
+    // repeat the provider action while handling this error.
+    const runtimeMessage = runtime ? `Trelio runtime admission rejected (${runtime.reason}${runtime.expiredCause ? ": " + runtime.expiredCause : ""}). `
+      + (recovery.requiredAction === "reload_agent_skill_in_current_chat"
+        ? "Reload get_agent_skill with instructions/execution in the same company/project/skill and current chat; use its fresh execution declaration. "
+        : "Use trelio-diagnostics to inspect this exact admission failure. ")
+      + "This refusal does not require toggling the plugin or restarting the app; do not automatically replay the original action." : null;
     const actionError = new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_FAILED",
-      stderr || "The Trelio Workspace bridge action failed.",
+      runtimeMessage || stderr || "The Trelio Workspace bridge action failed.",
       {
         operation: invocation.operation,
         failureCode,
         ...(processDiagnostic ? { process: processDiagnostic } : {}),
         ...(httpDiagnostic ? { http: httpDiagnostic } : {}),
-        ...(stdout ? { stdout } : {}),
-        ...(stderr ? { stderr } : {}),
+        ...(recovery ? { recovery } : {}),
+        // Runtime refusal diagnostics need no raw child prose or provider data.
+        // Other action failures retain the existing local recovery context.
+        ...(!runtime && stdout ? { stdout } : {}),
+        ...(!runtime && stderr ? { stderr } : {}),
       },
     );
     // Retain the public wrapper ABI and local stdout/stderr recovery context.

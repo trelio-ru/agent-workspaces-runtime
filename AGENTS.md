@@ -710,6 +710,10 @@ publication tooling также остаются вне этого публичн
   разрешает повтор mutation или передачу stdout/message в telemetry.
   Typed HTTP failure bridge передаётся отдельным final frame: только exact
   status и allowlisted backend code участвуют в той же проекции, что in-process.
+  Runtime admission сохраняет закрытые reason/expiredCause через этот же frame;
+  истёкший skill context ведёт к fresh exact skill read в том же чате, не к
+  plugin toggle. Proof/session/bridge/grant/Run lease различаются; отказ никогда
+  не повторяет provider action. См. тот же transport-контракт.
   Legacy prose не разбирается как HTTP; wrapper и правила повторов сохраняются.
   Сохраняй внутренний skill exit отдельно от CLI exit; Windows private worker
   различает startup/request/protocol/ACL/DPAPI. Hook deny сохраняет закрытый

@@ -819,6 +819,15 @@ test("storage billing blocker preserves the current Run and gives one exact reco
   const httpError = new TrelioApiError(429, "Rate limited", 1000, "PRIVATE_CANARY", {
     message: "PRIVATE_CANARY protected response", credentials: "PRIVATE_CANARY",
   });
+  const runtimeFrame = JSON.parse(formatBridgeCommandError(new TrelioApiError(409,
+    "runtime expired", null, "TRELIO_RUNTIME_HOOK_REQUIRED", {
+      reason: "expired", expiredCause: "runtime_session_ended", proofAgeMs: 12,
+      runtimeSessionId: "PRIVATE_CANARY", token: "PRIVATE_CANARY",
+    }), "skill"));
+  assert.deepEqual(runtimeFrame.details.runtime, {
+    reason: "expired", expiredCause: "runtime_session_ended", proofAgeMs: 12,
+  });
+  assert.doesNotMatch(JSON.stringify(runtimeFrame), /PRIVATE_CANARY|runtimeSessionId|token/u);
   const httpFrame = JSON.parse(formatBridgeCommandError(httpError, "open"));
   assert.deepEqual(httpFrame, {
     code: "TRELIO_BRIDGE_HTTP_ERROR",
@@ -9719,7 +9728,9 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
   const companyId = "99999999-9999-4999-8999-999999999999";
   const memberId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const connectionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-  const runtimeArgv = ["--runtime-session", "dddddddd-dddd-4ddd-8ddd-dddddddddddd"];
+  const expiredRuntimeSessionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const runtimeArgv = ["--runtime-session", expiredRuntimeSessionId];
+  let admissionRefusals = 0;
   const deliveredFilePathLog = path.join(temporaryDirectory, "delivered-file-path.txt");
   const runId = "66666666-6666-4666-8666-666666666666";
   const grantIds = {
@@ -9800,6 +9811,17 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
         assert.equal(body.runtimeSessionId, runtimeArgv[1]);
         assert.equal(body.runtimeAttestation, undefined);
         response.setHeader("content-type", "application/json");
+        // A resumed chat can still retain a descriptor from a finished hook
+        // session. Reject before resolve/package/provider; a later fresh native
+        // declaration uses a different session without restarting this process.
+        if (body.runtimeSessionId === expiredRuntimeSessionId) {
+          admissionRefusals += 1;
+          response.statusCode = 409;
+          response.end(JSON.stringify({ code: "TRELIO_RUNTIME_HOOK_REQUIRED",
+            reason: "expired", expiredCause: "runtime_session_ended",
+            message: "runtime admission expired", token: "PRIVATE_CANARY" }));
+          return;
+        }
         response.end(JSON.stringify({
           schemaVersion: 1,
           company: { id: companyId, slug: "integration-company" },
@@ -10037,6 +10059,19 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
       },
     );
 
+    await assert.rejects(runSkill(), error => {
+      const frame = JSON.parse(error.stderr.trim().split("Ошибка: ").at(-1));
+      assert.deepEqual(frame.details.runtime, { reason: "expired", expiredCause: "runtime_session_ended" });
+      assert.doesNotMatch(error.stdout, /runtime:|setup-authorized/u);
+      assert.doesNotMatch(error.stderr, /PRIVATE_CANARY/u);
+      return true;
+    });
+    assert.equal(admissionRefusals, 1, "an admission refusal never retries a stale session");
+    assert.equal(resolveCount, 0, "no package resolution before fresh admission");
+    assert.equal(packageDownloadCount, 0, "no package download or provider launch after refusal");
+    // Represents the server-selected descriptor from a fresh get_agent_skill,
+    // never a host substitution of a new session into the rejected invocation.
+    runtimeArgv[1] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     const firstRun = await runSkill();
     assert.match(firstRun.stdout, /\nchat:none\n/u);
     // Hydrate a pre-upgrade session after its admission is already cached. The

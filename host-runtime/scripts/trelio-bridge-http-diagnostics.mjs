@@ -15,16 +15,59 @@ export const bridgeHttpDiagnosticCode = (status, backendCode) =>
     : isHttpFailure(status) && status >= 500 ? "TRELIO_BACKEND_HTTP_5XX"
     : "TRELIO_BACKEND_HTTP_OTHER";
 
-export const buildBridgeHttpErrorFrame = (status, backendCode, message) => ({
-  code: "TRELIO_BRIDGE_HTTP_ERROR",
-  // This is the existing bounded local CLI explanation, not telemetry. Never
-  // copy the response payload, headers, URL or arbitrary Error properties.
-  message,
-  details: {
-    httpStatus: status,
-    ...(knownCodes.has(backendCode) ? { backendCode } : {}),
-  },
-});
+// Admission has several independent clocks: proof, runtime, bridge and source
+// grant. Preserve only the backend's closed diagnosis, never the session/proof
+// envelope. Keeping the projector shared also makes child and in-process errors
+// agree without parsing human prose or promoting diagnosis into retry authority.
+const runtimeReasons = new Set(["missing", "invalid", "expired", "replayed"]);
+const expiredCauses = new Set([
+  "proof_age", "proof_clock_skew", "runtime_session_unavailable",
+  "runtime_session_ended", "runtime_session_expired", "bridge_session_revoked",
+  "bridge_session_expired", "source_grant_revoked", "source_grant_expired",
+]);
+export const projectRuntimeAdmissionFailure = (backendCode, payload) => {
+  if (backendCode !== "TRELIO_RUNTIME_HOOK_REQUIRED" || !runtimeReasons.has(payload?.reason)) return null;
+  const expired = payload.reason === "expired";
+  return {
+    reason: payload.reason,
+    ...(expired && expiredCauses.has(payload.expiredCause) ? { expiredCause: payload.expiredCause } : {}),
+    ...(expired && Number.isSafeInteger(payload.proofAgeMs) ? { proofAgeMs: payload.proofAgeMs } : {}),
+    // False/unknown remains distinct from affirmative pre-dispatch evidence.
+    ...(typeof payload.beforeDispatch === "boolean" ? { beforeDispatch: payload.beforeDispatch } : {}),
+  };
+};
+
+export const runtimeAdmissionRecovery = (runtime, operation) => {
+  if (!runtime) return null;
+  const reloadSkill = operation === "skill_run" && runtime.reason === "expired"
+    && ["runtime_session_ended", "runtime_session_expired"].includes(runtime.expiredCause);
+  return {
+    requiredAction: reloadSkill ? "reload_agent_skill_in_current_chat" : "diagnose_runtime_admission",
+    ...(reloadSkill ? { toolName: "get_agent_skill", sections: ["instructions", "execution"] } : {}),
+    diagnosticSkill: "trelio-diagnostics",
+    automaticRetry: false,
+    // Admission is a completed backend refusal, not evidence that the client's
+    // MCP connection or installed plugin is stale. Recovery keeps the chat and
+    // existing Run; a new skill declaration must come from a fresh native read.
+    pluginToggleRequired: false,
+    restartRequired: false,
+  };
+};
+
+export const buildBridgeHttpErrorFrame = (status, backendCode, message, payload = null) => {
+  const runtime = status === 409 ? projectRuntimeAdmissionFailure(backendCode, payload) : null;
+  return {
+    code: "TRELIO_BRIDGE_HTTP_ERROR",
+    // This is the existing bounded local CLI explanation, not telemetry. Never
+    // copy the response payload, headers, URL or arbitrary Error properties.
+    message,
+    details: {
+      httpStatus: status,
+      ...(knownCodes.has(backendCode) ? { backendCode } : {}),
+      ...(runtime ? { runtime } : {}),
+    },
+  };
+};
 
 export const parseBridgeHttpDiagnostic = stderr => {
   if (typeof stderr !== "string" || Buffer.byteLength(stderr, "utf8") > 64 * 1024) return null;
@@ -40,6 +83,8 @@ export const parseBridgeHttpDiagnostic = stderr => {
     const backendCode = payload?.details?.backendCode;
     if (payload?.code !== "TRELIO_BRIDGE_HTTP_ERROR" || !isHttpFailure(status)
       || (backendCode !== undefined && !knownCodes.has(backendCode))) return null;
-    return { httpStatus: status, failureCode: bridgeHttpDiagnosticCode(status, backendCode) };
+    const runtime = status === 409 ? projectRuntimeAdmissionFailure(backendCode, payload.details?.runtime) : null;
+    return { httpStatus: status, failureCode: bridgeHttpDiagnosticCode(status, backendCode),
+      ...(runtime ? { runtime } : {}) };
   } catch { return null; }
 };
