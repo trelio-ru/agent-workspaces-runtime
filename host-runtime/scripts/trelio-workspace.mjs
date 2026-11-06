@@ -13536,8 +13536,16 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     const sourceRunId = error?.details?.runId;
     if (options.dir || !requestedRunId || error?.code !== "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED"
       || error.details?.reasonCode !== "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW"
-      || sourceRunId === requestedRunId
-      || !["running", "waiting_for_human", "review"].includes((await loadRunSnapshot(sourceRunId))?.run?.status)) throw error;
+      || sourceRunId === requestedRunId) throw error;
+    // The same refusal can describe a child inside an old multi-Run
+    // container. That container is not one worker's checkout: bypassing its
+    // migration would skip review of other unfinished/unknown children.
+    // Admit a sibling only for the exact materialized root already validated
+    // by preflight, never for a container inferred from one live child.
+    const sourceMetadata = await readOptionalRunMetadata(rootDirectory);
+    if (sourceMetadata?.runId !== sourceRunId) throw error;
+    await assertValidMaterializedRoot(rootDirectory, sourceMetadata, workspaceId, origin);
+    if (!["running", "waiting_for_human", "review"].includes((await loadRunSnapshot(sourceRunId))?.run?.status)) throw error;
     rootDirectory = workspaceParallelDirectory(rootDirectory, workspaceId, requestedRunId);
     parallelOpen = true;
     directoryPreflight = await preflight(rootDirectory, true);

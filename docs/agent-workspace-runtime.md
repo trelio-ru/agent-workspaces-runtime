@@ -1997,6 +1997,9 @@ returned `open` и повторяет исходное действие один
 Run, независимый подготовленный Run открывается в отдельном `p-<digest>` root.
 Digest связывает parent/Workspace/Run; повторный exact open использует свою копию.
 Source files, lease и registry не меняются; explicit directory не перенаправляется.
+Этот путь требует собственной проверенной metadata выбранного root. Старый
+multi-Run container без неё сохраняет прежний migration/reclaim refusal:
+один живой child не разрешает обход проверки остальных каталогов.
 Один последовательный Run переиспользует существующий checkout. Parallel roots
 имеют те же 3 дня retention и terminal/clean/idle guards, что recovery copies.
 
