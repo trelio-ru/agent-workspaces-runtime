@@ -1163,14 +1163,31 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       if(name==='get_assistant_intake_context'){
         const authority=value.creationAuthority;
         if(!object(authority)||authority.company?.id!==pass.companyId||!authority.instructions)fail('ASSISTANT_MCP_INVALID_RESPONSE');
-        const selectedProject=value.kind==='route_existing'&&value.projectId!==null?authority.projects?.find(row=>row.id===value.projectId):null;
-        if(value.kind==='route_existing'&&value.projectId!==null&&!selectedProject)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        if(business.projectId!==undefined&&(business.projectId!==value.projectId
+          ||value.kind!=='route_existing'&&!value.metadata))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        if(value.metadata&&value.sourceRead?.projectId!=null&&value.sourceRead.projectId!==value.projectId)
+          fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        const selectedCreation=value.kind!=='route_existing'&&value.metadata&&UUID.test(value.projectId??'')
+          &&(business.projectId===value.projectId||value.sourceRead?.projectId===value.projectId);
+        const scopedProjectId=value.kind==='route_existing'||selectedCreation?value.projectId:null;
+        const selectedProject=scopedProjectId!==null?authority.projects?.find(row=>row.id===scopedProjectId):null;
+        if(scopedProjectId!==null&&!selectedProject)fail('ASSISTANT_MCP_INVALID_RESPONSE');
         value.effectiveInstructions=local.buildLocalScopedEffectiveInstructions(authority,selectedProject);
         if(value.metadata){
           const project=authority.projects.find(row=>row.id===value.projectId);
           if(!project)fail('ASSISTANT_MCP_INVALID_RESPONSE');
-          value.metadata.structuredContent.effectiveInstructions=local.buildLocalScopedEffectiveInstructions(authority,project);
-          value.metadata.content=[{type:'text',text:JSON.stringify(value.metadata.structuredContent)}];
+          if(selectedCreation){
+            // The native explicit/configured project read has one complete
+            // selected-project authority at the top. Creator data is nested
+            // within that SAME read; no second compiled rule/JSON copy and no
+            // loss of project-specific rules. Company questions stay company
+            // scoped; legacy unselected metadata retains its old projection.
+            const {effectiveInstructions:_instructions,...core}=value.metadata.structuredContent;
+            value.metadata={...value.metadata,structuredContent:core,content:[]};
+          }else{
+            value.metadata.structuredContent.effectiveInstructions=local.buildLocalScopedEffectiveInstructions(authority,project);
+            value.metadata.content=[{type:'text',text:JSON.stringify(value.metadata.structuredContent)}];
+          }
         }
         delete value.creationAuthority;
       }

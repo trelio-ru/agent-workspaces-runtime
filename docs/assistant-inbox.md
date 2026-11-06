@@ -720,6 +720,15 @@ late fences positively select the validated original `read-reference` profile
 a positive external effect must not be hidden by a later refusal or acquire
 permission to replay.
 
+A source configured for a project, or an explicit native `projectId` read,
+returns that exact project's complete authority at the top once. Nested creator
+metadata retains its full canonical core with no second instruction/text copy.
+A company-wide question keeps company authority even when only one project is
+eligible: `metadataNextCall` offers the existing exact project read before task
+creation. That structural continuation is not body evidence or project consent;
+the next read repeats native proof and BOTH creator ACL. Legacy unselected
+metadata never silently lifts company questions into a project's rules.
+
 Schema16 adds only nullable `reply_receipt_id` and positive `reply_message_id`
 to the SAME private SQLite journal; migration preserves old refs/cursors/fences.
 Text is transient RAM/private child stdin, never SQLite/argv/env. The ordinary

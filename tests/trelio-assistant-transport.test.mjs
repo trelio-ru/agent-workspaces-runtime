@@ -581,6 +581,42 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         intakeState='reply_pending';return {content:[],structuredContent:{state:'reply_pending',receiptId:randomUUID()}};
       });
       assert.equal(reply.structuredContent.state,'reply_pending');
+      intakeState='leased';
+      const creationProjectId=randomUUID();
+      const creationContext=(configured=false)=>({content:[],structuredContent:{managedEncryptedContent:{
+        schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
+        context:{projectId:creationProjectId,sourceRead:{projectId:configured?creationProjectId:null},
+          metadata:{structuredContent:{project:{id:creationProjectId},creatorFieldsCanary:'COMPLETE_CREATOR_CORE'},content:[]},
+          creationAuthority:{company:{id:companyId,slug:'encrypted'},viewer:{memberId:randomUUID()},
+            projects:[{id:creationProjectId,slug:'selected-project'}],instructions:{company:{compiledMarkdown:'COMPANY_SCOPE_RULES'},
+              projects:[{projectId:creationProjectId,snapshot:{compiledMarkdown:`COMPANY_SCOPE_RULES\nPROJECT_SCOPE_RULES ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_plain_text')}`}}],userProfile:null}}},
+        encryptedPayloads:[richPayload]}}});
+      // Explicit project reads and owner-configured project sources retain all
+      // project authority once, rather than applying an eligible project's
+      // rules to an unrelated company question or duplicating full metadata.
+      for(const configured of [false,true]){
+        const selected=await withAssistantManagedContentArguments({...input,name:'get_assistant_intake_context',args:{
+          intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId},...(configured?{}:{projectId:creationProjectId})}},
+          async()=>creationContext(configured));
+        assert.equal(selected.structuredContent.effectiveInstructions.scope.project.id,creationProjectId);
+        assert.match(selected.structuredContent.effectiveInstructions.layers[0].markdown,/COMPANY_SCOPE_RULES.*PROJECT_SCOPE_RULES.*RICH_BODY_CANARY/su);
+        assert.equal(selected.structuredContent.metadata.structuredContent.effectiveInstructions,undefined);
+        assert.deepEqual(selected.structuredContent.metadata.content,[]);
+        assert.equal(selected.structuredContent.metadata.structuredContent.creatorFieldsCanary,'COMPLETE_CREATOR_CORE');
+      }
+      const companyContext=creationContext();
+      const companyValue=companyContext.structuredContent.managedEncryptedContent.context;
+      companyValue.metadata=null;companyValue.metadataNextCall={tool:'get_assistant_intake_context',arguments:{projectId:creationProjectId}};
+      companyValue.creationAuthority.projects=[];companyValue.creationAuthority.instructions.projects=[];
+      companyContext.structuredContent.managedEncryptedContent.encryptedPayloads=[];
+      const companyRead=await withAssistantManagedContentArguments({...input,name:'get_assistant_intake_context',args:{
+        intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId}}},async()=>companyContext);
+      assert.equal(companyRead.structuredContent.effectiveInstructions.scope.project,null);
+      assert.match(companyRead.structuredContent.effectiveInstructions.layers[0].markdown,/COMPANY_SCOPE_RULES/u);
+      assert.doesNotMatch(JSON.stringify(companyRead),/PROJECT_SCOPE_RULES/u);
+      assert.deepEqual(companyRead.structuredContent.metadataNextCall,{tool:'get_assistant_intake_context',arguments:{projectId:creationProjectId}});
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'get_assistant_intake_context',args:{
+        intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId},projectId:randomUUID()}},async()=>creationContext()),/INVALID_RESPONSE/);
       intake.intakeKind='route_existing';intake.eventIds=[intake.eventId,randomUUID()];intakeState='leased';
       const projectId=randomUUID(),taskId=randomUUID();
       client.readSourceIntake=async()=>({state:intakeState,kind:'route_existing',eventIds:intake.eventIds,threadId:intake.threadId,eventId:intake.eventId,

@@ -1227,6 +1227,8 @@ publication tooling также остаются вне этого публичн
   final MCP output; structural source status never substitutes for recipient ACL.
   Positively select original read-reference/ASR; preserve the original deadline
   and exclude irreversible reply/ACK/setup/unsubscribe.
+  Explicit/configured creation scope returns full exact authority once; company
+  questions defer creator metadata via native metadataNextCall, never guessed rules.
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an
   explicit source generation remains the normal retry. Schema17 permits only a

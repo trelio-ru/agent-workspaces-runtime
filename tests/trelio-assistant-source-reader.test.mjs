@@ -1889,7 +1889,9 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
     const contextStore={...selectedStore,get:slot=>slot.kind==='runtime'&&slot.id===pass.passId?runtimeRecord:selectedStore.get(slot),
       put:async(slot,value)=>{if(slot.kind==='runtime'&&slot.id===pass.passId){runtimeRecord=structuredClone(value);return;}
         return selectedStore.put(slot,value);}};
-    let confirmations=0;
+    // The raw native response fits its 512KiB transport; adding the actual
+    // original and both model-facing representations crosses that SAME cap.
+    let confirmations=0,nativeContextProse='OVERSIZED_CONTEXT_CANARY'+ 'x'.repeat(270000);
     const contextClient={...client,readSourceIntake:async()=>({state:'leased',readConfirmed:confirmations>0,threadId,eventId:pass.eventId,sourceRevision:0,
       leaseExpiresAt:new Date(Date.now()+60000).toISOString()}),confirmIntakeRead:async input=>{
       confirmations++;assert.equal(input.intakePass.intakeId,pass.passId);
@@ -1905,10 +1907,25 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
         if(wire.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
         if(wire.payload.method==='tools/list')return reply({tools:[{name:'get_assistant_intake_context',inputSchema:{type:'object'},description:'Synthetic native context'}]});
         assert.equal(wire.payload.method,'tools/call');assert.equal(wire.payload.params.name,'get_assistant_intake_context');
-        return reply({content:[],structuredContent:{sourceRead:{companyId,sourceId,sourceRevision:0,intakeId:pass.passId,
+        return reply({content:[],structuredContent:{nativeContextProse,sourceRead:{companyId,sourceId,sourceRevision:0,intakeId:pass.passId,
           eventId:pass.eventId,threadId,localAccountId:accountId}}});
       }});
     try{
+      // A positively read original is NOT a delivered model response when the
+      // final serialized MCP envelope refuses. Keep ACK evidence absent, even
+      // though the independent native exact-body confirmation remains genuine.
+      const modelReadWitness=async()=>{
+        const opened=await openAssistantDatabase(inboxDirectory);
+        try{return opened.database.prepare(`SELECT e.model_read_intake_id FROM assistant_inbox_events e
+          JOIN assistant_source_intake_events b ON b.event_key=e.event_key WHERE b.intake_id=?`).get(pass.passId).model_read_intake_id;}
+        finally{await opened.close();}
+      };
+      await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}),
+        error=>error.code==='ASSISTANT_SOURCE_CONTEXT_LIMIT');
+      assert.equal(await modelReadWitness(),null,'an oversized refusal must not earn model delivery/ACK evidence');
+      // Complete native intake authority may exceed the skill-only 40k cap.
+      // Preserve both existing native representations under its 512KiB ceiling.
+      nativeContextProse='NATIVE_CONTEXT_CANARY\n'+'я\n'.repeat(15000);
       const readsBeforeContext=await fs.readFile(marker,'utf8');
       const delivered=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
       assert.equal(await fs.readFile(marker,'utf8'),readsBeforeContext+'read;','final metadata admission never invokes the original provider twice');
@@ -1922,9 +1939,14 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
       assert.equal(deliveredOriginal.sha256,withAudio.media.original.sha256);
       assert.deepEqual(await fs.readFile(deliveredOriginal.localFilePath),original);
       assert.equal(JSON.parse(delivered.content[0].text).ownerMessage.media.kind,'voice');
+      assert.equal(delivered.structuredContent.nativeContextProse,nativeContextProse,'complete native context stays byte-for-byte intact');
+      assert.equal(JSON.stringify(delivered).split('NATIVE_CONTEXT_CANARY').length-1,2,'both native MCP representations retain complete authority');
+      assert.ok(Buffer.byteLength(JSON.stringify(delivered))>40000);
+      assert.ok(Buffer.byteLength(JSON.stringify(delivered))<=512*1024,'measure the actual escaped native MCP result');
+      assert.equal(await modelReadWitness(),pass.passId,'only a fully admitted bounded response earns model delivery evidence');
       assert.equal(delivered.structuredContent.sourceRead,undefined,'host-only selectors stay private');
       assert.doesNotMatch(JSON.stringify(delivered),/ownerExternalUserId|senderExternalUserId|replyText|UNTRUSTED_QUOTE/);
-      assert.equal(confirmations,1);
+      assert.equal(confirmations,2);
       // Ready ASR crosses the SAME real production MCP materializer, source
       // admission/signature/cache/process engine and durable runtime binding.
       // Only external decoder/native HTTP responses are synthetic here; real
@@ -1978,12 +2000,12 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
       assert.equal(completed.structuredContent.ownerMessage.media.transcription.machineGenerated,true);
       assert.equal(completed.structuredContent.ownerMessage.media.transcription.complete,true);
       assert.equal(await fs.readFile(processorMarker,'utf8'),'start;status;','repeated context never starts a second decoder');
-      assert.equal(confirmations,3);
+      assert.equal(confirmations,4);
       assert.doesNotMatch(JSON.stringify(completed),/sourceAudio|processorIntakeId|ownerExternalUserId|privateKeyPkcs8/);
       assert.ok(runtimeRecord.sourceAudio.processor.releaseId,'package pin survives in SAME protected runtime record');
       await fs.writeFile(processorFault,'large-text');
       const large=await contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}});
-      assert.ok(Buffer.byteLength(JSON.stringify(large))<=40000);
+      assert.ok(Buffer.byteLength(JSON.stringify(large))<=512*1024);
       assert.equal(large.structuredContent.ownerMessage.media.transcription.text,undefined);
       assert.equal(await fs.readFile(large.structuredContent.ownerMessage.media.transcription.file.localFilePath,'utf8'),'я'.repeat(15000));
       for(const fault of ['unknown','setup_required','unsupported']){
