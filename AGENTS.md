@@ -223,6 +223,9 @@ publication tooling также остаются вне этого публичн
   Новые plugin hooks и перехват final response для этого не добавляются.
   Entry-policy генерируется из backend; polling/proposal DTO не расширяются.
 
+- Skill recovery выбирает доступную совместимую альтернативу без вопроса только
+  о выборе provider; explicit service, recipient/cost, ACL и unknown mutation
+  сохраняют свои границы. [Контракт](docs/agent-skills-and-secrets.md#живой-каталог).
 - Перед новой функцией или инструкцией модели применяй
   [приоритет алгоритмического исполнения](docs/agent-workspace-runtime.md#algorithmic-execution).
 - Подробно комментируй нетривиальный код, особенно security, transport, ACL,

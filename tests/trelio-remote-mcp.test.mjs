@@ -5359,18 +5359,21 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
     /Reuse ≤12h при том же context\/intent/u,
     /reload после new session, compaction, expiry, route\/blocker\/release change/u,
     /Missing tool ≠ missing guidance/u,
-    /runtimeExecution\.localAction либо Remote MCP tools с возвращёнными identity\/release/u,
-    /формальному integrationRouting, primary\/fallback и точным разрешённым причинам/u,
-    /не выводи их из IDs\/порядка/u,
-    /Нет корректного routing – нет fallback/u,
-    /Assignment, connection, session каждого навыка независимы/u,
-    /При setup_required\/no_access\/needs_reconnect объясни блокировку и необходимую настройку/u,
-    /требует явного выбора пользователя после объяснения, кроме разрешения formal routing/u,
-    /При searched, hasMore=false и отсутствии relevant skill допустим совместимый личный connector/u,
-    /Временная ошибка\/control-plane outage не доказывает отсутствие и не разрешает fallback/u,
-    /До повтора неоднозначной mutation установи реальный результат/u,
-    /Не обходи рабочий навык browser\/HTTP\/другим MCP\/script/u,
-    /request_plugin_install до каталога/u,
+    /runtimeExecution\.localAction or Remote MCP tools with exact identity\/release/u,
+    /Honor formal integrationRouting and its reasons/u,
+    /never infer priority from IDs\/order/u,
+    /Malformed declared routing blocks that route; absent routing does not forbid alternatives/u,
+    /Assignments, connections and sessions stay independent/u,
+    /On setup_required\/no_access\/needs_reconnect\/unsupported or a bounded technical failure, briefly explain the blocker/u,
+    /automatically find\/load an available compatible skill and continue the authorized task/u,
+    /do not ask merely to choose a provider/u,
+    /Preserve explicit service\/account choice, ACL, authorized recipients\/costs and independent mutation approval/u,
+    /ask only for missing authority/u,
+    /Searched guidance with hasMore=false and no usable relevant skill permits compatible personal connectors/u,
+    /Control-plane outage is not an empty catalog; transient failure is not no_access\/setup_required/u,
+    /Unknown mutation outcomes require read-back before retry or switching/u,
+    /Never bypass a working skill through browser\/HTTP\/another MCP\/script/u,
+    /request_plugin_install before catalog discovery/u,
     /Явная development\/debug\/audit\/release задача в названном каноническом репозитории/u,
     /одного checkout мало/u,
     /Сохраняй scope\/ACL, secret delivery, no-logging, output bounds и authority внешних mutations/u,
@@ -5466,7 +5469,7 @@ test("platform routing sends a provider-neutral signed skill through runtimeExec
     type: "runtimeExecution",
     skillId: "signed-inventory-runtime",
   });
-  assert.match(instructions, /объявленные выбранным навыком runtimeExecution\.localAction/u);
+  assert.match(instructions, /selected skill's declared runtimeExecution\.localAction/u);
 });
 
 test("platform routing sends a provider-neutral knowledge service through remoteMcpExecution", async () => {
@@ -5489,7 +5492,7 @@ test("platform routing sends a provider-neutral knowledge service through remote
     type: "remoteMcpExecution",
     skillId: "remote-knowledge",
   });
-  assert.match(instructions, /объявленные выбранным навыком runtimeExecution\.localAction либо Remote MCP tools с возвращёнными identity\/release/u);
+  assert.match(instructions, /selected skill's declared runtimeExecution\.localAction or Remote MCP tools with exact identity\/release/u);
 });
 
 test("platform routing discovers a runtime even without an integration-specific tool", async () => {
@@ -5680,12 +5683,12 @@ test("platform routing allows a named fallback when no relevant skill exists", a
     type: "fallback",
     reason: "no_relevant_skill",
   });
-  assert.match(instructions, /При searched, hasMore=false и отсутствии relevant skill/u);
-  assert.match(instructions, /допустим совместимый личный connector/u);
+  assert.match(instructions, /Searched guidance with hasMore=false and no usable relevant skill/u);
+  assert.match(instructions, /permits compatible personal connectors/u);
   assert.match(instructions, /Exact reads\/Run без поиска/u);
 });
 
-test("platform routing blocks on explicit no_access until the user chooses another source", async () => {
+test("a denied skill stays blocked while guidance permits a compatible authorized alternative", async () => {
   const instructions = await readRoutingInstructionsFromInitialize();
   const route = resolveCatalogFixtureRoute({
     purpose: "legal_source_search",
@@ -5703,8 +5706,10 @@ test("platform routing blocks on explicit no_access until the user chooses anoth
     type: "blocked",
     reason: "no_access",
   });
-  assert.match(instructions, /объясни блокировку и необходимую настройку/u);
-  assert.match(instructions, /требует явного выбора пользователя после объяснения/u);
+  assert.match(instructions, /briefly explain the blocker/u);
+  assert.match(instructions, /automatically find\/load an available compatible skill/u);
+  assert.match(instructions, /ask only for missing authority/u);
+  assert.doesNotMatch(instructions, /требует явного выбора пользователя после объяснения/u);
 });
 
 test("stdio host emits only newline-delimited JSON-RPC frames", async (t) => {

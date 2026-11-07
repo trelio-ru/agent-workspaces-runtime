@@ -65,14 +65,18 @@ exact company/project/skill/release находится в model context. Усп�
 Run, а executable release всё равно разрешается host-ом перед каждым
 действием.
 
-Availability и readiness различаются. Company `setup_required` или возвращённые
-навыком `setup_required`, `no_access`, `needs_reconnect` останавливают текущий
-запрос к данным: агент сообщает blocker и required action. Вне формального
-`integrationRouting` нельзя автоматически искать или запускать другую
-реализацию; она допустима только после явного выбора пользователя. Пустой
-relevant search при этом не запрещает совместимый личный skill или connector.
-Недоступность catalog/control plane и transient network failure сами по себе не
-доказывают отсутствие интеграции, `no_access` или `setup_required`.
+Availability и readiness различаются. Подтверждённый setup/access/unsupported
+или bounded technical failure останавливает только текущую реализацию: агент
+кратко называет blocker и самостоятельно находит/загружает доступный совместимый
+навык для порученной задачи. Выбор реализации не требует вопроса. Сохраняются
+явный service/account choice, formal routing, ACL, разрешённые получатели данных
+и расходы, независимое согласование mutation. Новое разрешение запрашивается
+только при его отсутствии; неизвестный исход записи сначала проверяется read-back,
+без retry через другой навык. Совместимость по смыслу оценивает модель;
+исполнение/admission остаются у прежнего host/provider, без второго executor.
+Успешный `searched` без пригодного relevant skill допускает compatible personal
+connector; unavailable control plane не считается пустым каталогом. Transient
+failure не доказывает `no_access` или `setup_required`.
 
 Если catalog items возвращают `integrationRouting`, маршрут определяется только
 его текущими полями: `family`, `role`, `priority`, `selectionRule`,
@@ -80,9 +84,10 @@ relevant search при этом не запрещает совместимый �
 `ambiguousMutationFallback`. Skill ID, title, порядок rows и прошлый запуск не
 являются authority. Fallback разрешён только к exact `fallbackSkillId` после
 причины из `fallbackWhen`; assignments, connections, credentials, sessions и
-policy остаются независимыми. Отсутствующий или противоречивый contract,
-control-plane outage, timeout, transient/unknown failure и запрещённый fallback
-после ambiguous mutation означают fail-closed.
+policy остаются независимыми. Противоречивый объявленный contract блокирует именно этот маршрут;
+его отсутствие не вводит общего запрета совместимых альтернатив. Formal route
+не расширяется по timeout/transient failure, если такой причины нет в нём;
+неизвестная mutation всегда сохраняет запрет replay.
 
 Найденный и доступный навык нельзя обходить browser, Computer Use, direct HTTP,
 другим MCP или локальным скриптом. Внешний transport не может расширить ACL,
