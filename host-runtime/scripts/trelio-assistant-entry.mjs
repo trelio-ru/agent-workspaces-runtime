@@ -1736,7 +1736,8 @@ const productionContext = async (action, options = {}) => {
 // production factory. This does not add it to the model-visible MCP catalogue.
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
-  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply'];
+  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
+  'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
 /** Reuse the host setup mutex at the final NEW-work HTTP boundary. This is a
  * denial/CAS check, never domain admission: native owner/device/task guards
@@ -1801,7 +1802,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     return value.value;
   };
   const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
-    ['claimTaskHost','beginTaskPass','beginSourceIntake'].includes(name))]))};
+    ['claimTaskHost','beginTaskPass','beginSourceIntake','prepareOwnerReplyDelivery'].includes(name))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
   const configDirectory=dependencies.configurationDirectory??dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();
   const root=dependencies.directory??path.join(configDirectory,'digital-assistants','runtime');
@@ -1814,7 +1815,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   let coordinator,closed=false;
   try {
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
-      readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply};
+      readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
+      readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply};
     if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     // Observe the native boundary before the coordinator deliberately replaces
     // a post-admission error with its durable delivery-uncertain fence. That
@@ -1899,9 +1901,26 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
         receiptId:input.outcome.receiptId,replyText:input.replyText,candidateMessageId:input.candidateMessageId,
         reference:{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key}});
     }));
+    // SAME signed source sender/verifier, with a separate fixed native receipt
+    // and no active model pass. Fresh identity/private invocation is mandatory
+    // on BOTH branches; dependency-only coordinator tests cannot prove wiring.
+    const preparedReplyAction=verify=>(input,signal)=>invoke(async(live,host,store)=>{
+      const {replyAssistantOwnerIntake,verifyAssistantOwnerReply}=await import('./trelio-assistant-transport.mjs');
+      const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+      const current=runtimeHookSignal(),combined=signal?AbortSignal.any([signal,current]):current;
+      if(await host.readActivePass()!==null)fail('ASSISTANT_INTAKE_CHANGED');
+      const row=input.row,source=(await live.sourceAccounts(row.scope.companyId,combined)).find(value=>value.id===row.scope.bindingId);
+      return (verify?verifyAssistantOwnerReply:replyAssistantOwnerIntake)({identity:stableIdentity,client:live,host,store,source,signal:combined,
+        preparedDelivery:input.grant,receiptId:input.grant.receiptId,replyText:input.replyText,
+        ...(dependencies.sourcePackage?{sourcePackage:dependencies.sourcePackage}:{}),
+        ...(verify?{candidateMessageId:input.candidateMessageId}:{beforeInvoke:input.beforeInvoke,onConfirmed:input.onConfirmed}),
+        reference:{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key}});
+    });
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
       sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,acknowledgeSource,verifyOwnerReply,
+      deliverPreparedOwnerReply:dependencies.deliverPreparedOwnerReply??preparedReplyAction(false),
+      verifyPreparedOwnerReply:dependencies.verifyPreparedOwnerReply??preparedReplyAction(true),
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
         report:(row,observation,signal)=>invoke(live=>live.reportSourceHealth({companyId:row.companyId,sourceId:row.id,...observation},signal))},
       native:{...observedNative,

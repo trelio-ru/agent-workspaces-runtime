@@ -116,6 +116,11 @@ export const questionProviderPackage=configuration=>async(input,action)=>{
       assert.equal(captureMode,'assistant_source_reply');assert.equal(runtimeArguments[0],'reply-reference');
       assert.ok(['reply_owner','verify_owner_reply'].includes(admission.kind));assert.equal(admission.receiptId,input.sourceIntake.replyReceiptId);
       assert.equal(input.sourceIntake.replyProtocolVersion,2);
+      if(configuration.preparedReplyDelivery){
+        assert.equal(input.sourceIntake.preparedReplyDeliveryProtocolVersion,1);
+        assert.equal(JSON.parse(assistantOwnerReplyInput(input.sourceIntake,input.intakeExecution)).text,'  Prepared **CURRENT_SYNTHETIC_PLAN**  ',
+          'the exact original draft reaches the actual provider pipe; its Markdown parser owns rendered whitespace/entities');
+      }
       if(input.intakeExecution.replyDocument?.filePath)await fs.writeFile(path.join(configuration.root,'synthetic-prepared-file.json'),
         JSON.stringify({filePath:input.intakeExecution.replyDocument.filePath}),{mode:0o600});
       const value=await callQuestionTelegram(configuration,{receiptId:admission.receiptId,

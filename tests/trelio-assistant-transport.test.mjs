@@ -12,6 +12,34 @@ const memoryStore = () => {
     put:async(input,value)=>values.set(key(input),structuredClone(value)),remove:async input=>values.delete(key(input)) };
 };
 
+test('prepared reply device wire is structural, closed and never retries an unknown outcome',async()=>{
+ const {assistantPreparedOwnerReplyReceipt}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID();
+ const locator={companyId,sourceId:randomUUID(),intakeId:randomUUID()},input={...locator,originalReceiptId:randomUUID(),
+  terminalTurnId:randomUUID(),clientRequestId:randomUUID(),previousPrerequisiteKey:'a'.repeat(64),prerequisiteKey:'b'.repeat(64)};
+ const grant={schemaVersion:1,intakeId:locator.intakeId,sourceId:locator.sourceId,sourceRevision:0,deviceId,
+  localAccountId:randomUUID(),ownerIdentityId:randomUUID(),ownerUserId:randomUUID(),eventId:randomUUID(),threadId:randomUUID(),
+  ...Object.fromEntries(Object.entries(input).filter(([key])=>!['companyId','sourceId','intakeId'].includes(key))),
+  receiptId:randomUUID(),leaseExpiresAt:new Date(Date.now()+1800000).toISOString(),state:'pending',confirmedAt:null};
+ for(const patch of [{replyText:'FORBIDDEN_CONTENT'},{messageId:91},{safe:true},{previousPrerequisiteKey:['a'.repeat(64)]},
+  {prerequisiteKey:'a'.repeat(64)},{sourceRevision:-1},{state:'replied'},{confirmedAt:new Date().toISOString()}])
+  assert.throws(()=>assistantPreparedOwnerReplyReceipt({...grant,...patch}),/INVALID_RESPONSE|INVALID_INPUT/);
+ let privateReads=0,posts=0,mode='missing';
+ const client=createAssistantDeviceClient({origin,assistantId,deviceId,
+  store:{get:async()=>{privateReads++;return {assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1};}},
+  http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+   const body=JSON.parse(options.body);
+   if(url.endsWith('/reply-delivery/read')){assert.deepEqual(body,locator);return new Response(JSON.stringify({schemaVersion:1,delivery:mode==='missing'?null:grant}),{headers:{'content-type':'application/json'}});}
+   assert.ok(url.endsWith('/reply-delivery/prepare'));posts++;assert.deepEqual(body,input);throw new TypeError('synthetic unknown commit');
+  }})});
+ for(const patch of [{replyText:'FORBIDDEN_CONTENT'},{safe:true},{prerequisiteKey:['b'.repeat(64)]}])
+  await assert.rejects(client.prepareOwnerReplyDelivery({...input,...patch}),/INVALID_INPUT/);
+ assert.equal(privateReads,0,'reject content/container smuggling before credential I/O');
+ await assert.rejects(client.prepareOwnerReplyDelivery(input),/TRANSPORT_UNAVAILABLE/);assert.equal(posts,1);
+ assert.equal(await client.readOwnerReplyDelivery(locator),null);assert.equal(posts,1,'absent read-back never retries prepare');
+ mode='visible';assert.equal((await client.readOwnerReplyDelivery(locator)).receiptId,grant.receiptId);assert.equal(posts,1);
+});
+
 test('native intake budget preserves full authority in both routes and refuses before model-read evidence',async()=>{
   const {completeAssistantSourceIntakeDelivery}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   let confirmations=0;
@@ -4467,11 +4495,11 @@ test('cancelled reply-only continuation keeps its separate strict witness and na
  assert.equal(calls,before,'no mixed/forged certificate reaches HTTP');
 });
 
-test('cancelled context recovery capability survives the real device codec without caller authority or inferred support',async()=>{
+for(const field of ['readOnlyCancelledContextRecoveryProtocolVersion','preparedOwnerReplyDeliveryProtocolVersion'])
+test(`independent owner capability survives the real device codec (${field})`,async()=>{
  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
  const locator={companyId,sourceId,intakeId},input={...locator,sourceRevision:2,eventId:randomUUID(),threadId:randomUUID(),
   ownerIdentityId:randomUUID(),senderExternalUserId:'123',conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
- const field='readOnlyCancelledContextRecoveryProtocolVersion';
  const calls=[];let capability=1,legacy=true;
  const client=createAssistantDeviceClient({origin,assistantId,deviceId,
   store:{get:async()=>({assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1})},

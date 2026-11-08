@@ -680,6 +680,84 @@ test('owner reply recovery reads one completed exact native call, never invokes 
  turns=[original,original];assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),null);
 });
 
+test('prepared reply capture selects only the final exact pre-dispatch refusal without replaying earlier tools',async()=>{
+ const {assistantPreparedOwnerReply}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+ const deliveryId=randomUUID(),intakePass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()};
+ const code='ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_404';
+ const reply={type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',status:'failed',error:null,
+  arguments:{intakePass,clientRequestId:intakePass.intakeId,decision:'reply_owner',replyText:'  Prepared answer\n',runtimeSessionProof:{}},
+  result:{isError:true,content:[{type:'text',text:code}]}};
+ const context={type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_intake_context',status:'completed',error:null,
+  arguments:{intakePass,runtimeSessionProof:{}},result:{content:[{type:'text',text:'synthetic original'}]}};
+ const turn={id:randomUUID(),status:'completed',error:null,items:[
+  {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nsynthetic scope'}]},context,
+  {type:'mcpToolCall',server:'codex_apps',tool:'google_calendar.read_event',status:'completed',result:{content:[]}},
+  // A completed earlier action is NOT certified read-only. The new primitive
+  // only captures an already prepared output; it never re-executes this code,
+  // classifies its effects as absent, starts a model, or grants delivery.
+  {type:'mcpToolCall',server:'cua_repl',tool:'js',status:'completed',arguments:{code:'synthetic unknown action'},result:{content:[]}},
+  context,reply,{type:'agentMessage',text:'synthetic final note'}]};
+ const options={deliveryId,intakePass};
+ assert.equal(typeof assistantPreparedOwnerReply,'function');
+ assert.deepEqual(assistantPreparedOwnerReply(turn,options),{turnId:turn.id,replyText:'  Prepared answer\n'});
+ assert.equal(await assistantReadOnlyPreparationFailure(turn,{...options,replyDispatchCorrection:true}),false,
+  'output capture must NEVER broaden an existing whole-turn read-only certificate');
+ const changed=change=>{const copy=structuredClone(turn);change(copy);return assistantPreparedOwnerReply(copy,options);};
+ for(const state of ['failed','interrupted','inProgress'])assert.equal(changed(t=>{t.status=state;}),null);
+ assert.equal(changed(t=>{t.error={message:'unknown native error'};}),null);
+ assert.equal(changed(t=>{t.items.push(reply);}),null);
+ assert.equal(changed(t=>{t.items.push(context);}),null,'a tool after the final refusal is not the selected output');
+ assert.equal(changed(t=>{t.items[3].status='inProgress';}),null);
+ assert.equal(changed(t=>{t.items.push(t.items[0]);}),null);
+ for(const mutation of [r=>{r.status='completed';},r=>{r.result.isError=false;},
+  r=>{r.result.content[0].text='prose '+code;},r=>{r.error={message:'prose '+code};},
+  r=>{r.result.structuredContent={code:'ASSISTANT_INTAKE_CHANGED'};},
+  r=>{r.arguments.intakePass.sourceId=randomUUID();},r=>{r.arguments.clientRequestId=randomUUID();},
+  r=>{r.arguments.replyFile={workspaceId:randomUUID()};},r=>{r.arguments.replyText='';},
+  r=>{r.arguments.replyText='\ud800';},r=>{r.arguments.replyText='x'.repeat(4097);},r=>{r.arguments.replyText='x\0';}])
+  assert.equal(changed(t=>mutation(t.items[5])),null);
+});
+
+test('prepared reply reader completes bounded native pages and refuses unknown or duplicate later history',async()=>{
+ const {readAssistantCodexPreparedOwnerReply}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+ const threadId=randomUUID(),deliveryId=randomUUID(),pass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()};
+ const context={type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_intake_context',status:'completed',
+  arguments:{intakePass:pass,runtimeSessionProof:{}},result:{content:[]}};
+ const original={id:randomUUID(),status:'completed',items:[
+  {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nsynthetic original'}]},context,
+  {type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',status:'failed',arguments:{
+   intakePass:pass,clientRequestId:pass.intakeId,decision:'reply_owner',replyText:'  Exact prepared text\n',runtimeSessionProof:{}},
+   result:{structuredContent:{code:'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_404'},content:[]}}]};
+ const proof={...pass,intakeId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),sourceRevision:2,
+  receiptId:randomUUID(),taskId:randomUUID(),threadId};
+ const successor={id:randomUUID(),status:'completed',items:[
+  {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(proof.deliveryId)+'\nsynthetic later original'}]},
+  {...context,arguments:{intakePass:{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:proof.intakeId},runtimeSessionProof:{}}},
+  {type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',status:'completed',arguments:{
+   intakePass:{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:proof.intakeId},clientRequestId:proof.intakeId,
+   decision:'create_task',projectId:randomUUID(),fields:{title:'synthetic'},runtimeSessionProof:{}},result:{structuredContent:{
+    schemaVersion:1,id:proof.intakeId,companyId:pass.companyId,sourceId:pass.sourceId,sourceRevision:proof.sourceRevision,
+    eventId:proof.eventId,threadId,state:'created',taskId:proof.taskId,receiptId:proof.receiptId,readConfirmed:true,ownerPrivateRead:true}}}]};
+ let pages=[{data:[successor],nextCursor:'older'},{data:[original],nextCursor:null}],requests=[];
+ const read=(extra={})=>readAssistantCodexPreparedOwnerReply(threadId,deliveryId,pass,{executable:process.execPath,environment:{},
+  settledCreationSuccessors:[proof],...extra,spawnProcess:nativeRpc(request=>{
+   requests.push(request.method);
+   if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd:process.cwd()}}};
+   assert.equal(request.method,'thread/turns/list','capture may never queue/start/resume or execute a tool');
+   return {result:pages[request.params.cursor===undefined?0:1]};
+  })});
+ assert.deepEqual(await read(),{turnId:original.id,replyText:'  Exact prepared text\n'});
+ assert.equal(requests.filter(method=>method==='thread/turns/list').length,2);
+ assert.equal(await read({settledCreationSuccessors:[]}),null);
+ pages=[{data:[successor,original],nextCursor:'older'},{data:[structuredClone(original)],nextCursor:null}];
+ assert.equal(await read(),null,'the original duplicate on a later page must still refuse');
+ pages=[{data:[{...successor,status:'interrupted'},original],nextCursor:null}];assert.equal(await read(),null);
+ pages=[{data:[{...successor,items:[...successor.items,{type:'mcpToolCall',server:'other',tool:'send',status:'completed'}]},original],nextCursor:null}];
+ assert.equal(await read(),null,'a later creation receipt does not certify extra native effects');
+ pages=[{data:[successor,original],nextCursor:'older'},{data:[],nextCursor:'older'}];assert.equal(await read(),null);
+ assert.throws(()=>read({settledCreationSuccessors:[{...proof,replyText:'must stay private'}]}),/INVALID_INPUT/);
+});
+
 test('model-free Codex usage reads exact native account and quotas without a model or private fields',async()=>{
   const {readAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
   const calls=[];

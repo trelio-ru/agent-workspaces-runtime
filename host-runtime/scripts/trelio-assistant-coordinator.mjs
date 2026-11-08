@@ -63,11 +63,13 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 };
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, verifyOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, verifyOwnerReply = null,
+  deliverPreparedOwnerReply = null, verifyPreparedOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(verifyOwnerReply!==null&&typeof verifyOwnerReply!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+  if([deliverPreparedOwnerReply,verifyPreparedOwnerReply].some(value=>value!==null&&typeof value!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(onBusinessConfirmed!==null&&typeof onBusinessConfirmed!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(sourceHealth!==null&&(!sourceHealth||typeof sourceHealth.read!=='function'||typeof sourceHealth.report!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(readSourceMonitor!==null && (typeof readSourceMonitor!=='function' || typeof client.sourceAccounts!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
@@ -1025,6 +1027,106 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       finally{inbox.deferOwnerIntake(row.id);}
     }
   };
+  /** Deliver an already settled prepared output WITHOUT another native/model
+   * invocation. Old arbitrary tools are data, never certified effect-free and
+   * never replayed. Independent native grant + SAME final-spawn journal CAS
+   * are the authority. Every unknown outcome has a read-only continuation. */
+  const recoverPreparedOwnerReply=async signal=>{
+    if(!passHost||await passHost.readActivePass()!==null||typeof workspaceForIntake!=='function'||!deliverPreparedOwnerReply
+      ||typeof native.readPreparedOwnerReply!=='function'||typeof native.readPrerequisites!=='function'
+      ||['prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery'].some(key=>typeof client[key]!=='function'))return null;
+    for(let row of inbox.preparedOwnerReplyCandidates()){
+      let frozen=inbox.preparedOwnerReply(row.id);
+      try{
+        if(await native.ready(identity,signal)!==true)continue;lease();
+        const source=await intakeSource(row,signal),locator=intakeLocator(row);
+        const original=await client.readSourceIntake(locator,signal);lease();
+        if(original.preparedOwnerReplyDeliveryProtocolVersion!==1||original.state!=='cancelled'
+          ||original.id!==row.id||original.sourceId!==row.scope.bindingId||original.companyId!==row.scope.companyId
+          ||original.eventId!==row.original_event_id||original.threadId!==row.thread_id||original.sourceRevision!==row.source_revision
+          ||original.receiptId!==row.outcome_receipt||original.ownerPrivateRead!==true||original.readConfirmed!==true
+          ||original.taskId!==null||original.readOnlyRecovery!==undefined||Date.parse(original.leaseExpiresAt)>now())continue;
+        // Inventory ALL later originals before applying the eight-row bound.
+        // Only independently settled CREATED receipts can be skipped. Unknown
+        // work, a different account/owner, later reply or recovery stays fenced.
+        const later=inbox.readonlyRecoverySuccessors(row.id),settledCreationSuccessors=[];
+        if(later.length>8)continue;
+        for(const successor of later){
+          if(successor.kind!=='owner_command'||successor.state!=='complete'||successor.settled!==1||successor.outcome_state!=='created'
+            ||successor.native_started!==1||successor.reply_receipt_id!==null||successor.reply_message_id!==null
+            ||successor.reply_abandon_receipt_id!==null||successor.readonly_recovery_json!==null||successor.prepared_reply_json!==null
+            ||['source_key','source_revision','account_key','owner_identity_id','conversation_key','thread_id'].some(key=>successor[key]!==row[key])
+            ||successor.original_event_id===row.original_event_id||!uuid.test(successor.outcome_receipt??''))fail('ASSISTANT_INTAKE_CHANGED');
+          const receipt=await client.readSourceIntake(intakeLocator(successor),signal);lease();
+          if(receipt.id!==successor.id||receipt.companyId!==row.scope.companyId||receipt.sourceId!==row.scope.bindingId
+            ||receipt.sourceRevision!==row.source_revision||receipt.eventId!==successor.original_event_id||receipt.threadId!==row.thread_id
+            ||receipt.state!=='created'||receipt.receiptId!==successor.outcome_receipt||receipt.readConfirmed!==true
+            ||receipt.ownerPrivateRead!==true||!uuid.test(receipt.taskId??'')
+            ||successor.outcome_task_id!==null&&successor.outcome_task_id!==receipt.taskId)fail('ASSISTANT_INTAKE_CHANGED');
+          settledCreationSuccessors.push({...intakeLocator(successor),sourceRevision:receipt.sourceRevision,eventId:receipt.eventId,
+            threadId:receipt.threadId,deliveryId:successor.delivery_id,taskId:receipt.taskId,receiptId:receipt.receiptId});
+        }
+        const capture=()=>native.readPreparedOwnerReply(row.thread_id,row.delivery_id,locator,{signal,settledCreationSuccessors});
+        const prepared=await capture();lease();
+        if(!prepared||!uuid.test(prepared.turnId??'')||typeof prepared.replyText!=='string')continue;
+        if(!frozen){
+          const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+          const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
+          if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||prerequisite.fingerprint===row.intake_prerequisite)continue;
+          const summary=readAssistantInboxDispatchSummary({database,identity,companies:[]});
+          if(summary.uncertainDeliveries!==0)continue;
+          frozen=inbox.freezePreparedOwnerReply(row.id,{terminalTurnId:prepared.turnId,previousPrerequisiteKey:row.intake_prerequisite,
+            prerequisiteKey:prerequisite.fingerprint});
+          // Intent is durable BEFORE native POST. A thrown/lost response may
+          // only reach read below on a later cycle, never this POST again.
+          await client.prepareOwnerReplyDelivery({...locator,originalReceiptId:original.receiptId,
+            terminalTurnId:frozen.terminalTurnId,previousPrerequisiteKey:frozen.previousPrerequisiteKey,
+            prerequisiteKey:frozen.prerequisiteKey,clientRequestId:frozen.clientRequestId},signal);lease();
+        }
+        if(prepared.turnId!==frozen.terminalTurnId)fail('ASSISTANT_INTAKE_CHANGED');
+        const grant=await client.readOwnerReplyDelivery(locator,signal);lease();
+        if(!grant||grant.intakeId!==row.id||grant.sourceId!==source.id||grant.sourceRevision!==source.revision
+          ||grant.deviceId!==identity.deviceId||grant.localAccountId!==source.localAccountId||grant.ownerIdentityId!==row.owner_identity_id
+          ||grant.eventId!==row.original_event_id||grant.threadId!==row.thread_id||grant.originalReceiptId!==row.outcome_receipt
+          ||['clientRequestId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey'].some(key=>grant[key]!==frozen[key]))fail('ASSISTANT_INTAKE_CHANGED');
+        inbox.observePreparedOwnerReply(row.id,{receiptId:grant.receiptId,leaseExpiresAt:Date.parse(grant.leaseExpiresAt)});
+        frozen=inbox.preparedOwnerReply(row.id);
+        if(grant.state==='replied'){
+          // Native success cannot substitute a missing local positive provider
+          // observation. Keep uncertainty if its independently durable fence
+          // was lost/corrupted; never invent a message ID from that receipt.
+          if(frozen.messageId===null)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+        }else if(frozen.messageId===null&&frozen.attempted){
+          if(!verifyPreparedOwnerReply)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+          for(const candidateMessageId of inbox.ownerReplyCandidates(row.id)){
+            const positive=await verifyPreparedOwnerReply({row,grant,replyText:prepared.replyText,candidateMessageId},signal);lease();
+            if(positive){inbox.confirmPreparedOwnerReply(row.id,positive);break;}
+          }
+        }else if(frozen.messageId===null){
+          if(Date.parse(grant.leaseExpiresAt)<=now())fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+          await deliverPreparedOwnerReply({row,grant,replyText:prepared.replyText,
+            beforeInvoke:async()=>{
+              lease();if(await passHost.readActivePass()!==null)fail('ASSISTANT_INTAKE_CHANGED');
+              const current=await capture();lease();
+              if(current?.turnId!==prepared.turnId||current.replyText!==prepared.replyText)fail('ASSISTANT_INTAKE_CHANGED');
+              const summary=readAssistantInboxDispatchSummary({database,identity,companies:[]});
+              if(summary.uncertainDeliveries!==1)fail('ASSISTANT_INTAKE_CHANGED');
+              inbox.startPreparedOwnerReply(row.id,grant.receiptId);
+            },onConfirmed:positive=>{lease();inbox.confirmPreparedOwnerReply(row.id,positive);}},signal);lease();
+        }
+        frozen=inbox.preparedOwnerReply(row.id);
+        if(frozen.messageId===null)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+        if(grant.state!=='replied')await client.confirmOwnerReplyDelivery({...locator,receiptId:grant.receiptId},signal);
+        lease();inbox.finishPreparedOwnerReply(row.id,grant.receiptId);await businessConfirmed();
+        return {state:'completed',kind:'prepared_owner_reply'};
+      }catch{if(frozen)emit('ASSISTANT_OWNER_REPLY_UNCERTAIN');}
+      finally{inbox.deferOwnerIntake(row.id);}
+      // An unknown prepare or attempted send blocks new work even if the
+      // source/owner is later revoked. A fresh inventory is never absence proof.
+      if(frozen)return {state:'blocked',kind:'prepared_owner_reply'};
+    }
+    return inbox.hasPendingPreparedOwnerReply()?{state:'blocked',kind:'prepared_owner_reply'}:null;
+  };
   const recoverOwnerCapacity=async(row,outcome,terminal,signal)=>{
     if(terminal.state!=='failed'||terminal.failure!=='model_capacity'||!uuid.test(terminal.turnId??''))return false;
     // Native capacity alone never proves no business action. Only an original
@@ -1644,6 +1746,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       lease();
       const saved=passHost?await passHost.readActivePass():null;
       if(saved?.kind!=='source_intake'&&await reconcile(signal))return {state:'blocked'};
+      if(!saved){const prepared=await recoverPreparedOwnerReply(signal);if(prepared)return prepared;}
+      if(inbox.hasPendingPreparedOwnerReply())return {state:'blocked',kind:'prepared_owner_reply'};
       // Read-only waiting/policy/source recovery owns no native invocation.
       // Walk the bounded existing page so its oldest row cannot starve every
       // later company on each five-minute worker. Unknown/started work still
@@ -1709,7 +1813,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         signal=combinedSignal(signal);lease();
         const guard=async()=>{
           signal.throwIfAborted();lease();
-          if(!passHost || await passHost.readActivePass()!==null
+          if(!passHost || await passHost.readActivePass()!==null||inbox.hasPendingPreparedOwnerReply()
             || database.prepare("SELECT 1 FROM assistant_inbox_deliveries WHERE state IN ('leased','started','uncertain') LIMIT 1").get()
             || database.prepare("SELECT 1 FROM assistant_owner_intakes WHERE state IN ('provisioning','started','uncertain') LIMIT 1").get())
             fail('ASSISTANT_PASS_REVIEW_REQUIRED');

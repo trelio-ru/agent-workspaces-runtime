@@ -1167,3 +1167,14 @@ capability, current immutable cancellation and complete pre-reservation file-rea
 history are checked independently before that append. One consumed parent, the
 same permanent chat/original and the existing global bound remain unchanged;
 begin is durable before HTTP, unknown begin is GET-only, no old row/ACK is reset.
+
+## Schema v27: prepared output delivery
+
+Adds nullable structural `prepared_reply_json` to the SAME owner-original row.
+Its one prepare request, immutable terminal/prerequisite/receipt binding, absolute
+send deadline, monotonic provider attempt, local positive ID and native-confirmed
+bit survive restart. No original row/state/receipt/read/ACK is rewritten, and no
+answer or body hash is stored. Pending receipt uncertainty joins the existing
+SELECT-only device diagnostic and idle/new-work fences. Schema26 and all older
+upgrades preserve their exact historical fences. See the separate first-delivery
+contract in `assistant-scheduler.md`; this is not another read-only retry mode.

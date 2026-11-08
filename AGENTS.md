@@ -1334,3 +1334,12 @@ same runtime contract. Cover actual skill/import/bootstrap child processes.
   fetches including a returned selection, and the exact positive reply receipt.
   No successful/unknown read, provider call, business tool or prose earns this
   certificate. Keep its failure label separate from rate-limit diagnostics.
+
+- Prepared owner output delivery is a separate model-free FIRST send, never a
+  read-only replay certificate. Capture one exact terminal pre-native-arguments
+  refusal privately; freeze prepare intent in SAME schema27 journal, then use
+  the independent native receipt and SAME signed provider/one-spawn fence.
+  Unknown prepare/send/confirmation is read-back-only across restart. Earlier
+  arbitrary settled actions are never re-executed or called effect-free; old
+  cancellation/lease/read/ACK stays immutable. See the prepared-output section
+  in `docs/assistant-scheduler.md`; backend capability precedes runtime activation.

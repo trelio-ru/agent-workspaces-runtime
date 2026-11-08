@@ -2068,13 +2068,14 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
  }
 });
 
-for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])for(const boundaryRace of dispatchUncertain?['none','capacity','abandon']:['none'])for(const withDocument of dispatchUncertain?[false]:[false,true])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted}, dispatchUncertain=${dispatchUncertain}, race=${boundaryRace}, document=${withDocument})`,async t=>{
+for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])for(const boundaryRace of dispatchUncertain?['none','capacity','abandon']:['none'])for(const withDocument of dispatchUncertain?[false]:[false,true])for(const prepared of !dispatchUncertain&&!withDocument?[false,true]:[false])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted}, dispatchUncertain=${dispatchUncertain}, race=${boundaryRace}, document=${withDocument}, prepared=${prepared})`,async t=>{
  const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
  scope.skillId='telegram-mtproto';
  const sourceId=randomUUID(),accountId=randomUUID(),threadId=randomUUID(),receiptId=randomUUID();
  let intakeId=randomUUID(),eventId=randomUUID(),deliveryId=randomUUID(),inboxDirectory=null;
- const ownerIdentityId=randomUUID();
+ const ownerIdentityId=randomUUID(),originalReceiptId=randomUUID();
+ const {assistantPreparedOwnerReplyReceipt}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
  // Reproduce the real boundary: the GUI model continues after its independent
  // dispatcher lost observation. Native admission is fresh, but the SAME durable
  // inbox is UNCERTAIN before resolve returns. No fixture resets that state.
@@ -2102,7 +2103,8 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
    '--expected-conversation-key',reference.conversationKey,'--expected-owner-id','123456','--confirm'];
  intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,replyReceiptId:receiptId,replyProtocolVersion:2},admission:{schemaVersion:1,kind:'reply_owner',
    intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId,ownerExternalUserId:'123456'}};
- const dir=path.join(directory,`owner-private-reply-${encrypted}-${dispatchUncertain}-${boundaryRace}-${withDocument}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
+ if(prepared){intakeFixture.intent.preparedReplyDeliveryProtocolVersion=1;intakeFixture.admission.preparedReplyDeliveryProtocolVersion=1;}
+ const dir=path.join(directory,`owner-private-reply-${encrypted}-${dispatchUncertain}-${boundaryRace}-${withDocument}-${prepared}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
  const replyText='📎 [Проверенный источник](https://example.invalid/current)';
  const bytes=Buffer.from('SYNTHETIC ORIGINAL FILE\n📎'),workspaceId=randomUUID(),workspaceHead='a'.repeat(40);
  const replyDocument=withDocument?{workspaceId,workspaceHead,filePath:path.join(dir,'original.md'),fileName:'original.md',
@@ -2122,19 +2124,22 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
    fs.appendFileSync(${JSON.stringify(marker)},'sent;');process.stdout.write(${JSON.stringify(JSON.stringify(positive))});`);
  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',
    sourceDirectory:dir,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
- const replyHost={...host,...(dispatchUncertain?{configurationDirectory:path.join(directory,`reply-materializer-${encrypted}-${boundaryRace}`)}:{}),readActivePass:async()=>pass};
+ const replyHost={...host,...(dispatchUncertain?{configurationDirectory:path.join(directory,`reply-materializer-${encrypted}-${boundaryRace}`)}:{}),readActivePass:async()=>prepared?null:pass};
  const profile=await createAssistantSourceRuntimeProfile({identity,host:replyHost,store,scope}),root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),
    io:{ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
  await catalogue.change({operation:'create',id:accountId,name:'Synthetic reply',expectedRevision:(await catalogue.list()).revision});
- let attempt=false,confirmed=null,state='reply_pending';
+ let attempt=false,confirmed=null,state=prepared?'cancelled':'reply_pending';
+ const preparedDelivery=prepared?assistantPreparedOwnerReplyReceipt({schemaVersion:1,intakeId,sourceId,sourceRevision:0,deviceId,localAccountId:accountId,
+  ownerIdentityId,ownerUserId:randomUUID(),eventId,threadId,originalReceiptId,terminalTurnId:randomUUID(),previousPrerequisiteKey:'a'.repeat(64),
+  prerequisiteKey:'b'.repeat(64),clientRequestId:randomUUID(),receiptId,leaseExpiresAt:new Date(Date.now()+60000).toISOString(),state:'pending',confirmedAt:null}):null;
  const runtimeRecords=new Map(),replyStore={
   get:slot=>slot.kind==='runtime'?runtimeRecords.get(slot.id):selectedStore.get(slot),
   put:async(slot,value)=>{if(slot.kind==='runtime')runtimeRecords.set(slot.id,structuredClone(value));else await selectedStore.put(slot,value);},
   remove:async slot=>{assert.equal(slot.kind,'runtime');runtimeRecords.delete(slot.id);}};
- const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({id:intakeId,companyId,sourceId,taskId:null,readConfirmed:true,state,receiptId,ownerPrivateRead:true,threadId,eventId,
+ const client={identity,readOwnerReplyDelivery:async()=>preparedDelivery,sourceAccounts:async()=>[source],readSourceIntake:async()=>({id:intakeId,companyId,sourceId,taskId:null,readConfirmed:true,state,receiptId:prepared?originalReceiptId:receiptId,ownerPrivateRead:true,threadId,eventId,
    sourceRevision:0,...(replyDocument?{replyFile:{workspaceId,workspaceHead}}:{}),leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
- const input={identity,client,host:replyHost,store:replyStore,pass,source,reference,receiptId,replyText,replyDocument,
+ const input={identity,client,host:replyHost,store:replyStore,pass:prepared?undefined:pass,preparedDelivery,source,reference,receiptId,replyText,replyDocument,
    beforeInvoke:async()=>{assert.equal(attempt,false,'a persisted attempt never dispatches twice');
     if(replyDocument){const {filePath:_path,...document}=replyDocument;
      await replyStore.put({origin,kind:'runtime',id:pass.passId},{schemaVersion:1,passId:pass.passId,threadId:pass.threadId,ownerReplyDocument:{receiptId,document}});
@@ -2200,7 +2205,7 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
  assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  state='replied';await assert.rejects(replyAssistantOwnerIntake(input),/INTAKE_CHANGED/);
- state='reply_pending';
+ state=prepared?'cancelled':'reply_pending';
  intakeFixture.intent.replyVerificationMessageId=91;intakeFixture.admission.kind='verify_owner_reply';intakeFixture.admission.verificationMessageId=91;
  if(replyDocument){
   await fs.unlink(replyDocument.filePath);
@@ -2226,7 +2231,7 @@ for(const encrypted of [false,true])for(const dispatchUncertain of [false,true])
  if(encrypted){for(const mode of ['selection','recipient','missing']){setMode(mode);await assert.rejects(verifyAssistantOwnerReply({...input,candidateMessageId:91}));assert.equal(await fs.readFile(marker,'utf8'),afterVerification);}setMode('valid');}
  intakeFixture.intent.replyVerificationMessageId=undefined;delete intakeFixture.intent.replyVerificationMessageId;
  delete intakeFixture.admission.verificationMessageId;intakeFixture.admission.kind='reply_owner';
- state='reply_pending';attempt=false;intakeFixture.admission.ownerExternalUserId='654321';
+ state=prepared?'cancelled':'reply_pending';attempt=false;intakeFixture.admission.ownerExternalUserId='654321';
  await assert.rejects(replyAssistantOwnerIntake(input),/INVALID_RESPONSE/);assert.equal(attempt,false);
  assert.equal(await fs.readFile(marker,'utf8'),afterVerification,'wrong owner/native receipt cannot launch a child');
 });

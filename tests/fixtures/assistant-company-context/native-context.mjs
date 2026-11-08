@@ -37,6 +37,8 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
   assert.equal(configuration.identity.origin,'https://trelio.ru');
   const originalFetch=globalThis.fetch;
   const continuationBeginFaults={attempts:0,lostCommitted:false};
+  const preparedReplyFaults={attempts:0,lostCommitted:false};
+  const preparedReplyConfirmFaults={attempts:0,lostCommitted:false};
   globalThis.fetch=async(input,options={})=>{
     const selected=new URL(input instanceof Request?input.url:input);
     assert.ok(SAME_ORIGINS.has(selected.origin),'fixture cannot contact an external origin');
@@ -45,6 +47,18 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
     // bindings. Only the network destination changes to its owned loopback.
     const target=new URL(selected.pathname+selected.search,server);
     const response=await originalFetch(target,{...options,redirect:'error',headers:new Headers(options.headers)});
+    if(configuration.losePreparedReplyPrepare&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/reply-delivery/prepare'
+      &&options.method==='POST'){
+      preparedReplyFaults.attempts++;
+      if(response.ok&&!preparedReplyFaults.lostCommitted){await response.arrayBuffer();preparedReplyFaults.lostCommitted=true;
+        throw new TypeError('synthetic committed prepared receipt transport loss');}
+    }
+    if(configuration.losePreparedReplyConfirm&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/reply-delivery/confirm'
+      &&options.method==='POST'){
+      preparedReplyConfirmFaults.attempts++;
+      if(response.ok&&!preparedReplyConfirmFaults.lostCommitted){await response.arrayBuffer();preparedReplyConfirmFaults.lostCommitted=true;
+        throw new TypeError('synthetic committed prepared confirmation transport loss');}
+    }
     if(configuration.loseContinuationBegin&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/begin'
       &&options.method==='POST'&&typeof options.body==='string'&&(JSON.parse(options.body).readOnlyRecovery?.readOnlyContinuation===true||JSON.parse(options.body).readOnlyRecovery?.generationReplyCorrection===true||JSON.parse(options.body).readOnlyRecovery?.replyDispatchCorrection===true)){
       continuationBeginFaults.attempts++;
@@ -99,7 +113,7 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
   const withManagedContent=(request,send)=>withProductionAssistantManagedContent(request,send,{context,withProfile});
   const proxyFor=options=>createProductionAssistantMcp({...options,context,withProfile,withManagedContent,httpRequest,sourcePackage});
   return {
-    store,host,client,context,withProfile,
+    store,host,client,context,withProfile,preparedReplyFaults,preparedReplyConfirmFaults,
     execute:async request=>{
       // Count real opened ciphertext generations in this isolated child only.
       // No path/content is logged and the ordinary fd/ACL/crypto reader remains

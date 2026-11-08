@@ -64,6 +64,21 @@ const provisionReview=value=>{
   if(Object.keys(value).length!==4||typeof value.started!=='boolean')inputError();
   return {turnId:uuid(value.turnId),markerId:uuid(value.markerId),reviewId:uuid(value.reviewId),started:value.started};
 };
+/** One irreversible prepare intent plus the SAME provider's send/result fence.
+ * No answer text/history/body digest is durable. Losing prepare/send responses
+ * permits only exact native/provider read-back, never a new key or send. */
+const preparedReply=value=>{
+  const fields=['clientRequestId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey','receiptId','leaseExpiresAt','attempted','messageId','confirmed'];
+  object(value,fields);
+  if(Object.keys(value).length!==fields.length||['attempted','confirmed'].some(key=>typeof value[key]!=='boolean')
+    ||['previousPrerequisiteKey','prerequisiteKey'].some(key=>typeof value[key]!=='string'||!/^[0-9a-f]{64}$/u.test(value[key]))
+    ||value.previousPrerequisiteKey===value.prerequisiteKey||(value.receiptId===null)!==(value.leaseExpiresAt===null)
+    ||value.attempted&&value.receiptId===null||value.messageId!==null&&!value.attempted||value.confirmed&&value.messageId===null)inputError();
+  return {clientRequestId:uuid(value.clientRequestId),terminalTurnId:uuid(value.terminalTurnId),
+    previousPrerequisiteKey:value.previousPrerequisiteKey,prerequisiteKey:value.prerequisiteKey,
+    receiptId:value.receiptId===null?null:uuid(value.receiptId),leaseExpiresAt:value.leaseExpiresAt===null?null:integer(value.leaseExpiresAt,0,Number.MAX_SAFE_INTEGER),
+    attempted:value.attempted,messageId:value.messageId===null?null:integer(value.messageId,1,2147483647),confirmed:value.confirmed};
+};
 /** Closed host-only metadata. No history, query/body hash, provider ID or
  * caller-authored safety boolean enters this one-use recovery certificate. */
 export const assistantReadOnlyRecoveryMetadata=(value,{local=false,response=false}={})=>{
@@ -196,7 +211,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -240,6 +255,11 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
       ||row.outcome_state!=='waiting_owner'||!UUID.test(row.outcome_receipt??'')).length;
     result.uncertainDeliveries=get(`SELECT count(*) AS n FROM assistant_inbox_deliveries
       WHERE state IN ('started','uncertain') OR state='leased' AND native_started=1`).n+uncertainIntakes;
+    if(versions[0].version>=27){
+      const prepared=db.prepare('SELECT prepared_reply_json FROM assistant_owner_intakes WHERE prepared_reply_json IS NOT NULL LIMIT 10001').all();
+      if(prepared.length>10_000)fail('ASSISTANT_INBOX_FULL');
+      result.uncertainDeliveries+=prepared.filter(row=>!preparedReply(JSON.parse(row.prepared_reply_json)).confirmed).length;
+    }
     if(Object.values(result).some(value=>!Number.isSafeInteger(value)||value<0||value>50_000))fail('ASSISTANT_INBOX_FULL');
     const last=versions[0].version>=11?get(`SELECT failure_code,failure_stage FROM assistant_inbox_deliveries
       WHERE state IN ('started','uncertain') AND failure_code IS NOT NULL ORDER BY rowid DESC LIMIT 1`):null;
@@ -296,7 +316,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -531,10 +551,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // provider fence, model-read/ACK basis, lease or negative receipt.
       if(!readonlyColumns.includes(name))db.exec(`ALTER TABLE assistant_owner_intakes ADD COLUMN ${name} TEXT`);
     }
-    // Schema26 adds a strict final-dispatch-correction discriminator inside
-    // the existing recovery JSON. Historical rows/fences are never backfilled.
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=26');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (26)');
+    const preparedColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version>=27&&!preparedColumns.includes('prepared_reply_json'))fail('ASSISTANT_INBOX_CONFLICT');
+    // Additive only. The original cancellation/start/lease/receipt and every
+    // unknown legacy provider attempt stay byte-for-byte unchanged.
+    if(!preparedColumns.includes('prepared_reply_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN prepared_reply_json TEXT');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=27');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (27)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1106,6 +1129,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const {cancelledContextRead,...nativeWitness}=witness;
       if(cancelledContextRead!==undefined&&cancelledContextRead!==true)fail('ASSISTANT_INBOX_CONFLICT');
       const old=this.ownerIntake(id),metadata=assistantReadOnlyRecoveryMetadata({...nativeWitness,parentIntakeId:id,beginAttempted:false},{local:true});
+      if(old.prepared_reply_json!==null)fail('ASSISTANT_INBOX_CONFLICT');
       const prior=old.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(old.readonly_recovery_json),{local:true}):null;
       if(!metadata||old.readonly_recovery_json&&!prior||old.kind!=='owner_command'||old.state!=='complete'||old.settled!==1
         ||old.native_started!==1||!old.thread_id||old.outcome_receipt!==metadata.receiptId||old.outcome_task_id!==null
@@ -1295,11 +1319,62 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * body is stored. The native reader still verifies direction/header/text. */
     ownerReplyCandidates(id){
       const row=this.ownerIntake(id),pieces=row.native_event_id.split(':');
-      if(row.kind!=='owner_command'||pieces.length!==3||!row.reply_receipt_id)return [];
+      if(row.kind!=='owner_command'||pieces.length!==3||!row.reply_receipt_id&&!this.preparedOwnerReply(id)?.attempted)return [];
       return all('SELECT event_id FROM assistant_inbox_events WHERE source_key=? AND conversation_key=? AND provider_wake=0 ORDER BY rowid DESC LIMIT 100',row.source_key,row.conversation_key)
         .map(value=>value.event_id.split(':')).filter(value=>value.length===3&&value[0]==='message'&&value[1]===pieces[1]
           &&/^[1-9]\d{0,9}$/u.test(value[2])&&Number(value[2])>Number(pieces[2])&&Number(value[2])<2147483648)
         .map(value=>Number(value[2])).filter((value,index,all)=>all.indexOf(value)===index).slice(0,4);
+    },
+    preparedOwnerReply(id){const row=this.ownerIntake(id);return row.prepared_reply_json===null?null:preparedReply(JSON.parse(row.prepared_reply_json));},
+    preparedOwnerReplyCandidates(){return all(`SELECT i.id FROM assistant_owner_intakes i JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.settled=1 AND i.outcome_state='cancelled'
+        AND i.native_started=1 AND i.thread_id IS NOT NULL AND i.outcome_receipt IS NOT NULL AND i.outcome_task_id IS NULL
+        AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL AND i.reply_abandon_receipt_id IS NULL
+        AND i.readonly_recovery_json IS NULL AND i.retry_of_id IS NULL AND i.retry_ordinal=0 AND i.model_capacity_json IS NULL
+        AND json_extract(s.scope_json,'$.provider')='telegram' AND i.intake_prerequisite IS NOT NULL
+        AND (i.prepared_reply_json IS NULL OR json_extract(i.prepared_reply_json,'$.confirmed') IS NOT 1)
+        AND i.next_check_at<=? AND (i.prepared_reply_json IS NOT NULL OR s.state='active' AND i.source_revision=s.configuration_revision)
+        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+      ORDER BY (i.prepared_reply_json IS NOT NULL) DESC,i.created_at,i.id LIMIT 20`,time())
+      .map(value=>this.ownerIntake(value.id)).filter(row=>!this.preparedOwnerReply(row.id)?.confirmed);},
+    freezePreparedOwnerReply(id,value){return transaction(()=>{
+      const row=this.ownerIntake(id);
+      const metadata=preparedReply({...value,clientRequestId:randomUUID(),receiptId:null,leaseExpiresAt:null,attempted:false,messageId:null,confirmed:false});
+      if(row.prepared_reply_json!==null||row.state!=='complete'||row.outcome_state!=='cancelled'||row.settled!==1
+        ||row.native_started!==1||row.reply_receipt_id!==null||row.reply_message_id!==null||row.reply_abandon_receipt_id!==null
+        ||row.readonly_recovery_json!==null||row.retry_of_id!==null||row.retry_ordinal!==0||row.model_capacity_json!==null
+        ||row.scope.provider!=='telegram'||row.source_state!=='active'||row.source_revision!==row.configuration_revision
+        ||row.intake_prerequisite!==metadata.previousPrerequisiteKey
+        ||get('SELECT id FROM assistant_owner_intakes WHERE retry_of_id=?',row.id))fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET prepared_reply_json=? WHERE id=?',JSON.stringify(metadata),row.id);
+      return metadata;
+    });},
+    observePreparedOwnerReply(id,{receiptId,leaseExpiresAt}){return transaction(()=>{
+      const old=this.preparedOwnerReply(id);receiptId=uuid(receiptId);leaseExpiresAt=integer(leaseExpiresAt,0,Number.MAX_SAFE_INTEGER);
+      if(!old||old.receiptId!==null&&(old.receiptId!==receiptId||old.leaseExpiresAt!==leaseExpiresAt))fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET prepared_reply_json=? WHERE id=?',JSON.stringify(preparedReply({...old,receiptId,leaseExpiresAt})),id);
+    });},
+    startPreparedOwnerReply(id,receiptId){return transaction(()=>{
+      const row=this.ownerIntake(id),old=this.preparedOwnerReply(id);receiptId=uuid(receiptId);
+      if(!old||old.receiptId!==receiptId||old.attempted||old.confirmed||old.leaseExpiresAt<=time()
+        ||row.state!=='complete'||row.outcome_state!=='cancelled'||row.reply_receipt_id!==null||row.reply_message_id!==null
+        ||row.source_state!=='active'||row.source_revision!==row.configuration_revision)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET prepared_reply_json=? WHERE id=?',JSON.stringify({...old,attempted:true}),id);
+    });},
+    confirmPreparedOwnerReply(id,{receiptId,messageId}){return transaction(()=>{
+      const old=this.preparedOwnerReply(id);receiptId=uuid(receiptId);messageId=integer(messageId,1,2147483647);
+      if(!old||old.receiptId!==receiptId||!old.attempted||old.messageId!==null&&old.messageId!==messageId)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET prepared_reply_json=? WHERE id=?',JSON.stringify({...old,messageId}),id);
+    });},
+    finishPreparedOwnerReply(id,receiptId){return transaction(()=>{
+      const old=this.preparedOwnerReply(id);receiptId=uuid(receiptId);
+      if(!old||old.receiptId!==receiptId||!old.attempted||old.messageId===null)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET prepared_reply_json=? WHERE id=?',JSON.stringify({...old,confirmed:true}),id);
+    });},
+    hasPendingPreparedOwnerReply(){
+      const rows=all('SELECT id FROM assistant_owner_intakes WHERE prepared_reply_json IS NOT NULL LIMIT 10001');
+      if(rows.length>10_000)fail('ASSISTANT_INBOX_FULL');
+      return rows.some(row=>!this.preparedOwnerReply(row.id).confirmed);
     },
     startOwnerReply(id,receiptId){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);

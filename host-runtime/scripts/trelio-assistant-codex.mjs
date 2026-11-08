@@ -1013,6 +1013,122 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   }, options);
 };
 
+/** Select an immutable prepared text, NOT a read-only execution certificate.
+ *
+ * A final arguments-materialization refusal happened before the native reply
+ * reservation. Earlier tools can nevertheless have performed real actions.
+ * Never classify them as read-only, restart their model turn, or reuse its old
+ * proof. A separately versioned native delivery grant, current original/owner
+ * admission and the SAME durable provider-attempt fence are required before
+ * this private value can be delivered. This function supplies none of them.
+ * Keeping that distinction explicit avoids weakening the older whole-turn
+ * correction certificates just because a useful final answer already exists.
+ */
+export const assistantPreparedOwnerReply=(turn,{deliveryId,intakePass}={})=>{
+  if(!UUID.test(deliveryId??'')||!intakePass||Object.getPrototypeOf(intakePass)!==Object.prototype
+    ||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
+    ||turn.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)
+    ||turn.items.length<3||turn.items.length>512||turn.items[0]?.type!=='userMessage')return null;
+  const code='ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_404';
+  let users=0,contexts=0,selected=null;
+  for(const item of turn.items){
+    if(item.type==='userMessage'){
+      if(++users!==1||!Array.isArray(item.content)||item.content.length!==1||item.content[0]?.type!=='text'
+        ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return null;
+    }else if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+    else if(['mcpToolCall','commandExecution','dynamicToolCall','webSearch','imageGeneration'].includes(item.type)){
+      // Settled does NOT mean effect-free. We only exclude an active/unknown
+      // writer and never replay any of these earlier invocations. No tool may
+      // follow the selected final reply, even a later successful context read.
+      if(selected||!['completed','failed'].includes(item.status))return null;
+      if(item.type!=='mcpToolCall'||item.server!=='trelio-assistant')continue;
+      const args=item.arguments;
+      if(item.tool==='get_assistant_intake_context'){
+        if(!args?.intakePass||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+          ||Object.keys(intakePass).some(key=>args.intakePass[key]!==intakePass[key]))return null;
+        if(item.status==='completed'&&item.error==null&&item.result&&item.result.isError!==true)contexts++;
+      }else if(item.tool==='resolve_assistant_intake'){
+        if(!contexts||!args||Object.getPrototypeOf(args)!==Object.prototype
+          ||Object.keys(args).sort().join(',')!=='clientRequestId,decision,intakePass,replyText,runtimeSessionProof'
+          ||!args.intakePass||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+          ||Object.keys(intakePass).some(key=>args.intakePass[key]!==intakePass[key])
+          ||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'
+          ||typeof args.replyText!=='string'||!args.replyText.trim()||args.replyText.length>4096
+          ||!args.replyText.isWellFormed()||args.replyText.includes('\0')
+          ||item.status!=='failed'||!item.result||item.result.isError===false
+          ||item.result.structuredContent!==undefined&&item.result.structuredContent?.code!==code
+          ||item.error!=null&&item.error.message!==code
+          ||!(item.result.structuredContent?.code===code||item.error?.message===code
+            ||item.result.content?.length===1&&item.result.content[0]?.type==='text'
+              &&item.result.content[0].text===code))return null;
+        // Exact original bytes matter to the native one-send engine and later
+        // positive provider comparison. Never trim or rewrite a prepared reply.
+        selected={turnId:turn.id,replyText:args.replyText};
+      }
+    }else return null;
+  }
+  return users===1?selected:null;
+};
+
+/** Private, model-free capture of the SAME prepared output after a deployment
+ * fix. Full native history is read through the existing read-only App Server
+ * adapter. No queue/start/resume, old proof or earlier tool is invoked here.
+ *
+ * A later independent original may be skipped only with the coordinator's
+ * fresh native CREATED receipt and its whole exact terminal creation chain.
+ * Unknown/intervening turns retain the fence. This reuses the ordinary settled
+ * successor witness, not a model's description of what that later turn did.
+ * The returned body is ephemeral. Do not persist it or a plaintext body hash in
+ * SQLite/HTTP/logs, or use this capture as native permission to publish it.
+ */
+export const readAssistantCodexPreparedOwnerReply=(threadId,deliveryId,intakePass,options={})=>{
+  threadId=id(threadId);deliveryId=id(deliveryId);
+  if(!intakePass||Object.getPrototypeOf(intakePass)!==Object.prototype
+    ||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||Object.values(intakePass).some(value=>!UUID.test(value??'')))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  const proofs=options.settledCreationSuccessors??[];
+  const fields='companyId,deliveryId,eventId,intakeId,receiptId,sourceId,sourceRevision,taskId,threadId';
+  if(!Array.isArray(proofs)||proofs.length>8||proofs.some(proof=>!proof||Object.getPrototypeOf(proof)!==Object.prototype
+    ||Object.keys(proof).sort().join(',')!==fields
+    ||Object.entries(proof).some(([key,value])=>key==='sourceRevision'?!Number.isSafeInteger(value)||value<0:!UUID.test(value??''))
+    ||proof.companyId!==intakePass.companyId||proof.sourceId!==intakePass.sourceId||proof.threadId!==threadId
+    ||proof.intakeId===intakePass.intakeId||proof.deliveryId===deliveryId)
+    ||['deliveryId','eventId','intakeId','receiptId','taskId'].some(key=>new Set(proofs.map(proof=>proof[key])).size!==proofs.length))
+    fail('ASSISTANT_CODEX_INVALID_INPUT');
+  const marker=assistantDeliveryMarker(deliveryId)+'\n';
+  return readNative(threadId,async(_thread,request)=>{
+    let cursor=null,selected=null,matches=0;const cursors=new Set(),turns=new Set(),used=new Set();
+    for(let page=0;page<10;page++){
+      const result=await request('thread/turns/list',{threadId,limit:20,sortDirection:'desc',itemsView:'full',...(cursor?{cursor}:{})});
+      if(!Array.isArray(result?.data)||result.data.length>20)return null;
+      for(const turn of result.data){
+        if(!UUID.test(turn?.id??'')||turns.has(turn.id)||!Array.isArray(turn.items))return null;
+        turns.add(turn.id);
+        const marked=value=>turn.items.filter(item=>item.type==='userMessage'&&Array.isArray(item.content)
+          &&item.content.some(input=>input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(value))).length;
+        const count=marked(marker),successors=proofs.filter(proof=>marked(assistantDeliveryMarker(proof.deliveryId)+'\n'));
+        if(count){
+          matches+=count;
+          if(matches!==1||successors.length||used.size!==proofs.length)return null;
+          selected=assistantPreparedOwnerReply(turn,{deliveryId,intakePass});
+          if(!selected)return null;
+        }else if(!selected){
+          if(successors.length!==1||used.has(successors[0].intakeId)
+            ||!assistantSettledOwnerTaskCreation(turn,successors[0]))return null;
+          used.add(successors[0].intakeId);
+        }else if(successors.length)return null;
+      }
+      // Even after finding the draft, finish every bounded page: an older
+      // duplicate marker/turn cannot disappear behind an apparently good tail.
+      if(result.nextCursor===null)return matches===1?selected:null;
+      if(typeof result.nextCursor!=='string'||!result.nextCursor.length||result.nextCursor.length>1024||cursors.has(result.nextCursor))return null;
+      cursor=result.nextCursor;cursors.add(cursor);
+    }
+    return null;
+  },options);
+};
+
 /** Read back ONE already completed native tool invocation. Its text is only
  * a private comparison value for a read-only provider check, never fresh send
  * authority or a recovered instruction. Duplicate markers/calls, unknown turns

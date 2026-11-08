@@ -4075,3 +4075,56 @@ classification without declaring repaired business work. The server owns durable
 threshold/recovery hysteresis and separate per-code incidents/notices, seven-day
 metric retention and thirty-day closed-incident history. Native Windows CI runs
 the actual read-only pipe; synthetic tests do not claim production rollout.
+
+### First delivery of a prepared owner output
+
+An immutable completed owner turn may already contain its answer when the final
+`resolve_assistant_intake(reply_owner)` arguments materializer refused with the
+exact closed `ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_404` code.
+This is a separate **model-free first delivery**, not a continuation or a claim
+that earlier tools were read-only. The bounded full native history reader keeps
+one own marker, successful exact context and one final failed text-only reply;
+unknown/active actions, extra resolves, tools after that reply and duplicate
+markers refuse. At most eight later independent CREATED turns need the existing
+whole-turn witness and fresh native receipts. The answer remains ephemeral and
+byte-preserved until the SAME signed Telegram v2 Markdown process renders it.
+
+Native `preparedOwnerReplyDeliveryProtocolVersion:1` is independent of every
+older recovery capability. Its fixed device-only prepare/read/confirm routes
+accept structural locators only; no MCP tool exposes them. Prepare holds the
+existing device/source/intake locks, requires the unchanged current owner,
+account, BOTH memberships/project, selected allowed model and an expired,
+read-confirmed private CANCELLED root without siblings, task, file or pending
+question. An answered earlier dialogue is data, never action consent; its latest
+answer must precede the original read. Native observation and an immutable
+cancellation and original read at most 24 hours old are required. The SQL-closed operation ledger
+`assistant:prepared_owner_reply` owns one receipt per original, with a separate
+nonrenewable 30-minute send deadline. Neither original state nor old lease,
+receipt or runtime proof is reused. Every later intake for that original is
+permanently fenced independently in SQL. Backend migration/capability comes first.
+
+Schema27 adds only nullable structural `prepared_reply_json` to the SAME inbox.
+Freeze one client request before prepare HTTP. A lost response permits exact
+receipt read only, including when no receipt is visible. Before first provider
+spawn recapture the exact immutable draft, recheck idle host/current native
+source/recipient/model/grant and durably consume `attempted` under the existing
+coordinator lease. The SAME signed source package, account selector, original
+reference, formatter, private pipe and result validator perform the send. There
+is no second executor, model turn, fake active pass, Task/Run or body/hash cache.
+A positive provider ID is local structural evidence; confirm it natively before
+marking the separate delivery complete. Preserve all old original fields.
+
+Attempted/unknown sends use only signed passive-journal candidates plus the SAME
+provider header/peer/full-text verification; missing matches never permit a
+second send. Verification and positive receipt confirmation may outlive the send
+deadline, without renewing it. Pending prepare/send/confirmation retains global
+uncertainty and blocks new work/idle maintenance, including after source removal.
+Health clears only after actual native/provider completion and zero other device
+uncertainty. Old MCPs retain their existing exact-read and recovery protocols.
+
+Tests include real SQLite reopen/legacy upgrade and production factory/fixed
+HTTP/native PostgreSQL/source admission/native private store/reviewed provider
+composition. Lost prepare, lost positive confirmation and lost provider result
+must each deliver exactly once without another model invocation. Synthetic
+messages are never live acceptance; actual original owner delivery remains a
+separate production read-back requirement.
