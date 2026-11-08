@@ -1393,6 +1393,32 @@ task. Changed, foreign, running or queued definitions refuse; no stop, force
 overwrite, task execution, password or automatic Codex restart is introduced.
 Ordinary install/start/remove retain their existing exact loaded-shell checks.
 
+The existing five-minute idle MCP `health` maintenance also recovers a previously
+started registered supervisor after a positively observed Node exit `1`. The
+identity-bound supervisor record is required: pairing or install alone never
+grants an automatic first start. Use the SAME coordinator idle lease, setup
+mutex, exact native registration/SID/settings validator and Windows IgnoreNew.
+A changed/disabled/missing task, normal exit, explicit Windows stop, unknown
+scheduler result, active pass or unresolved installer/GUI journal refuses or
+defers. The fresh verified native target must match its protected installation
+receipt even when an older facade still owns another loaded shell. No cache
+scan, task retarget/install, Desktop restart, hook approval or new scheduler is
+introduced by this recovery path.
+
+Before one native `Run()` persist a CAS-bound `background-recovery.json` intent
+in the SAME protected assistant/device maintenance directory. It binds the full
+native definition digest and failed last-run observation; the native helper
+reopens and compares both immediately before Run. Positive instance acceptance
+is technical evidence only. An unknown/partial result remains read-back-only,
+including after process restart, clock advance or a newer signed implementation.
+Distinct positively witnessed failures have one/five/fifteen-minute backoff and
+escalate after three attempts. Only a genuinely changed verified code fingerprint
+may reopen that exhausted known-failure allowance; it never clears an uncertain
+start intent, a pass or business/send/ACK evidence. Without the app/MCP or an
+interactive Windows user this path cannot run; ordinary OS logon/restart policy
+remains independent. Later work resumes through the original supervisor and its
+unchanged native reconciliation, never by replaying a business tool or message.
+
 The pairing coordinator owns the independent owner decision, active-pass fence,
 quiescing journal and identity CAS. A snapshot alone grants no replacement. An
 older already-running supervisor may not understand graceful shutdown; it must

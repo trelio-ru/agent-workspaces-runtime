@@ -15,7 +15,7 @@ import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEX
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
-import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
+import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
@@ -1976,6 +1976,86 @@ export const resolveAssistantPluginHandoffLoaders = async ({installedPath,loaded
   return {nextLoader,previousLoaders};
 };
 
+/** Recover only an already-started exact registered supervisor. This uses the
+ * SAME idle coordinator lease and setup mutex as technical servicing, but does
+ * not install/retarget a task, update a plugin/Desktop or approve hooks. A live
+ * supervisor, intentional stop, replacement, active pass or uncertain native
+ * start is never converted into another writer. The old MCP facade already
+ * calls `health` every five minutes, so signed workers can add this repair
+ * without touching the stable plugin or asking a model to restart the host. */
+export const runProductionAssistantBackgroundRecovery=async({context=productionContext,
+  createHost=createAssistantRuntimeHost,environment=process.env,platform=process.platform,
+  versions=requireTrelioComponentVersions,createRecovery=createAssistantWindowsBackgroundRecovery,
+  readInventory=null,signal}={})=>{
+  if(platform!=='win32')return {state:'unsupported'};
+  const deadline=AbortSignal.timeout(45_000);signal=signal?AbortSignal.any([signal,deadline]):deadline;
+  const prior=await context(async(client,host)=>({identity:client.identity,supervisor:await host.readPluginSupervisor()}),{signal});
+  // Pairing/import alone never starts an assistant. This protected record is
+  // written only by a parent AFTER its real native registration was verified.
+  if(!prior?.identity||!new RegExp(UUID,'u').test(prior.identity.assistantId??'')||!new RegExp(UUID,'u').test(prior.identity.deviceId??''))
+    fail('ASSISTANT_HOST_NOT_CONFIGURED');
+  if(prior.supervisor===null)return {state:'not_started'};
+  if(!prior.supervisor)fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+  if(prior.supervisor.generation===environment.TRELIO_ASSISTANT_SUPERVISOR_GENERATION)
+    return {state:'supervised'};
+  const runtime=await createHost();
+  try{return await runtime.coordinator.maintainPluginAtIdleBoundary(coordinatorGuard=>context(async(client,host)=>host.withSetupLock(async()=>{
+    const guard=async()=>{
+      await coordinatorGuard();signal.throwIfAborted();
+      const current=await host.readIdentity();
+      if(['origin','assistantId','deviceId'].some(key=>current?.[key]!==prior.identity[key]||client.identity[key]!==prior.identity[key]
+        ||runtime.identity[key]!==prior.identity[key])
+        ||['pending_owner','quiescing'].includes((await host.readActivation())?.stage)||await host.readActivePass()!==null)
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    };
+    await guard();await client.readHealth(signal);await guard();
+    const supervisor=await host.readPluginSupervisor();
+    if(supervisor?.generation!==prior.supervisor.generation) return {state:'changed'};
+    const plugin=await host.readPluginUpdate(),desktop=await host.readCodexUpdate();
+    // Uncertain installer/GUI effects keep THEIR independent journal and
+    // review boundary. Recovery never clears a failed candidate or trust latch.
+    if(plugin&&(!['ready','retargeting','verifying'].includes(plugin.stage)||plugin.failedVersion)
+      ||desktop&&desktop.phase!=='ready')return {state:'maintenance_pending'};
+    let loader,treeSha256,pluginVersion;
+    if(plugin){
+      if(!plugin.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      const common=await import('./trelio-workspace.mjs');
+      const inventory=readInventory?await readInventory(plugin,guard,signal):await(async()=>{
+        const {resolveCodexExecutable,buildCodexEnvironment}=await import('./trelio-codex-conversation.mjs');
+        const executable=await resolveCodexExecutable(environment,{signal});if(!executable)fail('ASSISTANT_CODEX_UNAVAILABLE');
+        const {promisify}=await import('node:util'),{execFile}=await import('node:child_process');
+        const execute=promisify(execFile),env=buildCodexEnvironment(environment);
+        return common.readCodexPluginUpdateInventory({profile:'assistant',environment:env,
+          receipt:{version:plugin.targetVersion,treeSha256:plugin.targetTreeSha256},
+          execFileCommand:async(_command,args,options)=>{await guard();return execute(executable,args,{...options,
+            env:{...env,GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat'},timeout:30_000,signal,shell:false,windowsHide:true});}});
+      })();
+      if(inventory.state!=='installed'||inventory.version!==plugin.targetVersion||inventory.treeSha256!==plugin.targetTreeSha256)
+        fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      // Use only the freshly verified native installed target from the SAME
+      // protected receipt. A long-lived facade may still own the older shell;
+      // neither a cache scan nor that old path selects the registered action.
+      loader=await resolveHostRuntimeLoader({environment:{...environment,TRELIO_PLUGIN_ROOT:inventory.installedPath}});
+      treeSha256=inventory.treeSha256;pluginVersion=inventory.version;
+    }else{
+      loader=await resolveHostRuntimeLoader({environment});
+      const common=await import('./trelio-workspace.mjs');
+      // The dedicated distribution embeds a separately versioned common
+      // shell. Its exact cache basename/native manifest selects this version;
+      // TRELIO_PLUGIN_VERSION must not be mistaken for that distribution.
+      const retained=await common.retainLoadedCodexPluginInstallation({profile:'assistant',
+        loadedPluginDirectory:environment.TRELIO_PLUGIN_ROOT,loadedPluginVersion:path.basename(path.resolve(environment.TRELIO_PLUGIN_ROOT))});
+      treeSha256=retained.treeSha256;pluginVersion=retained.version;
+    }
+    const fingerprint=createHash('sha256').update(JSON.stringify({runtime:versions().hostRuntimeVersion,pluginVersion,treeSha256})).digest('hex');
+    const native=createRecovery({environment,signal,resolveLoader:async()=>loader,guard,
+      readIdentity:()=>host.readIdentity(),verifyContact:async()=>{await guard();await client.heartbeat(signal);await guard();}});
+    return maintainAssistantBackgroundRecovery({identity:prior.identity,fingerprint,guard,
+      inspect:()=>native.inspect(),start:snapshot=>native.start(snapshot),
+      readState:()=>host.readBackgroundRecovery(),writeState:(expected,next)=>host.writeBackgroundRecovery(expected,next)});
+  }),{signal,pluginMaintenance:true}),signal);}finally{await runtime.close();}
+};
+
 /** Only the supervisor's signed tick enters plugin maintenance. An idle
  * model-facing MCP health call never closes the user's Desktop/setup chat.
  * Keep the existing SQLite coordinator lease and protected setup identity;
@@ -2389,6 +2469,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
   backgroundTick=runAssistantBackgroundTick,requestRuntime=requestCurrentAssistantRuntime,upgradeRuntime=prepareHostRuntimeUpgrade,
+  backgroundRecovery=runProductionAssistantBackgroundRecovery,
   companyContextOperation=executeAssistantCompanyContextRequest,
   createRuntimeHost=createAssistantRuntimeHost,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
@@ -2414,6 +2495,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   if(request.operation==='health') {
     const canUpdate=await context(async (_client,host)=>!await host.readActivePass());
     if(canUpdate===null)return null;
+    let health;
     try {
       if(canUpdate)await upgradeRuntime({timeoutMs:30_000});
       else {
@@ -2427,13 +2509,18 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       }
       // Downloading is not activation. A new worker selected by the verified
       // pointer proves the actual loaded version before reporting recovery.
-      return await requestRuntime({operation:'health_check'});
+      health=await requestRuntime({operation:'health_check'});
     } catch(error) {
       const direct=assistantHealthFailure(error);
       return context(client=>maintainAssistantHost({client,versions:versions(),
         update:async()=>{throw new Error();},probe:async()=>{if(direct)fail(error.code);},
       }));
     }
+    if(canUpdate){
+      const recovery=await backgroundRecovery({context,createHost:createRuntimeHost});
+      if(recovery?.state==='review_required')await reportAssistantMaintenanceFailure({code:'ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED'});
+    }
+    return health;
   }
   if(request.operation==='health_check') {
     return context(async (client,host)=>{

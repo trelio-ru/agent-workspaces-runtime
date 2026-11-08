@@ -6,11 +6,12 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { resolveHostRuntimeLoader } from './trelio-host-runtime-recovery.mjs';
 import { createAssistantPairingClient, createAssistantDeviceClient } from './trelio-assistant-transport.mjs';
-import { validateAssistantActivationAuthorization, validateAssistantCodexUpdate, CODEX_DESKTOP_VERSION } from './trelio-assistant-hook.mjs';
+import { validateAssistantActivationAuthorization, validateAssistantCodexUpdate, validateAssistantBackgroundRecoveryRecord, CODEX_DESKTOP_VERSION } from './trelio-assistant-hook.mjs';
 import fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ensurePrivateDirectory, assertPrivatePathKind } from './trelio-workspace.mjs';
 export { validateAssistantCodexUpdate } from './trelio-assistant-hook.mjs';
+export { validateAssistantBackgroundRecoveryRecord } from './trelio-assistant-hook.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantSetupError extends Error {
@@ -202,6 +203,77 @@ export const createAssistantSetup = ({ origin, store, http, host, withLock = act
  */
 
 const operations = new Set(['install', 'status', 'start', 'remove', 'retarget']);
+
+/** Host-only recovery of an already registered supervisor, never onboarding or
+ * a business retry. The production composition owns native identity/idle gates. */
+export const validateAssistantBackgroundRecoveryObservation = value => {
+  if(!value||Object.getPrototypeOf(value)!==Object.prototype
+    ||Object.keys(value).sort().join(',')!=='definitionSha256,lastResult,lastRunAt,schemaVersion,state'
+    ||value.schemaVersion!==1||!['not_installed','registered','running','queued'].includes(value.state)
+    ||(value.state==='not_installed'?[value.definitionSha256,value.lastRunAt,value.lastResult].some(v=>v!==null)
+      :!/^[a-f0-9]{64}$/u.test(value.definitionSha256??'')
+        ||value.lastRunAt!==null&&(!Number.isSafeInteger(value.lastRunAt)||value.lastRunAt<0)
+        ||value.lastResult!==null&&(!Number.isSafeInteger(value.lastResult)||value.lastResult<0||value.lastResult>0xffffffff)))
+    fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+  return value;
+};
+
+export const maintainAssistantBackgroundRecovery = async ({identity,fingerprint,guard,inspect,readState,writeState,start,now=Date.now}={}) => {
+  if(!identity||!UUID.test(identity.assistantId??'')||!UUID.test(identity.deviceId??'')
+    ||!/^[a-f0-9]{64}$/u.test(fingerprint??'')||![guard,inspect,readState,writeState,start,now].every(v=>typeof v==='function'))
+    fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+  await guard();
+  const observed=validateAssistantBackgroundRecoveryObservation(await inspect());
+  // A removed/disabled/foreign task is never recreated here. Normal exit and
+  // Windows' explicit user-stop result are not failures. Only Node's positive
+  // exit 1 admits this recovery; scheduler errors and unknown outcomes do not.
+  if(observed.state!=='registered')return {state:observed.state};
+  if(observed.lastResult!==1||!observed.lastRunAt)return {state:'not_failed'};
+  const currentTime=now();
+  if(!Number.isSafeInteger(currentTime)||currentTime<=0||observed.lastRunAt>currentTime)
+    fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+  let previous=await readState();
+  if(previous!==null){
+    previous=validateAssistantBackgroundRecoveryRecord(previous);
+    if(previous.assistantId!==identity.assistantId||previous.deviceId!==identity.deviceId)
+      fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    // The same failed generation cannot earn a second Run(), even after a
+    // restart, clock advance or signed update. A lost acknowledgement stays
+    // read-back-only: an unrelated later start cannot discharge that intent.
+    if(['attempted','uncertain'].includes(previous.state))return {state:'review_required'};
+    if(observed.lastRunAt<=previous.lastRunAt)return {state:'pending'};
+    const delay=[60_000,300_000,900_000][previous.failures-1];
+    if(currentTime<previous.attemptedAt+delay)return {state:'backoff'};
+    // Three distinct positive crashes escalate instead of looping forever.
+    // A genuinely newer verified implementation may address that cause, but
+    // cannot erase the unresolved same-generation fence above.
+    if(previous.fingerprint===fingerprint&&previous.failures>=3)return {state:'review_required'};
+  }
+  const pending=validateAssistantBackgroundRecoveryRecord({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+    fingerprint,definitionSha256:observed.definitionSha256,lastRunAt:observed.lastRunAt,attemptedAt:currentTime,
+    attemptId:randomUUID(),failures:previous?.fingerprint===fingerprint?previous.failures+1:1,state:'attempted',instanceId:null});
+  await guard();await writeState(previous,pending);
+  // The SAME production coordinator lease/setup lock must still be held.
+  // Rebinding, a newly active pass or a changed definition denies before the
+  // native helper's final CAS/IgnoreNew boundary. Never undo this intent.
+  await guard();
+  let result;
+  try{result=await start(observed);}catch{
+    await guard();await writeState(pending,{...pending,state:'uncertain'});
+    return {state:'review_required'};
+  }
+  await guard();
+  if(result?.schemaVersion===1&&result.state==='requested'&&UUID.test(result.instanceId??'')
+    &&Object.keys(result).sort().join(',')==='instanceId,schemaVersion,state'){
+    await writeState(pending,{...pending,state:'started',instanceId:result.instanceId});
+    return {state:'start_requested'};
+  }
+  if(result?.schemaVersion===1&&result.state==='changed'&&Object.keys(result).sort().join(',')==='schemaVersion,state'){
+    await writeState(pending,{...pending,state:'not_started'});return {state:'changed'};
+  }
+  // Malformed/partial output cannot be interpreted as an absent OS effect.
+  await writeState(pending,{...pending,state:'uncertain'});return {state:'review_required'};
+};
 const codes = new Set(['ASSISTANT_BACKGROUND_UNAVAILABLE', 'ASSISTANT_BACKGROUND_CONFLICT',
   'ASSISTANT_BACKGROUND_BUSY', 'ASSISTANT_BACKGROUND_NOT_INSTALLED', 'ASSISTANT_BACKGROUND_READBACK_FAILED', 'ASSISTANT_BACKGROUND_ACCESS_DENIED']);
 const windowsPath = value => typeof value === 'string' && value.length <= 4096
@@ -211,6 +283,10 @@ const windowsPath = value => typeof value === 'string' && value.length <= 4096
 // command or interpolate a selected path into PowerShell source.
 export const quoteAssistantWindowsArgument = value => '"' + value.replace(/(\\*)"/gu, '$1$1\\"')
   .replace(/(\\+)$/u, '$1$1') + '"';
+
+const assistantWindowsBackgroundPlan=(operation,identity,executable,loader)=>({schemaVersion:1,operation,
+  assistantId:identity.assistantId.toLowerCase(),deviceId:identity.deviceId.toLowerCase(),command:executable,
+  arguments:`${quoteAssistantWindowsArgument(loader)} bridge assistant background`,workingDirectory:path.win32.dirname(executable)});
 
 /** Constant source only. All variable values travel as bounded UTF-8 JSON on
  * stdin. Task Scheduler/WindowsIdentity here inspect PUBLIC OS registration,
@@ -313,6 +389,11 @@ try {
     foreach ($key in $failed) { [Console]::Error.WriteLine('TRELIO_TASK_CHECK ' + $key) }
     return $failed.Count -eq 0
   }
+  function Get-DefinitionHash($task) {
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($task.Xml)))).Replace('-', '').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+  }
   # Replacement is an internal, owner-approved pairing path, never a normal
   # installer option. An older plugin path may no longer exist; inspect its
   # PUBLIC definition without resolving, reading or executing that path. The
@@ -341,11 +422,6 @@ try {
       }
     }
     if ($existing -and !(Test-DefinitionForReplacement $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
-    function Get-DefinitionHash($task) {
-      $hasher = [System.Security.Cryptography.SHA256]::Create()
-      try { return ([System.BitConverter]::ToString($hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($task.Xml)))).Replace('-', '').ToLowerInvariant() }
-      finally { $hasher.Dispose() }
-    }
     if ($p.operation -eq 'replacement_remove') {
       # A lost delete response can be reconciled as absent. An existing task
       # must match the protected original snapshot, not just a familiar name.
@@ -408,6 +484,42 @@ try {
     }
   }
   if ($existing -and !(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+  if ($p.operation -eq 'recovery_inspect' -or $p.operation -eq 'recovery_start') {
+    function Get-RecoveryObservation($task) {
+      if (!$task) { return @{schemaVersion=1;state='not_installed';definitionSha256=$null;lastRunAt=$null;lastResult=$null} }
+      $state = 'registered'
+      if ($task.State -eq 4) { $state = 'running' }
+      if ($task.State -eq 2) { $state = 'queued' }
+      $lastRunAt = $null
+      if ($task.LastRunTime.Year -ge 2000) { $lastRunAt = ([DateTimeOffset]::new($task.LastRunTime)).ToUnixTimeMilliseconds() }
+      return @{schemaVersion=1;state=$state;definitionSha256=(Get-DefinitionHash $task);lastRunAt=$lastRunAt;lastResult=([int64]$task.LastTaskResult -band 4294967295)}
+    }
+    if ($p.operation -eq 'recovery_inspect') {
+      [Console]::Out.WriteLine(((Get-RecoveryObservation $existing) | ConvertTo-Json -Compress))
+      return
+    }
+    # The protected journal persisted an intent BEFORE this one native call.
+    # Reopen the exact task and compare the entire definition AND failed run:
+    # a concurrent start, disable, replacement or retarget never earns Run().
+    if (!$existing) { throw 'ASSISTANT_BACKGROUND_NOT_INSTALLED' }
+    $existing = $folder.GetTask($name)
+    if (!(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+    $fresh = Get-RecoveryObservation $existing
+    $expected = $p.expected
+    if (!$expected -or $fresh.state -cne 'registered' -or $fresh.lastResult -ne 1 -or !$fresh.lastRunAt -or
+        $fresh.definitionSha256 -cne $expected.definitionSha256 -or $fresh.lastRunAt -ne $expected.lastRunAt -or
+        $expected.state -cne 'registered' -or $expected.lastResult -ne 1) {
+      [Console]::Out.WriteLine((@{schemaVersion=1;state='changed'} | ConvertTo-Json -Compress))
+      return
+    }
+    # IgnoreNew remains the OS race guard. Do not install, update, terminate,
+    # change triggers/ACLs or infer a business result from an accepted launch.
+    $started = $existing.Run($null)
+    $instance = ([string]$started.InstanceGuid).Trim('{}').ToLowerInvariant()
+    if ($instance -cnotmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$') { throw 'ASSISTANT_BACKGROUND_READBACK_FAILED' }
+    [Console]::Out.WriteLine((@{schemaVersion=1;state='requested';instanceId=$instance} | ConvertTo-Json -Compress))
+    return
+  }
   if ($p.operation -eq 'install' -and !$existing) {
     $d = $service.NewTask(0)
     $d.RegistrationInfo.Description = $marker
@@ -515,9 +627,8 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
     if (!windowsPath(executable) || !windowsPath(loader)) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
     if(operation==='retarget'&&(!Array.isArray(previousLoaders)||!previousLoaders.length||previousLoaders.length>3
       ||previousLoaders.some(loader=>!windowsPath(loader))||typeof restartRequested!=='boolean'||loaderArguments.length))fail('ASSISTANT_BACKGROUND_INVALID_INPUT');
-    const plan = { schemaVersion: 1, operation, assistantId: identity.assistantId.toLowerCase(), deviceId: identity.deviceId.toLowerCase(),
-      command: executable, arguments: `${[loader,...loaderArguments].map(quoteAssistantWindowsArgument).join(' ')} bridge assistant background`,
-      workingDirectory: path.win32.dirname(executable) };
+    const plan=assistantWindowsBackgroundPlan(operation,identity,executable,loader);
+    if(loaderArguments.length)plan.arguments=`${[loader,...loaderArguments].map(quoteAssistantWindowsArgument).join(' ')} bridge assistant background`;
     if(operation==='install'&&options.autoUpdatePlugin===true)plan.requireOwnTaskWrite=true;
     if(operation==='retarget'){
       plan.previousArguments=previousLoaders.map(loader=>`${quoteAssistantWindowsArgument(loader)} bridge assistant background`);
@@ -581,6 +692,52 @@ const projectAssistantBackgroundReplacementResult = (result, previous, removing 
     || (result.state === 'not_installed') !== (result.snapshot === null)
     || removing && result.state !== 'not_installed') fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
   return { schemaVersion: 1, state: result.state, snapshot: validateAssistantBackgroundReplacementSnapshot(result.snapshot, previous) };
+};
+
+/** Internal idle-maintenance adapter only. No new CLI/setup tool can select a
+ * recovery snapshot or executable. Reuse the exact same native registration
+ * validator, public-metadata pipe, non-sliding budget and IgnoreNew policy. */
+export const createAssistantWindowsBackgroundRecovery=({readIdentity,verifyContact,guard,
+  expectedOrigin='https://trelio.ru',platform=process.platform,environment=process.env,executable=process.execPath,
+  resolveLoader=resolveHostRuntimeLoader,runNative=runAssistantWindowsBackgroundNative,signal}={})=>{
+  if(![readIdentity,verifyContact,guard].every(v=>typeof v==='function'))fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+  const started=performance.now();
+  const remaining=()=>{
+    signal?.throwIfAborted();const left=45_000-(performance.now()-started);
+    if(left<10)fail('ASSISTANT_BACKGROUND_UNAVAILABLE');return Math.min(40_000,Math.floor(left));
+  };
+  const run=async(operation,expected)=>{
+    if(platform!=='win32')fail('ASSISTANT_BACKGROUND_PLATFORM_UNSUPPORTED');
+    remaining();await guard();const identity=await readIdentity();
+    if(!identity||identity.origin!==expectedOrigin||!UUID.test(identity.assistantId??'')||!UUID.test(identity.deviceId??''))
+      fail('ASSISTANT_HOST_NOT_CONFIGURED');
+    const loader=await resolveLoader({environment});
+    if(!windowsPath(executable)||!windowsPath(loader))fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+    const plan=assistantWindowsBackgroundPlan(operation,identity,executable,loader);
+    if(operation==='recovery_start'){
+      plan.expected=validateAssistantBackgroundRecoveryObservation(expected);
+      await verifyContact();
+    }
+    const current=await readIdentity();
+    if(['origin','assistantId','deviceId'].some(key=>current?.[key]!==identity[key]))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    await guard();
+    const result=await runNative(plan,{environment,timeoutMs:remaining(),signal,project:value=>{
+      // Recovery has its own CLOSED technical receipt, not the ordinary
+      // setup/businessReady DTO. Project it at the real native pipe boundary;
+      // the default setup projector would discard a successful OS Run() as a
+      // malformed reply, leaving an unnecessary permanent uncertain fence.
+      if(codes.has(value?.code))fail(value.code);
+      if(operation==='recovery_inspect')return validateAssistantBackgroundRecoveryObservation(value);
+      if(value&&Object.getPrototypeOf(value)===Object.prototype&&value.schemaVersion===1
+        &&(value.state==='changed'&&Object.keys(value).sort().join(',')==='schemaVersion,state'
+          ||value.state==='requested'&&Object.keys(value).sort().join(',')==='instanceId,schemaVersion,state'
+            &&UUID.test(value.instanceId??'')))return value;
+      fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+    }});remaining();
+    if(result?.code&&codes.has(result.code))fail(result.code);
+    return operation==='recovery_inspect'?validateAssistantBackgroundRecoveryObservation(result):result;
+  };
+  return {inspect:()=>run('recovery_inspect'),start:expected=>run('recovery_start',expected)};
 };
 
 /** Trusted pairing composition only: the owner has separately authorized the

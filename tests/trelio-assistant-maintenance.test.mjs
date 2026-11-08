@@ -6,8 +6,8 @@ import { executeAssistantRuntimeRequest, assistantHealthCompatibility, assistant
 import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { maintainAssistantCodexDesktop, validateAssistantCodexUpdate, compareCodexDesktopVersions,
   downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate,
-  runAssistantWindowsCodexService } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { runProductionAssistantCodexMaintenance, runProductionAssistantPluginMaintenance, runAssistantBackgroundTick } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  runAssistantWindowsCodexService, maintainAssistantBackgroundRecovery } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+import { runProductionAssistantCodexMaintenance, runProductionAssistantPluginMaintenance, runProductionAssistantBackgroundRecovery, runAssistantBackgroundTick } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -15,6 +15,141 @@ import os from 'node:os';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
+
+const backgroundRecoveryFixture=()=>{
+  let clock=2_000_000,record=null,fingerprint='a'.repeat(64),starts=0;
+  let observation={schemaVersion:1,state:'registered',definitionSha256:'b'.repeat(64),lastRunAt:1_000_000,lastResult:1};
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  const options={identity,now:()=>clock,get fingerprint(){return fingerprint;},guard:async()=>{},
+    inspect:async()=>structuredClone(observation),readState:async()=>structuredClone(record),
+    writeState:async(expected,next)=>{assert.deepEqual(expected,record);record=structuredClone(next);},
+    start:async snapshot=>{
+      // The durable intent must precede the OS effect, including a lost reply.
+      assert.equal(record.state,'attempted');assert.equal(snapshot.lastRunAt,observation.lastRunAt);
+      starts++;observation={...observation,state:'running',lastRunAt:clock};
+      return {schemaVersion:1,state:'requested',instanceId:randomUUID()};
+    }};
+  return {options,get record(){return record;},get starts(){return starts;},get observation(){return observation;},
+    setObservation:value=>{observation={...observation,...value};},advance:ms=>{clock+=ms;},
+    failNewRun:()=>{observation={...observation,state:'registered',lastResult:1};},
+    newFingerprint:()=>{fingerprint='c'.repeat(64);}};
+};
+
+test('automatic background recovery restarts one positively failed registered generation and never runs a second instance',async()=>{
+  const f=backgroundRecoveryFixture();
+  assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'start_requested');
+  assert.equal(f.starts,1);assert.equal(f.record.state,'started');
+  assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'running');
+  assert.equal(f.starts,1);
+});
+
+test('background recovery does not install, override a normal stop, or interpret scheduler/unknown results as a crash',async()=>{
+  for(const value of [{state:'not_installed',definitionSha256:null,lastRunAt:null,lastResult:null},
+    {state:'queued'},{lastResult:0},{lastResult:0x41306},{lastResult:0x41301},{lastRunAt:null},{lastRunAt:0}]){
+    const f=backgroundRecoveryFixture();f.setObservation(value);
+    await maintainAssistantBackgroundRecovery(f.options);assert.equal(f.starts,0);assert.equal(f.record,null);
+  }
+});
+
+test('unknown native background start remains read-back-only after restart and even a new signed implementation',async()=>{
+  const f=backgroundRecoveryFixture();
+  const start=async()=>{throw Object.assign(new Error('PRIVATE_NATIVE_DETAIL'),{code:'EPIPE'});};
+  assert.equal((await maintainAssistantBackgroundRecovery({...f.options,start})).state,'review_required');
+  assert.equal(f.record.state,'uncertain');f.advance(86_400_000);f.newFingerprint();
+  assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'review_required');
+  assert.equal(f.starts,0,'time/version changes cannot replay the unresolved OS start');
+  f.setObservation({lastRunAt:3_000_000});
+  assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'review_required','another observed run does not discharge the unknown request');
+});
+
+test('partial OS receipts and lost journal read-back retain a pre-start fence without another native request',async()=>{
+  for(const result of [null,{schemaVersion:1,state:'requested'},
+    {schemaVersion:1,state:'requested',instanceId:randomUUID(),extra:true}]){
+    const f=backgroundRecoveryFixture();let attempts=0;
+    assert.equal((await maintainAssistantBackgroundRecovery({...f.options,start:async()=>{attempts++;return result;}})).state,'review_required');
+    assert.equal(f.record.state,'uncertain');f.advance(86_400_000);
+    assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'review_required');assert.equal(attempts,1);assert.equal(f.starts,0);
+  }
+  const f=backgroundRecoveryFixture();let writes=0;
+  await assert.rejects(maintainAssistantBackgroundRecovery({...f.options,writeState:async(expected,next)=>{
+    if(++writes===2)throw new Error('PRIVATE_PERSIST_FAILURE');
+    return f.options.writeState(expected,next);
+  }}));
+  assert.equal(f.starts,1);assert.equal(f.record.state,'attempted');
+  f.failNewRun();f.advance(86_400_000);
+  assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'review_required');assert.equal(f.starts,1);
+});
+
+test('background recovery paces distinct proven failures, escalates after three attempts and preserves the start fence',async()=>{
+  const f=backgroundRecoveryFixture();await maintainAssistantBackgroundRecovery(f.options);
+  f.failNewRun();assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'backoff');assert.equal(f.starts,1);
+  f.advance(60_000);assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'start_requested');
+  f.failNewRun();f.advance(60_000);assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'backoff');
+  f.advance(4*60_000);assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'start_requested');
+  f.failNewRun();f.advance(15*60_000);assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'review_required');
+  assert.equal(f.starts,3);f.newFingerprint();
+  assert.equal((await maintainAssistantBackgroundRecovery(f.options)).state,'start_requested');assert.equal(f.starts,4);
+});
+
+test('late pass/identity/registration guards and failed durable intent prevent any automatic OS start',async()=>{
+  for(const boundary of ['guard','write']){
+    const f=backgroundRecoveryFixture();let checks=0;
+    await assert.rejects(maintainAssistantBackgroundRecovery({...f.options,
+      guard:async()=>{if(boundary==='guard'&&++checks===3)throw Object.assign(new Error(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});},
+      writeState:boundary==='write'?async()=>{throw new Error('PRIVATE_STORAGE_DETAIL');}:f.options.writeState}));
+    assert.equal(f.starts,0);
+  }
+});
+
+test('idle production maintenance composes protected recovery journal, exact native target and the SAME coordinator/setup locks',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-recovery-composition-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const installedPath=path.join(directory,'0.1.11'),loader=path.join(installedPath,'scripts','trelio-host-runtime-loader.mjs');
+  await fs.mkdir(path.dirname(loader),{recursive:true});await fs.writeFile(loader,'// inert verified-loader fixture\n');
+  const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()},files=new Map();
+  let locked=false,idle=false,closed=0,starts=0,active=null,checks=0;
+  const host=createAssistantHostState({directory:path.join(directory,'private'),store:{get:async()=>null},primitives:{
+    ensurePrivateDirectory:async()=>{},assertPrivatePathKind:async file=>{if(!files.has(file))throw Object.assign(Error(),{code:'ENOENT'});},
+    readPrivateJsonFile:async file=>structuredClone(files.get(file)),writePrivateJsonFile:async(file,value)=>files.set(file,structuredClone(value)),
+    withSetupLock:async action=>{assert.equal(locked,false);locked=true;try{return await action();}finally{locked=false;}},
+  }});
+  await host.saveIdentity(identity);await host.recordPluginSupervisor('3.30.11',randomUUID(),identity);
+  await host.writePluginUpdate(null,{schemaVersion:1,...Object.fromEntries(['assistantId','deviceId'].map(k=>[k,identity[k]])),
+    previousVersion:'0.1.10',previousTreeSha256:'d'.repeat(64),targetVersion:'0.1.11',targetTreeSha256:'e'.repeat(64),
+    stage:'retargeting',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
+  host.readActivePass=async()=>active;
+  const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{
+    idle=true;try{return await action(async()=>{assert.equal(idle,true);checks++;});}finally{idle=false;}
+  }},close:async()=>{closed++;}};
+  const options={platform:'win32',environment:{TRELIO_PLUGIN_ROOT:path.join(directory,'old-facade')},versions:()=>versions,
+    context:async action=>action({identity,readHealth:async()=>({code:'ready'}),heartbeat:async()=>({})},host),createHost:async()=>runtime,
+    readInventory:async(_receipt,guard)=>{await guard();assert.ok(idle&&locked);return {state:'installed',installedPath,version:'0.1.11',treeSha256:'e'.repeat(64)};},
+    createRecovery:settings=>({inspect:async()=>{await settings.guard();assert.ok(idle&&locked);assert.equal(await settings.resolveLoader(),loader);
+      return {schemaVersion:1,state:'registered',definitionSha256:'f'.repeat(64),lastRunAt:Date.now()-60_000,lastResult:1};},
+    start:async()=>{await settings.guard();await settings.verifyContact();assert.ok(idle&&locked);assert.equal((await host.readBackgroundRecovery()).state,'attempted');
+      starts++;return {schemaVersion:1,state:'requested',instanceId:randomUUID()};}}),
+  };
+  assert.equal((await runProductionAssistantBackgroundRecovery(options)).state,'start_requested');
+  assert.equal(starts,1);assert.equal(closed,1);assert.ok(checks>=5);assert.equal((await host.readBackgroundRecovery()).state,'started');
+  assert.equal([...files.keys()].some(file=>/policy\.json$/u.test(file)),false,'registration recovery neither enables plugin updates nor rewrites setup policy');
+  active={kind:'source_intake'};
+  await assert.rejects(runProductionAssistantBackgroundRecovery(options),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+  assert.equal(starts,1);assert.equal(closed,2);
+  const record=await host.readBackgroundRecovery();
+  await assert.rejects(host.writeBackgroundRecovery(null,record),'a stale durable CAS cannot replace the start intent');
+  await assert.rejects(host.writeBackgroundRecovery(record,{...record,deviceId:randomUUID()}),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+});
+
+test('fresh idle health invokes automatic recovery after signed activation without replaying or changing the health ABI',async()=>{
+  const effects=[];
+  const result=await executeAssistantRuntimeRequest({operation:'health'},{
+    context:async action=>action({}, {readActivation:async()=>null,readActivePass:async()=>null}),
+    upgradeRuntime:async()=>{effects.push('update');},requestRuntime:async request=>{
+      assert.deepEqual(request,{operation:'health_check'});effects.push('fresh_health');return {state:'checked'};
+    },backgroundRecovery:async()=>{effects.push('recover');return {state:'start_requested'};},
+  });
+  assert.deepEqual(effects,['update','fresh_health','recover']);assert.deepEqual(result,{state:'checked'});
+});
 
 const desktopUpdateFixture=()=>{
   let state=null,version='26.100.0.0',generation='100:1',clock=CODEX_UPDATE_INTERVAL*2,nextPid=101;

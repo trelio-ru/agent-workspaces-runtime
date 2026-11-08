@@ -974,6 +974,9 @@ publication tooling также остаются вне этого публичн
   It loads only the fixed OS utility manifest with process-local autoload off;
   slow module discovery never permits extra time or OS mutation replay.
   [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
+  Idle MCP recovery of a previously started failed supervisor uses that SAME
+  native task/idle lease and a durable pre-start CAS fence; unknown starts stay
+  read-back-only. Never reinstall, retarget, replay work or override a user stop.
 - Windows console/taskbar branding uses the SAME signed native binary after
   host/registration checks. Its pipe accepts only that host's assistant UUID;
   only the direct parent's owned visible classic console may change. Ownership

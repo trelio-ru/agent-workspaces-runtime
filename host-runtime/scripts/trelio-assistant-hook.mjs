@@ -228,6 +228,21 @@ const pluginUpdateRecord = value => {
   return value;
 };
 
+/** Technical launch fence for one real registered Windows task. It contains no
+ * task/owner message, command, path, credential or permission to replay work. */
+export const validateAssistantBackgroundRecoveryRecord=value=>{
+  const keys='assistantId,attemptId,attemptedAt,definitionSha256,deviceId,failures,fingerprint,instanceId,lastRunAt,schemaVersion,state';
+  if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==keys
+    ||value.schemaVersion!==1||!uuid.test(value.assistantId??'')||!uuid.test(value.deviceId??'')
+    ||!uuid.test(value.attemptId??'')||!['attempted','started','uncertain','not_started'].includes(value.state)
+    ||![value.fingerprint,value.definitionSha256].every(v=>/^[a-f0-9]{64}$/u.test(v??''))
+    ||![value.attemptedAt,value.lastRunAt].every(v=>Number.isSafeInteger(v)&&v>0)
+    ||!Number.isSafeInteger(value.failures)||value.failures<1||value.failures>3
+    ||(value.state==='started'?!uuid.test(value.instanceId??''):value.instanceId!==null))
+    fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+  return value;
+};
+
 export const createAssistantHostState=({directory,store,primitives={}})=>{
   if(!path.isAbsolute(directory??'') || !store) fail('ASSISTANT_HOST_STATE_INVALID');
   const ops={ensurePrivateDirectory,assertPrivatePathKind,readPrivateJsonFile,writePrivateJsonFile,...primitives};
@@ -358,6 +373,22 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const current=await readIdentity();if(!current)fail('ASSISTANT_HOST_NOT_CONFIGURED');
       if(value!==null)(await import('./trelio-assistant-codex.mjs')).validateAssistantHostJournal(value);
       await ops.writePrivateJsonFile(await maintenanceFile('host-health'),{assistantId:current.assistantId,deviceId:current.deviceId,value});
+    },
+    async readBackgroundRecovery(){
+      const target=await maintenanceFile('background-recovery');
+      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
+      const value=validateAssistantBackgroundRecoveryRecord(await ops.readPrivateJsonFile(target,{maximumBytes:4096}));
+      const current=await readIdentity();
+      if(!current||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId)fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      return value;
+    },
+    async writeBackgroundRecovery(expected,value){
+      const next=validateAssistantBackgroundRecoveryRecord(value),current=await readIdentity();
+      if(!current||next.assistantId!==current.assistantId||next.deviceId!==current.deviceId
+        ||JSON.stringify(await this.readBackgroundRecovery())!==JSON.stringify(expected))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      await ops.writePrivateJsonFile(await maintenanceFile('background-recovery'),next);
+      if(JSON.stringify(await this.readBackgroundRecovery())!==JSON.stringify(next))fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+      return next;
     },
     async readPluginSupervisor(){
       const target=await maintenanceFile('supervisor');

@@ -11,6 +11,7 @@ import { gunzipSync } from 'node:zlib';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
   validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon,runAssistantWindowsDesktop,ASSISTANT_WINDOWS_DESKTOP_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+import { createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS, resolveAssistantPluginHandoffLoaders } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const identity = { origin: 'https://trelio.ru', assistantId: randomUUID(), deviceId: randomUUID() };
@@ -33,6 +34,26 @@ test('background registration selects only the paired identity and loaded shell 
   assert.equal(contacts, 1, 'read-only status/removal must work during a network outage or device revocation');
   await manage('start'); assert.equal(contacts, 2);
   assert.equal(quoteAssistantWindowsArgument('C:\\folder\\'), '"C:\\folder\\\\"');
+});
+
+test('internal background recovery uses the same identity/loader/native pipe and late guards, with no public recovery command',async()=>{
+  const observed={schemaVersion:1,state:'registered',definitionSha256:'a'.repeat(64),lastRunAt:1000,lastResult:1};
+  const calls=[];let contacts=0,current=identity;
+  const options={platform:'win32',executable:'C:\\node.exe',guard:async()=>{},readIdentity:async()=>current,
+    resolveLoader:async()=>'C:\\plugin\\scripts\\trelio-host-runtime-loader.mjs',verifyContact:async()=>{contacts++;},
+    runNative:async(plan,options)=>{calls.push(plan);
+      assert.equal(typeof options.project,'function','the actual native pipe must use the recovery DTO projector');
+      const value=plan.operation==='recovery_inspect'?observed:{schemaVersion:1,state:'requested',instanceId:randomUUID()};
+      assert.throws(()=>options.project({...value,privateDetail:'PRIVATE'}),{code:'ASSISTANT_BACKGROUND_READBACK_FAILED'});
+      return options.project(value);}};
+  const native=createAssistantWindowsBackgroundRecovery(options);
+  assert.deepEqual(await native.inspect(),observed);assert.equal(contacts,0);
+  assert.equal((await native.start(observed)).state,'requested');assert.equal(contacts,1);
+  assert.equal(calls.length,2);assert.deepEqual(calls[1].expected,observed);
+  assert.equal(calls[1].arguments,'"C:\\plugin\\scripts\\trelio-host-runtime-loader.mjs" bridge assistant background');
+  await assert.rejects(runAssistantEntry(['background-recovery_start']),/COMMAND_UNSUPPORTED/);
+  await assert.rejects(createAssistantWindowsBackgroundRecovery({...options,verifyContact:async()=>{current={...identity,deviceId:randomUUID()};}}).start(observed),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+  assert.equal(calls.length,2,'rebind after native contact must precede the OS operation');
 });
 
 test('unpaired, wrong origin, revoked, unsupported OS and rebind failures precede OS mutation', async () => {
@@ -675,6 +696,62 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   assert.equal((await replacementController.inspect(fixture)).snapshot, null);
 });
 
+
+test('native Windows recovery runs the same failed registered fixture once and rejects a stale start snapshot',
+  {skip:process.platform!=='win32',timeout:120_000},async t=>{
+    // Hosted disposable task only. Actual exit 1 / Task Scheduler history and
+    // IRunningTask.InstanceGuid must cross the unchanged native JSON pipe.
+    // A real held second process proves IgnoreNew instead of a mocked receipt.
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-native-recovery-'));
+    const fixture={...identity,assistantId:randomUUID(),deviceId:randomUUID()};
+    const loader=path.join(directory,'scripts','trelio-host-runtime-loader.mjs');
+    const countFile=path.join(directory,'starts.json'),release=path.join(directory,'release');
+    await fs.mkdir(path.dirname(loader),{recursive:true});
+    await fs.writeFile(loader,`import fs from 'node:fs';
+      if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);
+      const countFile=${JSON.stringify(countFile)},release=${JSON.stringify(release)};
+      let count=0;try{count=JSON.parse(fs.readFileSync(countFile,'utf8'));}catch{}
+      fs.writeFileSync(countFile,JSON.stringify(++count));if(count===1)process.exit(1);
+      const deadline=setTimeout(()=>process.exit(8),30000);
+      const timer=setInterval(()=>{if(fs.existsSync(release)){clearTimeout(deadline);clearInterval(timer);}},25);
+    `);
+    const common={readIdentity:async()=>fixture,verifyContact:async()=>{},resolveLoader:async()=>loader};
+    const manage=createAssistantWindowsBackground(common);
+    t.after(async()=>{
+      await fs.writeFile(release,'release');let removed=false;
+      for(let attempt=0;attempt<40;attempt++){
+        try{await manage('remove');removed=true;break;}catch(error){if(error.code!=='ASSISTANT_BACKGROUND_BUSY')throw error;}
+        await new Promise(resolve=>setTimeout(resolve,250));
+      }
+      assert.ok(removed,'retain an unknown/live fixture instead of deleting its action or source');
+      await fs.rm(directory,{recursive:true,force:true});
+    });
+    await manage('install');await manage('start');
+    const native=createAssistantWindowsBackgroundRecovery({...common,guard:async()=>{}});
+    let observed;
+    const deadline=Date.now()+25_000;
+    while(Date.now()<deadline){
+      observed=await native.inspect();
+      if(observed.state==='registered'&&observed.lastResult===1&&observed.lastRunAt)break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    assert.equal(observed.state,'registered');assert.equal(observed.lastResult,1);
+    assert.equal(JSON.parse(await fs.readFile(countFile,'utf8')),1,'first real action must fail before recovery');
+    let state=null;
+    const options={identity:fixture,fingerprint:'a'.repeat(64),guard:async()=>{},inspect:()=>native.inspect(),start:snapshot=>native.start(snapshot),
+      readState:async()=>state,writeState:async(expected,next)=>{assert.deepEqual(expected,state);state=structuredClone(next);}};
+    assert.equal((await maintainAssistantBackgroundRecovery(options)).state,'start_requested');
+    assert.match(state.instanceId,/^[a-f0-9-]{36}$/u);
+    const startedDeadline=Date.now()+15_000;
+    while(Date.now()<startedDeadline){
+      try{if(JSON.parse(await fs.readFile(countFile,'utf8'))===2)break;}catch(error){if(error.code!=='ENOENT')throw error;}
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    assert.equal(JSON.parse(await fs.readFile(countFile,'utf8')),2,'a positive scheduler receipt alone is not executed-flow evidence');
+    assert.equal((await maintainAssistantBackgroundRecovery(options)).state,'running');
+    assert.deepEqual(await native.start(observed),{schemaVersion:1,state:'changed'},'late native snapshot CAS must not launch over the held real process');
+    assert.equal(JSON.parse(await fs.readFile(countFile,'utf8')),2);
+  });
 
 test('native plugin handoff retargets only the exact scheduled action and preserves its running old process', {skip:process.platform!=='win32'},async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-native-handoff-'));
