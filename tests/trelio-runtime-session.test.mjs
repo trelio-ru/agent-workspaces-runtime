@@ -1640,7 +1640,16 @@ test("first protected call observes the current model and supported host names i
       const recovered = await runHook({ ...reuseInput, tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
         tool_input: envelope }, environment);
       assert.equal(recovered.exitCode, 0, recovered.stderr);
-      const next = JSON.parse(recovered.stdout).hookSpecificOutput.updatedInput;
+      const hookResult = JSON.parse(recovered.stdout);
+      const next = hookResult.hookSpecificOutput?.updatedInput;
+      // Preserve the original production-path assertion, but make a native
+      // refusal diagnosable without printing arguments, proofs or hook prose.
+      const reason=typeof hookResult.hookSpecificOutput?.permissionDecisionReason==='string'
+        ?hookResult.hookSpecificOutput.permissionDecisionReason:'';
+      const failureCode=['LOCAL_CONTEXT_INVALID_INPUT','TRELIO_RUNTIME_HOOK_FAILED']
+        .find(code=>reason.startsWith(`${code}:`))??null;
+      assert.ok(next, JSON.stringify({route,nativeTool,decision:hookResult.hookSpecificOutput?.permissionDecision??null,
+        failureCode}));
       assert.deepEqual(next.parameters.arguments, originalInput);
       assert.equal(next.parameters.nativeCallRef, undefined);
       if (route !== "context") assert.equal(crypto.verify(null, Buffer.from([

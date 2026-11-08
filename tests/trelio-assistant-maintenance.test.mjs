@@ -101,13 +101,15 @@ test('late pass/identity/registration guards and failed durable intent prevent a
   }
 });
 
-test('idle production maintenance composes protected recovery journal, exact native target and the SAME coordinator/setup locks',async t=>{
+for(const previousRegistered of [false,true])test(`idle production recovery composes exact verified code and the SAME locks (previous registration=${previousRegistered})`,async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-recovery-composition-'));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));
   const installedPath=path.join(directory,'0.1.11'),loader=path.join(installedPath,'scripts','trelio-host-runtime-loader.mjs');
   await fs.mkdir(path.dirname(loader),{recursive:true});await fs.writeFile(loader,'// inert verified-loader fixture\n');
+  const previousRoot=path.join(directory,'0.1.10'),previousLoader=path.join(previousRoot,'scripts','trelio-host-runtime-loader.mjs');
+  await fs.mkdir(path.dirname(previousLoader),{recursive:true});await fs.writeFile(previousLoader,'// inert previous-loader fixture\n');
   const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()},files=new Map();
-  let locked=false,idle=false,closed=0,starts=0,active=null,checks=0;
+  let locked=false,idle=false,closed=0,starts=0,active=null,checks=0,retainedReads=0;
   const host=createAssistantHostState({directory:path.join(directory,'private'),store:{get:async()=>null},primitives:{
     ensurePrivateDirectory:async()=>{},assertPrivatePathKind:async file=>{if(!files.has(file))throw Object.assign(Error(),{code:'ENOENT'});},
     readPrivateJsonFile:async file=>structuredClone(files.get(file)),writePrivateJsonFile:async(file,value)=>files.set(file,structuredClone(value)),
@@ -124,13 +126,19 @@ test('idle production maintenance composes protected recovery journal, exact nat
   const options={platform:'win32',environment:{TRELIO_PLUGIN_ROOT:path.join(directory,'old-facade')},versions:()=>versions,
     context:async action=>action({identity,readHealth:async()=>({code:'ready'}),heartbeat:async()=>({})},host),createHost:async()=>runtime,
     readInventory:async(_receipt,guard)=>{await guard();assert.ok(idle&&locked);return {state:'installed',installedPath,version:'0.1.11',treeSha256:'e'.repeat(64)};},
-    createRecovery:settings=>({inspect:async()=>{await settings.guard();assert.ok(idle&&locked);assert.equal(await settings.resolveLoader(),loader);
+    retainLoaded:async settings=>{assert.ok(idle&&locked);retainedReads++;assert.equal(settings.loadedPluginDirectory,previousRoot);
+      assert.equal(settings.loadedPluginVersion,'0.1.10');return {version:'0.1.10',treeSha256:'d'.repeat(64)};},
+    createRecovery:settings=>({inspect:async()=>{await settings.guard();assert.ok(idle&&locked);
+      const selected=await settings.resolveLoader();
+      if(previousRegistered&&selected===loader)throw Object.assign(new Error(),{code:'ASSISTANT_BACKGROUND_CONFLICT'});
+      assert.equal(selected,previousRegistered?previousLoader:loader);
       return {schemaVersion:1,state:'registered',definitionSha256:'f'.repeat(64),lastRunAt:Date.now()-60_000,lastResult:1};},
     start:async()=>{await settings.guard();await settings.verifyContact();assert.ok(idle&&locked);assert.equal((await host.readBackgroundRecovery()).state,'attempted');
       starts++;return {schemaVersion:1,state:'requested',instanceId:randomUUID()};}}),
   };
   assert.equal((await runProductionAssistantBackgroundRecovery(options)).state,'start_requested');
   assert.equal(starts,1);assert.equal(closed,1);assert.ok(checks>=5);assert.equal((await host.readBackgroundRecovery()).state,'started');
+  assert.equal(retainedReads,previousRegistered?1:0,'previous code needs its own full saved-tree verification before any native launch');
   assert.equal([...files.keys()].some(file=>/policy\.json$/u.test(file)),false,'registration recovery neither enables plugin updates nor rewrites setup policy');
   active={kind:'source_intake'};
   await assert.rejects(runProductionAssistantBackgroundRecovery(options),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
@@ -138,6 +146,18 @@ test('idle production maintenance composes protected recovery journal, exact nat
   const record=await host.readBackgroundRecovery();
   await assert.rejects(host.writeBackgroundRecovery(null,record),'a stale durable CAS cannot replace the start intent');
   await assert.rejects(host.writeBackgroundRecovery(record,{...record,deviceId:randomUUID()}),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+  if(previousRegistered){
+    active=null;
+    await assert.rejects(runProductionAssistantBackgroundRecovery({...options,
+      retainLoaded:async()=>({version:'0.1.10',treeSha256:'0'.repeat(64)})}),{code:'ASSISTANT_PLUGIN_UPDATE_FAILED'});
+    assert.equal(starts,1,'a familiar old path without its exact saved tree cannot execute');
+    const retainedBefore=retainedReads;
+    await assert.rejects(runProductionAssistantBackgroundRecovery({...options,createRecovery:()=>({
+      inspect:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});},
+      start:async()=>{throw new Error('Unexpected start');},
+    })}),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});
+    assert.equal(retainedReads,retainedBefore,'an unknown/failed read cannot select a second loader');assert.equal(starts,1);
+  }
 });
 
 test('fresh idle health invokes automatic recovery after signed activation without replaying or changing the health ABI',async()=>{

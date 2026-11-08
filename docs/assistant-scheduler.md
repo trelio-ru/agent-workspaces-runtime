@@ -1405,6 +1405,15 @@ receipt even when an older facade still owns another loaded shell. No cache
 scan, task retarget/install, Desktop restart, hook approval or new scheduler is
 introduced by this recovery path.
 
+If an already approved handoff stopped in `retargeting` before its native
+definition changed, a definitive read-only target mismatch permits one exact
+previous-version inspection. Derive only that protected version in the freshly
+verified native installation family and independently verify its complete tree
+against the saved previous receipt before resolving its loader. No missing,
+changed or merely literal handoff-comparator path may execute. Unknown inspection
+or any attempted start never falls back. The original forty-five-second bound,
+snapshot CAS and single native Run remain unchanged; no task retarget is added.
+
 Before one native `Run()` persist a CAS-bound `background-recovery.json` intent
 in the SAME protected assistant/device maintenance directory. It binds the full
 native definition digest and failed last-run observation; the native helper

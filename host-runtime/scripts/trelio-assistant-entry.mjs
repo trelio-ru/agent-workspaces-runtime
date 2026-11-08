@@ -1986,7 +1986,7 @@ export const resolveAssistantPluginHandoffLoaders = async ({installedPath,loaded
 export const runProductionAssistantBackgroundRecovery=async({context=productionContext,
   createHost=createAssistantRuntimeHost,environment=process.env,platform=process.platform,
   versions=requireTrelioComponentVersions,createRecovery=createAssistantWindowsBackgroundRecovery,
-  readInventory=null,signal}={})=>{
+  readInventory=null,retainLoaded=null,signal}={})=>{
   if(platform!=='win32')return {state:'unsupported'};
   const deadline=AbortSignal.timeout(45_000);signal=signal?AbortSignal.any([signal,deadline]):deadline;
   const prior=await context(async(client,host)=>({identity:client.identity,supervisor:await host.readPluginSupervisor()}),{signal});
@@ -2016,7 +2016,7 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
     // review boundary. Recovery never clears a failed candidate or trust latch.
     if(plugin&&(!['ready','retargeting','verifying'].includes(plugin.stage)||plugin.failedVersion)
       ||desktop&&desktop.phase!=='ready')return {state:'maintenance_pending'};
-    let loader,treeSha256,pluginVersion;
+    let loader,treeSha256,pluginVersion,previousRoot=null;
     if(plugin){
       if(!plugin.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
       const common=await import('./trelio-workspace.mjs');
@@ -2037,6 +2037,12 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
       // neither a cache scan nor that old path selects the registered action.
       loader=await resolveHostRuntimeLoader({environment:{...environment,TRELIO_PLUGIN_ROOT:inventory.installedPath}});
       treeSha256=inventory.treeSha256;pluginVersion=inventory.version;
+      // A stopped parent can have persisted `retargeting` BEFORE its atomic
+      // native definition update. This exact previous version is structural
+      // authority from the protected receipt and verified native cache family,
+      // never a scan/newest-version guess or an executable from Task XML.
+      if(plugin.stage==='retargeting'&&plugin.previousVersion!==plugin.targetVersion)
+        previousRoot=path.join(path.dirname(inventory.installedPath),plugin.previousVersion);
     }else{
       loader=await resolveHostRuntimeLoader({environment});
       const common=await import('./trelio-workspace.mjs');
@@ -2048,10 +2054,29 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
       treeSha256=retained.treeSha256;pluginVersion=retained.version;
     }
     const fingerprint=createHash('sha256').update(JSON.stringify({runtime:versions().hostRuntimeVersion,pluginVersion,treeSha256})).digest('hex');
-    const native=createRecovery({environment,signal,resolveLoader:async()=>loader,guard,
-      readIdentity:()=>host.readIdentity(),verifyContact:async()=>{await guard();await client.heartbeat(signal);await guard();}});
+    const nativeOptions={environment,signal,guard,readIdentity:()=>host.readIdentity(),
+      verifyContact:async()=>{await guard();await client.heartbeat(signal);await guard();}};
+    let native=createRecovery({...nativeOptions,resolveLoader:async()=>loader});
     return maintainAssistantBackgroundRecovery({identity:prior.identity,fingerprint,guard,
-      inspect:()=>native.inspect(),start:snapshot=>native.start(snapshot),
+      inspect:async()=>{
+        try{return await native.inspect();}catch(error){
+          // Only a definitive READ-ONLY definition mismatch permits inspecting
+          // the independently verified previous implementation. Never retry a
+          // start, timeout, denied/I/O read or unknown native operation.
+          if(error.code!=='ASSISTANT_BACKGROUND_CONFLICT'||!previousRoot)throw error;
+          await guard();const common=await import('./trelio-workspace.mjs');
+          const retained=await(retainLoaded??common.retainLoadedCodexPluginInstallation)({profile:'assistant',
+            loadedPluginDirectory:previousRoot,loadedPluginVersion:plugin.previousVersion});
+          if(retained?.version!==plugin.previousVersion||retained.treeSha256!==plugin.previousTreeSha256)
+            fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+          // Unlike handoff's literal old-path comparator, this path becomes
+          // executable ONLY after the SAME complete immutable-tree verifier
+          // matches the saved receipt. Missing/pruned/changed code stays closed.
+          const previousLoader=await resolveHostRuntimeLoader({environment:{...environment,TRELIO_PLUGIN_ROOT:previousRoot}});
+          await guard();native=createRecovery({...nativeOptions,resolveLoader:async()=>previousLoader});
+          return native.inspect();
+        }
+      },start:snapshot=>native.start(snapshot),
       readState:()=>host.readBackgroundRecovery(),writeState:(expected,next)=>host.writeBackgroundRecovery(expected,next)});
   }),{signal,pluginMaintenance:true}),signal);}finally{await runtime.close();}
 };
