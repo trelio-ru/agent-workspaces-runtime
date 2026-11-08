@@ -66,6 +66,31 @@ Stale input, неизвестный результат mutation и непров�
 прав, скрытого fallback или blind retry. Проверяются отказы и совместимость
 затронутых клиентов.
 
+<a id="self-device-enrollment"></a>
+
+## Самостоятельное подключение личного устройства
+
+При explicit backend capability `selfEnrollmentSupported` human encryption setup
+создаёт отдельный device key прежним codec и сохраняет его с случайным local
+wrapping material в прежнем owner-private store. Личная ключ-фраза не запрашивается
+в локальной форме и не проходит runtime/MCP. Backend без capability сохраняет
+прежний setup; stable plugin shell и minimum не меняются.
+
+После public registration host открывает exact server-selected Trelio path для
+того же company/device/fingerprint. Обычный browser unlock использует личную
+фразу либо доверенный browser; отдельная кнопка подтверждает подключение своего
+устройства. Уже допущенный сотрудник сам подписывает device envelope, backend
+повторяет source identity/envelope, ownership/module/ACL/CAS. Первоначальный
+доступ человека к company key по-прежнему выдаёт владелец.
+
+Host не выполняет grant: только один browser open и bounded readiness GET до
+пяти минут с cancellation. Каждое чтение проверяет actor/company/device/fingerprint
+и stable encrypted state. Timeout/ошибка не создают новый device или повторную
+запись; следующий явный setup использует сохранённую identity. После ready
+сохраняются recipient/scope binding и обычный TRELIOE1 self-test. Managed
+assistant/existing-only profiles не получают human browser fallback. Доступ к
+другим людям, task/Workspace ACL и owner/recovery flows не меняются.
+
 <a id="call-time-budget"></a>
 
 ## Бюджет вызова и отмена

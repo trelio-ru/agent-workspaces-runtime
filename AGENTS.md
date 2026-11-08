@@ -29,6 +29,8 @@ publication tooling также остаются вне этого публичн
 
 ## Общие правила
 
+- Human encrypted-device setup follows [browser self-enrollment](docs/agent-workspace-runtime.md#self-device-enrollment): personal phrases stay in Trelio, own-device confirmation and bounded readiness reads; managed/existing-only profiles never open that flow.
+
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
   Source attention gates intake before models: email INBOX all new; Telegram/MAX
   private incoming or native mention/direct reply. Ordinary group history stays

@@ -6696,6 +6696,56 @@ const assertEncryptedCompanyRuntimeState = (runtime) => {
   throw new Error(`Шифрование Agent Workspaces пока не готово. ${explanation}`);
 };
 
+/** Human confirmation stays in the authenticated Trelio browser. Poll only
+ * public readiness for the SAME device; never submit a grant, collect a user's
+ * personal phrase, or substitute another actor/company while waiting. */
+export const waitForCompanyDeviceSelfEnrollment = async ({
+  origin, runtime, readRuntime, signal, openBrowserFn = openBrowser,
+  timeoutMs = 5 * 60_000, pollIntervalMs = 1500,
+}) => {
+  const path = `/${encodeURIComponent(runtime.company.slug)}/?${new URLSearchParams({
+    connectAgentDevice: runtime.device.id, deviceFingerprint: runtime.device.fingerprint,
+  })}`;
+  if (runtime.selfEnrollmentPath !== path) {
+    throw new Error("Trelio вернул некорректную ссылку подключения устройства.");
+  }
+  signal?.throwIfAborted();
+  const deadline = Date.now() + timeoutMs;
+  const timeoutError = new Error("Подключение не подтверждено в Trelio. Подтвердите его в браузере и повторите настройку.");
+  const controller = new AbortController();
+  const deadlineTimer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
+  const enrollmentSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  try {
+    await openBrowserFn(new URL(path, origin).href, { signal: enrollmentSignal });
+    while (Date.now() < deadline) {
+      enrollmentSignal.throwIfAborted();
+      const current = await readRuntime({ signal: enrollmentSignal });
+      enrollmentSignal.throwIfAborted();
+      assertEncryptedCompanyRuntimeState(current);
+      if (current.company?.id !== runtime.company.id || current.company?.slug !== runtime.company.slug
+        || current.viewer?.userId !== runtime.viewer.userId || current.device?.id !== runtime.device.id
+        || current.device?.fingerprint !== runtime.device.fingerprint
+        || current.scope?.id !== runtime.scope?.id || current.scope?.epoch !== runtime.scope?.epoch) {
+        throw new Error("Пользователь или устройство изменились во время подключения.");
+      }
+      if (current.accessState === "ready") return current;
+      if (current.accessState !== "access_pending") {
+        throw new Error("Подключение устройства больше недоступно.");
+      }
+      await new Promise((resolve, reject) => {
+        const cancel = () => { clearTimeout(timer); reject(enrollmentSignal.reason); };
+        const timer = setTimeout(() => {
+          enrollmentSignal.removeEventListener("abort", cancel);
+          resolve();
+        }, Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+        enrollmentSignal.addEventListener("abort", cancel, { once: true });
+        if (enrollmentSignal.aborted) { enrollmentSignal.removeEventListener("abort", cancel); cancel(); }
+      });
+    }
+    throw timeoutError;
+  } finally { clearTimeout(deadlineTimer); }
+};
+
 /**
  * Open the company scope for the local bridge without ever placing a private
  * key or the user's phrase in argv, stdout, a Workspace, or an API request.
@@ -6761,9 +6811,13 @@ export const ensureCompanyEncryptionContext = async ({
 
   if (!device) {
     if (existingOnly) throw new Error("Existing encryption device is required.");
-    let encryptionSecret = await collectEncryptionKey({
-      companyName: initialRuntime.company.name,
-    });
+    // With browser self-enrollment the personal phrase belongs ONLY to Trelio's
+    // existing identity-unlock page. The bridge seals its separate device using
+    // random local material and the same owner-only remembered-device store.
+    // An older backend retains its previous protected local-form protocol.
+    let encryptionSecret = initialRuntime.selfEnrollmentSupported === true
+      ? crypto.randomBytes(32).toString("base64url")
+      : await collectEncryptionKey({ companyName: initialRuntime.company.name });
     const generatedDevice = await createAgentEncryptionDevice();
     const wrapped = await wrapAndRememberAgentEncryptionDevice({
       device: generatedDevice,
@@ -6818,7 +6872,12 @@ export const ensureCompanyEncryptionContext = async ({
   if (registrationOnly || allowPendingRegistration && runtime.accessState === 'access_pending') return { runtime };
 
   if (runtime.accessState === "access_pending") {
-    throw new Error(
+    if (!executionProfile && !existingOnly && runtime.selfEnrollmentPath) {
+      runtime = await waitForCompanyDeviceSelfEnrollment({ origin, runtime, signal,
+        readRuntime: ({ signal: enrollmentSignal }) => readCompanyEncryptionRuntime({ origin: encryptedRequestOrigin,
+          token, companySlug: initialRuntime.company.slug, fingerprint: device.fingerprint, signal: enrollmentSignal }),
+      });
+    } else throw new Error(
       `Устройство ${device.fingerprint} зарегистрировано, но ещё не получило доступ. `
       + `Владелец компании должен открыть ${origin}/${runtime.company.slug}/settings/encryption/ `
       + "и нажать «Выдать доступ» у этого Agent Workspaces device, затем команду можно повторить.",

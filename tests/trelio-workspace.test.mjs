@@ -115,6 +115,7 @@ import {
   buildWindowsBridgeDpapiInvocation,
   collectAgentSkillDeviceConsentThroughLoopback,
   collectCompanyEncryptionKeyThroughLoopback,
+  waitForCompanyDeviceSelfEnrollment,
   hardenWindowsPrivatePath,
   resolveWindowsPowerShellExecutable,
   getGitStatus,
@@ -1860,6 +1861,41 @@ test("company encryption onboarding self-test round-trips the production TRELIOE
     format: "TRELIOE1",
     suite: COMPANY_ENCRYPTION_SUITE,
   });
+});
+
+test("device self-enrollment opens only the exact Trelio page and polls readiness without writes", async () => {
+  const initial = { state: "encrypted", accessState: "access_pending",
+    company: { id: "company", slug: "acme" }, viewer: { userId: "member" },
+    scope: { id: "scope", epoch: 1 },
+    device: { id: "device", fingerprint: "public-fingerprint" },
+    selfEnrollmentPath: "/acme/?connectAgentDevice=device&deviceFingerprint=public-fingerprint" };
+  let opens = 0, reads = 0;
+  const ready = await waitForCompanyDeviceSelfEnrollment({ origin: "https://trelio.test", runtime: initial,
+    pollIntervalMs: 1, timeoutMs: 1000,
+    openBrowserFn: async url => { opens++; assert.equal(url, `https://trelio.test${initial.selfEnrollmentPath}`); },
+    readRuntime: async () => ({ ...initial, accessState: ++reads === 1 ? "access_pending" : "ready" }),
+  });
+  assert.equal(ready.accessState, "ready");
+  assert.equal(opens, 1);
+  assert.equal(reads, 2);
+  for (const change of [{ viewer: { userId: "other" } }, { device: { id: "other", fingerprint: "public-fingerprint" } },
+    { company: { id: "other", slug: "acme" } }, { device: { id: "device", fingerprint: "other" } },
+    { scope: { id: "scope", epoch: 2 } }, { state: "decrypting" }]) {
+    await assert.rejects(waitForCompanyDeviceSelfEnrollment({ origin: "https://trelio.test", runtime: initial,
+      openBrowserFn: async () => {}, readRuntime: async () => ({ ...initial, ...change, accessState: "ready" }),
+    }));
+  }
+  await assert.rejects(waitForCompanyDeviceSelfEnrollment({ origin: "https://trelio.test",
+    runtime: { ...initial, selfEnrollmentPath: "https://attacker.test/" },
+    openBrowserFn: () => assert.fail("must not open a changed path"), readRuntime: () => assert.fail("must not read"),
+  }), /некорректную ссылку/u);
+  const aborted = AbortSignal.abort(new Error("cancelled"));
+  await assert.rejects(waitForCompanyDeviceSelfEnrollment({ origin: "https://trelio.test", runtime: initial, signal: aborted,
+    openBrowserFn: () => assert.fail("must not open after cancellation"), readRuntime: () => assert.fail("must not read"),
+  }), /cancelled/u);
+  await assert.rejects(waitForCompanyDeviceSelfEnrollment({ origin: "https://trelio.test", runtime: initial,
+    timeoutMs: 10, pollIntervalMs: 1, openBrowserFn: async () => {}, readRuntime: async () => initial,
+  }), /не подтверждено/u);
 });
 
 test("encryption setup reports plain companies without creating a Run", async () => {
