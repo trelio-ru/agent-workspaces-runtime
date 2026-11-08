@@ -1134,6 +1134,20 @@ business tool or replaces a chat. Temporary source polling failure does not
 independently cancel/repeat native work, and an unresolved failure is preserved
 when the pass settles. Raw errors/content are not supervisor output.
 
+The same already-running registered parent also owns its startup READ clock,
+independently of any MCP/chat. Closed temporary identity/private reads or native
+status-pipe unavailability retain the parent and wait five minutes before fresh
+reads under their unchanged original deadlines. Pin the first observed identity;
+replacement/rebinding stops the old parent. No health/business/GUI request runs
+until complete native registration, exact code preservation and the supervisor
+record have succeeded. Definitive absence, foreign/disabled definitions, denied
+access, corruption and unknown errors retain their original hard refusal.
+Code publication/preservation and structural writes are outside this retry:
+unknown effects are never replayed. A genuine already-dead old parent still
+requires an existing normal native delivery/start boundary; downloading a new
+release cannot execute code on an inert machine. This read loop neither invents
+that boundary nor overrides Windows stop/IgnoreNew or the OS crash-restart limit.
+
 This entry is not installed by import or pairing. Explicit Windows registration
 is described below; actual next-run read-back, desktop availability and owner
 onboarding require independent live evidence after deployment. Pairing alone

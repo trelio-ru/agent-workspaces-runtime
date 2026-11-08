@@ -977,6 +977,9 @@ publication tooling также остаются вне этого публичн
   Idle MCP recovery of a previously started failed supervisor uses that SAME
   native task/idle lease and a durable pre-start CAS fence; unknown starts stay
   read-back-only. Never reinstall, retarget, replay work or override a user stop.
+  The SAME registered parent retains its five-minute clock on closed transient
+  startup identity/native-status READ failures, without an open MCP. Definitive
+  refusal, code preservation and metadata writes never enter that retry loop.
 - Windows console/taskbar branding uses the SAME signed native binary after
   host/registration checks. Its pipe accepts only that host's assistant UUID;
   only the direct parent's owned visible classic console may change. Ownership

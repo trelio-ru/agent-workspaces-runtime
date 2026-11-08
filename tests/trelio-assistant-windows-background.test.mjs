@@ -697,6 +697,65 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
 });
 
 
+test('a real scheduled supervisor survives a failed native startup-read pipe without a chat or another OS start',
+  {skip:process.platform!=='win32',timeout:180_000},async t=>{
+    // A disposable real Task Scheduler action executes the production parent.
+    // Its first READ uses a real malformed PowerShell response; its second uses
+    // the unchanged native definition reader. Only the synthetic backoff clock
+    // is accelerated. Native/private deadlines and one-start assertions stay strict.
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-native-startup-clock-'));
+    const fixture={...identity,assistantId:randomUUID(),deviceId:randomUUID()};
+    const loader=path.join(directory,'scripts','trelio-host-runtime-loader.mjs'),receipt=path.join(directory,'receipt.json');
+    const starts=path.join(directory,'starts.json');
+    await fs.mkdir(path.dirname(loader),{recursive:true});
+    const entryUrl=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+    const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
+    await fs.writeFile(loader,`import fs from 'node:fs/promises';import assert from 'node:assert/strict';
+      import {runAssistantBackground} from ${JSON.stringify(entryUrl)};
+      import {createAssistantWindowsBackground,runAssistantWindowsBackgroundNative} from ${JSON.stringify(setupUrl)};
+      const fixture=${JSON.stringify(fixture)},loader=${JSON.stringify(loader)},receipt=${JSON.stringify(receipt)},starts=${JSON.stringify(starts)};
+      assert.deepEqual(process.argv.slice(2),['bridge','assistant','background']);
+      let count=0;try{count=JSON.parse(await fs.readFile(starts,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+      await fs.writeFile(starts,JSON.stringify(++count));
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),90_000);
+      let reads=0,waits=0,reports=0,ticks=0,recorded=0;
+      const publish=async value=>{await fs.writeFile(receipt+'.tmp',JSON.stringify(value));await fs.rename(receipt+'.tmp',receipt);};
+      const native=createAssistantWindowsBackground({readIdentity:async()=>fixture,verifyContact:async()=>{},resolveLoader:async()=>loader,
+        runNative:(plan,options)=>runAssistantWindowsBackgroundNative(plan,{...options,
+          ...(reads===1?{script:"$null=[Console]::In.ReadToEnd();[Console]::Out.WriteLine('{}')"}:{})})});
+      try{
+        const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity:fixture,activation:null}),
+          verifyRegistration:async()=>{reads++;const status=await native('status');assert.equal(status.state,'running');},
+          preservePlugin:()=>({ready:Promise.resolve(),close:async()=>{}}),recordSupervisor:async()=>{recorded++;},startConsoleIcon:async()=>null,
+          reportFailure:async error=>{assert.equal(error.code,'ASSISTANT_BACKGROUND_READBACK_FAILED');reports++;},
+          wait:async milliseconds=>{assert.equal(milliseconds,300_000);assert.equal(ticks,0);assert.equal(recorded,0);waits++;await new Promise(resolve=>setTimeout(resolve,50));},
+          request:async request=>{assert.equal(reads,2);assert.equal(recorded,1);if(request.operation==='background_tick'){ticks++;controller.abort();}return {state:'ready'};},
+        });
+        assert.equal(result.state,'stopped');assert.equal(waits,1);assert.equal(reports,1);assert.equal(ticks,1);
+        await publish({complete:true,starts:count,reads,waits,reports,ticks});
+      }catch(error){await publish({complete:false,code:/^[A-Z_]+$/.test(error.code??'')?error.code:'FIXTURE_FAILED'});process.exitCode=1;}
+      finally{clearTimeout(timer);}
+    `);
+    const manage=createAssistantWindowsBackground({readIdentity:async()=>fixture,verifyContact:async()=>{},resolveLoader:async()=>loader});
+    t.after(async()=>{
+      let removed=false;
+      for(let attempt=0;attempt<40;attempt++){
+        try{await manage('remove');removed=true;break;}catch(error){if(error.code!=='ASSISTANT_BACKGROUND_BUSY')throw error;}
+        await new Promise(resolve=>setTimeout(resolve,250));
+      }
+      assert(removed,'retain unknown/live fixture actions and files instead of forcing cleanup');
+      await fs.rm(directory,{recursive:true,force:true});
+    });
+    await manage('install');await manage('start');
+    let value=null;const deadline=Date.now()+100_000;
+    while(Date.now()<deadline){
+      try{value=JSON.parse(await fs.readFile(receipt,'utf8'));break;}catch(error){if(error.code!=='ENOENT')throw error;}
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    assert.deepEqual(value,{complete:true,starts:1,reads:2,waits:1,reports:1,ticks:1},'only executed-flow evidence proves the independent supervisor clock');
+    assert.equal(JSON.parse(await fs.readFile(starts,'utf8')),1,'no second Task Scheduler start or MCP supplies recovery');
+  });
+
 test('native Windows recovery runs the same failed registered fixture once and rejects a stale start snapshot',
   {skip:process.platform!=='win32',timeout:120_000},async t=>{
     // Hosted disposable task only. Actual exit 1 / Task Scheduler history and

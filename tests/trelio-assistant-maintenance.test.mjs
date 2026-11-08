@@ -3,7 +3,7 @@ import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
 import { executeAssistantRuntimeRequest, assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
-import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { runAssistantEntry, runAssistantBackground } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { maintainAssistantCodexDesktop, validateAssistantCodexUpdate, compareCodexDesktopVersions,
   downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate,
   runAssistantWindowsCodexService, maintainAssistantBackgroundRecovery } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
@@ -15,6 +15,93 @@ import os from 'node:os';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
+
+test('the registered supervisor survives failed startup reads without an MCP or a premature business tick',async()=>{
+  for(const stage of ['identity','registration']){
+    const controller=new AbortController(),identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+    const calls=[];let failed=false,waits=0,closed=0;
+    const failOnce=name=>{if(stage===name&&!failed){failed=true;throw Object.assign(new Error('PRIVATE_STARTUP_DETAIL'),
+      {code:name==='identity'?'ASSISTANT_PRIVATE_UNAVAILABLE':'ASSISTANT_BACKGROUND_READBACK_FAILED'});}};
+    const result=await runAssistantBackground({signal:controller.signal,
+      readHost:async()=>{calls.push('identity');failOnce('identity');return {identity,activation:null};},
+      verifyRegistration:async()=>{calls.push('registration');failOnce('registration');},
+      preservePlugin:()=>({ready:Promise.resolve().then(()=>{calls.push('preservation');}),close:async()=>{closed++;}}),
+      recordSupervisor:async()=>{calls.push('supervisor_record');},
+      startConsoleIcon:async()=>({close:async()=>{calls.push('icon_closed');}}),
+      request:async request=>{calls.push(request.operation);if(request.operation==='background_tick')controller.abort();return {state:'ready'};},
+      reportFailure:async()=>{calls.push('report');},maintainUnavailableWorker:async()=>{throw new Error('Startup must not enter GUI/plugin maintenance');},
+      wait:async milliseconds=>{assert.equal(milliseconds,300_000);assert(!calls.includes('background_tick'));waits++;},
+    });
+    assert.equal(result.state,'stopped');assert.equal(waits,1,stage);assert.equal(calls.filter(value=>value==='background_tick').length,1);
+    assert(calls.indexOf('report')<calls.indexOf('background_tick'),'business work must remain behind every successful startup gate');
+    assert.equal(calls.filter(value=>value==='supervisor_record').length,1);
+    assert.equal(closed,1);
+  }
+});
+
+test('startup read failures retain the OS clock but never adopt a changed identity, bypass registration or start work on abort',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  for(const ending of ['abort','replacement','rebind']){
+    const controller=new AbortController();let reads=0,waits=0,requests=0,preservations=0;
+    const result=await runAssistantBackground({signal:controller.signal,
+      readHost:async()=>({identity:ending==='rebind'&&reads++?{...identity,deviceId:randomUUID()}:identity,
+        activation:ending==='replacement'&&waits?{stage:'pending_owner'}:null}),
+      verifyRegistration:async()=>{throw Object.assign(new Error('PRIVATE_NATIVE_DETAIL'),{code:'ASSISTANT_BACKGROUND_READBACK_FAILED'});},
+      preservePlugin:()=>{preservations++;throw new Error('Unverified registration must not preserve/execute another shell');},
+      request:async()=>{requests++;throw new Error('Unverified registration must not run even maintenance');},
+      reportFailure:async()=>{throw new Error('A diagnostic outage must not kill the supervisor');},
+      wait:async milliseconds=>{assert.equal(milliseconds,300_000);waits++;if(ending==='abort')controller.abort();if(waits>1)throw new Error('Changed identities must stop');},
+    });
+    assert.equal(result.state,'stopped');assert.equal(waits,1);assert.equal(requests,0);assert.equal(preservations,0);
+  }
+});
+
+test('startup retry never repeats code publication, a structural write, or a definitive OS/private refusal',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  for(const stage of ['registration','identity','preservation','supervisor_record']){
+    for(const code of stage==='registration'?['ASSISTANT_BACKGROUND_CONFLICT','ASSISTANT_BACKGROUND_ACCESS_DENIED','ASSISTANT_BACKGROUND_NOT_INSTALLED','ASSISTANT_PRIVATE_UNAVAILABLE','FOREIGN_ERROR']
+      :stage==='identity'?['ASSISTANT_PRIVATE_CORRUPT','ASSISTANT_HOST_NOT_CONFIGURED','ASSISTANT_BACKGROUND_READBACK_FAILED']:['ASSISTANT_BACKGROUND_READBACK_FAILED']){
+      let calls=0,requests=0,waits=0;
+      const failure=()=>{calls++;throw Object.assign(new Error('PRIVATE_UNKNOWN_EFFECT'),{code});};
+      await assert.rejects(runAssistantBackground({readHost:async()=>{if(stage==='identity')failure();return {identity,activation:null};},
+        verifyRegistration:async()=>{if(stage==='registration')failure();},
+        preservePlugin:()=>({ready:Promise.resolve().then(()=>{if(stage==='preservation')failure();}),close:async()=>{}}),
+        recordSupervisor:async()=>{if(stage==='supervisor_record')failure();},
+        request:async()=>{requests++;},wait:async()=>{waits++;throw new Error('A refusal or unknown write cannot be retried');},
+      }),{code});
+      assert.equal(calls,1);assert.equal(waits,0);assert.equal(requests,0);
+    }
+  }
+});
+
+test('repeated temporary startup reads retain their clock beyond the finite OS crash count, with zero premature work',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'},controller=new AbortController();
+  let reads=0,waits=0,records=0,ticks=0;
+  await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),
+    verifyRegistration:async()=>{if(++reads<=4)throw Object.assign(new Error(),{code:reads%2?'ASSISTANT_BACKGROUND_UNAVAILABLE':'ASSISTANT_BACKGROUND_READBACK_FAILED'});},
+    preservePlugin:()=>({ready:Promise.resolve(),close:async()=>{}}),recordSupervisor:async()=>{records++;},startConsoleIcon:async()=>null,
+    reportFailure:async()=>{},wait:async milliseconds=>{assert.equal(milliseconds,300_000);assert.equal(ticks,0);assert.equal(records,0);waits++;},
+    request:async request=>{if(request.operation==='background_tick'){ticks++;controller.abort();}return {state:'ready'};},
+  });
+  assert.equal(reads,5);assert.equal(waits,4);assert.equal(records,1);assert.equal(ticks,1);
+});
+
+test('an explicit stop while startup gates settle returns normally instead of creating an OS crash-restart result',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  for(const stage of ['identity','registration','preservation','supervisor_record']){
+    const controller=new AbortController();let requests=0,records=0,closed=0;
+    const stop=at=>{if(stage===at)controller.abort();};
+    const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>{stop('identity');return {identity,activation:null};},
+      verifyRegistration:async()=>{stop('registration');},
+      preservePlugin:()=>({ready:Promise.resolve().then(()=>stop('preservation')),close:async()=>{closed++;}}),
+      recordSupervisor:async()=>{records++;stop('supervisor_record');},
+      startConsoleIcon:async()=>{throw new Error('A stopped parent must not touch a console');},request:async()=>{requests++;},
+      wait:async()=>{throw new Error('No waiting after explicit stop');},
+    });
+    assert.deepEqual(result,{schemaVersion:1,state:'stopped'});assert.equal(requests,0);
+    assert.equal(records,stage==='supervisor_record'?1:0);assert.equal(closed,['preservation','supervisor_record'].includes(stage)?1:0);
+  }
+});
 
 const backgroundRecoveryFixture=()=>{
   let clock=2_000_000,record=null,fingerprint='a'.repeat(64),starts=0;

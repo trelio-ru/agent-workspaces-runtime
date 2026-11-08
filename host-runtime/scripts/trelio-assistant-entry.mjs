@@ -2435,22 +2435,59 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
   process.on('SIGTERM',stop);process.on('SIGINT',stop);
   let consoleIcon=null,pluginPreservation=null;
   try {
-    const initial=await readHost();
-    if(!initial?.identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
-    const identity=JSON.stringify(initial.identity);
+    let initial=null,identity=null;
     const fenced=value=>['pending_owner','quiescing'].includes(value?.activation?.stage);
-    if(fenced(initial))return {schemaVersion:1,state:'stopped',reason:'replacement_pending'};
-    // An old Task Scheduler registration must never start a fresh parent for
-    // the new identity at its next logon. The SAME native status validator
-    // checks the current marker/SID/action before any worker or maintenance.
-    await verifyRegistration();
-    // A supervisor outlives individual MCP clients. Preserve its exact loaded
-    // shell BEFORE starting workers, using the common verifier/watch lifecycle;
-    // this never chooses another installed plugin or changes hook trust.
+    // A failed native/private startup READ must not destroy the only remaining
+    // five-minute clock when no chat/MCP is open. OS crash restarts are finite;
+    // exhausting them previously left a valid registered assistant inert until
+    // the next logon. Keep this SAME parent alive, with all business/maintenance
+    // requests still behind the complete original startup admission. Each read
+    // retains its ordinary private/native deadline; waiting grants no authority.
+    //
+    // Pin the first observed identity across failed attempts. Rebinding or an
+    // owner replacement stops this old parent instead of adopting another host.
+    // Only the two startup READS participate. Code publication/preservation and
+    // supervisor-record writes remain outside this retry boundary: a timeout
+    // there must never be mistaken for an absent effect and replayed.
+    while(!effective.aborted){
+      let readStage='identity';
+      try{
+        const observed=await readHost();
+        effective.throwIfAborted();
+        if(!observed?.identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
+        const observedIdentity=JSON.stringify(observed.identity);
+        if(identity!==null&&observedIdentity!==identity)
+          return {schemaVersion:1,state:'stopped',reason:'identity_changed'};
+        identity??=observedIdentity;
+        if(fenced(observed))return {schemaVersion:1,state:'stopped',reason:'replacement_pending'};
+        // Never turn a failed/foreign/unknown OS observation into an updater,
+        // scheduler start, GUI action or business pass. Only repeat this exact
+        // read after waiting; it must positively match before continuing.
+        readStage='registration';
+        await verifyRegistration();effective.throwIfAborted();
+        initial=observed;
+        break;
+      }catch(error){
+        // Definitive absence, foreign/disabled definitions, denied access,
+        // corrupt state and unknown exceptions retain their original hard
+        // refusal. A transient READ failure permits another READ, never a
+        // registration/start/retarget, GUI or business-operation retry.
+        const temporary=readStage==='identity'?error?.code==='ASSISTANT_PRIVATE_UNAVAILABLE'
+          :['ASSISTANT_BACKGROUND_READBACK_FAILED','ASSISTANT_BACKGROUND_UNAVAILABLE'].includes(error?.code);
+        if(!effective.aborted&&!temporary)throw error;
+        if(!effective.aborted)await reportFailure(error).catch(()=>undefined);
+        if(!effective.aborted)await wait(300_000,effective);
+      }
+    }
+    if(effective.aborted||initial===null)return {schemaVersion:1,state:'stopped'};
+    // Keep the original one-attempt immutable-code/structural-write boundary.
+    // No model/health tick starts until it has completed and read back normally.
     pluginPreservation=preservePlugin({environment});
     await pluginPreservation.ready;
+    if(effective.aborted)return {schemaVersion:1,state:'stopped'};
     const generation=randomUUID();
     await recordSupervisor(initial.identity,generation);
+    if(effective.aborted)return {schemaVersion:1,state:'stopped'};
     const workerEnvironment={...environment,TRELIO_ASSISTANT_SUPERVISOR_GENERATION:generation};
     // Cosmetic only, after the exact identity/OS registration checks. The
     // helper refuses shared/hidden/terminal-host windows; a failed icon never
