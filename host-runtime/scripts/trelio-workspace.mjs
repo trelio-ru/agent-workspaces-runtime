@@ -3526,11 +3526,21 @@ export const retainLoadedCodexPluginInstallation = async ({
     loadedPluginVersion,
     { profile },
   );
-  // Restore earlier exact releases only after proving that this process itself
-  // was loaded from the expected Codex cache layout. The same bridge module is
-  // also imported from a source checkout and by Claude, where touching Codex
-  // retention would be outside the active client lifecycle.
-  await restoreRetainedCodexPluginInstallations({ retentionDirectory, profile });
+  // Assistant snapshots also contain verified but NEVER activated candidates.
+  // They are immutable recovery evidence, not a request to install every saved
+  // version again. Native Codex chooses the newest materialized cache version:
+  // resurrecting a failed candidate here silently undoes its native rollback.
+  // Each live assistant MCP/supervisor already owns a watcher for its exact
+  // loaded entry; this invocation may preserve only that same source. Keep the
+  // historical human/component lifecycle unchanged, including explicit full
+  // restore calls and every ordinary snapshot/type/integrity guard.
+  if (profile === "assistant") {
+    // The old batch restore also initialized this protected root. Keep that
+    // SAME private-directory admission before publishing our first snapshot.
+    await ensurePrivateDirectory(retentionDirectory);
+  } else {
+    await restoreRetainedCodexPluginInstallations({ retentionDirectory, profile });
+  }
   const entryId = buildCodexPluginRetentionEntryId({
     installedPath: source.installedPath,
     version: source.version,
@@ -3758,7 +3768,7 @@ const runCodexPluginMutationWithRetention = async (
 ) => {
   if (!preserveLoadedPlugin) return operation();
 
-  await retainLoadedCodexPluginInstallation({
+  const loadedEntry = await retainLoadedCodexPluginInstallation({
     loadedPluginDirectory,
     loadedPluginVersion,
     retentionDirectory, profile,
@@ -3774,9 +3784,13 @@ const runCodexPluginMutationWithRetention = async (
 
   try {
     // Codex may prune versioned cache folders on both marketplace upgrade and
-    // an otherwise harmless `plugin add`. Restoration therefore belongs in a
-    // finally-equivalent path for every mutating CLI call, including failures.
-    await restoreRetainedCodexPluginInstallations({ retentionDirectory, profile });
+    // an otherwise harmless `plugin add`. Preserve the actual caller even on
+    // failure, but never turn dormant assistant archives into native installs.
+    // In particular an archived newer FAILED candidate must stay private after
+    // an exact older-version add. Other live assistant callers independently
+    // watch their own entries; human/component restoration retains its ABI.
+    if (profile === "assistant") await restoreOneRetainedCodexPlugin(loadedEntry);
+    else await restoreRetainedCodexPluginInstallations({ retentionDirectory, profile });
   } catch (retentionError) {
     throw new Error(
       "Codex обновил plugin cache, но Trelio не смог восстановить пути активных задач.",

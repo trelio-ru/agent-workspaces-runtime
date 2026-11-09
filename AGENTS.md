@@ -1030,6 +1030,10 @@ publication tooling также остаются вне этого публичн
   переход combined main без заранее установленного companion и все клиенты.
   Main-only update не меняет hook identity.
 
+- Assistant code retention preserves each actual loaded caller, not every
+  dormant candidate snapshot. Never resurrect a failed newer cache entry during
+  native rollback; see [preservation](docs/agent-workspace-runtime.md#codex-plugin-preservation).
+
 - Долгие цели: host передаёт только проверенные UUID/path locators собственного
   `assistants/<assistantUserId>/WORK.md` по stdin; формат/continuation – task-worker
   нового плагина и [контракт](docs/assistant-scheduler.md#durable-human-goal).

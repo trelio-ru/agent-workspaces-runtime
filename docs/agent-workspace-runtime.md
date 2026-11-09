@@ -353,6 +353,15 @@ retained-копии публикация удаляет только полож�
 snapshot, реальный permission failure остаётся terminal. Immutable receipt,
 native plugin inventory и hook trust не переписываются.
 
+Assistant snapshots могут содержать проверенные, но ещё не активированные
+кандидаты. Сохранение загруженной версии и finalizer native CLI восстанавливают
+только exact entry своего вызывающего процесса. Архив другой версии остаётся
+приватной immutable-копией: его наличие не устанавливает эту версию обратно.
+Иначе native Codex выбирает более новый materialized cache и отменяет выполненный
+откат. Другие живые MCP/supervisor сохраняют собственные paths через прежние
+watchers. Human/hook-компоненты и явный bulk-restore сохраняют прежний контракт;
+остальные integrity/type/CAS/no-replay проверки не меняются.
+
 Native rollback может заново клонировать тот же detached distribution commit
 после появления новых коммитов в official `main`. Только hook-free assistant
 main с явным отдельным hookComponent допускает различия inactive

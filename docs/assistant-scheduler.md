@@ -2272,6 +2272,13 @@ never overrides component minimums/native ACL. Its incident remains visible
 through SAME device health until a new candidate is actually verified. Neither
 an updater failure nor rollback retries a business/provider operation.
 
+Retention finalizers preserve only the actual loaded assistant caller. Verified
+inactive candidates remain private archives; recreating their native cache paths
+would make Codex select the failed newer version after an otherwise valid
+rollback. Every other live MCP/supervisor keeps its own exact-path watcher.
+Native CLI plus shared-retention acceptance must assert the final selected
+version after all finalizers, not merely the version returned by `plugin add`.
+
 The implementation must pass native Windows manifest/process/CLI tests and a
 real dedicated Desktop update before unattended activation is called verified.
 Other operating systems leave this Windows policy inactive. Windows login is

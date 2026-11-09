@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/scripts/trelio-assistant-entry.mjs";
 import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation,
-  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion,
+  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion, resolveInstalledCodexPluginBridge,
   validateCodexHookComponentRequirement, verifyAssistantHookComponentIntegrity,
   inspectHumanCodexHookComponent, inspectBundledPlugin, startHumanCodexPluginPreservation,
   migrateHumanCodexHookComponent, readAssistantPluginPublishedRef } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -344,6 +344,55 @@ const fixture = async (profile = "human") => {
     TRELIO_HOST_RUNTIME_VERSION: "3.18.0",
   } };
 };
+
+for (const lostResult of [false, true]) {
+  test(`assistant caller preservation does not reinstall a dormant newer archive (lost result: ${lostResult})`, async t => {
+    const f = await fixture("assistant");
+    t.after(() => fs.rm(f.root, {recursive: true, force: true}));
+    await fs.writeFile(path.join(f.plugin, "scripts/trelio-host-runtime-loader.mjs"), "synthetic loader, never executed\n");
+    const newer = path.join(path.dirname(f.plugin), "0.1.4");
+    await fs.cp(f.plugin, newer, {recursive: true});
+    await fs.writeFile(path.join(newer, ".codex-plugin/plugin.json"), JSON.stringify({name: "trelio-digital-assistant", version: "0.1.4"}));
+    const candidate = await retainLoadedCodexPluginInstallation({profile: "assistant", retentionDirectory: f.retentionDirectory,
+      loadedPluginDirectory: newer, loadedPluginVersion: "0.1.4"});
+    const candidateReceipt = await fs.readFile(path.join(candidate.entryDirectory, "metadata.json"));
+    const original = await retainLoadedCodexPluginInstallation({profile: "assistant", retentionDirectory: f.retentionDirectory,
+      loadedPluginDirectory: f.plugin, loadedPluginVersion: "0.1.3"});
+    await fs.rm(newer, {recursive: true});
+    // An inactive verified candidate is not a live caller. Merely starting an
+    // old MCP must not publish that newer archive back into native discovery.
+    const errors = [], watcher = startLoadedCodexPluginPreservation({environment: f.environment,
+      retentionDirectory: f.retentionDirectory, onError: error => errors.push(error)});
+    try { await watcher.ready; await assert.rejects(fs.lstat(newer), {code: "ENOENT"}); }
+    finally { await watcher.close(); }
+    assert.deepEqual(errors, []);
+
+    let adds = 0;
+    const options = {profile: "assistant", environment: f.environment, verifyMarketplace: false,
+      loadedPluginDirectory: f.plugin, loadedPluginVersion: "0.1.3", retentionDirectory: f.retentionDirectory,
+      execFileCommand: async (_command, args) => {
+        assert.deepEqual(args, ["plugin", "add", "trelio-digital-assistant@trelio-digital-assistants", "--json"]);
+        adds++;
+        // Native add may prune even its caller's old path. A failed/lost
+        // result must preserve that caller without reviving unrelated copies.
+        await fs.rm(f.plugin, {recursive: true});
+        if (lostResult) throw Object.assign(new Error("synthetic lost result"), {code: "ETIMEDOUT"});
+        await fs.cp(original.pluginDirectory, f.plugin, {recursive: true});
+        return {stdout: JSON.stringify({pluginId: "trelio-digital-assistant@trelio-digital-assistants",
+          marketplaceName: "trelio-digital-assistants", installedPath: f.plugin, version: "0.1.3"})};
+      }};
+    if (lostResult) await assert.rejects(resolveInstalledCodexPluginBridge(options), {code: "ETIMEDOUT"});
+    else assert.equal((await resolveInstalledCodexPluginBridge(options)).version, "0.1.3");
+    assert.equal(adds, 1, "preservation never replays native add");
+    await assert.rejects(fs.lstat(newer), {code: "ENOENT"});
+    assert.deepEqual(await fs.readFile(path.join(f.plugin, ".codex-plugin/plugin.json")),
+      await fs.readFile(path.join(original.pluginDirectory, ".codex-plugin/plugin.json")));
+    assert.deepEqual(await fs.readFile(path.join(candidate.entryDirectory, "metadata.json")), candidateReceipt,
+      "the unused private archive/receipt remains available and immutable");
+    assert.equal(await fs.readFile(path.join(candidate.pluginDirectory, ".codex-plugin/plugin.json"), "utf8"),
+      JSON.stringify({name: "trelio-digital-assistant", version: "0.1.4"}));
+  });
+}
 
 test("hook-free main rollback reconciles a real native re-clone against its original receipt without rewriting Git or trust", async t => {
   const f = await fixture("assistant");

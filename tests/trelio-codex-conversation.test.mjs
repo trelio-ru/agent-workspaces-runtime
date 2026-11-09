@@ -13,10 +13,83 @@ import { readCodexConversationTitle, syncRunCodexConversationTitle,resolveCodexE
 import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateHumanCodexHookComponent,
-  inspectHumanCodexHookComponent, readAssistantPluginPublishedRef } from "../host-runtime/scripts/trelio-workspace.mjs";
+  inspectHumanCodexHookComponent, readAssistantPluginPublishedRef, restoreAssistantCodexPluginVersion,
+  readCodexPluginUpdateInventory, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
+
+test('actual Codex assistant rollback keeps the newer candidate archived instead of reinstalling it from retention',
+ {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
+ const execute=promisify(execFile),executable=process.env.TRELIO_TEST_CODEX_CLI;
+ const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-native-rollback-')));
+ let preservation=null;const preservationErrors=[];
+ t.after(async()=>{await preservation?.close();await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
+ const home=path.join(root,'home'),repository=path.join(root,'repository'),retentionDirectory=path.join(root,'retention');
+ const official='https://github.com/trelio-ru/digital-assistants.git',marketplace='trelio-digital-assistants';
+ const plugin='trelio-digital-assistant@trelio-digital-assistants';
+ for(const directory of [home,repository])await fs.mkdir(directory);
+ const environment={...buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
+   LOCALAPPDATA:path.join(home,'local'),APPDATA:path.join(home,'roaming')}),GIT_TERMINAL_PROMPT:'0',
+   GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:path.join(home,'.gitconfig')};
+ // The official identity is redirected ONLY inside this synthetic HOME. The
+ // native CLI, immutable-ref installs, pruning and inventory are genuine; no
+ // network account, model, GUI, real plugin config or hook trust participates.
+ await fs.writeFile(path.join(home,'.gitconfig'),`[url "${pathToFileURL(repository).href}"]\n\tinsteadOf = ${official}\n`);
+ await fs.writeFile(path.join(home,'config.toml'),'[features]\nplugins=true\nhooks=false\napps=false\n');
+ const git=(...args)=>execute('git',['-c',`core.hooksPath=${path.join(root,'no-hooks')}`,...args],{cwd:repository,env:environment});
+ const commit=async()=>{await git('add','.');await git('-c','user.name=Synthetic','-c','user.email=fixture@example.invalid',
+   '-c','commit.gpgsign=false','commit','-qm','synthetic rollback fixture');};
+ const native=async args=>JSON.parse((await execute(executable,args,{cwd:root,env:environment,timeout:30000})).stdout);
+ await git('init','-q');await git('branch','-M','main');
+ for(const version of ['0.1.3','0.1.4']){
+  await git('checkout','--orphan','distribution-'+version);await git('rm','-rf','--ignore-unmatch','.');
+  await fs.mkdir(path.join(repository,'.codex-plugin'),{recursive:true});await fs.mkdir(path.join(repository,'scripts'),{recursive:true});
+  await fs.writeFile(path.join(repository,'.gitattributes'),'* -text\n');
+  await fs.writeFile(path.join(repository,'.codex-plugin/plugin.json'),JSON.stringify({name:'trelio-digital-assistant',version}));
+  await fs.writeFile(path.join(repository,'scripts/trelio-host-runtime-loader.mjs'),'synthetic immutable loader; never executed\n');
+  await fs.writeFile(path.join(repository,'package-integrity.json'),JSON.stringify({schemaVersion:1,plugin:'trelio-digital-assistant',
+   hookComponent:{pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.1',integritySha256:'a'.repeat(64)}}));
+  await commit();await git('tag','plugin-v'+version);
+  await git('checkout','--orphan','marketplace-'+version);await git('rm','-rf','--ignore-unmatch','.');
+  await fs.mkdir(path.join(repository,'.agents/plugins'),{recursive:true});
+  await fs.writeFile(path.join(repository,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:[
+   {name:'trelio-digital-assistant',source:{source:'url',url:official,ref:'plugin-v'+version},policy:{installation:'AVAILABLE',authentication:'ON_USE'}}]}));
+  await commit();await git('tag','v'+version);
+ }
+ await git('branch','-M','main');
+ await native(['plugin','marketplace','add',official,'--ref','v0.1.3','--json']);
+ const previous=await native(['plugin','add',plugin,'--json']);assert.equal(previous.version,'0.1.3');
+ const options={profile:'assistant',environment,retentionDirectory,
+   loadedPluginDirectory:previous.installedPath,loadedPluginVersion:previous.version,
+   execFileCommand:(_command,args,settings)=>execute(executable,args,{...settings,cwd:root,env:environment,timeout:30000})};
+ const saved=await retainLoadedCodexPluginInstallation(options);
+ preservation=startLoadedCodexPluginPreservation({environment:{...environment,TRELIO_PLUGIN_ROOT:previous.installedPath,
+  TRELIO_PLUGIN_VERSION:'3.2.3'},retentionDirectory,checkIntervalMs:20,onError:error=>preservationErrors.push(error)});
+ await preservation.ready;
+ await native(['plugin','marketplace','remove',marketplace,'--json']);
+ await native(['plugin','marketplace','add',official,'--ref','main','--json']);
+ const candidate=await native(['plugin','add',plugin,'--json']);assert.equal(candidate.version,'0.1.4');
+ // Native add really prunes the former cache. Wait only for the live parent's
+ // ordinary watcher, never explicitly restore the collection of archives.
+ const restoredAt=Date.now()+5000;
+ while(true){try{await fs.readFile(path.join(previous.installedPath,'.codex-plugin/plugin.json'));break;}
+  catch(error){if(error.code!=='ENOENT'||Date.now()>=restoredAt)throw error;await new Promise(resolve=>setTimeout(resolve,20));}}
+ assert.deepEqual(preservationErrors,[]);
+ const archived=await retainLoadedCodexPluginInstallation({...options,loadedPluginDirectory:candidate.installedPath,loadedPluginVersion:candidate.version});
+ const archivedReceipt=await fs.readFile(path.join(archived.entryDirectory,'metadata.json'));
+ // The existing registered parent still owns the known-good previous loader.
+ // A verified candidate snapshot is not evidence that a caller loaded it.
+ const restored=await restoreAssistantCodexPluginVersion({...options,version:previous.version,treeSha256:saved.treeSha256});
+ assert.equal(restored.version,previous.version);assert.equal(restored.treeSha256,saved.treeSha256);
+ const observed=await readCodexPluginUpdateInventory({...options,receipt:{version:previous.version,treeSha256:saved.treeSha256}});
+ assert.equal(observed.version,previous.version,'native inventory must still select the actual rollback after retention finalizers');
+ assert.equal(observed.desiredVersion,candidate.version,'official main discovery is restored without reinstalling its failed candidate');
+ await assert.rejects(fs.lstat(candidate.installedPath),{code:'ENOENT'});
+ assert.deepEqual(await fs.readFile(path.join(archived.entryDirectory,'metadata.json')),archivedReceipt);
+ assert.equal(JSON.parse(await fs.readFile(path.join(archived.pluginDirectory,'.codex-plugin/plugin.json'),'utf8')).version,candidate.version);
+ assert.doesNotMatch(await fs.readFile(path.join(home,'config.toml'),'utf8'),/trusted_hash|trusted_content_hash/u);
+});
 
 test('actual Codex migrates an existing combined main to independent hooks without a manual companion install or trust write',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
