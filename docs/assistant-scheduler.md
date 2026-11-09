@@ -2138,6 +2138,10 @@ Native marketplace/list omits its configured ref. Observe only the exact officia
 assistant table through the SAME bounded no-symlink UTF-8/TOML config reader;
 malformed, duplicate, inline, foreign or typed source settings refuse. The host
 never edits that configuration itself.
+Native Codex also lists bundled marketplaces with only their common name/root
+fields. Validate that bounded complete inventory without requiring Git fields
+from unrelated rows. Only the exact assistant marketplace must prove its fixed
+Git provenance; a present malformed/foreign selected row is never absence.
 An absent/disabled MAIN plugin is not installed/enabled. A required missing hook
 companion may be installed from the SAME official marketplace; a human-disabled
 companion is never enabled. Its exact independent version/inventory digest

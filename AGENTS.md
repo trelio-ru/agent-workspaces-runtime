@@ -1051,7 +1051,10 @@ publication tooling также остаются вне этого публичн
   without pruning live code, resetting the failed candidate or replaying work.
   Keep native source pinned to the verified immutable version. Public bounded
   main discovery reuses the SAME source parser and both exact Git-ref proofs;
-  source metadata is never edited by hand. Positive source gaps recover only
+  source metadata is never edited by hand. Native bundled marketplace rows
+  need only their common name/root shape; Git provenance belongs to the exact
+  selected assistant source, never to unrelated bundled metadata.
+  Positive source gaps recover only
   through the protected intent, explicit enabled setting and original previous
   receipt. Native failed-version reselection preserves its latch and hook basis.
 

@@ -3856,9 +3856,11 @@ const assertOfficialCodexMarketplace = async ({
     { execFileCommand, environment },
   );
   if(!Array.isArray(result?.marketplaces))throw new Error('Invalid native marketplace inventory.');
+  // Native Codex lists bundled marketplaces as name/root only. Validate their
+  // common row shape, not Git-only fields they do not own. Only the exact
+  // selected assistant source below may establish official Git provenance.
   if(profile==='assistant'&&(result.marketplaces.some(row=>!row||typeof row!=='object'||Array.isArray(row)
-    ||typeof row.name!=='string'||!row.name||typeof row.root!=='string'||!path.isAbsolute(row.root)
-    ||typeof row.marketplaceSource?.sourceType!=='string'||typeof row.marketplaceSource?.source!=='string')
+    ||typeof row.name!=='string'||!row.name||typeof row.root!=='string'||!path.isAbsolute(row.root))
     ||new Set(result.marketplaces.map(row=>row.name)).size!==result.marketplaces.length))
     throw new Error('Invalid native assistant marketplace inventory.');
   const matches=result.marketplaces.filter(item=>item?.name===selected.marketplace);

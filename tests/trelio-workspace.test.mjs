@@ -12248,10 +12248,15 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
   await writeMarket('plugin-v0.1.3');let version='0.1.3',enabled=true,source='https://github.com/trelio-ru/digital-assistants.git',adds=0,prepared=null;
   let latest='0.1.4',registered=true,sourceRef='main';
   await fs.writeFile(path.join(home,'config.toml'),'[plugins."trelio-digital-assistant@trelio-digital-assistants"]\nenabled=true\n');
+  // Real installed Codex also reports bundled marketplaces without a Git
+  // source descriptor. They do not grant our source provenance or disappear
+  // when this updater's native source-remove result is lost.
+  const builtins=[{name:'openai-bundled',root:path.join(root,'builtin')},
+    {name:'native-default',root:path.join(root,'native'),marketplaceSource:null}];
   const argsSeen=[];
   const execFileCommand=async(_command,args)=>{
     argsSeen.push(args);let value;
-    if(args[1]==='marketplace'&&args[2]==='list')value={marketplaces:registered?[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]:[]};
+    if(args[1]==='marketplace'&&args[2]==='list')value={marketplaces:[...builtins,...(registered?[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]:[])]};
     else if(args[1]==='list')value={installed:[{pluginId:`${name}@${marketplace}`,version,installed:true,enabled}]};
     else if(args[1]==='marketplace'){
       assert.equal(prepared,latest,'intent must precede source switching too');
@@ -12296,12 +12301,15 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
   assert.deepEqual(await readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true}),{state:'marketplace_absent'});
   for(const marketplaces of [[null],[{}],[{name:'foreign'}]])await assert.rejects(readCodexPluginUpdateInventory({
     ...options,allowMissingMarketplace:true,execFileCommand:async()=>({stdout:JSON.stringify({marketplaces})})}),/Invalid native/);
+  await assert.rejects(readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true,
+    execFileCommand:async()=>({stdout:JSON.stringify({marketplaces:[...builtins,{name:marketplace,root:market}]})})}),
+    'a present selected source without Git provenance is never an absent source');
   await fs.writeFile(path.join(home,'config.toml'),'[plugins."trelio-digital-assistant@trelio-digital-assistants"]\nenabled=false\n');
   await assert.rejects(readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true}));
   await assert.rejects(readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true,execFileCommand:async()=>({stdout:'{}'})}));
   registered=true;
   enabled=false;assert.deepEqual(await readCodexPluginUpdateInventory(options),{state:'disabled'});
-  source='https://github.com/other/foreign.git';await assert.rejects(readCodexPluginUpdateInventory(options));source='https://github.com/trelio-ru/digital-assistants.git';
+  source='https://github.com/other/foreign.git';await assert.rejects(readCodexPluginUpdateInventory(options));await assert.rejects(readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true}));source='https://github.com/trelio-ru/digital-assistants.git';
   await writeMarket('main');await assert.rejects(readCodexPluginUpdateInventory(options));
   assert.ok(argsSeen.every(args=>!args.includes('trelio-plugins')&&!args.includes('trelio-agent-workspaces@trelio-plugins')));
 });
