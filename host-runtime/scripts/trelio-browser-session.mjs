@@ -72,6 +72,335 @@ const SESSION_CLASSES = new Set([
 ]);
 const require = createRequire(import.meta.url);
 
+export const BROWSER_EXECUTION_SESSIONS_API = 'trelio.browser-execution-sessions/v1';
+
+/** A signed provider declares an indivisible native resource, rather than the
+ * host guessing from a provider ID. Stateless/API providers remain concurrent.
+ * This is execution scheduling only, never sending or credential authority. */
+export function skillResourcePolicy(parsedPackage, arguments_ = []) {
+  const entries = parsedPackage?.files?.filter(file => file.path === 'trelio-execution-resource.json') || [];
+  if (!entries.length) return null;
+  let value;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(entries[0].bytes)); } catch {}
+  if (entries.length !== 1 || !Buffer.isBuffer(entries[0].bytes) || entries[0].bytes.length > 1024
+      || !value || Object.keys(value).sort().join() !== 'schemaVersion,scope' || value.schemaVersion !== 1
+      || !['account', 'device'].includes(value.scope) || !parsedPackage.capabilities?.includes('local-session')) {
+    fail('BROWSER_SESSION_RESOURCE_POLICY_INVALID', 'The signed execution resource policy is invalid.');
+  }
+  if (['guides', 'commands', 'help', '--help', '-h', '__trelio_accounts_import'].includes(arguments_[0])) return null;
+  return value;
+}
+
+/** Separate the owner of a live workflow from the account that owns its saved
+ * authentication. Only the verified executor supplies this identity; cwd,
+ * inherited CODEX_THREAD_ID and model-selected labels are never owners. A
+ * hook-free caller has no observed chat identity and retains the explicit
+ * provider-session protocol instead of borrowing an unrelated chat's owner. */
+export function browserExecutionOwner(environment = process.env) {
+  const session = environment.TRELIO_SKILL_RUNTIME_SESSION_ID;
+  if (session === undefined || session === '') return null;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+  if (typeof session !== 'string' || !uuid.test(session)) {
+    fail('BROWSER_SESSION_OWNER_INVALID', 'The observed execution owner is invalid.');
+  }
+  return createHash('sha256').update(`trelio/browser-execution/v1/${session.toLowerCase()}`).digest('hex');
+}
+
+/** Providers retain their own account/AAD and native authentication guards.
+ * Only disposable control state moves underneath this owner-specific root.
+ * Returning the account root for an unbound legacy caller preserves its
+ * existing explicit-session ABI; it must never be selected for a bound chat. */
+export function browserExecutionDirectory(accountDirectory, environment = process.env) {
+  if (typeof accountDirectory !== 'string' || !path.isAbsolute(accountDirectory)) {
+    fail('BROWSER_SESSION_OWNER_INVALID', 'The account directory is invalid.');
+  }
+  const owner = browserExecutionOwner(environment);
+  return owner ? path.join(accountDirectory, 'sessions', owner) : accountDirectory;
+}
+
+/** Account-wide destructive/setup operations must examine every live owner,
+ * including a pre-upgrade legacy lease. Providers keep their native lease
+ * format/liveness proof; the host owns only this bounded, non-following owner
+ * inventory. Call inside withBrowserAccountState when reserving/deleting state.
+ */
+export async function browserExecutionDirectories(accountDirectory) {
+  browserExecutionDirectory(accountDirectory, {});
+  const { assertPrivatePathKind } = await import('./trelio-workspace.mjs');
+  const root = path.join(accountDirectory, 'sessions');
+  try { await assertPrivatePathKind(root, 'directory'); }
+  catch (error) { if (error.code === 'ENOENT') return [accountDirectory]; throw error; }
+  const entries = await fsp.readdir(root, { withFileTypes: true });
+  if (entries.length > 1024 || entries.some(entry => !entry.isDirectory() || !/^[a-f0-9]{64}$/u.test(entry.name))) {
+    fail('BROWSER_SESSION_STATE_INVALID', 'The execution owner inventory is invalid.');
+  }
+  const directories = [accountDirectory, ...entries.map(entry => path.join(root, entry.name))];
+  for (const directory of directories) await assertPrivatePathKind(directory, 'directory');
+  return directories;
+}
+
+/** One common short transaction lock for reusable account state. Waiting is
+ * permitted only before the callback starts: a failed save/input is never
+ * replayed. The existing nonce/PID mutex refuses live/unknown-owner takeover
+ * and supplies the same native private-path checks on every platform. */
+export async function withBrowserAccountState(accountDirectory, operation, { waitMs = 30_000 } = {}) {
+  if (!path.isAbsolute(accountDirectory) || typeof operation !== 'function'
+      || !Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > MAX_LEASE_MS) {
+    fail('BROWSER_SESSION_STATE_INVALID', 'The account transaction is invalid.');
+  }
+  const { prepareVisualLockRoot } = await import('./trelio-visual-bootstrap.mjs');
+  const { withMirrorRetentionLock } = await import('./trelio-mirror-retention.mjs');
+  const root = path.join(accountDirectory, 'state-control');
+  await prepareVisualLockRoot(root);
+  let entered = false;
+  const result = await withMirrorRetentionLock(root, async () => {
+    entered = true;
+    return operation();
+  }, { waitMs });
+  if (!entered) fail('BROWSER_SESSION_STATE_BUSY', 'The saved account state is busy.');
+  return result;
+}
+
+/** Opaque encrypted bytes can be compared without moving provider keys or
+ * plaintext into the host. A writer keeps its own base across the whole live
+ * session; the transaction lock alone would still permit stale last-writer
+ * wins. Callers must retain the conflicting encrypted candidate for recovery. */
+export function browserSnapshotRevision(bytes) {
+  if (bytes === null) return null;
+  if (!Buffer.isBuffer(bytes) && typeof bytes !== 'string') {
+    fail('BROWSER_SESSION_STATE_INVALID', 'The encrypted snapshot is invalid.');
+  }
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** Publish only against the exact ciphertext read by this workflow. A late
+ * session still saves its encrypted candidate privately, but cannot roll back
+ * another session's newer login/logout. Provider callbacks preserve native
+ * private-file/AAD/key handling; the generic host never decrypts their data. */
+export async function saveBrowserAccountSnapshot({ accountDirectory, revision, bytes, read, write, retain, reconcile }) {
+  if (revision !== null && !/^[a-f0-9]{64}$/u.test(revision || '')
+      || typeof read !== 'function' || typeof write !== 'function' || typeof retain !== 'function'
+      || reconcile !== undefined && typeof reconcile !== 'function') {
+    fail('BROWSER_SESSION_STATE_INVALID', 'The snapshot transaction is invalid.');
+  }
+  const nextRevision = browserSnapshotRevision(bytes);
+  return withBrowserAccountState(accountDirectory, async () => {
+    const current = await read();
+    if (browserSnapshotRevision(current) !== revision) {
+      // Only the provider can reconcile its independently versioned critical
+      // credential/fence metadata. The host never merges opaque browser state.
+      // Reconciliation runs once under this same lock and must retain the
+      // current browser snapshot; its own metadata CAS may refuse the write.
+      const resolved = reconcile ? await reconcile(current, bytes) : null;
+      if (resolved !== null) {
+        const resolvedRevision = browserSnapshotRevision(resolved);
+        await write(resolved);
+        return { published: true, revision: resolvedRevision };
+      }
+      await retain(bytes);
+      return { published: false, revision };
+    }
+    await write(bytes);
+    return { published: true, revision: nextRevision };
+  });
+}
+
+/** Persistent messenger profiles contain native IndexedDB CryptoKeys, so a
+ * storageState/cookie export is not an equivalent fork. Reuse the bounded
+ * native auth-store archive used by visual sessions, excluding history,
+ * downloads, saved passwords and executable cache. Each chat owns its working
+ * profile and lock. The account snapshot is copied only while stopped; a late
+ * publisher retains its own state without replacing a newer login/logout.
+ * Messenger profiles already have a private, plaintext native-store contract;
+ * this API must never be used as a protected-snapshot plaintext fallback. */
+export async function prepareParallelBrowserProfile({ profileDirectory, lockPath, environment = process.env }) {
+  const owner = browserExecutionOwner(environment);
+  if (!owner) return { profileDirectory, lockPath, publish: async () => {} };
+  readBrowserSessionBinding({ environment, expectedSessionClass: 'messenger-profile' });
+  if (![profileDirectory, lockPath].every(value => typeof value === 'string' && path.isAbsolute(value))) {
+    fail('BROWSER_SESSION_STATE_INVALID', 'The persistent profile is invalid.');
+  }
+  const { prepareVisualPrivateDirectory } = await import('./trelio-visual-bootstrap.mjs');
+  const { readPrivateJsonFile, writePrivateJsonFile } = await import('./trelio-workspace.mjs');
+  const { snapshotVisualProfile, restoreVisualProfile } = await import('./trelio-visual-profile.mjs');
+  const root = path.join(path.dirname(profileDirectory), 'parallel-profiles', createHash('sha256').update(profileDirectory).digest('hex'));
+  await prepareVisualPrivateDirectory(root);
+  const own = path.join(root, 'sessions', owner), profile = path.join(own, 'profile');
+  const head = path.join(root, 'current.json'), base = path.join(own, 'base.json');
+  const readHead = async () => {
+    const value = await readPrivateJsonFile(head, { maximumBytes: 24 * 1024 * 1024 });
+    if (!Object.keys(value).length) return null;
+    if (Object.keys(value).sort().join() !== 'schemaVersion,snapshot' || value.schemaVersion !== 1
+        || value.snapshot?.schemaVersion !== 2 || typeof value.snapshot.profile !== 'string') {
+      fail('BROWSER_SESSION_STATE_INVALID', 'The saved profile snapshot is invalid.');
+    }
+    return value;
+  };
+  const initialize = () => withBrowserAccountState(root, async () => {
+    await prepareVisualPrivateDirectory(own);
+    const existing = await fsp.lstat(profile).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (existing) {
+      await prepareVisualPrivateDirectory(profile);
+      const previous = await readPrivateJsonFile(base, { maximumBytes: 1024 });
+      if (!Object.hasOwn(previous, 'revision') || previous.revision !== null && !/^[a-f0-9]{64}$/u.test(previous.revision)) {
+        fail('BROWSER_SESSION_STATE_INVALID', 'The profile fork is incomplete.');
+      }
+      return;
+    }
+    const retained = await readPrivateJsonFile(path.join(own, 'snapshot.json'), { maximumBytes: 24 * 1024 * 1024 });
+    const current = await readHead();
+    let snapshot = Object.keys(retained).length ? retained.snapshot : current?.snapshot;
+    if (Object.keys(retained).length && (Object.keys(retained).sort().join() !== 'schemaVersion,snapshot'
+        || retained.schemaVersion !== 1 || retained.snapshot?.schemaVersion !== 2)) {
+      fail('BROWSER_SESSION_STATE_INVALID', 'The retained profile snapshot is invalid.');
+    }
+    if (!current && !Object.keys(retained).length) {
+      // The legacy canonical profile may still be used by an older process.
+      // Acquire its existing profile lock before reading native databases.
+      // A busy/unknown legacy owner is never copied or stopped automatically.
+      await prepareVisualPrivateDirectory(path.dirname(lockPath));
+      snapshot = await withExclusiveProfileLock(lockPath, 'Browser', () => snapshotVisualProfile(profileDirectory));
+    }
+    const staging = path.join(own, `profile-${randomUUID()}.partial`);
+    await restoreVisualProfile(snapshot, staging);
+    await fsp.rename(staging, profile);
+    if (Object.keys(retained).length) {
+      const previous = await readPrivateJsonFile(base, { maximumBytes: 1024 });
+      if (!Object.hasOwn(previous, 'revision') || previous.revision !== null && !/^[a-f0-9]{64}$/u.test(previous.revision)) {
+        fail('BROWSER_SESSION_STATE_INVALID', 'The retained profile base is invalid.');
+      }
+    } else await writePrivateJsonFile(base, { revision: current ? browserSnapshotRevision(JSON.stringify(current)) : null });
+  });
+  await initialize();
+  return {
+    profileDirectory: profile,
+    lockPath: path.join(own, 'browser.lock'),
+    initialize,
+    publish: async () => {
+      // Caller must have joined BrowserContext.close/native process shutdown.
+      // Capture stays outside the account metadata mutex; only this chat can
+      // hold its own profile lock, and other chats continue their browser work.
+      const candidate = { schemaVersion: 1, snapshot: await snapshotVisualProfile(profile) };
+      if (Buffer.byteLength(JSON.stringify(candidate)) > 24 * 1024 * 1024) {
+        fail('BROWSER_SESSION_STATE_INVALID', 'The saved profile snapshot exceeds its bound.');
+      }
+      await withBrowserAccountState(root, async () => {
+        const expected = await readPrivateJsonFile(base, { maximumBytes: 1024 });
+        const current = await readHead();
+        const revision = current ? browserSnapshotRevision(JSON.stringify(current)) : null;
+        await writePrivateJsonFile(path.join(own, 'snapshot.json'), candidate);
+        if (expected.revision === revision) {
+          await writePrivateJsonFile(head, candidate);
+          await writePrivateJsonFile(base, { revision: browserSnapshotRevision(JSON.stringify(candidate)) });
+        }
+      });
+      // Only the stopped, durably saved private working copy is disposable.
+      // Immutable auth data survives in the bounded candidate/common archive;
+      // browser cache/history does not accumulate for every old chat.
+      await fsp.rm(profile, { recursive: true, maxRetries: 5, retryDelay: 100 });
+    },
+  };
+}
+
+/** A protocol device cannot be cloned like an ephemeral browser context. Keep
+ * one native provider service, but give every chat its own logical lease.
+ * Explicit, target-bound provider operations are serialized before dispatch;
+ * closing a logical lease stops the service only after its last owner leaves.
+ * Persist a closing fence BEFORE that one stop. Lost stop results are resolved
+ * by status only, never by replay or a replacement connection. */
+export async function withSharedAccountService({ accountDirectory, environment = process.env,
+  operation, sessionId, start, dispatch, changesState = false, requiresFreshObservation = false,
+  observesResult = () => false, waitMs = MAX_LEASE_MS }) {
+  const owner = browserExecutionOwner(environment);
+  if (!owner) return operation === 'start' ? start() : dispatch(operation, sessionId);
+  if (!['start', 'status', 'stop', 'request'].includes(operation) || typeof start !== 'function' || typeof dispatch !== 'function'
+      || typeof changesState !== 'boolean' || typeof requiresFreshObservation !== 'boolean' || typeof observesResult !== 'function') {
+    fail('BROWSER_SESSION_STATE_INVALID', 'The shared service operation is invalid.');
+  }
+  const { readPrivateJsonFile, writePrivateJsonFile } = await import('./trelio-workspace.mjs');
+  const file = path.join(accountDirectory, 'service-sessions.json');
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
+  const mapped = (result, logical) => ({ ...result,
+    ...(Object.hasOwn(result, 'sessionId') ? { sessionId: logical } : {}),
+    ...(result.continuation?.arguments ? { continuation: { ...result.continuation,
+      arguments: result.continuation.arguments.map((value, index, args) => args[index - 1] === '--session' ? logical : value) } } : {}),
+  });
+  return withBrowserAccountState(accountDirectory, async () => {
+    let state = await readPrivateJsonFile(file, { maximumBytes: 65536 });
+    if (Object.keys(state).length && (Object.keys(state).sort().join() !== 'expiresAt,generation,owners,schemaVersion,serviceId'
+        || state.schemaVersion !== 2 || !uuid.test(state.serviceId) || !Number.isSafeInteger(state.expiresAt)
+        || !Number.isSafeInteger(state.generation) || state.generation < 0
+        || !state.owners || Array.isArray(state.owners) || Object.keys(state.owners).length > 64
+        || Object.entries(state.owners).some(([key, value]) => !/^[a-f0-9]{64}$/u.test(key)
+          || !value || typeof value !== 'object' || Array.isArray(value)
+          || Object.keys(value).sort().join() !== 'observedGeneration,phase,sessionId' || !uuid.test(value.sessionId)
+          || !Number.isSafeInteger(value.observedGeneration) || value.observedGeneration < -1 || value.observedGeneration > state.generation
+          || !['active', 'closing', 'closed'].includes(value.phase)))) {
+      fail('BROWSER_SESSION_STATE_INVALID', 'The shared service state is invalid.');
+    }
+    const persist = () => writePrivateJsonFile(file, state);
+    let entry = state.owners?.[owner];
+    if (operation === 'start') {
+      if (Object.values(state.owners || {}).some(value => value.phase === 'closing')) {
+        const current = await dispatch('status', state.serviceId);
+        if (current.phase !== 'closed') fail('BROWSER_SESSION_STATE_BUSY', 'The previous service shutdown is unresolved.');
+        for (const previous of Object.values(state.owners)) previous.phase = 'closed';
+        await persist();
+      }
+      const result = await start();
+      if (!uuid.test(result.sessionId || '') || !Number.isSafeInteger(result.expiresAt) || result.phase === 'closed') {
+        fail('BROWSER_SESSION_STATE_INVALID', 'The shared service did not return a live lease.');
+      }
+      if (state.serviceId !== result.sessionId) state = { schemaVersion: 2, serviceId: result.sessionId, expiresAt: result.expiresAt, generation: 0, owners: {} };
+      entry = state.owners[owner];
+      if (!entry || entry.phase !== 'active') {
+        // Closed receipts may be pruned; active/uncertain leases are never
+        // evicted to create room or to permit a new provider connection.
+        for (const [key, value] of Object.entries(state.owners)) if (Object.keys(state.owners).length >= 64 && value.phase === 'closed') delete state.owners[key];
+        if (Object.keys(state.owners).length >= 64) fail('BROWSER_SESSION_STATE_BUSY', 'The service owner limit is reached.');
+        entry = state.owners[owner] = { sessionId: randomUUID(), phase: 'active', observedGeneration: -1 };
+      }
+      if (observesResult(result)) entry.observedGeneration = state.generation;
+      await persist();
+      return mapped({ ...result, expiresAt: state.expiresAt }, entry.sessionId);
+    }
+    if (operation === 'status' && sessionId === undefined) sessionId = entry?.sessionId;
+    if (!entry || entry.sessionId !== sessionId) fail('BROWSER_SESSION_OWNER_INVALID', 'This chat does not own the requested service lease.');
+    if (entry.phase === 'closed') {
+      if (!['status', 'stop'].includes(operation)) fail('BROWSER_SESSION_LEASE_EXPIRED', 'The logical service lease is closed.');
+      return { phase: 'closed', sessionId, expiresAt: state.expiresAt };
+    }
+    if (entry.phase === 'closing') {
+      const current = await dispatch('status', state.serviceId);
+      if (current.phase === 'closed') { entry.phase = 'closed'; await persist(); }
+      return { phase: entry.phase, sessionId, expiresAt: state.expiresAt };
+    }
+    if (operation === 'stop') {
+      if (Object.entries(state.owners).some(([key, value]) => key !== owner && value.phase === 'active')) {
+        entry.phase = 'closed'; await persist();
+        return { phase: 'closed', sessionId, expiresAt: state.expiresAt, sharedServiceActive: true };
+      }
+      entry.phase = 'closing'; await persist();
+      const result = await dispatch('stop', state.serviceId);
+      if (result.phase === 'closed') { entry.phase = 'closed'; await persist(); }
+      return mapped(result, sessionId);
+    }
+    // A second workflow may have changed a physical screen after this chat's
+    // last image. Refuse coordinate input before dispatch, requiring a fresh
+    // observation of the SAME service. Reserve generation before input so an
+    // unknown result also invalidates every stale sibling frame.
+    if (requiresFreshObservation && entry.observedGeneration !== state.generation) {
+      fail('BROWSER_SESSION_OBSERVATION_STALE', 'Another workflow changed this resource; obtain a fresh observation.');
+    }
+    if (changesState) {
+      if (state.generation === Number.MAX_SAFE_INTEGER) fail('BROWSER_SESSION_STATE_INVALID', 'The resource generation limit is reached.');
+      state.generation++; await persist();
+    }
+    const result = await dispatch(operation, state.serviceId);
+    if (observesResult(result)) { entry.observedGeneration = state.generation; await persist(); }
+    return mapped(result, sessionId);
+  }, { waitMs });
+}
+
 export class BrowserSessionError extends Error {
   constructor(code, message, details = undefined) {
     super(message);
@@ -614,7 +943,14 @@ export const withPersistentBrowserSession = async ({
 }, callback) => {
   if (typeof startInBackground !== "boolean") fail("BROWSER_SESSION_BACKGROUND_ARGUMENT_INVALID", "startInBackground must be an explicit boolean.");
   const binding = readBrowserSessionBinding({ expectedSessionClass: "messenger-profile" });
+  const execution = await prepareParallelBrowserProfile({ profileDirectory, lockPath });
+  profileDirectory = execution.profileDirectory;
+  lockPath = execution.lockPath;
   return withExclusiveProfileLock(lockPath, label, async () => {
+    // A preceding same-chat command may have published/disposed its profile
+    // after our preparation. Recheck under the actual execution lock so a
+    // new empty profile can never masquerade as a restored login.
+    await execution.initialize?.();
     privateDirectory(profileDirectory);
     privateDirectory(downloadsDirectory);
     const resolvedBrowserExecutable = chromeExecutable || defaultBrowserExecutable();
@@ -667,6 +1003,7 @@ export const withPersistentBrowserSession = async ({
       process.removeListener("SIGTERM", close);
       process.removeListener("SIGINT", close);
       if (!closed) await context.close();
+      await execution.publish();
     }
   });
 };

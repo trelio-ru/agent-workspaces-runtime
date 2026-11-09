@@ -11,6 +11,73 @@ HTTPS origins, без credentials/query/hash. Их рендерит общий l
 переход по ссылке выполняет пользователь. Статическая подсказка не меняет
 fingerprint исполняемой recipe, credentials и pending fence.
 
+<a id="parallel-skill-sessions"></a>
+
+## Параллельные сценарии навыков
+
+Общий `trelio-browser-session.mjs` предоставляет
+`BROWSER_EXECUTION_SESSIONS_API=trelio.browser-execution-sessions/v1`.
+Host передаёт точный module URL всем signed `local-session` packages через
+`TRELIO_EXECUTION_SESSION_MODULE_URL`; browser packages также сохраняют прежний
+`TRELIO_BROWSER_SESSION_MODULE_URL`. Переменные не наследуются и не могут
+подменяться Secret checkout. Доступность source не доказывает публикацию API;
+зависимый package обязан иметь minimumHostVersion первого опубликованного host.
+
+`browserExecutionOwner` принимает только observed `TRELIO_SKILL_RUNTIME_SESSION_ID`.
+Название/cwd чата, account UUID и ambient `CODEX_THREAD_ID` не заменяют владельца.
+`browserExecutionDirectory(accountDirectory)` отделяет lease/control/status,
+browser profile и cleanup каждого владельца от account vault/key/AAD.
+Без observed identity legacy explicit-session ABI сохраняется; такой клиент
+не получает обещание изоляции двух неразличимых implicit сценариев. Закрытие
+чужого runtime session ID запрещено, даже если выбран тот же аккаунт.
+
+`withPersistentBrowserSession` автоматически fork-ит native messenger auth
+stores в отдельный stopped profile каждого владельца. IndexedDB CryptoKeys
+переносятся native archive codec; cookies/storageState его не заменяют. History,
+password store, cache и downloads не входят в fork. Browser close/process join
+предшествует snapshot. Опубликованный snapshot меняется только при совпадении
+base revision; late fork сохраняет свою копию, не затирая новый login/logout.
+Это прежний private plaintext messenger-store contract, без plaintext fallback
+для protected-snapshot. Visual workers используют отдельные live directories,
+общий OS key и AEAD ciphertext; state конфликт сохраняется отдельно зашифрованным.
+Credential/attempt-fence CAS не разрешает двум workers повторить один input.
+
+`withBrowserAccountState` сериализует короткие account transactions. Provider
+сохраняет свои native owner/ACL, key/unlock и vault format. Для opaque ciphertext
+`saveBrowserAccountSnapshot` сравнивает точную исходную revision. Неизменённые
+credentials и browser storage не сливаются автоматически. Только provider-owned
+`reconcile` может обновить независимо проверенную credential/refusal metadata,
+сохраняя свежий browser state и собственный metadata CAS. Каждый callback
+исполняется максимум один раз. `browserExecutionDirectories` даёт bounded
+непереходящий по ссылкам inventory, включая legacy root: setup/reset/crypto-erase
+резервируются тем же account mutex и требуют отсутствия конфликтующих live leases.
+
+`withSharedAccountService` применяется к одному неклонируемому linked device
+либо физическому экрану. У чатов разные logical session IDs; полные target-bound
+операции идут в общей очереди. Stop освобождает только свою lease, physical stop
+выполняется последним владельцем. До него persist-ится closing fence; потерянный
+результат проверяется status, stop/input не повторяются. Новый start запрещён
+при неразрешённом closing любого владельца. Hard deadline физической сессии
+не переносится вторым start. Native expiry/idle guards остаются authority.
+Для physical UI mutation резервирует generation до dispatch; другой чат обязан
+получить свежую observation. Unknown input также делает старые кадры непригодными.
+
+Для SDK, который держит единственную SQLite/protocol session на аккаунт,
+пакет включает в SAME signed inventory `trelio-execution-resource.json`:
+`{"schemaVersion":1,"scope":"account"}` (`device` – один физический ресурс).
+Host проверяет closed schema и `local-session`, ставит invocation в очередь до
+interpreter/credential/native setup и сохраняет исходный wall/monotonic budget.
+Свежий managed admission проверяется после ожидания. Metadata-only help/guides
+и import не занимают provider resource. Отсутствующий marker не создаёт
+глобальный lock у stateless API. Runtime не содержит таблицы provider ID.
+
+Обязательные regressions: два владельца одного аккаунта, foreign session refusal,
+независимые browser contexts и close, shared-key creation, stale auth-state CAS,
+неизвестный input/stop без replay, реальная очередь child processes, physical
+stale-frame refusal и original expiry. Synthetic native browser/OS tests не
+доказывают одновременную поддержку сессий конкретным внешним сервисом: его
+собственные ограничения отражаются отдельно и не обходятся повторным входом.
+
 ## Что получает модель
 
 `trelio.visual-browser/v1` передаёт PNG отдельным MCP image block и закрытые

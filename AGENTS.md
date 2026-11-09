@@ -636,6 +636,12 @@ publication tooling также остаются вне этого публичн
   Учёт пяти вкладок включает blank/login popups, не сбрасывается tool calls
   или закрытием вкладки; tabs.onCreated закрывает overflow. Нельзя обещать
   предотвращение самого transient popup creation до browser event.
+- Parallel skill workflows use the common execution-session API, never an
+  account-global implicit live worker. Observed runtime identity partitions
+  control/profile/cleanup; reusable auth stays account-scoped with ciphertext
+  CAS and private conflict retention. Indivisible SDK/device work uses the
+  signed resource policy/common queue and logical leases, without replay or
+  deadline renewal. See [parallel sessions](docs/visual-browser.md#parallel-skill-sessions).
 - HTTP-ошибки browser document сохраняют только numeric status и approved
   origin через общий observer; transport failure не получает выдуманного кода.
   Provider interpretation и отсутствие credential reset/replay сохраняются по

@@ -127,7 +127,8 @@ try {
   const dependencies = await startup;
   if (stopping || Date.now() >= owner.deadlineAt) throw new Error('VISUAL_START_CANCELLED');
   startupPhase = 'storage_prepare';
-  const store = new ProtectedVisualStore({ directory: owner.directory, scope: owner.scope, AsyncEntry: dependencies.AsyncEntry });
+  const store = new ProtectedVisualStore({ directory: owner.directory, scope: owner.scope,
+    executionOwner: owner.executionOwner, AsyncEntry: dependencies.AsyncEntry });
   fixtureDiagnostic({ stage: 'startup_browser' });
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.

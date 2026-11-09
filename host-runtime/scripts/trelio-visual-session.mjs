@@ -11,7 +11,7 @@ import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnviro
 import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
-import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
+import { readBrowserSessionBinding, browserExecutionOwner, browserExecutionDirectory, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { nodeChildEnvironment } from './trelio-local-path.mjs';
 import { withMirrorRetentionLock } from './trelio-mirror-retention.mjs';
@@ -73,6 +73,9 @@ export function visualSessionBinding(env = process.env) {
     accountId: account?.id,
     companyId: env.TRELIO_SKILL_COMPANY_ID,
     memberId: env.TRELIO_SKILL_MEMBER_ID,
+    // Account storage remains reusable; a live browser and its close/input
+    // authority belong to one observed execution owner only.
+    ...(browserExecutionOwner(env) ? { executionOwner: browserExecutionOwner(env) } : {}),
   };
   if (!uuid.test(binding.accountId) || !uuid.test(binding.companyId) || !uuid.test(binding.memberId)
     || lease.manualAssist !== true || lease.startedAt > Date.now() + 5000) throw new Error('VISUAL_IDENTITY_INVALID');
@@ -123,7 +126,8 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
   // Native tests use an isolated directory and synthetic localhost. An Avito
   // invocation cannot enable fixture controls or select an arbitrary root.
   const configDirectory = fixture?.directory || resolveWorkspaceBridgeConfigDirectory();
-  const directory = path.join(configDirectory, 'visual-browser', binding.scope);
+  const accountDirectory = path.join(configDirectory, 'visual-browser', binding.scope);
+  const directory = browserExecutionDirectory(accountDirectory, env);
   let startupStage = 'owner_prepare';
   try {
     await prepareVisualPrivateDirectory(directory);
@@ -205,7 +209,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
     }
     if (operation === 'status' || operation === 'wait' || operation === 'close') {
       try {
-        await assertPrivatePathKind(path.join(directory, 'state.enc'), 'file');
+        await assertPrivatePathKind(path.join(accountDirectory, 'state.enc'), 'file');
         return visualStatus('saved_unverified', 'none', { hasStoredSession: true });
       } catch (error) {
         return error.code === 'ENOENT' ? visualStatus('not_configured') : visualStatus('error', 'storage_unavailable', { diagnostic: visualStartupDiagnostic('storage_read', undefined, error) });
@@ -220,18 +224,25 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
     // from different company contexts. An incomplete or abandoned claim is never
     // silently stolen: recovery needs evidence rather than killing a guessed PID.
     startupStage = 'owner_prepare';
-    try { await fs.mkdir(active, { mode: 0o700 }); }
-    catch (error) { if (error.code === 'EEXIST') return busy(); throw error; }
-    await prepareVisualPrivateDirectory(active);
-    owner = {
-      schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
-      pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-      origins, domains, externalNavigation, directory: configDirectory, operation, args, observationMode, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint,
-      mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
-      ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
-    };
-    startupStage = 'owner_publish';
-    await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
+    // The common account transaction also excludes an explicit disconnect
+    // while another chat reserves its worker; browser work stays outside it.
+    const claimed = await withBrowserAccountState(accountDirectory, async () => {
+      try { await fs.mkdir(active, { mode: 0o700 }); }
+      catch (error) { if (error.code === 'EEXIST') return false; throw error; }
+      await prepareVisualPrivateDirectory(active);
+      owner = {
+        schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
+        ...(binding.executionOwner ? { executionOwner: binding.executionOwner } : {}),
+        pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
+        origins, domains, externalNavigation, directory: configDirectory, operation, args, observationMode, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint,
+        mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
+        ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
+      };
+      startupStage = 'owner_publish';
+      await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
+      return true;
+    });
+    if (!claimed) return busy();
     startupStage = 'worker_spawn';
     const child = spawn(workerExecutable, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
       detached: true, shell: false, windowsHide: true, stdio: 'ignore',

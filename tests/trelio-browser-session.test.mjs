@@ -22,7 +22,153 @@ import {
   backgroundPersistentLaunchOptions,
   createBackgroundPersistentPage,
   withPersistentBrowserSession,
+  browserExecutionOwner, browserExecutionDirectory, browserSnapshotRevision,
+  withBrowserAccountState, saveBrowserAccountSnapshot,
+  prepareParallelBrowserProfile,
+  withSharedAccountService, skillResourcePolicy,
 } from "../host-runtime/scripts/trelio-browser-session.mjs";
+
+test('chat ownership separates live control roots while preserving the reusable account root', () => {
+  const root = path.resolve(os.tmpdir(), 'synthetic-account');
+  const a = { TRELIO_SKILL_RUNTIME_SESSION_ID: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
+  const b = { TRELIO_SKILL_RUNTIME_SESSION_ID: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' };
+  assert.notEqual(browserExecutionDirectory(root, a), browserExecutionDirectory(root, b));
+  assert.equal(browserExecutionDirectory(root, a), browserExecutionDirectory(root, { ...a, CODEX_THREAD_ID: 'foreign' }));
+  assert.equal(browserExecutionDirectory(root, {}), root, 'unobserved clients never borrow an inherited chat');
+  assert.equal(browserExecutionOwner({ CODEX_THREAD_ID: a.TRELIO_SKILL_RUNTIME_SESSION_ID }), null);
+  assert.throws(() => browserExecutionDirectory(root, { TRELIO_SKILL_RUNTIME_SESSION_ID: '../foreign' }), { code: 'BROWSER_SESSION_OWNER_INVALID' });
+});
+
+test('concurrent saved-state writers preserve the newer snapshot and retain the losing ciphertext', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-snapshot-race-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let current = 'synthetic-encrypted-base';
+  const revision = browserSnapshotRevision(current), retained = [];
+  const save = bytes => saveBrowserAccountSnapshot({ accountDirectory: root, revision, bytes,
+    read: async () => current, write: async value => { current = value; },
+    retain: async value => retained.push(value) });
+  const results = await Promise.all([save('synthetic-encrypted-a'), save('synthetic-encrypted-b')]);
+  assert.equal(results.filter(result => result.published).length, 1);
+  assert.equal(retained.length, 1);
+  assert.notEqual(retained[0], current);
+  let attempts = 0;
+  await assert.rejects(withBrowserAccountState(root, () => { attempts++; throw Error('synthetic-write-failure'); }), /synthetic-write-failure/);
+  assert.equal(attempts, 1, 'the queue never retries a failed operation');
+});
+
+test('a provider reconciles only independently fenced metadata while preserving newer account state', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-state-reconcile-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let current = 'synthetic-newer-encrypted-state', calls = 0;
+  const result = await saveBrowserAccountSnapshot({ accountDirectory: root,
+    revision: browserSnapshotRevision('synthetic-old-base'), bytes: 'synthetic-refusal',
+    read: async () => current, write: async bytes => { current = bytes; },
+    retain: async () => assert.fail('critical metadata is reconciled rather than discarded'),
+    reconcile: async (saved, candidate) => {
+      calls++; assert.equal(saved, 'synthetic-newer-encrypted-state'); assert.equal(candidate, 'synthetic-refusal');
+      return 'synthetic-newer-state-and-refusal';
+    },
+  });
+  assert.equal(result.published, true); assert.equal(calls, 1);
+  assert.equal(current, 'synthetic-newer-state-and-refusal');
+});
+
+test('persistent browser forks keep native auth stores and isolate two chats without copying history', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-profile-forks-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const profileDirectory = path.join(root, 'state', 'chrome-profile'), lockPath = path.join(root, 'locks', 'browser.lock');
+  fs.mkdirSync(path.join(profileDirectory, 'Default', 'LocalStorage'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(profileDirectory, 'Default', 'LocalStorage', 'state'), 'synthetic-base');
+  fs.writeFileSync(path.join(profileDirectory, 'Default', 'History'), 'synthetic-history');
+  const env = id => ({ ...bindingEnvironment(), TRELIO_SKILL_RUNTIME_SESSION_ID: id });
+  const [a, b] = await Promise.all([
+    prepareParallelBrowserProfile({ profileDirectory, lockPath, environment: env('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') }),
+    prepareParallelBrowserProfile({ profileDirectory, lockPath, environment: env('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb') }),
+  ]);
+  assert.notEqual(a.profileDirectory, b.profileDirectory);
+  assert.notEqual(a.lockPath, b.lockPath);
+  const state = fork => path.join(fork.profileDirectory, 'Default', 'LocalStorage', 'state');
+  assert.equal(fs.readFileSync(state(a), 'utf8'), 'synthetic-base');
+  assert.equal(fs.existsSync(path.join(a.profileDirectory, 'Default', 'History')), false);
+  fs.writeFileSync(state(a), 'synthetic-new-login');
+  fs.writeFileSync(state(b), 'synthetic-late-login');
+  await a.publish(); await b.publish();
+  const c = await prepareParallelBrowserProfile({ profileDirectory, lockPath,
+    environment: env('cccccccc-cccc-4ccc-8ccc-cccccccccccc') });
+  assert.equal(fs.readFileSync(state(c), 'utf8'), 'synthetic-new-login');
+  await b.initialize();
+  assert.equal(fs.readFileSync(state(b), 'utf8'), 'synthetic-late-login', 'a stale publisher retains its own complete profile');
+  assert.equal(fs.existsSync(a.profileDirectory), false, 'a stopped saved working copy is disposed');
+  assert.equal(fs.readFileSync(state(b), 'utf8'), 'synthetic-late-login', 'disposing one chat never closes/removes its sibling');
+});
+
+test('shared protocol service gives chats separate leases, queues requests and never replays a lost final stop', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-shared-device-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serviceId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  let phase = 'ready', requests = 0, inFlight = 0, stops = 0;
+  const start = async () => ({ phase, sessionId: serviceId, expiresAt: Date.now() + 60000 });
+  const dispatch = async (operation, physical) => {
+    assert.equal(physical, serviceId);
+    if (operation === 'stop') { stops++; phase = 'closed'; throw Error('synthetic-lost-stop-result'); }
+    if (operation === 'request') {
+      inFlight++; assert.equal(inFlight, 1, 'one indivisible protocol request at a time');
+      await new Promise(resolve => setTimeout(resolve, 20)); requests++; inFlight--;
+    }
+    return { phase, sessionId: physical };
+  };
+  const call = (owner, operation, sessionId) => withSharedAccountService({ accountDirectory: root,
+    environment: { TRELIO_SKILL_RUNTIME_SESSION_ID: owner }, operation, sessionId, start, dispatch });
+  const a = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', b = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const first = await call(a, 'start'), second = await call(b, 'start');
+  assert.notEqual(first.sessionId, second.sessionId);
+  await Promise.all([call(a, 'request', first.sessionId), call(b, 'request', second.sessionId)]);
+  assert.equal(requests, 2);
+  await assert.rejects(call(a, 'stop', second.sessionId), { code: 'BROWSER_SESSION_OWNER_INVALID' });
+  assert.equal((await call(a, 'stop', first.sessionId)).phase, 'closed');
+  assert.equal(stops, 0, 'a sibling still owns the physical connection');
+  assert.equal((await call(b, 'request', second.sessionId)).phase, 'ready');
+  await assert.rejects(call(b, 'stop', second.sessionId), /synthetic-lost-stop-result/);
+  assert.equal((await call(b, 'stop', second.sessionId)).phase, 'closed');
+  assert.equal(stops, 1, 'the retained closing fence permits only status reconciliation');
+});
+
+test('a shared physical screen invalidates sibling observations before dispatch, including unknown input', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-screen-generation-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const physical = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const owners = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
+  let calls = 0, unknown = false, image = false;
+  const call = (owner, operation, sessionId, changesState = false) => withSharedAccountService({
+    accountDirectory: root, environment: { TRELIO_SKILL_RUNTIME_SESSION_ID: owner }, operation, sessionId,
+    start: async () => ({ sessionId: physical, expiresAt: Date.now() + 60000, phase: 'ready', image: true }),
+    dispatch: async () => { calls++; if (unknown) throw Error('synthetic-unknown-input'); return { sessionId: physical, phase: 'ready', image }; },
+    changesState, requiresFreshObservation: changesState, observesResult: value => value.image === true,
+  });
+  const a = await call(owners[0], 'start'), b = await call(owners[1], 'start');
+  unknown = true;
+  await assert.rejects(call(owners[0], 'request', a.sessionId, true), /synthetic-unknown-input/);
+  const before = calls;
+  await assert.rejects(call(owners[1], 'request', b.sessionId, true), { code: 'BROWSER_SESSION_OBSERVATION_STALE' });
+  assert.equal(calls, before, 'stale input never reaches the provider');
+  unknown = false; image = true;
+  await call(owners[1], 'request', b.sessionId);
+  await call(owners[1], 'request', b.sessionId, true);
+  assert.equal(calls, before + 2, 'only a fresh observation permits one next input');
+});
+
+test('resource scheduling is declared only by exact signed inventory, with closed scope and schema', () => {
+  const parsed = value => ({ capabilities: ['local-session'], files: [{ path: 'trelio-execution-resource.json', bytes: Buffer.from(JSON.stringify(value)) }] });
+  assert.equal(skillResourcePolicy({ files: [], capabilities: ['local-session'] }), null);
+  assert.deepEqual(skillResourcePolicy(parsed({ schemaVersion: 1, scope: 'account' })), { schemaVersion: 1, scope: 'account' });
+  assert.equal(skillResourcePolicy(parsed({ schemaVersion: 1, scope: 'device' }), ['guides']), null);
+  for (const value of [{ schemaVersion: 2, scope: 'account' }, { schemaVersion: 1, scope: 'chat' },
+    { schemaVersion: 1, scope: 'device', bypass: true }]) {
+    assert.throws(() => skillResourcePolicy(parsed(value)), { code: 'BROWSER_SESSION_RESOURCE_POLICY_INVALID' });
+  }
+  const duplicate = parsed({ schemaVersion: 1, scope: 'account' }); duplicate.files.push(duplicate.files[0]);
+  assert.throws(() => skillResourcePolicy(duplicate), { code: 'BROWSER_SESSION_RESOURCE_POLICY_INVALID' });
+});
 
 const bindingEnvironment = (overrides = {}) => {
   const startedAt = Date.now();

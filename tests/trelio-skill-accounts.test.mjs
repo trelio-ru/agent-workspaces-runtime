@@ -743,3 +743,16 @@ test('account remove runs the signed fixed provider through the real executor be
   await prepareSkillAccount({...base,runtimeArguments:['account','remove','--id',id,'--expected-revision',String(revision),'--confirm']});
   assert.equal(outputs.at(-1).removed,true);assert.deepEqual(outputs.at(-1).accounts,[]);
 });
+
+
+test('the signed SDK resource queues actual provider children before native dispatch without retry', async t => {
+  const f = await monitorFixture(t, `import fs from 'node:fs/promises';import path from 'node:path';
+    const claim=path.join(process.env.TRELIO_SKILL_RUNTIME_ROOT,'active-claim');
+    await fs.mkdir(claim); // overlapping native children would fail with EEXIST
+    await new Promise(resolve=>setTimeout(resolve,100));
+    await fs.rmdir(claim);process.stdout.write('completed');`);
+  f.input.artifact.parsedPackage.files = [{ path: 'trelio-execution-resource.json',
+    bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, scope: 'account' })) }];
+  const results = await Promise.all([f.run(), f.run()]);
+  assert.deepEqual(results, [{ stdout: 'completed' }, { stdout: 'completed' }]);
+});
