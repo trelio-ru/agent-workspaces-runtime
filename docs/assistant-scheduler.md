@@ -354,6 +354,15 @@ profile and synthetic stdio MCP: legacy projection reproduces error 193, fixed
 projection reaches `initialize`/`tools/list` through the native resolver. It
 makes no model turn or tool call and is not a real assistant business outcome.
 
+New ordinary task invocations sample an observation budget from their exact
+native admitted lease, capped at the existing thirty-minute adapter ceiling.
+An independent nonrenewing timer also includes preflight time; periodic native
+lease renewal never moves that original deadline. This avoids the unrelated
+fifteen-minute default expiring while a legitimate 600s + 600s search still runs.
+Expired zero-start recovery retains its separate existing admission path and
+earlier uncertain work never receives a new observer or start from this change.
+Expiry still preserves the original marker/pass and unknown-action fence.
+
 The host passes a one-use synchronous `startInvocation` callback that performs the
 inbox's leased -> started CAS. Missing history cannot authorize a second attempt.
 After queue dispatch, the adapter must find exactly one matching native user-message
@@ -1636,6 +1645,31 @@ read-only snapshot assembly under the SAME original timer. Snapshot refresh
 and the one owned-timeout resume share a maximum of TWO read children; a changed
 formulation cannot launch a parallel reader or buy a third first sync. It never renews a lease, poll clock or owned read deadline.
 Successful delivery consumes the value: another same-query call must read anew.
+
+After BOTH owned full-search clocks expire, the retained executor exposes an
+ordinary read-only recovery plan: select `get_assistant_status` with
+`view:company_context`, then `search_tasks` with the same company and queries.
+Error identity and the retained parent-clock accounting are mandatory; a foreign
+timeout, ACL/recipient/transport refusal or cancelled waiter supplies no plan.
+This is a different existing corpus, not a third full preparation or replay.
+Each call needs fresh hook/native admission. Empty task results call for bounded
+subject-anchored reformulations and exact current source reads, never an empty
+company claim or a request that the owner repeat the original question.
+
+The current signed worker appends a bounded host-mechanics hint to the native
+`search` description only when that SAME fresh company catalogue actually offers
+`search_tasks`. Preserve its original native description/schema, 4096-character
+description and 65 536-byte catalogue ceilings; omit the optional hint if it
+cannot fit. Existing facades use their ordinary catalogue revision notification
+and supported company-context selection, without a Desktop/MCP restart.
+
+Task-only refinement assembles native task projections and current discussion
+through the SAME common hydrator/matcher and fresh starting/final manifests.
+It never opens unrelated Workspace files, acquires the full mirror writer or
+publishes its partial domain snapshot as a complete company generation. The
+common three-attempt optimistic conflict bound, current recipient/pass checks,
+task/archive/project corpus and fixed original invocation clock remain strict.
+Its snapshot is invocation-local RAM, with no new persistent cache or endpoint.
 
 Canonical task references in `fetch` reuse the SAME exact native task MVCC
 reader directly. Canonical `context:type:UUID` reads open the existing encrypted

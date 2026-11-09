@@ -14,6 +14,7 @@ import {PassThrough} from 'node:stream';
 // plaintext substitute a native assistant private-store E2E result.
 for(const scenario of [
   {name:'cold',files:3000,stallAttempts:0},
+  {name:'task-only-refinement',files:16,stallAttempts:0,taskOnlyRefinement:true,nativeCase:'cold'},
   {name:'slow-exact',files:16,stallAttempts:0,slowExact:true,legacyFetch:true,nativeCase:'cold'},
   {name:'owned-timeout-resume',files:16,stallAttempts:1},
   {name:'second-timeout-hard',files:16,stallAttempts:2},
@@ -155,7 +156,10 @@ for(const scenario of [
     const directory=path.join(root,'native-context'),workspace=await createAssistantWorkspaceExecutor({configDirectory:directory,companyPreparationOptions:{waitMs:2}});
     output.on('data',chunk=>{buffer+=chunk;for(;;){const end=buffer.indexOf('\n');if(end<0)break;responses.push(JSON.parse(buffer.slice(0,end)));buffer=buffer.slice(end+1);}});
     running=runAssistantSetupMcp({input,output,preservePlugin:()=>null,scheduleMaintenance:()=>null,createWorkspace:()=>workspace,
-      createMcp:options=>createForwardingAssistantMcp({...options,request,configurationDirectory:directory,createWorkspace:()=>workspace})});
+      // Preserve the real facade's shared executor factory, including its
+      // retained error accounting and EOF cleanup. Replacing this inner
+      // factory would hide that instance from the actual serial MCP owner.
+      createMcp:options=>createForwardingAssistantMcp({...options,request,configurationDirectory:directory})});
     let sequence=0;
     const send=async(method,params)=>{
       const id=++sequence;input.write(JSON.stringify({jsonrpc:'2.0',id,method,...(params?{params}:{})})+'\n');
@@ -168,6 +172,44 @@ for(const scenario of [
     await send('initialize');
     const locator={companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId};
     const call=(name,args)=>send('tools/call',{name,arguments:{...args,intakePass:locator,runtimeSessionProof:buildRuntimeSessionProof({state,toolName:name})}});
+    if(scenario.taskOnlyRefinement){
+      // This is a separate genuinely admitted native read, not a third full
+      // preparation or a replay of the failed search. Existing facades already
+      // support the company_context view; no Desktop/MCP restart is required.
+      const initialCatalogue=await send('tools/list');
+      const description=initialCatalogue.result.tools.find(tool=>tool.name==='search').description;
+      assert.ok(description.startsWith('Synthetic native company search'));
+      assert.match(description,/search_tasks/,'existing facades discover the current worker fallback through normal native metadata');
+      const selected=await call('get_assistant_status',{view:'company_context'});
+      assert.equal(selected.result.isError,undefined);
+      const catalogue=await send('tools/list');
+      assert.ok(catalogue.result.tools.some(tool=>tool.name==='search_tasks'));
+      const result=await call('search_tasks',{companySlugs:['synthetic'],queries:['weekend']});
+      assert.equal(result.result?.isError,undefined,JSON.stringify(result.result));
+      assert.match(JSON.stringify(result.result.structuredContent.tasks),/Synthetic weekend journey/);
+      assert.equal(backend.counts.fileReads,0,'task refinement must not download unrelated Workspace ciphertext');
+      assert.equal(backend.counts.builds,0,'a task-only query never launches the full company file index');
+      await assert.rejects(fs.lstat(paths.pointer),{code:'ENOENT'},'the task-only snapshot is never published as a complete company mirror');
+      const comment=await call('search_tasks',{companySlugs:['synthetic'],queries:['CURRENT_SYNTHETIC_PLAN']});
+      assert.equal(comment.result.isError,undefined);
+      assert.equal(comment.result.structuredContent.tasks.length,1,'current comment-only evidence stays in the native task corpus');
+      assert.equal((await call('search_tasks',{companySlugs:['foreign'],queries:['weekend']})).result.isError,true);
+      backend.setMode('generation_churn');
+      const manifestsBefore=backend.counts.manifests;
+      const conflict=await call('search_tasks',{companySlugs:['synthetic'],queries:['weekend']});
+      assert.equal(conflict.result.isError,true);
+      assert.match(conflict.result.structuredContent.code,/LOCAL_CONTEXT_GENERATION_CHANGED$/);
+      assert.equal(backend.counts.manifests-manifestsBefore,6,'three complete native manifest pairs bound task-only snapshot recovery');
+      await assert.rejects(fs.lstat(paths.pointer),{code:'ENOENT'});
+      backend.setMode('ready');
+      backend.setMode('recipient_revoked');
+      assert.equal((await call('search_tasks',{companySlugs:['synthetic'],queries:['weekend']})).result.isError,true);
+      backend.setMode('ready');backend.setClosed(true);
+      assert.equal((await call('search_tasks',{companySlugs:['synthetic'],queries:['weekend']})).result.isError,true);
+      backend.assertClean();assert.equal(backend.counts.fileReads,0);assert.equal(backend.counts.mutations,0);
+      assert.deepEqual(await native.host.readActivePass(),pass);
+      console.log('NATIVE_OWNER_COMPANY_CHAIN_EXECUTED');return;
+    }
     let search,terminal;
     const coldStarted=Date.now();
     for(let poll=0;poll<1200;poll++){
@@ -197,6 +239,23 @@ for(const scenario of [
       assert.equal(injectedPreparationTimeouts,scenario.stallAttempts);
       assert.equal(backend.counts.stalledBuilds,scenario.stallAttempts,'each deadline must cancel an actual pending synthetic response');
       await assert.rejects(fs.lstat(paths.pointer),{code:'ENOENT'},'an incomplete/failed generation is never published');
+      if(scenario.stallAttempts===2){
+        // The actual serial MCP error must provide executable, ordinary read
+        // nextCalls. Following them consumes NEW native proofs and selects
+        // the current task corpus without starting a third full file index.
+        const recovery=terminal.structuredContent.recovery;
+        assert.deepEqual(recovery.nextCall,{tool:'get_assistant_status',arguments:{view:'company_context'}});
+        assert.deepEqual(recovery.taskSearchNextCall,{tool:'search_tasks',arguments:{companySlugs:['synthetic'],queries:['weekend'],limit:10}});
+        assert.doesNotMatch(JSON.stringify(recovery),/runtimeSessionProof|intakePass|taskPass|binding|descriptor/);
+        assert.equal((await call(recovery.nextCall.tool,recovery.nextCall.arguments)).result.isError,undefined);
+        const filesBeforeRefinement=backend.counts.fileReads;
+        const refined=await call(recovery.taskSearchNextCall.tool,recovery.taskSearchNextCall.arguments);
+        assert.equal(refined.result?.isError,undefined,JSON.stringify(refined.result));
+        assert.match(JSON.stringify(refined.result.structuredContent.tasks),/Synthetic weekend journey/);
+        assert.equal(backend.counts.fileReads,filesBeforeRefinement);
+        assert.equal(backend.counts.builds,builds,'refinement never acquires a full-index budget');
+        await assert.rejects(fs.lstat(paths.pointer),{code:'ENOENT'});
+      }else assert.equal(terminal.structuredContent.recovery,undefined,'ordinary/unknown refusals retain their hard boundary');
       console.log('NATIVE_OWNER_COMPANY_CHAIN_EXECUTED');return;
     }
     assert.ok(search,JSON.stringify({reason:'cold_preparation_did_not_complete',

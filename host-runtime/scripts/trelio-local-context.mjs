@@ -3979,6 +3979,7 @@ const buildMirror = async ({
   previous,
   signal,
   searchCache,
+  taskSearchOnly = false,
 }) => {
   if (
     ![1, 2].includes(rawManifest?.schemaVersion)
@@ -4031,7 +4032,8 @@ const buildMirror = async ({
   // generation without another decrypt/resolve cycle.
   const manifest = await hydrateAgentCompanyEncryptedJson({
     value: inheritAgentCompanyEncryptedSnapshot(rawManifest,
-      { ...rawManifest, contextDocuments: [], searchDocuments: [] }),
+      { ...rawManifest, contextDocuments: [], searchDocuments: [],
+        ...(taskSearchOnly ? { acceptedWorkspaces: [], workspaces: [], agentSkills: null, agentProcedures: [] } : {}) }),
     origin: requestOrigin,
     token,
     companyEncryption,
@@ -4113,7 +4115,7 @@ const buildMirror = async ({
   const previousContextDocuments = new Map(
     (previous?.contextDocuments ?? []).map((document) => [document.id, document]),
   );
-  const contextDocumentRecords = (rawManifest.contextDocuments ?? []).map((document) => {
+  const contextDocumentRecords = (taskSearchOnly ? [] : rawManifest.contextDocuments ?? []).map((document) => {
     const cached = previousContextDocuments.get(document.id);
     return cached?.revisionToken === document.revisionToken
       ? { cached }
@@ -4142,7 +4144,8 @@ const buildMirror = async ({
     const previousSearchDocuments = new Map(
       (previous?.searchDocuments ?? []).map((document) => [document.cacheKey ?? document.id, document]),
     );
-    const searchDocumentRecords = (rawManifest.searchDocuments ?? []).map((document) => {
+    const searchDocumentRecords = (rawManifest.searchDocuments ?? [])
+      .filter(document => !taskSearchOnly || document.type === "task").map((document) => {
       const cached = previousSearchDocuments.get(document.cacheKey ?? document.id);
       return cached?.revisionToken === document.revisionToken
         ? { cached }
@@ -4160,7 +4163,7 @@ const buildMirror = async ({
       }),
     });
   }
-  const registryRowLocators = usesBackendSearchProjections ? {} : Object.fromEntries(
+  const registryRowLocators = taskSearchOnly || usesBackendSearchProjections ? {} : Object.fromEntries(
     (rawManifest.contextDocuments ?? [])
       .filter((document) => document?.type === "registry")
       .map((document) => [
@@ -8668,6 +8671,27 @@ export const handleTrelioLocalContextOperation = async (
     const nativeTool = String(rawInput?.nativeTool || "").trim();
     const input = rawInput?.arguments;
     const profile = currentWorkspaceExecutionProfile();
+    if (nativeTool === "search_tasks") {
+      // Task refinement has its OWN existing native corpus: task titles,
+      // descriptions, checklists, controls, attachment names and discussion.
+      // Requiring every accepted Workspace file here makes this fallback wait
+      // for the very same full index that just exhausted search preparation.
+      // Assemble only the current native task projections in invocation RAM.
+      // The shared generation reader repeats fresh ACL-filtered manifests and
+      // retries only its ordinary bounded revision conflicts. It never opens
+      // the mirror writer, reuses a failed search's proof/clock or publishes
+      // this task-only snapshot as a complete company generation.
+      const selected = await buildStableCompanyMirror({
+        previous: null,
+        readManifest: () => fetchManifest({ origin: provider.requestOrigin, token: provider.token, companySlug, signal }),
+        buildCandidate: (rawManifest, previous) => buildMirror({ origin, requestOrigin: provider.requestOrigin,
+          token: provider.token, companyEncryption: provider.companyEncryption, rawManifest, previous, signal,
+          taskSearchOnly: true }),
+        publish: async candidate => candidate,
+      });
+      signal?.throwIfAborted();
+      return handleNativeLocalContextRead(selected.mirror, nativeTool, input);
+    }
     if (profile?.canReadCompanyContextExact?.(nativeTool)) {
       if (!input || typeof input !== "object" || Array.isArray(input))
         throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "An exact native read input is required.");

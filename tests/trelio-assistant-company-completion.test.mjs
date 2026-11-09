@@ -97,12 +97,19 @@ test('pending search records between-poll failure and permits only one exact own
   });}});
   assert.equal((await f.call()).structuredContent.state,'preparing');deadlines[0]();
   await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.workspace.taskSearchRecovery(Object.assign(Error(),{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'})),null);
   const changed=await f.call({queries:['DIFFERENT_AFTER_TIMEOUT']});
   assert.deepEqual(changed.structuredContent.nextCall.arguments.queries,['PRIVATE_QUERY']);
   assert.equal(started,1,'an owned timeout grants one resume of the original formulation, not a new query');
   assert.equal((await f.call()).structuredContent.state,'preparing');assert.equal(started,2);
   deadlines[1]();await new Promise(resolve=>setImmediate(resolve));
-  for(let i=0;i<3;i++)await assert.rejects(f.call(),{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'});
+  let exhausted;
+  for(let i=0;i<3;i++)await assert.rejects(f.call(),error=>{
+    assert.equal(error.code,'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');exhausted=error;return true;
+  });
+  assert.deepEqual(f.workspace.taskSearchRecovery(exhausted),{readOnly:true,
+    nextCall:{tool:'get_assistant_status',arguments:{view:'company_context'}},
+    taskSearchNextCall:{tool:'search_tasks',arguments:{companySlugs:['synthetic'],queries:['PRIVATE_QUERY'],limit:10}}});
   assert.equal(started,2,'another admitted poll cannot create a third owned reader');
 });
 
@@ -110,6 +117,7 @@ test('a request-child lookalike timeout cannot grant another owned first sync',a
   const timeout=Object.assign(Error(),{code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'});
   const f=await pendingSearchFixture(t,{search:()=>{throw timeout;}});
   for(let i=0;i<3;i++)await assert.rejects(f.call(),error=>error===timeout);
+  assert.equal(f.workspace.taskSearchRecovery(timeout),null,'a child lookalike cannot advertise parent-clock recovery');
   assert.equal(f.observed.filter(value=>value==='company_context_search').length,1);
 });
 

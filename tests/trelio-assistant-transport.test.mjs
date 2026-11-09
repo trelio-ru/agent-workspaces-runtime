@@ -3990,8 +3990,8 @@ test('stable task plus native intake catalogue stays within the unchanged 64KiB 
 test('initial cached task catalogue exposes unified company discovery before any status call or active intake',async()=>{
  const origin='https://initial-discovery.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
- let active=null,malformed=false;const calls=[];
- const definition=name=>({name,description:`Native ${name}`,inputSchema:{type:'object',properties:{
+ let active=null,malformed=false,refinement=false,longDescription=false;const calls=[];
+ const definition=name=>({name,description:longDescription&&name==='search'?'x'.repeat(4096):`Native ${name}`,inputSchema:{type:'object',properties:{
   ...(name==='search'?{queries:{type:'array',items:{type:'string'},minItems:1}}:{}),
   ...(name==='fetch'?{id:{type:'string'}}:{}),intakePass:{},taskPass:{},runtimeSessionProof:{}},additionalProperties:false}});
  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>active,httpRequest:async input=>{
@@ -4000,7 +4000,7 @@ test('initial cached task catalogue exposes unified company discovery before any
   if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
   if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
   if(input.payload.method==='tools/list')return response({tools:(view==='company_context'
-   ?['get_assistant_status','search','fetch',...(malformed?[]:['get_trelio_tool_contract'])]
+   ?['get_assistant_status','search','fetch',...(malformed?[]:['get_trelio_tool_contract']),...(refinement?['search_tasks']:[])]
    :view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']
    :['get_assistant_status','get_task','update_task_title']).map(definition)});
   calls.push({view,name:input.payload.params.name});return response({content:[],structuredContent:{view}});
@@ -4010,6 +4010,16 @@ test('initial cached task catalogue exposes unified company discovery before any
   assert.ok(tools.some(tool=>tool.name===name),`${name} is discoverable before the first pass/model turn`);
  assert.deepEqual(calls,[],'metadata never creates an intake, task, Run or model call');
  assert.equal(JSON.stringify(tools).includes('intakePass'),false);
+ assert.equal(tools.find(tool=>tool.name==='search').description,'Native search','a missing native refinement grants no host hint');
+ refinement=true;
+ const refinedCatalogue=await client.listTools(),searchDefinition=refinedCatalogue.find(tool=>tool.name==='search');
+ assert.ok(searchDefinition.description.startsWith('Native search'));
+ assert.match(searchDefinition.description,/search_tasks/);
+ assert.deepEqual(searchDefinition.inputSchema,tools.find(tool=>tool.name==='search').inputSchema,'recovery guidance never changes the native schema');
+ assert.ok(Buffer.byteLength(JSON.stringify(refinedCatalogue))<=65536);
+ longDescription=true;
+ assert.equal((await client.listTools()).find(tool=>tool.name==='search').description,'x'.repeat(4096),'omit optional guidance rather than truncating a native description');
+ longDescription=false;
  active={kind:'source_intake',intakeKind:'owner_command'};
  assert.equal((await client.callTool('search',{queries:['trip']})).structuredContent.view,'company_context');
  assert.equal((await client.callTool('fetch',{id:'selected-native-id'})).structuredContent.view,'company_context');

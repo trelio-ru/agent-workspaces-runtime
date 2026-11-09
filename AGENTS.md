@@ -158,6 +158,12 @@ publication tooling также остаются вне этого публичн
   exact recipient binding and complete mirror publication remain mandatory. An owned first-sync timeout (direct reason or native AbortError with that exact cause) permits one resumed readonly child only after fresh admission; other failures never retry. Common read errors retain fixed closed codes, never paths/prose.
   Record preparation failures at owned-child settlement, even between polls;
   the common registry's discarded failed entry never resets refusal/retry state.
+  After two OWN full-search deadlines, return ordinary company-context/task-only
+  read nextCalls, never a third full sync. Fresh native catalogue metadata keeps
+  that refinement discoverable to old facades within the SAME schema/byte bounds.
+  Task refinement hydrates only native task projections under the common fresh
+  manifest/generation fence; no Workspace file prerequisite, mirror writer,
+  incomplete pointer or cross-call cache. Current comments and revocations stay covered.
   The signed request pipe distinguishes its own timeout, caller cancellation,
   process/input failure, nonzero exit, empty/invalid response and output bound;
   none authorizes replay or exposes child output. Reject damaged UTF-8 before
@@ -897,6 +903,9 @@ publication tooling также остаются вне этого публичн
   real HTTP codec and SQLite restart together; direct coordinator injection
   alone cannot prove the background recovery path is connected.
 - Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
+  New leased task invocations sample their original native lease once (max 30m),
+  including preflight, rather than the shorter 15m observer default. Renewals never
+  reset that clock; old uncertainty and expired zero-start recovery stay unchanged.
 - Assistant maintenance: fixed signed worker, no replay/health shortcut; terminal retained-pass updates require the SAME coordinator lease/native evidence. MCP facade survives runtime updates. Check the exact public installable ref before any plugin install intent; pending publication preserves latches. Only legacy hook 0.1.0 admits native directory-only .git metadata. Current hooks require exact immutable git-subdir ./plugin with no installed .git; never prune cache or migrate trust. Plugin hooks live in a separately immutable companion: main-only updates preserve native hashes, real hook/loader changes require native review; never migrate approval or hide mutable bytes. Desktop maintenance defaults on for new/existing paired devices, preserves explicit owner opt-out and uses signed official MSIX under the SAME idle/setup locks; no standalone CLI update, forced exit or uncertain install replay. Plugin maintenance is an explicit per-device setup opt-in: SAME updater/retention, idle coordinator + setup mutex, durable native install/GUI/registered-parent handoff and bounded rollback; never automate hook trust. Installer options must cross both real entry boundaries; unknown commands/values refuse before spawn. Desktop discovery/exit uses SAME native worker, exact AppModel/user/session/process-root/generation, and normal Restart Manager; a tray-hidden process stays running, never force or local compile. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
   A terminal failed Desktop install permits ONE separately journaled idle
   registration-recovery restart after retained-signature and fresh readiness

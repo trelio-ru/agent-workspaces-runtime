@@ -3529,8 +3529,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // This is metadata from the SAME device/native endpoint, not a schema
       // copy, a task grant, another connector or a second business executor.
       const deadline=AbortSignal.timeout(timeoutMs),bounded=signal?AbortSignal.any([signal,deadline]):deadline;
+      let refinementAvailable=false;
       const catalogue=(allowed,profile,optional=false)=>perform(async({protocol,config,credential,session,request,signal})=>{
         const tools=await protocol.listRemoteTools(config,credential,session,request,{signal}),seen=new Set();
+        if(profile==='company_context'&&tools.some(tool=>tool?.name==='search_tasks'
+          &&typeof tool.description==='string'&&tool.description.length<=4096&&object(tool.inputSchema)
+          &&tool.inputSchema.type==='object'))refinementAvailable=true;
         const selected=tools.filter(tool=>allowed.includes(tool?.name)
           &&(!['download_attachment','download_registry_document','download_knowledge_base_attachment'].includes(tool.name)||typeof materializeAttachment==='function')).map(tool=>{
           if(seen.has(tool.name)||typeof tool.description!=='string'||tool.description.length>4096||!object(tool.inputSchema)||tool.inputSchema.type!=='object')fail('ASSISTANT_MCP_INVALID_RESPONSE');
@@ -3563,6 +3567,18 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             ...(!a.readOnlyHint&&a.idempotentHint===true?{idempotentHint:true}:{}),openWorldHint:false}};});
       }
       if(Buffer.byteLength(JSON.stringify(result))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      // The same fresh native catalogue must actually offer this refinement.
+      // Keep every native description/schema and the original byte ceiling:
+      // an optional host-mechanics hint never makes a valid catalogue fail or
+      // silently truncates native authority. Older facades request definitions
+      // from the current signed worker and receive the ordinary revision-change
+      // notification, so this fallback remains discoverable without restart.
+      if(refinementAvailable){
+        const hint=' Local full-index preparation timeout: select get_assistant_status(view=company_context), then search_tasks with the original company and queries. This separately authorised task-only read does not wait for Workspace file indexing. Reformulate empty task queries; fetch the selected current source.';
+        const candidate=result.map(tool=>tool.name==='search'&&tool.description.length+hint.length<=4096
+          ?{...tool,description:tool.description+hint}:tool);
+        if(Buffer.byteLength(JSON.stringify(candidate))<=65_536)result=candidate;
+      }
       return result;
     },
     async callTool(name, args, signal) {

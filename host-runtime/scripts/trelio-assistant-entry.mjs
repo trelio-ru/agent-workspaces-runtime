@@ -1407,7 +1407,15 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
       } catch (error) {
         const result = { code: safeError(error),
           ...(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(error.reason)?{reason:error.reason}:{}) };
-        return respond({ isError: true, content: [{ type: 'text', text: result.code }], structuredContent: result });
+        // The retained executor can identify its OWN exhausted full-search
+        // clocks. This is a navigation plan to separately admitted read tools,
+        // never a third preparation, borrowed proof or automatic tool replay.
+        const recovery=message.params?.name==='search'?workspace?.taskSearchRecovery?.(error):null;
+        return respond({ isError: true,
+          content: [{ type: 'text', text: recovery
+            ? `${result.code}. Full company-index preparation is exhausted. Continue with the returned company-context selection, then its task-only search, using fresh hook admission for each call. If no relevant tasks match, reformulate subject-anchored task queries. Do not repeat this full-index preparation, ask the owner to repeat the request, or claim that unsearched sources are empty.`
+            : result.code }],
+          structuredContent: { ...result, ...(recovery?{recovery}:{}) } });
       }
     }
     return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32601, message: 'Method not found' } });
@@ -3228,7 +3236,8 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
   const rememberSearchFailure=(key,job,error,retryable=false)=>{
     const previous=searchFailures.get(key);
     const failures=Math.max((previous?.failures??0)+1,retryable&&(searchLaunches.get(key)??0)>=2?2:1);
-    searchFailures.set(key,{error,failures,retryable,endedAt:Date.now(),fingerprint:job.fingerprint,arguments:job.arguments});finishSearchJob(key,job);
+    searchFailures.set(key,{error,failures,retryable,endedAt:Date.now(),fingerprint:job.fingerprint,arguments:job.arguments,
+      nativeTool:job.nativeTool,companySlug:job.companySlug});finishSearchJob(key,job);
     return failures;
   };
   return {async completeCompanySearch(raw,args,{signal,request=requestCurrentAssistantRuntime}={}){
@@ -3268,7 +3277,8 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       // the actual query. A generation conflict cannot restart this clock, and
       // a short MCP wait never owns/cancels the query child. This replaces the
       // old prepare -> second full sync under setup's unrelated 45-second clock.
-      job={controller,deadlineError,conflicts:0,fingerprint,arguments:argumentsObject};
+      job={controller,deadlineError,conflicts:0,fingerprint,arguments:argumentsObject,
+        nativeTool:descriptor.nativeTool,companySlug:descriptor.companySlug};
       job.timer=setTimeout(()=>controller.abort(deadlineError),10*60_000);job.timer.unref();
       searchJobs.set(key,job);preparationControllers.add(controller);
     }
@@ -3355,6 +3365,18 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     }
     finishSearchJob(key,job);searchFailures.delete(key);searchLaunches.delete(key);
     return result.result;
+  },taskSearchRecovery(error){
+    // Object identity and the retained parent-clock accounting distinguish an
+    // exhausted owned search from provider/validator/foreign timeout lookalikes.
+    // The slug comes from the native descriptor, queries from its exact local
+    // business input. No pass, key, proof or plaintext result is transported.
+    const failure=[...searchFailures.values()].find(value=>value.error===error&&value.nativeTool==='search'
+      &&value.retryable===true&&value.failures>=2);
+    if(!failure||!Array.isArray(failure.arguments.queries))return null;
+    return {readOnly:true,
+      nextCall:{tool:'get_assistant_status',arguments:{view:'company_context'}},
+      taskSearchNextCall:{tool:'search_tasks',arguments:{companySlugs:[failure.companySlug],
+        queries:structuredClone(failure.arguments.queries),limit:failure.arguments.limit??10}}};
   },async prepareCompanySearch(raw,{signal,request=requestCurrentAssistantRuntime}={}){
     if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||raw.schemaVersion!==1
       ||Object.keys(raw).sort().join(',')!=='binding,descriptor,schemaVersion'||raw.descriptor?.nativeTool!=='search'

@@ -2507,6 +2507,17 @@ capabilities и без чтения данных компании. Эти усл
 
 ## Поиск и отдельный файл
 
+`search_tasks` использует свой существующий task-only корпус. Для encrypted
+company native-read host собирает в памяти только свежие task projections:
+название, описание, чек-листы, контроли, имена вложений и ручные комментарии.
+Общий hydrator/matcher и начальный/финальный native manifest сохраняют ACL,
+проектные/архивные фильтры и три bounded попытки при revision conflict.
+Чтение файлов остальных Workspaces, mirror writer и публикация неполной
+company generation для этого пути не нужны. Нового cache, endpoint или
+повторного использования proof/permission между вызовами нет. Этот отдельный
+read остаётся доступен после исчерпания двух исходных clocks общего поиска;
+план выбора/fresh admission описан в company-context контракте scheduler.
+
 Точный `get_workspace` и `fetch` с `workspace:<UUID>` не запускают company sync.
 Backend exact GET `/company-context/:companySlug/workspaces/:workspaceId`
 проверяет paired read bridge/source OAuth scopes, company MCP policy и canonical

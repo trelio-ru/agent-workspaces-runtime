@@ -30,7 +30,7 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
     acceptedWorkspaces:[],workspaces:[],contextDocuments:[{id:registryId,type:'registry',title:marker(projectId,'title'),projectId,projectSlug,revisionToken:'d'.repeat(64),payload:null}],
     searchDocuments:[{id:`task:synthetic/${projectSlug}/1`,type:'task',title:marker(taskId,'title'),
       stableKey:`synthetic/${projectSlug}/1/task`,referenceValues:[taskId],revisionToken:'b'.repeat(64),
-      fields:[{source:'title',values:[marker(taskId,'title')]}],metadata:{projectId,projectSlug,taskNumber:1}}],
+      fields:[{source:'title',values:[marker(taskId,'title')]},{source:'comment',values:[marker(taskId,'current')]}],metadata:{projectId,projectSlug,taskNumber:1}}],
     instructions,agentSkills:{company:[],projects:[]},agentProcedures:[]};
   let managed,envelope,mode='ready',closed=false,healthRevision=1,lastNativeTool=null,slowExactConsumed=false,documentReads=0;
   const workspaceId=randomUUID(),workspaceHead='c'.repeat(40),projectionId=randomUUID(),manifestFileId=randomUUID();
@@ -50,12 +50,14 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
   const intake=()=>({schemaVersion:1,id:pass.passId,companyId:company.id,sourceId:pass.sourceId,sourceRevision:pass.sourceRevision,
     eventId:pass.eventId,threadId:pass.threadId,state:closed?'cancelled':'leased',leaseExpiresAt,
     taskId:null,receiptId:null,readConfirmed:true,ownerPrivateRead:true,execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}});
-  const schema=properties=>({type:'object',anyOf:[{type:'object',properties:{...properties,intakePass:{},runtimeSessionProof:{}},
-    required:[...Object.keys(properties),'intakePass','runtimeSessionProof'],additionalProperties:false},
+  const schema=(properties,required=Object.keys(properties))=>({type:'object',anyOf:[{type:'object',properties:{...properties,intakePass:{},runtimeSessionProof:{}},
+    required:[...required,'intakePass','runtimeSessionProof'],additionalProperties:false},
     {type:'object',properties:{localContextRead:{const:true,type:'boolean'},intakePass:{},runtimeSessionProof:{}},
       required:['localContextRead','intakePass','runtimeSessionProof'],additionalProperties:false}]});
   const tools=[{name:'get_assistant_status',description:'Synthetic native status',inputSchema:{type:'object',properties:{view:{type:'string'}},additionalProperties:true}},
     {name:'search',description:'Synthetic native company search',inputSchema:schema({queries:{type:'array',items:{type:'string'}}})},
+    {name:'search_tasks',description:'Synthetic native task refinement',inputSchema:schema({companySlugs:{type:'array',items:{type:'string'}},queries:{type:'array',items:{type:'string'}},limit:{type:'integer',minimum:1,maximum:100}},['companySlugs','queries'])},
+    {name:'get_trelio_tool_contract',description:'Synthetic exact read schema',inputSchema:{type:'object',properties:{name:{type:'string'}},required:['name'],additionalProperties:false}},
     {name:'fetch',description:'Synthetic native exact source',inputSchema:schema({id:{type:'string'}})},
     {name:'get_task_activity',description:'Synthetic current discussion',inputSchema:schema({companySlug:{type:'string'},projectSlug:{type:'string'},taskNumber:{type:'integer'}})},
     ...['get_assistant_intake_context','resolve_assistant_intake'].map(name=>({name,description:'Synthetic owner lifecycle',inputSchema:{type:'object'}}))];
@@ -81,7 +83,7 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
         assert.equal(body.method,'tools/call');
         const {name,arguments:args}=body.params;lastNativeTool=name;
         if(name==='get_assistant_status'){reply({content:[],structuredContent:{companyContextRead:true,presentationProfile:'company_context'}});return;}
-        assert.ok(['search','fetch','get_task_activity'].includes(name),'no task/Workspace write is part of a company question');
+        assert.ok(['search','search_tasks','fetch','get_task_activity'].includes(name),'no task/Workspace write is part of a company question');
         assert.deepEqual(args.intakePass,origin);assert.equal(args.localContextRead,true);
         verifyProof(args.runtimeSessionProof,name);counts.nativeAdmissions++;
         assert.ok(!JSON.stringify(args).includes('weekend'),'the original company query stays local');
@@ -156,7 +158,12 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
           await new Promise(resolve=>{const timer=setTimeout(resolve,32000);response.once('close',()=>{clearTimeout(timer);resolve();});});
           if(response.destroyed)return;
         }
-        counts.manifests++;json(response,{schemaVersion:1,context:manifest,encryptedPayloads:payloads});return;}
+        counts.manifests++;
+        // Each response is a valid native generation, but no pair agrees.
+        // Exercise the real common reader's three-attempt conflict fence;
+        // never publish a task-only candidate or turn churn into empty data.
+        const current=mode==='generation_churn'?{...manifest,generation:createHash('sha256').update(String(counts.manifests)).digest('hex')}:manifest;
+        json(response,{schemaVersion:1,context:current,encryptedPayloads:payloads});return;}
       if(selected.pathname.endsWith(`/company-context/${company.slug}/tasks/${projectSlug}/1`)){
         counts.exact++;assert.equal(request.method,'GET');
         assert.equal(selected.searchParams.get('expectedRevision'),'b'.repeat(64));

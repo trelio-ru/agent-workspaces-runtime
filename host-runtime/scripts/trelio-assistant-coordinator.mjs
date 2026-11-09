@@ -1544,7 +1544,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   const perform = async (job,signal,continuation=null) => {
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
-    let checking=false,started=false,taskPass=null,failureStage='native_claim';
+    let checking=false,started=false,taskPass=null,observationTimer=null,failureStage='native_claim';
     const watch=setInterval(()=>{
       if(checking) return; checking=true;
       void (async()=>{
@@ -1624,6 +1624,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(!['leased','review_required'].includes(admitted.state) || admitted.bindingId!==authority.bindingId || admitted.bindingRevision!==authority.revision
           || admitted.deliveryId!==job.deliveryId || admitted.threadId!==plan.threadId
           || !Number.isFinite(Date.parse(admitted.leaseExpiresAt)) || !recovering&&Date.parse(admitted.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        if(!recovering){
+          // A NEW ordinary task has the same potentially twenty-minute company
+          // preparation as owner intake. The native adapter's fifteen-minute
+          // default previously abandoned its reader while the GUI still worked.
+          // Sample this exact admitted lease ONCE, capped by the adapter's
+          // existing thirty-minute ceiling. Independent cancellation also counts
+          // preflight time; watchdog renewals never move this original clock.
+          // An expired zero-start recovery keeps its separate existing path:
+          // this does not renew an old pass or grant another model invocation.
+          const remaining=Math.min(30*60_000,Date.parse(admitted.leaseExpiresAt)-now());
+          if(!Number.isSafeInteger(remaining)||remaining<100)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          options.passTimeoutMs=remaining;
+          observationTimer=setTimeout(()=>controller.abort(),remaining);observationTimer.unref?.();
+        }
         const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
           passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);
         execution=assistantExecutionConfiguration(admitted.execution);
@@ -1734,7 +1748,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       } else inbox.abandonUnstartedDelivery(job.deliveryId);
       const code=started?'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN':errorCode(error);
       emit(code); throw new AssistantCoordinatorError(code);
-    } finally { clearInterval(watch); controller.abort(); }
+    } finally { clearInterval(watch);clearTimeout(observationTimer); controller.abort(); }
   };
   const workOnce = async signal => {
     if(closed || active) return null;
