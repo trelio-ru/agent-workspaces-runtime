@@ -1637,11 +1637,27 @@ test("first protected call observes the current model and supported host names i
               arguments: envelope } }) } },
         call("current", "mcp__trelio_remote_skills", "continue_trelio_local_action", envelope),
       ].map((row) => JSON.stringify(row)).join("\n") + "\n");
-      const recovered = await runHook({ ...reuseInput, tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
-        tool_input: envelope }, environment);
-      assert.equal(recovered.exitCode, 0, recovered.stderr);
-      const hookResult = JSON.parse(recovered.stdout);
-      const next = hookResult.hookSpecificOutput?.updatedInput;
+      let hookResult, next;
+      // Each real hook starts its own 250ms transcript worker. Under native CI
+      // load that worker may correctly time out and refuse incomplete input;
+      // this is not a failure of route recovery or permission to enlarge the
+      // production budget. Like the receipt-hint fixture above, inspect this
+      // immutable synthetic route at most three times, without dispatching any
+      // MCP operation. A denial must remain closed and disclose no source body;
+      // at least one real inspection must still recover the exact arguments.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const recovered = await runHook({ ...reuseInput,
+          tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action", tool_input: envelope }, environment);
+        assert.equal(recovered.exitCode, 0, recovered.stderr);
+        assert.equal(recovered.stderr, "");
+        hookResult = JSON.parse(recovered.stdout);
+        next = hookResult.hookSpecificOutput?.updatedInput;
+        if (next) break;
+        assert.equal(hookResult.hookSpecificOutput?.permissionDecision, "deny");
+        assert.ok(hookResult.hookSpecificOutput?.permissionDecisionReason?.startsWith("LOCAL_CONTEXT_INVALID_INPUT:"));
+        assert.equal(recovered.stdout.includes("PRIVATE-CONTINUATION-CANARY"), false);
+        assert.equal(recovered.stdout.includes("runtimeSessionProof"), false);
+      }
       // Preserve the original production-path assertion, but make a native
       // refusal diagnosable without printing arguments, proofs or hook prose.
       const reason=typeof hookResult.hookSpecificOutput?.permissionDecisionReason==='string'

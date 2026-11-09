@@ -3196,6 +3196,11 @@ backend schema/ACL, OAuth, live provider state, CAS/idempotency и челове�
 
 Проверки: `trelio-local-continuation.test.mjs`, реальные PreToolUse subprocess
 regressions, dispatcher/input transport, immutable proof и instruction delivery.
+Положительный hook fixture допускает максимум три независимых осмотра того же
+синтетического transcript без MCP dispatch. Каждый отказ остаётся fail-closed
+без source body/proof; хотя бы один осмотр обязан восстановить точные args.
+Это учитывает штатный отказ cold worker под нагрузкой, не меняя production
+250 ms, отрицательные проверки или запрет автоматического replay действий.
 
 
 ### Native checkpoint continuation
