@@ -2570,6 +2570,25 @@ capabilities и без чтения данных компании. Эти усл
 
 ## Поиск и отдельный файл
 
+Native `get_registry`, другие detail/list/fetch и read-only подготовка
+`upsert_registry_rows`/`archive_registry_rows` используют один bounded recovery:
+только настоящий HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` обновляет discovery
+locator и повторяет чтение один раз. Runtime публикует прежний content-free
+mutation marker для соседних host, сбрасывает RAM/startup freshness и выполняет
+`forceSync`/`requireFresh` без readable fallback. Второй конфликт, ACL, crypto,
+transport и отмена возвращаются без нового цикла. Исходный deadline не меняется;
+смена company/scope/epoch/public key/device прекращает чтение до новой hydration.
+Row revisions, clientRequestId и остальные аргументы записи не переписываются.
+Uploads, proof submission и mutation POST остаются вне recovery; неизвестный
+результат записи требует read-back, а не автоматического повтора.
+
+`set_registry_workspaces`/`set_registry_tasks` с canonical `e-UUID` registry и
+project locators идут сразу через обычный protector/proof/backend ACL/context CAS.
+Связи и защищённый change summary не требуют индекса файлов остальных Workspaces.
+Исторические aliases по-прежнему разрешаются только локальным discovery. Это
+узкий allowlist; row mutation/custom fields и остальные actions сохраняют свои
+требования к свежему domain context.
+
 `search_tasks` использует свой существующий task-only корпус. Для encrypted
 company native-read host собирает в памяти только свежие task projections:
 название, описание, чек-листы, контроли, имена вложений и ручные комментарии.

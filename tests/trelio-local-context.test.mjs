@@ -11,7 +11,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
-  usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
+  hydrateNativeReadWithRevisionRefresh, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
   buildStableCompanyMirror,
   createHumanCompanySearchReader,
@@ -44,7 +44,7 @@ import {
   handleNativeLocalContextRead,
   handleTrelioWorkspaceActionOperation,
   hydrateChangedCompanyMirrorRecords,
-  isLocalTaskSectionRevisionConflict,
+  isLocalProjectionRevisionConflict,
   listCompanyContextMirror,
   localActionMayMutateCompanyContext,
   materializeHistoricalWorkspaceTreeForRestore,
@@ -56,7 +56,7 @@ import {
   readLocalMeetingTranscriptFile,
   protectLocalActionArguments,
   readLocalCompanyMirrorMutationToken,
-  readTaskSectionsWithRevisionRefresh,
+  readLocalProjectionWithRevisionRefresh,
   rebuildHydratedLocalActionTaskDocuments,
   resolveMirrorPaths,
   resolveLocalProposalPreparation,
@@ -2811,6 +2811,24 @@ test("encrypted registry actions preserve row identity and typed structure acros
       privateJwk: device.privateBundle.encryptionPrivateJwk,
     },
   };
+  for (const [nativeTool, field] of [["set_registry_workspaces", "workspaceIds"], ["set_registry_tasks", "taskIds"]]) {
+    const input = { companySlug: "acme", projectSlug: `e-${actionRunId}`, registrySlug: `e-${actionWorkspaceId}`,
+      expectedContextRevision: 4, clientRequestId: "exact-link-change", changeSummary: "Private link summary",
+      [field]: [actionSecretId] };
+    assert.equal(localReadActionNeedsMirror(nativeTool, input), false);
+    const protectedRequest = await protectLocalActionArguments({ nativeTool, arguments: input,
+      companyEncryption, mirror: { company: companyEncryption.runtime.company, projects: [], tasks: [] } });
+    assert.equal(protectedRequest.value.expectedContextRevision, input.expectedContextRevision);
+    assert.equal(protectedRequest.value.clientRequestId, input.clientRequestId);
+    assert.equal(protectedRequest.value.registrySlug, input.registrySlug);
+    assert.deepEqual(protectedRequest.value[field], input[field]);
+    assert.doesNotMatch(JSON.stringify({ value: protectedRequest.value, payloads: protectedRequest.payloads }), /Private link summary/u);
+    const decrypted = await decryptCompanyPayload({ encryptedPayload: protectedRequest.payloads[0],
+      scopePrivateKey: device.privateKeys.encryptionPrivateKey, scopePrivateJwk: device.privateBundle.encryptionPrivateJwk });
+    assert.equal(decrypted.values.change_summary, input.changeSummary);
+    for (const changed of [{ registrySlug: "historical-registry" }, { projectSlug: "historical-project" },
+      { registrySlug: "e-malformed" }]) assert.equal(localReadActionNeedsMirror(nativeTool, { ...input, ...changed }), true);
+  }
   const registryMirror = structuredClone(mirror);
   const registry = registryMirror.contextDocuments[0];
   registry.payload.registry = {
@@ -4014,9 +4032,9 @@ test("stale supplemental task sections refresh the mirror and repeat only the re
   const reads = [];
   let refreshCount = 0;
 
-  const result = await readTaskSectionsWithRevisionRefresh({
+  const result = await readLocalProjectionWithRevisionRefresh({
     initialReady: staleReady,
-    readSections: async (ready) => {
+    readProjection: async (ready) => {
       reads.push(ready.mirror);
       if (ready === staleReady) {
         throw new TrelioApiError(
@@ -4046,11 +4064,11 @@ test("task-section refresh remains fail-closed for unrelated and repeated confli
     null,
     "ANOTHER_CONFLICT",
   );
-  assert.equal(isLocalTaskSectionRevisionConflict(unrelated), false);
+  assert.equal(isLocalProjectionRevisionConflict(unrelated), false);
   await assert.rejects(
-    readTaskSectionsWithRevisionRefresh({
+    readLocalProjectionWithRevisionRefresh({
       initialReady: { mirror: "stale" },
-      readSections: async () => { throw unrelated; },
+      readProjection: async () => { throw unrelated; },
       refreshReady: async () => assert.fail("Unrelated conflicts must not refresh."),
     }),
     (error) => error === unrelated,
@@ -4065,9 +4083,9 @@ test("task-section refresh remains fail-closed for unrelated and repeated confli
   let readCount = 0;
   let refreshCount = 0;
   await assert.rejects(
-    readTaskSectionsWithRevisionRefresh({
+    readLocalProjectionWithRevisionRefresh({
       initialReady: { mirror: "stale" },
-      readSections: async () => {
+      readProjection: async () => {
         readCount += 1;
         throw revisionConflict;
       },
@@ -4080,6 +4098,78 @@ test("task-section refresh remains fail-closed for unrelated and repeated confli
   );
   assert.equal(readCount, 2);
   assert.equal(refreshCount, 1);
+});
+
+test("registry reads reselect a fresh descriptor after a real native revision refusal", async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const id = "66666666-6666-4666-8666-666666666666";
+  const initial = revisionToken => ({ token: "synthetic-token", requestOrigin: "https://trelio.test",
+    mirror: { company: { slug: "acme" }, projects: [], tasks: [], contextDocuments: [{
+      id, type: "registry", projectId: null, projectSlug: null, revisionToken,
+    }], searchDocuments: [{ referenceValues: ["vendors"], metadata: {
+      contextDocumentId: id, sourceType: "registry", projectId: null, projectSlug: null,
+    } }] } });
+  const document = { id, type: "registry", revisionToken: "f".repeat(64), projectId: null,
+    projectSlug: null, payload: { registry: { id, slug: "vendors", columns: [] },
+      rows: [{ id: actionRunId, rowKey: "existing", revision: 7, values: {} }] } };
+
+  // These are the actual detail selectors used by exact read, list and fetch,
+  // including the get_registry read which precedes row payload preparation.
+  for (const [nativeTool, input] of [["get_registry", { registrySlug: "vendors" }],
+    ["list_registries", {}], ["fetch", { id: `context:registry:${id}` }],
+    ["get_registry", { registrySlug: "vendors", rows: [{ rowKey: "existing", expectedRevision: 6 }] }]]) {
+    const originalInput = structuredClone(input), revisions = [];
+    let refreshes = 0;
+    globalThis.fetch = async (url, options) => {
+      assert.equal(options.method ?? "GET", "GET", "read recovery must never submit a mutation");
+      assert.equal(new URL(url).pathname, `/api/agent-workspaces/company-context/acme/documents/registry/${id}`);
+      const revision = new URL(url).searchParams.get("expectedRevision");
+      revisions.push(revision);
+      return revision === document.revisionToken
+        ? new Response(JSON.stringify({ document }), { status: 200 })
+        : new Response(JSON.stringify({ code: "LOCAL_CONTEXT_GENERATION_CHANGED", message: "Synthetic stale descriptor" }), { status: 409 });
+    };
+    const hydrated = await hydrateNativeReadWithRevisionRefresh({
+      origin: "https://trelio.test", ready: initial("a".repeat(64)), nativeTool, input,
+      refreshReady: async () => { refreshes++; return initial(document.revisionToken); },
+    });
+    assert.deepEqual(revisions, ["a".repeat(64), document.revisionToken]);
+    assert.equal(refreshes, 1);
+    assert.deepEqual(hydrated.contextDocuments, [document]);
+    assert.deepEqual(input, originalInput, "fresh row evidence must never rewrite the caller's stale business CAS");
+  }
+});
+
+test("projection refresh preserves refusals, cancellation and recipient binding", async t => {
+  const refusal = new TrelioApiError(403, "Denied");
+  await assert.rejects(readLocalProjectionWithRevisionRefresh({ initialReady: {},
+    readProjection: async () => { throw refusal; }, refreshReady: () => assert.fail("No ACL retry") }), error => error === refusal);
+  const conflict = new TrelioApiError(409, "Changed", null, "LOCAL_CONTEXT_GENERATION_CHANGED");
+  const abort = new Error("synthetic cancellation");
+  await assert.rejects(readLocalProjectionWithRevisionRefresh({ initialReady: {},
+    readProjection: async () => { throw conflict; }, refreshReady: async () => { throw abort; } }), error => error === abort);
+  const cancelled = new AbortController(); cancelled.abort(abort);
+  await assert.rejects(hydrateNativeReadWithRevisionRefresh({ ready: {}, nativeTool: "list_registries", input: {},
+    signal: cancelled.signal, refreshReady: () => assert.fail("No cancellation retry") }), error => error === abort);
+  // The comparison runs before any native document read/decryption.
+  const ready = { companyEncryption: { runtime: { company: { id: actionWorkspaceId },
+    scope: { id: actionRunId, epoch: 1 }, device: { id: actionSecretId } } },
+    mirror: { company: { slug: "acme" } } };
+  // A plain-provider transition is rejected rather than trying to interpret its
+  // remote result as an encrypted mirror or grant permission for a write.
+  await assert.rejects(hydrateNativeReadWithRevisionRefresh({ ready: { nativeProvider: true },
+    nativeTool: "list_registries", input: {} }), { code: "LOCAL_CONTEXT_COMPANY_MISMATCH" });
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  ready.requestOrigin = "https://trelio.test"; ready.token = "synthetic-token";
+  ready.mirror.contextDocuments = [{ id: actionWorkspaceId, type: "registry", revisionToken: "a".repeat(64) }];
+  let reads = 0;
+  globalThis.fetch = async () => { reads++; return new Response(JSON.stringify({ code: conflict.code }), { status: 409 }); };
+  const changed = structuredClone(ready); changed.companyEncryption.runtime.scope.epoch = 2;
+  await assert.rejects(hydrateNativeReadWithRevisionRefresh({ ready, nativeTool: "list_registries", input: {},
+    refreshReady: async () => changed }), { code: "LOCAL_CONTEXT_COMPANY_MISMATCH" });
+  assert.equal(reads, 1, "changed encryption binding must refuse before a second HTTP read");
 });
 
 test("encrypted mirror generations are schema-isolated while mutation coherence spans versions", () => {

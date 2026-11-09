@@ -682,6 +682,10 @@ publication tooling также остаются вне этого публичн
   обработка read-conflicts всех этапов чтения обязательны по
   [runtime contract](docs/agent-workspace-runtime.md). Публикация не повторяется;
   HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` сохраняет code без backend payload/details.
+  Native detail/list/fetch и read-only подготовка строк реестра обновляют
+  stale locator один раз под исходным deadline; fresh sync без readable fallback.
+  Row CAS, payload uploads и mutation POST не входят в retry. Exact canonical
+  registry-link actions не требуют company mirror; aliases требуют discovery.
   Completed Workspace prefixes share that SAME encrypted scratchpad/quota and
   exact origin/company/scope/epoch/device/head binding. Persist only after every
   file reader settles; reuse only entries in a freshly ACL-filtered company

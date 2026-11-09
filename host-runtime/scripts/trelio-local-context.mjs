@@ -6855,6 +6855,35 @@ const hydrateMirrorForNativeRead = async ({ ready, nativeTool, input, signal }) 
   };
 };
 
+/** Only revision-fenced reads belong inside this recovery boundary. A complete
+ * immutable mirror can outlive a sibling write (or be a readable fallback while
+ * its writer is busy). A native document 409 proves that locator stale; throw
+ * away session freshness and join ONE fresh sync before hydrating again. The
+ * original invocation signal/deadline still bounds both attempts. In particular
+ * callers must keep payload uploads, proof submission and mutation POSTs OUTSIDE
+ * this callback: a read conflict never permits replaying an uncertain write. */
+export const hydrateNativeReadWithRevisionRefresh = async ({ origin, ready, nativeTool, input, signal, refreshReady }) => (
+  readLocalProjectionWithRevisionRefresh({
+    initialReady: ready,
+    readProjection: current => {
+      if (current.nativeProvider) throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed during the read.");
+      const binding = state => {
+        const runtime = state.companyEncryption?.runtime;
+        return [runtime?.company?.id, runtime?.scope?.id, runtime?.scope?.epoch,
+          runtime?.scope?.publicEncryptionJwk, runtime?.device?.id];
+      };
+      // Registry write preparation still uses its originally admitted signer.
+      // Refreshing a locator cannot silently switch its encryption recipient.
+      if (!isDeepStrictEqual(binding(ready), binding(current))) throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption binding changed during the read.");
+      signal?.throwIfAborted();
+      return hydrateMirrorForNativeRead({ ready: current, nativeTool, input, signal });
+    },
+    refreshReady: refreshReady ?? (() => refreshMirrorAfterRevisionConflict({ origin, ready, signal })),
+  })
+);
+
 export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) => {
   const input = rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)
     ? rawArguments
@@ -8381,30 +8410,29 @@ const applyLocalProposalAction = async ({
   }
 };
 
-export const isLocalTaskSectionRevisionConflict = (error) => (
+export const isLocalProjectionRevisionConflict = (error) => (
   error instanceof TrelioApiError
   && error.statusCode === 409
   && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED"
 );
 
-export const readTaskSectionsWithRevisionRefresh = async ({
+export const readLocalProjectionWithRevisionRefresh = async ({
   initialReady,
-  readSections,
+  readProjection,
   refreshReady,
 }) => {
   try {
-    return await readSections(initialReady);
+    return await readProjection(initialReady);
   } catch (error) {
-    if (!isLocalTaskSectionRevisionConflict(error)) throw error;
+    if (!isLocalProjectionRevisionConflict(error)) throw error;
   }
 
-  // Supplemental sections must describe the same task revision as the compact
-  // core. A server read fence is authoritative evidence that this process kept
-  // an older immutable mirror; refresh once and repeat only the read-only
-  // request. A second conflict is returned unchanged instead of hiding a task
-  // that is genuinely changing continuously.
+  // A native projection fence proves this immutable mirror is stale. Refresh
+  // its discovery revision once and repeat only the read. A second conflict is
+  // returned unchanged; continuous changes must not cause an unbounded loop.
+  // No caller-supplied row revision, head or mutation argument is rewritten.
   const refreshedReady = await refreshReady();
-  return readSections(refreshedReady);
+  return readProjection(refreshedReady);
 };
 
 const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal, onProgress }) => {
@@ -8496,6 +8524,18 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal, 
   localCompanyMirrorObservedMutation.set(sessionKey, mutationToken);
   cacheDecryptedMirror(sessionKey, synced.mirror);
   return { ...synced, token, companyEncryption, requestOrigin };
+};
+
+/** A server-proven stale locator cannot use the normal readable fallback.
+ * Publish the existing content-free marker for sibling hosts, then join the
+ * same bounded writer with requireFresh. Permission/crypto/transport failures
+ * and caller cancellation retain their identity; there is no cache repair or
+ * new invocation clock. This function is never a mutation retry boundary. */
+const refreshMirrorAfterRevisionConflict = async ({ origin, ready, signal }) => {
+  signal?.throwIfAborted();
+  await invalidateLocalCompanyMirrorSession({ origin, companySlug: ready.mirror.company.slug,
+    companyEncryption: ready.companyEncryption });
+  return getReadyMirror({ origin, companySlug: ready.mirror.company.slug, forceSync: true, signal });
 };
 
 /** Host-only preparation uses the SAME complete, encrypted mirror writer and
@@ -8995,9 +9035,9 @@ export const handleTrelioLocalContextOperation = async (
       );
     }
     if (nativeTool === "get_task_sections") {
-      return readTaskSectionsWithRevisionRefresh({
+      return readLocalProjectionWithRevisionRefresh({
         initialReady: ready,
-        readSections: (currentReady) => {
+        readProjection: (currentReady) => {
           if (currentReady.nativeProvider) return currentReady.result;
           return getTaskSectionsFromProvider({
             origin: currentReady.requestOrigin,
@@ -9029,8 +9069,8 @@ export const handleTrelioLocalContextOperation = async (
     const input = rawInput?.arguments && typeof rawInput.arguments === "object"
       ? rawInput.arguments
       : {};
-    const detailedMirror = await hydrateMirrorForNativeRead({
-      ready,
+    const detailedMirror = await hydrateNativeReadWithRevisionRefresh({
+      origin, ready,
       nativeTool,
       input,
       signal,
@@ -9075,8 +9115,8 @@ export const handleTrelioLocalContextOperation = async (
       projectSlug,
       taskNumber,
     };
-    const detailedMirror = await hydrateMirrorForNativeRead({
-      ready,
+    const detailedMirror = await hydrateNativeReadWithRevisionRefresh({
+      origin, ready,
       nativeTool: "get_task",
       input,
       signal,
@@ -9084,8 +9124,8 @@ export const handleTrelioLocalContextOperation = async (
     return buildLocalExactTaskRead(liveMirror(detailedMirror), [input], rawInput?.knownInstructionLayerKeys);
   }
   if (operation === "fetch") {
-    const detailedMirror = await hydrateMirrorForNativeRead({
-      ready,
+    const detailedMirror = await hydrateNativeReadWithRevisionRefresh({
+      origin, ready,
       nativeTool: "fetch",
       input: { id: rawInput?.resultId },
       signal,
@@ -9617,6 +9657,14 @@ export const uploadLocalImportFiles = async ({ rawResult, manifestPath, origin, 
 };
 
 export const localReadActionNeedsMirror = (nativeTool, input) => {
+  // These two structural link mutations already carry native registry/project
+  // locators. Their ordinary backend ACL/contextRevision and the common local
+  // content protector remain authoritative; unrelated Workspace files add no
+  // evidence and must not consume the mutation's minute before its first POST.
+  // Historical aliases still need local discovery and never cross HTTP clear.
+  if (["set_registry_workspaces", "set_registry_tasks"].includes(nativeTool)
+    && /^e-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(input?.registrySlug ?? "")
+    && (!input?.projectSlug || /^e-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(input.projectSlug))) return false;
   if (!["get_agent_instructions", "get_task_create_meta", "get_project_meta", "list_my_tasks", "list_projects"].includes(nativeTool)) return true;
   return Boolean(input?.projectSlug && !/^e-[0-9a-f-]{36}$/u.test(input.projectSlug));
 };
@@ -9737,27 +9785,12 @@ const executeTrelioLocalActionOperation = async (
   };
   let actionMirror = ready.mirror;
   if (["upsert_registry_rows", "archive_registry_rows"].includes(nativeTool)) {
-    const documentId = findProjectedContextDocumentId(
-      ready.mirror,
-      "registry",
-      (document) => (
-        collectText(document.referenceValues).includes(String(rawInput.arguments.registrySlug || ""))
-        && buildMirrorProjectScopeMatcher(
-          ready.mirror,
-          rawInput.arguments.projectSlug || null,
-        )(document.metadata ?? {})
-      ),
-    );
-    if (documentId) {
-      actionMirror = await hydrateMirrorContextDetails({
-        mirror: ready.mirror,
-        documentIds: [documentId],
-        origin: ready.requestOrigin,
-        token: ready.token,
-        companyEncryption: ready.companyEncryption,
-        signal,
-      });
-    }
+    // Only the selected registry read can refresh. The original row CAS and
+    // idempotency key below remain byte-for-byte caller-owned; no payload or
+    // mutation has been submitted at this stage, including on the second 409.
+    actionMirror = await hydrateNativeReadWithRevisionRefresh({
+      origin, ready, nativeTool: "get_registry", input: rawInput.arguments, signal,
+    });
   } else if (LOCAL_ACTION_CUSTOM_FIELD_VALUE_TOOLS.has(nativeTool)) {
     const operations = nativeTool === "batch_update_tasks"
       ? rawInput.arguments.operations ?? []
