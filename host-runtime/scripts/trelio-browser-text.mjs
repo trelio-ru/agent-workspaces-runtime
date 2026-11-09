@@ -1,10 +1,12 @@
+import { createUtf16TextPolicy } from "./trelio-context-search-matching.mjs";
 /** Fixed isolated-world reader for a signed host opt-in, never page JS.
  * It reads rendered text nodes and viewport control labels, without reading
  * input values, attributes inventories, HTML, storage or network responses.
  * Requests contain a literal text filter and offset, never a selector/script.
  */
-export function installTextObserver(linkUrl, includeLinkTargets = false) {
-  const clean = (value, limit) => String(value || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, limit);
+export function installTextObserver(linkUrl, includeLinkTargets = false, textPolicy = createUtf16TextPolicy()) {
+  const { sliceUtf16CodePoints, readUtf16TextChunk } = textPolicy;
+  const clean = (value, limit) => sliceUtf16CodePoints(String(value || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/gu, '').replace(/\s+/gu, ' ').trim(), 0, limit);
   const hidden = element => {
     for (let node = element; node; node = node.parentElement) {
       if (node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true') return true;
@@ -58,7 +60,7 @@ export function installTextObserver(linkUrl, includeLinkTargets = false) {
       const remaining = 100_000 - characters;
       const rendered = clean(node.textContent, remaining + 1);
       if (rendered.length > remaining) scanLimited = true;
-      const value = rendered.slice(0, remaining);
+      const value = sliceUtf16CodePoints(rendered, 0, remaining);
       if (!value) continue;
       characters += value.length + 1;
       lines.push(value);
@@ -68,7 +70,11 @@ export function installTextObserver(linkUrl, includeLinkTargets = false) {
     // literal filtering must not silently drop the price the user asked for.
     const selected = new Set();
     if (needle) for (let i = 0; i < lines.length; i++) if (lines[i].toLocaleLowerCase().includes(needle)) for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) selected.add(j);
-    const all = (needle ? lines.filter((_, i) => selected.has(i)) : lines).join('\n'), text = all.slice(offset, offset + 6000);
+    const all = (needle ? lines.filter((_, i) => selected.has(i)) : lines).join('\n');
+    let page;
+    try { page = readUtf16TextChunk(all, offset, 6000); }
+    catch { return respond({ error: 'invalid_input' }); }
+    const { text, nextOffset } = page;
     const controls = [];
     let linkTargetBytes = 0, linkTargetsLimited = false;
     // Coordinates refer to this viewport, like the image API. Do not scroll or
@@ -115,7 +121,7 @@ export function installTextObserver(linkUrl, includeLinkTargets = false) {
       }
       controls.push(control);
     }
-    respond({ title: clean(document.title, 240), text, controls, nextOffset: offset + text.length < all.length ? offset + text.length : null, scanLimited,
+    respond({ title: clean(document.title, 240), text, controls, nextOffset, scanLimited,
       ...(linkTargetsLimited ? { linkTargetsLimited: true } : {}) });
   });
 }
@@ -150,7 +156,7 @@ export function readableLinkUrl(value) {
 export const TEXT_KIND = 'trelio.browser-text/v1';
 const fail = () => { throw new Error('VISUAL_RESULT_INVALID'); };
 const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
-const string = (v, max) => typeof v === 'string' && v.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(v);
+const string = (v, max) => typeof v === 'string' && v.length <= max && v.isWellFormed() && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(v);
 export function validateTextResult(v) {
   if (!exact(v, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'title', 'text', 'controls', 'nextOffset', 'scanLimited',
     ...(Object.hasOwn(v || {}, 'linkTargetsLimited') ? ['linkTargetsLimited'] : [])]) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
@@ -173,3 +179,9 @@ export function validateTextResult(v) {
   if (Buffer.byteLength(JSON.stringify(v)) > 40_000) fail();
   return v;
 }
+
+/** Only fixed reviewed functions and the signed boolean enter the isolated
+ * script. No page code, selector, caller source or text content is evaluated.
+ */
+export const buildTextObserverScript = (includeLinkTargets = false) =>
+  `(${installTextObserver.toString()})(${readableLinkUrl.toString()},${includeLinkTargets === true},(${createUtf16TextPolicy.toString()})());`;

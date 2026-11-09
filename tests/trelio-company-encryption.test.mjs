@@ -263,7 +263,7 @@ test("bridge streams a browser-compatible multi-chunk TRELIOE1 file", async () =
         entityRevision: 1,
         schemaVersion: 1,
       },
-      originalName: "workspace.bundle",
+      originalName: "n".repeat(1023) + "💗tail",
       mimeType: "application/vnd.git.bundle",
     });
     const decrypted = await decryptFileFromCompanyContainer({
@@ -281,9 +281,10 @@ test("bridge streams a browser-compatible multi-chunk TRELIOE1 file", async () =
       maximumPlaintextBytes: bytes.byteLength,
     });
 
-    assert.equal(decrypted.originalName, "workspace.bundle");
+    assert.equal(decrypted.originalName, "n".repeat(1023));
+    assert.ok(decrypted.originalName.isWellFormed());
     assert.deepEqual(await readFile(decryptedPath), bytes);
-    assert.equal(decryptedInMemory.originalName, "workspace.bundle");
+    assert.equal(decryptedInMemory.originalName, "n".repeat(1023));
     assert.deepEqual(decryptedInMemory.bytes, bytes);
     decryptedInMemory.bytes.fill(0);
 

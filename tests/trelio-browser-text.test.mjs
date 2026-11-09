@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
-import { TEXT_KIND, installTextObserver, readableLinkUrl, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
+import { TEXT_KIND, buildTextObserverScript, readableLinkUrl, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
 const sample = () => ({ kind: TEXT_KIND, state: 'ready', reason: 'none', sessionId: '12345678-1234-4234-8234-123456789012', frameId: '12345678-1234-4234-8234-123456789013', width: 1440, height: 1000, scroll: { up: false, down: true, left: false, right: false }, title: 'Fixture', text: 'Объявление', controls: [{ role: 'button', label: 'Найти', x: 200, y: 100 }], nextOffset: null, scanLimited: false });
 
 // Synthetic published-document markup, not a copy of any provider page. The
@@ -71,11 +71,44 @@ test('the actual fixed observer does not read href without signed external-navig
     document: { title: 'Synthetic source', body: {}, createTreeWalker: () => ({ nextNode: () => null }),
       querySelectorAll: selector => selector.includes('input[type="password"]') ? [] : [anchor], elementFromPoint: () => anchor } });
   for (const includeTargets of [false, true]) {
-    vm.runInContext(`(${installTextObserver.toString()})(${readableLinkUrl.toString()},${includeTargets});`, context);
+    vm.runInContext(buildTextObserverScript(includeTargets), context);
     handler({ kind: 'read_rendered_text' }, { id: 'synthetic-extension' }, value => { result = value; });
     assert.equal(result.controls[0].url, includeTargets ? anchor.href : undefined);
     if (!includeTargets) assert.equal(hrefReads, 0, 'legacy observation must not even inspect the link destination');
   }
+});
+test('isolated observer pages and metadata keep emoji whole using the packaged common policy', () => {
+  let handler;
+  const source = 'a'.repeat(5999) + '💗👍🏽👨‍👩‍👧‍👦🇷🇺' + 'z'.repeat(6100);
+  const parent = { parentElement: null, closest: () => null, getAttribute: () => null,
+    getClientRects: () => [{}] };
+  const context = vm.createContext({ URL, URLSearchParams, TextEncoder,
+    NodeFilter: { SHOW_TEXT: 4 }, getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    chrome: { runtime: { id: 'synthetic-extension', onMessage: { addListener(value) { handler = value; } } } },
+    document: { title: 't'.repeat(239) + '💗tail', body: {}, querySelectorAll: () => [],
+      createTreeWalker() { let read = false; return { nextNode() {
+        if (read) return null; read = true; return { textContent: source, parentElement: parent };
+      } }; } } });
+  // Execute exactly the same self-contained script that is written for Chrome,
+  // without supplying lexical imports that the isolated world cannot capture.
+  vm.runInContext(buildTextObserverScript(), context);
+  const read = offset => { let result;
+    handler({ kind: 'read_rendered_text', offset, includeControls: false }, { id: 'synthetic-extension' }, value => { result = value; });
+    return result;
+  };
+  let offset = 0, rebuilt = '';
+  for (;;) {
+    const result = read(offset);
+    assert.ok(result.text.isWellFormed()); assert.ok(result.title.isWellFormed());
+    assert.ok(result.text.length <= 6000); assert.ok(result.title.length <= 240);
+    rebuilt += result.text;
+    if (result.nextOffset === null) break;
+    assert.equal(result.nextOffset, offset + result.text.length);
+    assert.ok(result.nextOffset > offset); offset = result.nextOffset;
+  }
+  assert.equal(rebuilt, source);
+  assert.equal(read(6000).error, 'invalid_input');
+  for (const key of ['title', 'text']) assert.throws(() => validateTextResult({ ...sample(), [key]: '\uD83D' }), /VISUAL_RESULT_INVALID/);
 });
 test('text crosses the actual typed MCP action handler without generic stdout truncation', async () => {
   const { handleToolCall } = await import('../host-runtime/scripts/trelio-remote-mcp.mjs');

@@ -92,3 +92,28 @@ test("discovery resolves a binary original above an old registry mention without
   assert.deepEqual(exact.materialize.arguments.parameters, { workspaceId: id, workspaceHead: head, filePath: found.path });
   assert.throws(() => getWorkspaceFileFromMirror(mirror, { workspaceId: id, workspaceHead: "c".repeat(40), filePath: found.path }), { code: "LOCAL_CONTEXT_WORKSPACE_OUTDATED" });
 });
+
+test("generated common text pages and guidance keep Unicode valid within legacy budgets", async () => {
+  const { readUtf16TextChunk, sliceUtf16CodePoints } = await import('../host-runtime/scripts/trelio-context-search-matching.mjs');
+  const { compactSearchGuidance } = await import('../host-runtime/scripts/trelio-agent-guidance-search.mjs');
+  const source = 'a'.repeat(7999) + '💗👍🏽👨‍👩‍👧‍👦🇷🇺' + 'b'.repeat(8100);
+  let offset = 0, rebuilt = '';
+  for (;;) {
+    const page = readUtf16TextChunk(source, offset, 8000);
+    assert.ok(page.text.isWellFormed()); assert.ok(page.text.length <= 8000);
+    rebuilt += page.text;
+    if (page.nextOffset === null) break;
+    assert.equal(page.nextOffset, offset + page.text.length); assert.ok(page.nextOffset > offset);
+    offset = page.nextOffset;
+  }
+  assert.equal(rebuilt, source);
+  assert.throws(() => readUtf16TextChunk(source, 8000, 8000), /offset splits/);
+  assert.throws(() => readUtf16TextChunk('💗', 0, 1), /limit cannot fit/);
+  assert.ok(sliceUtf16CodePoints(source, 8000, 8100).isWellFormed());
+  const edge = limit => 'a'.repeat(limit - 1) + '💗tail';
+  const result = compactSearchGuidance([{ kind: 'skill', id: 'synthetic', title: edge(160),
+    description: edge(180), match: { matchedTerms: [edge(80)] } }], { companySlug: 'synthetic' }).items[0];
+  for (const [value, limit] of [[result.title, 160], [result.descriptionPreview, 180], [result.matchedTerms[0], 80]]) {
+    assert.ok(value.isWellFormed()); assert.ok(value.length <= limit); assert.ok(!value.includes('\uFFFD'));
+  }
+});

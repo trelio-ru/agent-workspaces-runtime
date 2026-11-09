@@ -349,3 +349,17 @@ test('shared child transport retains complete visual-size frames only under the 
   assert.equal(ordinary.stdout.length,1024*1024);
   await assert.rejects(runWorkspaceFinishProcess(process.execPath,['-e','process.exit(99)'],{maximumCharacters:16*1024*1024}),/output bound/);
 });
+
+test("bounded child stdout and stderr tails keep whole supplementary characters", async () => {
+  // Force the retained suffix to begin on the low half of a pair in the old
+  // implementation. Write both real pipes and include a final nonzero exit so
+  // the same invariant is exercised in the attached failure diagnostics.
+  const source = `const text='prefix💗'+'x'.repeat(1024*1024-1);process.stdout.write(text);process.stderr.write(text);process.exitCode=7;`;
+  await assert.rejects(runWorkspaceFinishProcess(process.execPath, ["-e", source], {}), error => {
+    for (const output of [error.stdout, error.stderr]) {
+      assert.equal(output, "x".repeat(1024 * 1024 - 1));
+      assert.equal(output.isWellFormed(), true);
+    }
+    return true;
+  });
+});

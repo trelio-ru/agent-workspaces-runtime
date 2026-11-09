@@ -934,3 +934,16 @@ input и Enter. Foreground совпал до/после каждого дейс�
 а не доказательство готовности Windows/Linux или любого сценария сайта.
 Предыдущий DevTools-pipe эксперимент зацикливал challenge; он удалён из рабочего
 пути. Native CGEvent/AX probes также не являются provider fallback.
+
+
+### Unicode boundaries in fixed text observation
+
+The isolated reader receives the self-contained factory of the SAME generated
+Unicode policy. `buildTextObserverScript` serializes only reviewed fixed functions
+and the signed boolean, never page/caller code. Title/control prefixes and both
+text-page boundaries preserve complete code points within their UTF-16 budgets.
+Continuation advances by the actual cut; a manually split offset returns the
+existing `invalid_input`. Renderer result validation also refuses lone surrogates.
+Tests execute that exact script without lexical host imports and reconstruct a
+multi-page synthetic document byte-for-byte. Content/privacy guards, no field-value
+reads, visibility, scan limits, origins and native mutation authority are unchanged.

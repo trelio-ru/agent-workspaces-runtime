@@ -1,4 +1,75 @@
 // Generated context discovery and ordinary list policies. Do not edit by hand.
+/** Self-contained policy factory: the fixed browser observer serializes this
+ * exact source into its isolated world without importing page code or copying
+ * a second implementation. Native, browser and host keep one boundary policy.
+ */
+export function createUtf16TextPolicy() {
+    /**
+     * Preserve the existing UTF-16 budgets and offsets at text boundaries. String
+     * slicing can manufacture a lone surrogate from valid input; strict JSON
+     * readers reject that response before the application can handle it. Inspect
+     * only the two cut positions, without copying a large file to a code-point array.
+     * This pure source is shared by backend, browser and the generated host policy.
+     * @param {string} text
+     * @param {number} offset
+     */
+    const splitsCodePoint = (text, offset) => {
+        const before = text.charCodeAt(offset - 1);
+        const after = text.charCodeAt(offset);
+        return before >= 0xD800 && before <= 0xDBFF && after >= 0xDC00 && after <= 0xDFFF;
+    };
+    /** @param {number} offset @param {number} length */
+    const sliceOffset = (offset, length) => {
+        const integer = Math.trunc(offset) || 0;
+        return integer < 0 ? Math.max(0, length + integer) : Math.min(length, integer);
+    };
+    /** Display-only window: move a split edge inward, keeping the original budget.
+     * This does not normalize source text or promise grapheme-cluster segmentation.
+     * @param {string} text
+     * @param {number} [start]
+     * @param {number} [end]
+     */
+    const sliceUtf16CodePoints = (text, start = 0, end = text.length) => {
+        start = sliceOffset(start, text.length);
+        end = sliceOffset(end, text.length);
+        if (splitsCodePoint(text, start))
+            start++;
+        if (splitsCodePoint(text, end))
+            end--;
+        return text.slice(start, Math.max(start, end));
+    };
+    /** Lossless paging uses a different rule from display truncation: the start
+     * must be an actual boundary, and the cursor follows the *actual* end. Silently
+     * dropping the leading low surrogate would lose content and corrupt cursors.
+     * An explicit invalid offset or a one-unit budget at an emoji is a recoverable
+     * input error, never an empty page with a non-advancing continuation.
+     * @param {string} text
+     * @param {number} offset
+     * @param {number} limit
+     * @param {(message: string) => Error} [invalidInput]
+     */
+    const readUtf16TextChunk = (text, offset, limit, invalidInput = (message) => new RangeError(message)) => {
+        if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1) {
+            throw invalidInput("Text offset and limit must be nonnegative/positive safe integers.");
+        }
+        if (splitsCodePoint(text, offset)) {
+            throw invalidInput("Text offset splits a Unicode code point. Use the returned nextOffset.");
+        }
+        let end = Math.min(text.length, offset + limit);
+        if (splitsCodePoint(text, end))
+            end--;
+        if (end <= offset && offset < text.length) {
+            throw invalidInput("Text limit cannot fit a Unicode code point. Use a limit of at least 2.");
+        }
+        return {
+            text: text.slice(offset, end),
+            nextOffset: end < text.length ? end : null,
+        };
+    };
+    return { sliceUtf16CodePoints, readUtf16TextChunk };
+}
+export const { sliceUtf16CodePoints, readUtf16TextChunk } = createUtf16TextPolicy();
+
 /**
  * Portable agent-search policy. The same patterns run in PostgreSQL and in the
  * encrypted local mirror; neither provider may substitute its own dictionary,
@@ -76,25 +147,6 @@ const findContextSearchEvidenceSpans = (compactText, rawQueries) => {
             .sort((left, right) => left.start - right.start || left.end - right.end)
             .map((span) => [`${span.start}:${span.end}`, span])).values()];
 };
-/**
- * Keep the existing UTF-16 size/offset contract, but move a cut inside a
- * surrogate pair inward. A half-emoji is not a Unicode scalar: JavaScript can
- * serialize it as an escape while a strict JSON client rejects the entire MCP
- * response. Inspect only the two boundaries, rather than spreading a possibly
- * large document into a second code-point array for every preview.
- */
-const sliceContextSearchCodePoints = (text, start, end) => {
-    const splitsPair = (offset) => {
-        const previous = text.charCodeAt(offset - 1);
-        const current = text.charCodeAt(offset);
-        return previous >= 0xD800 && previous <= 0xDBFF && current >= 0xDC00 && current <= 0xDFFF;
-    };
-    if (splitsPair(start))
-        start++;
-    if (splitsPair(end))
-        end--;
-    return text.slice(start, Math.max(start, end));
-};
 const sliceContextSearchPreview = (text, evidenceStart, evidenceEnd, limit) => {
     if (text.length <= limit)
         return text;
@@ -109,7 +161,7 @@ const sliceContextSearchPreview = (text, evidenceStart, evidenceEnd, limit) => {
     const suffix = end < text.length ? "…" : "";
     // contentBudget already reserves both ellipses. A second raw slice here
     // would reintroduce the very same invalid-Unicode edge after the safe cut.
-    return `${prefix}${sliceContextSearchCodePoints(text, start, end)}${suffix}`;
+    return `${prefix}${sliceUtf16CodePoints(text, start, end)}${suffix}`;
 };
 /**
  * Build display evidence only after ranking. A nearby match gets one readable
@@ -123,7 +175,7 @@ export const buildContextSearchPreview = (value, rawQueries, maxLength = CONTEXT
         return compactText;
     const spans = findContextSearchEvidenceSpans(compactText, rawQueries);
     if (spans.length === 0)
-        return `${sliceContextSearchCodePoints(compactText, 0, limit - 1)}…`;
+        return `${sliceUtf16CodePoints(compactText, 0, limit - 1)}…`;
     const first = spans[0];
     const last = spans.at(-1);
     if (last.end - first.start <= limit - 2) {
@@ -182,7 +234,7 @@ export const matchesContextListDocument = (type, payload, rawQuery) => {
         // Native list pages filters the compact index preview, never full body,
         // discussion, sidebar pages, audit actors or rich-text editor metadata.
         const body = String(entity.bodyPlainText ?? "").trim().replace(/\s+/gu, " ");
-        const preview = entity.previewText ?? (body.length <= 180 ? body : `${body.slice(0, 177).trimEnd()}...`);
+        const preview = entity.previewText ?? (body.length <= 180 ? body : `${sliceUtf16CodePoints(body, 0, 177).trimEnd()}...`);
         return [entity.title, entity.slug, preview].some((value) => listLower(value).includes(listLower(query)));
     }
     if (type === "registry") {

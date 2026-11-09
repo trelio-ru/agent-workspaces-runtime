@@ -1,3 +1,4 @@
+import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { outsideTrelioCallBudget } from "./trelio-hook-private-session.mjs";
@@ -330,10 +331,10 @@ export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onPro
   }
   const child = spawn(executable, args, { cwd, signal, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "", failure = null;
-  const parse = createFinishProgressParser(onProgress, (text) => { stderr = (stderr + text).slice(-maximumCharacters); });
+  const parse = createFinishProgressParser(onProgress, (text) => { stderr = sliceUtf16CodePoints(stderr + text, -maximumCharacters); });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => { stdout = (stdout + chunk).slice(-maximumCharacters); });
+  child.stdout.on("data", (chunk) => { stdout = sliceUtf16CodePoints(stdout + chunk, -maximumCharacters); });
   child.stderr.on("data", (chunk) => {
     parse(chunk);
   });

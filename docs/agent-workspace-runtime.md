@@ -2700,6 +2700,17 @@ Shared ranking генерируется из backend `shared/context-search-rank
 `scripts/build-context-search-ranking.mjs --runtime-root <checkout>`; `--check`
 проверяет exact bytes и не допускает ручного semantic/performance fork.
 
+Общая Unicode policy принадлежит backend `shared/unicode-text.js` и генерируется
+в существующий `trelio-context-search-matching.mjs` вместе с matching/list policy.
+Guidance, task-list previews, metadata/file names и bounded process text используют
+тот же helper, без дополнительного файла package или повышения minimum.
+`readUtf16TextChunk` для accepted файлов/diff сохраняет целые code points и выдаёт
+cursor фактического конца порции. Сборка по cursors равна исходному тексту; ручной
+offset внутрь пары и limit `1` перед supplementary point получают существующий
+`LOCAL_CONTEXT_INVALID_INPUT`, без пустого непродвигающегося nextOffset. Лимиты
+измеряются UTF-16, а grapheme-cluster segmentation не вводится. Source validation,
+ACL/crypto/revision и hard bounds сохраняются.
+
 Preview сохраняет прежние UTF-16 offsets и предел длины, но обе границы каждого
 фрагмента сдвигаются внутрь, если разрезают surrogate pair. Это относится и к
 первому witness, и к итоговому snippet, включая два далёких фрагмента и fallback

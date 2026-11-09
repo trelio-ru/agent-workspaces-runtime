@@ -3777,6 +3777,7 @@ test("local encrypted history reproduces bounded native diff and file reads", as
       fs.writeFile(path.join(repository, "README.md"), "accepted readme\n"),
       fs.writeFile(path.join(repository, ".trelio", "workspace.json"), "after metadata\n"),
       fs.writeFile(path.join(repository, "artifacts", "report.md"), "after line\nsecond line\nthird line\n"),
+      fs.writeFile(path.join(repository, "artifacts", "emoji.md"), "a".repeat(39999) + "💗👍🏽👨‍👩‍👧‍👦🇷🇺tail"),
       fs.writeFile(path.join(repository, "artifacts", "note[1].md"), "selected after\n"),
       fs.writeFile(path.join(repository, "artifacts", "note1.md"), "sibling after\n"),
     ]);
@@ -3821,6 +3822,31 @@ test("local encrypted history reproduces bounded native diff and file reads", as
     });
     assert.equal(before.text, "line");
     assert.equal(before.nextOffset, 9);
+    const emojiSource = "a".repeat(39999) + "💗👍🏽👨‍👩‍👧‍👦🇷🇺tail";
+    let rebuilt = "", emojiOffset = 0;
+    do {
+      const page = await readLocalWorkspaceRevisionFile({ repositoryDirectory: repository,
+        revisionHead: acceptedHead, filePath: "artifacts/emoji.md", offset: emojiOffset, limit: 40000 });
+      assert.ok(page.text.isWellFormed()); assert.ok(page.text.length <= 40000);
+      rebuilt += page.text;
+      if (page.nextOffset === null) break;
+      assert.equal(page.nextOffset, emojiOffset + page.text.length);
+      assert.ok(page.nextOffset > emojiOffset); emojiOffset = page.nextOffset;
+    } while (true);
+    assert.equal(rebuilt, emojiSource, "file paging must not drop or duplicate any code unit");
+    await assert.rejects(readLocalWorkspaceRevisionFile({ repositoryDirectory: repository,
+      revisionHead: acceptedHead, filePath: "artifacts/emoji.md", offset: 40000 }),
+      error => error.code === "LOCAL_CONTEXT_INVALID_INPUT");
+    const entirePatch = await inspectLocalWorkspaceRevisionDiff({ repositoryDirectory: repository,
+      baseHead, acceptedHead, filePath: "artifacts/emoji.md", patchLimit: 100000 });
+    const emojiAt = entirePatch.patch.indexOf("💗"); assert.ok(emojiAt > 0);
+    const firstPatch = await inspectLocalWorkspaceRevisionDiff({ repositoryDirectory: repository,
+      baseHead, acceptedHead, filePath: "artifacts/emoji.md", patchLimit: emojiAt + 1 });
+    assert.ok(firstPatch.patch.isWellFormed()); assert.equal(firstPatch.nextPatchOffset, emojiAt);
+    const secondPatch = await inspectLocalWorkspaceRevisionDiff({ repositoryDirectory: repository,
+      baseHead, acceptedHead, filePath: "artifacts/emoji.md", patchOffset: firstPatch.nextPatchOffset });
+    assert.ok(secondPatch.patch.isWellFormed());
+    assert.equal(firstPatch.patch + secondPatch.patch, entirePatch.patch);
     const readme = await readLocalWorkspaceRevisionFile({
       repositoryDirectory: repository,
       revisionHead: acceptedHead,
@@ -5468,4 +5494,16 @@ test('canonical exact fetch parsing supplies only native source coordinates with
   assert.deepEqual(exactCompanyFetchLocator(`context:registry:${documentId}`),{type:'context',documentType:'registry',documentId});
   for(const value of ['task:synthetic/legacy-alias/7',`task:synthetic/${projectSlug}/0`,
     'context:registry:bad-id',`workspace:${documentId}`,null])assert.equal(exactCompanyFetchLocator(value),null);
+});
+
+test("actual local task lists preserve supplementary Unicode in description previews", () => {
+  const fixture = structuredClone(mirror);
+  const source = 'а'.repeat(499) + '💗👍🏽👨‍👩‍👧‍👦🇷🇺 хвост';
+  fixture.tasks[0].payload.task.descriptionPlainText = source;
+  for (const tool of ['list_my_tasks', 'list_project_tasks']) {
+    const result = handleNativeLocalContextRead(fixture, tool, { companySlug: 'acme', projectSlug: 'mobile' });
+    const preview = result.tasks.find(task => task.id === fixture.tasks[0].id).descriptionPreview;
+    assert.equal(preview, 'а'.repeat(499));
+    assert.ok(preview.isWellFormed()); assert.ok(!preview.includes('\uFFFD'));
+  }
 });

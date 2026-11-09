@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 
@@ -1476,7 +1477,7 @@ export class TrelioApiError extends Error {
     code = null,
     payload = null,
   ) {
-    super(`Trelio API ${statusCode}: ${String(message).slice(0, 1000)}`);
+    super(`Trelio API ${statusCode}: ${sliceUtf16CodePoints(String(message), 0, 1000)}`);
     this.statusCode = statusCode;
     this.retryAfterMilliseconds = retryAfterMilliseconds;
     this.code = code;
@@ -2940,7 +2941,7 @@ const parseJsonCommandOutput = (rawOutput, commandLabel) => {
 };
 
 const buildChildProcessErrorDetail = (error) => (
-  String(error?.stderr || error?.stdout || error?.message || error).trim().slice(0, 4_000)
+  sliceUtf16CodePoints(String(error?.stderr || error?.stdout || error?.message || error).trim(), 0, 4_000)
 );
 
 export const isCodexPluginAutoUpdateEnvironment = (
@@ -5303,7 +5304,7 @@ export class BridgePairingRequiredError extends Error {
 }
 
 const buildBridgeDeviceIdentity = () => ({
-  deviceName: String(os.hostname() || "Local device").trim().slice(0, 120),
+  deviceName: sliceUtf16CodePoints(String(os.hostname() || "Local device").trim(), 0, 120),
   platform: `${process.platform}/${process.arch}`.slice(0, 64),
 });
 
@@ -6772,7 +6773,7 @@ const registerCompanyEncryptionDevice = async ({
       body: JSON.stringify({
         companySlug: runtime.company.slug,
         suite: COMPANY_ENCRYPTION_SUITE,
-        name: `Agent Workspaces – ${os.hostname()}`.slice(0, 255),
+        name: sliceUtf16CodePoints(`Agent Workspaces – ${os.hostname()}`, 0, 255),
         platform: `${process.platform}/${process.arch}`.slice(0, 64),
         publicEncryptionJwk: device.publicEncryptionJwk,
         publicSigningJwk: device.publicSigningJwk,

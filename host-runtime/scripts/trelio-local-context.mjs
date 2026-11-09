@@ -1,3 +1,4 @@
+import { readUtf16TextChunk, sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, createCompanySearchOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
@@ -2890,15 +2891,14 @@ const protectLocalActionUpload = async ({
       )
     : crypto.randomUUID();
   const originalName = normalizeBoundedString(rawArguments.fileName, "fileName", 255);
-  const mimeType = String(rawArguments.contentType || "application/octet-stream")
+  const mimeType = sliceUtf16CodePoints(String(rawArguments.contentType || "application/octet-stream")
     .trim()
-    .toLowerCase()
-    .slice(0, 255) || "application/octet-stream";
+    .toLowerCase(), 0, 255) || "application/octet-stream";
   const values = {
     original_name: originalName,
     mime_type: mimeType,
     ...(typeof rawArguments.altText === "string" && rawArguments.altText.trim()
-      ? { alt_text: rawArguments.altText.trim().slice(0, 1000) }
+      ? { alt_text: sliceUtf16CodePoints(rawArguments.altText.trim(), 0, 1000) }
       : {}),
   };
 
@@ -2986,9 +2986,9 @@ export const buildLocalTaskAttachmentStreamRequest = async ({
   const originalName = typeof rawArguments?.fileName === "string" && rawArguments.fileName.trim()
     ? normalizeBoundedString(rawArguments.fileName, "fileName", 255)
     : normalizeBoundedString(path.basename(staging.originalPath), "fileName", 255);
-  const mimeType = String(
+  const mimeType = sliceUtf16CodePoints(String(
     rawArguments?.contentType || inferLocalActionUploadContentType(originalName),
-  ).trim().toLowerCase().slice(0, 255) || "application/octet-stream";
+  ).trim().toLowerCase(), 0, 255) || "application/octet-stream";
   if (isPublicImage && !["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType)) {
     throw new TrelioLocalContextError("PUBLIC_FEEDBACK_IMAGE_TYPE_UNSUPPORTED", "Only JPEG, PNG, GIF and WebP screenshots are supported.");
   }
@@ -5927,7 +5927,7 @@ const buildLocalListedTask = (mirror, record, rawInput) => {
     id: record.id,
     number: record.number,
     title: task.title,
-    descriptionPreview: String(task.descriptionPlainText || "").trim().slice(0, 500),
+    descriptionPreview: sliceUtf16CodePoints(String(task.descriptionPlainText || "").trim(), 0, 500),
     publicPath,
     url: mirror.origin ? new URL(publicPath, mirror.origin).toString() : publicPath,
     archiveState: task.isArchived || task.archivedAt ? "archived" : "active",
@@ -10755,7 +10755,7 @@ const truncateWorkspaceActionOutput = (value) => {
   const output = String(value || "");
   return output.length <= 64 * 1024
     ? output
-    : `${output.slice(0, 64 * 1024)}\n[output truncated]`;
+    : `${sliceUtf16CodePoints(output, 0, 64 * 1024)}\n[output truncated]`;
 };
 
 export const workspaceActionFailureCode = (error, operation) => {
@@ -11702,13 +11702,10 @@ export const inspectLocalWorkspaceRevisionDiff = async ({
     normalizedFilePath,
   ], { cwd: repositoryDirectory, signal });
   const patchTotalChars = patchResult.stdout.length;
-  const patch = patchResult.stdout.slice(
-    normalizedPatchOffset,
-    normalizedPatchOffset + normalizedPatchLimit,
+  const { text: patch, nextOffset: nextPatchOffset } = readUtf16TextChunk(
+    patchResult.stdout, normalizedPatchOffset, normalizedPatchLimit,
+    (message) => new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", message),
   );
-  const nextPatchOffset = normalizedPatchOffset + patch.length < patchTotalChars
-    ? normalizedPatchOffset + patch.length
-    : null;
 
   return {
     baseHead: normalizedBaseHead,
@@ -11808,10 +11805,8 @@ export const readLocalWorkspaceRevisionFile = async ({
     );
   }
   const fullText = bytes.toString("utf8");
-  const text = fullText.slice(normalizedOffset, normalizedOffset + normalizedLimit);
-  const nextOffset = normalizedOffset + text.length < fullText.length
-    ? normalizedOffset + text.length
-    : null;
+  const { text, nextOffset } = readUtf16TextChunk(fullText, normalizedOffset, normalizedLimit,
+    (message) => new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", message));
 
   return {
     text,

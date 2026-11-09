@@ -723,8 +723,9 @@ publication tooling также остаются вне этого публичн
   pure module. Все formulations документа делят bounded file-local matcher;
   rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
   ranking генерируется backend `build-context-search-ranking.mjs`; проверяй `--check`.
-  Preview cuts preserve whole Unicode code points within the existing UTF-16
-  budget; regenerate matching from backend and test both window edges/emoji.
+  Bounded human text uses the generated common Unicode policy; preserve UTF-16
+  budgets and exact paging cursors. Test both emoji edges, lossless reconstruction
+  and the fixed observer's self-contained script; see the runtime Unicode contract.
   Проверяй native/local parity, большие файлы, границы UTF-8/слов,
   crypto binding и очистку staging по [контракту](docs/agent-workspace-runtime.md).
   Modern projection reads use at most four <=1-MiB files; large streams remain

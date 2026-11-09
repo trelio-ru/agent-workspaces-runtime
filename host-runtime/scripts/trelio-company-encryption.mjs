@@ -1,7 +1,9 @@
+import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 /**
  * Browser-compatible primitives for encrypted Trelio companies.
  *
- * The bridge deliberately keeps this module dependency-free.  Node.js 22
+ * The bridge uses only the common pure Unicode policy, without external
+ * runtime dependencies. Node.js 22
  * already provides the P-256, HKDF and AES-GCM primitives required by RFC
  * 9180, while a small local implementation prevents the installed plugin from
  * depending on a mutable global npm tree.  Secret phrases and private JWKs
@@ -979,8 +981,8 @@ export const encryptFileToCompanyContainer = async ({
     aad: { ...aad, purpose: "file-data-key" },
   });
   const metadataPlaintext = canonicalBytes({
-    originalName: String(originalName || "file").slice(0, 1024),
-    mimeType: String(mimeType || "application/octet-stream").slice(0, 255),
+    originalName: sliceUtf16CodePoints(String(originalName || "file"), 0, 1024),
+    mimeType: sliceUtf16CodePoints(String(mimeType || "application/octet-stream"), 0, 255),
   });
   const metadataCiphertext = await webcrypto.subtle.encrypt(
     {

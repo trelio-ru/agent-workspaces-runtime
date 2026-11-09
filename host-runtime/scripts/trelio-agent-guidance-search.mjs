@@ -1,10 +1,11 @@
 // Generated portable guidance search. Do not edit by hand.
+import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 /* Pure guidance matching shared by native MCP and the encrypted local mirror.
  * Keep this module free of DB, transport and company-content dependencies. */
 export const DEFAULT_GUIDANCE_RESULTS = 3;
 export const MAX_GUIDANCE_RESULTS = 5;
 export const guidanceSearchInput = (input) => ({
-    query: (input.intent ?? input.queries.join(" ")).slice(0, 500),
+    query: sliceUtf16CodePoints(input.intent ?? input.queries.join(" "), 0, 500),
     // Keep original intent for lexical discovery. A query that is exactly a
     // technical slug can also resolve an already chosen awareness hint; only
     // an exact member of the ACL-filtered catalog receives the lookup priority.
@@ -21,9 +22,9 @@ export const compactSearchGuidance = (candidates, scope, rawLimit) => {
         status: "searched",
         items: candidates.slice(0, limit).map((candidate) => ({
             kind: candidate.kind,
-            title: candidate.title.slice(0, 160),
-            descriptionPreview: candidate.description.slice(0, 180),
-            matchedTerms: candidate.match.matchedTerms.slice(0, 3).map((term) => term.slice(0, 80)),
+            title: sliceUtf16CodePoints(candidate.title, 0, 160),
+            descriptionPreview: sliceUtf16CodePoints(candidate.description, 0, 180),
+            matchedTerms: candidate.match.matchedTerms.slice(0, 3).map((term) => sliceUtf16CodePoints(term, 0, 80)),
             ...(candidate.kind === "skill" && candidate.readiness ? { readiness: {
                     company: candidate.readiness.company,
                     personal: candidate.readiness.personal,
