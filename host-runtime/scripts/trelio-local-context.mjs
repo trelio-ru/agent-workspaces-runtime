@@ -8527,6 +8527,8 @@ export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug,
 const HUMAN_SEARCH_TOOLS = new Set(["search", "search_agent_workspace_files", "search_agent_secrets", "search_agent_guidance"]);
 const HUMAN_SEARCH_STAGES = new Set(["starting", "access", "mirror_read", "mirror_wait", "manifest", "hydrating", "verifying", "publishing", "searching"]);
 export const isHumanCompanySearch = input => input?.operation === "native_read" && HUMAN_SEARCH_TOOLS.has(input.nativeTool);
+export const isHumanCompanySearchPoll = input => input?.operation === "search_poll" && HUMAN_SEARCH_TOOLS.has(input.nativeTool)
+  && input.arguments && Object.keys(input.arguments).length === 0;
 const humanSearchBinding = (origin, provider) => {
   const { runtime } = provider.companyEncryption;
   return sha256(JSON.stringify([origin, provider.token, runtime.company.id,
@@ -8538,7 +8540,7 @@ const humanSearchBinding = (origin, provider) => {
  * store and perform fresh native admission. Re-pairing, scope rotation or a
  * different device must not release an old process's retained plaintext. */
 export const readHumanCompanySearchAdmission = async (origin, input, { signal } = {}) => {
-  if (!isHumanCompanySearch(input) || currentWorkspaceExecutionProfile()
+  if (!(isHumanCompanySearch(input) || isHumanCompanySearchPoll(input)) || currentWorkspaceExecutionProfile()
     || Buffer.byteLength(JSON.stringify(input)) > 64 * 1024)
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Недопустимый запрос локального поиска.");
   const companySlug = normalizeCompanySlug(input.companySlug);

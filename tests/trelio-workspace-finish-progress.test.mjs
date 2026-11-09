@@ -38,6 +38,10 @@ test("company search shares one isolated preparation, survives short wait cancel
   assert.equal(first.nextCall.arguments.parameters.searchOperationId, first.operationId);
   const second = await reader.read("https://synthetic.invalid", searchInput);
   assert.equal(second.operationId, first.operationId);
+  assert.deepEqual(first.nextCall.arguments.parameters.arguments, {});
+  assert.doesNotMatch(JSON.stringify(first), /PRIVATE_QUERY|PRIVATE_ANSWER/u);
+  const compactPoll = first.nextCall.arguments.parameters;
+  await assert.rejects(reader.read("https://synthetic.invalid", { ...compactPoll, nativeTool: "search_agent_guidance" }, { operationId: first.operationId }), { code: "LOCAL_CONTEXT_SEARCH_UNKNOWN" });
   await assert.rejects(reader.read("https://synthetic.invalid", { ...searchInput, arguments: { queries: ["changed"] } }), { code: "LOCAL_CONTEXT_SEARCH_IN_PROGRESS" });
   const cancelled = new AbortController();
   cancelled.abort();

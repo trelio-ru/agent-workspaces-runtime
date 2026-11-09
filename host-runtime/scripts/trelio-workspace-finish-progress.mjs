@@ -174,7 +174,8 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
     operationId: value.operationId, elapsedMs: value.elapsedMs,
     progress: { stage: entry.stage, stageElapsedMs: Math.max(0, Math.round(performance.now() - entry.stageAt)), timings: { ...entry.timings } },
     nextCall: { server: "trelio-remote-skills", tool: "continue_trelio_local_action", arguments: {
-      schemaVersion: 1, route: "context", parameters: { ...entry.input, searchOperationId: value.operationId },
+      schemaVersion: 1, route: "context", parameters: { companySlug: entry.input.companySlug,
+        nativeTool: entry.input.nativeTool, operation: "search_poll", arguments: {}, searchOperationId: value.operationId },
     } },
     instruction: "Подготовка и поиск продолжаются. Вызовите nextCall; это продолжение одной операции, а не новый поиск. preparing не является результатом поиска.",
   });
@@ -207,8 +208,12 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
       }
       const fingerprint = canonicalJson({ origin, input });
       let entry = current;
-      if (operationId && (!entry || entry.id !== operationId || entry.fingerprint !== fingerprint))
+      const poll = input.operation === "search_poll";
+      if (operationId && (!entry || entry.id !== operationId || (poll
+        ? entry.input.companySlug !== input.companySlug || entry.input.nativeTool !== input.nativeTool || entry.origin !== origin
+        : entry.fingerprint !== fingerprint)))
         fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Операция поиска неизвестна этому host. Выполните новый поиск через native Trelio.");
+      if (poll && !operationId) fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Продолжение поиска требует точный идентификатор операции.");
       if (entry && entry.binding !== admission.binding) {
         entry.controller.abort(); clearTimeout(entry.retentionTimer);
         await closeReader();
@@ -222,7 +227,7 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
       if (!operationId && (!entry || entry.settled && entry.fingerprint !== fingerprint)) {
         if (entry) { clearTimeout(entry.retentionTimer); operations.discardTerminal("search", entry.id, entry.binding); }
         const controller = new AbortController();
-        entry = { input: structuredClone(input), fingerprint, binding: admission.binding, controller,
+        entry = { origin, input: structuredClone(input), fingerprint, binding: admission.binding, controller,
           stage: "starting", stageAt: performance.now(), timings: {}, settled: false };
         current = entry;
       }

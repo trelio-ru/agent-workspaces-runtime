@@ -122,6 +122,7 @@ import {
   completeHumanCompanySearch,
   closeHumanCompanySearches,
   isHumanCompanySearch,
+  isHumanCompanySearchPoll,
   handleTrelioLocalActionOperation,
   handleTrelioLocalProposalOperation,
   handleTrelioLocalWorkspaceOperation,
@@ -5675,7 +5676,11 @@ export const handleToolCall = async (
 ) => {
   throwIfAborted(signal);
   const runLocalContextRoute = async (routeArguments, operationId) => {
-    const search = isHumanCompanySearch(routeArguments)
+    // A poll changes only waiting. Completed values retain the same semantic
+    // projection, selection refs and exact fetch continuation as a direct read.
+    const readArguments = routeArguments.operation === "search_poll"
+      ? { ...routeArguments, operation: "native_read" } : routeArguments;
+    const search = (isHumanCompanySearch(routeArguments) || isHumanCompanySearchPoll(routeArguments))
       ? (localSearchOperation ?? (localContextOperation === handleTrelioLocalContextOperation ? completeHumanCompanySearch : null)) : null;
     if (operationId !== undefined && (!search || typeof operationId !== "string"))
       throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Недопустимое продолжение поиска.");
@@ -5683,7 +5688,7 @@ export const handleToolCall = async (
       origin,
       routeArguments,
       { signal, ...(operationId ? { operationId } : {}) },
-    ), routeArguments, origin);
+    ), readArguments, origin);
     // The first bridge-selected local company read is already authoritative
     // provider evidence. Persisting its opaque company selector protects even
     // a later model that skips the dedicated proposal context after compaction.
@@ -5694,7 +5699,7 @@ export const handleToolCall = async (
       provider: providerResult?.provider,
     });
     const result = buildTextResult(providerResult);
-    const nativeTool = routeArguments?.operation === "native_read"
+    const nativeTool = readArguments?.operation === "native_read"
       ? routeArguments.nativeTool : routeArguments?.operation === "get_task" ? "get_task" : "";
     return compactLocalNativeMcpResult(
       nativeTool,

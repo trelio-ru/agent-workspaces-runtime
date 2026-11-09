@@ -144,8 +144,12 @@ Task-only `search_tasks` сохраняет отдельный native projection
 
 Общий short-wait registry ждёт до 10 секунд после свежего admission.
 `state=preparing`, readOnly, operationId, elapsedMs, закрытый этап и timings не
-являются результатом поиска. Exact nextCall сохраняет исходные company, method
-и аргументы, добавляя только `parameters.searchOperationId`. Одинаковый pending
+являются результатом поиска. Exact nextCall содержит company, method,
+`operation=search_poll`, пустые arguments и `parameters.searchOperationId`.
+Исходный запрос остаётся только в памяти host и не копируется в каждый poll.
+Selector сверяется с origin/company/method исходной операции после admission;
+он не разрешает менять запрос. Прежний explicit input с exact ID также допустим.
+Одинаковый pending
 input присоединяется к одной операции; другой запрос не создаёт конкурирующий
 reader. Poll неизвестного/выданного ID после restart возвращает отказ без
 автоматического повторения. Отмена короткого ожидания не отменяет исходный reader;

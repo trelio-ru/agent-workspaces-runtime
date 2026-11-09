@@ -3942,7 +3942,7 @@ test("human search preparation keeps its original query and exact poll through t
   const gate = new Promise(resolve => { release = resolve; });
   const manager = createCompanySearchOperations({ waitMs: 1, authorize: async () => ({ binding: "same-recipient" }),
     validate: async () => true, execute: async () => { launches++; await gate; return { generation: "a".repeat(64),
-      result: { provider: "local_company_context", results: [] } }; } });
+      result: { provider: "local_company_context", results: [{ id: "workspace:11111111-1111-4111-8111-111111111111", type: "workspace" }] } }; } });
   const original = { schemaVersion: 1, route: "context", parameters: { operation: "native_read", companySlug: "synthetic",
     nativeTool: "search", arguments: { queries: ["PRIVATE_QUERY"], limit: 5 } } };
   const call = args => handleToolCall("https://synthetic.invalid", "continue_trelio_local_action", args, {
@@ -3951,11 +3951,16 @@ test("human search preparation keeps its original query and exact poll through t
   });
   const pending = JSON.parse((await call(original)).content[0].text);
   assert.equal(pending.state, "preparing");
-  assert.deepEqual(pending.nextCall.arguments.parameters.arguments, original.parameters.arguments);
+  assert.deepEqual(pending.nextCall.arguments.parameters.arguments, {});
+  assert.equal(pending.nextCall.arguments.parameters.operation, "search_poll");
+  assert.doesNotMatch(JSON.stringify(pending), /PRIVATE_QUERY/u, "Polls never repeat protected query prose into model context");
+  assert.ok(Buffer.byteLength(JSON.stringify(pending)) < 2048);
   release();
   const result = JSON.parse((await call(pending.nextCall.arguments)).content[0].text);
   assert.equal(result.provider, "local_company_context");
-  assert.deepEqual(result.results, []);
+  assert.equal(result.results.length, 1);
+  assert.ok(result.results[0].selectionRef);
+  assert.equal(result.nextCall.arguments.parameters.nativeTool, "fetch");
   assert.equal(launches, 1);
   await assert.rejects(call({ ...original, parameters: { ...original.parameters, nativeTool: "create_task", searchOperationId: pending.operationId } }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
   await manager.close();
