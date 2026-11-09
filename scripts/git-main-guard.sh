@@ -227,7 +227,9 @@ agent_workspaces_acquire_main_lock() {
   local current_host=""
   local existing_host=""
   local existing_pid=""
+  local existing_operation=""
   local lock_acquired=0
+  local attempt=0
 
   common_directory="$(
     agent_workspaces_git_common_directory "${repository_path}"
@@ -235,35 +237,53 @@ agent_workspaces_acquire_main_lock() {
   lock_directory="${common_directory}/trelio-agent-workspaces-runtime-main-update.lock"
   current_host="$(uname -n)"
 
-  if mkdir "${lock_directory}" 2>/dev/null; then
-    lock_acquired=1
-  else
-    if [[ -f "${lock_directory}/owner" ]]; then
-      existing_host="$(sed -n 's/^host=//p' "${lock_directory}/owner" | head -n 1)"
-      existing_pid="$(sed -n 's/^pid=//p' "${lock_directory}/owner" | head -n 1)"
+  # A verified FIFO owner can race a waiting coordinator's short metadata read
+  # immediately before transport. Retry ONLY acquisition of a naturally released
+  # FIFO mutex (or its unpublished-owner interval), never the Git push itself.
+  # Keep one fixed attempt budget across owner changes; CI/queue admission is
+  # still checked independently before transport and by the pre-push hook.
+  while (( attempt < 100 )); do
+    attempt=$((attempt + 1))
+    if mkdir "${lock_directory}" 2>/dev/null; then
+      lock_acquired=1
+      break
     fi
 
-    # Lock принадлежит одному локальному процессу. Удаляем его только когда
-    # exact PID на том же host уже не существует, затем захватываем ровно один
-    # раз; живой или чужой lock всегда остаётся fail-closed.
-    if [[ "${existing_host}" == "${current_host}" ]] \
-      && [[ "${existing_pid}" =~ ^[1-9][0-9]*$ ]] \
-      && ! kill -0 "${existing_pid}" 2>/dev/null; then
-      rm -f "${lock_directory}/owner"
-      if rmdir "${lock_directory}" 2>/dev/null \
-        && mkdir "${lock_directory}" 2>/dev/null; then
-        lock_acquired=1
-      fi
+    # Never follow or remove an unknown claim. A fresh positive disappearance
+    # permits another mkdir; an unchanged dead/foreign/unsafe claim does not.
+    if [[ ! -e "${lock_directory}" && ! -L "${lock_directory}" ]]; then
+      continue
     fi
-  fi
+    if [[ -L "${lock_directory}" || ! -d "${lock_directory}" ]]; then
+      break
+    fi
+    existing_host=""
+    existing_pid=""
+    existing_operation=""
+    if [[ -f "${lock_directory}/owner" && ! -L "${lock_directory}/owner" ]]; then
+      existing_host="$(sed -n 's/^host=//p' "${lock_directory}/owner" | head -n 1)"
+      existing_pid="$(sed -n 's/^pid=//p' "${lock_directory}/owner" | head -n 1)"
+      existing_operation="$(sed -n 's/^operation=//p' "${lock_directory}/owner" | head -n 1)"
+    fi
+    if { [[ "${existing_operation}" == "FIFO coordination" ]] \
+      && [[ "${existing_host}" == "${current_host}" ]] \
+      && [[ "${existing_pid}" =~ ^[1-9][0-9]*$ ]] \
+      && kill -0 "${existing_pid}" 2>/dev/null; } \
+      || [[ ! -e "${lock_directory}/owner" && ! -L "${lock_directory}/owner" ]]; then
+      sleep 0.05
+      continue
+    fi
+    if [[ ! -e "${lock_directory}" && ! -L "${lock_directory}" ]]; then
+      continue
+    fi
+    break
+  done
 
   if [[ "${lock_acquired}" -ne 1 ]]; then
     agent_workspaces_git_guard_log \
       "ERROR: another guarded main operation is active: ${lock_directory}"
-    if [[ -f "${lock_directory}/owner" ]]; then
-      sed 's/^/[agent-workspaces-git-guard]   /' \
-        "${lock_directory}/owner" >&2
-    fi
+    # The refused owner is untrusted metadata, not a log payload. Inspect it
+    # through ordinary coordination diagnostics rather than dumping file prose.
     return 1
   fi
 

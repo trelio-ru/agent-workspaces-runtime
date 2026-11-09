@@ -34,6 +34,14 @@ Fresh absence/replacement resets the observation, and a published owner ends it;
 an unchanged empty claim still refuses without removal or CI.
 Tests force disappearance/replacement and a late ownerless interval after a long
 live-owner wait; unchanged dead and ownerless claims remain fenced.
+The runtime shell transport also shares this mutex. It waits for natural release
+of a confirmed live same-host `FIFO coordination` holder, or an unpublished-owner
+interval, for at most 100 acquisition attempts with 50-ms waits. This budget is
+not renewed by owner changes. It never removes a dead/unknown/foreign claim,
+borrows ownership, repeats a push or renews CI/admission. The normal pre-transport
+and pre-push owner/SHA/tag checks remain mandatory. Refused owner-file prose is
+never dumped to the diagnostic stream. Real Git fixtures cover the live-FIFO
+overlap and preserve unrelated/dead claims before ordinary guarded tag transport.
 Canonical pre-push checks live process ancestry, exact worktree/branch/SHA/tag
 and verified ticket state. A caller-authored boolean, direct main/tag push or
 old transport wrapper cannot borrow the slot. Required CI remains repository

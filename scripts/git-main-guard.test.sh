@@ -128,6 +128,56 @@ if [[ "${configured_canonical}" != "${resolved_canonical}" ]] \
   exit 1
 fi
 
+# A waiting FIFO coordinator uses the SAME short mutex as transport. Force
+# that exact overlap: no protected ref has changed, so natural mutex release
+# must allow ordinary acquisition without borrowing/removing the live claim.
+source "${CANONICAL_REPOSITORY}/scripts/git-main-guard.sh"
+fifo_lock="${CANONICAL_REPOSITORY}/.git/trelio-agent-workspaces-runtime-main-update.lock"
+mkdir "${fifo_lock}"
+printf 'operation=FIFO coordination\npid=%s\nhost=%s\n' "$$" "$(uname -n)" > "${fifo_lock}/owner"
+(
+  sleep 0.3
+  rm "${fifo_lock}/owner"
+  rmdir "${fifo_lock}"
+) &
+fifo_releaser=$!
+if ! acquired_fifo_lock="$(agent_workspaces_acquire_main_lock "${CANONICAL_REPOSITORY}" 'push main')"; then
+  wait "${fifo_releaser}"
+  printf 'Guarded transport refused a normally released live FIFO mutex.\n' >&2
+  exit 1
+fi
+wait "${fifo_releaser}"
+agent_workspaces_release_main_lock "${acquired_fifo_lock}"
+
+# Waiting is acquisition-only. An unrelated live operation still refuses and
+# retains exactly its owner; no arbitrary live lock becomes takeover authority.
+mkdir "${fifo_lock}"
+printf 'operation=unrelated operation\npid=%s\nhost=%s\n' "$$" "$(uname -n)" > "${fifo_lock}/owner"
+cp "${fifo_lock}/owner" "${TEST_ROOT}/original-lock-owner"
+if agent_workspaces_acquire_main_lock "${CANONICAL_REPOSITORY}" 'push main' >/dev/null 2>&1; then
+  printf 'Guarded transport borrowed an unrelated live mutex.\n' >&2
+  exit 1
+fi
+cmp "${fifo_lock}/owner" "${TEST_ROOT}/original-lock-owner"
+rm "${fifo_lock}/owner"
+rmdir "${fifo_lock}"
+
+# An exited owner's unchanged directory is not a normal FIFO handoff. The
+# transport must preserve it for review instead of deleting another claim.
+(sleep 0) &
+dead_lock_owner=$!
+wait "${dead_lock_owner}"
+mkdir "${fifo_lock}"
+printf 'operation=FIFO coordination\npid=%s\nhost=%s\n' "${dead_lock_owner}" "$(uname -n)" > "${fifo_lock}/owner"
+cp "${fifo_lock}/owner" "${TEST_ROOT}/original-lock-owner"
+if agent_workspaces_acquire_main_lock "${CANONICAL_REPOSITORY}" 'push main' >/dev/null 2>&1; then
+  printf 'Guarded transport removed an unchanged dead mutex.\n' >&2
+  exit 1
+fi
+cmp "${fifo_lock}/owner" "${TEST_ROOT}/original-lock-owner"
+rm "${fifo_lock}/owner"
+rmdir "${fifo_lock}"
+
 # System metadata and Python bytecode remain local, while an accidental source
 # file under removed platform-skills would still be visible and block a push.
 mkdir -p \
