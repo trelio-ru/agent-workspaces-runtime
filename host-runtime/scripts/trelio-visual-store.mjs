@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind } from './trelio-workspace.mjs';
+import { withBrowserAccountState, browserSnapshotRevision, browserExecutionDirectories } from './trelio-browser-session.mjs';
 
 const FORMAT = 'trelio.protected-browser-state/v1';
 const CREDENTIAL_FORMAT = 'trelio.protected-browser-credentials/v1';
@@ -67,12 +68,15 @@ export function visualStorageScope({ origin, skillId, accountId }) {
 export class ProtectedVisualStore {
   #key;
   #entry;
-  constructor({ directory, scope, AsyncEntry }) {
+  #revisions = new Map();
+  constructor({ directory, scope, executionOwner, AsyncEntry }) {
     if (!/^[0-9a-f]{64}$/u.test(scope) || !path.isAbsolute(directory)) throw invalid('VISUAL_IDENTITY_INVALID');
     this.scope = scope;
     this.directory = path.join(directory, 'visual-browser', scope);
     this.file = path.join(this.directory, 'state.enc');
     this.credentialsFile = path.join(this.directory, 'credentials.enc');
+    if (executionOwner !== undefined && !/^[a-f0-9]{64}$/u.test(executionOwner)) throw invalid('VISUAL_IDENTITY_INVALID');
+    this.executionOwner = executionOwner;
     this.#entry = new AsyncEntry('trelio.visual-browser.v1', scope, { linux: { store: 'secret-service' } });
   }
 
@@ -120,6 +124,7 @@ export class ProtectedVisualStore {
   async #readRecord(file, format) {
     await this.init();
     const envelope = await readPrivateJsonFile(file, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
+    this.#revisions.set(file, Object.keys(envelope).length ? browserSnapshotRevision(JSON.stringify(envelope)) : null);
     if (Object.keys(envelope).length === 0) return null;
     let plain;
     try {
@@ -138,13 +143,27 @@ export class ProtectedVisualStore {
     } finally { plain?.fill(0); }
   }
 
-  read() { return this.#readRecord(this.file, FORMAT); }
-  readCredentials() { return this.#readRecord(this.credentialsFile, CREDENTIAL_FORMAT); }
+  read() { return withBrowserAccountState(this.directory, async () => {
+    if (this.executionOwner) {
+      const retained = path.join(this.directory, 'sessions', this.executionOwner);
+      const candidate = path.join(retained, 'state.enc');
+      const exists = await fs.lstat(candidate).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+      if (exists) {
+        const base = await readPrivateJsonFile(path.join(retained, 'state-base.json'), { maximumBytes: 1024 });
+        if (Object.keys(base).join() !== 'revision' || base.revision !== null && !/^[a-f0-9]{64}$/u.test(base.revision)) throw invalid('VISUAL_STORAGE_CORRUPT');
+        this.#revisions.set(this.file, base.revision);
+        return this.#readRecord(candidate, FORMAT);
+      }
+    }
+    return this.#readRecord(this.file, FORMAT);
+  }); }
+  readCredentials() { return withBrowserAccountState(this.directory, () => this.#readRecord(this.credentialsFile, CREDENTIAL_FORMAT)); }
 
   async #hasEncryptedRecord() {
     // A credentials-only account already owns a key. Losing that key must not
     // silently create a replacement merely because no browser snapshot exists.
-    const exists = await Promise.all([this.file, this.credentialsFile].map(file => fs.lstat(file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })));
+    const candidates = (await browserExecutionDirectories(this.directory)).slice(1).map(directory => path.join(directory, 'state.enc'));
+    const exists = await Promise.all([this.file, this.credentialsFile, ...candidates].map(file => fs.lstat(file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })));
     return exists.some(Boolean);
   }
 
@@ -153,42 +172,86 @@ export class ProtectedVisualStore {
     // desktop Secret Service must not be discovered only after somebody has
     // entered their password. Existing ciphertext never permits key replacement.
     await this.init();
-    const exists = await this.#hasEncryptedRecord();
-    await this.#keyBytes(!exists);
+    await withBrowserAccountState(this.directory, async () => {
+      const exists = await this.#hasEncryptedRecord();
+      await this.#keyBytes(!exists);
+    });
   }
 
   async #writeRecord(file, format, value) {
     await this.init();
-    // A damaged/missing OS key must never be replaced merely because a caller
-    // wants to save new data over an existing encrypted session.
-    const exists = await this.#hasEncryptedRecord();
-    const plain = Buffer.from(JSON.stringify(value));
-    try {
-      if (plain.length > MAX_STATE) throw invalid('VISUAL_STORAGE_TOO_LARGE');
-      const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', await this.#keyBytes(!exists), iv);
-      cipher.setAAD(Buffer.from(`${format}/${this.scope}`));
-      const data = Buffer.concat([cipher.update(plain), cipher.final()]);
-      await writePrivateJsonFile(file, { format, scope: this.scope, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') });
-    } finally { plain.fill(0); }
+    return withBrowserAccountState(this.directory, async () => {
+      // A damaged/missing OS key must never be replaced merely because a caller
+      // wants to save new data over an existing encrypted session.
+      const exists = await this.#hasEncryptedRecord();
+      const plain = Buffer.from(JSON.stringify(value));
+      try {
+        if (plain.length > MAX_STATE) throw invalid('VISUAL_STORAGE_TOO_LARGE');
+        const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', await this.#keyBytes(!exists), iv);
+        cipher.setAAD(Buffer.from(`${format}/${this.scope}`));
+        const data = Buffer.concat([cipher.update(plain), cipher.final()]);
+        const envelope = { format, scope: this.scope, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') };
+        const current = await readPrivateJsonFile(file, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
+        const revision = Object.keys(current).length ? browserSnapshotRevision(JSON.stringify(current)) : null;
+        if ((this.#revisions.get(file) ?? null) !== revision) {
+          // Browser state is an opaque archive: merging it could resurrect an
+          // explicit logout or corrupt IndexedDB. Retain this stopped session's
+          // encrypted candidate without overwriting the newer account snapshot.
+          // Credentials/fences cannot fork: a stale writer must refuse BEFORE
+          // another secret-delivery step can be authorised.
+          if (file !== this.file || !this.executionOwner) throw invalid('VISUAL_STORAGE_CONFLICT');
+          const retained = path.join(this.directory, 'sessions', this.executionOwner);
+          await ensurePrivateDirectory(retained);
+          await writePrivateJsonFile(path.join(retained, 'state.enc'), envelope);
+          await writePrivateJsonFile(path.join(retained, 'state-base.json'), { revision: this.#revisions.get(file) ?? null });
+          return;
+        }
+        await writePrivateJsonFile(file, envelope);
+        this.#revisions.set(file, browserSnapshotRevision(JSON.stringify(envelope)));
+      } finally { plain.fill(0); }
+    });
   }
 
   write(value) { return this.#writeRecord(this.file, FORMAT, value); }
   writeCredentials(value) { return this.#writeRecord(this.credentialsFile, CREDENTIAL_FORMAT, value); }
   async forgetCredentials() {
     await this.init();
-    // Keep the OS key and the independently reusable browser session intact.
-    try { await assertPrivatePathKind(this.credentialsFile, 'file'); await fs.unlink(this.credentialsFile); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return withBrowserAccountState(this.directory, async () => {
+      // Deletion shares the same CAS boundary as pending credential delivery.
+      // A stale setup/fence writer cannot resurrect a forgotten credential.
+      const current = await readPrivateJsonFile(this.credentialsFile, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
+      const revision = Object.keys(current).length ? browserSnapshotRevision(JSON.stringify(current)) : null;
+      if (this.#revisions.has(this.credentialsFile) && this.#revisions.get(this.credentialsFile) !== revision) throw invalid('VISUAL_STORAGE_CONFLICT');
+      try { await assertPrivatePathKind(this.credentialsFile, 'file'); await fs.unlink(this.credentialsFile); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      this.#revisions.set(this.credentialsFile, null);
+    });
   }
 
-  // Used only for a user's explicit disconnect, or a newly created synthetic
-  // test account. Removing local material does not revoke the provider session.
+  // Explicit disconnect erases the account, so it must first prove that no
+  // chat (including a pre-upgrade worker) can later write with a cached key.
+  // Startup reserves its active claim under this SAME account transaction.
   async remove() {
     await this.init();
-    await this.#entry.deleteCredential(AbortSignal.timeout(15_000));
-    await fs.rm(this.file, { force: true });
-    await fs.rm(this.credentialsFile, { force: true });
-    this.close();
+    return withBrowserAccountState(this.directory, async () => {
+      for (const directory of await browserExecutionDirectories(this.directory)) {
+        try {
+          await assertPrivatePathKind(path.join(directory, 'active'), 'directory');
+          throw invalid('VISUAL_STORAGE_CONFLICT');
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      await this.#entry.deleteCredential(AbortSignal.timeout(15_000));
+      await fs.rm(this.file, { force: true });
+      await fs.rm(this.credentialsFile, { force: true });
+      for (const directory of (await browserExecutionDirectories(this.directory)).slice(1)) {
+        for (const file of ['state.enc', 'state-base.json']) {
+          const candidate = path.join(directory, file);
+          try { await assertPrivatePathKind(candidate, 'file'); await fs.unlink(candidate); }
+          catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+      }
+      this.close();
+    });
   }
   close() { this.#key?.fill(0); this.#key = undefined; }
 }

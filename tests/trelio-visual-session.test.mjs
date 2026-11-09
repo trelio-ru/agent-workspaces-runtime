@@ -7,13 +7,50 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 import { runVisualSession, withVisualOwnerFileLock, readVisualOwner,
-  publishVisualWorkerOwner } from '../host-runtime/scripts/trelio-visual-session.mjs';
+  publishVisualWorkerOwner, visualSessionBinding } from '../host-runtime/scripts/trelio-visual-session.mjs';
+import { browserExecutionDirectory } from '../host-runtime/scripts/trelio-browser-session.mjs';
+import { visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-node.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
   processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
+
+test('two chats on one visual account address different workers and close only their own session', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-two-chats-')));
+  const start = Date.now(), hits = [[], []], servers = [];
+  const base = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-two-chats',
+    TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(),
+    TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({
+      apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 120000 }),
+    TRELIO_BROWSER_SESSION_STARTED_AT: String(start), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(start + 120000) };
+  t.after(async () => {
+    await Promise.all(servers.map(server => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); })));
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  const environments = [0, 1].map(() => ({ ...base, TRELIO_SKILL_RUNTIME_SESSION_ID: randomUUID() }));
+  for (const [index, env] of environments.entries()) {
+    const binding = visualSessionBinding(env);
+    const server = http.createServer(async (request, response) => {
+      const chunks = []; for await (const chunk of request) chunks.push(chunk);
+      hits[index].push(JSON.parse(Buffer.concat(chunks)).operation);
+      response.end(JSON.stringify(visualStatus('closed')));
+    });
+    servers.push(server); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const active = path.join(browserExecutionDirectory(path.join(directory, 'visual-browser', binding.scope), env), 'active');
+    await fs.mkdir(active, { recursive: true, mode: 0o700 });
+    await writePrivateJsonFile(path.join(active, 'owner.json'), { schemaVersion: 1, scope: binding.scope,
+      bindingHash: binding.bindingHash, token: 'a'.repeat(64), pid: process.pid,
+      port: server.address().port, deadlineAt: binding.deadlineAt });
+  }
+  const call = (index, operation) => runVisualSession({ origins: [`http://127.0.0.1:${servers[0].address().port}`], operation,
+    env: environments[index], fixture: { directory } });
+  assert.equal((await call(0, 'close')).state, 'closed');
+  assert.deepEqual(hits, [['close'], []]);
+  assert.equal((await call(1, 'status')).state, 'closed');
+  assert.deepEqual(hits, [['close'], ['status']]);
+});
 
 test('an unsafe owner mutex root refuses before its operation without replacing the existing entry', async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-owner-unsafe-test-')));
@@ -329,6 +366,71 @@ test('detached worker keeps its original lease and encrypted storage across shor
       // dump owner.json: it includes the private control bearer token.
       failure.message += `; synthetic worker evidence: ${diagnostic || 'unavailable'}`;
       throw failure;
+    }
+  }
+});
+
+
+test('native browser workers of two chats keep separate contexts, frames and shutdown on one saved account', {
+  skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180000,
+}, async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-native-two-chats-')));
+  const server = http.createServer((_request, response) => {
+    response.setHeader('content-type', 'text/html');
+    response.end('<!doctype html><body style="background:#45cc77;height:2000px">Synthetic parallel browser</body>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`, started = Date.now();
+  const base = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-parallel-native',
+    TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(),
+    TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({
+      apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 150000 }),
+    TRELIO_BROWSER_SESSION_STARTED_AT: String(started), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(started + 150000) };
+  const owners = [0, 1].map(() => ({ ...base, TRELIO_SKILL_RUNTIME_SESSION_ID: randomUUID() }));
+  const call = (index, operation, args = {}) => runVisualSession({ origins: [origin], operation, args,
+    env: owners[index], fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } });
+  const binding = visualSessionBinding(owners[0]);
+  const active = index => path.join(browserExecutionDirectory(path.join(directory, 'visual-browser', binding.scope), owners[index]), 'active');
+  const closed = async index => {
+    for (let attempt = 0; attempt < 160; attempt++) {
+      const exists = await fs.lstat(active(index)).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+      if (!exists) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw Error('Synthetic parallel worker cleanup was not confirmed');
+  };
+  let cleanupComplete = false;
+  try {
+    const starts = await Promise.all(owners.map((_, index) => call(index, 'setup', { url: origin })));
+    assert.deepEqual(starts.map(value => value.state), ['preparing', 'preparing']);
+    for (let index = 0; index < 2; index++) {
+      let status;
+      for (let attempt = 0; attempt < 120; attempt++) {
+        status = await call(index, 'status');
+        if (status.state !== 'preparing') break;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      assert.equal(status.state, 'manual_input_required');
+      assert.equal((await call(index, 'ready')).state, 'saved_unverified');
+    }
+    const [a, b] = await Promise.all(owners.map((_, index) => call(index, 'navigate', { url: origin })));
+    assert.equal(a.state, 'ready'); assert.equal(b.state, 'ready');
+    assert.notEqual(a.sessionId, b.sessionId);
+    assert.equal((await call(1, 'scroll', { frameId: a.frameId, x: 300, y: 300, deltaY: 100 })).reason, 'stale_frame');
+    assert.equal((await call(0, 'close')).state, 'closed'); await closed(0);
+    const next = await call(1, 'navigate', { url: origin });
+    assert.equal(next.state, 'ready', 'closing the sibling preserves this browser');
+    assert.equal((await call(1, 'scroll', { frameId: next.frameId, x: 300, y: 300, deltaY: 100 })).state, 'ready');
+  } finally {
+    try {
+      for (let index = 0; index < 2; index++) { await call(index, 'close'); await closed(index); }
+      const { AsyncEntry } = await loadVisualDependencies();
+      const store = new ProtectedVisualStore({ directory, scope: binding.scope, AsyncEntry });
+      try { await store.remove(); } finally { store.close(); }
+      cleanupComplete = true;
+    } finally {
+      server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+      if (cleanupComplete) await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }
 });

@@ -86,3 +86,44 @@ test('AEAD snapshot survives a new instance; missing key/corruption never replac
     assert.equal(keys.size, 0);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
+
+test('parallel visual sessions share one key, retain conflicting encrypted state and fence stale credentials', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-parallel-store-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  let key = null, creations = 0;
+  class Entry {
+    async getSecret() { return key; }
+    async setSecret(value) { creations++; key = [...value]; }
+    async deleteCredential() { key = null; }
+  }
+  const scope = visualStorageScope({ origin: 'https://example.test', skillId: 'fixture-browser', accountId: randomUUID() });
+  const make = owner => new ProtectedVisualStore({ directory, scope, executionOwner: owner.repeat(64), AsyncEntry: Entry });
+  const first = make('a'), second = make('b');
+  t.after(() => { first.close(); second.close(); });
+  await Promise.all([first.read(), second.read()]);
+  await Promise.all([first.prepare(), second.prepare()]);
+  assert.equal(creations, 1, 'concurrent initial setup cannot replace the shared OS key');
+  await first.write({ syntheticState: 'new-login' });
+  await second.write({ syntheticState: 'older-session' });
+  const fresh = make('c'); t.after(() => fresh.close());
+  assert.deepEqual(await fresh.read(), { syntheticState: 'new-login' });
+  const retained = path.join(second.directory, 'sessions', 'b'.repeat(64), 'state.enc');
+  assert.doesNotMatch(await fs.readFile(retained, 'utf8'), /older-session/);
+  const candidate = make('d'); candidate.file = retained; t.after(() => candidate.close());
+  assert.deepEqual(await candidate.read(), { syntheticState: 'older-session' });
+  await Promise.all([first.readCredentials(), second.readCredentials()]);
+  await first.writeCredentials({ syntheticFence: 'pending' });
+  await assert.rejects(second.writeCredentials({ syntheticFence: 'complete' }), { code: 'VISUAL_STORAGE_CONFLICT' });
+  assert.deepEqual(await fresh.readCredentials(), { syntheticFence: 'pending' });
+  const active = path.join(second.directory, 'sessions', 'b'.repeat(64), 'active');
+  await fs.mkdir(active, { mode: 0o700 });
+  await assert.rejects(first.remove(), { code: 'VISUAL_STORAGE_CONFLICT' });
+  assert.ok(key, 'a sibling claim protects its cached encryption key');
+  await fs.rmdir(active);
+  await fresh.forgetCredentials();
+  await assert.rejects(first.writeCredentials({ syntheticFence: 'complete' }), { code: 'VISUAL_STORAGE_CONFLICT' });
+  await fresh.remove();
+  assert.equal(key, null);
+  await assert.rejects(fs.stat(retained), { code: 'ENOENT' });
+
+});

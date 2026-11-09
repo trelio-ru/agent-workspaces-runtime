@@ -25,7 +25,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 };
 
 import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
-import { browserControllerEnabled, parseBrowserControllerArguments } from './trelio-browser-session.mjs';
+import { browserControllerEnabled, parseBrowserControllerArguments, skillResourcePolicy, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -9019,6 +9019,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_BROWSER_CONTROLLER_ENABLED: _staleBrowserController,
     TRELIO_BROWSER_CONTROLLER_ORIGIN: _staleBrowserControllerOrigin,
     TRELIO_BROWSER_SESSION_MODULE_URL: _staleBrowserSessionModuleUrl,
+    TRELIO_EXECUTION_SESSION_MODULE_URL: _staleExecutionSessionModuleUrl,
     TRELIO_BROWSER_SESSION_POLICY_JSON: _staleBrowserSessionPolicy,
     TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
     TRELIO_BROWSER_SESSION_DEADLINE_AT: _staleBrowserSessionDeadlineAt,
@@ -9086,6 +9087,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
         "TRELIO_BROWSER_MAIL_MODULE_URL",
         "TRELIO_BROWSER_CONTROLLER_ENABLED",
         "TRELIO_BROWSER_CONTROLLER_ORIGIN",
+        "TRELIO_EXECUTION_SESSION_MODULE_URL",
       ].includes(key)
     );
     if (
@@ -9112,6 +9114,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_SKILL_RUNTIME_VERSION: artifact.runtimeVersion,
     TRELIO_SKILL_RUNTIME_ROOT: runtimeDirectory,
     TRELIO_SKILL_RELEASE_ID: executionContext.releaseId,
+    ...(artifact.parsedPackage?.capabilities?.includes('local-session')
+      ? { TRELIO_EXECUTION_SESSION_MODULE_URL: BROWSER_SESSION_MODULE_URL } : {}),
     ...(executionContext.runtimeSessionId
       ? { TRELIO_SKILL_RUNTIME_SESSION_ID: executionContext.runtimeSessionId } : {}),
     ...(browserControllerEnabled(artifact.parsedPackage)
@@ -9168,7 +9172,28 @@ export const buildAgentSkillRuntimeEnvironment = ({
   };
 };
 
-export const runMaterializedAgentSkill = async ({
+// A verified provider may own one non-clonable SDK/device resource. Queue its
+// invocation BEFORE interpreter/credential/native-attempt preparation. The
+// original clocks cross the wait, and the ordinary executor rechecks current
+// managed authority before its one provider spawn. A failed/unknown operation
+// is never retried by this scheduler.
+export const runMaterializedAgentSkill = async options => {
+  const clock = { wall: Date.now(), monotonic: performance.now() };
+  const resource = skillResourcePolicy(options.artifact?.parsedPackage, options.runtimeArguments);
+  if (!resource) return runMaterializedAgentSkillUnqueued(options, clock);
+  const profile = currentWorkspaceExecutionProfile();
+  if (profile && typeof profile.resolveSkillCatalogueDirectory !== 'function') denyWorkspaceExecutionProfile();
+  const root = profile ? await profile.resolveSkillCatalogueDirectory(CONFIG_DIRECTORY) : CONFIG_DIRECTORY;
+  const context = options.executionContext;
+  const scope = resource.scope === 'device' ? ['device'] : context.account?.id
+    ? ['account', context.account.id] : ['legacy', context.companyId, context.localIdentity?.memberId, context.localIdentity?.connectionId];
+  const key = crypto.createHash('sha256').update(JSON.stringify([context.origin || DEFAULT_ORIGIN, options.artifact.skillId, scope])).digest('hex');
+  return withBrowserAccountState(path.join(root, 'skill-execution-resources', key),
+    () => runMaterializedAgentSkillUnqueued(options, clock),
+    { waitMs: Math.max(1, Math.min(30000, options.timeoutMs ?? 60000)) });
+};
+
+const runMaterializedAgentSkillUnqueued = async ({
   artifact,
   runtimeDirectory,
   runtimeArguments,
@@ -9182,12 +9207,12 @@ export const runMaterializedAgentSkill = async ({
   captureMode = 'monitor',
   timeoutMs = 60_000,
   signal = null,
-}) => {
+}, clock) => {
   // The absolute browser lease covers setup/credential preparation too. A
   // slow owner handoff must consume the same signed budget instead of starting
   // a fresh window only after the setup step returns.
-  const runtimeStartedAt = Date.now();
-  const runtimeStartedClock = performance.now();
+  const runtimeStartedAt = clock.wall;
+  const runtimeStartedClock = clock.monotonic;
   // This is an internal consumer of the ordinary verified execution engine,
   // not a tool/argv option or a new admission path. A background caller must
   // first obtain live source authority, verify/materialize the signed package
