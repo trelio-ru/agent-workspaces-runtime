@@ -1033,6 +1033,10 @@ publication tooling также остаются вне этого публичн
 - Assistant code retention preserves each actual loaded caller, not every
   dormant candidate snapshot. Never resurrect a failed newer cache entry during
   native rollback; see [preservation](docs/agent-workspace-runtime.md#codex-plugin-preservation).
+  A live failed-version parent must first close its known GUI generation and
+  hand off the SAME registered task to the exact retained previous receipt.
+  Native downgrade waits for that parent; unknown close/handoff stays fenced,
+  without pruning live code, resetting the failed candidate or replaying work.
 
 - Долгие цели: host передаёт только проверенные UUID/path locators собственного
   `assistants/<assistantUserId>/WORK.md` по stdin; формат/continuation – task-worker

@@ -362,6 +362,20 @@ Assistant snapshots могут содержать проверенные, но �
 watchers. Human/hook-компоненты и явный bulk-restore сохраняют прежний контракт;
 остальные integrity/type/CAS/no-replay проверки не меняются.
 
+Если failed candidate уже владеет живым supervisor, его watcher сохраняет этот
+код до обычного завершения процесса. Откат сначала выбирает exact previous
+version/full digest из защищённого journal и SAME retained-code verifier в той
+же native cache family. Разрешён только этот проверенный предыдущий snapshot,
+без выбора соседней версии, удаления живого кода или изменения hook dependency.
+Далее bounded `rollback_closing` закрывает только известную GUI generation через
+прежний native graceful-close и сохраняет неизвестный результат. Фаза
+`rollback_retargeting` передаёт SAME зарегистрированную задачу проверенному old
+loader. Лишь следующий parent выполняет native downgrade; старый parent и GUI
+MCP уже завершили свои watchers. Если parent уже использовал previous version,
+тот же close fence всё равно исключает живой MCP неудачной версии. Новая GUI
+generation не закрывается повторно; lost handoff наблюдается через штатный CAS.
+До успешного native read-back версия не объявляется установленной/готовой.
+
 Native rollback может заново клонировать тот же detached distribution commit
 после появления новых коммитов в official `main`. Только hook-free assistant
 main с явным отдельным hookComponent допускает различия inactive

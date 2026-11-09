@@ -210,7 +210,7 @@ const pluginUpdateRecord = value => {
   if (!value || Object.getPrototypeOf(value)!==Object.prototype
     || actual!==keys
     || value.schemaVersion!==1 || !uuid.test(value.assistantId??'') || !uuid.test(value.deviceId??'')
-    || !['ready','installing','installed','hook_installing','closing','starting','verifying','hook_review','retargeting','rolling_back','failed'].includes(value.stage)
+    || !['ready','installing','installed','hook_installing','closing','starting','verifying','hook_review','retargeting','rolling_back','rollback_closing','rollback_retargeting','failed'].includes(value.stage)
     || ![value.previousVersion,value.targetVersion].every(v=>typeof v==='string'&&/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(v))
     || !/^[0-9a-f]{64}$/u.test(value.previousTreeSha256??'')
     || value.failedVersion!==null&&!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(value.failedVersion??'')

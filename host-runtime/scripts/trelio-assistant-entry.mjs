@@ -654,7 +654,7 @@ export const prepareAssistantHookComponentBootstrap = async ({context=production
     const save=async patch=>{
       await guard();const next={...state,...patch};await host.writePluginUpdate(state,next);state=next;
     };
-    if(state&&(['failed','rolling_back','installing','closing','starting','verifying','retargeting'].includes(state.stage)
+    if(state&&(['failed','rolling_back','rollback_closing','rollback_retargeting','installing','closing','starting','verifying','retargeting'].includes(state.stage)
       ||state.targetVersion!==inventory.version||state.targetTreeSha256!==inventory.treeSha256))fail('ASSISTANT_BACKGROUND_BUSY');
     const options={requirement:inventory.hookComponent,execFileCommand,environment:env,signal};
     if(state?.stage==='hook_installing'){
@@ -2151,8 +2151,9 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
     };
     const inventory=async()=>{
       const journal=await lockedHost.readPluginUpdate();
-      const version=journal?.stage==='rolling_back'?journal.previousVersion:journal?.targetVersion;
-      const treeSha256=journal?.stage==='rolling_back'?journal.previousTreeSha256:journal?.targetTreeSha256;
+      const rollingBack=['rolling_back','rollback_closing','rollback_retargeting'].includes(journal?.stage);
+      const version=rollingBack?journal.previousVersion:journal?.targetVersion;
+      const treeSha256=rollingBack?journal.previousTreeSha256:journal?.targetTreeSha256;
       const current=await common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env,
         receipt:version&&treeSha256?{version,treeSha256}:null});
       if(current.state==='installed'&&(!treeSha256||current.version!==version)){
@@ -2180,6 +2181,8 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
         :common.installAssistantHookComponent({requirement,beforeInstall,execFileCommand,environment:env,signal}),
       rollback:(version,treeSha256)=>common.restoreAssistantCodexPluginVersion({version,treeSha256,execFileCommand,environment:env,
         loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
+      rollbackHost:(version,treeSha256)=>common.prepareAssistantCodexPluginRollbackHost({version,treeSha256,execFileCommand,environment:env,
+        loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory),guard,signal}),
       desktop:(operation,generation)=>runAssistantWindowsDesktop(operation,generation,{environment,signal,guard}),
       activateHost:async installed=>{
         await guard();

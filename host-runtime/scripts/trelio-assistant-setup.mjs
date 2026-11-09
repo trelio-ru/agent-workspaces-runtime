@@ -1036,7 +1036,7 @@ export const runAssistantWindowsCodexService = async (operation,generation=null,
  * unfinished installation is reconciled from native inventory, and a new GUI
  * process is observed rather than closed again. Business receipts and chats
  * are never touched. A native hook-review result waits for the human unchanged. */
-export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,hooks=null,activateHost=null,bootstrapHost=false,
+export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,rollbackHost=null,hooks=null,activateHost=null,bootstrapHost=false,
   guard=async()=>{}}) => {
   let state=await readState();
   let startedThisTick=false,optionalDiscovery=false,hostCurrent=false;
@@ -1049,6 +1049,45 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
   };
   const recover=async()=>{
     await guard();
+    const basis=typeof rollbackHost==='function'?await rollbackHost(state.previousVersion,state.previousTreeSha256):null;
+    if(typeof rollbackHost==='function'){
+      if(basis!==null&&(basis.version!==state.previousVersion||basis.treeSha256!==state.previousTreeSha256||typeof activateHost!=='function'))
+        fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      // A live failed-version parent (or its GUI MCP) still preserves its exact
+      // cache. First close ONLY the known Desktop generation, durably fence
+      // that close, then hand the registered task to the verified old loader.
+      // Native plugin installation waits for the NEW parent's ordinary tick.
+      if(state.stage==='rolling_back')await save({stage:'rollback_closing',desktopGeneration:null,restarts:0});
+      if(state.stage==='rollback_closing'){
+        let observed=await desktop('inspect'),closedThisTick=false;
+        if(state.restarts===0){
+          await save({desktopGeneration:observed.generation,restarts:1});
+          if(observed.state==='running'){await guard();await desktop('close',observed.generation);closedThisTick=true;}
+          observed=await desktop('inspect');
+        }
+        if(observed.state==='running'){
+          if(observed.generation!==state.desktopGeneration||state.restarts>=2)fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+          if(closedThisTick)return {state:'activating',blockBusiness:true};
+          await save({restarts:2});await guard();await desktop('close',observed.generation);
+          return {state:'activating',blockBusiness:true};
+        }
+        if(observed.state!=='stopped')fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+        await save({stage:'rollback_retargeting'});
+      }
+      if(state.stage!=='rollback_retargeting')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      // Another GUI generation starting after the positive close is not ours
+      // to close again. The SAME stop fence survives parent handoff, a lost
+      // native install response and every later observation of this phase.
+      if((await desktop('inspect')).state!=='stopped')fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+      if(basis!==null){
+        const activation=await activateHost(basis);
+        if(activation?.state!=='handoff')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+        return {state:'host_handoff',blockBusiness:true};
+      }
+    }
+    // The exact previous loader now owns this parent. Keep the candidate
+    // failure latched, but finish its original native rollback normally. No
+    // task/provider operation or previously uncertain install is replayed.
     const restored=await rollback(state.previousVersion,state.previousTreeSha256);
     if(restored.version!==state.previousVersion||restored.treeSha256!==state.previousTreeSha256)
       fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
@@ -1059,7 +1098,8 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     return restored;
   };
   await guard();
-  let current=state?.stage==='rolling_back'?await recover():await inventory();
+  let current=['rolling_back','rollback_closing','rollback_retargeting'].includes(state?.stage)?await recover():await inventory();
+  if(current?.blockBusiness===true)return current;
   if(current.state==='disabled')return {state:'disabled',blockBusiness:true};
   if(!state)await save({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
     previousVersion:current.version,previousTreeSha256:current.treeSha256,targetVersion:current.version,targetTreeSha256:current.treeSha256,
@@ -1119,6 +1159,7 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
         await save({stage:'rolling_back',failedVersion:state.targetVersion});
         if(typeof rollback!=='function')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
         current=await recover();
+        if(current?.blockBusiness===true)return current;
       }else await save({stage:'installed',targetTreeSha256:current.treeSha256});
     }
     if(state.stage==='hook_installing'){
@@ -1215,7 +1256,7 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     // The exact verified current plugin remains usable during a Git/network
     // outage. Checking for a compatible optional update must not stop work.
     if(state.stage==='ready'&&optionalDiscovery)return {state:'current',version:current.version,updateDeferred:true};
-    if(['hook_review','failed'].includes(state.stage))throw error;
+    if(['hook_review','failed','rolling_back','rollback_closing','rollback_retargeting'].includes(state.stage))throw error;
     if(state.failures<2){await save({failures:state.failures+1});return {state:'retrying',blockBusiness:true};}
     const changedHookComponent=state.hookComponent&&state.hookComponent.previousVersion!==state.hookComponent.version;
     // A legacy combined plugin and a newly trusted companion must never run
@@ -1223,7 +1264,7 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     // stays fenced on failure; do not manufacture a mixed rollback baseline.
     if(!changedHookComponent&&typeof rollback==='function' && state.previousVersion!==state.targetVersion){
       await save({stage:'rolling_back',failedVersion:state.targetVersion,failures:3});
-      await recover();return {state:'retrying',blockBusiness:true};
+      const recovered=await recover();return recovered?.blockBusiness===true?recovered:{state:'retrying',blockBusiness:true};
     }
     await save({stage:'failed',failures:3,failedVersion:state.failedVersion??state.targetVersion});throw error;
   }

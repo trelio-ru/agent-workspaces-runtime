@@ -2279,6 +2279,19 @@ rollback. Every other live MCP/supervisor keeps its own exact-path watcher.
 Native CLI plus shared-retention acceptance must assert the final selected
 version after all finalizers, not merely the version returned by `plugin add`.
 
+A failed-version parent also owns a LIVE watcher, so it cannot perform the
+native downgrade while retaining itself. Before that mutation, the SAME
+protected previous receipt and retained-tree verifier select only its exact
+cache-family loader, with unchanged hook dependency. `rollback_closing` journals
+the known GUI generation and at most two graceful-close requests; lost close
+results are observed, never applied to another generation. This also closes a
+failed GUI MCP when the parent already uses the previous version.
+`rollback_retargeting` then reuses the existing registered-task CAS/quiescing
+handoff. Only the next previous-version parent performs the native rollback and
+ordinary GUI/hook/MCP verification. Missing/changed snapshots refuse before GUI
+effects. Unknown close/retarget remains in its phase; no live-code pruning,
+failed-version reset, trust write, second supervisor or business replay occurs.
+
 The implementation must pass native Windows manifest/process/CLI tests and a
 real dedicated Desktop update before unattended activation is called verified.
 Other operating systems leave this Windows policy inactive. Windows login is

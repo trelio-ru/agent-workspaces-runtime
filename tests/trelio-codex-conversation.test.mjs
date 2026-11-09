@@ -14,12 +14,15 @@ import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-loca
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateHumanCodexHookComponent,
   inspectHumanCodexHookComponent, readAssistantPluginPublishedRef, restoreAssistantCodexPluginVersion,
-  readCodexPluginUpdateInventory, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+  prepareAssistantCodexPluginRollbackHost, readCodexPluginUpdateInventory, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
 
-test('actual Codex assistant rollback keeps the newer candidate archived instead of reinstalling it from retention',
+for(const liveFailedParent of [false,true])test(liveFailedParent
+ ?'actual Codex assistant rollback hands off a live failed-version parent before native downgrade'
+ :'actual Codex assistant rollback keeps the newer candidate archived instead of reinstalling it from retention',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const execute=promisify(execFile),executable=process.env.TRELIO_TEST_CODEX_CLI;
  const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-native-rollback-')));
@@ -78,9 +81,67 @@ test('actual Codex assistant rollback keeps the newer candidate archived instead
  assert.deepEqual(preservationErrors,[]);
  const archived=await retainLoadedCodexPluginInstallation({...options,loadedPluginDirectory:candidate.installedPath,loadedPluginVersion:candidate.version});
  const archivedReceipt=await fs.readFile(path.join(archived.entryDirectory,'metadata.json'));
- // The existing registered parent still owns the known-good previous loader.
- // A verified candidate snapshot is not evidence that a caller loaded it.
- const restored=await restoreAssistantCodexPluginVersion({...options,version:previous.version,treeSha256:saved.treeSha256});
+ let restored;
+ if(liveFailedParent){
+  await preservation.close();
+  let loaded=candidate,stage={schemaVersion:1,assistantId:id,deviceId:id,stage:'rolling_back',
+   previousVersion:previous.version,previousTreeSha256:saved.treeSha256,targetVersion:candidate.version,
+   targetTreeSha256:archived.treeSha256,desktopGeneration:null,restarts:0,failures:3,failedVersion:candidate.version};
+  const errors=[],effects=[];let generation='100:1000',rollbacks=0;
+  const caller=()=>({...options,loadedPluginDirectory:loaded.installedPath,loadedPluginVersion:loaded.version});
+  const prepare=()=>prepareAssistantCodexPluginRollbackHost({...caller(),version:previous.version,treeSha256:saved.treeSha256});
+  const configBefore=await fs.readFile(path.join(home,'config.toml'));
+  await assert.rejects(prepareAssistantCodexPluginRollbackHost({...caller(),version:previous.version,treeSha256:'0'.repeat(64)}),
+   /receipt is unavailable/);
+  const previousLoader=path.join(previous.installedPath,'scripts/trelio-host-runtime-loader.mjs'),originalLoader=await fs.readFile(previousLoader);
+  await fs.writeFile(previousLoader,'changed synthetic loader; never executed\n');
+  await assert.rejects(prepare(),/другие bytes/);
+  assert.equal(await fs.readFile(previousLoader,'utf8'),'changed synthetic loader; never executed\n');
+  await fs.writeFile(previousLoader,originalLoader);
+  assert.deepEqual(await fs.readFile(path.join(home,'config.toml')),configBefore);
+  const preserve=()=>startLoadedCodexPluginPreservation({environment:{...environment,TRELIO_PLUGIN_ROOT:loaded.installedPath,
+   TRELIO_PLUGIN_VERSION:'3.2.3'},retentionDirectory,checkIntervalMs:20,onError:error=>errors.push(error)});
+  preservation=preserve();await preservation.ready;
+  const flow={identity:{assistantId:id,deviceId:id},readState:async()=>structuredClone(stage),
+   writeState:async(expected,next)=>{assert.deepEqual(expected,stage);stage=structuredClone(next);},guard:async()=>{},
+   inventory:()=>readCodexPluginUpdateInventory({...caller(),receipt:{version:previous.version,treeSha256:saved.treeSha256}}),
+   rollbackHost:(version,treeSha256)=>prepareAssistantCodexPluginRollbackHost({...caller(),version,treeSha256}),
+   rollback:async(version,treeSha256)=>{rollbacks++;effects.push('native_rollback');
+    assert.equal(generation,null);assert.equal(loaded.version,previous.version);
+    return restoreAssistantCodexPluginVersion({...caller(),version,treeSha256});},
+   upgrade:()=>assert.fail('the failed candidate must not be installed again'),
+   desktop:async operation=>{
+    if(operation==='close'){assert.equal(stage.stage,'rollback_closing');effects.push('gui_close');generation=null;}
+    if(operation==='start'){assert.equal(stage.stage,'verifying');effects.push('gui_start');generation='200:2000';}
+    return {state:generation?'running':'stopped',generation};
+   },
+   // This fixture exercises real Git/CLI/retention and orchestration. Existing
+   // native Windows tests independently cover GUI/SCM/hook activation; no
+   // synthetic trust decision is written to this isolated Codex configuration.
+   hooks:async(_operation,requirement)=>{assert.equal(requirement.version,'0.1.1');return {matches:true};},
+   probe:async()=>assert.equal((await flow.inventory()).version,previous.version),
+   activateHost:async basis=>{
+    if(stage.stage==='rollback_retargeting'){
+     assert.equal(generation,null);assert.equal(rollbacks,0);
+     assert.equal(basis.version,previous.version);assert.equal(basis.treeSha256,saved.treeSha256);
+     assert.equal((await flow.inventory()).version,candidate.version,'native inventory must remain honest before parent handoff');
+     effects.push('parent_handoff');await preservation.close();loaded=previous;
+     preservation=preserve();await preservation.ready;return {state:'handoff'};
+    }
+    assert.equal(stage.stage,'retargeting');return {state:'current'};
+   }};
+  assert.deepEqual(await maintainAssistantPlugin(flow),{state:'host_handoff',blockBusiness:true});
+  assert.equal(stage.stage,'rollback_retargeting');assert.equal(rollbacks,0);
+  assert.deepEqual(effects,['gui_close','parent_handoff']);
+  assert.deepEqual(await maintainAssistantPlugin(flow),{state:'rolled_back',version:previous.version});
+  assert.deepEqual(effects,['gui_close','parent_handoff','native_rollback','gui_start']);
+  assert.equal(stage.stage,'ready');assert.equal(stage.failedVersion,candidate.version);
+  assert.equal(rollbacks,1);assert.deepEqual(errors,[]);
+  restored=await flow.inventory();
+ }else{
+  // A verified dormant candidate is not evidence that a caller loaded it.
+  restored=await restoreAssistantCodexPluginVersion({...options,version:previous.version,treeSha256:saved.treeSha256});
+ }
  assert.equal(restored.version,previous.version);assert.equal(restored.treeSha256,saved.treeSha256);
  const observed=await readCodexPluginUpdateInventory({...options,receipt:{version:previous.version,treeSha256:saved.treeSha256}});
  assert.equal(observed.version,previous.version,'native inventory must still select the actual rollback after retention finalizers');

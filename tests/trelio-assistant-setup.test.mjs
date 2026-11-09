@@ -2147,6 +2147,13 @@ test('plugin journal has identity/CAS/read-back and never accepts hook trust, co
   await assert.rejects(host.writePluginUpdate(null,record),/STATE_INVALID/);
   for(const patch of [{trusted:true},{command:'private'},{path:'private'},{targetVersion:'../bad'},{restarts:3},{assistantId:randomUUID()}])
     await assert.rejects(host.writePluginUpdate(record,{...record,...patch}));
+  let previous=record;
+  for(const stage of ['rollback_closing','rollback_retargeting']){
+    const next={...record,stage,desktopGeneration:'100:1000',restarts:2,failures:3,failedVersion:record.targetVersion};
+    await host.writePluginUpdate(previous,next);assert.deepEqual(await host.readPluginUpdate(),next);
+    await assert.rejects(host.writePluginUpdate(next,{...next,restarts:3}),/STATE_INVALID/);
+    previous=next;
+  }
 });
 
 test('Desktop helper has only fixed registered package and graceful close, with closed pipe projection',async()=>{
@@ -2183,6 +2190,83 @@ test('bounded failed activation rolls back exact previous tree and latches the f
   assert.equal(rollbacks,1);assert.equal(f.counts().installs,1);assert.deepEqual(f.effects,[]);
 });
 
+
+const rollbackHandoffFixture=async()=>{
+  const f=pluginUpdateFixture();Object.assign(f.current(),{version:'0.1.4',treeSha256:'b'.repeat(64)});
+  await f.options.writeState(null,{schemaVersion:1,...f.options.identity,stage:'rolling_back',previousVersion:'0.1.3',
+    previousTreeSha256:'a'.repeat(64),targetVersion:'0.1.4',targetTreeSha256:'b'.repeat(64),
+    desktopGeneration:null,restarts:0,failures:3,failedVersion:'0.1.4'});
+  const effects=[];let previousParent=false,generation='100:1000';
+  f.options.rollbackHost=async()=>previousParent?null:{version:'0.1.3',treeSha256:'a'.repeat(64)};
+  f.options.desktop=async operation=>{
+    if(operation==='close'){assert.equal(f.state().stage,'rollback_closing');effects.push('close');generation=null;}
+    if(operation==='start'){assert.equal(f.state().stage,'verifying');effects.push('start');generation='200:2000';}
+    return {state:generation?'running':'stopped',generation};
+  };
+  f.options.rollback=async(version,treeSha256)=>{
+    assert.equal(previousParent,true);assert.equal(generation,null);effects.push('rollback');
+    Object.assign(f.current(),{version,treeSha256});return {...f.current()};
+  };
+  f.options.activateHost=async()=>{
+    if(f.state().stage==='rollback_retargeting'){
+      assert.equal(generation,null);effects.push('handoff');previousParent=true;return {state:'handoff'};
+    }
+    assert.equal(f.state().stage,'retargeting');return {state:'current'};
+  };
+  return {...f,effects,setPrevious:value=>{previousParent=value;},setGeneration:value=>{generation=value;}};
+};
+
+test('rollback closes the failed GUI and hands off its parent before any native downgrade',async()=>{
+  const f=await rollbackHandoffFixture();
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
+  assert.deepEqual(f.effects,['close','handoff']);assert.equal(f.state().stage,'rollback_retargeting');
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'rolled_back',version:'0.1.3'});
+  assert.deepEqual(f.effects,['close','handoff','rollback','start']);assert.equal(f.state().failedVersion,'0.1.4');
+  assert.equal(f.state().stage,'ready');assert.equal(f.counts().installs,0);
+});
+
+test('rollback closes a failed GUI even when the registered parent already uses the previous version',async()=>{
+  const f=await rollbackHandoffFixture();f.setPrevious(true);
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'rolled_back',version:'0.1.3'});
+  assert.deepEqual(f.effects,['close','rollback','start']);
+});
+
+test('rollback preserves a lost close fence and observes the stopped GUI without sending close again',async()=>{
+  const f=await rollbackHandoffFixture(),desktop=f.options.desktop;
+  f.options.desktop=async operation=>{const result=await desktop(operation);if(operation==='close')throw Error('lost close response');return result;};
+  await assert.rejects(maintainAssistantPlugin(f.options),/lost close response/);
+  assert.equal(f.state().stage,'rollback_closing');assert.equal(f.state().restarts,1);
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
+  assert.deepEqual(f.effects,['close','handoff']);
+});
+
+test('rollback close permits one later same-generation request and never resets its exhausted fence',async()=>{
+  const f=await rollbackHandoffFixture();let closes=0;
+  f.options.desktop=async operation=>{if(operation==='close')closes++;return {state:'running',generation:'100:1000'};};
+  for(let i=0;i<2;i++)assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'activating',blockBusiness:true});
+  assert.equal(closes,2);assert.equal(f.state().restarts,2);
+  for(let i=0;i<2;i++)await assert.rejects(maintainAssistantPlugin(f.options),/DESKTOP_UNAVAILABLE/);
+  assert.equal(closes,2);assert.equal(f.state().stage,'rollback_closing');assert.equal(f.state().failures,3);
+});
+
+test('rollback never closes a replacement GUI generation or acts without a verified previous-code basis',async()=>{
+  const f=await rollbackHandoffFixture();let closes=0,generation='100:1000';
+  f.options.desktop=async operation=>{if(operation==='close')closes++;return {state:'running',generation};};
+  await maintainAssistantPlugin(f.options);generation='200:2000';
+  await assert.rejects(maintainAssistantPlugin(f.options),/DESKTOP_UNAVAILABLE/);assert.equal(closes,1);
+  const other=await rollbackHandoffFixture();other.options.rollbackHost=async()=>{throw Error('previous receipt changed');};
+  await assert.rejects(maintainAssistantPlugin(other.options),/previous receipt changed/);
+  assert.deepEqual(other.effects,[]);assert.equal(other.state().stage,'rolling_back');
+});
+
+test('a positively started previous parent settles a lost handoff without retargeting or closing again',async()=>{
+  const f=await rollbackHandoffFixture(),activate=f.options.activateHost;
+  f.options.activateHost=async basis=>{const result=await activate(basis);if(result.state==='handoff')throw Error('lost handoff response');return result;};
+  await assert.rejects(maintainAssistantPlugin(f.options),/lost handoff response/);
+  assert.equal(f.state().stage,'rollback_retargeting');
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'rolled_back',version:'0.1.3'});
+  assert.deepEqual(f.effects,['close','handoff','rollback','start']);
+});
 
 test('a newer fix can replace an awaiting-hooks version without trusting it or adopting it as rollback basis',async()=>{
   const f=pluginUpdateFixture();f.trust(false);await maintainAssistantPlugin(f.options);

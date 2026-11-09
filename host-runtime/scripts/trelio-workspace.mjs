@@ -4462,6 +4462,41 @@ export const updateCodexPluginMarketplace = async ({
   );
 };
 
+/** A failed main may itself own the registered supervisor. Its live retention
+ * watcher MUST preserve that code until normal parent handoff, so installing
+ * an older version first would immediately resurrect the failed native cache.
+ * Select only the protected previous receipt in the SAME cache family and
+ * retained-code verifier. This is a technical handoff basis, never native
+ * installed-version/readiness evidence or permission to delete live code. */
+export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha256,
+  loadedPluginDirectory,loadedPluginVersion,execFileCommand=execFileAsync,
+  environment=process.env,retentionDirectory,guard=async()=>{},signal}={})=>{
+  await guard();signal?.throwIfAborted();
+  if(!parseStableVersion(version)||!/^[a-f0-9]{64}$/u.test(treeSha256??''))throw new Error('Invalid rollback host receipt.');
+  const profile='assistant',selected=codexRetentionProfile(profile);
+  const current=await readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,
+    receipt:{version,treeSha256}});
+  if(current.state!=='installed')throw new Error('Rollback plugin is not enabled.');
+  const loaded=await inspectImmutableCodexPluginTree(loadedPluginDirectory,loadedPluginVersion,{profile});
+  if(!sameLocalPath(path.dirname(current.installedPath),path.dirname(loaded.installedPath)))throw new Error('Rollback host cache family differs.');
+  const installedPath=path.join(path.dirname(loaded.installedPath),version);
+  const entries=(await readRetainedCodexPluginEntries(retentionDirectory??selected.directory,profile))
+    .filter(entry=>entry.version===version&&entry.treeSha256===treeSha256&&sameLocalPath(entry.installedPath,installedPath));
+  if(entries.length!==1)throw new Error('Original rollback host receipt is unavailable.');
+  const retained=await assertRetainedCodexPluginEntry(entries[0]);
+  const hookComponent=await readAssistantHookComponentRequirement(entries[0].pluginDirectory);
+  if(['pluginId','version','integritySha256'].some(key=>hookComponent?.[key]!==current.hookComponent?.[key]))
+    throw new Error('Rollback would change the hook component.');
+  // Restore only a positively absent exact previous path. The common publisher
+  // refuses changed/nonempty/unsafe trees; no cache scan, merge or pruning.
+  await guard();signal?.throwIfAborted();await restoreOneRetainedCodexPlugin(entries[0]);
+  const tree=await inspectImmutableCodexPluginTree(installedPath,version,{profile});
+  if(!await matchesRetainedCodexPluginTree(entries[0],retained,tree))throw new Error('Rollback host receipt bytes differ.');
+  await guard();signal?.throwIfAborted();
+  if(sameLocalPath(loaded.installedPath,installedPath))return null;
+  return {state:'retained',version,installedPath,treeSha256,...(hookComponent?{hookComponent}:{})};
+};
+
 /** Recover the last verified assistant distribution through native Codex
  * commands only. The official immutable source tag contains the marketplace
  * reference for that SAME version. Marketplace remove/add is necessary because
