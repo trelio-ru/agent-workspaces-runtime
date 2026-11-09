@@ -371,7 +371,9 @@ test('detached worker keeps its original lease and encrypted storage across shor
 });
 
 
-test('native browser workers of two chats keep separate contexts, frames and shutdown on one saved account', {
+// Independent fresh accounts exercise concurrent cold init more than once;
+// these are separate synthetic lifecycles, never retries of a failed action.
+for (const repetition of [1, 2, 3]) test(`native browser workers of two chats keep separate contexts, frames and shutdown on one saved account (fresh ${repetition})`, {
   skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180000,
 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-native-two-chats-')));
@@ -410,7 +412,10 @@ test('native browser workers of two chats keep separate contexts, frames and shu
         if (status.state !== 'preparing') break;
         await new Promise(resolve => setTimeout(resolve, 250));
       }
-      assert.equal(status.state, 'manual_input_required');
+      // Keep only the production closed startup diagnostic. A failed native
+      // child must expose its stage/cause, never owner.json or control tokens.
+      assert.equal(status.state, 'manual_input_required', JSON.stringify({ reason: status.reason, diagnostic: status.diagnostic,
+        workerEvidence: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') }));
       assert.equal((await call(index, 'ready')).state, 'saved_unverified');
     }
     const [a, b] = await Promise.all(owners.map((_, index) => call(index, 'navigate', { url: origin })));

@@ -80,7 +80,13 @@ export class ProtectedVisualStore {
     this.#entry = new AsyncEntry('trelio.visual-browser.v1', scope, { linux: { store: 'secret-service' } });
   }
 
-  async init() {
+  init() { return withBrowserAccountState(this.directory, () => this.#init()); }
+
+  async #init() {
+    // Windows validation also hardens DACLs. It is a write, not a harmless
+    // preflight: every internal caller holds the SAME account transaction so
+    // a second worker cannot alter parent ACLs while the first publishes a
+    // private file/claim. Public init uses that lock too; never nest it here.
     // Check every ancestor before following it. Credentials must not be
     // redirected into a checkout or a symlink-backed public directory.
     let cursor = this.directory;
@@ -122,7 +128,7 @@ export class ProtectedVisualStore {
   }
 
   async #readRecord(file, format) {
-    await this.init();
+    await this.#init();
     const envelope = await readPrivateJsonFile(file, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
     this.#revisions.set(file, Object.keys(envelope).length ? browserSnapshotRevision(JSON.stringify(envelope)) : null);
     if (Object.keys(envelope).length === 0) return null;
@@ -171,16 +177,16 @@ export class ProtectedVisualStore {
     // Verify the native vault before opening a human login window. A missing
     // desktop Secret Service must not be discovered only after somebody has
     // entered their password. Existing ciphertext never permits key replacement.
-    await this.init();
     await withBrowserAccountState(this.directory, async () => {
+      await this.#init();
       const exists = await this.#hasEncryptedRecord();
       await this.#keyBytes(!exists);
     });
   }
 
   async #writeRecord(file, format, value) {
-    await this.init();
     return withBrowserAccountState(this.directory, async () => {
+      await this.#init();
       // A damaged/missing OS key must never be replaced merely because a caller
       // wants to save new data over an existing encrypted session.
       const exists = await this.#hasEncryptedRecord();
@@ -215,8 +221,8 @@ export class ProtectedVisualStore {
   write(value) { return this.#writeRecord(this.file, FORMAT, value); }
   writeCredentials(value) { return this.#writeRecord(this.credentialsFile, CREDENTIAL_FORMAT, value); }
   async forgetCredentials() {
-    await this.init();
     return withBrowserAccountState(this.directory, async () => {
+      await this.#init();
       // Deletion shares the same CAS boundary as pending credential delivery.
       // A stale setup/fence writer cannot resurrect a forgotten credential.
       const current = await readPrivateJsonFile(this.credentialsFile, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
@@ -232,8 +238,8 @@ export class ProtectedVisualStore {
   // chat (including a pre-upgrade worker) can later write with a cached key.
   // Startup reserves its active claim under this SAME account transaction.
   async remove() {
-    await this.init();
     return withBrowserAccountState(this.directory, async () => {
+      await this.#init();
       for (const directory of await browserExecutionDirectories(this.directory)) {
         try {
           await assertPrivatePathKind(path.join(directory, 'active'), 'directory');

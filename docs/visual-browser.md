@@ -43,8 +43,11 @@ base revision; late fork сохраняет свою копию, не затир
 Credential/attempt-fence CAS не разрешает двум workers повторить один input.
 
 `withBrowserAccountState` сериализует короткие account transactions. Provider
-сохраняет свои native owner/ACL, key/unlock и vault format. Для opaque ciphertext
-`saveBrowserAccountSnapshot` сравнивает точную исходную revision. Неизменённые
+сохраняет свои native owner/ACL, key/unlock и vault format.
+Protected store выполняет init и Windows DACL hardening под тем же mutex:
+проверка private path на Windows также меняет ACL и не является read-only preflight.
+Она не должна конкурировать с публикацией private file/claim другого worker.
+Для opaque ciphertext `saveBrowserAccountSnapshot` сравнивает точную исходную revision. Неизменённые
 credentials и browser storage не сливаются автоматически. Только provider-owned
 `reconcile` может обновить независимо проверенную credential/refusal metadata,
 сохраняя свежий browser state и собственный metadata CAS. Каждый callback
