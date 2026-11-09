@@ -11,7 +11,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
-  hydrateNativeReadWithRevisionRefresh, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
+  hydrateNativeReadWithRevisionRefresh, hydrateLocalActionMirror, prepareLocalActionContext, canonicalizeLocalProposalTarget, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
   buildStableCompanyMirror,
   createHumanCompanySearchReader,
@@ -3550,6 +3550,50 @@ test("legacy task URLs use the canonical project route for every proposal write"
   );
 });
 
+test("canonical single and bundled proposals never open a full company mirror", async () => {
+  const projectSlug = `e-${mirror.projects[0].id}`;
+  const unavailable = async () => assert.fail("canonical proposal must not wait for a company index");
+  const target = { projectSlug, taskNumber: 17 };
+  assert.deepEqual(await canonicalizeLocalProposalTarget(target, unavailable), target);
+  assert.deepEqual(await canonicalizeLocalProposalTarget({ runId: actionRunId }, unavailable), { runId: actionRunId });
+  const saved = [];
+  const result = await prepareLocalProposalBundle({ companySlug: "acme",
+    rawBlocks: [
+      { type: "commentProposal", companySlug: "acme", ...target,
+        proposalText: "Synthetic unpublished update", expectedStateRevision: 4,
+        expectedPublicCommentsSnapshotHash: "a".repeat(64) },
+      { type: "statusProposal", companySlug: "acme", ...target,
+        expectedStateRevision: 7, expectedStatusId: actionSecretId,
+        targetStatusCode: "done", reason: "Synthetic ready evidence" },
+    ],
+    canonicalizeTarget: value => canonicalizeLocalProposalTarget(value, unavailable),
+    saveProposal: async value => {
+      saved.push(structuredClone(value));
+      if (value.kind === "status") {
+        const refusal = new Error("Synthetic current native status refusal");
+        refusal.code = "TASK_STATUS_PROPOSAL_OUTDATED"; throw refusal;
+      }
+      return { currentDraft: { proposalId: actionRunId } };
+    },
+  });
+  assert.equal(saved.length, 2, "native refusal must not replay a save");
+  assert.deepEqual(saved.map(value => value.rawPayload.target), [target, target]);
+  assert.equal(saved[0].rawPayload.expectedStateRevision, 4);
+  assert.equal(saved[0].rawPayload.expectedPublicCommentsSnapshotHash, "a".repeat(64));
+  assert.equal(saved[1].rawPayload.expectedStateRevision, 7);
+  assert.equal(result.proposalBundle.blocks[0].status, "ready");
+  assert.equal(result.proposalBundle.blocks[1].error.code, "TASK_STATUS_PROPOSAL_OUTDATED");
+  let reads = 0;
+  const legacy = await canonicalizeLocalProposalTarget({ projectSlug: "mobile-legacy", taskNumber: 17 },
+    async () => { reads++; return mirror; });
+  assert.deepEqual(legacy, { projectSlug: "mobile", taskNumber: 17 }); assert.equal(reads, 1);
+  for (const invalid of [{ ...target, taskNumber: 0 }, { ...target, runId: actionRunId }])
+    await assert.rejects(canonicalizeLocalProposalTarget(invalid, unavailable), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+  const refusal = new Error("Synthetic local discovery refusal");
+  await assert.rejects(canonicalizeLocalProposalTarget({ projectSlug: "legacy", taskNumber: 17 },
+    async () => { throw refusal; }), error => error === refusal);
+});
+
 test("ambiguous project routing aliases fail closed", () => {
   const ambiguousMirror = {
     ...mirror,
@@ -4100,45 +4144,187 @@ test("task-section refresh remains fail-closed for unrelated and repeated confli
   assert.equal(refreshCount, 1);
 });
 
-test("registry reads reselect a fresh descriptor after a real native revision refusal", async t => {
+test("all domain detail selectors recover once from a native revision refusal", async t => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
   const id = "66666666-6666-4666-8666-666666666666";
-  const initial = revisionToken => ({ token: "synthetic-token", requestOrigin: "https://trelio.test",
-    mirror: { company: { slug: "acme" }, projects: [], tasks: [], contextDocuments: [{
-      id, type: "registry", projectId: null, projectSlug: null, revisionToken,
-    }], searchDocuments: [{ referenceValues: ["vendors"], metadata: {
-      contextDocumentId: id, sourceType: "registry", projectId: null, projectSlug: null,
-    } }] } });
-  const document = { id, type: "registry", revisionToken: "f".repeat(64), projectId: null,
-    projectSlug: null, payload: { registry: { id, slug: "vendors", columns: [] },
-      rows: [{ id: actionRunId, rowKey: "existing", revision: 7, values: {} }] } };
-
-  // These are the actual detail selectors used by exact read, list and fetch,
-  // including the get_registry read which precedes row payload preparation.
-  for (const [nativeTool, input] of [["get_registry", { registrySlug: "vendors" }],
-    ["list_registries", {}], ["fetch", { id: `context:registry:${id}` }],
-    ["get_registry", { registrySlug: "vendors", rows: [{ rowKey: "existing", expectedRevision: 6 }] }]]) {
-    const originalInput = structuredClone(input), revisions = [];
-    let refreshes = 0;
+  const cases = [];
+  for (const [type, get, input, list] of [
+    ["contact", "get_contact", { contactId: id }, "list_contacts"],
+    ["knowledge_page", "get_knowledge_base_page", { pageSlug: "article" }, "list_knowledge_base_pages"],
+    ["meeting", "get_meeting", { meetingId: id }, null],
+    ["regular_work", "get_regular_work", { setId: id }, "list_regular_work"],
+    ["registry", "get_registry", { registrySlug: "vendors" }, "list_registries"],
+  ]) {
+    cases.push({ type, nativeTool: get, input });
+    if (list) cases.push({ type, nativeTool: list, input: {} });
+    cases.push({ type, nativeTool: "fetch", input: { id: `context:${type}:${id}` } });
+    if (type === "regular_work") cases.push({ type, nativeTool: get,
+      input: { ...input, occurrenceId: actionRunId } });
+    if (type === "registry") for (const nativeTool of ["upsert_registry_rows", "archive_registry_rows"])
+      cases.push({ type, nativeTool, action: true, input: { registrySlug: "vendors", clientRequestId: "registry-cas",
+        rows: [{ rowKey: "existing", expectedRevision: 6 }] } });
+  }
+  for (const { type, nativeTool, input, action } of cases) {
+    const original = structuredClone(input);
+    const initial = revisionToken => ({ token: "synthetic-token", requestOrigin: "https://trelio.test",
+      mirror: { company: { slug: "acme" }, projects: [], tasks: [], contextDocuments: [{
+        id, type, projectId: null, projectSlug: null, revisionToken,
+      }], searchDocuments: [{ referenceValues: ["vendors", "article"], metadata: {
+        contextDocumentId: id, sourceType: type, projectId: null, projectSlug: null,
+      } }] } });
+    const document = { id, type, revisionToken: "f".repeat(64), projectId: null,
+      projectSlug: null, payload: {} };
+    const revisions = []; let refreshes = 0;
     globalThis.fetch = async (url, options) => {
       assert.equal(options.method ?? "GET", "GET", "read recovery must never submit a mutation");
-      assert.equal(new URL(url).pathname, `/api/agent-workspaces/company-context/acme/documents/registry/${id}`);
-      const revision = new URL(url).searchParams.get("expectedRevision");
-      revisions.push(revision);
+      const selected = new URL(url);
+      assert.equal(selected.pathname, `/api/agent-workspaces/company-context/acme/documents/${type}/${id}`);
+      if (input.occurrenceId) assert.equal(selected.searchParams.get("occurrenceId"), input.occurrenceId);
+      const revision = selected.searchParams.get("expectedRevision"); revisions.push(revision);
       return revision === document.revisionToken
         ? new Response(JSON.stringify({ document }), { status: 200 })
-        : new Response(JSON.stringify({ code: "LOCAL_CONTEXT_GENERATION_CHANGED", message: "Synthetic stale descriptor" }), { status: 409 });
+        : new Response(JSON.stringify({ code: "LOCAL_CONTEXT_GENERATION_CHANGED" }), { status: 409 });
     };
-    const hydrated = await hydrateNativeReadWithRevisionRefresh({
+    const hydrated = await (action ? hydrateLocalActionMirror : hydrateNativeReadWithRevisionRefresh)({
       origin: "https://trelio.test", ready: initial("a".repeat(64)), nativeTool, input,
       refreshReady: async () => { refreshes++; return initial(document.revisionToken); },
     });
-    assert.deepEqual(revisions, ["a".repeat(64), document.revisionToken]);
-    assert.equal(refreshes, 1);
-    assert.deepEqual(hydrated.contextDocuments, [document]);
-    assert.deepEqual(input, originalInput, "fresh row evidence must never rewrite the caller's stale business CAS");
+    assert.deepEqual(revisions, ["a".repeat(64), document.revisionToken], `${type}/${nativeTool}`);
+    assert.equal(refreshes, 1); assert.deepEqual(hydrated.contextDocuments, [document]);
+    assert.deepEqual(input, original);
   }
+});
+
+// These are the actual action-context/protector entry points. No admission is
+// forged and no POST is made: only synthetic read responses cross native GET.
+test("canonical independent actions protect content without opening any company mirror", async () => {
+  const device = await createAgentEncryptionDevice();
+  const companyEncryption = { runtime: { company: mirror.company,
+    scope: { id: actionRunId, epoch: 1, publicEncryptionJwk: device.publicEncryptionJwk },
+    device: { id: actionSecretId } }, device,
+    scopePrivateEncryptionKey: { privateKey: device.privateKeys.encryptionPrivateKey,
+      privateJwk: device.privateBundle.encryptionPrivateJwk } };
+  const projectSlug = `e-${mirror.projects[0].id}`, companySlug = "acme";
+  const cases = [
+    ["update_contact", { companySlug, projectSlug, contactId: actionWorkspaceId, expectedRevision: 7,
+      descriptionText: "PRIVATE_ACTION_CONTACT", channels: [{ kind: "email", value: "PRIVATE_ACTION_EMAIL" }] }],
+    ["record_meeting_result", { meetingId: actionWorkspaceId, basedOnSourceIds: [actionRunId],
+      expectedResultRevision: 4, verificationStatus: "agent_checked", resultMarkdown: "PRIVATE_ACTION_RESULT" }],
+    ["link_workspace_task", { workspaceId: actionWorkspaceId, taskId: actionRunId }],
+    ["update_knowledge_base_page", { companySlug, pageSlug: `e-${actionWorkspaceId}`, slug: "private-new-slug",
+      title: "PRIVATE_ACTION_TITLE", bodyMarkdown: "PRIVATE_ACTION_BODY", commentsEnabled: true,
+      sidebarLinks: [], expectedUpdatedAt: "2026-11-09T01:00:00.000Z", clientRequestId: "page-update" }],
+    ["create_or_update_regular_work", { companySlug, projectSlug, setId: actionWorkspaceId, operation: "update_set",
+      expectedRevision: 4, state: "active", title: "PRIVATE_ACTION_SET", description: "PRIVATE_ACTION_DESCRIPTION", clientRequestId: "regular-update" }],
+    ["plan_agent_procedure_change", { companySlug, projectSlug, action: "create_draft", clientRequestId: "procedure-plan",
+      draft: { title: "PRIVATE_ACTION_PROCEDURE", instructionsMarkdown: "PRIVATE_ACTION_INSTRUCTIONS" } }],
+    ["create_task_relation", { taskId: actionWorkspaceId, targetTaskId: actionRunId,
+      relationType: "PRIVATE_ACTION_RELATION", note: "PRIVATE_ACTION_NOTE" }],
+  ];
+  for (const [nativeTool, input] of cases) {
+    const before = structuredClone(input);
+    const prepared = await prepareLocalActionContext({ origin: "https://trelio.test", company: mirror.company, nativeTool, input,
+      readMirror: async () => assert.fail("canonical ID action must work even when the full mirror is cold/busy/unavailable") });
+    assert.deepEqual(prepared.mirror, { company: mirror.company, projects: [], tasks: [] });
+    const sealed = await protectLocalActionArguments({ nativeTool, arguments: input,
+      companyEncryption, mirror: prepared.mirror });
+    assert.deepEqual(input, before);
+    assert.doesNotMatch(JSON.stringify({ value: sealed.value, payloads: sealed.payloads }), /PRIVATE_ACTION_/u);
+    // Local preparation does not replace independent native CAS/confirmation.
+    for (const key of ["contactId", "meetingId", "workspaceId", "taskId", "targetTaskId", "setId",
+      "expectedRevision", "expectedResultRevision", "expectedUpdatedAt", "clientRequestId"])
+      if (Object.hasOwn(input, key)) assert.deepEqual(sealed.value[key], input[key]);
+  }
+  const nativeRefusal = new Error("synthetic unavailable mirror");
+  for (const [nativeTool, input] of [
+    ["update_contact", { projectSlug: "historical-project" }],
+    ["update_knowledge_base_page", { pageSlug: "historical-page" }],
+    ["update_registry_definition", { registrySlug: "historical-registry" }],
+    ["apply_agent_procedure_change", { plan: { projectSlug: "historical-project" } }],
+    ["create_or_update_regular_work", { item: { task: { projectSlug: "historical-project" } } }],
+    ["plan_workspace_transfer", { targetProjectSlug: "historical-project" }],
+    ["unreviewed_future_operation", { projectSlug }],
+    ["delete_workspace", { workspaceId: actionWorkspaceId }],
+  ]) {
+    let reads = 0;
+    await assert.rejects(prepareLocalActionContext({ company: mirror.company, nativeTool, input,
+      readMirror: async () => { reads++; throw nativeRefusal; } }), error => error === nativeRefusal);
+    assert.equal(reads, 1, "unknown methods, special domain evidence and nested historical aliases cannot bypass discovery");
+  }
+  for (const input of [null, undefined, []]) assert.equal(localReadActionNeedsMirror("update_contact", input), true);
+});
+
+test("typed task action preparation refreshes stale metadata without changing write CAS", async t => {
+  const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+  const device = await createAgentEncryptionDevice();
+  const companyEncryption = { runtime: { company: mirror.company,
+    scope: { id: actionRunId, epoch: 1, publicEncryptionJwk: device.publicEncryptionJwk },
+    device: { id: actionSecretId } }, device,
+    scopePrivateEncryptionKey: { privateKey: device.privateKeys.encryptionPrivateKey,
+      privateJwk: device.privateBundle.encryptionPrivateJwk } };
+  const ready = revisionToken => {
+    const selected = structuredClone(mirror); selected.tasks[0].revisionToken = revisionToken;
+    delete selected.tasks[0].payload;
+    return { mirror: selected, companyEncryption, token: "synthetic-token", requestOrigin: "https://trelio.test" };
+  };
+  const fields = [{ id: "text-field", fieldType: "text" }, { id: "date-field", fieldType: "date" }];
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  const patch = { ...target, customFieldValues: [{ fieldId: "text-field", value: "PRIVATE_TASK_FIELD" },
+    { fieldId: "date-field", value: "2026-11-10" }], expectedDueAtTime: "2026-11-09T00:00:00.000Z" };
+  for (const [nativeTool, input] of [
+    ["update_task_custom_field", { ...target, fieldId: "text-field", value: "PRIVATE_TASK_FIELD", clientRequestId: "field-update" }],
+    ["plan_task_update", patch],
+    ["apply_task_patch", { ...patch, clientRequestId: "task-patch" }],
+    ["batch_update_tasks", { dryRun: false, operations: [{ ...patch, clientRequestId: "batch-a" },
+      { ...patch, clientRequestId: "batch-b" }] }],
+  ]) {
+    const original = structuredClone(input), revisions = []; let mirrorReads = 0, refreshes = 0;
+    globalThis.fetch = async (url, options) => {
+      assert.equal(options.method ?? "GET", "GET");
+      const selected = new URL(url); assert.equal(selected.pathname, "/api/agent-workspaces/company-context/acme/tasks/mobile/17");
+      const revision = selected.searchParams.get("expectedRevision"); revisions.push(revision);
+      if (revision === "old") return new Response(JSON.stringify({ code: "LOCAL_CONTEXT_GENERATION_CHANGED" }), { status: 409 });
+      assert.equal(revision, "fresh");
+      return new Response(JSON.stringify({ revisionToken: revision,
+        task: { task: { customFields: { fields } }, project: mirror.projects[0] } }), { status: 200 });
+    };
+    const prepared = await prepareLocalActionContext({ origin: "https://trelio.test", company: mirror.company,
+      nativeTool, input, readMirror: async () => { mirrorReads++; return ready("old"); },
+      refreshReady: async () => { refreshes++; return ready("fresh"); } });
+    assert.equal(mirrorReads, 1); assert.equal(refreshes, 1);
+    assert.deepEqual(revisions, ["old", "fresh"], "duplicate batch targets share the same revision-fenced read");
+    assert.deepEqual(prepared.mirror.tasks[0].payload.task.customFields.fields, fields);
+    const sealed = await protectLocalActionArguments({ nativeTool, arguments: input, companyEncryption, mirror: prepared.mirror });
+    assert.deepEqual(input, original, "read recovery cannot rewrite original operations, revisions or idempotency keys");
+    assert.doesNotMatch(JSON.stringify({ value: sealed.value, payloads: sealed.payloads }), /PRIVATE_TASK_FIELD/u);
+    const patches = nativeTool === "batch_update_tasks" ? sealed.value.operations : [sealed.value];
+    for (const result of patches) {
+      if (result.customFieldValues) {
+        assert.match(result.customFieldValues[0].value, /^~e1:/u);
+        assert.equal(result.customFieldValues[1].value, "2026-11-10");
+        assert.equal(result.expectedDueAtTime, patch.expectedDueAtTime);
+      } else assert.match(result.value, /^~e1:/u);
+    }
+  }
+  for (const status of [401, 403, 409, 500]) {
+    let reads = 0, refreshes = 0;
+    globalThis.fetch = async () => { reads++; return new Response(JSON.stringify({ code:
+      status === 409 ? "LOCAL_CONTEXT_GENERATION_CHANGED" : "SYNTHETIC_REFUSAL" }), { status }); };
+    await assert.rejects(prepareLocalActionContext({ origin: "https://trelio.test", company: mirror.company,
+      nativeTool: "apply_task_patch", input: patch, readMirror: async () => ready("old"),
+      refreshReady: async () => { refreshes++; return ready("fresh"); } }),
+    error => error instanceof TrelioApiError && error.statusCode === status);
+    assert.equal(reads, status === 409 ? 2 : 1); assert.equal(refreshes, status === 409 ? 1 : 0);
+  }
+  const cancellation = new Error("synthetic original cancellation"), controller = new AbortController();
+  let reads = 0;
+  globalThis.fetch = async () => { reads++; return new Response(JSON.stringify({ code: "LOCAL_CONTEXT_GENERATION_CHANGED" }), { status: 409 }); };
+  await assert.rejects(prepareLocalActionContext({ origin: "https://trelio.test", company: mirror.company,
+    nativeTool: "batch_update_tasks", input: { operations: [patch] }, signal: controller.signal,
+    readMirror: async () => ready("old"), refreshReady: async () => { controller.abort(cancellation); return ready("fresh"); } }),
+  error => error === cancellation);
+  assert.equal(reads, 1, "cancelled preparation cannot begin another read or upload");
 });
 
 test("projection refresh preserves refusals, cancellation and recipient binding", async t => {

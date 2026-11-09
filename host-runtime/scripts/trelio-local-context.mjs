@@ -163,6 +163,7 @@ const DEFAULT_CONTEXT_SEARCH_RESULTS = 5;
 const MAX_PROPOSAL_BROWSER_MANIFEST_BYTES = 32 * 1024 * 1024;
 const MIRROR_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const CANONICAL_LOCAL_ROUTE_PATTERN = /^e-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const GIT_OBJECT_PATTERN = /^[0-9a-f]{40,64}$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const AGENT_TASK_PROPOSAL_ENCRYPTED_ENTITY_TYPE = "agent_task.proposal";
@@ -6884,6 +6885,24 @@ export const hydrateNativeReadWithRevisionRefresh = async ({ origin, ready, nati
   })
 );
 
+/** Prepare only domain evidence. Both registry rows and typed task fields can
+ * be selected from an older immutable generation after a sibling write. Keep
+ * their GETs inside the SAME one-refresh boundary, before any ciphertext upload
+ * or mutation dispatch. Re-read every batch target from one refreshed mirror;
+ * caller CAS, idempotency keys and the original operations remain untouched. */
+export const hydrateLocalActionMirror = async ({ origin, ready, nativeTool, input, signal, refreshReady }) => {
+  if (["upsert_registry_rows", "archive_registry_rows"].includes(nativeTool)) {
+    return hydrateNativeReadWithRevisionRefresh({ origin, ready, nativeTool: "get_registry",
+      input, signal, refreshReady });
+  }
+  if (LOCAL_ACTION_CUSTOM_FIELD_VALUE_TOOLS.has(nativeTool)) {
+    const tasks = nativeTool === "batch_update_tasks" ? input.operations ?? [] : [input];
+    return hydrateNativeReadWithRevisionRefresh({ origin, ready, nativeTool: "get_tasks",
+      input: { tasks }, signal, refreshReady });
+  }
+  return ready.mirror;
+};
+
 export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) => {
   const input = rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)
     ? rawArguments
@@ -7463,6 +7482,17 @@ export const canonicalizeProposalTargetFromMirror = (mirror, rawTarget) => {
     projectSlug: project.slug,
     taskNumber: target.taskNumber,
   };
+};
+
+/** An already canonical task locator is not a discovery request. Validate it
+ * exactly as the legacy path, then let the SAME native proposal endpoint check
+ * task ACL/workflow/CAS. Only historical protected aliases need the local
+ * mirror; no cached task presence becomes permission or a save retry. Shared
+ * by single cards and bundles so the latter does not revive a cold full sync. */
+export const canonicalizeLocalProposalTarget = async (rawTarget, readMirror) => {
+  const target = normalizeProposalTarget(rawTarget);
+  if (target.runId || CANONICAL_LOCAL_ROUTE_PATTERN.test(target.projectSlug)) return target;
+  return canonicalizeProposalTargetFromMirror(await readMirror(), target);
 };
 
 const normalizeBoundedStringArray = (value, fieldName, maximumItems, maximumLength) => {
@@ -9198,13 +9228,13 @@ export const handleTrelioLocalProposalOperation = async (
       companySlug,
       rawBlocks,
       automaticStarts,
-      canonicalizeTarget: async (target) => {
-        if (target.runId) return target;
-        // One mirror generation canonicalizes every old project alias in the
-        // bundle; getReadyMirror reuses the startup sync and in-memory object.
+      canonicalizeTarget: target => canonicalizeLocalProposalTarget(target, async () => {
+        // Only actual historical aliases share one mirror in this bundle.
         ready ??= await getReadyMirror({ origin, companySlug, signal });
-        return canonicalizeProposalTargetFromMirror(ready.mirror, target);
-      },
+        if (ready.nativeProvider) throw new TrelioLocalContextError(
+          "LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed during proposal preparation.");
+        return ready.mirror;
+      }),
       saveProposal: async ({ kind: blockKind, rawPayload: blockPayload }) => {
         const rawResult = await saveLocalProposal({
           origin,
@@ -9231,18 +9261,12 @@ export const handleTrelioLocalProposalOperation = async (
 
   let proposalTarget = null;
   if (operation === "context" || operation === "save") {
-    proposalTarget = normalizeProposalTarget(rawPayload.target);
-    if (!proposalTarget.runId) {
-      // Project aliases are available only in the decrypted local mirror. The
-      // provider is already cached by the live check above, so getReadyMirror
-      // performs at most the normal first-start sync and never repeats device
-      // authorization just to canonicalize a legacy task URL.
+    proposalTarget = await canonicalizeLocalProposalTarget(rawPayload.target, async () => {
       const ready = await getReadyMirror({ origin, companySlug, signal });
-      proposalTarget = canonicalizeProposalTargetFromMirror(
-        ready.mirror,
-        proposalTarget,
-      );
-    }
+      if (ready.nativeProvider) throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed during proposal preparation.");
+      return ready.mirror;
+    });
   }
 
   let rawResult;
@@ -9656,17 +9680,60 @@ export const uploadLocalImportFiles = async ({ rawResult, manifestPath, origin, 
   return { structuredContent: receipt, content: [{ type: "text", text: "Import package staged and validated. Review the receipt and plan before start_import." }] };
 };
 
+const LOCAL_ACTION_ROUTE_FIELDS = new Set(["projectSlug", "sourceProjectSlug", "targetProjectSlug", "registrySlug", "pageSlug"]);
+// These reviewed native handlers need only their original arguments and the
+// SAME content protector. None consumes registry row locators, custom-field
+// types, a deletion tombstone or a reconstructed task document from a mirror.
+// This is a preparation optimisation, never a method/ACL allowlist: native
+// schema, proof, scopes, object access, CAS and human approval still run at POST.
+// Unknown/new methods deliberately retain discovery until reviewed here.
+const MIRROR_INDEPENDENT_LOCAL_ACTIONS = new Set([
+  "create_contact", "update_contact", "create_contact_comment", "update_contact_comment",
+  "create_meeting", "add_meeting_source", "record_meeting_result", "set_meeting_access",
+  "plan_meeting_context_updates", "confirm_meeting_context_updates", "record_meeting_context_update_outcome",
+  "create_workspace", "update_workspace", "link_workspace_project", "unlink_workspace_project",
+  "link_workspace_task", "unlink_workspace_task", "plan_workspace_transfer", "apply_workspace_transfer",
+  "create_task_relation", "delete_task_relation",
+  "create_registry", "update_registry_definition", "set_registry_workspaces", "set_registry_tasks",
+  "create_knowledge_base_page", "update_knowledge_base_page", "archive_knowledge_base_page", "upload_knowledge_base_attachment",
+  "create_or_update_regular_work", "complete_regular_check", "create_regular_check_comment",
+  "plan_agent_procedure_change", "apply_agent_procedure_change", "plan_agent_procedure_publication", "publish_agent_procedure",
+]);
+
+const hasHistoricalLocalRoute = value => {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(hasHistoricalLocalRoute);
+  return Object.entries(value).some(([key, child]) => (
+    LOCAL_ACTION_ROUTE_FIELDS.has(key) && child !== null && child !== undefined
+      ? typeof child !== "string" || !CANONICAL_LOCAL_ROUTE_PATTERN.test(child)
+      : hasHistoricalLocalRoute(child)
+  ));
+};
+
 export const localReadActionNeedsMirror = (nativeTool, input) => {
-  // These two structural link mutations already carry native registry/project
-  // locators. Their ordinary backend ACL/contextRevision and the common local
-  // content protector remain authoritative; unrelated Workspace files add no
-  // evidence and must not consume the mutation's minute before its first POST.
-  // Historical aliases still need local discovery and never cross HTTP clear.
-  if (["set_registry_workspaces", "set_registry_tasks"].includes(nativeTool)
-    && /^e-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(input?.registrySlug ?? "")
-    && (!input?.projectSlug || /^e-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(input.projectSlug))) return false;
-  if (!["get_agent_instructions", "get_task_create_meta", "get_project_meta", "list_my_tasks", "list_projects"].includes(nativeTool)) return true;
-  return Boolean(input?.projectSlug && !/^e-[0-9a-f-]{36}$/u.test(input.projectSlug));
+  if (!input || typeof input !== "object" || Array.isArray(input)) return true;
+  // Inspect nested plans/items too: a known outer method must not send an old
+  // protected project/page/registry alias clear merely because its root has no
+  // projectSlug. New content `slug` fields remain protected by the normal codec.
+  if (hasHistoricalLocalRoute(input)) return true;
+  return !MIRROR_INDEPENDENT_LOCAL_ACTIONS.has(nativeTool)
+    && !["get_agent_instructions", "get_task_create_meta", "get_project_meta", "list_my_tasks", "list_projects"].includes(nativeTool);
+};
+
+/** Compose dependency selection with the actual domain reader. The minimal
+ * context contains no cached authority or task projection; approved independent
+ * handlers still protect content and dispatch through their unchanged native
+ * gates. Keeping discovery lazy makes a cold/full/busy mirror irrelevant to
+ * UUID-only actions without teaching the model to retry writes. */
+export const prepareLocalActionContext = async ({ origin, company, nativeTool, input, signal, readMirror, refreshReady }) => {
+  signal?.throwIfAborted();
+  const ready = localReadActionNeedsMirror(nativeTool, input)
+    ? await readMirror()
+    : { mirror: { company, projects: [], tasks: [] } };
+  if (ready.nativeProvider) return ready;
+  return { ...ready, mirror: await hydrateLocalActionMirror({
+    origin, ready, nativeTool, input, signal, refreshReady,
+  }) };
 };
 
 export const handleTrelioLocalActionOperation = async (
@@ -9777,34 +9844,14 @@ const executeTrelioLocalActionOperation = async (
 
   // Historical/pre-encryption project links remain valid. Canonicalization is
   // local because the clear alias itself must not be sent back to Trelio.
-  const ready = localReadActionNeedsMirror(nativeTool, rawInput.arguments)
-    ? await getReadyMirror({ origin, companySlug, signal })
-    : { mirror: { company: provider.companyEncryption.runtime.company, projects: [], tasks: [] } };
+  const ready = await prepareLocalActionContext({
+    origin, company: provider.companyEncryption.runtime.company, nativeTool,
+    input: rawInput.arguments, signal, readMirror: () => getReadyMirror({ origin, companySlug, signal }),
+  });
   if (ready.nativeProvider) return {
     content: [{ type: "text", text: JSON.stringify(ready.result) }],
   };
-  let actionMirror = ready.mirror;
-  if (["upsert_registry_rows", "archive_registry_rows"].includes(nativeTool)) {
-    // Only the selected registry read can refresh. The original row CAS and
-    // idempotency key below remain byte-for-byte caller-owned; no payload or
-    // mutation has been submitted at this stage, including on the second 409.
-    actionMirror = await hydrateNativeReadWithRevisionRefresh({
-      origin, ready, nativeTool: "get_registry", input: rawInput.arguments, signal,
-    });
-  } else if (LOCAL_ACTION_CUSTOM_FIELD_VALUE_TOOLS.has(nativeTool)) {
-    const operations = nativeTool === "batch_update_tasks"
-      ? rawInput.arguments.operations ?? []
-      : [rawInput.arguments];
-    const taskIds = taskIdsForLocators(ready.mirror, operations);
-    actionMirror = await hydrateMirrorTaskDetails({
-      mirror: ready.mirror,
-      taskIds,
-      origin: ready.requestOrigin,
-      token: ready.token,
-      companyEncryption: ready.companyEncryption,
-      signal,
-    });
-  }
+  const actionMirror = ready.mirror;
   const canonicalArguments = canonicalizeLocalActionProjectSlugs(
     rawInput.arguments,
     actionMirror,

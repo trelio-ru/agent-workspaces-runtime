@@ -2570,24 +2570,46 @@ capabilities и без чтения данных компании. Эти усл
 
 ## Поиск и отдельный файл
 
-Native `get_registry`, другие detail/list/fetch и read-only подготовка
-`upsert_registry_rows`/`archive_registry_rows` используют один bounded recovery:
-только настоящий HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` обновляет discovery
-locator и повторяет чтение один раз. Runtime публикует прежний content-free
-mutation marker для соседних host, сбрасывает RAM/startup freshness и выполняет
-`forceSync`/`requireFresh` без readable fallback. Второй конфликт, ACL, crypto,
-transport и отмена возвращаются без нового цикла. Исходный deadline не меняется;
-смена company/scope/epoch/public key/device прекращает чтение до новой hydration.
-Row revisions, clientRequestId и остальные аргументы записи не переписываются.
-Uploads, proof submission и mutation POST остаются вне recovery; неизвестный
-результат записи требует read-back, а не автоматического повтора.
+Native detail/list/fetch, read-only подготовка строк реестра и typed task fields
+используют один bounded recovery: только настоящий HTTP 409
+`LOCAL_CONTEXT_GENERATION_CHANGED` обновляет discovery locator и повторяет чтение
+один раз. Это включает `update_task_custom_field`, `plan_task_update`,
+`apply_task_patch` и `batch_update_tasks`; все batch targets заново выбираются из
+одного refreshed mirror, повторяющиеся task IDs делят один projection read.
+Runtime публикует прежний content-free mutation marker для соседних host,
+сбрасывает RAM/startup freshness и выполняет `forceSync`/`requireFresh` без
+readable fallback. Второй конфликт, ACL, crypto, transport и отмена возвращаются
+без нового цикла. Исходный deadline не меняется; смена company/scope/epoch/public
+key/device прекращает чтение до новой hydration. Row/task revisions,
+clientRequestId, typed date/number values и оригинальные operations не
+переписываются. Uploads, proof submission и mutation POST остаются вне recovery;
+неизвестный результат записи требует read-back, а не автоматического повтора.
 
-`set_registry_workspaces`/`set_registry_tasks` с canonical `e-UUID` registry и
-project locators идут сразу через обычный protector/proof/backend ACL/context CAS.
-Связи и защищённый change summary не требуют индекса файлов остальных Workspaces.
-Исторические aliases по-прежнему разрешаются только локальным discovery. Это
-узкий allowlist; row mutation/custom fields и остальные actions сохраняют свои
-требования к свежему domain context.
+Подготовка local action явно различает domain evidence и поиск aliases.
+Закрытый reviewed allowlist `MIRROR_INDEPENDENT_LOCAL_ACTIONS` разрешает не
+загружать зеркало для операций с контактами/их обсуждением, встречами/источниками/
+итогами/планами/доступом, named Workspace metadata/связями/переносами, task relations,
+registry definitions/links, страницами БЗ/вложениями, regular-work sets/checks и
+procedure plan/apply/publication. Их protector не использует cached row locators,
+field types, deletion tombstone или reconstructed task document. Свежие provider,
+proof, schema/scopes, объектные ACL, CAS и независимое human approval остаются в
+прежнем native dispatch. Подготовка не даёт новых прав и не повторяет POST.
+
+`projectSlug`, `sourceProjectSlug`, `targetProjectSlug`, `registrySlug`, `pageSlug`
+включая вложенные планы/пункты допускают этот путь только с canonical `e-UUID`
+либо допустимым null/omission. Новое content-поле `slug` по-прежнему шифруется
+общим codec. Historical/неверные aliases сохраняют локальный discovery; неизвестный
+метод сохраняет mirror prerequisite. Registry rows, custom fields, Workspace
+deletion и task-document mutations не попадают в allowlist без своих domain
+проверок. Нельзя превращать эту оптимизацию в blanket bypass всех local actions.
+
+Single-card и bundled task proposals используют один target normalizer. Exact
+Run UUID либо canonical `e-UUID` project + положительный task number сразу идут
+через тот же native context/save, без company index. Historical aliases разрешаются
+в прежнем ACL-filtered mirror; bundle лениво разделяет только реально нужный
+снимок. Наличие старой задачи в cache не является полномочием. Исходные proposal
+revision/hash/preparation refs и независимые решения человека сохраняются;
+ошибка native save не запускает новый sync/save или автоматический retry.
 
 `search_tasks` использует свой существующий task-only корпус. Для encrypted
 company native-read host собирает в памяти только свежие task projections:
