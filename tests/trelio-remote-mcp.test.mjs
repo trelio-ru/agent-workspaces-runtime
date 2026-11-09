@@ -4460,15 +4460,15 @@ test("local proposal render treats an empty elicitation capability as form suppo
       provider: "local_company_context",
       proposal: {
         schemaVersion: 1,
-        project: { name: "Защищённый проект" },
-        task: { number: 12, title: "Проверить результат" },
+        project: { name: "я".repeat(79) + "💗 проект" },
+        task: { number: 12, title: "т".repeat(99) + "💗 задача" },
         currentDraft: {
           proposalId,
           revision: 3,
           items: [{
             itemId,
-            checklistTitle: "Приёмка",
-            content: "Проверить отчёт",
+            checklistTitle: "п".repeat(79) + "💗 приёмка",
+            content: "о".repeat(178) + "💗 отчёт",
           }],
         },
       },
@@ -4477,6 +4477,11 @@ test("local proposal render treats an empty elicitation capability as form suppo
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0].method, "elicitation/create");
+  const assertUnicode = value => {
+    if (typeof value === "string") assert.ok(value.isWellFormed(), "local form text must keep whole emoji");
+    else if (value && typeof value === "object") Object.values(value).forEach(assertUnicode);
+  };
+  assertUnicode(requests[0].params);
   assert.deepEqual(
     requests[0].params.requestedSchema.properties.proposal_1_items.default,
     [itemId],

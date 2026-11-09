@@ -471,6 +471,21 @@ test("shared Playwright bootstrap returns only sanitized failure diagnostics", (
   }
 });
 
+test("browser bootstrap diagnostic truncation keeps whole emoji", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-unicode-"));
+  try {
+    assert.throws(() => bootstrapPlaywright({ root,
+      npmInvocation: { executable: "/trusted/node", npmCliPath: "/trusted/npm-cli.js" },
+      spawn: () => ({ status: 1, stdout: "", stderr: "x".repeat(1999) + "💗tail" }),
+    }), error => {
+      assert.equal(error.code, "BROWSER_SESSION_BOOTSTRAP_FAILED");
+      assert.equal(error.details.stderr, "x".repeat(1999));
+      assert.ok(error.details.stderr.isWellFormed());
+      return true;
+    });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("shared browser runtime resolves npm-cli.js without a command shell", () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-npm-layout-"));
   const fakeNode = path.join(temporary, "node.exe");

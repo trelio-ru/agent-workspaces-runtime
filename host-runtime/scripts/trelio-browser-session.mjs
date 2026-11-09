@@ -1,3 +1,4 @@
+import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 /**
  * Shared browser-session runtime for signed Agent Skills.
  *
@@ -701,7 +702,7 @@ const sanitizedOutput = (value) => {
     .replace(/((?:_authToken|authToken|password|token)\s*[=:]\s*)[^\s]+/giu, "$1<redacted>")
     .replace(/([?&](?:access_token|auth|password|token)=)[^&\s]+/giu, "$1<redacted>")
     .replace(/[\r\n\t]+/gu, " ");
-  return sanitized.slice(0, 2_000);
+  return sliceUtf16CodePoints(sanitized, 0, 2_000);
 };
 
 export const bootstrapPlaywright = ({

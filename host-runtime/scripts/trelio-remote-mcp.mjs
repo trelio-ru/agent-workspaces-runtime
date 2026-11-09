@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
@@ -4717,7 +4718,7 @@ const boundedProposalFormText = (value, maximum = 180) => {
     ? value.replace(/\s+/gu, " ").trim()
     : "";
   if (normalized.length <= maximum) return normalized;
-  return `${normalized.slice(0, Math.max(0, maximum - 1))}…`;
+  return `${sliceUtf16CodePoints(normalized, 0, Math.max(0, maximum - 1))}…`;
 };
 
 const proposalFormLabel = (proposal) => {
