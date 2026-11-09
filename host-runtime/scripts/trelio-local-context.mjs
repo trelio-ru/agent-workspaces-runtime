@@ -8608,6 +8608,10 @@ export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, 
     signal?.throwIfAborted();
     if (active) throw error("LOCAL_CONTEXT_SEARCH_IN_PROGRESS", "Предыдущий поисковый процесс ещё работает.");
     clearTimeout(idleTimer);
+    // An invalidated generation may be closing while a new admitted query
+    // arrives. Never send that query into the old, half-closed IPC channel.
+    if (closing) await closing;
+    signal?.throwIfAborted();
     if (child && scope !== admission.binding) await close();
     if (!child) open();
     scope = admission.binding;

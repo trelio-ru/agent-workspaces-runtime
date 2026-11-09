@@ -165,6 +165,8 @@ UUID операции не является capability. Перед однокр�
 проверяется свежая native manifest generation. Смена доступа/generation не
 допускает retained plaintext и не запускает скрытый повтор. Два одновременных
 poll не могут получить один результат дважды.
+Неуспешный final fence закрывает и warm reader: следующий явный поиск читает
+новый startup snapshot, а не повторно отвергает старую RAM-generation до TTL.
 
 Тяжёлые JSON, crypto и индекс изолированы от MCP event loop. Parent хранит один
 запрос и ответ до 512 KiB, без зеркала. Один warm child обслуживает один recipient;

@@ -288,6 +288,11 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
         // Cancelling a waiter leaves the same reader and deadline intact.
         // A real validation refusal discards retained plaintext immediately.
         if (!signal?.aborted && entry.settled) {
+          // A failed generation/recipient fence invalidates this warm reader,
+          // not only its answer. Otherwise the next explicit search can reuse
+          // the same stale startup snapshot and fail forever until its TTL.
+          // A late duplicate poll must never close a newer query's reader.
+          if (current === entry) await closeReader();
           clearTimeout(entry.retentionTimer);
           operations.discardTerminal("search", entry.id, entry.binding);
           if (current === entry) current = null;

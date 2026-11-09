@@ -76,8 +76,15 @@ test("company search deadlines never slide across polls and stale recipients can
 });
 
 test("company search refuses changed generations, oversized answers and duplicate concurrent delivery", async () => {
-  const stale = createCompanySearchOperations({ ...searchOptions, execute: async () => searchValue, validate: async () => false });
+  let nativeCurrent = false, invalidatedReaders = 0, executions = 0;
+  const stale = createCompanySearchOperations({ ...searchOptions,
+    execute: async () => { executions++; return searchValue; }, validate: async () => nativeCurrent,
+    closeReader: async () => { invalidatedReaders++; } });
   await assert.rejects(stale.read("https://synthetic.invalid", searchInput), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+  assert.equal(invalidatedReaders, 1, "A stale startup snapshot must not survive a failed final generation fence");
+  nativeCurrent = true;
+  assert.deepEqual(await stale.read("https://synthetic.invalid", searchInput), searchValue.result);
+  assert.equal(executions, 2, "Only the explicit new search runs again, after dropping the stale reader");
   await stale.close();
   const oversized = createCompanySearchOperations({ ...searchOptions, execute: async () => ({ ...searchValue, result: { text: "x".repeat(513 * 1024) } }) });
   await assert.rejects(oversized.read("https://synthetic.invalid", searchInput), { code: "LOCAL_CONTEXT_SEARCH_FAILED" });
