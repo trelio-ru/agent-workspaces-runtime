@@ -1152,10 +1152,18 @@ const LOCAL_AGENT_INSTRUCTION_PUBLICATION_TOOLS = new Set([
   "publish_agent_instructions",
   "plan_my_agent_profile_update",
   "publish_my_agent_profile",
+  "request_assistant_profile_update",
 ]);
 const LOCAL_COMPANY_AGENT_INSTRUCTIONS_MAX_BYTES = 16 * 1024;
 const LOCAL_PROJECT_AGENT_INSTRUCTIONS_MAX_BYTES = 8 * 1024;
 const LOCAL_PERSONAL_AGENT_PROFILE_MAX_BYTES = 16 * 1024;
+/** Plaintext normalization precedes encryption. The native publisher cannot
+ * repair CRLF/trailing whitespace inside an opaque instructions marker. */
+export const normalizeLocalAgentInstructionsMarkdown=value=>{
+  if(typeof value!=='string')throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','Instruction Markdown must be text.');
+  const body=value.replace(/\r\n?/gu,'\n').trim();
+  return body?`${body}\n`:'';
+};
 const LOCAL_ACTION_CONTENT_SLUG_TOOLS = new Set([
   "create_knowledge_base_page",
   "update_knowledge_base_page",
@@ -1208,7 +1216,7 @@ export const assertLocalAgentInstructionPublicationWithinLimit = ({
   if (typeof instructionsMarkdown !== "string") return null;
 
   const isPersonalProfile = nativeTool === "plan_my_agent_profile_update"
-    || nativeTool === "publish_my_agent_profile";
+    || nativeTool === "publish_my_agent_profile" || nativeTool === "request_assistant_profile_update";
   const isProjectScope = !isPersonalProfile && typeof rawArguments?.projectSlug === "string"
     && rawArguments.projectSlug.trim().length > 0;
   const maxBytes = isPersonalProfile
@@ -1216,8 +1224,7 @@ export const assertLocalAgentInstructionPublicationWithinLimit = ({
     : isProjectScope
     ? LOCAL_PROJECT_AGENT_INSTRUCTIONS_MAX_BYTES
     : LOCAL_COMPANY_AGENT_INSTRUCTIONS_MAX_BYTES;
-  const normalizedBody = instructionsMarkdown.replace(/\r\n?/gu, "\n").trim();
-  const normalizedMarkdown = normalizedBody ? `${normalizedBody}\n` : "";
+  const normalizedMarkdown = normalizeLocalAgentInstructionsMarkdown(instructionsMarkdown);
   const sizeBytes = Buffer.byteLength(normalizedMarkdown, "utf8");
 
   if (sizeBytes > maxBytes) {

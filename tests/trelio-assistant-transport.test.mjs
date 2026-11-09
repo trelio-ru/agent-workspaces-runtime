@@ -227,6 +227,10 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         const opened=await decryptCompanyPayload({encryptedPayload:payload,scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
         assert.ok(opened.values,'SAME payload crypto opens actual business content');
       }
+      if(preparation.actionPreview&&preparation.nativeTool==='request_assistant_profile_update')return json({schemaVersion:1,companyId,
+        recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,context:{
+          snapshot:{memberId:identity.assistantId,expectedRevisionId:preparation.arguments.expectedRevisionId},
+          questionText:`Native full profile: ${preparation.arguments.instructionsMarkdown}\nReason: ${preparation.arguments.reason}`},encryptedPayloads:[...staged.values()]});
       if(preparation.actionPreview)return json({schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,
         scopeId,scopeEpoch:1,context:{snapshot:preparation.arguments.operation==='create_private_secret'?{neutralPrivateMetadata:{name:'Personal secret'}}
           :{control:{id:preparation.arguments.fields.controlId,note:preparation.arguments.reason}},
@@ -559,6 +563,28 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     // The production facade owns an empty lock directory; remove that exact
     // fixture directory before the independent no-canary self-test assertions.
     await fs.rm(path.join(root,'digital-assistants'),{recursive:true,force:true});
+    const exercisePersonalProfile=async()=>{
+      const profile={clientRequestId:randomUUID(),expectedRevisionId:null,instructionsMarkdown:'PROFILE_RUNTIME_CANARY\r\n',
+        changeSummary:'PROFILE_RUNTIME_SUMMARY_CANARY',reason:'PROFILE_RUNTIME_REASON_CANARY'};
+      let calls=0;
+      const result=await withAssistantManagedContentArguments({...input,name:'request_assistant_profile_update',args:profile},async wire=>{
+        calls++;assert.doesNotMatch(JSON.stringify(wire),/PROFILE_RUNTIME_/);
+        const {encryptedContent,...business}=wire,active=await host.readActivePass();
+        const target=active.kind==='source_intake'?{kind:'source_intake',pass:{companyId,sourceId:active.sourceId,intakeId:active.passId}}
+          :{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}};
+        assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',
+          phase:'publication',companyId,target,nativeTool:'request_assistant_profile_update',arguments:business,action:encryptedContent.action},encryptedContent.signature),true);
+        assert.match(encryptedContent.action.questionText,/^~e1:/u);assert.ok(encryptedContent.action.intentJson);
+        return {content:[],structuredContent:{state:'pending',questionId:randomUUID()}};
+      });
+      assert.equal(result.structuredContent.state,'pending');assert.equal(calls,1,'planning never performs an automatic owner approval or publication');
+      const before=preparations;
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'request_assistant_profile_update',
+        args:{...profile,clientRequestId:randomUUID(),instructionsMarkdown:'я'.repeat(8192)}},()=>assert.fail('oversized profile was sent')),
+        {code:'LOCAL_ACTION_AGENT_INSTRUCTIONS_TOO_LARGE'});
+      assert.equal(preparations,before,'same shared 16-KiB guard runs before content staging');
+    };
+    await exercisePersonalProfile();
     const cancellation={runId:randomUUID(),reason:'CANCEL_REASON_CANARY'};
     let cancellationCalls=0,cancellationMarker=null;
     const cancelSend=async wire=>{
@@ -591,6 +617,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     client.readSourceIntake=async()=>{intakeReads++;return {state:intakeState,threadId:intake.threadId,eventId:intake.eventId,
       sourceRevision:intake.sourceRevision,leaseExpiresAt:new Date(Date.now()+600000).toISOString()};};
     try{
+      await exercisePersonalProfile();
       const result=await withAssistantManagedContentArguments({...input,name:'resolve_assistant_intake',args:{decision:'create_task',
         intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId},clientRequestId:intake.passId,projectId:randomUUID(),
         fields:{title:'New owner goal'}}},async wire=>{
@@ -3394,6 +3421,34 @@ test('owner dialogue tools use live backend schemas and poll projection keeps on
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,now:()=>100,http:async()=>({events:[{...event,answerText:'PRIVATE ANSWER'}],nextCursor:'1',hasMore:false})});
   assert.deepEqual((await client.poll(companyId)).events,[event]);
   event.ownerQuestionId='PRIVATE QUESTION';await assert.rejects(client.poll(companyId));
+});
+
+test('own-profile discovery preserves the legacy intake pair and uses its bounded native view for a genuine task origin',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'p'.repeat(43)}`,expiresAt:10000});
+  let available=false,active={kind:'task'},calls=0;
+  const native=name=>({name,description:`Native ${name}`,inputSchema:{type:'object',properties:{},additionalProperties:true}});
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,now:()=>100,readActivePass:async()=>active,
+    withWorkspaceArguments:(input,send)=>send(input.args),httpRequest:async input=>{
+      const profile=input.config.headers['x-trelio-assistant-capability-profile']??'task';
+      const reply=result=>({sessionId:`profile-${profile}`,message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[native('get_assistant_status'),...(profile==='source_intake'
+        ?[native('get_assistant_intake_context'),native('resolve_assistant_intake'),...(available?[native('request_assistant_profile_update')]:[])]
+        :profile==='company_context'?['search','fetch','get_trelio_tool_contract'].map(native):[native('get_task')])]});
+      assert.equal(profile,'source_intake','schema and native call use the SAME narrow presentation, without another task schema copy');
+      assert.equal(input.payload.params.name,'request_assistant_profile_update');calls++;
+      return reply({content:[],structuredContent:{state:'pending',questionId:randomUUID()}});
+    }});
+  assert.ok(!(await client.listTools()).some(tool=>tool.name==='request_assistant_profile_update'),'old backends remain supported without an invented definition');
+  available=true;
+  assert.equal((await client.listTools()).filter(tool=>tool.name==='request_assistant_profile_update').length,1);
+  const draft={instructionsMarkdown:'Own rule',expectedRevisionId:null,changeSummary:'Own change',reason:'Personal preference',clientRequestId:randomUUID()};
+  assert.equal((await client.callTool('request_assistant_profile_update',draft)).structuredContent.state,'pending');
+  active={kind:'source_intake',intakeKind:'route_existing'};
+  await assert.rejects(client.callTool('request_assistant_profile_update',draft),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  assert.equal(calls,1,'triage never dispatches a profile mutation');
 });
 
 

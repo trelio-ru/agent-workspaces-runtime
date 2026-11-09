@@ -692,7 +692,7 @@ const validateAssistantEncryptedSkillRead = (value,pass=null) => {
 /** Closed content surface implemented with the SAME local protector, payload
  * collision comparison, managed OS identity and native data-plane routes. This
  * list is a transport capability, never a replacement domain schema or ACL. */
-const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['execute_assistant_operation','call_remote_agent_skill_tool','cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
+const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['request_assistant_profile_update','execute_assistant_operation','call_remote_agent_skill_tool','cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
   'create_task','create_comment','update_comment','update_task_title','update_task_description','create_task_control',
   'update_task_control','create_checklist','update_checklist','create_subtask','create_task_relation','update_task_status',
   'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',
@@ -837,7 +837,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   // Content-dependent refinements cannot be evaluated on opaque markers by
   // the native Zod validator. Preserve its question/choice contract BEFORE
   // sealing; these local guards grant no action or owner decision authority.
-  const question=name==='ask_assistant_owner'||name==='resolve_assistant_intake'&&business.decision==='ask_owner';
+  const question=name==='ask_assistant_owner'||name==='resolve_assistant_intake'&&business.decision==='ask_owner'&&business.ownerQuestionId===undefined;
   if(name==='resolve_assistant_intake'&&business.decision==='reply_owner'){
     if(!assistantOwnerReplyText(business.replyText))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
     business.replyText=business.replyText.trim();
@@ -861,7 +861,9 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   const target=pass.kind==='source_intake'
     ?{kind:'source_intake',pass:{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}}
     :{kind:'task',pass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId}};
-  if((target.kind==='source_intake')!==['get_assistant_intake_context','resolve_assistant_intake'].includes(name))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  if(name==='request_assistant_profile_update'){
+    if(pass.intakeKind==='route_existing'||pass.readOnlyRecovery)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  }else if((target.kind==='source_intake')!==['get_assistant_intake_context','resolve_assistant_intake'].includes(name))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   if(name==='request_assistant_action'&&(typeof business.reason!=='string'||!business.reason.trim()
     ||Buffer.byteLength(business.reason.trim(),'utf8')>2000))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   let publicationTerminal=null;
@@ -881,6 +883,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
     signal,lockDirectory,managedContentOperation:async({context,token,requestPayloads,assertCurrent})=>{
       const common=await import('./trelio-workspace.mjs'),local=await import('./trelio-local-context.mjs'),
         crypto=await import('./trelio-company-encryption.mjs');
+      if(name==='request_assistant_profile_update')business.instructionsMarkdown=local.normalizeLocalAgentInstructionsMarkdown(business.instructionsMarkdown);
       const current=async()=>{await assertCurrent();await assertPass();};
       let customField=null,commentFiles=null,commentMentions=null,commentAttachmentLinks=[],secretRecipe=null,privateRecipeArguments=null;
       if(secretSkill){
@@ -1107,7 +1110,20 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
           delete protectedValue.value.encryptedFiles;
         }
         wire=protectedValue.value;
-        if(name==='request_assistant_action'){
+        if(name==='request_assistant_profile_update'){
+          // The SAME native preparation/HPKE snapshot produces the exact
+          // owner-visible preview. Only its question is sealed here; profile
+          // leaves already use the common instructions/summary/reason codec.
+          // The model cannot replace that preview or approve its publication.
+          const preview=await stage(protectedValue,{actionPreview:true}),opened=await hydrate(preview);
+          if(typeof opened.questionText!=='string'||Buffer.byteLength(opened.questionText,'utf8')>24576||!object(opened.snapshot))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          const content=await local.protectLocalActionArguments({nativeTool:'request_assistant_action',companyEncryption:context,
+            arguments:{clientRequestId:business.clientRequestId,encryptedAction:{questionText:opened.questionText,
+              intentJson:{fields:Object.fromEntries(Object.entries(business).filter(([key])=>key!=='ownerDecisionId')),snapshot:opened.snapshot}}}});
+          const ownerActionContent=content.value.encryptedAction;
+          await stage({value:wire,payloads:content.payloads,expectedPayloadValues:content.expectedPayloadValues},{ownerActionContent});
+          action={...ownerActionContent,snapshot:structuredClone(preview.context.snapshot)};
+        }else if(name==='request_assistant_action'){
           const preview=await stage(protectedValue,{actionPreview:true}),opened=await hydrate(preview);
           if(typeof opened.questionText!=='string'||Buffer.byteLength(opened.questionText,'utf8')>16384||!object(opened.snapshot)||!Array.isArray(opened.requiredActions))fail('ASSISTANT_MCP_INVALID_RESPONSE');
           // Keep original native markers for final CAS. Only the owner-visible
@@ -3175,7 +3191,7 @@ const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS
   // exposing the name does not read a provider body or create a new task.
   'bind_assistant_source_conversation','execute_assistant_operation',
   'connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool',
-  'ask_assistant_owner', 'request_assistant_action', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
+  'ask_assistant_owner', 'request_assistant_action', 'request_assistant_profile_update', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
   // Native server cancellation needs no local file/CLI adapter. Its live
   // dedicated schema and pass/own-Run checks remain backend authority; adding
   // this name never opens cancel/restore in the local Workspace dispatcher.
@@ -3477,7 +3493,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   };
   const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:[...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
+    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
       ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
       :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
       :presentationProfile==='company_context'?['get_assistant_status',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
@@ -3530,12 +3546,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // copy, a task grant, another connector or a second business executor.
       const deadline=AbortSignal.timeout(timeoutMs),bounded=signal?AbortSignal.any([signal,deadline]):deadline;
       let refinementAvailable=false;
-      const catalogue=(allowed,profile,optional=false)=>perform(async({protocol,config,credential,session,request,signal})=>{
+      const catalogue=(allowed,profile,optional=false,additional=[])=>perform(async({protocol,config,credential,session,request,signal})=>{
         const tools=await protocol.listRemoteTools(config,credential,session,request,{signal}),seen=new Set();
         if(profile==='company_context'&&tools.some(tool=>tool?.name==='search_tasks'
           &&typeof tool.description==='string'&&tool.description.length<=4096&&object(tool.inputSchema)
           &&tool.inputSchema.type==='object'))refinementAvailable=true;
-        const selected=tools.filter(tool=>allowed.includes(tool?.name)
+        const selected=tools.filter(tool=>(allowed.includes(tool?.name)||additional.includes(tool?.name))
           &&(!['download_attachment','download_registry_document','download_knowledge_base_attachment'].includes(tool.name)||typeof materializeAttachment==='function')).map(tool=>{
           if(seen.has(tool.name)||typeof tool.description!=='string'||tool.description.length>4096||!object(tool.inputSchema)||tool.inputSchema.type!=='object')fail('ASSISTANT_MCP_INVALID_RESPONSE');
           seen.add(tool.name);
@@ -3546,12 +3562,16 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         // An older native catalogue may genuinely have neither intake method.
         // Do not invent definitions. One missing half is malformed, not legacy.
         if(optional&&seen.size===0&&tools.some(t=>t?.name==='get_assistant_status'))return [];
-        if(optional?seen.size!==allowed.length:!seen.has('get_assistant_status'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        if(optional?allowed.some(name=>!seen.has(name)):!seen.has('get_assistant_status'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
         if(JSON.stringify(selected).includes(credential)||Buffer.byteLength(JSON.stringify(selected))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return selected;
       },bounded,timeoutMs,profile);
       const normal=await catalogue(await selectedTools(true),presentationProfile);
-      const intake=await catalogue(intakeToolNames,'source_intake',true);
+      // The two original intake methods remain an indivisible legacy pair.
+      // Profile planning is an optional native definition in that SAME bounded
+      // view, usable with either genuine origin; never append its full schema
+      // to the already near-bound task catalogue or invent it on old backends.
+      const intake=await catalogue(intakeToolNames,'source_intake',true,['request_assistant_profile_update']);
       // Read native discovery definitions from their existing session-fixed
       // view BEFORE the client starts a model turn, not after a status call.
       // Older native catalogues may have none; partial sets fail closed.
@@ -3736,7 +3756,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
       }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs,
-        companyReadSession?'company_context':null);
+        name==='request_assistant_profile_update'?'source_intake':companyReadSession?'company_context':null);
     },
   };
 };

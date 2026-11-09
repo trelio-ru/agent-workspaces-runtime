@@ -3036,6 +3036,34 @@ rebuilt under their current exact identity. The actual Windows preflight test
 uses the same native chdir and asserts a bounded cwd; no OS registry, long-path
 policy, ACL or shell setting is changed.
 
+<a id="personal-profile-update"></a>
+
+### Personal profile update
+
+`request_assistant_profile_update` is a closed native capability for the
+assistant's own company/member journal. It requires a direct owner instruction,
+the current full profile and a personal-scope rationale. First prepare the full
+replacement, preserving unrelated rules. Only the SAME persisted owner decision
+permits a later call with its `ownerDecisionId`, unchanged draft/request key and
+fresh proof to publish. No model approval flag, arbitrary member selector,
+local memory file, task or Run is introduced. The native profile revision and
+applied receipt commit atomically; an uncertain response requires exact read-back.
+
+The ordinary task-work origin and verified fully read private-owner Telegram
+intake share this tool. Hook/proxy presentation never grants native authority;
+triage, discussion, unread/group originals and reply-only recovery remain denied.
+An intake follows returned `nextCall` through the SAME resolver with the sealed
+`ownerQuestionId`, then rereads the original after the owner's decision. It never
+creates a second question, replays an old command or preserves a stale peer grant.
+
+Encrypted publication uses SAME managed protector/payload staging, native HPKE
+preview, opaque owner intent, current recipient and signature inventory. Normalize
+the Markdown and enforce the common 16-KiB bound before protection. Only this full
+native profile preview may occupy 24 KiB; ordinary question limits stay 16 KiB.
+Old facades receive the live native schema through the current signed worker;
+there is no plugin-shell schema copy, new key or human OAuth fallback. Backend
+support must be deployed before runtime activation; established minima stay intact.
+
 ### Exact owner action client
 
 `request_assistant_action` is a guarded write in the live backend catalog, never
