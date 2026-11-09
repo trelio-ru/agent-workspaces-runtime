@@ -14,7 +14,9 @@ import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-loca
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateHumanCodexHookComponent,
   inspectHumanCodexHookComponent, readAssistantPluginPublishedRef, restoreAssistantCodexPluginVersion,
-  prepareAssistantCodexPluginRollbackHost, readCodexPluginUpdateInventory, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+  prepareAssistantCodexPluginRollbackHost, readCodexPluginUpdateInventory, startLoadedCodexPluginPreservation,
+  updateCodexPluginMarketplace, readAssistantPluginLatestVersion } from "../host-runtime/scripts/trelio-workspace.mjs";
+import {readCodexAssistantMarketplaceSource} from '../host-runtime/scripts/trelio-codex-routing.mjs';
 import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -45,7 +47,7 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
    '-c','commit.gpgsign=false','commit','-qm','synthetic rollback fixture');};
  const native=async args=>JSON.parse((await execute(executable,args,{cwd:root,env:environment,timeout:30000})).stdout);
  await git('init','-q');await git('branch','-M','main');
- for(const version of ['0.1.3','0.1.4']){
+ const writeRelease=async version=>{
   await git('checkout','--orphan','distribution-'+version);await git('rm','-rf','--ignore-unmatch','.');
   await fs.mkdir(path.join(repository,'.codex-plugin'),{recursive:true});await fs.mkdir(path.join(repository,'scripts'),{recursive:true});
   await fs.writeFile(path.join(repository,'.gitattributes'),'* -text\n');
@@ -59,7 +61,8 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
   await fs.writeFile(path.join(repository,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:[
    {name:'trelio-digital-assistant',source:{source:'url',url:official,ref:'plugin-v'+version},policy:{installation:'AVAILABLE',authentication:'ON_USE'}}]}));
   await commit();await git('tag','v'+version);
- }
+ };
+ for(const version of ['0.1.3','0.1.4'])await writeRelease(version);
  await git('branch','-M','main');
  await native(['plugin','marketplace','add',official,'--ref','v0.1.3','--json']);
  const previous=await native(['plugin','add',plugin,'--json']);assert.equal(previous.version,'0.1.3');
@@ -145,11 +148,60 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
  assert.equal(restored.version,previous.version);assert.equal(restored.treeSha256,saved.treeSha256);
  const observed=await readCodexPluginUpdateInventory({...options,receipt:{version:previous.version,treeSha256:saved.treeSha256}});
  assert.equal(observed.version,previous.version,'native inventory must still select the actual rollback after retention finalizers');
- assert.equal(observed.desiredVersion,candidate.version,'official main discovery is restored without reinstalling its failed candidate');
+ assert.equal(observed.desiredVersion,previous.version,'native startup must retain the known-good source, not main');
+ assert.deepEqual(await readCodexAssistantMarketplaceSource({environment}),{configured:true,ref:'v'+previous.version});
+ // A fresh actual native process refreshes its configured source just as cold
+ // discovery does. Its source must stay pinned; no retained failed candidate
+ // may become selected merely because Codex starts again.
+ await native(['plugin','marketplace','upgrade',marketplace,'--json']);
+ assert.equal((await readCodexPluginUpdateInventory(options)).desiredVersion,previous.version);
  await assert.rejects(fs.lstat(candidate.installedPath),{code:'ENOENT'});
  assert.deepEqual(await fs.readFile(path.join(archived.entryDirectory,'metadata.json')),archivedReceipt);
  assert.equal(JSON.parse(await fs.readFile(path.join(archived.pluginDirectory,'.codex-plugin/plugin.json'),'utf8')).version,candidate.version);
  assert.doesNotMatch(await fs.readFile(path.join(home,'config.toml'),'utf8'),/trusted_hash|trusted_content_hash/u);
+ if(!liveFailedParent){
+  // Genuine native CLI/Git/source-gap acceptance. Public discovery uses the
+  // SAME bounded parser over synthetic public-code bytes, not an injected
+  // installed-version receipt. All native effects stay inside this HOME.
+  const latest=()=>readAssistantPluginLatestVersion({fetchResponse:async()=>new Response(
+   await fs.readFile(path.join(repository,'.agents/plugins/marketplace.json')))});
+  const published=selection=>readAssistantPluginPublishedRef({...selection,readGit:async(args,settings)=>{
+   const result=await execute('git',args,{...settings,cwd:repository,env:environment});return {...result,code:0};
+  }});
+  const unchangedConfig=await fs.readFile(path.join(home,'config.toml'));
+  let intents=[];
+  const updater={...options,readLatestVersion:latest,readPublishedRef:published,
+   beforeInstall:async version=>{intents.push(version);}};
+  assert.equal((await updateCodexPluginMarketplace({...updater,onlyIfNewerThan:candidate.version})).unchanged,true);
+  assert.deepEqual(intents,[]);assert.deepEqual(await fs.readFile(path.join(home,'config.toml')),unchangedConfig);
+  await writeRelease('0.1.5');await git('branch','-M','main');
+  let removeLost=false,targetAdds=0;
+  await assert.rejects(updateCodexPluginMarketplace({...updater,onlyIfNewerThan:candidate.version,
+   execFileCommand:async(command,args,settings)=>{
+    if(args[1]==='add')targetAdds++;
+    const result=await options.execFileCommand(command,args,settings);
+    if(args[1]==='marketplace'&&args[2]==='remove'){removeLost=true;throw new Error('synthetic lost source-remove result');}
+    return result;
+   }}),/synthetic lost source-remove/);
+  assert.equal(removeLost,true);assert.equal(targetAdds,0);assert.deepEqual(intents,['0.1.5']);
+  await assert.rejects(readCodexPluginUpdateInventory(options),/marketplace is absent/);
+  assert.deepEqual(await readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true}),{state:'marketplace_absent'});
+  // Protected rollback alone consumes the positively observed source gap. It
+  // restores old source metadata, not the uncertain newer installation. The
+  // already verified old cache must not receive a second native plugin add.
+  assert.equal(await prepareAssistantCodexPluginRollbackHost({...options,version:previous.version,
+   treeSha256:saved.treeSha256,allowMissingMarketplace:true}),null);
+  const recovery=await restoreAssistantCodexPluginVersion({...options,version:previous.version,treeSha256:saved.treeSha256,
+   execFileCommand:async(command,args,settings)=>{assert.notEqual(args[1],'add');return options.execFileCommand(command,args,settings);}});
+  assert.equal(recovery.version,previous.version);assert.equal(recovery.desiredVersion,previous.version);
+  // A real later release, not the failed one, remains independently eligible.
+  await writeRelease('0.1.6');await git('branch','-M','main');
+  const fixed=await updateCodexPluginMarketplace({...updater,onlyIfNewerThan:'0.1.5'});
+  assert.equal(fixed.version,'0.1.6');assert.deepEqual(intents,['0.1.5','0.1.6']);
+  assert.deepEqual(await readCodexAssistantMarketplaceSource({environment}),{configured:true,ref:'v0.1.6'});
+  assert.equal((await readCodexPluginUpdateInventory({...options,loadedPluginDirectory:fixed.installedPath,loadedPluginVersion:fixed.version})).version,'0.1.6');
+  assert.doesNotMatch(await fs.readFile(path.join(home,'config.toml'),'utf8'),/trusted_hash|trusted_content_hash/u);
+ }
 });
 
 test('actual Codex migrates an existing combined main to independent hooks without a manual companion install or trust write',

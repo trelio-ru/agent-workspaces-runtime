@@ -426,7 +426,7 @@ test("hook-free main rollback reconciles a real native re-clone against its orig
   const market = path.join(f.root, "market"); await fs.mkdir(path.join(market, ".agents/plugins"), {recursive: true});
   await fs.writeFile(path.join(market, ".agents/plugins/marketplace.json"), JSON.stringify({name: "trelio-digital-assistants",
     plugins: [{name: "trelio-digital-assistant", source: {source: "url", url: "https://github.com/trelio-ru/digital-assistants.git", ref: "plugin-v0.1.3"}}]}));
-  const mutations = []; let present = true;
+  const mutations = []; let present = true, sourceRef = "main";
   const execFileCommand = async (_command, args) => {
     let result;
     if (args[1] === "marketplace" && args[2] === "list") result = {marketplaces: present ? [{name: "trelio-digital-assistants", root: market,
@@ -436,7 +436,7 @@ test("hook-free main rollback reconciles a real native re-clone against its orig
       mutations.push(args);
       assert.equal(args[1], "marketplace", "a positive rollback read-back NEVER repeats plugin add");
       if (args[2] === "remove") {present = false; result = {};}
-      else {assert.deepEqual(args, ["plugin", "marketplace", "add", "https://github.com/trelio-ru/digital-assistants.git", "--ref", "main", "--json"]); present = true; result = {};}
+      else {assert.deepEqual(args, ["plugin", "marketplace", "add", "https://github.com/trelio-ru/digital-assistants.git", "--ref", "v0.1.3", "--json"]); present = true; sourceRef = "v0.1.3"; result = {};}
     }
     return {stdout: JSON.stringify(result)};
   };
@@ -449,9 +449,9 @@ test("hook-free main rollback reconciles a real native re-clone against its orig
   assert.equal(observed.observedTreeSha256, raw.treeSha256);
   assert.equal(await restoreRetainedCodexPluginInstallations({profile: "assistant", retentionDirectory: f.retentionDirectory}), 1);
   const restored = await restoreAssistantCodexPluginVersion({...options, ...receipt,
-    loadedPluginDirectory: f.plugin, loadedPluginVersion: "0.1.3"});
+    loadedPluginDirectory: f.plugin, loadedPluginVersion: "0.1.3", readSource: async()=>({configured:present,ref:sourceRef})});
   assert.equal(restored.treeSha256, receipt.treeSha256);
-  assert.equal(mutations.length, 2, "only official main discovery is restored, once");
+  assert.equal(mutations.length, 2, "only the exact immutable source is pinned, once");
   assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/packed-refs")), currentRefs);
   assert.deepEqual(await fs.readFile(path.join(entry.entryDirectory, "metadata.json")), receiptBytes);
 

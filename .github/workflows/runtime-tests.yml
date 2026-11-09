@@ -632,9 +632,18 @@ jobs:
           node tests/trelio-instruction-reuse.test.mjs
           node tests/trelio-local-continuation.test.mjs
 
+      # Pin/read/discover uses real Windows config and bounded transport too;
+      # the separate native CLI fixture covers actual source registration.
+      - name: Run Windows assistant immutable-source discovery regressions
+        if: needs.ci-plan.outputs.profile == 'full'
+        run: >-
+          node --test
+          --test-name-pattern="assistant plugin updater|assistant public marketplace|assistant publication preflight"
+          tests/trelio-workspace.test.mjs
+
       - name: Run Windows persisted hook settings diagnostics
         if: needs.ci-plan.outputs.profile == 'full'
-        run: node --test --test-name-pattern="persisted hook" tests/trelio-codex-routing.test.mjs
+        run: node --test --test-name-pattern="persisted hook|assistant marketplace" tests/trelio-codex-routing.test.mjs
 
       - name: Run native Windows private process regressions
         run: node tests/trelio-windows-native-private.test.mjs

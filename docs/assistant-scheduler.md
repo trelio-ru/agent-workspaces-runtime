@@ -2116,8 +2116,22 @@ before native process launch. No task/chat/receipt/queue is removed or migrated.
 The shared human updater has closed assistant-main and assistant-hook profiles, reusing the
 native executable resolver, official Git marketplace, bounded JSON CLI,
 immutable-tree verifier and exact loaded-code retention. Commands are
-`plugin marketplace upgrade trelio-digital-assistants` then, only for a newer
-immutable `plugin-vX.Y.Z`, `plugin add trelio-digital-assistant@trelio-digital-assistants`.
+a native source switch to exact `vX.Y.Z`, then, only when it is not already
+natively installed, `plugin add trelio-digital-assistant@trelio-digital-assistants`.
+The source stays pinned: Desktop startup must not independently reselect a failed
+version. Future release discovery uses one fixed, token-free HTTPS GET of the
+official main marketplace JSON (no cookies/redirects, 256 KiB and ten seconds
+within the original maintenance signal). The SAME pure immutable-source parser
+is used for native and public metadata. This is only a discovery hint, never an
+installer, package verifier or authority to retry. Both exact `plugin-vX.Y.Z`
+and marketplace `vX.Y.Z` public Git refs must be published before install intent.
+An eligible release exceeds both the installed and latched failed version.
+The existing beforeInstall journal precedes source removal/addition as well as
+plugin add; unknown outcomes reconcile inventory, never repeat target install.
+Native marketplace/list omits its configured ref. Observe only the exact official
+assistant table through the SAME bounded no-symlink UTF-8/TOML config reader;
+malformed, duplicate, inline, foreign or typed source settings refuse. The host
+never edits that configuration itself.
 An absent/disabled MAIN plugin is not installed/enabled. A required missing hook
 companion may be installed from the SAME official marketplace; a human-disabled
 companion is never enabled. Its exact independent version/inventory digest
@@ -2262,9 +2276,19 @@ may do that. Healthy current-version cycles perform no Desktop operations.
 
 Persistent activation failure is bounded to three observations. Recovery uses
 only the same previously verified tree and official immutable source tag via
-native marketplace remove/add/install, with exact read-back, then restores the
-main discovery source. Native Codex refuses a direct source-ref switch; the
-explicit intermediate journal survives that gap. This does not remove the
+native marketplace remove/add/install, with exact pinned-source and full-tree
+read-back. The verified old source remains pinned, including across cold native
+refresh/startup; failed archives stay private. Native Codex refuses a direct
+source-ref switch; the explicit intermediate journal survives that gap. Only a
+complete positive native source absence plus explicit owner-enabled main under
+the original protected installing/rollback intent admits prior-receipt recovery.
+A lost source removal never permits replay of target installation. A native
+already verified old installation needs no duplicate plugin add. Unknown,
+foreign, disabled, malformed or inaccessible inventories are never absence.
+If older code already confirmed rollback but Desktop has independently
+reselected the exact failed version, fresh exact native installation and the
+unchanged original previous receipt/hook dependency admit a new rollback of
+that observed reselection. Preserve the failed latch and unknown-action fences. This does not remove the
 plugin identity or edit trust/config by hand. An unavailable/unsafe/disabled
 snapshot fails closed. The failed candidate stays latched, preventing infinite
 reinstalls/restart loops; a newer release is independently eligible. Rollback

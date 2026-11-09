@@ -376,6 +376,19 @@ MCP уже завершили свои watchers. Если parent уже испо
 generation не закрывается повторно; lost handoff наблюдается через штатный CAS.
 До успешного native read-back версия не объявляется установленной/готовой.
 
+После rollback native source остаётся на exact `v<previous>`: восстановление
+`main` позволяет самому Desktop снова выбрать отклонённую версию. Ref читается
+тем же bounded no-symlink TOML reader, без raw config write. Новые версии
+обнаруживаются отдельным fixed public HTTPS GET main marketplace JSON; прежний
+native source parser, оба immutable Git refs, intent-before-effect и полная
+native tree/hook verification обязательны. Потерянный source remove/add допускает
+лишь prior-receipt rollback по положительному native отсутствию и сохранённому
+owner-enabled main; неизвестность/отказ не считаются отсутствием. Существующая
+точная old installation не устанавливается повторно. Fresh native reselection
+уже отклонённой версии после старого rollback исправляется тем же guarded
+rollback с неизменным previous receipt/hook и failed latch. Подробный flow –
+[maintenance](assistant-scheduler.md#model-free-maintenance).
+
 Native rollback может заново клонировать тот же detached distribution commit
 после появления новых коммитов в official `main`. Только hook-free assistant
 main с явным отдельным hookComponent допускает различия inactive

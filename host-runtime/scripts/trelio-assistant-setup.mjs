@@ -1100,6 +1100,26 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
   await guard();
   let current=['rolling_back','rollback_closing','rollback_retargeting'].includes(state?.stage)?await recover():await inventory();
   if(current?.blockBusiness===true)return current;
+  if(current.state==='marketplace_absent'){
+    // A positive complete native absence is admitted ONLY by the production
+    // inventory under this protected installation intent and explicit enabled
+    // setting. Recover the prior receipt; never repeat the uncertain target.
+    if(state?.stage!=='installing')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+    await save({stage:'rolling_back',failedVersion:state.targetVersion,failures:3});
+    current=await recover();if(current?.blockBusiness===true)return current;
+  }
+  if(state?.failedVersion&&state.previousVersion===state.targetVersion&&state.previousTreeSha256===state.targetTreeSha256
+    &&current.state==='installed'&&current.version===state.failedVersion
+    &&['ready','installed','closing','starting','verifying','failed','retargeting'].includes(state.stage)
+    &&!(state.hookComponent&&state.hookComponent.previousVersion!==state.hookComponent.version)){
+    // Older code restored main discovery after a confirmed rollback. Desktop
+    // can then independently select that SAME failed candidate at startup.
+    // This is a newly observed native installation, not replay of the old
+    // unknown add. Keep the failed latch and original previous receipt; the
+    // corrected rollback pins that source so startup cannot undo it again.
+    await save({stage:'rolling_back',targetVersion:current.version,targetTreeSha256:current.treeSha256,failures:3});
+    current=await recover();if(current?.blockBusiness===true)return current;
+  }
   if(current.state==='disabled')return {state:'disabled',blockBusiness:true};
   if(!state)await save({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
     previousVersion:current.version,previousTreeSha256:current.treeSha256,targetVersion:current.version,targetTreeSha256:current.treeSha256,

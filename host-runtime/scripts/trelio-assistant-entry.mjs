@@ -2155,7 +2155,7 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
       const version=rollingBack?journal.previousVersion:journal?.targetVersion;
       const treeSha256=rollingBack?journal.previousTreeSha256:journal?.targetTreeSha256;
       const current=await common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env,
-        receipt:version&&treeSha256?{version,treeSha256}:null});
+        receipt:version&&treeSha256?{version,treeSha256}:null,allowMissingMarketplace:rollingBack||journal?.stage==='installing'});
       if(current.state==='installed'&&(!treeSha256||current.version!==version)){
         // Pin the exact NEW native candidate before maintenance adopts its
         // digest. A later GUI/native metadata refresh must still have that
@@ -2181,8 +2181,12 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
         :common.installAssistantHookComponent({requirement,beforeInstall,execFileCommand,environment:env,signal}),
       rollback:(version,treeSha256)=>common.restoreAssistantCodexPluginVersion({version,treeSha256,execFileCommand,environment:env,
         loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
-      rollbackHost:(version,treeSha256)=>common.prepareAssistantCodexPluginRollbackHost({version,treeSha256,execFileCommand,environment:env,
-        loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory),guard,signal}),
+      rollbackHost:async(version,treeSha256)=>{
+        const state=await lockedHost.readPluginUpdate();
+        return common.prepareAssistantCodexPluginRollbackHost({version,treeSha256,execFileCommand,environment:env,
+          loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory),guard,signal,
+          allowMissingMarketplace:['rolling_back','rollback_closing','rollback_retargeting'].includes(state?.stage)});
+      },
       desktop:(operation,generation)=>runAssistantWindowsDesktop(operation,generation,{environment,signal,guard}),
       activateHost:async installed=>{
         await guard();

@@ -402,7 +402,7 @@ export const inspectCodexTrelioHookSettings = async ({
  * Unsupported inline/duplicate/typed forms refuse rather than look unset. */
 export const readCodexPluginEnablement = async ({ pluginId, environment = process.env,
   configPath = resolveCodexConfigPath({ environment }), filesystem = fs } = {}) => {
-  if (pluginId !== "trelio-agent-workspaces-hooks@trelio-plugins")
+  if (!["trelio-agent-workspaces-hooks@trelio-plugins","trelio-digital-assistant@trelio-digital-assistants"].includes(pluginId))
     throw new Error("Unsupported Codex dependency.");
   const { source } = await readCodexConfig(configPath, filesystem);
   const target = ["plugins", pluginId, "enabled"];
@@ -424,6 +424,45 @@ export const readCodexPluginEnablement = async ({ pluginId, environment = proces
     enabled = value === "true";
   }
   return enabled;
+};
+
+/** Native marketplace/list omits its configured Git ref. Reuse the SAME
+ * bounded, no-symlink UTF-8/TOML reader to observe only our fixed assistant
+ * source. This is configuration evidence, never plugin/hook readiness or a
+ * config writer. Unknown inline/duplicate/typed forms refuse before effects. */
+export const readCodexAssistantMarketplaceSource=async({environment=process.env,
+  configPath=resolveCodexConfigPath({environment}),filesystem=fs}={})=>{
+  const {source}=await readCodexConfig(configPath,filesystem),prefix=['marketplaces','trelio-digital-assistants'];
+  const values=new Map();let table=[],selectedTable=false;
+  for(const statement of scanTomlStatements(source)){
+    const code=stripTrailingTomlComment(statement.text).trim();
+    if(code.startsWith('[')&&code.endsWith(']')){
+      table=parseTablePath(statement.text);
+      const arrayTable=code.startsWith('[[')&&code.endsWith(']]')?parseTomlKeyPath(code.slice(2,-2)):null;
+      if(arrayTable&&(keyPathStartsWith(arrayTable,prefix)||keyPathStartsWith(prefix,arrayTable)))
+        failUnsupported('Unsupported assistant marketplace table.');
+      if(table&&keyPathStartsWith(table,prefix)&&table.length!==prefix.length)failUnsupported('Unsupported assistant marketplace nesting.');
+      if(table&&keyPathEquals(table,prefix)){
+        if(selectedTable)failUnsupported('Duplicate assistant marketplace table.');
+        selectedTable=true;
+      }
+      continue;
+    }
+    const assignment=readAssignment(statement.text);if(!assignment||!table)continue;
+    const key=[...table,...assignment.keyPath];
+    if(!keyPathStartsWith(key,prefix)&&!keyPathStartsWith(prefix,key))continue;
+    if(key.length!==3||!['source_type','source','ref'].includes(key[2])||values.has(key[2]))
+      failUnsupported('Unsupported assistant marketplace assignment.');
+    const value=decodeComparableTomlString(stripTrailingTomlComment(statement.text).slice(assignment.equalsIndex+1).trim());
+    if(typeof value!=='string')failUnsupported('Unsupported assistant marketplace value.');
+    values.set(key[2],value);
+  }
+  if(values.size===0){if(selectedTable)failUnsupported('Incomplete assistant marketplace table.');return {configured:false};}
+  const ref=values.get('ref')??null;
+  if(values.get('source_type')!=='git'||values.get('source')!=='https://github.com/trelio-ru/digital-assistants.git'
+    ||ref!==null&&!/^(?:main|v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u.test(ref))
+    failUnsupported('Assistant marketplace source differs from its fixed contract.');
+  return {configured:true,ref};
 };
 
 /**

@@ -2268,6 +2268,24 @@ test('a positively started previous parent settles a lost handoff without retarg
   assert.deepEqual(f.effects,['close','handoff','rollback','start']);
 });
 
+test('a fresh native reselection of the rejected version repairs a previously confirmed rollback without clearing its latch',async()=>{
+  const f=await rollbackHandoffFixture();f.setPrevious(true);
+  await f.options.writeState(f.state(),{...f.state(),stage:'failed',targetVersion:'0.1.3',targetTreeSha256:'a'.repeat(64)});
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'rolled_back',version:'0.1.3'});
+  assert.deepEqual(f.effects,['close','rollback','start']);assert.equal(f.state().failedVersion,'0.1.4');assert.equal(f.counts().installs,0);
+});
+
+test('a positively absent native source under an installation intent rolls back, never repeats the uncertain target',async()=>{
+  const f=await rollbackHandoffFixture();f.setPrevious(true);
+  await f.options.writeState(f.state(),{...f.state(),stage:'installing',targetTreeSha256:null,failedVersion:null,failures:0});
+  f.options.inventory=async()=>({state:'marketplace_absent'});f.options.upgrade=()=>assert.fail('unknown target must not be installed again');
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'rolled_back',version:'0.1.3'});
+  assert.deepEqual(f.effects,['close','rollback','start']);assert.equal(f.state().failedVersion,'0.1.4');
+  const other=await rollbackHandoffFixture();other.options.inventory=async()=>({state:'marketplace_absent'});
+  await other.options.writeState(other.state(),{...other.state(),stage:'ready'});
+  await assert.rejects(maintainAssistantPlugin(other.options),/STATE_INVALID/);assert.deepEqual(other.effects,[]);
+});
+
 test('a newer fix can replace an awaiting-hooks version without trusting it or adopting it as rollback basis',async()=>{
   const f=pluginUpdateFixture();f.trust(false);await maintainAssistantPlugin(f.options);
   Object.assign(f.current(),{desiredVersion:'0.1.5'});await maintainAssistantPlugin(f.options);

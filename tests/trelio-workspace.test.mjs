@@ -167,6 +167,7 @@ import {
   updateCodexPluginMarketplace,
   readCodexPluginUpdateInventory,
   readAssistantPluginPublishedRef,
+  readAssistantPluginLatestVersion,
   inspectAssistantHookComponent,
   verifyAssistantHookComponentIntegrity,
   installAssistantHookComponent,
@@ -12245,23 +12246,30 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
   const writeMarket=ref=>fs.writeFile(path.join(market,'.agents','plugins','marketplace.json'),JSON.stringify({name:marketplace,
     plugins:[{name,source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref}}]}));
   await writeMarket('plugin-v0.1.3');let version='0.1.3',enabled=true,source='https://github.com/trelio-ru/digital-assistants.git',adds=0,prepared=null;
+  let latest='0.1.4',registered=true,sourceRef='main';
+  await fs.writeFile(path.join(home,'config.toml'),'[plugins."trelio-digital-assistant@trelio-digital-assistants"]\nenabled=true\n');
   const argsSeen=[];
   const execFileCommand=async(_command,args)=>{
     argsSeen.push(args);let value;
-    if(args[1]==='marketplace'&&args[2]==='list')value={marketplaces:[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]};
+    if(args[1]==='marketplace'&&args[2]==='list')value={marketplaces:registered?[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]:[]};
     else if(args[1]==='list')value={installed:[{pluginId:`${name}@${marketplace}`,version,installed:true,enabled}]};
-    else if(args[1]==='marketplace'&&args[2]==='upgrade'){
-      assert.equal(args[3],marketplace);await writeMarket('plugin-v0.1.4');value={selectedMarketplaces:[marketplace],errors:[]};
+    else if(args[1]==='marketplace'){
+      assert.equal(prepared,latest,'intent must precede source switching too');
+      if(args[2]==='remove'){assert.equal(args[3],marketplace);registered=false;}
+      else{assert.deepEqual(args,['plugin','marketplace','add',source,'--ref',`v${latest}`,'--json']);registered=true;sourceRef=`v${latest}`;await writeMarket(`plugin-v${latest}`);}
+      value={};
     }else{
       assert.deepEqual(args,['plugin','add',`${name}@${marketplace}`,'--json']);
-      assert.equal(prepared,'0.1.4','intent must be durable before native add');adds++;version='0.1.4';await writePlugin(version);
+      assert.equal(prepared,latest,'intent must be durable before native add');adds++;version=latest;await writePlugin(version);
       value={pluginId:`${name}@${marketplace}`,marketplaceName:marketplace,version,installedPath:cache(version)};
     }
     return {stdout:JSON.stringify(value)};
   };
   let published=false,publicationReads=0;
   const options={profile:'assistant',environment:{CODEX_HOME:home},execFileCommand,preserveLoadedPlugin:false,
-    readPublishedRef:async selection=>{publicationReads++;assert.deepEqual(selection,{profile:'assistant',version:'0.1.4',signal:undefined});return published;}};
+    readLatestVersion:async()=>latest,readSource:async()=>({configured:registered,ref:sourceRef}),
+    readPublishedRef:async selection=>{publicationReads++;assert.equal(selection.profile,'assistant');assert.equal(selection.version,latest);
+      assert.ok(selection.sourceTag===undefined||selection.sourceTag===true);return published;}};
   const before=await readCodexPluginUpdateInventory(options);assert.equal(before.version,'0.1.3');assert.match(before.treeSha256,/^[a-f0-9]{64}$/);
   const pending=await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.3',beforeInstall:()=>assert.fail('unpublished version must not acquire an install intent')});
   assert.equal(pending.publicationPending,true);assert.equal(pending.unchanged,true);assert.equal(adds,0);assert.equal(prepared,null);assert.equal(version,'0.1.3');
@@ -12271,11 +12279,50 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
   await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.3',beforeInstall:async target=>{prepared=target;}});
   assert.equal(adds,1);const after=await readCodexPluginUpdateInventory(options);assert.equal(after.version,'0.1.4');assert.notEqual(after.treeSha256,before.treeSha256);
   await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.4',beforeInstall:()=>assert.fail('unchanged must not install')});assert.equal(adds,1);
-  assert.equal(publicationReads,2,'the exact current version needs neither another network probe nor another add');
+  assert.equal(publicationReads,3,'both immutable refs are checked once; current needs neither another Git probe nor another add');
+  latest='0.1.3';
+  assert.equal((await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.2',beforeInstall:()=>assert.fail('public metadata must not downgrade a newer native installation')})).unchanged,true);
+  latest='0.1.5';
+  assert.equal((await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.4',
+    readPublishedRef:async selection=>!selection.sourceTag,beforeInstall:()=>assert.fail('missing immutable source ref must not acquire intent')})).publicationPending,true);
+  assert.equal(prepared,'0.1.4');assert.equal(adds,1);
+  latest='0.1.5';let removes=0;
+  const lost={...options,execFileCommand:async(command,args,settings)=>{
+    const result=await execFileCommand(command,args,settings);if(args[1]==='marketplace'&&args[2]==='remove'){removes++;throw Error('lost source removal response');}return result;
+  }};
+  await assert.rejects(updateCodexPluginMarketplace({...lost,onlyIfNewerThan:'0.1.4',beforeInstall:async target=>{prepared=target;}}),/lost source removal response/);
+  assert.equal(removes,1);assert.equal(adds,1,'unknown source switch never repeats target install');
+  await assert.rejects(readCodexPluginUpdateInventory(options));
+  assert.deepEqual(await readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true}),{state:'marketplace_absent'});
+  for(const marketplaces of [[null],[{}],[{name:'foreign'}]])await assert.rejects(readCodexPluginUpdateInventory({
+    ...options,allowMissingMarketplace:true,execFileCommand:async()=>({stdout:JSON.stringify({marketplaces})})}),/Invalid native/);
+  await fs.writeFile(path.join(home,'config.toml'),'[plugins."trelio-digital-assistant@trelio-digital-assistants"]\nenabled=false\n');
+  await assert.rejects(readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true}));
+  await assert.rejects(readCodexPluginUpdateInventory({...options,allowMissingMarketplace:true,execFileCommand:async()=>({stdout:'{}'})}));
+  registered=true;
   enabled=false;assert.deepEqual(await readCodexPluginUpdateInventory(options),{state:'disabled'});
   source='https://github.com/other/foreign.git';await assert.rejects(readCodexPluginUpdateInventory(options));source='https://github.com/trelio-ru/digital-assistants.git';
   await writeMarket('main');await assert.rejects(readCodexPluginUpdateInventory(options));
   assert.ok(argsSeen.every(args=>!args.includes('trelio-plugins')&&!args.includes('trelio-agent-workspaces@trelio-plugins')));
+});
+
+test('assistant public marketplace discovery is fixed, bounded and never executable/native-install authority',async()=>{
+  const manifest={name:'trelio-digital-assistants',plugins:[{name:'trelio-digital-assistant',source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref:'plugin-v0.1.4'}}]};
+  let calls=0;
+  const fetchResponse=async(url,options)=>{calls++;assert.equal(url,'https://raw.githubusercontent.com/trelio-ru/digital-assistants/main/.agents/plugins/marketplace.json');
+    assert.equal(options.credentials,'omit');assert.equal(options.redirect,'error');assert.equal(options.cache,'no-store');assert.equal(options.signal.aborted,false);
+    return new Response(JSON.stringify(manifest));};
+  assert.equal(await readAssistantPluginLatestVersion({fetchResponse}),'0.1.4');assert.equal(calls,1);
+  for(const response of [new Response('',{status:404}),new Response('',{status:429}),new Response('bad JSON PRIVATE_SENTINEL'),
+    new Response(Buffer.from([0xff])),new Response('x',{headers:{'content-length':String(256*1024+1)}}),
+    new Response('x'.repeat(256*1024+1)),new Response(JSON.stringify({...manifest,name:'foreign'})),
+    new Response(JSON.stringify({...manifest,plugins:[{...manifest.plugins[0],source:{...manifest.plugins[0].source,url:'https://foreign.invalid/x'}}]}))]){
+    let count=0;await assert.rejects(readAssistantPluginLatestVersion({fetchResponse:async()=>{count++;return response;}}));assert.equal(count,1);
+  }
+  const cancelled=new AbortController();cancelled.abort();
+  await assert.rejects(readAssistantPluginLatestVersion({signal:cancelled.signal,fetchResponse:()=>assert.fail('cancelled before network')}),{name:'AbortError'});
+  const late=new AbortController();await assert.rejects(readAssistantPluginLatestVersion({signal:late.signal,fetchResponse:async()=>{
+    late.abort();return new Response(JSON.stringify(manifest));}}),{name:'AbortError'});
 });
 
 for (const componentVersion of ['0.1.0','0.1.1']) {
@@ -12382,6 +12429,9 @@ test('assistant publication preflight reads only one exact official public ref a
   await assert.rejects(readAssistantPluginPublishedRef({...options,signal:cancelled.signal,readGit:()=>assert.fail('cancelled before Git')}),{name:'AbortError'});
   const late=new AbortController();
   await assert.rejects(readAssistantPluginPublishedRef({...options,signal:late.signal,readGit:async()=>{late.abort();return {stdout:`${'a'.repeat(40)}\t${ref}\n`,stderr:''};}}),{name:'AbortError'});
+  assert.equal(await readAssistantPluginPublishedRef({profile:'assistant',version:'0.1.6',sourceTag:true,readGit:async args=>{
+    assert.equal(args.at(-1),'refs/tags/v0.1.6');return {stdout:`${'b'.repeat(40)}\trefs/tags/v0.1.6\n`,stderr:''};}}),true);
+  await assert.rejects(readAssistantPluginPublishedRef({profile:'assistantHooks',version:'0.1.0',sourceTag:true,readGit:()=>assert.fail('invalid source tag profile')}));
   assert.equal(await readAssistantPluginPublishedRef({profile:'assistantHooks',version:'0.1.0',readGit:async args=>{
     assert.equal(args.at(-1),'refs/tags/hooks-v0.1.0');return {stdout:`${'b'.repeat(40)}\trefs/tags/hooks-v0.1.0\n`,stderr:''};}}),true);
 });

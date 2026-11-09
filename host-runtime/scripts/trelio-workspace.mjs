@@ -30,7 +30,7 @@ import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpo
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment } from "./trelio-codex-conversation.mjs";
-import { readCodexPluginEnablement } from "./trelio-codex-routing.mjs";
+import { readCodexPluginEnablement, readCodexAssistantMarketplaceSource } from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
 import {
@@ -3842,6 +3842,10 @@ const runCodexJsonCommand = async (
   return parseJsonCommandOutput(result.stdout, `codex ${argumentsList.join(" ")}`);
 };
 
+class AssistantCodexMarketplaceAbsentError extends Error {
+  constructor(){super('The native assistant marketplace is absent.');}
+}
+
 const assertOfficialCodexMarketplace = async ({
   execFileCommand = execFileAsync,
   environment = process.env, profile = "human",
@@ -3851,9 +3855,15 @@ const assertOfficialCodexMarketplace = async ({
     CODEX_MARKETPLACE_LIST_ARGUMENTS,
     { execFileCommand, environment },
   );
-  const marketplace = Array.isArray(result?.marketplaces)
-    ? result.marketplaces.find((item) => item?.name === selected.marketplace)
-    : null;
+  if(!Array.isArray(result?.marketplaces))throw new Error('Invalid native marketplace inventory.');
+  if(profile==='assistant'&&(result.marketplaces.some(row=>!row||typeof row!=='object'||Array.isArray(row)
+    ||typeof row.name!=='string'||!row.name||typeof row.root!=='string'||!path.isAbsolute(row.root)
+    ||typeof row.marketplaceSource?.sourceType!=='string'||typeof row.marketplaceSource?.source!=='string')
+    ||new Set(result.marketplaces.map(row=>row.name)).size!==result.marketplaces.length))
+    throw new Error('Invalid native assistant marketplace inventory.');
+  const matches=result.marketplaces.filter(item=>item?.name===selected.marketplace);
+  if(profile==='assistant'&&matches.length===0)throw new AssistantCodexMarketplaceAbsentError();
+  const marketplace=matches.length===1?matches[0]:null;
 
   if (
     marketplace?.marketplaceSource?.sourceType !== "git"
@@ -3865,15 +3875,61 @@ const assertOfficialCodexMarketplace = async ({
   }
 };
 
+// Native inventory and public discovery MUST interpret exactly the same fixed
+// repository/ref grammar. Public metadata is only an update hint; immutable
+// native installation, retained bytes and hook review remain separate gates.
+const codexMarketplaceSourceVersion=(manifest,profile)=>{
+  const selected=codexRetentionProfile(profile),entries=manifest?.plugins?.filter(row=>row?.name===selected.name);
+  const source=entries?.length===1?entries[0].source:null;
+  const hookProfile=profile==='humanHooks'||profile==='assistantHooks';
+  const sourceVersion=typeof source?.ref==='string'?(hookProfile?/^hooks-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u:/^plugin-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u).exec(source.ref)?.[1]:null;
+  // The first component was a root Git-URL checkout. Native Codex includes
+  // that checkout's mutable index/reflog in its hook fingerprint. New releases
+  // use its supported fixed subdirectory projection so NO checkout metadata
+  // enters the installed hook bundle. Keep the immutable legacy source readable
+  // during migration; never reinterpret it or prune metadata after installation.
+  const projectedHooks=profile==='humanHooks'||profile==='assistantHooks'&&sourceVersion!=='0.1.0';
+  const validHookSource=!hookProfile||Object.keys(source??{}).sort().join(',')===(projectedHooks?'path,ref,source,url':'ref,source,url');
+  if(manifest?.name!==selected.marketplace||source?.source!==(projectedHooks?'git-subdir':'url')
+    ||projectedHooks&&source.path!=='./plugin'||!validHookSource||source?.url!==selected.repository||!sourceVersion)
+    throw new Error('Invalid immutable plugin source.');
+  return sourceVersion;
+};
+
+/** Fixed public-code discovery only. Keeping native Codex pinned prevents its
+ * own startup from installing a rejected candidate. This bounded token-free
+ * read still discovers future releases without temporarily unpinning native
+ * configuration. Never execute response content or treat it as install proof. */
+export const readAssistantPluginLatestVersion=async({signal,fetchResponse=fetch}={})=>{
+  const deadline=AbortSignal.timeout(10_000);signal=signal?AbortSignal.any([signal,deadline]):deadline;
+  signal.throwIfAborted();
+  const response=await fetchResponse('https://raw.githubusercontent.com/trelio-ru/digital-assistants/main/.agents/plugins/marketplace.json',
+    {redirect:'error',credentials:'omit',cache:'no-store',signal});
+  if(response.status!==200)throw new Error('Official assistant marketplace discovery failed.');
+  const bytes=await readBoundedResponseBuffer(response,256*1024,'Assistant marketplace');signal.throwIfAborted();
+  if(!isUtf8(bytes))throw new Error('Invalid official assistant marketplace encoding.');
+  let manifest;try{manifest=JSON.parse(bytes.toString('utf8'));}catch{throw new Error('Invalid official assistant marketplace JSON.');}
+  return codexMarketplaceSourceVersion(manifest,'assistant');
+};
+
 /** Content-free native inventory for the same fixed updater/retention profile.
  * Discovery is NOT installation: an absent/disabled plugin is never enabled by
  * maintenance. Read only the exact marketplace root returned by Codex; never
  * enumerate cache versions or accept a model-selected Git URL/ref/path. */
 export const readCodexPluginUpdateInventory = async ({profile = "human",
   execFileCommand = execFileAsync, environment = process.env, filesystem = fs,
-  receipt = null, retentionDirectory} = {}) => {
+  receipt = null, retentionDirectory,allowMissingMarketplace=false} = {}) => {
   const selected = codexRetentionProfile(profile);
-  await assertOfficialCodexMarketplace({execFileCommand, environment, profile});
+  if(typeof allowMissingMarketplace!=='boolean'||allowMissingMarketplace&&profile!=='assistant')throw new Error('Invalid native absence selection.');
+  try{await assertOfficialCodexMarketplace({execFileCommand, environment, profile});}
+  catch(error){
+    // Only a COMPLETE native empty catalogue and the owner's explicit enabled
+    // plugin setting can reconcile a protected source-switch gap. IO/foreign/
+    // malformed inventories and an owner opt-out never acquire this result.
+    if(!(error instanceof AssistantCodexMarketplaceAbsentError)||!allowMissingMarketplace
+      ||await readCodexPluginEnablement({pluginId:selected.pluginId,environment})!==true)throw error;
+    return {state:'marketplace_absent'};
+  }
   const catalog = await runCodexJsonCommand(CODEX_MARKETPLACE_LIST_ARGUMENTS, {execFileCommand, environment});
   const matches = catalog.marketplaces.filter(row => row.name === selected.marketplace);
   if (matches.length !== 1 || typeof matches[0].root !== "string" || !path.isAbsolute(matches[0].root))
@@ -3883,22 +3939,8 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 256 * 1024)
     throw new Error("Unsafe marketplace manifest.");
   const manifest = JSON.parse(await filesystem.readFile(manifestPath, "utf8"));
-  const entries = manifest.plugins?.filter(row => row.name === selected.name);
-  const source = entries?.length === 1 ? entries[0].source : null;
-  const official = selected.repository;
+  const sourceVersion=codexMarketplaceSourceVersion(manifest,profile);
   const hookProfile = profile === "humanHooks" || profile === "assistantHooks";
-  const sourceVersion=typeof source?.ref==='string'?(hookProfile?/^hooks-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u:/^plugin-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u).exec(source.ref)?.[1]:null;
-  // The first component was a root Git-URL checkout. Native Codex includes
-  // that checkout's mutable index/reflog in its hook fingerprint. New releases
-  // use its supported fixed subdirectory projection so NO checkout metadata
-  // enters the installed hook bundle. Keep the immutable legacy source readable
-  // during migration; never reinterpret it or prune metadata after installation.
-  const projectedHooks = profile === "humanHooks" || profile === 'assistantHooks' && sourceVersion !== '0.1.0';
-  const validHookSource = !hookProfile
-    || Object.keys(source ?? {}).sort().join(',') === (projectedHooks ? 'path,ref,source,url' : 'ref,source,url');
-  if (manifest.name !== selected.marketplace || source?.source !== (projectedHooks ? 'git-subdir' : 'url')
-    || projectedHooks && source.path !== './plugin' || !validHookSource || source.url !== official || !sourceVersion)
-    throw new Error("Invalid immutable plugin source.");
   const listing = await runCodexJsonCommand(["plugin", "list", "--marketplace", selected.marketplace, "--json"], {execFileCommand, environment});
   if (!Array.isArray(listing.installed)) throw new Error("Invalid plugin inventory.");
   const installed = listing.installed.filter(row => row.pluginId === selected.pluginId);
@@ -3948,11 +3990,12 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
  * empty read is pending publication; network/diagnostic/ambiguous reads throw
  * and never mean absence. This is readiness only, not trust or install proof.
  * Native Codex still installs/verifies the official source independently. */
-export const readAssistantPluginPublishedRef = async ({profile,version,signal,readGit=runGit}) => {
-  if(!['assistant','assistantHooks','humanHooks'].includes(profile)||!parseStableVersion(version))
+export const readAssistantPluginPublishedRef = async ({profile,version,signal,readGit=runGit,sourceTag=false}) => {
+  if(!['assistant','assistantHooks','humanHooks'].includes(profile)||!parseStableVersion(version)
+    ||typeof sourceTag!=='boolean'||sourceTag&&profile!=='assistant')
     throw new Error('Invalid assistant distribution selection.');
   signal?.throwIfAborted();
-  const ref=`refs/tags/${profile==='assistant'?'plugin':'hooks'}-v${version}`;
+  const ref=`refs/tags/${sourceTag?'v':profile==='assistant'?'plugin-v':'hooks-v'}${version}`;
   const result=await readGit(['-c','credential.helper=','-c','core.askPass=','ls-remote','--refs',
     codexRetentionProfile(profile).repository,ref],{signal,timeout:10_000,maxBuffer:16*1024,
     env:{GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat',GIT_ASKPASS:'',SSH_ASKPASS:''}});
@@ -4367,11 +4410,57 @@ export const updateCodexPluginMarketplace = async ({
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = PLUGIN_VERSION,
   retentionDirectory, profile = "human",signal,readPublishedRef=readAssistantPluginPublishedRef,
+  readLatestVersion=readAssistantPluginLatestVersion,readSource=readCodexAssistantMarketplaceSource,
 } = {}) => {
   const selected = codexRetentionProfile(profile);
   let lastError = null;
 
   await assertOfficialCodexMarketplace({ execFileCommand, environment, profile });
+
+  if(profile==='assistant'){
+    const options={profile,execFileCommand,environment,filesystem,retentionDirectory};
+    const inventory=await readCodexPluginUpdateInventory(options);
+    if(inventory.state!=='installed')throw new Error('Plugin is disabled.');
+    const latest=await readLatestVersion({signal});
+    if(!parseStableVersion(latest))throw new Error('Invalid assistant release discovery.');
+    if(isStableVersionAtLeast(inventory.version,latest)||onlyIfNewerThan&&isStableVersionAtLeast(onlyIfNewerThan,latest)){
+      if(minimumVersion&&!isStableVersionAtLeast(inventory.version,minimumVersion))throw new Error('No eligible assistant version satisfies the required minimum.');
+      return {...inventory,unchanged:true};
+    }
+    if(minimumVersion&&!isStableVersionAtLeast(latest,minimumVersion))throw new Error('Assistant discovery is below the required minimum.');
+    // Check both independent refs before an install intent. An immutable main
+    // distribution without its versioned marketplace source is not ready.
+    if(!await readPublishedRef({profile,version:latest,signal})
+      ||!await readPublishedRef({profile,version:latest,signal,sourceTag:true}))
+      return {...inventory,unchanged:true,publicationPending:true};
+    if(typeof beforeInstall!=='function')throw new Error('Missing assistant maintenance fence.');
+    const fresh=await readCodexPluginUpdateInventory(options),source=await readSource({environment});
+    if(fresh.state!=='installed'||![inventory.version,latest].includes(fresh.version)||source.configured!==true)
+      throw new Error('Assistant source changed during public discovery.');
+    if(preserveLoadedPlugin)await retainLoadedCodexPluginInstallation({profile,retentionDirectory,
+      loadedPluginDirectory:inventory.installedPath,loadedPluginVersion:inventory.version});
+    await beforeInstall(latest);
+    await assertOfficialCodexMarketplace({execFileCommand,environment,profile});
+    const mutate=args=>runCodexPluginMutationWithRetention(()=>runCodexJsonCommand(args,{execFileCommand,environment}),
+      {profile,preserveLoadedPlugin,loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
+    // Native Codex cannot change a registered Git ref in place. Its SAME
+    // durable installation intent covers this source gap; unknown outcomes
+    // reconcile the original inventory and roll back, never repeat target add.
+    await mutate(['plugin','marketplace','remove',selected.marketplace,'--json']);
+    await mutate(['plugin','marketplace','add',selected.repository,'--ref',`v${latest}`,'--json']);
+    const pinned=await readSource({environment});
+    if(pinned.configured!==true||pinned.ref!==`v${latest}`)throw new Error('Assistant native source pin differs from its intent.');
+    const selectedTarget=await readCodexPluginUpdateInventory(options);
+    if(selectedTarget.state!=='installed'||selectedTarget.desiredVersion!==latest
+      ||![inventory.version,latest].includes(selectedTarget.version))throw new Error('Assistant native source changed during installation.');
+    // Desktop can materialize the newly eligible source itself. A positive
+    // exact native installation is reconciled without another add invocation.
+    if(selectedTarget.version===latest)return {version:latest,installedPath:selectedTarget.installedPath};
+    const installation=await resolveInstalledCodexPluginBridge({minimumVersion:latest,execFileCommand,environment,filesystem,
+      verifyMarketplace:false,preserveLoadedPlugin,loadedPluginDirectory,loadedPluginVersion,retentionDirectory,profile});
+    if(installation?.version!==latest)throw new Error('Assistant native install version differs from its intent.');
+    return installation;
+  }
 
   for (
     let attempt = 0;
@@ -4401,27 +4490,6 @@ export const updateCodexPluginMarketplace = async ({
         throw new Error("Codex не подтвердил обновление Trelio marketplace.");
       }
 
-      if (profile === "assistant") {
-        const inventory = await readCodexPluginUpdateInventory({profile, execFileCommand, environment, filesystem});
-        if (inventory.state !== "installed") throw new Error("Plugin is disabled.");
-        if (onlyIfNewerThan && isStableVersionAtLeast(onlyIfNewerThan, inventory.desiredVersion))
-          return {...inventory, unchanged: true};
-        // Do not burn the one installation attempt or latch failedVersion for
-        // a source whose immutable package has not been published yet.
-        if(!await readPublishedRef({profile,version:inventory.desiredVersion,signal}))
-          return {...inventory,unchanged:true,publicationPending:true};
-        // Durable host intent precedes the one native installation. If its
-        // response is lost, maintenance reconciles native inventory, never
-        // reruns this mutation from an error/retry branch.
-        if (typeof beforeInstall !== "function") throw new Error("Missing assistant maintenance fence.");
-        // Preserve the last native-verified installed tree for rollback too.
-        // The long-lived supervisor may still use an older common shell; its
-        // own loaded-code watcher alone does not retain this newer distribution.
-        if (preserveLoadedPlugin) await retainLoadedCodexPluginInstallation({
-          profile,retentionDirectory,loadedPluginDirectory:inventory.installedPath,loadedPluginVersion:inventory.version,
-        });
-        await beforeInstall(inventory.desiredVersion);
-      }
       const installation = await resolveInstalledCodexPluginBridge({
         minimumVersion,
         execFileCommand,
@@ -4470,22 +4538,26 @@ export const updateCodexPluginMarketplace = async ({
  * installed-version/readiness evidence or permission to delete live code. */
 export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha256,
   loadedPluginDirectory,loadedPluginVersion,execFileCommand=execFileAsync,
-  environment=process.env,retentionDirectory,guard=async()=>{},signal}={})=>{
+  environment=process.env,retentionDirectory,guard=async()=>{},signal,allowMissingMarketplace=false}={})=>{
   await guard();signal?.throwIfAborted();
   if(!parseStableVersion(version)||!/^[a-f0-9]{64}$/u.test(treeSha256??''))throw new Error('Invalid rollback host receipt.');
   const profile='assistant',selected=codexRetentionProfile(profile);
-  const current=await readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,
+  const current=await readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,allowMissingMarketplace,
     receipt:{version,treeSha256}});
-  if(current.state!=='installed')throw new Error('Rollback plugin is not enabled.');
+  if(!['installed','marketplace_absent'].includes(current.state))throw new Error('Rollback plugin is not enabled.');
   const loaded=await inspectImmutableCodexPluginTree(loadedPluginDirectory,loadedPluginVersion,{profile});
-  if(!sameLocalPath(path.dirname(current.installedPath),path.dirname(loaded.installedPath)))throw new Error('Rollback host cache family differs.');
+  const home=environment.CODEX_HOME||path.join(environment.USERPROFILE||environment.HOME||'','.codex');
+  if(!path.isAbsolute(home)||!sameLocalPath(path.dirname(loaded.installedPath),path.join(home,'plugins','cache',selected.marketplace,selected.name)))
+    throw new Error('Rollback host cache family differs.');
   const installedPath=path.join(path.dirname(loaded.installedPath),version);
   const entries=(await readRetainedCodexPluginEntries(retentionDirectory??selected.directory,profile))
     .filter(entry=>entry.version===version&&entry.treeSha256===treeSha256&&sameLocalPath(entry.installedPath,installedPath));
   if(entries.length!==1)throw new Error('Original rollback host receipt is unavailable.');
   const retained=await assertRetainedCodexPluginEntry(entries[0]);
   const hookComponent=await readAssistantHookComponentRequirement(entries[0].pluginDirectory);
-  if(['pluginId','version','integritySha256'].some(key=>hookComponent?.[key]!==current.hookComponent?.[key]))
+  const loadedHook=await readAssistantHookComponentRequirement(loaded.installedPath);
+  if(['pluginId','version','integritySha256'].some(key=>hookComponent?.[key]!==loadedHook?.[key]
+    ||current.state==='installed'&&hookComponent?.[key]!==current.hookComponent?.[key]))
     throw new Error('Rollback would change the hook component.');
   // Restore only a positively absent exact previous path. The common publisher
   // refuses changed/nonempty/unsafe trees; no cache scan, merge or pruning.
@@ -4504,7 +4576,8 @@ export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha25
  * identity/configuration and never edits hook trust. Each lost phase is resolved
  * by fresh native inventory; no cache folder/config file is rewritten by us. */
 export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,execFileCommand=execFileAsync,
-  environment=process.env,loadedPluginDirectory,loadedPluginVersion,retentionDirectory}={}) => {
+  environment=process.env,loadedPluginDirectory,loadedPluginVersion,retentionDirectory,
+  readSource=readCodexAssistantMarketplaceSource}={}) => {
   if(!parseStableVersion(version)||!/^[0-9a-f]{64}$/u.test(treeSha256??''))throw new Error("Invalid rollback receipt.");
   const profile="assistant",selected=codexRetentionProfile(profile);
   const readInventory=()=>readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,
@@ -4522,8 +4595,8 @@ export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,exe
   };
   const present=await sources();
   // Even after losing the final response, an exact previously verified tree in
-  // the native installed inventory proves installation. Restore main discovery
-  // below without reinstalling/reopening that version a second time.
+  // the native installed inventory proves installation. Confirm its pinned
+  // source below without reinstalling/reopening that version a second time.
   let installed=null;
   if(present)installed=await readInventory();
   if(installed?.state==="disabled")throw new Error("Plugin was disabled by its owner.");
@@ -4534,19 +4607,28 @@ export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,exe
     // not merely have a matching source tag name.
     const metadata=await readInventory();
     if(metadata.desiredVersion!==version)throw new Error("Rollback tag mismatch.");
-    const result=await resolveInstalledCodexPluginBridge({profile,minimumVersion:version,execFileCommand,environment,
-      loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
-    if(result?.version!==version)throw new Error("Rollback version mismatch.");
+    if(metadata.version!==version||metadata.treeSha256!==treeSha256){
+      const result=await resolveInstalledCodexPluginBridge({profile,minimumVersion:version,execFileCommand,environment,
+        loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
+      if(result?.version!==version)throw new Error("Rollback version mismatch.");
+    }
     installed=await readInventory();
     if(installed.version!==version||installed.treeSha256!==treeSha256)throw new Error("Rollback tree mismatch.");
   }
-  // Restore the original official main source after selecting the known-good
-  // installed release. A marketplace refresh does NOT install its newer plugin;
-  // the caller's failed-version latch suppresses that exact bad candidate.
-  if(await sources())await run(["plugin","marketplace","remove",selected.marketplace,"--json"]);
-  await run(["plugin","marketplace","add","https://github.com/trelio-ru/digital-assistants.git","--ref","main","--json"]);
+  // Desktop startup can install main's advertised version independently of our
+  // failed-version latch. Keep the native source pinned to this SAME immutable
+  // prior release. Public, bounded discovery still finds future eligible fixes.
+  // Read the native ref (which marketplace/list omits) before any repetition of
+  // source registration after a lost result; never rewrite config ourselves.
+  let source=await readSource({environment});
+  if(source.configured!==true||source.ref!==`v${version}`){
+    if(await sources())await run(['plugin','marketplace','remove',selected.marketplace,'--json']);
+    await run(['plugin','marketplace','add',selected.repository,'--ref',`v${version}`,'--json']);
+    source=await readSource({environment});
+  }
+  if(source.configured!==true||source.ref!==`v${version}`)throw new Error('Rollback source pin was not confirmed.');
   const restored=await readInventory();
-  if(restored.version!==version||restored.treeSha256!==treeSha256)throw new Error("Rollback read-back mismatch.");
+  if(restored.version!==version||restored.treeSha256!==treeSha256||restored.desiredVersion!==version)throw new Error("Rollback read-back mismatch.");
   return restored;
 };
 

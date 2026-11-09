@@ -12,6 +12,7 @@ import {
   buildCodexRoutingConfigPatch,
   inspectCodexTrelioHookSettings,
   readCodexPluginEnablement,
+  readCodexAssistantMarketplaceSource,
   parseCodexTrelioHookSettings,
   migrateCodexLegacyTrelioMcpForRuntime,
   planCodexTrelioHookRouting,
@@ -45,6 +46,40 @@ test("dependency opt-out survives missing native cache and focused TOML reading 
     await writeFile(configPath, `[plugins.'other-${pluginId}']\nenabled=false\n[unrelated]\nnotes="""\n[plugins.'${pluginId}']\nenabled=false\n"""`);
     assert.equal(await read(), null);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('assistant marketplace source reads exact native TOML without guessing refs, opt-out or config writes',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'trelio-assistant-source-')),configPath=path.join(root,'config.toml');
+  const read=()=>readCodexAssistantMarketplaceSource({configPath}),id='trelio-digital-assistant@trelio-digital-assistants';
+  try{
+    assert.deepEqual(await read(),{configured:false});
+    const fields='source_type = "git"\n source = "https://github.com/trelio-ru/digital-assistants.git"\n ref = "v0.1.3" # exact native pin\n';
+    for(const source of ['[marketplaces.trelio-digital-assistants]\n'+fields,
+      '[marketplaces."trelio-digital-assistants"]\n'+fields,
+      fields.split('\n').filter(Boolean).map(line=>'marketplaces.trelio-digital-assistants.'+line.trim()).join('\n')]){
+      await writeFile(configPath,source);assert.deepEqual(await read(),{configured:true,ref:'v0.1.3'});
+      assert.equal(await readFile(configPath,'utf8'),source);
+    }
+    await writeFile(configPath,'[marketplaces.trelio-digital-assistants]\nsource_type="git"\nsource="https://github.com/trelio-ru/digital-assistants.git"\n');
+    assert.deepEqual(await read(),{configured:true,ref:null},'native default is observed, never called pinned');
+    for(const source of ['[marketplaces.trelio-digital-assistants]',
+      '[marketplaces]\ntrelio-digital-assistants={source_type="git"}',
+      '[marketplaces.trelio-digital-assistants.ref]\nx="v0.1.3"',
+      '[[marketplaces.trelio-digital-assistants]]\n'+fields,
+      '[["marketplaces"."trelio-digital-assistants"]]\n'+fields,
+      '[marketplaces.trelio-digital-assistants]\n'+fields+'[marketplaces.trelio-digital-assistants]\n',
+      '[marketplaces.trelio-digital-assistants]\n'+fields+'ref="main"',
+      '[marketplaces.trelio-digital-assistants]\n'+fields.replace('"v0.1.3"','true'),
+      '[marketplaces.trelio-digital-assistants]\n'+fields.replace('trelio-ru/digital-assistants.git','other/foreign.git')]){
+      await writeFile(configPath,source);await assert.rejects(read(),CodexRoutingConfigError);
+      assert.equal(await readFile(configPath,'utf8'),source);
+    }
+    await writeFile(configPath,`[plugins."${id}"]\nenabled=true\n`);
+    assert.equal(await readCodexPluginEnablement({pluginId:id,configPath}),true);
+    await writeFile(configPath,`[plugins."${id}"]\nenabled=false\n`);
+    assert.equal(await readCodexPluginEnablement({pluginId:id,configPath}),false);
+    await assert.rejects(readCodexPluginEnablement({pluginId:'foreign',configPath}));
+  }finally{await rm(root,{recursive:true,force:true});}
 });
 
 test("persisted hook inspection separates disabled PreToolUse, saved trust and unknown live state", () => {

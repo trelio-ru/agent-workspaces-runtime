@@ -1046,6 +1046,11 @@ publication tooling также остаются вне этого публичн
   hand off the SAME registered task to the exact retained previous receipt.
   Native downgrade waits for that parent; unknown close/handoff stays fenced,
   without pruning live code, resetting the failed candidate or replaying work.
+  Keep native source pinned to the verified immutable version. Public bounded
+  main discovery reuses the SAME source parser and both exact Git-ref proofs;
+  source metadata is never edited by hand. Positive source gaps recover only
+  through the protected intent, explicit enabled setting and original previous
+  receipt. Native failed-version reselection preserves its latch and hook basis.
 
 - Долгие цели: host передаёт только проверенные UUID/path locators собственного
   `assistants/<assistantUserId>/WORK.md` по stdin; формат/continuation – task-worker
