@@ -698,6 +698,15 @@ pins source event/revision, original size/hash, request and exact processor byte
 before a durable one-attempt claim. Repeated context observes that SAME job;
 release drift, changed original and uncertain start never create a second decoder.
 
+Complete failed original/ASR processes retain the common numeric exit bucket.
+The SAME capture engine privately selects failed stderr (legacy stdout only
+when stderr is empty), then the exact-read adapter exposes only that provider's
+reviewed reference code or the common Telegram operational code. Success pipes,
+UTF-8/EOF/output/deadline guards and native body/model-read confirmation remain
+unchanged. Empty failed stdout is not a malformed incoming body; no classification
+permits retry, decoder restart, login, ACK or another source. Unknown provider
+prose/fields stay private, and setup/password codes never become read recovery.
+
 Original caption remains intact. Only completed source-bound, full-hash/EOF and
 strict UTF-8 verified ASR earns `contentRead:true`, explicitly machine-generated.
 Large output uses the same bounded private TXT primitive. Pending/unknown files

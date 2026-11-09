@@ -10,7 +10,7 @@ import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
-import { PROCESS_DIAGNOSTIC_CODES, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
+import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -3493,7 +3493,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       }
       const readRefusal=['company_read','company_file'].includes(stage)
         ?assistantCompanyContextReadRefusalCode(error):null;
-      const code=readRefusal??(/^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_|REMOTE_MCP_)[A-Z_]{1,100}$/u.test(error?.code??'')
+      // Numeric EXIT_1..6 codes do not fit the historical letters-only
+      // recovery grammar. Keep only genuine common process-error instances
+      // from its closed vocabulary, never widen that grammar to native data.
+      const processRefusal=error instanceof ProcessDiagnosticError&&PROCESS_DIAGNOSTIC_CODES.includes(error.code)?error.code:null;
+      const code=readRefusal??processRefusal??(/^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_|REMOTE_MCP_)[A-Z_]{1,100}$/u.test(error?.code??'')
         ?error.code:localFailureCodes[stage]);
       throw Object.assign(new AssistantTransportError(code),
         code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid','expired','replayed'].includes(error.reason)
@@ -4485,6 +4489,46 @@ export const ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES=Object.freeze(['ACCOUNT_CATALO
 export const ASSISTANT_SOURCE_MONITOR_ERROR_CODES=Object.freeze(['TELEGRAM','EMAIL','MAX'].flatMap(prefix=>
   ['INVALID_CURSOR','SCOPE_CHANGED','UIDVALIDITY_CHANGED','GAP','INVALID_RESPONSE','REFERENCE_UNAVAILABLE','UNAVAILABLE']
     .map(suffix=>`${prefix}_MONITOR_${suffix}`)));
+const SOURCE_OPERATIONAL_TELEGRAM_ERROR_CODES=Object.freeze([
+  'TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_RATE_LIMITED',
+  'TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED',
+  'TELEGRAM_SERVICE_UNAVAILABLE','TELEGRAM_WINDOWS_NATIVE_FAILURE',
+]);
+const SOURCE_REFERENCE_ERROR_CODES=Object.freeze({
+  'telegram-mtproto':['TELEGRAM_REFERENCE_INPUT_INVALID','TELEGRAM_REFERENCE_CHANGED','TELEGRAM_REFERENCE_INCOMPLETE',
+    'TELEGRAM_REFERENCE_UNAVAILABLE','TELEGRAM_REFERENCE_SCOPE_CHANGED'],
+  'email-imap-smtp':['EMAIL_REFERENCE_INPUT_INVALID','EMAIL_REFERENCE_CHANGED','EMAIL_REFERENCE_INCOMPLETE','EMAIL_REFERENCE_UNAVAILABLE'],
+  'max-web':['MAX_REFERENCE_CHANGED','MAX_REFERENCE_UNAVAILABLE'],
+});
+/** Decode one COMPLETE signed source process result. A failed process with
+ * no JSON is an exit failure, never evidence of an empty/damaged incoming
+ * message. The process engine already rejects cancellation/partial/oversized
+ * pipes; neither this decoder nor its callers may retry the provider. */
+const parseAssistantSourceProcessResult=result=>{
+  if(!object(result)||!Number.isSafeInteger(result.exitCode)||result.exitCode<0||result.exitCode>0xffffffff
+    ||typeof result.stdout!=='string'||Buffer.byteLength(result.stdout)>1024*1024)fail('ASSISTANT_SOURCE_READ_INVALID');
+  try{return JSON.parse(result.stdout);}catch{
+    if(result.exitCode!==0)throw skillRuntimeExitError(result.exitCode);
+    fail('ASSISTANT_SOURCE_READ_INVALID');
+  }
+};
+/** Exact-read refusals use only each reviewed provider's fixed reference
+ * vocabulary or the SAME common operational Telegram decoder as monitors.
+ * Do not forward exception prose, retry hints, native IDs/paths, setup/login
+ * categories or a foreign provider's lookalike code. The original exit bucket
+ * remains the fallback; a refusal grants no read, ACK, login or replay. */
+export const projectAssistantSourceReadProcess=(result,{skillId})=>{
+  const references=Object.hasOwn(SOURCE_REFERENCE_ERROR_CODES,skillId)?SOURCE_REFERENCE_ERROR_CODES[skillId]:null;
+  if(!references)fail('ASSISTANT_SOURCE_READ_INVALID');
+  const raw=parseAssistantSourceProcessResult(result);
+  if(result.exitCode===0)return raw;
+  if(object(raw)&&raw.ok===false&&references.includes(raw.code))
+    fail(`ASSISTANT_SOURCE_READ_${raw.code}`);
+  const error=skillSetupExitError(result.exitCode,{skillId,stderr:result.stdout});
+  if(SOURCE_OPERATIONAL_TELEGRAM_ERROR_CODES.includes(error.details.providerCode))
+    fail(`ASSISTANT_SOURCE_READ_${error.details.providerCode}`);
+  throw skillRuntimeExitError(result.exitCode);
+};
 /** Source setup receives only complete private process output. Preserve known
  * provider categories, never their prose, details, next actions or extra keys.
  * Unknown/non-JSON failures retain the real process-exit category instead of
@@ -5103,9 +5147,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
     // diagnosis. Prose/details/retry hints remain private; this code grants no
     // login, reset, replay, ACK, source generation or cursor change.
     const failure=skillSetupExitError(result.exitCode,{skillId,stderr:result.stdout});
-    if(['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_RATE_LIMITED',
-      'TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED',
-      'TELEGRAM_SERVICE_UNAVAILABLE','TELEGRAM_WINDOWS_NATIVE_FAILURE'].includes(failure.details.providerCode))
+    if(SOURCE_OPERATIONAL_TELEGRAM_ERROR_CODES.includes(failure.details.providerCode))
       fail(`ASSISTANT_SOURCE_MONITOR_${failure.details.providerCode}`);
     throw skillRuntimeExitError(result.exitCode);
   }
@@ -5946,7 +5988,7 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
     const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
       executionContext,runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,
       timeoutMs:Math.min(60_000,await profile.remainingMs()),signal:combined});
-    let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+    const value=projectAssistantSourceReadProcess(result,{skillId:source.skillId});
     if(routing){
       if(result.exitCode!==0)fail('ASSISTANT_SOURCE_READ_INVALID');
       validateAssistantSourceReadResult({value,provider:parsed.provider,reference});
@@ -6085,7 +6127,7 @@ export const processAssistantOwnerIntakeAudio=async({identity,client,host,store,
         executionContext:{companyId:source.companyId,projectId:source.projectId,skillId:'audio-transcription',releaseId:resolution.releaseId,
           localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection},runtimeArguments:['source-original'],
         captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,timeoutMs:Math.min(60000,await profile.remainingMs()),signal:combined});
-      let value;try{value=JSON.parse(captured.stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+      let value=parseAssistantSourceProcessResult(captured);
       if(captured.exitCode!==0){
         // Preserve a useful closed cause without returning arbitrary provider
         // stderr, model text, filesystem paths or a false "empty message".

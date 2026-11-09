@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {rethrowAssistantSourceError,projectAssistantSourceSetupResult,projectAssistantSourceMessageMedia,assistantSourceOriginalAudioCapability}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+const {rethrowAssistantSourceError,projectAssistantSourceSetupResult,projectAssistantSourceReadProcess,projectAssistantSourceMessageMedia,assistantSourceOriginalAudioCapability}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 
 test('source setup keeps only closed provider failure codes and the original process exit',()=>{
   const read=(stdout,exitCode=2,skillId='telegram-mtproto')=>projectAssistantSourceSetupResult({stdout,exitCode},{skillId});
@@ -33,6 +33,23 @@ test('source setup keeps only closed provider failure codes and the original pro
   assert.throws(()=>read(JSON.stringify(payload),2,'email-imap-smtp'),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_2');
   assert.throws(()=>read('',0),error=>error.code==='ASSISTANT_SOURCE_INVALID_RESPONSE');
   assert.deepEqual(read('{"authorized":true}',0),{authorized:true});
+});
+
+test('exact source refusals retain only native reference/operational codes for that provider',()=>{
+  const read=(raw,skillId='telegram-mtproto',exitCode=3)=>projectAssistantSourceReadProcess({exitCode,stdout:JSON.stringify(raw)},{skillId});
+  for(const [skillId,code] of [['telegram-mtproto','TELEGRAM_REFERENCE_CHANGED'],
+    ['email-imap-smtp','EMAIL_REFERENCE_INCOMPLETE'],['max-web','MAX_REFERENCE_UNAVAILABLE']]){
+    const raw={ok:false,code,error:'PRIVATE_REASON',path:'PRIVATE_PATH',nextAction:'PRIVATE_RETRY'};
+    assert.throws(()=>read(raw,skillId),error=>error.code===`ASSISTANT_SOURCE_READ_${code}`
+      &&!JSON.stringify(error).includes('PRIVATE'));
+    for(const changed of [{...raw,ok:true},{...raw,code:code+'_PRIVATE'},{...raw,code:'TELEGRAM_PASSWORD_INVALID'}])
+      assert.throws(()=>read(changed,skillId),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_3');
+    for(const other of ['telegram-mtproto','email-imap-smtp','max-web'].filter(value=>value!==skillId))
+      assert.throws(()=>read(raw,other),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_3');
+  }
+  assert.deepEqual(read({message:'complete'},'telegram-mtproto',0),{message:'complete'});
+  assert.throws(()=>projectAssistantSourceReadProcess({exitCode:0,stdout:'PRIVATE_BROKEN_JSON'},
+    {skillId:'telegram-mtproto'}),error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
 });
 
 test('source setup preserves the SAME actual Python prerequisite, without private cause or retry',async t=>{
@@ -1785,6 +1802,12 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
     assert.equal(process.env.CODEX_THREAD_ID,undefined);
     if(${encrypted})assert.equal(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON).setup,'ENCRYPTED_SETUP_CONFIG_CANARY');
     fs.appendFileSync(${JSON.stringify(marker)},'read;');const value=JSON.parse(fs.readFileSync(${JSON.stringify(output)},'utf8'));
+    if(value.fixtureReadFailure){
+      const refusal=value.fixtureReadFailure;
+      process.stdout.write(refusal.stdout??'');
+      process.stderr.write(refusal.invalidUtf8?Buffer.from([255]):refusal.stderr??'');
+      process.exit(refusal.exitCode??3);
+    }
     if(process.env.TRELIO_ASSISTANT_SOURCE_MEDIA==='1'){
       const chunks=[];for await(const chunk of process.stdin)chunks.push(chunk);
       const input=JSON.parse(Buffer.concat(chunks));assert.deepEqual(Object.keys(input).sort(),['directory','maxBytes','requestId','schemaVersion']);
@@ -1819,6 +1842,33 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store:selectedStore,pass,source,reference:ref};
   await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,
     media:{status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false},ownerIdentityId,ownerExternalUserId:'123456',privateOwnerConversation:false});
+  // Complete failed read pipes use the actual signed provider/account/process
+  // composition. Never turn an empty stdout refusal into malformed incoming
+  // content, leak stderr, or invoke the provider a second time. The SAME path
+  // covers owner Telegram and both MAX source profiles in both content modes.
+  for(const refusal of [
+    {stderr:JSON.stringify({ok:false,code:'TELEGRAM_NETWORK_UNAVAILABLE',error:'PRIVATE_REFUSAL'}),
+      expected:provider==='telegram-mtproto'?'ASSISTANT_SOURCE_READ_TELEGRAM_NETWORK_UNAVAILABLE':'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {stderr:JSON.stringify({ok:false,code:'TELEGRAM_REFERENCE_CHANGED',error:'PRIVATE_REFUSAL'}),
+      expected:provider==='telegram-mtproto'?'ASSISTANT_SOURCE_READ_TELEGRAM_REFERENCE_CHANGED':'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {stderr:'PRIVATE_TRACEBACK',expected:'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {stdout:'PRIVATE_TRACEBACK',expected:'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {stderr:'',expected:'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {stdout:JSON.stringify({ok:false,code:'TELEGRAM_NETWORK_UNAVAILABLE'}),
+      expected:provider==='telegram-mtproto'?'ASSISTANT_SOURCE_READ_TELEGRAM_NETWORK_UNAVAILABLE':'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {stdout:JSON.stringify(message),stderr:'PRIVATE_STDERR',expected:'TRELIO_SKILL_RUNTIME_EXIT_3'},
+    {invalidUtf8:true,expected:'TRELIO_SKILL_RUNTIME_OUTPUT_INVALID'},
+  ]){
+    await fs.writeFile(output,JSON.stringify({...message,fixtureReadFailure:refusal}));
+    const before=await fs.readFile(marker,'utf8');
+    await assert.rejects(readAssistantOwnerIntakeMessage(input),error=>{
+      assert.equal(error.code,refusal.expected);
+      assert.doesNotMatch(error.message+JSON.stringify(error),/PRIVATE|fixtureReadFailure|main\.mjs|stdout|stderr/);
+      return true;
+    });
+    assert.equal(await fs.readFile(marker,'utf8'),before+'read;','a refused read never replays the provider');
+  }
+  await fs.writeFile(output,JSON.stringify(message));
   // A captionless voice is a real original, not an empty incoming message.
   // Exercise the signed provider/private account path in BOTH content modes;
   // preserving only a fabricated MCP callback would miss the first loss here.
@@ -1966,6 +2016,7 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
         const result={schemaVersion:1,protocol:'assistant-source-audio/v1',requestId:input.requestId,contentRead:false};
         const fault=fs.existsSync(${JSON.stringify(processorFault)})?fs.readFileSync(${JSON.stringify(processorFault)},'utf8'):'';
         if(['unknown','setup_required'].includes(fault)){result.state=fault;process.stdout.write(JSON.stringify(result));process.exit(0);}
+        if(fault==='process-refusal'){process.stderr.write('PRIVATE_PROCESS_REFUSAL');process.exit(3);}
         if(fault==='unsupported'){process.stdout.write(JSON.stringify({ok:false,errorCode:'AUDIO_PLATFORM_UNSUPPORTED',error:'PRIVATE_PATH'}));process.exit(1);}
         if(!fs.existsSync(claim)){
           fs.writeFileSync(claim,'ONE START',{flag:'wx',mode:0o600});fs.mkdirSync(input.outputDirectory,{mode:0o700});
@@ -2021,6 +2072,9 @@ for(const encrypted of [false,true])test(`owner intake rereads one exact signed 
         else assert.equal(media.transcription.code,'AUDIO_PLATFORM_UNSUPPORTED');
         assert.doesNotMatch(JSON.stringify(observed),/PRIVATE_PATH/);
       }
+      await fs.writeFile(processorFault,'process-refusal');
+      await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}),
+        error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_3'&&!JSON.stringify(error).includes('PRIVATE_PROCESS_REFUSAL'));
       for(const fault of ['invalid-utf8','false-hash']){
         await fs.writeFile(processorFault,fault);
         await assert.rejects(contextProxy.callTool('get_assistant_intake_context',{intakePass:{companyId,sourceId,intakeId:pass.passId}}),

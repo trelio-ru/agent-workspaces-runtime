@@ -9552,6 +9552,10 @@ const runMaterializedAgentSkillUnqueued = async ({
       // project closed codes; normal/task calls never receive that pipe. A
       // monitor's nonzero exit with empty stdout is a refusal, not malformed
       // success. Keep successful stdout and every partial-pipe guard unchanged.
+      // Exact source readers have the SAME complete-refusal convention. Prefer
+      // their failed stderr when present, otherwise retain legacy stdout; the
+      // trusted read adapter alone projects closed codes. Success and partial
+      // pipes retain their original handling, and no provider is replayed.
       // Setup providers deliberately leave stdout empty on failure. Reading
       // stdout in that case would hide the original failure behind a JSON error.
       // A credential setup is deliberately output-free: even a reviewed
@@ -9562,7 +9566,7 @@ const runMaterializedAgentSkillUnqueued = async ({
       // ABI only when completed stderr is empty; never merge pipes, scan prose
       // or turn invalid UTF-8 into a success.
       const failedPrivatePipe=result.exitCode!==0 && (sourceAckCapture || sourceSetupCapture
-        || captureMode==='monitor' && profile?.kind==='digital_assistant_source' && result.stderr.length>0);
+        || (sourceIntakeCapture || captureMode==='monitor' && profile?.kind==='digital_assistant_source') && result.stderr.length>0);
       const stdout = privateSetup || interactiveSecretSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
         : new TextDecoder('utf-8', { fatal: true }).decode(failedPrivatePipe ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };

@@ -1255,6 +1255,7 @@ test('all trusted materializers preserve local refusal provenance without claimi
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});
   const {RemoteMcpHostError}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
   const {TrelioApiError}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {skillRuntimeExitError}=await import('../host-runtime/scripts/trelio-process-diagnostics.mjs');
   const company={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'synthetic',
     taskId:f.pass.taskId,passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
   const skill={schemaVersion:1,nativeTool:'get_agent_skill',companyId:f.pass.companyId,projectId:null,skillId:'synthetic',releaseId:randomUUID(),arguments:{sections:['instructions']}};
@@ -1287,6 +1288,8 @@ test('all trusted materializers preserve local refusal provenance without claimi
       [Object.assign(Error('PRIVATE_LOCAL_PATH_CANARY'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED',reason:'expired',payload:{secret:'PRIVATE'}}),'ASSISTANT_PASS_REVIEW_REQUIRED'],
       [new RemoteMcpHostError('REMOTE_MCP_AUTH_REJECTED','PRIVATE_PROVIDER_AUTH_CANARY'),'REMOTE_MCP_AUTH_REJECTED'],
       [Error('PRIVATE_LOCAL_PATH_CANARY'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+      [Object.assign(skillRuntimeExitError(3),{message:'PRIVATE_PROCESS_PATH',cause:'PRIVATE_CAUSE'}),'TRELIO_SKILL_RUNTIME_EXIT_3'],
+      [Object.assign(Error('PRIVATE_FORGED_PROCESS_PATH'),{code:'TRELIO_SKILL_RUNTIME_EXIT_3'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
       [new TrelioApiError(403,'PRIVATE_NATIVE_HTTP_CANARY',null,'ACCESS_DENIED',{private:'PRIVATE'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_ACCESS_DENIED`],
       [new TrelioApiError(403,'PRIVATE_NATIVE_HTTP_CANARY',null,'PRIVATE_CODE_CANARY'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_TRELIO_BACKEND_HTTP_403`],
       [Object.assign(Error('PRIVATE_FORGED_HTTP_CANARY'),{statusCode:403,code:'ACCESS_DENIED'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
@@ -1307,7 +1310,7 @@ test('all trusted materializers preserve local refusal provenance without claimi
         assert.doesNotMatch(JSON.stringify(caught),/PRIVATE|payload|reason/);return true;
       });
     }
-    assert.equal(requests,stage==='workspace_arguments'?0:10);assert.equal(materializations,10,'each explicit invocation materializes once; no retry/fallback');
+    assert.equal(requests,stage==='workspace_arguments'?0:12);assert.equal(materializations,12,'each explicit invocation materializes once; no retry/fallback');
   }
 });
 

@@ -1792,6 +1792,10 @@ WeakSet retains only its exact thrown object. That object keeps native endpoint
 authentication/scope provenance. A copied error or a provider Remote MCP error
 from a local materializer never borrows assistant-device setup recovery. Native
 admission, one-use proof, unchanged deadlines and no-replay remain independent.
+Numeric common process EXIT_1..6 buckets cross that same boundary only from
+its genuine closed ProcessDiagnosticError class. Do not broaden the historical
+letters-only recovery grammar or accept a provider's digit-bearing lookalike;
+only the fixed code survives, never message/cause or replay permission.
 Tests exercise every callback through the real MCP wrapper, exact native send
 versus copied auth errors, privacy and one native call per explicit invocation.
 
