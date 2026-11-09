@@ -888,6 +888,11 @@ request, pre-aborted и pending-bind cleanup. Диагностика допол�
 только фиксированные variant/action/state/reason. Это исправляет утечку fixture,
 а не доказывает устранение исходной native ошибки; 180 секунд и все assertions
 сохранены.
+Его существующий fixture-only callback сохраняет последние восемь закрытых
+operation/state/reason исходных authentication calls: подтверждение ввода
+отличается от последующего read-only probe. Arguments, document IDs, URLs,
+credentials и native error prose не выдаются. Это не добавляет probe, повтор,
+ожидание готовности или новый budget и само по себе не исправляет отказ.
 Manual window-close/ready/logout/crash regression использует тот же общий
 fixture-owned HTTP helper, что authentication regression. Ошибка тела выводит
 только фиксированные phase/completion/state/reason, errno/syscall, lifecycle stages

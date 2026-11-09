@@ -445,12 +445,21 @@ export class ExtensionVisualBrowser {
   }
   #send(operation, args = {}) {
     if (!this.#socket || this.#socket.readyState !== 1) return Promise.reject(fault('operation_failed'));
-    return new Promise((resolve, reject) => {
+    const result = new Promise((resolve, reject) => {
       const id = crypto.randomUUID();
       const timer = setTimeout(() => { this.#pending.delete(id); reject(fault('operation_failed')); }, 40_000);
       this.#pending.set(id, { resolve, reject, timer });
       this.#socket.send(JSON.stringify({ id, operation, args }));
     });
+    // Only the existing localhost-fixture callback can observe these closed
+    // protocol buckets. Distinguish a lost input acknowledgement from a later
+    // read failure without logging arguments, document IDs, credentials, native
+    // errors or URLs. This never catches/retries an action or changes its result.
+    if (!this.testDiagnostics || !['authentication-probe', 'authentication-fill', 'authentication-follow'].includes(operation)) return result;
+    const report = value => this.testDiagnostics({ stage: 'authentication_transport', operation,
+      state: ['challenge', 'unknown', 'success', 'submitted', 'error'].includes(value?.state) ? value.state : 'other',
+      reason: ['operation_failed', 'document_blocked', 'navigation_blocked', 'session_closed', 'lease_expired', 'manual_control_active'].includes(value?.reason) ? value.reason : 'other' });
+    return result.then(value => { report(value); return value; }, error => { report({ state: 'error', reason: 'operation_failed' }); throw error; });
   }
   async #nativeDiagnostics() {
     if (!this.testNativeLogging || !this.#directory) return;

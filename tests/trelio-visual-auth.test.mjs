@@ -349,8 +349,16 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   // Fixed synthetic phases/counters locate a hosted outer deadline without
   // printing forms, credentials, private browser output, URLs or native logs.
   let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;
-  let nativeExit=null,nativeLog=null,startupDiagnostic=null;const evidence=[];
+  let nativeExit=null,nativeLog=null,startupDiagnostic=null;const evidence=[],authenticationTransport=[];
   const record=value=>{
+    if(value?.stage==='authentication_transport'){
+      // Keep only the original private dispatch's closed result, never another
+      // probe. Input acknowledgement and subsequent navigation observation have
+      // different no-replay implications; aggregate counters cannot distinguish
+      // them after a fast renderer transition.
+      authenticationTransport.push({operation:value.operation,state:value.state,reason:value.reason});
+      if(authenticationTransport.length>8)authenticationTransport.shift();
+    }
     // The browser already reports these fixture-only closed fields. Retain
     // them for the current browser generation instead of losing its real exit
     // behind a later extension_not_connected/assertion. Never copy native log
@@ -373,7 +381,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
     passwordSubmits,codeSubmits,codeResponses,methodFollows,mailSubmits,
     consumedSteps:currentFixtureStore?.saved?.attempt?.steps?.length??null,
-    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',startupDiagnostic,nativeExit,nativeLog,evidence})+'\n');};
+    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',startupDiagnostic,nativeExit,nativeLog,evidence,authenticationTransport})+'\n');};
   const observe=value=>{
     lastState=['ready','error','manual_input_required','saved_unverified'].includes(value?.state)?value.state:'other';
     lastReason=['none','bootstrap_failed','manual_control_active','operation_failed','lease_expired','storage_unavailable'].includes(value?.reason)?value.reason:'other';
@@ -432,7 +440,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
   const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
-  const make = () => { currentFixtureStore = activeStore;nativeExit=null;nativeLog=null;startupDiagnostic=null;evidence.length=0;return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
+  const make = () => { currentFixtureStore = activeStore;nativeExit=null;nativeLog=null;startupDiagnostic=null;evidence.length=0;authenticationTransport.length=0;return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
     mailIdentity: { origin: 'https://trelio.ru', companyId, memberId, scope: 'd'.repeat(64) },
     policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' }); };
   let browser = make();
