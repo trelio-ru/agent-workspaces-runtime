@@ -1820,8 +1820,14 @@ source in both genuine task and private-owner profiles before publication.
 
 The combined catalogue retains the existing byte bound without truncation:
 identical scalar leaf schemas may share local definitions inside ONE tool.
-Whole descriptions, formats, regexes, defaults and bounds remain unchanged;
-references expand to the same schema. Existing refs/IDs, unknown vocabulary or
+If the COMPLETE production catalogue still exceeds the bound, the SAME ref-free
+vocabulary proof additionally shares exact repeated containers/alternatives in
+that tool, using only reachable definitions and short collision-free local IDs.
+Always reproject the original native documents, never refactor prior generated
+refs. Whole descriptions, formats, regexes, defaults and bounds remain unchanged;
+references expand to the same schema. Real attachment materializers must be
+present in catalogue acceptance: omitting those callbacks hides their native
+definitions and is not a production byte-budget test. Existing refs/IDs, unknown vocabulary or
 scope-changing dialects disable this optimization. Tiny contracts remain inline
 when definitions cost more. Native wire validators/pre-send shape checks always
 use the original fresh schema. Test the initial native Codex MCP inventory,

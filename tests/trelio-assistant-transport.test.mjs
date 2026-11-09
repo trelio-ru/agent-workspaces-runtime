@@ -4115,6 +4115,60 @@ test('catalogue scalar sharing is lossless, tool-local and preserves all native 
  assert.deepEqual(assistantModelInputSchema(tiny,{compactScalars:true}),tiny,'reference overhead never expands a small contract');
 });
 
+test('catalogue container sharing preserves full native alternatives and only reachable tool-local definitions',()=>{
+ const item={type:'object',properties:{label:{type:'string',minLength:1,maxLength:300},
+  nativeBusinessProof:{anyOf:[{type:'string',format:'uuid',description:'Keep this complete native business constraint '.repeat(4)},{type:'null'}]}},
+  required:['label','nativeBusinessProof'],additionalProperties:false};
+ const pair={type:'array',items:item,minItems:1,maxItems:20};
+ const source={type:'object',properties:{first:pair,second:structuredClone(pair),third:structuredClone(pair)},
+  required:['first','second'],additionalProperties:false};
+ const original=structuredClone(source),shared=assistantModelInputSchema(source,{compactContainers:true});
+ assert.deepEqual(source,original);assert.ok(shared.$defs);assert.ok(shared.properties.first.$ref);
+ const collision=assistantModelInputSchema({...source,$defs:{ts0:{type:'integer',minimum:41}}},{compactContainers:true});
+ assert.deepEqual(collision.$defs.ts0,{type:'integer',minimum:41});assert.notEqual(collision.properties.first.$ref,'#/$defs/ts0');
+ const used=new Set(),expand=node=>{
+  if(Array.isArray(node))return node.map(expand);
+  if(!node||typeof node!=='object')return node;
+  if(node.$ref){const [,group,key]=node.$ref.split('/');assert.equal(group,'$defs');used.add(key);return expand(shared[group][key]);}
+  return Object.fromEntries(Object.entries(node).filter(([key])=>key!=='$defs').map(([key,value])=>[key,expand(value)]));
+ };
+ assert.deepEqual(expand(shared),original);
+ assert.deepEqual([...used].sort(),Object.keys(shared.$defs).sort(),'unused parent/child candidates must not consume the catalogue budget');
+ assert.ok(Buffer.byteLength(JSON.stringify(shared))<Buffer.byteLength(JSON.stringify(original)));
+ for(const patch of [{$id:'https://scope.invalid'},{$dynamicAnchor:'scope'},{$ref:'#/other'},
+  {properties:{...source.properties,foreign:{$ref:'#/$defs/foreign'}}}]){
+  const native={...source,...patch};
+  if(patch.$ref)assert.throws(()=>assistantModelInputSchema(native,{compactContainers:true}),/INVALID_RESPONSE/);
+  else assert.deepEqual(assistantModelInputSchema(native,{compactContainers:true}),native,'a document with reference/scope semantics is never refactored');
+ }
+});
+
+test('the complete attachment-capable catalogue compacts containers instead of dropping tools or increasing its native ceiling',async()=>{
+ const origin='https://full-catalogue.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'f'.repeat(43)}`,expiresAt:1});
+ const objectSchema={type:'object',properties:{text:{type:'string',maxLength:128},flag:{type:'boolean'}},required:['text'],additionalProperties:false};
+ const schema={type:'object',properties:Object.fromEntries(Array.from({length:12},(_,i)=>['option'+i,structuredClone(objectSchema)])),additionalProperties:false};
+ const normal=['get_assistant_status','get_task','download_attachment','create_task','update_checklist','create_comment'].map(name=>({name,description:'',inputSchema:structuredClone(schema)}));
+ const intake=['get_assistant_intake_context','resolve_assistant_intake'].map(name=>({name,description:'',inputSchema:{type:'object',properties:{}}}));
+ // Each native view individually fits. Their complete model catalogue with
+ // real materializers must stay bounded too; scalar-only sharing cannot save
+ // these short repeated object schemas. No tools/description may be removed.
+ const padded=[...normal,...intake];for(const tool of padded)tool.description='N'.repeat(4090);
+ for(let i=0;i<6;i++){normal[i].inputSchema.properties.padding={type:'string',description:'B'.repeat(3900)};}
+ const wire={normal:JSON.stringify(normal),intake:JSON.stringify(intake)};let bodyReads=0;
+ const client=createAssistantMcpClient({origin,assistantId,deviceId,store,materializeAttachment:()=>{bodyReads++;assert.fail('metadata must not read a body');},httpRequest:async input=>{
+  const response=result=>({sessionId:'full-catalogue',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+  if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+  if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+  assert.equal(input.payload.method,'tools/list');
+  return response({tools:input.config.headers['x-trelio-assistant-capability-profile']==='source_intake'?intake:normal});
+ }});
+ const tools=await client.listTools();assert.ok(Buffer.byteLength(JSON.stringify(tools))<=65536);
+ assert.deepEqual(new Set(tools.map(t=>t.name)),new Set(padded.map(t=>t.name)));
+ for(const tool of tools)assert.equal(tool.description,padded.find(t=>t.name===tool.name).description);
+ assert.equal(bodyReads,0);assert.deepEqual(wire,{normal:JSON.stringify(normal),intake:JSON.stringify(intake)});
+});
+
 test('managed Remote MCP reuses credential paths and exact native attempt fence without human namespace access',async()=>{
   let input,receipts=0;
   const f=await workspaceProfileFixture({remoteMcp:({pass})=>{

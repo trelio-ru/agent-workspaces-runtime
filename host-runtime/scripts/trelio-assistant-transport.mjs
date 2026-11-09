@@ -3262,7 +3262,7 @@ const projectAssistantSkillReadPresentation=(result,sections)=>{
   return {...result,structuredContent:after,content:result.content.map(block=>block.type==='text'&&block.text===previousJson
     ?{...block,text:nextJson}:block)};
 };
-export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,compactDialect=false,compactScalars=false}={}) => {
+export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,compactDialect=false,compactScalars=false,compactContainers=false}={}) => {
   const schema=structuredClone(source);
   let visited=0;
   const projectRoot=(node,depth=0)=>{
@@ -3300,7 +3300,7 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
   };
   if(!object(schema))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   projectRoot(schema);
-  if((compactDialect||compactScalars)&&[undefined,'http://json-schema.org/draft-07/schema#','https://json-schema.org/draft/2020-12/schema'].includes(schema.$schema)){
+  if((compactDialect||compactScalars||compactContainers)&&[undefined,'http://json-schema.org/draft-07/schema#','https://json-schema.org/draft/2020-12/schema'].includes(schema.$schema)){
     // MCP inputs default to 2020-12. Elide a legacy dialect annotation ONLY
     // after proving the whole document uses the shared, ref-free vocabulary.
     // Tuple items, refs/IDs, dependencies, new-dialect and unknown keywords keep
@@ -3326,10 +3326,12 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
     };
     if(equivalent(schema)){
       if(compactDialect&&schema.$schema==='http://json-schema.org/draft-07/schema#')delete schema.$schema;
-      if(compactScalars){
-        // Exact repeated leaf schemas only, inside ONE tool document. Keep the
-        // complete original description, format, regex, limits and defaults in
-        // a local definition. Never share across tools or factor a document
+      if(compactScalars||compactContainers){
+        // Exact repeated schemas only, inside ONE tool document. The ordinary
+        // pass shares scalar leaves. A still-oversized COMPLETE catalogue may
+        // additionally share containers through this SAME ref-free vocabulary
+        // proof. Keep descriptions, regexes, bounds and business fields intact.
+        // Never share across tools or factor a document
         // with refs/IDs/unknown vocabulary: their resolution scope could change.
         // This is serialization, not native validation or managed-field pruning.
         const visit=(node,action)=>{
@@ -3342,13 +3344,13 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
         const leaf=node=>['string','integer','number','boolean','null'].includes(node.type)
           &&![...maps,...singles,...lists].some(key=>Object.hasOwn(node,key));
         const counts=new Map();
-        visit(schema,node=>{if(leaf(node)){const key=JSON.stringify(node);counts.set(key,(counts.get(key)??0)+1);}});
+        visit(schema,node=>{if(node!==schema&&(compactContainers||leaf(node))){const key=JSON.stringify(node);counts.set(key,(counts.get(key)??0)+1);}});
         const definitionsKey=schema.$schema==='http://json-schema.org/draft-07/schema#'?'definitions':'$defs';
         const definitions={...schema[definitionsKey]},references=new Map();
         for(const [key,count]of counts){
           if(count<2)continue;
-          let index=references.size,name=`trelio_scalar_${index}`;
-          while(Object.hasOwn(definitions,name))name=`trelio_scalar_${++index}`;
+          let index=references.size,name=compactContainers?`ts${index}`:`trelio_scalar_${index}`;
+          while(Object.hasOwn(definitions,name))name=compactContainers?`ts${++index}`:`trelio_scalar_${++index}`;
           const ref={$ref:`#/${definitionsKey}/${name}`};
           // Include the definition key, separator and every reference; small
           // repeated scalars must remain inline when sharing would cost more.
@@ -3356,17 +3358,24 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
             +count*Buffer.byteLength(JSON.stringify(ref))+32)continue;
           definitions[name]=JSON.parse(key);references.set(key,ref);
         }
-        const replace=node=>{
+        // Sharing a parent reduces the number of its child occurrences.
+        // Publish only definitions reached by the transformed root, then the
+        // transitive definitions they actually use. A finite ref-free input
+        // cannot make a definition contain itself. Native definitions and all
+        // original constraints stay intact; only our new refs are introduced.
+        const used=new Set(),byName=new Map([...references].map(([text,ref])=>[ref.$ref.split('/').at(-1),text]));
+        const replace=(node,root=false)=>{
           if(typeof node==='boolean')return node;
-          const ref=leaf(node)&&references.get(JSON.stringify(node));
-          if(ref)return {...ref};
+          const ref=!root&&(compactContainers||leaf(node))&&references.get(JSON.stringify(node));
+          if(ref){used.add(ref.$ref.split('/').at(-1));return {...ref};}
           for(const key of maps)if(node[key])for(const [name,child]of Object.entries(node[key]))node[key][name]=replace(child);
           for(const key of singles)if(node[key]!==undefined)node[key]=replace(node[key]);
-          for(const key of lists)if(node[key])node[key]=node[key].map(replace);
+          for(const key of lists)if(node[key])node[key]=node[key].map(child=>replace(child));
           return node;
         };
-        const shared=structuredClone(schema);replace(shared);
-        if(references.size)shared[definitionsKey]=definitions;
+        const shared=replace(structuredClone(schema),true),reachable={...schema[definitionsKey]};
+        for(const name of used)reachable[name]=replace(JSON.parse(byName.get(name)),true);
+        if(used.size)shared[definitionsKey]=reachable;
         if(Buffer.byteLength(JSON.stringify(shared))<Buffer.byteLength(JSON.stringify(schema)))return shared;
       }
     }
@@ -3581,10 +3590,14 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         // Lossless MCP defaults only: false readOnly/idempotent, true
         // destructive, and write hints ignored on a read-only tool. Preserve
         // every description, property, bound and non-default write hint.
-        result=result.map(tool=>{const a=tool.annotations;return {...tool,
-          inputSchema:assistantModelInputSchema(tool.inputSchema,{omittedRootFields:[],compactDialect:true,compactScalars:true}),
+        // Retain the original documents for the second compaction: once leaf
+        // refs exist their resolution scope deliberately forbids refactoring.
+        const original=result,compact=compactContainers=>original.map(tool=>{const a=tool.annotations;return {...tool,
+          inputSchema:assistantModelInputSchema(tool.inputSchema,{omittedRootFields:[],compactDialect:true,compactScalars:true,compactContainers}),
           annotations:{...(a.readOnlyHint?{readOnlyHint:true}:{}),...(!a.readOnlyHint&&a.destructiveHint===false?{destructiveHint:false}:{}),
             ...(!a.readOnlyHint&&a.idempotentHint===true?{idempotentHint:true}:{}),openWorldHint:false}};});
+        result=compact(false);
+        if(Buffer.byteLength(JSON.stringify(result))>65_536)result=compact(true);
       }
       if(Buffer.byteLength(JSON.stringify(result))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
       // The same fresh native catalogue must actually offer this refinement.

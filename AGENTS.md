@@ -144,7 +144,10 @@ publication tooling также остаются вне этого публичн
   Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.
   Fresh native input inventory checks closed fields/container types BEFORE managed staging;
   generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
-  V2 company reads use SAME native schemas/ACL/mirror/exact/files; genuine task or private-owner intake origin, never fake task/Run. Initial discovery includes native search/fetch/contract alongside task/intake tools, without a mid-turn catalogue dependency. Exact repeated scalar schemas may share tool-local definitions only when lossless and smaller; retain native validation and 65 536-byte bounds. See the company-context scheduler contract.
+  V2 company reads use SAME native schemas/ACL/mirror/exact/files; genuine task or private-owner intake origin, never fake task/Run. Initial discovery includes native search/fetch/contract alongside task/intake tools, without a mid-turn catalogue dependency. Exact repeated scalar schemas may share tool-local definitions only when lossless and smaller; retain native validation and 65 536-byte bounds. Complete production
+  acceptance includes real attachment materializers. Still-oversized catalogues
+  may share exact repeated containers through that SAME ref-free vocabulary
+  proof and reachable tool-local definitions, never truncation or larger bounds. See the company-context scheduler contract.
   Search completion keeps sync+query in the SAME original bounded read child;
   the common short-wait registry retains only a bounded undelivered value.
   Fresh native generation/pass/recipient validation precedes one-time delivery;
