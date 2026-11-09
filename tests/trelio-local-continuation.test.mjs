@@ -256,8 +256,23 @@ test("production bounded worker uses only its exact owner transcript, rejecting 
     const hook = { ...hookInput, transcript_path: transcript };
     await fs.writeFile(transcript, [JSON.stringify({ type: "session_meta", payload: header }),
       ...rows.map((row) => JSON.stringify(row))].join("\n") + "\n", { mode: 0o600 });
-    const recovered = await recoverLocalContinuationArguments({ hookInput: hook, input });
-    assert.equal(recovered.parameters.arguments.title, original.title);
+    let recovered;
+    // The real worker keeps its production 250ms limit even on a loaded native
+    // runner. A timed-out inspection must return the original incomplete input,
+    // never partial source fields. Three bounded, non-dispatching inspections
+    // still require one positive recovery; a broken reader cannot pass on its
+    // fail-closed behavior alone. This is the same fixture contract as PreToolUse.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const inspected = await recoverLocalContinuationArguments({ hookInput: hook, input });
+      if (inspected.parameters.nativeCallRef === undefined) {
+        recovered = inspected;
+        break;
+      }
+      assert.deepEqual(inspected, input);
+    }
+    assert.deepEqual(recovered?.parameters.arguments, {
+      companySlug: "demo", projectSlug: "project", title: original.title, clientRequestId: original.clientRequestId,
+    });
     const linked = path.join(dir, "link.jsonl");
     await fs.symlink(transcript, linked);
     assert.deepEqual(await recoverLocalContinuationArguments({ hookInput: { ...hook, transcript_path: linked }, input }), input);

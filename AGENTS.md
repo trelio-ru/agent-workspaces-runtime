@@ -1104,7 +1104,7 @@ publication tooling также остаются вне этого публичн
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; plugin source не vendored.
 - Исходные args, checkpoint binding и search selection исполняются по
   [контракту](docs/agent-workspace-runtime.md#исходные-аргументы-local-continuation).
-  Native hook fixtures сохраняют production budget и требуют closed refusal плюс positive recovery без MCP dispatch.
+  Native hook/worker fixtures сохраняют production budget и требуют closed refusal плюс positive recovery без MCP dispatch.
 - Все non-UI local-company continuations используют один model-visible
   `continue_trelio_local_action` envelope (`route` + exact native
   `parameters.arguments`). Новый native MCP-метод добавляется в backend
