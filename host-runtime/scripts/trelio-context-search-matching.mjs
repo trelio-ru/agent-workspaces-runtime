@@ -76,6 +76,25 @@ const findContextSearchEvidenceSpans = (compactText, rawQueries) => {
             .sort((left, right) => left.start - right.start || left.end - right.end)
             .map((span) => [`${span.start}:${span.end}`, span])).values()];
 };
+/**
+ * Keep the existing UTF-16 size/offset contract, but move a cut inside a
+ * surrogate pair inward. A half-emoji is not a Unicode scalar: JavaScript can
+ * serialize it as an escape while a strict JSON client rejects the entire MCP
+ * response. Inspect only the two boundaries, rather than spreading a possibly
+ * large document into a second code-point array for every preview.
+ */
+const sliceContextSearchCodePoints = (text, start, end) => {
+    const splitsPair = (offset) => {
+        const previous = text.charCodeAt(offset - 1);
+        const current = text.charCodeAt(offset);
+        return previous >= 0xD800 && previous <= 0xDBFF && current >= 0xDC00 && current <= 0xDFFF;
+    };
+    if (splitsPair(start))
+        start++;
+    if (splitsPair(end))
+        end--;
+    return text.slice(start, Math.max(start, end));
+};
 const sliceContextSearchPreview = (text, evidenceStart, evidenceEnd, limit) => {
     if (text.length <= limit)
         return text;
@@ -88,7 +107,9 @@ const sliceContextSearchPreview = (text, evidenceStart, evidenceEnd, limit) => {
     start = Math.max(0, end - contentBudget);
     const prefix = start > 0 ? "…" : "";
     const suffix = end < text.length ? "…" : "";
-    return `${prefix}${text.slice(start, end)}${suffix}`.slice(0, limit);
+    // contentBudget already reserves both ellipses. A second raw slice here
+    // would reintroduce the very same invalid-Unicode edge after the safe cut.
+    return `${prefix}${sliceContextSearchCodePoints(text, start, end)}${suffix}`;
 };
 /**
  * Build display evidence only after ranking. A nearby match gets one readable
@@ -102,7 +123,7 @@ export const buildContextSearchPreview = (value, rawQueries, maxLength = CONTEXT
         return compactText;
     const spans = findContextSearchEvidenceSpans(compactText, rawQueries);
     if (spans.length === 0)
-        return `${compactText.slice(0, limit - 1)}…`;
+        return `${sliceContextSearchCodePoints(compactText, 0, limit - 1)}…`;
     const first = spans[0];
     const last = spans.at(-1);
     if (last.end - first.start <= limit - 2) {

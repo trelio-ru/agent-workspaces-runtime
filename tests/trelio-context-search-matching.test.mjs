@@ -32,6 +32,24 @@ test("local preview keeps distant subject and distinguishing evidence within 300
   assert.match(preview, / … /u);
 });
 
+test("generated previews preserve whole Unicode characters at every clipping boundary", () => {
+  // A valid emoji must never become a lone UTF-16 surrogate in a JSON result.
+  // Exercise the generated implementation, including both distant windows,
+  // rather than repairing a malformed result in a client-specific adapter.
+  const base = `anchor ${"x".repeat(100)} ${"y".repeat(100)} ending`;
+  for (let offset = 0; offset <= base.length; offset++) {
+    const source = `${base.slice(0, offset)}💗${base.slice(offset)}`;
+    for (const queries of [["anchor ending"], ["absent"]]) {
+      for (const limit of [32, 63, 64, 300]) {
+        const preview = buildContextSearchPreview(source, queries, limit);
+        assert.equal(preview.isWellFormed(), true, `Split Unicode at ${offset}/${limit}`);
+        assert.ok(preview.length <= limit);
+        assert.ok(!preview.includes("\uFFFD"));
+      }
+    }
+  }
+});
+
 test("local unified search returns five results by default and reports remaining coverage", () => {
   const mirror = {
     company: { id: "11111111-1111-4111-8111-111111111111", slug: "example", name: "Example" },

@@ -2670,6 +2670,14 @@ Shared ranking генерируется из backend `shared/context-search-rank
 `scripts/build-context-search-ranking.mjs --runtime-root <checkout>`; `--check`
 проверяет exact bytes и не допускает ручного semantic/performance fork.
 
+Preview сохраняет прежние UTF-16 offsets и предел длины, но обе границы каждого
+фрагмента сдвигаются внутрь, если разрезают surrogate pair. Это относится и к
+первому witness, и к итоговому snippet, включая два далёких фрагмента и fallback
+без evidence. Valid source не превращается в lone surrogate или replacement
+character: такой JSON ломает строгие Unicode-клиенты до доставки результата.
+Matching генерируется из backend `shared/context-search-matching.ts` через
+`scripts/build-context-search-matching.mjs`; размер корпуса, ACL и rank неизменны.
+
 Encrypted regular-work mirror получает отдельную bounded search projection со
 всеми доступными активными пунктами, ручными комментариями и закреплёнными
 именами вложений. Значения остаются protected markers до trusted local hydration;
