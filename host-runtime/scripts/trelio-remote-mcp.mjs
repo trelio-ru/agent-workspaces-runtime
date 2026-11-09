@@ -3,6 +3,7 @@ import { normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, Age
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
+import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-session.mjs";
 
 /**
  * Universal local host for declarative company Remote MCP skills.
@@ -1029,8 +1030,37 @@ const useOAuthVault = async (operation) => {
   }
 };
 
+// All writers (refresh, connect and forget) share the exact same vault-cell
+// transaction. Otherwise a refresh could resurrect a credential removed in
+// another chat, even if simultaneous refreshes themselves were serialized.
+const withOAuthCredentialState = async (origin, resolved, operation, {
+  signal, withCredentialState = withBrowserAccountState,
+} = {}) => {
+  const namespace = currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null;
+  const directory = path.join(path.dirname(resolveRemoteMcpCredentialFile(resolved.localIdentity)),
+    "oauth-state", remoteMcpOAuthSessionAccount(origin, resolved, namespace));
+  let operationError;
+  try {
+    return await withCredentialState(directory, async () => {
+      try {
+        throwIfAborted(signal);
+        await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
+        return await operation();
+      } catch (error) { operationError = error; throw error; }
+    }, { signal });
+  } catch (error) {
+    if (error === operationError || signal?.aborted || error?.name === "AbortError") throw error;
+    if (error?.code === "BROWSER_SESSION_STATE_BUSY") throw new RemoteMcpHostError(
+      "REMOTE_MCP_OAUTH_REFRESH_BUSY", "OAuth-сессия обновляется в другом чате. Повторите чтение позже.");
+    // Only the exact callback error retains existing provider semantics. Native
+    // acquisition/release diagnostics may contain private paths and stay local.
+    throw new RemoteMcpHostError("REMOTE_MCP_OAUTH_STORE_UNAVAILABLE", "Защищённое локальное хранилище OAuth недоступно или повреждено.");
+  }
+};
+
 export const loadPersonalCredential = async (origin, resolved, {
   signal, createOAuthVault = createRemoteMcpOAuthVault, refreshOAuth = refreshRemoteMcpOAuth,
+  withCredentialState = withBrowserAccountState,
 } = {}) => {
   throwIfAborted(signal);
   await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
@@ -1040,9 +1070,10 @@ export const loadPersonalCredential = async (origin, resolved, {
 
   if (resolved.remoteMcp.config.authentication.type === "oauth2_pkce") {
     const namespace = currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null;
+    const credentialFile = resolveRemoteMcpCredentialFile(resolved.localIdentity);
     const vault = createOAuthVault({
       namespace,
-      credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
+      credentialFile,
     });
     // Share only work on the SAME OS-vault cell and declaration. The old
     // member+config key joined different skills (or human/managed devices)
@@ -1078,11 +1109,18 @@ export const loadPersonalCredential = async (origin, resolved, {
     // With that promise it is our normal rotation, so another doctor/call waits
     // for its result instead of incorrectly starting an interactive reconnect.
     // Missing/replaced-issuer state still refuses, even while work is pending.
-    assertSession(session, Boolean(pending));
-    if (!pending && session.expiresAt > Date.now() + 60_000) return session.accessToken;
+    if (pending) assertSession(session, true);
 
     if (!pending) {
-      const refresh = (async () => {
+      // The promise coalesces callers in this process; the common native lock
+      // serializes the SAME canonical vault cell across independent MCP hosts.
+      // Its directory includes the actual OS-vault account (including managed
+      // namespace), never a provider endpoint/member-only approximation. After
+      // waiting, a live rotation has settled; a retained marker now really is
+      // uncertain and must still refuse instead of replaying a refresh POST.
+      const refresh = withOAuthCredentialState(origin, resolved, async () => {
+        throwIfAborted(signal);
+        await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
         const current = await useOAuthVault(() => vault.read(origin, resolved));
         throwIfAborted(signal);
         // Forget/reconnect can change the vault after the first read. Repeat
@@ -1106,7 +1144,7 @@ export const loadPersonalCredential = async (origin, resolved, {
           refreshInProgress: false,
         }));
         return next.accessToken;
-      })();
+      }, { signal, withCredentialState });
       oauthRefreshes.set(key, refresh);
       refresh.finally(() => {
         if (oauthRefreshes.get(key) === refresh) oauthRefreshes.delete(key);
@@ -1116,6 +1154,7 @@ export const loadPersonalCredential = async (origin, resolved, {
     // A joiner has its own invocation cancellation. It never inherits the
     // first caller's permission to keep using the eventual token after abort.
     throwIfAborted(signal);
+    await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
     return credential;
   }
 
@@ -1160,14 +1199,17 @@ export const loadPersonalCredential = async (origin, resolved, {
   return credential.secret;
 };
 
-const forgetPersonalCredential = async (origin, resolved, { signal } = {}) => {
+export const forgetPersonalCredential = async (origin, resolved, {
+  signal, createOAuthVault = createRemoteMcpOAuthVault, withCredentialState = withBrowserAccountState,
+} = {}) => {
   throwIfAborted(signal);
   if (resolved.remoteMcp.config.authentication.type === "oauth2_pkce") {
-    const vault = createRemoteMcpOAuthVault({
+    const vault = createOAuthVault({
       namespace: currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null,
       credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
     });
-    return useOAuthVault(() => vault.remove(origin, resolved));
+    return withOAuthCredentialState(origin, resolved, () => useOAuthVault(() => vault.remove(origin, resolved)),
+      { signal, withCredentialState });
   }
   const credentialFile = resolveRemoteMcpCredentialFile(resolved.localIdentity);
   const credential = await readPrivateJsonFile(credentialFile);
@@ -2702,6 +2744,7 @@ const maximumStableVersion = (...versions) => versions.reduce(
 
 export const resolveAgentSkillPackageMinimumHostVersion = ({
   capabilities = [],
+  resourcePolicy = null,
   packageSizeBytes,
   requestedMinimum,
   encrypted = false,
@@ -2712,6 +2755,7 @@ export const resolveAgentSkillPackageMinimumHostVersion = ({
     : AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION;
   const effectiveMinimum = maximumStableVersion(
     requestedMinimum,
+    resourcePolicy ? "3.31.0" : AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
     capabilities.includes(ACCOUNT_CAPABILITY)
       ? maximumStableVersion(packageContractMinimum, ACCOUNT_MINIMUM_HOST_VERSION) : packageContractMinimum,
   );
@@ -2778,7 +2822,7 @@ const buildCompanyPrivateSkillId = (companyId, skillSlug) => (
   `company-${companyId}-${skillSlug}`
 );
 
-const buildRuntimeManifest = (parsedPackage) => ({
+export const buildRuntimeManifest = (parsedPackage) => ({
   format: AGENT_SKILL_PACKAGE_FORMAT,
   skill: {
     id: parsedPackage.skillId,
@@ -2786,6 +2830,10 @@ const buildRuntimeManifest = (parsedPackage) => ({
   },
   entrypoint: parsedPackage.entrypoint,
   capabilities: [...parsedPackage.capabilities].sort(),
+  // The descriptor is part of the validated signed package contract. In E2EE
+  // the server cannot reconstruct it from package bytes; dropping it here
+  // would make a reviewed visual package select the wrong execution route.
+  ...(parsedPackage.browserSession ? { browserSession: parsedPackage.browserSession } : {}),
   files: parsedPackage.files.map((file) => ({
     path: file.path,
     mode: file.mode,
@@ -2850,6 +2898,11 @@ const readAndBindAgentSkillPackage = async ({
   }
 };
 
+export const remoteMcpPublicationMinimumHostVersion = config => (
+  config.schemaVersion === REMOTE_MCP_OAUTH_WRITE_SCHEMA_VERSION ? "3.1.0"
+    : config.schemaVersion === REMOTE_MCP_CONFIG_SCHEMA_VERSION ? "1.13.3" : "1.4.7"
+);
+
 const normalizePublicationExecution = async ({
   input,
   companyId,
@@ -2872,9 +2925,7 @@ const normalizePublicationExecution = async ({
         String(error?.message || "Remote MCP declaration не прошла локальную проверку."),
       );
     }
-    const schemaMinimum = config.schemaVersion === REMOTE_MCP_CONFIG_SCHEMA_VERSION
-      ? "1.13.3"
-      : "1.4.7";
+    const schemaMinimum = remoteMcpPublicationMinimumHostVersion(config);
     return {
       kind: "remote_mcp",
       remoteMcpConfig: config,
@@ -2901,6 +2952,7 @@ const normalizePublicationExecution = async ({
     const effectiveMinimum = resolveAgentSkillPackageMinimumHostVersion({
       packageSizeBytes: prepared.parsedPackage.packageSizeBytes,
       capabilities: prepared.parsedPackage.capabilities,
+      resourcePolicy: skillResourcePolicy(prepared.parsedPackage),
       requestedMinimum,
       encrypted,
     });
@@ -6106,7 +6158,7 @@ export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal 
       namespace: currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null,
         credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
       });
-      await useOAuthVault(() => vault.write(origin, resolved, session));
+      await withOAuthCredentialState(origin, resolved, () => useOAuthVault(() => vault.write(origin, resolved, session)), { signal });
       return buildTextResult({
         connected: true,
         skillId: resolved.skill.id,

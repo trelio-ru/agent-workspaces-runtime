@@ -727,7 +727,7 @@ Callback/state/PKCE и очистка дополнительно проверя�
 
 ### OAuth-сессии Remote MCP
 
-Вызовы одного local host объединяют обновление только для одной exact ячейки
+Вызовы независимых local hosts объединяют обновление только для одной exact ячейки
 OS vault и неизменной декларации. Identity берётся из того же canonical account
 hash, что macOS Keychain/libsecret/DPAPI: origin, company, member, skill и
 managed namespace. Config fingerprint дополнительно разделяет декларации.
@@ -735,12 +735,16 @@ managed namespace. Config fingerprint дополнительно разделя�
 другого навыка, human-профиля или managed device. Алгоритм account hash и
 формат сохранённой сессии не меняются; миграция и новый login не требуются.
 
-Сначала перечитывается exact сессия и проверяются её наличие и issuer. Только
-существующий in-process promise той же ячейки подтверждает, что
-`refreshInProgress` относится к ещё выполняющемуся обновлению: следующий
-caller ждёт его результат вместо ложного требования переподключиться. Marker
-без такого promise сохраняет прежний uncertain/reconnect отказ; он не даёт
-повторять refresh POST или сбрасывать хранилище.
+In-process promise объединяет callers одного процесса. Между процессами та же
+native account transaction сериализует чтение/rotation exact vault cell. После
+ожидания повторяются managed admission, cancellation, private read и issuer
+guard. Живое обновление другого чата успевает сохранить новый token; оставшийся
+после освобождения lock `refreshInProgress` означает неизвестный исход и даёт
+прежний uncertain/reconnect отказ. Он не разрешает повторять refresh POST,
+открывать login или сбрасывать хранилище. Provider tool calls остаются
+параллельными: общий lock покрывает только доступ к OAuth-сессии.
+Connect и forget записывают/удаляют ту же ячейку под этим же lock; завершившийся
+refresh не может восстановить credential после принятого forget.
 
 Перед rotation повторяются все session guards после второго private read.
 Исчезнувшая сессия и изменившийся issuer дают закрытый
@@ -749,7 +753,20 @@ TypeError. Persisted fence ставится до единственного POST
 неизвестного исхода. Cancelled joiner не получает eventual токен другого
 вызова; его отмена не запускает второй refresh. Проверки используют настоящий
 loader, canonical vault codec и managed AsyncLocalStorage profile с
-синтетическими OS keyring и token endpoint, без рабочих credentials.
+синтетическими OS keyring и token endpoint, без рабочих credentials. Отдельная
+fixture запускает два независимых процесса с production credential loader, общей private-file OS-vault
+моделью и одним held HTTP POST; второй процесс обязан увидеть live marker,
+дождаться результата и никогда не послать второй POST. Неизвестный исход
+сохраняет fence и после завершения первого процесса.
+
+### Локальная подготовка приватных навыков
+
+Private publication сохраняет `browserSession` в manifest из того же parsed
+signed package, включая локальный E2EE-путь. Resource marker валидируется общим
+package parser до шифрования, а effective minimum host повышается до 3.31.0.
+Remote MCP schema 1/2/3 требует соответственно 1.4.7/1.13.3/3.1.0; encrypted
+publication дополнительно сохраняет текущий host floor. Backend не может
+восстановить пропущенный descriptor или проверить содержимое encrypted package.
 
 ### Восстановление подписанного рантайма
 

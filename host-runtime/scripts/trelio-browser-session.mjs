@@ -82,7 +82,7 @@ export function skillResourcePolicy(parsedPackage, arguments_ = []) {
   if (!entries.length) return null;
   let value;
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(entries[0].bytes)); } catch {}
-  if (entries.length !== 1 || !Buffer.isBuffer(entries[0].bytes) || entries[0].bytes.length > 1024
+  if (entries.length !== 1 || entries[0].mode !== 0o644 || !Buffer.isBuffer(entries[0].bytes) || entries[0].bytes.length > 1024
       || !value || Object.keys(value).sort().join() !== 'schemaVersion,scope' || value.schemaVersion !== 1
       || !['account', 'device'].includes(value.scope) || !parsedPackage.capabilities?.includes('local-session')) {
     fail('BROWSER_SESSION_RESOURCE_POLICY_INVALID', 'The signed execution resource policy is invalid.');
@@ -142,7 +142,8 @@ export async function browserExecutionDirectories(accountDirectory) {
  * permitted only before the callback starts: a failed save/input is never
  * replayed. The existing nonce/PID mutex refuses live/unknown-owner takeover
  * and supplies the same native private-path checks on every platform. */
-export async function withBrowserAccountState(accountDirectory, operation, { waitMs = 30_000 } = {}) {
+export async function withBrowserAccountState(accountDirectory, operation, { waitMs = 30_000, signal } = {}) {
+  signal?.throwIfAborted();
   if (!path.isAbsolute(accountDirectory) || typeof operation !== 'function'
       || !Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > MAX_LEASE_MS) {
     fail('BROWSER_SESSION_STATE_INVALID', 'The account transaction is invalid.');
@@ -153,9 +154,10 @@ export async function withBrowserAccountState(accountDirectory, operation, { wai
   await prepareVisualLockRoot(root);
   let entered = false;
   const result = await withMirrorRetentionLock(root, async () => {
+    signal?.throwIfAborted();
     entered = true;
     return operation();
-  }, { waitMs });
+  }, { waitMs, signal });
   if (!entered) fail('BROWSER_SESSION_STATE_BUSY', 'The saved account state is busy.');
   return result;
 }
@@ -347,8 +349,16 @@ export async function withSharedAccountService({ accountDirectory, environment =
         await persist();
       }
       const result = await start();
-      if (!uuid.test(result.sessionId || '') || !Number.isSafeInteger(result.expiresAt) || result.phase === 'closed') {
+      if (!uuid.test(result.sessionId || '') || !Number.isSafeInteger(result.expiresAt) || result.phase === 'closed'
+          || typeof result.reused !== 'boolean') {
         fail('BROWSER_SESSION_STATE_INVALID', 'The shared service did not return a live lease.');
+      }
+      // A pre-upgrade/unbound owner may already hold this native service.
+      // Adopting its ID would make our last logical stop kill that other chat.
+      // Only a fresh native creation or this exact registered service may join;
+      // a refusal does not stop/restart the native service or infer its owner.
+      if (result.reused && state.serviceId !== result.sessionId) {
+        fail('BROWSER_SESSION_UNREGISTERED_SERVICE', 'The existing native service belongs to an unregistered workflow. Close it in its original chat before starting a managed lease.');
       }
       if (state.serviceId !== result.sessionId) state = { schemaVersion: 2, serviceId: result.sessionId, expiresAt: result.expiresAt, generation: 0, owners: {} };
       entry = state.owners[owner];

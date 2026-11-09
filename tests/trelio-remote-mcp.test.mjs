@@ -37,6 +37,8 @@ import {
   readLocalProposalAppResource,
   remoteMcpHttpRequest,
   resolveAgentSkillPackageMinimumHostVersion,
+  buildRuntimeManifest,
+  remoteMcpPublicationMinimumHostVersion,
   resolveRemoteMcpCredentialFile,
   resolveSafeRemoteMcpEndpoint,
   runStdioHost,
@@ -307,6 +309,10 @@ test("in-process bridge transport errors retain closed diagnostics without repla
 test("large private packages raise their exact runtime host floor", () => {
   for (const encrypted of [false, true]) assert.equal(resolveAgentSkillPackageMinimumHostVersion({
     packageSizeBytes: 1, requestedMinimum: "1.4.0", hostRuntimeVersion: "3.6.2", encrypted,
+    capabilities: ["local-session"], resourcePolicy: { schemaVersion: 1, scope: "account" },
+  }), "3.31.0");
+  for (const encrypted of [false, true]) assert.equal(resolveAgentSkillPackageMinimumHostVersion({
+    packageSizeBytes: 1, requestedMinimum: "1.4.0", hostRuntimeVersion: "3.6.2", encrypted,
     capabilities: ["local-session", "local-accounts-v1"],
   }), "3.7.0");
   assert.equal(resolveAgentSkillPackageMinimumHostVersion({
@@ -323,6 +329,17 @@ test("large private packages raise their exact runtime host floor", () => {
     encrypted: true,
     hostRuntimeVersion: "2.4.1",
   }), "2.4.1");
+});
+
+test("private publication preserves the parsed browser descriptor and exact Remote MCP schema floor", () => {
+  const browserSession = { apiVersion: 1, sessionClass: "protected-snapshot", leaseMs: 60_000, manualAssist: false };
+  const manifest = buildRuntimeManifest({ skillId: "private-test", runtimeVersion: "1.0.0",
+    entrypoint: { path: "main.mjs", interpreter: "node" }, capabilities: ["browser", "local-session"],
+    browserSession, files: [{ path: "main.mjs", mode: 0o644, sha256: "a".repeat(64), bytes: Buffer.from("fixture") }] });
+  assert.deepEqual(manifest.browserSession, browserSession);
+  assert.equal(manifest.files[0].sizeBytes, 7);
+  assert.deepEqual([1, 2, 3].map(schemaVersion => remoteMcpPublicationMinimumHostVersion({ schemaVersion })),
+    ["1.4.7", "1.13.3", "3.1.0"]);
 });
 
 test("private metadata resolves from exact source or one complete editable draft", () => {

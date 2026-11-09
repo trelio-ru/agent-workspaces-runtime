@@ -7790,6 +7790,11 @@ export const parseAndValidateAgentSkillPackage = (
     throw new Error(`Executable entrypoint ${entrypointPath} должен иметь mode 0755.`);
   }
 
+  // Validate the signed resource declaration in the SAME parser used by pack,
+  // private publication (including local E2EE) and materialization. Backend
+  // validation alone cannot inspect an encrypted company's package contents.
+  skillResourcePolicy({ files: parsedFiles, capabilities });
+
   return {
     format: AGENT_SKILL_PACKAGE_FORMAT,
     skillId,

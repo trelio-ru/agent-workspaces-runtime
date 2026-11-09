@@ -751,7 +751,7 @@ test('the signed SDK resource queues actual provider children before native disp
     await fs.mkdir(claim); // overlapping native children would fail with EEXIST
     await new Promise(resolve=>setTimeout(resolve,100));
     await fs.rmdir(claim);process.stdout.write('completed');`);
-  f.input.artifact.parsedPackage.files = [{ path: 'trelio-execution-resource.json',
+  f.input.artifact.parsedPackage.files = [{ path: 'trelio-execution-resource.json', mode: 0o644,
     bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, scope: 'account' })) }];
   const results = await Promise.all([f.run(), f.run()]);
   assert.deepEqual(results, [{ stdout: 'completed' }, { stdout: 'completed' }]);

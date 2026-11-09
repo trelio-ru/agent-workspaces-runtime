@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 
 import {
   connectRemoteMcpOAuth,
   discoverRemoteMcpOAuth,
   oauthHttpJson,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
-import { loadPersonalCredential } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
-import { withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { loadPersonalCredential, forgetPersonalCredential } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { withWorkspaceExecutionProfile, writePrivateJsonFile, readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createRemoteMcpOAuthVault } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
 
 const config = {
@@ -356,6 +357,9 @@ const refreshFixture = () => {
   return { createVault, declaration, session, managedProfile };
 };
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+// These codec tests use an in-memory OS vault. Cross-process locking and native
+// private I/O are exercised separately below in a disposable real directory.
+const withSyntheticCredentialState = async (_root, operation) => operation();
 
 for (const variation of ["company", "skill", "managed namespace"]) {
   test("OAuth refresh never shares tokens across " + variation, async () => {
@@ -370,7 +374,7 @@ for (const variation of ["company", "skill", "managed namespace"]) {
     await firstVault.write("https://trelio.ru", declaration, session("first"));
     await otherVault.write("https://trelio.ru", other, session("second"));
     const started = deferred(), release = deferred(); let refreshes = 0;
-    const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+    const options = { withCredentialState: withSyntheticCredentialState, createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
       refreshes++; if (current.refreshToken === "synthetic-refresh-first") { started.resolve(); await release.promise; }
       return { ...current, accessToken: current.refreshToken + "-new", expiresAt: Date.now() + 3600000 };
     } };
@@ -392,7 +396,7 @@ test("OAuth caller joins its active refresh instead of reporting false reconnect
   const { createVault, declaration, session } = refreshFixture();
   await createVault({ credentialFile: "/unused/shared.json" }).write("https://trelio.ru", declaration, session("shared"));
   const started = deferred(), release = deferred(); let refreshes = 0;
-  const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+  const options = { withCredentialState: withSyntheticCredentialState, createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
     refreshes++; started.resolve(); await release.promise;
     return { ...current, accessToken: "synthetic-shared-new", expiresAt: Date.now() + 3600000 };
   } };
@@ -409,6 +413,7 @@ test("OAuth caller joins its active refresh instead of reporting false reconnect
 test("OAuth session removed before rotation returns reconnect without a TypeError or provider call", async () => {
   const { declaration, session } = refreshFixture(); let reads = 0, writes = 0, refreshes = 0;
   await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, {
+    withCredentialState: withSyntheticCredentialState,
     createOAuthVault: () => ({ read: async () => ++reads === 1 ? session("removed") : null,
       write: async () => { writes++; } }),
     refreshOAuth: async () => { refreshes++; assert.fail("missing session cannot rotate"); },
@@ -420,7 +425,7 @@ test("OAuth unknown refresh remains fenced and never retries its provider POST",
   const { createVault, declaration, session } = refreshFixture();
   await createVault({ credentialFile: "/unused/fenced.json" }).write("https://trelio.ru", declaration, session("fenced"));
   let refreshes = 0;
-  const options = { createOAuthVault: createVault, refreshOAuth: async () => {
+  const options = { withCredentialState: withSyntheticCredentialState, createOAuthVault: createVault, refreshOAuth: async () => {
     refreshes++; throw new Error("synthetic uncertain refresh");
   } };
   await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, options), /synthetic uncertain refresh/);
@@ -433,6 +438,7 @@ test("OAuth unknown refresh remains fenced and never retries its provider POST",
 test("OAuth issuer changed between reads refuses before returning a replacement token", async () => {
   const { declaration, session } = refreshFixture(); let reads = 0, writes = 0, refreshes = 0;
   await assert.rejects(loadPersonalCredential("https://trelio.ru", declaration, {
+    withCredentialState: withSyntheticCredentialState,
     createOAuthVault: () => ({ read: async () => ++reads === 1 ? session("before") : {
       ...session("replacement"), issuer: "https://other.example.test", expiresAt: Date.now() + 3600000,
     }, write: async () => { writes++; } }),
@@ -445,7 +451,7 @@ test("OAuth cancelled joiner cannot receive another caller's eventual token", as
   const { createVault, declaration, session } = refreshFixture();
   await createVault({ credentialFile: "/unused/cancel.json" }).write("https://trelio.ru", declaration, session("cancel"));
   const started = deferred(), release = deferred(); const controller = new AbortController(); let refreshes = 0;
-  const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+  const options = { withCredentialState: withSyntheticCredentialState, createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
     refreshes++; started.resolve(); await release.promise;
     return { ...current, accessToken: "synthetic-not-for-cancelled-caller", expiresAt: Date.now() + 3600000 };
   } };
@@ -457,4 +463,105 @@ test("OAuth cancelled joiner cannot receive another caller's eventual token", as
   const [success, cancelled] = await outcomes;
   assert.equal(success.status, "fulfilled"); assert.equal(cancelled.status, "rejected");
   assert.equal(cancelled.reason.name, "AbortError"); assert.equal(refreshes, 1);
+});
+
+test('forget waits for an active OAuth rotation and cannot resurrect its credential', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'trelio-oauth-forget-race-')));
+  const { createVault, declaration, session, managedProfile } = refreshFixture();
+  const profile = { ...managedProfile('assistant:synthetic:forget-race'), resolveRemoteMcpCredentialDirectory: () => root };
+  const started = deferred(), release = deferred();
+  try {
+    await withWorkspaceExecutionProfile(profile, async () => {
+      const vault = createVault({ credentialFile: '/unused/synthetic', namespace: profile.remoteMcpCredentialNamespace });
+      await vault.write('https://trelio.ru', declaration, session('forget'));
+      const options = { createOAuthVault: createVault, refreshOAuth: async (_config, current) => {
+        started.resolve(); await release.promise;
+        return { ...current, accessToken: 'synthetic-rotated', expiresAt: Date.now() + 3600000 };
+      } };
+      const first = loadPersonalCredential('https://trelio.ru', declaration, options);
+      await started.promise;
+      const forgotten = forgetPersonalCredential('https://trelio.ru', declaration, options);
+      await new Promise(setImmediate); release.resolve();
+      await first; assert.equal(await forgotten, true);
+      assert.equal(await vault.read('https://trelio.ru', declaration), null);
+    });
+  } finally { release.resolve(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const uncertain of [false, true]) test(`independent MCP processes share one OAuth rotation; uncertain=${uncertain}`, { timeout: 45_000 }, async () => {
+  // Only the OS keyring and token endpoint are synthetic. Both child hosts use
+  // production vault identity/codec, credential loader and native account lock.
+  // A real POST is held while the second process enters; no token reaches the
+  // parent stdout, model-visible error or process argv/environment.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "trelio-oauth-two-hosts-")));
+  const vaultFile = path.join(root, "synthetic-os-vault.json");
+  const { declaration, session } = refreshFixture();
+  const next = { ...session("cross-process"), accessToken: "synthetic-rotated", expiresAt: Date.now() + 3600000 };
+  await writePrivateJsonFile(vaultFile, { serialized: JSON.stringify({ schemaVersion: 1,
+    account: (await import("../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs")).remoteMcpOAuthSessionAccount("https://trelio.ru", declaration),
+    fingerprint: declaration.remoteMcp.configFingerprint, ...session("cross-process") }) });
+  const started = deferred(), release = deferred(); let posts = 0;
+  const server = http.createServer(async (request, response) => {
+    posts++; request.resume(); started.resolve(); await release.promise;
+    if (uncertain) response.destroy();
+    else { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(next)); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const moduleUrl = name => new URL(`../host-runtime/scripts/${name}.mjs`, import.meta.url).href;
+  const script = `
+    import { loadPersonalCredential } from ${JSON.stringify(moduleUrl("trelio-remote-mcp"))};
+    import { createRemoteMcpOAuthVault } from ${JSON.stringify(moduleUrl("trelio-remote-mcp-oauth-vault"))};
+    import { readPrivateJsonFile, writePrivateJsonFile } from ${JSON.stringify(moduleUrl("trelio-workspace"))};
+    const file = ${JSON.stringify(vaultFile)};
+    const options = { createOAuthVault: input => { const vault = createRemoteMcpOAuthVault({ ...input, platform: "linux",
+      linuxSecretTool: async (mode, _account, serialized) => mode === "lookup"
+        ? (await readPrivateJsonFile(file)).serialized : writePrivateJsonFile(file, { serialized }) });
+      return { ...vault, read: async (...args) => { const value = await vault.read(...args);
+        if (value?.refreshInProgress) process.send({ stage: "contended" }); return value; } }; },
+      refreshOAuth: async () => { const result = await fetch(${JSON.stringify(`http://127.0.0.1:${server.address().port}/token`)}, { method: "POST" }); return result.json(); } };
+    process.send({ stage: "entered" });
+    try { const token = await loadPersonalCredential("https://trelio.ru", ${JSON.stringify(declaration)}, options);
+      process.send({ stage: "done", ready: token === "synthetic-rotated" }); }
+    catch (error) { process.send({ stage: "done", refusal: error.code === "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED" ? "reconnect" : "uncertain" }); }
+  `;
+  const children = [], closures = [];
+  const start = () => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+      env: { ...process.env, TRELIO_CONFIG_HOME: path.join(root, "config") }, timeout: 35_000,
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    children.push(child);
+    let bytes = 0;
+    for (const stream of [child.stdout, child.stderr]) stream.on("data", value => { bytes += value.length; });
+    const entered = deferred(), contended = deferred(), done = deferred();
+    child.on("message", value => { if (value.stage === "entered") entered.resolve(); if (value.stage === "contended") contended.resolve(); if (value.stage === "done") done.resolve(value); });
+    const closed = new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", code => code === 0 && bytes === 0 ? resolve() : reject(new Error("synthetic child failed without diagnostic output")));
+    });
+    closures.push(closed.catch(() => undefined));
+    return { entered: entered.promise, contended: contended.promise, done: done.promise, closed };
+  };
+  try {
+    const beforeDone = (stage, child) => Promise.race([stage, child.done.then(value => {
+      throw new Error(`synthetic child settled before barrier: ${value.refusal || 'ready'}`);
+    }), child.closed.then(() => { throw new Error('synthetic child closed before barrier'); })]);
+    const first = start(); await beforeDone(started.promise, first);
+    const second = start(); await beforeDone(second.contended, second);
+    release.resolve();
+    const [one, two] = await Promise.all([first.done, second.done]);
+    await Promise.all([first.closed, second.closed]);
+    assert.equal(posts, 1, "the second process must not replay the POST");
+    if (uncertain) { assert.equal(one.refusal, "uncertain"); assert.equal(two.refusal, "reconnect"); }
+    else { assert.equal(one.ready, true); assert.equal(two.ready, true); }
+    const saved = JSON.parse((await readPrivateJsonFile(vaultFile)).serialized);
+    assert.equal(saved.refreshInProgress, uncertain);
+  } finally {
+    release.resolve();
+    for (const child of children) if (child.exitCode === null) child.kill();
+    await Promise.all(closures);
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
 });

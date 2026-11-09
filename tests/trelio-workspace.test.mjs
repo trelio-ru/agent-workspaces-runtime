@@ -9327,6 +9327,25 @@ test("skill package host rejects non-portable paths and case collisions", () => 
   );
 });
 
+test("the shared package parser validates the signed execution resource before private E2EE publication", () => {
+  const entry = (filePath, bytes, mode = 0o644) => ({ path: filePath, mode,
+    sha256: createHash("sha256").update(bytes).digest("hex"), contentBase64: bytes.toString("base64") });
+  const source = { format: "trelio-agent-skill-package/v1", skill: { id: "private-test", runtimeVersion: "1.0.0" },
+    entrypoint: { path: "main.mjs", interpreter: "node" }, capabilities: ["local-session"],
+    files: [entry("main.mjs", Buffer.from("fixture"))] };
+  const parse = (policy, mode = 0o644, capabilities = source.capabilities) => parseAndValidateAgentSkillPackage(Buffer.from(JSON.stringify({
+    ...source, capabilities, files: [...source.files, entry("trelio-execution-resource.json", policy, mode)],
+  })));
+  assert.equal(parse(Buffer.from('{"schemaVersion":1,"scope":"account"}')).files.length, 2);
+  for (const invalid of ['{"schemaVersion":1,"scope":"company"}', '{"schemaVersion":1,"scope":"device","extra":true}', ' '.repeat(1025)]) {
+    assert.throws(() => parse(Buffer.from(invalid)), error => error.code === "BROWSER_SESSION_RESOURCE_POLICY_INVALID");
+  }
+  assert.throws(() => parse(Buffer.from('{"schemaVersion":1,"scope":"device"}'), 0o755),
+    error => error.code === "BROWSER_SESSION_RESOURCE_POLICY_INVALID");
+  assert.throws(() => parse(Buffer.from('{"schemaVersion":1,"scope":"device"}'), 0o644, []),
+    error => error.code === "BROWSER_SESSION_RESOURCE_POLICY_INVALID");
+});
+
 test("skill pack rejects machine-specific Python bytecode cache", async () => {
   const temporaryDirectory = await mkdtemp(
     path.join(os.tmpdir(), "trelio-skill-pack-cache-test-"),

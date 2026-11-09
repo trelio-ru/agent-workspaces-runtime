@@ -1213,9 +1213,13 @@ publication tooling также остаются вне этого публичн
 - Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
 - Assistant Remote MCP reuses the SAME resolver/forms/vault/doctor/call with a managed namespace, native-selected encrypted config and one-use owner attempt fence. Presentation views never grant authority; see [contract](docs/assistant-scheduler.md#managed-remote-mcp-profile).
-  OAuth refresh joins only the SAME canonical vault-account/declaration promise,
-  including company/skill/device namespace; never share a provider token by
-  config/member alone. A live same-cell rotation is not a reconnect failure.
+  OAuth refresh joins only the SAME canonical vault-account/declaration promise
+  and native cross-process transaction, including company/skill/device namespace;
+  never share a provider token by config/member alone. Recheck admission/cancellation and the
+  exact vault after waiting; a retained uncertain marker never permits replay.
+  Private publication preserves browserSession and validates signed resources
+  before E2EE; schema-specific minimum versions remain exact.
+  A live same-cell rotation is not a reconnect failure.
   Missing/changed-issuer rereads refuse before POST; uncertain persisted fences
   and each joiner's cancellation remain intact. See the [OAuth contract](docs/agent-workspace-runtime.md#remote-mcp-oauth-sessions).
 - Assistant owner actions: live sealed intent and persisted decision; never text-as-approval. Signup is one attempt, never site success. See [contract](docs/assistant-scheduler.md#exact-owner-action-client).

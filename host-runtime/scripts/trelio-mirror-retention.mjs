@@ -39,7 +39,8 @@ const deadOwner = pid => {
     return error.code === "ESRCH";
   }
 };
-export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000 } = {}) => {
+export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000, signal } = {}) => {
+  signal?.throwIfAborted();
   // Contenders inspect only structural lock metadata. Windows hardening is a
   // write: applying a parent DACL while its owner publishes a child can race
   // the child's DACL verification. Serialize every protected read/hardening
@@ -53,6 +54,9 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
   let attempted = false;
   let claimSharingRetries = 0;
   for (;;) {
+    // Cancellation affects only this contender. It cannot steal the current
+    // owner's lock or replay its operation; the original wait clock remains.
+    signal?.throwIfAborted();
     if (attempted && Date.now() >= deadline) return { skipped: "busy" };
     attempted = true;
     let claimedIdentity;
@@ -148,7 +152,7 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
       await sleep(20);
     }
   }
-  try { return await operation(); } finally {
+  try { signal?.throwIfAborted(); return await operation(); } finally {
     await fs.unlink(ownerPath);
     await fs.rmdir(lock);
   }

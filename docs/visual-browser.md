@@ -54,7 +54,10 @@ credentials и browser storage не сливаются автоматическ�
 
 `withSharedAccountService` применяется к одному неклонируемому linked device
 либо физическому экрану. У чатов разные logical session IDs; полные target-bound
-операции идут в общей очереди. Stop освобождает только свою lease, physical stop
+операции идут в общей очереди. `start` возвращает boolean `reused`: уже работающий
+native service допускается только при совпадении с exact host registry.
+Legacy/unbound service нельзя присвоить новому чату и затем закрыть его последним
+logical stop. Stop освобождает только свою lease, physical stop
 выполняется последним владельцем. До него persist-ится closing fence; потерянный
 результат проверяется status, stop/input не повторяются. Новый start запрещён
 при неразрешённом closing любого владельца. Hard deadline физической сессии

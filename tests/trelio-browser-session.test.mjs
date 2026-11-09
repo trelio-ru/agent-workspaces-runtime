@@ -106,8 +106,8 @@ test('shared protocol service gives chats separate leases, queues requests and n
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-shared-device-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const serviceId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
-  let phase = 'ready', requests = 0, inFlight = 0, stops = 0;
-  const start = async () => ({ phase, sessionId: serviceId, expiresAt: Date.now() + 60000 });
+  let phase = 'ready', requests = 0, inFlight = 0, stops = 0, starts = 0;
+  const start = async () => ({ phase, sessionId: serviceId, expiresAt: Date.now() + 60000, reused: starts++ > 0 });
   const dispatch = async (operation, physical) => {
     assert.equal(physical, serviceId);
     if (operation === 'stop') { stops++; phase = 'closed'; throw Error('synthetic-lost-stop-result'); }
@@ -138,10 +138,10 @@ test('a shared physical screen invalidates sibling observations before dispatch,
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const physical = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const owners = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
-  let calls = 0, unknown = false, image = false;
+  let calls = 0, unknown = false, image = false, starts = 0;
   const call = (owner, operation, sessionId, changesState = false) => withSharedAccountService({
     accountDirectory: root, environment: { TRELIO_SKILL_RUNTIME_SESSION_ID: owner }, operation, sessionId,
-    start: async () => ({ sessionId: physical, expiresAt: Date.now() + 60000, phase: 'ready', image: true }),
+    start: async () => ({ sessionId: physical, expiresAt: Date.now() + 60000, phase: 'ready', image: true, reused: starts++ > 0 }),
     dispatch: async () => { calls++; if (unknown) throw Error('synthetic-unknown-input'); return { sessionId: physical, phase: 'ready', image }; },
     changesState, requiresFreshObservation: changesState, observesResult: value => value.image === true,
   });
@@ -158,7 +158,7 @@ test('a shared physical screen invalidates sibling observations before dispatch,
 });
 
 test('resource scheduling is declared only by exact signed inventory, with closed scope and schema', () => {
-  const parsed = value => ({ capabilities: ['local-session'], files: [{ path: 'trelio-execution-resource.json', bytes: Buffer.from(JSON.stringify(value)) }] });
+  const parsed = value => ({ capabilities: ['local-session'], files: [{ path: 'trelio-execution-resource.json', mode: 0o644, bytes: Buffer.from(JSON.stringify(value)) }] });
   assert.equal(skillResourcePolicy({ files: [], capabilities: ['local-session'] }), null);
   assert.deepEqual(skillResourcePolicy(parsed({ schemaVersion: 1, scope: 'account' })), { schemaVersion: 1, scope: 'account' });
   assert.equal(skillResourcePolicy(parsed({ schemaVersion: 1, scope: 'device' }), ['guides']), null);
@@ -168,6 +168,33 @@ test('resource scheduling is declared only by exact signed inventory, with close
   }
   const duplicate = parsed({ schemaVersion: 1, scope: 'account' }); duplicate.files.push(duplicate.files[0]);
   assert.throws(() => skillResourcePolicy(duplicate), { code: 'BROWSER_SESSION_RESOURCE_POLICY_INVALID' });
+});
+
+test('unregistered native services never become another chats stop authority', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-legacy-service-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let dispatches = 0;
+  const options = { accountDirectory: root, environment: { TRELIO_SKILL_RUNTIME_SESSION_ID: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+    start: async () => ({ phase: 'ready', sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', expiresAt: Date.now() + 60000, reused: true }),
+    dispatch: async () => { dispatches++; assert.fail('legacy service must not be stopped'); } };
+  await assert.rejects(withSharedAccountService({ ...options, operation: 'start' }), { code: 'BROWSER_SESSION_UNREGISTERED_SERVICE' });
+  await assert.rejects(withSharedAccountService({ ...options, operation: 'stop', sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }), { code: 'BROWSER_SESSION_OWNER_INVALID' });
+  assert.equal(dispatches, 0);
+});
+
+test('cancelling an account-state waiter neither enters its callback nor disturbs the owner', async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'trelio-cancel-state-wait-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const first = withBrowserAccountState(root, async () => { entered(); await held; return 'owner-finished'; });
+  await started;
+  const controller = new AbortController();
+  const waiting = withBrowserAccountState(root, () => assert.fail('cancelled waiter cannot run'), { signal: controller.signal });
+  const refusal = assert.rejects(waiting, { name: 'AbortError' });
+  controller.abort(); await refusal;
+  release(); assert.equal(await first, 'owner-finished');
 });
 
 const bindingEnvironment = (overrides = {}) => {
