@@ -119,6 +119,9 @@ import {
   TRELIO_WORKSPACE_ACTION_TOOL,
   TrelioLocalContextError,
   handleTrelioLocalContextOperation,
+  completeHumanCompanySearch,
+  closeHumanCompanySearches,
+  isHumanCompanySearch,
   handleTrelioLocalActionOperation,
   handleTrelioLocalProposalOperation,
   handleTrelioLocalWorkspaceOperation,
@@ -5651,6 +5654,7 @@ export const handleToolCall = async (
   {
     signal,
     localContextOperation = handleTrelioLocalContextOperation,
+    localSearchOperation = null,
     localActionOperation = handleTrelioLocalActionOperation,
     localWorkspaceOperation = handleTrelioLocalWorkspaceOperation,
     workspaceActionOperation = handleTrelioWorkspaceActionOperation,
@@ -5670,11 +5674,15 @@ export const handleToolCall = async (
   } = {},
 ) => {
   throwIfAborted(signal);
-  const runLocalContextRoute = async (routeArguments) => {
-    const providerResult = attachLocalContextNextCall(await localContextOperation(
+  const runLocalContextRoute = async (routeArguments, operationId) => {
+    const search = isHumanCompanySearch(routeArguments)
+      ? (localSearchOperation ?? (localContextOperation === handleTrelioLocalContextOperation ? completeHumanCompanySearch : null)) : null;
+    if (operationId !== undefined && (!search || typeof operationId !== "string"))
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Недопустимое продолжение поиска.");
+    const providerResult = attachLocalContextNextCall(await (search ?? localContextOperation)(
       origin,
       routeArguments,
-      { signal },
+      { signal, ...(operationId ? { operationId } : {}) },
     ), routeArguments, origin);
     // The first bridge-selected local company read is already authoritative
     // provider evidence. Persisting its opaque company selector protects even
@@ -5790,7 +5798,7 @@ export const handleToolCall = async (
         nativeTool: parameters.nativeTool,
         operation: parameters.operation,
         arguments: nativeArguments,
-      });
+      }, parameters.searchOperationId);
     }
     if (rawArguments.route === "action" || nativeInstructionRead) {
       return runLocalNativeActionRoute({
@@ -6680,6 +6688,13 @@ export const handleLocalMcpMessage = async (
       // Reuse the published Trelio deadline bucket without widening the
       // backend-owned telemetry vocabulary or degrading this result to UNKNOWN.
       if (effectiveError instanceof TrelioCallTimeoutError) diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
+      // These model-visible read-only lifecycle errors do not widen the
+      // backend-owned telemetry catalogue. Preserve its existing buckets;
+      // never pretend the search timeout was a failed/unknown mutation.
+      else if (effectiveError instanceof TrelioLocalContextError && effectiveError.code === "LOCAL_CONTEXT_SEARCH_TIMEOUT")
+        diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
+      else if (effectiveError instanceof TrelioLocalContextError && ["LOCAL_CONTEXT_SEARCH_FAILED", "LOCAL_CONTEXT_SEARCH_UNKNOWN", "LOCAL_CONTEXT_SEARCH_IN_PROGRESS", "LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED"].includes(effectiveError.code))
+        diagnosticCode = "REMOTE_MCP_HOST_ERROR";
       else if (effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError)
         diagnosticCode = effectiveError.diagnosticCode ?? errorPayload.code;
       else if (effectiveError instanceof TrelioApiError) {
@@ -6999,6 +7014,7 @@ export const runStdioHost = async ({
   // EOF means the MCP transport disappeared. Abort every active operation so
   // loopback listeners, sockets and opener children cannot outlive the host.
   transportClosed = true;
+  const closingSearches = closeHumanCompanySearches();
   const closingPluginPreservation = pluginPreservation?.close();
   for (const controller of activeToolCalls.values()) {
     controller.abort(createCancellationError());
@@ -7008,6 +7024,7 @@ export const runStdioHost = async ({
     pending.reject(new Error("MCP transport closed before the client answered."));
   }
   await Promise.allSettled([...inFlightDispatches]);
+  await closingSearches;
   await closingPluginPreservation;
   if (runtimeDelegatePromise) {
     await runtimeDelegatePromise.catch(() => null);

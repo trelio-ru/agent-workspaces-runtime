@@ -1,15 +1,15 @@
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
-import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
-import { trelioCallSignal, parseTrelioCallTimeout } from "./trelio-hook-private-session.mjs";
+import { createWorkspaceFinishOperations, createCompanySearchOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
+import { trelioCallSignal, parseTrelioCallTimeout, withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
-import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
-import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery } from "./trelio-bridge-http-diagnostics.mjs";
+import { parseProcessDiagnostic, ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
+import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
@@ -51,19 +51,20 @@ import {
 import crypto from "node:crypto";
 import { prepareRuntimeProofSubmission, submitPreparedRuntimeProof } from "./trelio-runtime-proof-preparation.mjs";
 import { Buffer, isUtf8 } from "node:buffer";
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { isLocalPathInside, sameLocalPath } from "./trelio-local-path.mjs";
+import { isLocalPathInside, sameLocalPath, isDirectModuleInvocation, nodeChildEnvironment } from "./trelio-local-path.mjs";
 
 import {
   LEGACY_WORKSPACE_CONTEXT_FILE_NAME,
   TrelioApiError,
   WORKSPACE_CONTEXT_FILE_NAME,
+  BridgeTransportError,
   buildBridgeTransportDiagnosticDetails,
   ensureBridgeCompatibility,
   ensureCompanyEncryptionContext,
@@ -77,6 +78,7 @@ import {
   readEncryptedWorkspaceSearchDocuments,
   readPrivateJsonFile,
   readJsonResponse as readJson,
+  readExistingBridgeSessionToken,
   request,
   requireToken,
   resolveBridgeDataPlaneRouting,
@@ -84,6 +86,7 @@ import {
   resolveCompanyEncryptionRequestOrigin,
   resolveCompanyContextMirrorDirectory,
   resolveRegisteredWorkspaceRootDirectory,
+  sanitizeAgentSkillInheritedEnvironment,
   runAutomaticLocalCleanup,
   runGit,
   writeAndDecryptCompanyWorkspaceBundle,
@@ -119,6 +122,8 @@ import {
 // projections and keeps full task/domain payloads out of the mirror. Exact reads are hydrated
 // into the bounded process cache only when the caller opens a selected object.
 const MIRROR_SCHEMA_VERSION = 8;
+const IS_HUMAN_SEARCH_READER = isDirectModuleInvocation(import.meta.url)
+  && process.argv[2] === "--company-search-reader" && typeof process.send === "function";
 const MIRROR_LOCK_STALE_MS = 10 * 60 * 1000;
 // A first company snapshot can legitimately hydrate thousands of tasks. When
 // no readable generation exists yet, simultaneous MCP hosts join that single
@@ -919,13 +924,14 @@ export const createEncryptedSearchFileCache = async ({
 
 // Only optimistic read conflicts restart assembly. Permission, crypto, transport
 // and caller cancellation errors keep their exact original identity.
-export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish }) => {
+export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish, onProgress = () => {} }) => {
   let failureStage = "starting_manifest";
   let failureReason = "revision_conflict";
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let candidate;
     try {
       failureStage = "starting_manifest";
+      onProgress("manifest");
       // The backend assembles each manifest from revision-fenced task search
       // projections, so either manifest read can itself conflict before a
       // generation is returned. All three read stages share the same bounded
@@ -935,8 +941,10 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
         return { mirror: previous, changed: false };
       }
       failureStage = "candidate";
+      onProgress("hydrating");
       candidate = await buildCandidate(startingManifest, previous);
       failureStage = "finishing_manifest";
+      onProgress("verifying");
       const finishingManifest = await readManifest();
       if (finishingManifest.generation !== startingManifest.generation) {
         failureReason = "generation_mismatch";
@@ -958,6 +966,7 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
     }
     // Publication switches the durable pointer. Keep it outside read recovery:
     // a failed or ambiguous write never authorizes replaying that side effect.
+    onProgress("publishing");
     return { mirror: await publish(candidate), changed: true };
   }
   throw new TrelioLocalContextError(
@@ -3670,13 +3679,18 @@ const resolveLocalCompanyProvider = async ({
   signal,
   allowCached = false,
   requirePlain = false,
+  existingOnly = IS_HUMAN_SEARCH_READER,
 }) => {
   const cacheKey = companyContextSessionKey(origin, companySlug);
   const managed = currentWorkspaceExecutionProfile()?.kind === "digital_assistant";
   if (!managed && allowCached && !requirePlain && localCompanyProviderCache.has(cacheKey)) {
     return localCompanyProviderCache.get(cacheKey);
   }
-  const token = await requireToken(origin, { onStatus: () => undefined, signal });
+  // Detached read preparation cannot initiate pairing or migrate credentials.
+  // Missing/replaced local identity is a refusal, never a second setup flow.
+  const token = existingOnly ? await readExistingBridgeSessionToken(origin, { signal })
+    : await requireToken(origin, { onStatus: () => undefined, signal });
+  if (!token) throw new TrelioLocalContextError("BRIDGE_SESSION_REQUIRED", "Требуется действующее подключение локального bridge.");
   const compatibility = await ensureBridgeCompatibility(origin, token, { signal });
   const routing = requirePlain || (compatibility?.encryptedDataPlane?.enabled === true
     && compatibility.encryptedDataPlane.routingVersion === 1)
@@ -4213,6 +4227,7 @@ export const syncCompanyContextMirror = async ({
   companyEncryption,
   requireFresh = false,
   signal,
+  onProgress = () => {},
 }) => {
   const companySlug = companyEncryption.runtime.company.slug;
   const requestOrigin = resolveCompanyEncryptionRequestOrigin(origin, companyEncryption);
@@ -4220,7 +4235,9 @@ export const syncCompanyContextMirror = async ({
     origin,
     companyId: companyEncryption.runtime.company.id,
   });
+  onProgress("mirror_read");
   let previous = await readMirrorGeneration({ paths, companyEncryption });
+  onProgress("mirror_wait");
   const writer = await acquireMirrorWriter(paths, {
     signal,
     // Normal local reads may use a complete immutable generation while a
@@ -4250,6 +4267,7 @@ export const syncCompanyContextMirror = async ({
     previous = await readMirrorGeneration({ paths, companyEncryption, previous });
     let searchCache;
     const result = await buildStableCompanyMirror({
+      onProgress,
       previous,
       readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
       buildCandidate: async (rawManifest, reusable) => buildMirror({
@@ -8382,7 +8400,7 @@ export const readTaskSectionsWithRevisionRefresh = async ({
   return readSections(refreshedReady);
 };
 
-const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }) => {
+const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal, onProgress }) => {
   const managed = currentWorkspaceExecutionProfile()?.kind === "digital_assistant";
   forceSync ||= managed;
   const provider = await resolveLocalCompanyProvider({
@@ -8446,6 +8464,7 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }
     companyEncryption,
     requireFresh: forceSync,
     signal,
+    onProgress,
   });
   if (managed) return { ...synced, token, companyEncryption, requestOrigin };
   if (synced.syncInProgress) {
@@ -8488,17 +8507,158 @@ export const prepareTrelioLocalCompanyContext = async (origin, companySlug, {sig
  * generation, including its ACL-filtered inventory. This reads no mirror or
  * answer and never falls back after a refusal. The caller separately fences the
  * original pass and managed scope/epoch/device/envelope before and after it. */
-export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug, generation, {signal}={}) => {
+export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug, generation, {signal, expectedBinding}={}) => {
   if (!MIRROR_GENERATION_PATTERN.test(String(generation ?? "")))
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid search generation.");
-  const provider = await resolveLocalCompanyProvider({origin, companySlug:normalizeCompanySlug(companySlug), signal});
+  const provider = await resolveLocalCompanyProvider({origin, companySlug:normalizeCompanySlug(companySlug), signal,
+    ...(expectedBinding ? { existingOnly: true } : {}) });
   if (provider.nativeProvider) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed.");
+  if (expectedBinding && humanSearchBinding(origin, provider) !== expectedBinding) return false;
   const manifest = await fetchManifest({origin:provider.requestOrigin, token:provider.token,
     companySlug:normalizeCompanySlug(companySlug), signal});
   if (!MIRROR_GENERATION_PATTERN.test(String(manifest?.generation ?? "")))
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid native generation.");
   signal?.throwIfAborted();
   return manifest.generation === generation;
+};
+
+// Task-only refinement owns a separate native projection reader and must not
+// inherit the full company mirror prerequisite or its long preparation clock.
+const HUMAN_SEARCH_TOOLS = new Set(["search", "search_agent_workspace_files", "search_agent_secrets", "search_agent_guidance"]);
+const HUMAN_SEARCH_STAGES = new Set(["starting", "access", "mirror_read", "mirror_wait", "manifest", "hydrating", "verifying", "publishing", "searching"]);
+export const isHumanCompanySearch = input => input?.operation === "native_read" && HUMAN_SEARCH_TOOLS.has(input.nativeTool);
+const humanSearchBinding = (origin, provider) => {
+  const { runtime } = provider.companyEncryption;
+  return sha256(JSON.stringify([origin, provider.token, runtime.company.id,
+    runtime.scope.id, runtime.scope.epoch, runtime.device.id]));
+};
+
+/** A bridge token fingerprint is local equality metadata, never a credential
+ * transport or an access grant. Both processes independently open the SAME OS
+ * store and perform fresh native admission. Re-pairing, scope rotation or a
+ * different device must not release an old process's retained plaintext. */
+export const readHumanCompanySearchAdmission = async (origin, input, { signal } = {}) => {
+  if (!isHumanCompanySearch(input) || currentWorkspaceExecutionProfile()
+    || Buffer.byteLength(JSON.stringify(input)) > 64 * 1024)
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Недопустимый запрос локального поиска.");
+  const companySlug = normalizeCompanySlug(input.companySlug);
+  const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal, existingOnly: true });
+  if (provider.nativeProvider) return provider;
+  return { binding: humanSearchBinding(origin, provider) };
+};
+
+/** Heavy JSON/crypto/index work belongs to ONE isolated process, not the MCP
+ * event loop. A real child PID is important: after OOM/termination, the existing
+ * mirror lock recovery can prove the writer dead. A thread shares the live MCP
+ * PID and would strand that lock. Only bounded query/result IPC crosses here;
+ * mirrors, company keys, tokens, paths and proof material never do. */
+export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, stopGraceMs = 5000 } = {}) => {
+  let child = null, active = null, idleTimer, scope = null, closing = null;
+  const error = (code, message) => new TrelioLocalContextError(code, message);
+  const close = () => {
+    if (closing) return closing;
+    clearTimeout(idleTimer);
+    const owned = child;
+    if (!owned) return Promise.resolve();
+    closing = new Promise(resolve => {
+      // Let the original signal abort HTTP, settle file workers, erase private
+      // staging and release the mirror writer before exit. Only a stuck/native
+      // CPU dependency needs termination; it still has a real recoverable PID.
+      const timer = setTimeout(() => owned.kill(), stopGraceMs);
+      owned.once("close", () => { clearTimeout(timer); resolve(); });
+      if (active && owned.connected) {
+        try { owned.send({ type: "cancel", id: active.id }, () => {}); }
+        catch { owned.kill(); }
+      } else owned.kill();
+    }).finally(() => { closing = null; });
+    return closing;
+  };
+  const open = () => {
+    let environment = sanitizeAgentSkillInheritedEnvironment();
+    for (const key of ["TRELIO_PLUGIN_ROOT", "TRELIO_PLUGIN_VERSION", "TRELIO_HOST_RUNTIME_VERSION", "TRELIO_HOST_RUNTIME_DIRECTORY"])
+      if (process.env[key] !== undefined) environment[key] = process.env[key];
+    child = spawnReader ? spawnReader() : fork(fileURLToPath(import.meta.url), ["--company-search-reader"], {
+      execPath: process.execPath, execArgv: ["--max-old-space-size=2048"],
+      env: nodeChildEnvironment(environment), windowsHide: true,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    const owned = child;
+    // Process diagnostics never expose stderr, exception prose or private paths.
+    owned.on("error", () => { active?.reject(error("LOCAL_CONTEXT_SEARCH_FAILED", "Не удалось запустить изолированный поиск.")); });
+    owned.on("close", () => {
+      if (child === owned) { child = null; scope = null; }
+      active?.reject(active.signal?.aborted ? active.signal.reason
+        : error("LOCAL_CONTEXT_SEARCH_FAILED", "Процесс поиска завершился до готового ответа. Автоматического повтора нет."));
+    });
+    owned.on("message", message => {
+      const pending = active;
+      if (!pending || message?.id !== pending.id) return;
+      if (pending.signal?.aborted) return; // Wait for owned process cleanup/close.
+      if (message.type === "progress" && HUMAN_SEARCH_STAGES.has(message.stage)) pending.onProgress(message.stage);
+      else if (message.type === "result" && Buffer.byteLength(JSON.stringify(message)) <= 512 * 1024) pending.resolve(message.value);
+      else if (message.type === "failure") {
+        const code = diagnosticContract.errorCodes.includes(message.code) ? message.code : "LOCAL_CONTEXT_SEARCH_FAILED";
+        pending.reject(error(code, "Локальный поиск остановлен на этапе " + pending.stage + ". Автоматического повтора нет."));
+      } else pending.reject(error("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный ответ процесса поиска."));
+    });
+  };
+  return { close, async execute(origin, input, admission, { signal, onProgress = () => {} } = {}) {
+    signal?.throwIfAborted();
+    if (active) throw error("LOCAL_CONTEXT_SEARCH_IN_PROGRESS", "Предыдущий поисковый процесс ещё работает.");
+    clearTimeout(idleTimer);
+    if (child && scope !== admission.binding) await close();
+    if (!child) open();
+    scope = admission.binding;
+    const owned = child, id = crypto.randomUUID();
+    let abort;
+    try {
+      return await new Promise((resolve, reject) => {
+        const pending = { id, resolve, reject, signal, stage: "starting", onProgress(stage) { this.stage = stage; onProgress(stage); } };
+        active = pending;
+        abort = () => {
+          // Stop the owned child, then settle after close so another query can
+          // never race a still-running mirror writer. Ordinary poll cancellation
+          // does not reach this original operation signal.
+          void close();
+        };
+        signal?.addEventListener("abort", abort, { once: true });
+        owned.send({ id, origin, input, binding: admission.binding }, failure => {
+          if (failure) reject(error("LOCAL_CONTEXT_SEARCH_FAILED", "Не удалось передать запрос процессу поиска."));
+        });
+      });
+    } catch (failure) {
+      // A lost/malformed pipe or failed reader cannot leave an unknown active
+      // request in a warm child that silently ignores the next query.
+      await close();
+      throw failure;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      active = null;
+      // Bound plaintext residency and process count independently of company
+      // bytes. A larger corpus never purchases an unbounded heap or more readers.
+      idleTimer = setTimeout(() => { void close(); }, idleMs);
+      idleTimer.unref?.();
+    }
+  } };
+};
+
+let humanCompanySearches;
+const createHumanCompanySearches = () => {
+  const humanSearchReader = createHumanCompanySearchReader();
+  return createCompanySearchOperations({
+    authorize: readHumanCompanySearchAdmission,
+    execute: humanSearchReader.execute,
+    validate: (origin, input, value, admission, { signal }) => isTrelioLocalCompanyGenerationCurrent(
+      origin, input.companySlug, value.generation, { signal, expectedBinding: admission.binding }),
+    closeReader: humanSearchReader.close,
+    errorFactory: (code, message, details) => new TrelioLocalContextError(code, message, details),
+  });
+};
+export const completeHumanCompanySearch = (...args) => (humanCompanySearches ??= createHumanCompanySearches()).read(...args);
+export const closeHumanCompanySearches = async () => {
+  const previous = humanCompanySearches;
+  humanCompanySearches = null;
+  await previous?.close();
 };
 
 export const usesFreshExactTaskRead = (nativeTool, input) => {
@@ -8660,7 +8820,7 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
 export const handleTrelioLocalContextOperation = async (
   origin,
   rawInput,
-  { signal, readUnfiledQueue, onSearchSnapshot } = {},
+  { signal, readUnfiledQueue, onSearchSnapshot, onSearchProgress } = {},
 ) => {
   const operation = String(rawInput?.operation || "").trim();
   const companySlug = normalizeCompanySlug(rawInput?.companySlug);
@@ -8791,13 +8951,14 @@ export const handleTrelioLocalContextOperation = async (
     origin,
     companySlug,
     signal,
+    onProgress: onSearchProgress,
   });
   if (ready.nativeProvider) return ready.result;
 
   // Trusted in-process completion observer only: raw MCP arguments cannot
   // supply it. Bind the pending answer to exactly the complete snapshot used by
   // this query, without a second mirror read/decrypt or a cached native grant.
-  if (operation === "native_read" && ["search", "fetch"].includes(rawInput.nativeTool))
+  if (operation === "native_read" && (HUMAN_SEARCH_TOOLS.has(rawInput.nativeTool) || rawInput.nativeTool === "fetch"))
     onSearchSnapshot?.(ready.mirror.serverGeneration);
 
   // The backend owns which response DTOs may carry live context. Polls,
@@ -8861,6 +9022,7 @@ export const handleTrelioLocalContextOperation = async (
       input,
       signal,
     });
+    onSearchProgress?.("searching");
     return liveResult(handleNativeLocalContextRead(liveMirror(detailedMirror), nativeTool, input));
   }
   if (operation === "search") {
@@ -12664,3 +12826,50 @@ export const TRELIO_LOCAL_ACTION_TOOL = {
     openWorldHint: false,
   },
 };
+
+// Fixed signed entry, no model-selected module/executable or source injection.
+// The child reads credentials privately; request input travels only via IPC.
+if (IS_HUMAN_SEARCH_READER) {
+  let running = null;
+  process.on("disconnect", () => process.exit(0));
+  process.on("message", async message => {
+    if (message?.type === "cancel") {
+      if (running?.id === message.id) running.controller.abort(new DOMException("Search cancelled", "AbortError"));
+      return;
+    }
+    if (running || !message || !UUID_PATTERN.test(message.id ?? "")
+      || typeof message.origin !== "string" || !isHumanCompanySearch(message.input)
+      || Buffer.byteLength(JSON.stringify(message)) > 70 * 1024) return;
+    const controller = new AbortController();
+    running = { id: message.id, controller };
+    let generation, failed = false;
+    try {
+      process.send?.({ id: message.id, type: "progress", stage: "access" });
+      const value = await withPrivateProcessSession(async () => {
+        const admission = await readHumanCompanySearchAdmission(message.origin, message.input, { signal: controller.signal });
+        if (admission.binding !== message.binding) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Search admission changed.");
+        return handleTrelioLocalContextOperation(message.origin, message.input, {
+          signal: controller.signal,
+          onSearchSnapshot: value => { generation = value; },
+          onSearchProgress: stage => process.send?.({ id: message.id, type: "progress", stage }),
+        });
+      }, controller.signal);
+      controller.signal.throwIfAborted();
+      const result = { id: message.id, type: "result", value: { generation, result: value } };
+      if (Buffer.byteLength(JSON.stringify(result)) > 512 * 1024) throw new Error();
+      process.send?.(result);
+    } catch (error) {
+      failed = true;
+      const code = (error instanceof TrelioLocalContextError || error instanceof ProcessDiagnosticError)
+        && diagnosticContract.errorCodes.includes(error.code) ? error.code
+        : error instanceof TrelioApiError ? bridgeHttpDiagnosticCode(error.statusCode, error.code)
+          : error instanceof BridgeTransportError ? "TRELIO_BRIDGE_TRANSPORT_FAILED" : "LOCAL_CONTEXT_SEARCH_FAILED";
+      // Flush the small closed failure before exiting. Private-session and all
+      // started file workers have settled; no unknown child is kept warm.
+      await new Promise(resolve => process.send?.({ id: message.id, type: "failure", code }, () => resolve()));
+    } finally {
+      running = null;
+      if (failed || controller.signal.aborted) process.exit(0);
+    }
+  });
+}

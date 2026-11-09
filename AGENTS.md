@@ -360,6 +360,10 @@ publication tooling также остаются вне этого публичн
 - Обычный local MCP использует один непродлеваемый бюджет 60 секунд, включая
   подготовку, HTTP/body и 429 waits. HTTP standalone/background bridge также
   ограничен 60 секундами; transport failure не запускает sleep/replay.
+  Human company search готовит полный снимок и ищет в одном изолированном
+  процессе под отдельным 10-минутным сроком; short waits продолжают exact
+  операцию без нового sync. Fresh recipient/generation fence предшествует
+  одноразовой выдаче; тяжёлый corpus не переносится в MCP-процесс.
   Human/provider lifetimes и зарегистрированный finish сохраняют отдельные
   границы: [контракт](docs/agent-workspace-runtime.md#call-time-budget).
   Best-effort retention после lifecycle ограничен пятью секундами и не блокирует

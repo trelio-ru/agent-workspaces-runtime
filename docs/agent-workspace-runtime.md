@@ -128,6 +128,63 @@ poll не отменяет child и не разрешает второй writer.
 exact Run read-back. Ограничение signed runtime не меняет client-managed сроки
 удалённого native MCP `/mcp`, plugin shell, OAuth, hook trust или минимальные версии.
 
+### Подготовка поиска в обычном чате
+
+Human `context/native_read` для `search`, `search_agent_workspace_files`,
+`search_agent_secrets`, `search_agent_guidance` использует
+тот же полный encrypted mirror, matching/ranking и atomic publication. Sync и
+запрос выполняются в одном отдельном Node-процессе с исходным конечным сроком
+10 минут. Короткий MCP-вызов ждёт готовность, но не владеет этим сроком. Каждый
+HTTP/body read по-прежнему ограничен минутой; poll и конфликт manifest не
+начинают срок заново. Partial mirror не публикуется и не превращается в
+неполную успешную выдачу. Бизнес-Task/Run не создаётся; остальные local reads
+и mutations сохраняют обычную минуту.
+Task-only `search_tasks` сохраняет отдельный native projection path без
+подготовки общего зеркала и без присоединения к pending full search.
+
+Общий short-wait registry ждёт до 10 секунд после свежего admission.
+`state=preparing`, readOnly, operationId, elapsedMs, закрытый этап и timings не
+являются результатом поиска. Exact nextCall сохраняет исходные company, method
+и аргументы, добавляя только `parameters.searchOperationId`. Одинаковый pending
+input присоединяется к одной операции; другой запрос не создаёт конкурирующий
+reader. Poll неизвестного/выданного ID после restart возвращает отказ без
+автоматического повторения. Отмена короткого ожидания не отменяет исходный reader;
+EOF и его собственный deadline останавливают принадлежащий host процесс.
+Сначала original AbortSignal отменяет HTTP/reader и даёт до пяти секунд на
+settlement workers, очистку private staging и release lock. Только зависшая
+неотменяемая зависимость завершается принудительно; это не новый срок работы.
+Тайм-аут поиска не сообщает о неизвестном результате записи: эта ветка read-only.
+
+Перед каждым ожиданием заново проверяются native provider, bridge grant и
+recipient/scope/device. Хеш точной привязки остаётся только в памяти host;
+UUID операции не является capability. Перед однократной выдачей дополнительно
+проверяется свежая native manifest generation. Смена доступа/generation не
+допускает retained plaintext и не запускает скрытый повтор. Два одновременных
+poll не могут получить один результат дважды.
+
+Тяжёлые JSON, crypto и индекс изолированы от MCP event loop. Parent хранит один
+запрос и ответ до 512 KiB, без зеркала. Один warm child обслуживает один recipient;
+смена привязки закрывает прежний процесс. Hard TTL decrypted mirror остаётся
+600 секунд; idle child и недоставленный ответ также удаляются не позже 600
+секунд. Node heap child ограничен 2 GiB: это предел JS heap, не полного RSS.
+Ошибка ресурсов/завершение процесса даёт явный отказ без partial success/replay.
+Размер конкретного инцидента не задаёт предел компаний: прежние domain bounds
+и полный corpus сохраняются, ресурсы устройства остаются конечными.
+
+Настоящий child PID сохраняет обычное восстановление mirror lock после
+аварии/OOM; thread с PID живого MCP здесь непригоден. Команда запуска fixed,
+запрос идёт только по private IPC. Каждый процесс читает credentials/keys своим
+обычным protected storage engine; они, proofs и corpus не пересылаются.
+stdout/stderr не выдаются. Progress содержит только allowlisted этапы и
+длительности, без текста, paths, business IDs, размеров компании и exceptions.
+Plugin shell, package file ceiling и native input schema не меняются.
+
+Проверки: real dispatcher/short waits, cancellation/deadline/EOF, recipient и
+generation refusal, одноразовая выдача; отдельный synthetic child сканирует
+полный corpus 320 MiB через production matcher до последнего файла, сохраняя
+доступность parent event loop. Этот fixture не доказывает live encrypted sync
+или неограниченную ёмкость устройства.
+
 <a id="unfiled-response-reminders"></a>
 
 ## Очередь «Неразобранные» перед каждым ответом

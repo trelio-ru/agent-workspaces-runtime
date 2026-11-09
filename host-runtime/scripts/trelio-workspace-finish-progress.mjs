@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { outsideTrelioCallBudget } from "./trelio-hook-private-session.mjs";
+import { canonicalJson } from "./trelio-company-encryption.mjs";
 
 const PREFIX = "TRELIO_FINISH_PROGRESS ";
 const STAGES = new Set([
@@ -157,6 +158,150 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       return wait(entry, signal);
     },
   };
+};
+
+/** One read-only search owns its preparation and query, rather than spending
+ * the caller's minute assembling a large company. Reuse the finish registry's
+ * short, cancellable waits, but NEVER its mutation semantics or automatic
+ * failed-entry replacement. A poll is an exact retained operation, not replay.
+ * Only a bounded answer lives here; the isolated reader owns the corpus. */
+export const createCompanySearchOperations = ({ authorize, execute, validate, closeReader = async () => {},
+  waitMs = 10_000, timeoutMs = 10 * 60_000, retentionMs = 600_000, errorFactory = operationError } = {}) => {
+  const operations = createWorkspaceFinishOperations({ waitMs, errorFactory });
+  let current = null, closed = false;
+  const fail = (code, message) => { throw errorFactory(code, message); };
+  const pending = (value, entry) => ({ schemaVersion: 1, state: "preparing", readOnly: true,
+    operationId: value.operationId, elapsedMs: value.elapsedMs,
+    progress: { stage: entry.stage, stageElapsedMs: Math.max(0, Math.round(performance.now() - entry.stageAt)), timings: { ...entry.timings } },
+    nextCall: { server: "trelio-remote-skills", tool: "continue_trelio_local_action", arguments: {
+      schemaVersion: 1, route: "context", parameters: { ...entry.input, searchOperationId: value.operationId },
+    } },
+    instruction: "Подготовка и поиск продолжаются. Вызовите nextCall; это продолжение одной операции, а не новый поиск. preparing не является результатом поиска.",
+  });
+  return {
+    async read(origin, input, { signal, operationId } = {}) {
+      signal?.throwIfAborted();
+      if (closed) fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Поисковый host закрыт. Выполните новый поиск через native Trelio.");
+      // Every wait obtains fresh provider/credential/scope admission BEFORE it
+      // looks up an answer. Operation UUID and equal query text grant no ACL.
+      let admission;
+      try { admission = await authorize(origin, input, { signal }); }
+      catch (error) {
+        if (!signal?.aborted && current) {
+          const refused = current;
+          refused.controller.abort(); clearTimeout(refused.retentionTimer);
+          await closeReader();
+          operations.discardTerminal("search", refused.id, refused.binding);
+          if (current === refused) current = null;
+        }
+        throw error;
+      }
+      if (admission.nativeProvider) {
+        if (current) {
+          current.controller.abort(); clearTimeout(current.retentionTimer);
+          await closeReader();
+          operations.discardTerminal("search", current.id, current.binding);
+          current = null;
+        }
+        return admission.result;
+      }
+      const fingerprint = canonicalJson({ origin, input });
+      let entry = current;
+      if (operationId && (!entry || entry.id !== operationId || entry.fingerprint !== fingerprint))
+        fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Операция поиска неизвестна этому host. Выполните новый поиск через native Trelio.");
+      if (entry && entry.binding !== admission.binding) {
+        entry.controller.abort(); clearTimeout(entry.retentionTimer);
+        await closeReader();
+        operations.discardTerminal("search", entry.id, entry.binding);
+        if (current === entry) current = null;
+        fail("LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED", "Доступ к подготовленному поиску изменился. Получите новый native маршрут.");
+      }
+      if (!operationId && entry && !entry.settled && entry.fingerprint !== fingerprint)
+        throw errorFactory("LOCAL_CONTEXT_SEARCH_IN_PROGRESS", "Предыдущий поиск ещё готовится. Продолжите его nextCall перед новым запросом.",
+          pending(operations.active("search"), entry));
+      if (!operationId && (!entry || entry.settled && entry.fingerprint !== fingerprint)) {
+        if (entry) { clearTimeout(entry.retentionTimer); operations.discardTerminal("search", entry.id, entry.binding); }
+        const controller = new AbortController();
+        entry = { input: structuredClone(input), fingerprint, binding: admission.binding, controller,
+          stage: "starting", stageAt: performance.now(), timings: {}, settled: false };
+        current = entry;
+      }
+      const render = async value => {
+        entry.id = value.operationId;
+        if (value.state === "running") return pending(value, entry);
+        entry.stage = "validating";
+        // Completion is undelivered data, not a reusable authorization cache.
+        // Fresh native manifest equality and recipient identity fence delivery.
+        if (!await validate(origin, input, value, admission, { signal }))
+          fail("LOCAL_CONTEXT_GENERATION_CHANGED", "Контекст изменился во время поиска. Выполните новый native поиск.");
+        signal?.throwIfAborted();
+        if (entry.delivered || current !== entry)
+          fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Этот результат поиска уже выдан. Выполните новый native поиск.");
+        entry.delivered = true;
+        clearTimeout(entry.retentionTimer);
+        operations.discardTerminal("search", entry.id, entry.binding);
+        if (current === entry) current = null;
+        return value.result;
+      };
+      try {
+        const value = operationId || entry.id
+          ? await operations.poll("search", operationId ?? entry.id, signal, entry.binding)
+          : await operations.start({ key: "search", scope: entry.binding, fingerprint, signal, pollAction: {},
+            execute: async () => {
+              // Registry ownership is already synchronous. Retain the ID even
+              // if the first waiter is cancelled before receiving nextCall, so
+              // TTL/EOF can erase this exact undelivered terminal value later.
+              entry.id ??= operations.active("search").operationId;
+              const timer = setTimeout(() => controllerAbort(entry), timeoutMs);
+              try {
+                const value = await execute(origin, entry.input, admission, { signal: entry.controller.signal,
+                  onProgress: stage => {
+                    // The reader adapter supplies a closed stage vocabulary.
+                    // Timings contain no corpus size, content or identifiers.
+                    const now = performance.now();
+                    entry.timings[entry.stage] = (entry.timings[entry.stage] ?? 0) + Math.max(0, Math.round(now - entry.stageAt));
+                    entry.stage = stage; entry.stageAt = now;
+                  } });
+                entry.controller.signal.throwIfAborted();
+                // No corpus, source bytes, keys or unbounded result can enter
+                // the short-wait registry, even from a malformed reader pipe.
+                if (!value || typeof value.generation !== "string" || !/^[a-f0-9]{64}$/u.test(value.generation)
+                  || !value.result || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024)
+                  fail("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный результат изолированного поиска.");
+                return value;
+              } finally {
+                clearTimeout(timer); entry.settled = true;
+                entry.retentionTimer = setTimeout(() => {
+                  operations.discardTerminal("search", entry.id, entry.binding);
+                  if (current === entry) current = null;
+                }, retentionMs);
+                entry.retentionTimer.unref?.();
+              }
+            } });
+        return await render(value);
+      } catch (error) {
+        // Cancelling a waiter leaves the same reader and deadline intact.
+        // A real validation refusal discards retained plaintext immediately.
+        if (!signal?.aborted && entry.settled) {
+          clearTimeout(entry.retentionTimer);
+          operations.discardTerminal("search", entry.id, entry.binding);
+          if (current === entry) current = null;
+        }
+        throw error;
+      }
+    },
+    async close() {
+      closed = true;
+      clearTimeout(current?.retentionTimer);
+      current?.controller.abort();
+      await closeReader();
+      current = null;
+    },
+  };
+  function controllerAbort(entry) {
+    entry.controller.abort(errorFactory("LOCAL_CONTEXT_SEARCH_TIMEOUT", "Подготовка поиска не завершилась за 10 минут. Готовые зашифрованные части сохранены; автоматического повтора нет.",
+      { stage: entry.stage, timings: { ...entry.timings } }));
+  }
 };
 
 /** Keep the latest bounded terminal output while reading progress immediately.

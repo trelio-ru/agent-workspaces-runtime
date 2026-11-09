@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { once } from "node:events";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFinishProgressParser, createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "../host-runtime/scripts/trelio-workspace-finish-progress.mjs";
+import { createFinishProgressParser, createWorkspaceFinishOperations, createCompanySearchOperations, runWorkspaceFinishProcess } from "../host-runtime/scripts/trelio-workspace-finish-progress.mjs";
 import { handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "../host-runtime/scripts/trelio-workspace-finish-recovery.mjs";
 import fs from "node:fs/promises";
@@ -13,6 +13,80 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { trelioCallSignal, withTrelioCallBudget } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 
 const pending = () => { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; };
+
+const searchInput = { companySlug: "synthetic", nativeTool: "search", operation: "native_read", arguments: { queries: ["PRIVATE_QUERY"] } };
+const searchValue = { generation: "a".repeat(64), result: { provider: "local_company_context", results: [{ title: "PRIVATE_ANSWER" }] } };
+const searchOptions = { authorize: async () => ({ binding: "recipient" }), validate: async () => true, waitMs: 2 };
+
+test("company search shares one isolated preparation, survives short wait cancellation and delivers once", async () => {
+  const prepared = pending();
+  let executions = 0, admissionReads = 0, querySignal;
+  const reader = createCompanySearchOperations({ ...searchOptions,
+    authorize: async () => { admissionReads++; return { binding: "recipient" }; },
+    execute: async (_origin, _input, _admission, { signal, onProgress }) => {
+      executions++; querySignal = signal; onProgress("hydrating");
+      assert.equal(trelioCallSignal(), undefined);
+      await prepared.promise; signal.throwIfAborted(); return searchValue;
+    } });
+  const caller = new AbortController();
+  const first = await withTrelioCallBudget(signal => reader.read("https://synthetic.invalid", searchInput, { signal }), { signal: caller.signal, timeoutMs: 30 });
+  caller.abort();
+  assert.equal(first.state, "preparing");
+  assert.equal(first.progress.stage, "hydrating");
+  assert.equal(querySignal.aborted, false);
+  assert.equal(first.results, undefined, "Preparation is never an empty successful result");
+  assert.equal(first.nextCall.arguments.parameters.searchOperationId, first.operationId);
+  const second = await reader.read("https://synthetic.invalid", searchInput);
+  assert.equal(second.operationId, first.operationId);
+  await assert.rejects(reader.read("https://synthetic.invalid", { ...searchInput, arguments: { queries: ["changed"] } }), { code: "LOCAL_CONTEXT_SEARCH_IN_PROGRESS" });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(reader.read("https://synthetic.invalid", searchInput, { operationId: first.operationId, signal: cancelled.signal }), { name: "AbortError" });
+  prepared.resolve();
+  assert.deepEqual(await reader.read("https://synthetic.invalid", searchInput, { operationId: first.operationId }), searchValue.result);
+  await assert.rejects(reader.read("https://synthetic.invalid", searchInput, { operationId: first.operationId }), { code: "LOCAL_CONTEXT_SEARCH_UNKNOWN" });
+  assert.equal(executions, 1);
+  assert.ok(admissionReads >= 5);
+  await reader.close();
+});
+
+test("company search deadlines never slide across polls and stale recipients cannot receive a result", async () => {
+  let binding = "one", launches = 0;
+  const reader = createCompanySearchOperations({ ...searchOptions, timeoutMs: 35,
+    authorize: async () => ({ binding }), execute: async (_origin, _input, _admission, { signal }) => {
+      launches++;
+      await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    } });
+  const first = await reader.read("https://synthetic.invalid", searchInput);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  await assert.rejects(reader.read("https://synthetic.invalid", searchInput, { operationId: first.operationId }), { code: "LOCAL_CONTEXT_SEARCH_TIMEOUT" });
+  assert.equal(launches, 1);
+  await assert.rejects(reader.read("https://synthetic.invalid", searchInput, { operationId: first.operationId }), { code: "LOCAL_CONTEXT_SEARCH_UNKNOWN" });
+  await reader.close();
+  const delayed = pending();
+  const acl = createCompanySearchOperations({ ...searchOptions, authorize: async () => ({ binding }), execute: () => delayed.promise });
+  const running = await acl.read("https://synthetic.invalid", searchInput);
+  delayed.resolve(searchValue); binding = "other";
+  await assert.rejects(acl.read("https://synthetic.invalid", searchInput, { operationId: running.operationId }), { code: "LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED" });
+  await acl.close();
+});
+
+test("company search refuses changed generations, oversized answers and duplicate concurrent delivery", async () => {
+  const stale = createCompanySearchOperations({ ...searchOptions, execute: async () => searchValue, validate: async () => false });
+  await assert.rejects(stale.read("https://synthetic.invalid", searchInput), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+  await stale.close();
+  const oversized = createCompanySearchOperations({ ...searchOptions, execute: async () => ({ ...searchValue, result: { text: "x".repeat(513 * 1024) } }) });
+  await assert.rejects(oversized.read("https://synthetic.invalid", searchInput), { code: "LOCAL_CONTEXT_SEARCH_FAILED" });
+  await oversized.close();
+  const gate = pending(), both = pending(); let validations = 0;
+  const once = createCompanySearchOperations({ ...searchOptions, execute: async () => { await gate.promise; return searchValue; },
+    validate: async () => { if (++validations === 2) both.resolve(); await both.promise; return true; } });
+  const first = await once.read("https://synthetic.invalid", searchInput);
+  gate.resolve();
+  const results = await Promise.allSettled([1, 2].map(() => once.read("https://synthetic.invalid", searchInput, { operationId: first.operationId })));
+  assert.equal(results.filter(x => x.status === "fulfilled").length, 1);
+  await once.close();
+});
 
 test("background finish detaches from a short caller budget but every poll remains cancellable", async () => {
   const manager = createWorkspaceFinishOperations({ waitMs: 5 });

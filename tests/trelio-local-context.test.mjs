@@ -2,7 +2,7 @@ import { MCP_TASK_READ_MAX_RESULT_BYTES, measureMcpTaskReadResultBytes, fitsMcpT
 import assert from "node:assert/strict";
 import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -14,6 +14,8 @@ import {
   usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
   buildStableCompanyMirror,
+  createHumanCompanySearchReader,
+  isHumanCompanySearch,
   createEncryptedSearchFileCache,
   assertLocalAgentInstructionPublicationWithinLimit,
   assertHydratedLocalProposalPublicationMatches,
@@ -69,6 +71,80 @@ import {
   uploadLocalTaskAttachmentPayloads,
   uploadLocalActionPayloads,
 } from "../host-runtime/scripts/trelio-local-context.mjs";
+
+test("human search preparation excludes task-only reads, exact fetches and every write", () => {
+  assert.equal(isHumanCompanySearch({ operation: "native_read", nativeTool: "search" }), true);
+  assert.equal(isHumanCompanySearch({ operation: "native_read", nativeTool: "search_agent_workspace_files" }), true);
+  for (const nativeTool of ["search_tasks", "get_task", "fetch", "create_task", "create_comment", "unknown"])
+    assert.equal(isHumanCompanySearch({ operation: "native_read", nativeTool }), false);
+  assert.equal(isHumanCompanySearch({ operation: "arbitrary", nativeTool: "search" }), false);
+});
+
+test("isolated human search scans a 320-MiB corpus without blocking MCP or copying it into the parent", { timeout: 120_000 }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-large-human-search-"));
+  const source = new URL("../host-runtime/scripts/trelio-local-context.mjs", import.meta.url).href;
+  const fixture = path.join(root, "reader.mjs");
+  // Only synthetic public text is generated inside the real child. Import the
+  // actual index/ranking implementation, rather than a fake delayed result.
+  await fs.writeFile(fixture, `import { searchCompanyContextMirror } from ${JSON.stringify(source)};
+let mirror;
+process.on('message', message => {
+  if(message.type==='cancel'){process.exit(0);return;}
+  process.send({id:message.id,type:'progress',stage:'searching'});
+  if(message.input.arguments.queries[0]==='failure'){
+    process.send({id:message.id,type:'failure',code:'TRELIO_BACKEND_HTTP_5XX',message:'PRIVATE_ERROR_CANARY'});return;
+  }
+  if(message.input.arguments.queries[0]==='stall'){for(;;){}}
+  if(!mirror){
+    const part='neutral background words '.repeat(3000).slice(0,65536);
+    const documents=Array.from({length:320},(_,file)=>({name:'source-'+file+'.txt',path:'source-'+file+'.txt',text:'',
+      sizeBytes:16*65536,contentType:'text/plain',chunks:Array.from({length:16},(_,index)=>({index,isLast:index===15,
+        text:part+(file===319&&index===15?' unique terminal needle ':'')}))}));
+    mirror={company:{id:'synthetic',slug:'synthetic',name:'Synthetic'},generation:'a'.repeat(64),serverGeneration:'a'.repeat(64),
+      createdAt:'2026-11-09T00:00:00Z',searchDocuments:[],tasks:[],projects:[],workspaceEntries:[],
+      workspaces:[{id:'synthetic-workspace',acceptedHead:'b'.repeat(40),scopeType:'project',scopeKey:'synthetic',documents}]};
+  }
+  const result=searchCompanyContextMirror(mirror,message.input.arguments.queries,5);
+  process.send({id:message.id,type:'result',value:{generation:mirror.serverGeneration,result}});
+});`);
+  let starts = 0, sawProgress, loopTurns = 0;
+  const progress = new Promise(resolve => { sawProgress = resolve; });
+  const reader = createHumanCompanySearchReader({ spawnReader: () => { starts++; return fork(fixture, [], {
+    execArgv: ["--max-old-space-size=2048"], stdio: ["ignore", "ignore", "ignore", "ipc"],
+    env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: root },
+  }); } });
+  t.after(async () => { await reader.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const clock = setInterval(() => loopTurns++, 5);
+  t.after(() => clearInterval(clock));
+  const input = { companySlug: "synthetic", operation: "native_read", nativeTool: "search", arguments: { queries: ["unique terminal needle"] } };
+  const read = reader.execute("https://synthetic.invalid", input, { binding: "synthetic-recipient" }, { onProgress: sawProgress });
+  await progress;
+  const before = loopTurns;
+  const result = await read;
+  clearInterval(clock);
+  assert.ok(loopTurns > before, "MCP event loop remains available during actual indexing/matching");
+  assert.equal(result.result.results.length, 1);
+  assert.match(result.result.results[0].id, /source-319/u, "Read through the last file, beyond the former incident's corpus size");
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 8192, "Only the bounded answer crosses the process boundary");
+  assert.deepEqual(await reader.execute("https://synthetic.invalid", input, { binding: "synthetic-recipient" }), result);
+  assert.equal(starts, 1, "Warm questions reuse one reader instead of decrypting another whole snapshot");
+  const deadline = new AbortController();
+  const reason = Object.assign(new Error("Synthetic original deadline"), { code: "LOCAL_CONTEXT_SEARCH_TIMEOUT" });
+  let stallStarted;
+  const stalled = new Promise(resolve => { stallStarted = resolve; });
+  const stopped = reader.execute("https://synthetic.invalid", { ...input, arguments: { queries: ["stall"] } }, { binding: "synthetic-recipient" },
+    { signal: deadline.signal, onProgress: stallStarted });
+  await stalled;
+  deadline.abort(reason);
+  await assert.rejects(stopped, failure => failure === reason, "The original operation deadline stops a CPU-bound real child and remains the reported cause");
+  assert.equal(starts, 1, "Cancellation never restarts the reader automatically");
+  await assert.rejects(reader.execute("https://synthetic.invalid", { ...input, arguments: { queries: ["failure"] } }, { binding: "synthetic-recipient" }), failure => {
+    assert.equal(failure.code, "TRELIO_BACKEND_HTTP_5XX");
+    assert.doesNotMatch(failure.message, /PRIVATE_ERROR_CANARY/u);
+    return true;
+  });
+  assert.equal(starts, 2, "Only the explicit next read creates a new child after cancellation");
+});
 import {
   createAgentEncryptionDevice,
   decryptCompanyPayload,

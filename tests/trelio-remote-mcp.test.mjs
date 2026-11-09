@@ -3936,6 +3936,31 @@ test("one local dispatcher preserves exact native inputs across route families",
   }]);
 });
 
+test("human search preparation keeps its original query and exact poll through the real MCP dispatcher", async () => {
+  const { createCompanySearchOperations } = await import("../host-runtime/scripts/trelio-workspace-finish-progress.mjs");
+  let release, launches = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const manager = createCompanySearchOperations({ waitMs: 1, authorize: async () => ({ binding: "same-recipient" }),
+    validate: async () => true, execute: async () => { launches++; await gate; return { generation: "a".repeat(64),
+      result: { provider: "local_company_context", results: [] } }; } });
+  const original = { schemaVersion: 1, route: "context", parameters: { operation: "native_read", companySlug: "synthetic",
+    nativeTool: "search", arguments: { queries: ["PRIVATE_QUERY"], limit: 5 } } };
+  const call = args => handleToolCall("https://synthetic.invalid", "continue_trelio_local_action", args, {
+    localSearchOperation: (...args) => manager.read(...args),
+    localContextOperation: () => assert.fail("Poll must not start another sync"),
+  });
+  const pending = JSON.parse((await call(original)).content[0].text);
+  assert.equal(pending.state, "preparing");
+  assert.deepEqual(pending.nextCall.arguments.parameters.arguments, original.parameters.arguments);
+  release();
+  const result = JSON.parse((await call(pending.nextCall.arguments)).content[0].text);
+  assert.equal(result.provider, "local_company_context");
+  assert.deepEqual(result.results, []);
+  assert.equal(launches, 1);
+  await assert.rejects(call({ ...original, parameters: { ...original.parameters, nativeTool: "create_task", searchOperationId: pending.operationId } }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+  await manager.close();
+});
+
 test("encrypted onboarding instruction reads use the native settings handler from either local route", async () => {
   for (const route of ["context", "action"]) {
     for (const projectSlug of [undefined, "historical-project"]) {
