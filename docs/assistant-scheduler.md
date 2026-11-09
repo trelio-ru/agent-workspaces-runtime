@@ -311,6 +311,30 @@ never another submission, timeout extension, queue removal or local state reset.
 This is a new technical verification, not a replay of an uncertain business or
 provider operation. A completed verification alone clears no business/ACK health.
 
+<a id="native-browser-observation-recovery"></a>
+
+### Native browser observation recovery
+
+The SAME handoff producer selects this guidance only for ordinary task and
+owner-intake passes, never READY, source triage or discussion. A read-only tab
+attachment failure does not prove that an already authorized site/account is
+unavailable. The agent first inspects Codex's actually advertised capabilities
+and, when supported, observes the SAME existing assistant-computer window via
+its native app/computer interface. It verifies application, site and account
+before continuing under the original authority; owner intake remains read-only.
+
+Codex owns these tools, their live capability declarations and window content.
+The dispatcher has no callback for their observations and must not invoke a
+second GUI writer. Consequently window recognition and semantic result checks
+remain model work; native pass selection is deterministic in the shared prompt
+producer. No runtime browser fallback, new session, account or tool method is
+invented. Signed-provider routing, ACL/login challenges and sealed decisions
+remain independent. Prior possible input requires exact read-back before more
+input, never replay. The failure alone grants no app restart/kill, browser or
+extension/debugger setting change, profile/credential extraction or manual-owner
+handoff before the available observation path is checked. Delivery tests cover
+eligible and restricted profiles; they do not prove a real calendar write.
+
 ### Exact independent READY prompt reconciliation
 
 A completed independent owner readiness review is compared with the SAME

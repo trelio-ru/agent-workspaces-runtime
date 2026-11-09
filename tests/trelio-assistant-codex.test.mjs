@@ -129,6 +129,7 @@ test('native discussion prompt uses only task/comment locators and never a mater
   assert.match(input,/restricted native discussion pass/u);assert.match(input,/replyCommentId/u);
   assert.match(input,/Do not create\/read a Workspace or WORK\.md/u);
   assert.doesNotMatch(input,/Use the assistant-task-worker skill|workStatePath|Save confirmed progress/u);
+  assert.doesNotMatch(input,/failed read-only tab attachment/u);
 });
 const nativeRpc = handler => (_executable, args, options) => {
   assert.deepEqual(args,['app-server','--listen','stdio://']); assert.equal(options.shell,false);
@@ -360,6 +361,7 @@ test('initial native chat persists its ID synchronously and consumes no business
   assert.equal(confirmed,1);
   assert.equal(result.threadId,threadId);assert.match(input,/Do not use tools/u);
   assert.doesNotMatch(input,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
+  assert.doesNotMatch(input,/failed read-only tab attachment/u,'READY stays exactly tool-free');
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd,execution},{...options,onThreadStarted:()=>{throw new Error('private disk failure');}}),/DELIVERY_UNCERTAIN/);
   assert.equal(confirmed,1,'an unknown provision never reports login recovery');
@@ -401,6 +403,10 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
   assert.ok(input.includes('get_assistant_owner_question'));
   assert.match(input,/This is a scheduled task pass/);
+  assert.match(input,/failed read-only tab attachment/u);
+  for(const invariant of ['SAME existing window on this assistant computer','verify the application, site and account',
+    'never bypasses a provider refusal','read back that exact result before any further input',
+    'does not authorize restarting or killing Chrome/Codex','actual result is verified'])assert.ok(input.includes(invariant));
   assert.match(input,/separate last successfully reviewed message position for each task\/account\/conversation\/topic/);
   assert.match(input,/advance that position only together with successfully accepted task material/);
   assert.match(input,/never use the background monitor cursor/);
@@ -1067,12 +1073,28 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  assert.deepEqual(JSON.parse(scope.slice('TRELIO_ASSISTANT_INTAKE '.length)),{kind:'source_intake',...intakeContext});
  assert.match(input,/Only reply_owner is permitted/);
  assert.match(input,/already available external sources/);
+ assert.match(input,/failed read-only tab attachment/u);
+ assert.match(input,/In a source intake it remains read-only/u);
  assert.match(input,/A personal question does not require a task or Workspace Run/);
  assert.match(input,/real ACL and current login/);assert.match(input,/fresh current company sources again/);
  assert.match(input,/does not establish that a prior response was delivered/);
  assert.doesNotMatch(input,/prior technical limitation reply was positively delivered/);
  assert.doesNotMatch(scope,/taskId|recovery|workStatePath/,'hook ABI stays structural and unchanged');
  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{replyOnlyRecovery:true}),/INVALID_INPUT/);
+});
+test('routing-only intake receives no browser observation recovery or wider tool guidance',async()=>{
+ const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),eventId=randomUUID(),cwd=await fs.realpath(process.cwd());
+ const intakeContext={assistantId:randomUUID(),companyId:randomUUID(),sourceId:randomUUID(),sourceRevision:1,
+  intakeId:randomUUID(),eventId,intakeKind:'route_existing',eventIds:[eventId]};
+ let reads=0,starts=0,input='';
+ await runAssistantCodexPass({threadId,deliveryId,cwd,intakeContext,execution},{
+  readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+  readMetadata:async()=>({threadId,cwd}),startInvocation:()=>{starts++;},
+  readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
+  openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,cwd,onInput:text=>{input=text;}})});
+ assert.equal(starts,1);assert.match(input,/restricted source_triage\/v1/u);
+ assert.doesNotMatch(input,/failed read-only tab attachment|native app\/computer interface/u);
+ assert.match(input,/Use only get_assistant_intake_context and resolve_assistant_intake/u);
 });
 test('native recovery reader requires complete latest unique marker coverage and returns only a closed witness',async()=>{
  const f=readonlyPreparationFixture();let reads=0;
