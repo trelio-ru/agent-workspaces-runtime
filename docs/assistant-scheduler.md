@@ -3380,7 +3380,8 @@ Self-contained greetings/arithmetic need no company search. Clear direct
 work commands about existing tasks select one native accepted assignment via
 `route_existing`/`taskId`, after exact source reads. Other tasks are context for
 that worker; missing assignment/access needs the owner question, never a duplicate
-card. A new independent goal alone selects `create_task`. The intake itself
+card. A new independent goal or an explicit owner request for a separate card
+selects `create_task`. The intake itself
 still cannot execute external mutations; ordinary task-pass authority owns the
 action. One original has one executor, preserving existing goal/cadence. The native one-attempt receipt, exact
 peer/revision/key and signed provider >=2.16.0 fence native rich conversational

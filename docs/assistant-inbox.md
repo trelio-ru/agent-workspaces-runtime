@@ -780,7 +780,8 @@ permanent-chat source route, including across restart. No second card, assignmen
 provider action, ACK or processed bit follows from routing. Other tasks remain
 read-only context for that worker; no fanout of one calendar/send action.
 
-Only a new independent owner goal uses the SAME native creator/BOTH ACL and commits task,
+A new independent owner goal or an explicit request for a separate card uses the
+SAME native creator/BOTH ACL and commits task,
 accepted new assignment, receipt and per-event route atomically. Ordinary task
 provision subsequently creates its permanent chat. Multiple commands in one owner
 conversation remain independent events/tasks; no whole-conversation route is

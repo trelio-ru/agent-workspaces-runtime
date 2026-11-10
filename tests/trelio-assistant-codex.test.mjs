@@ -1138,6 +1138,7 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  assert.match(input,/In a source intake it remains read-only/u);
  assert.match(input,/A personal question does not require a task or Workspace Run/);
  assert.match(input,/route_existing with taskId for ONE already accepted assignment/);
+ assert.match(input,/explicit owner request for a separate card/);
  assert.match(input,/Missing assignment or access needs ask_owner, never a new workaround card/);
  assert.match(input,/real ACL and current login/);assert.match(input,/fresh current company sources again/);
  assert.match(input,/does not establish that a prior response was delivered/);
