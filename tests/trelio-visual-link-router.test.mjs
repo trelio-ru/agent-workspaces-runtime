@@ -3,6 +3,27 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { visualLinkRouter, visualAttachmentRouter, visualAudioRouter, visualAudioReceiver } from '../host-runtime/scripts/trelio-visual-link-router.mjs';
 
+for (const fixtureOnly of [false, true]) test(`audio arm diagnostics cannot replace a page method or authorize input (fixture=${fixtureOnly})`, () => {
+  let listener;
+  const messages = [];
+  class Media {
+    get src() { return ''; } get currentSrc() { return ''; }
+    get muted() { return false; } set muted(_value) {}
+    play() {} pause() {}
+  }
+  const window = { addEventListener(_kind, fn) { listener = fn; }, postMessage(value) { messages.push(value); } };
+  vm.runInNewContext(`(${visualAudioRouter.toString()})(${fixtureOnly});`, {
+    window, document: { addEventListener() {} }, HTMLMediaElement: Media, HTMLAudioElement: class extends Media {}, Date, setTimeout, clearTimeout,
+  });
+  const replacement = () => { throw Error('PRIVATE_PAGE_METHOD'); };
+  Media.prototype.play = replacement;
+  listener({ source: window, data: { kind: 'trelio_audio_arm', nonce: '00000000-0000-4000-8000-000000000001', x: 10, y: 20 } });
+  assert.equal(Media.prototype.play, replacement, 'a refusal leaves the page method unchanged and uncalled');
+  assert.deepEqual(messages.map(value => value.stage), fixtureOnly ? ['main_received', 'main_play_changed'] : []);
+  for (const item of messages) assert.equal(Object.keys(item).sort().join(','), 'kind,nonce,stage');
+  assert.doesNotMatch(JSON.stringify(messages), /PRIVATE_PAGE_METHOD|ready|url/u);
+});
+
 test('audio routing binds one trusted coordinate click, preserves native methods/mute state and rejects multiple players', async () => {
   let message, click; const messages = [];
   class Media {

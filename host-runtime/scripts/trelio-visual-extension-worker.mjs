@@ -132,6 +132,16 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   }, { urls: config.matches, types: ['main_frame'] });
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (manual || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
+    // Fixture evidence is selected by the trusted synthetic origin policy,
+    // bounded to this exact pending operation and reduced before transport.
+    // Never forward page messages, URLs, errors, nonce or native output.
+    if (config.fixtureOnly === true && message?.kind === 'audio_fixture_stage'
+      && pendingAudio?.tabId === sender.tab.id && pendingAudio.nonce === message.nonce
+      && (pendingAudio.fixtureStages ?? 0) < 8
+      && ['arm_sent', 'main_received', 'main_play_changed', 'main_armed', 'source_wait_expired'].includes(message.stage)) {
+      pendingAudio.fixtureStages = (pendingAudio.fixtureStages ?? 0) + 1;
+      socket?.send(JSON.stringify({ kind: 'audio_fixture_stage', stage: message.stage })); return;
+    }
     if (message?.kind === 'route_audio_source' && pendingAudio?.tabId === sender.tab.id && pendingAudio.nonce === message.nonce) {
       if (pendingAudio.generation !== navigationGeneration || Date.now() >= pendingAudio.until) pendingAudio.reject(Error('stale_frame'));
       else if (message.reason) pendingAudio.reject(Object.assign(Error(['attachment_too_large', 'attachment_unsupported'].includes(message.reason) ? message.reason : 'attachment_link_required'),

@@ -529,6 +529,13 @@ Chromium fixture проверяет HTTP, lazy blob и native `<audio>`, exact b
 сохранение чата, отсутствие replay и новые late guards в обязательных OS lanes.
 Синтетический fixture не доказывает совместимость живого плеера конкретного сайта.
 
+Its existing fixture-only callback also retains fixed phases of the ORIGINAL
+audio arm (isolated request, MAIN receipt/native-method refusal/armed, source
+timeout). The exact pending tab/nonce fences this evidence; only closed phase
+names leave the extension. No URL, nonce, source/DOM, exception, extra observation,
+input retry or deadline extension is added. Production audio selection is unchanged;
+missing phase evidence never establishes a root cause or permission to replay.
+
 Отказ `attachment_unsupported` при `download-audio` может дополнительно вернуть
 закрытый `audioDiagnostic`: `audio_response` различает unsupported status,
 invalid headers, unsupported MIME и invalid body; `audio_blob` – MIME/body;

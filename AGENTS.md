@@ -618,6 +618,9 @@ publication tooling также остаются вне этого публичн
   audio/data from forbidden video tracks without disclosing metadata or bytes.
   AAC MIME labels may describe a fully validated audio-only M4A container;
   retain canonical audio/mp4 receipts and exact bytes, never relax box/video guards.
+  Native fixture-only arm phases retain only the exact pending operation's closed
+  stages; no page/source/error data, extra input, retry or larger deadline. See
+  the same audio contract; phase evidence alone is never a fix.
 - Исходящие файлы – signed `fileUploads` opt-in и additive API marker по
   [visual contract](docs/visual-browser.md#исходящие-файлы). Один coordinate
   click/native chooser получает только frozen regular files, без фильтра

@@ -371,6 +371,10 @@ export class ExtensionVisualBrowser {
             this.#terminal = 'bootstrap_failed'; return;
           }
           if (value.kind === 'windows_closed') { this.testDiagnostics?.({ stage: 'windows_closed' }); this.#windowsClosed = true; if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
+          if (value.kind === 'audio_fixture_stage' && this.policy.fixtureOnly === true
+            && ['arm_sent', 'main_received', 'main_play_changed', 'main_armed', 'source_wait_expired'].includes(value.stage)) {
+            this.testDiagnostics?.({ stage: 'audio_player', phase: value.stage }); return;
+          }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
           const pending = this.#pending.get(value.id); if (!pending) return;
           this.#pending.delete(value.id); clearTimeout(pending.timer); pending.resolve(value.result);
@@ -398,8 +402,8 @@ export class ExtensionVisualBrowser {
     await fs.writeFile(path.join(extension, 'authentication.js'), `(${installVisualAuthentication.toString()})(${JSON.stringify(this.authentication)});`, { mode: 0o600 });
     if (this.attachmentDownloads) await fs.writeFile(path.join(extension, 'attachment-router.js'), `(${visualAttachmentRouter.toString()})();`, { mode: 0o600 });
     if (this.audioDownloads) {
-      await fs.writeFile(path.join(extension, 'audio-receiver.js'), `(${visualAudioReceiver.toString()})();`, { mode: 0o600 });
-      await fs.writeFile(path.join(extension, 'audio-router.js'), `(${visualAudioRouter.toString()})();`, { mode: 0o600 });
+      await fs.writeFile(path.join(extension, 'audio-receiver.js'), `(${visualAudioReceiver.toString()})(${this.policy.fixtureOnly === true});`, { mode: 0o600 });
+      await fs.writeFile(path.join(extension, 'audio-router.js'), `(${visualAudioRouter.toString()})(${this.policy.fixtureOnly === true});`, { mode: 0o600 });
     }
     if (this.observationMode === 'text') await fs.writeFile(path.join(extension, 'text-observer.js'),
       buildTextObserverScript(this.externalNavigation === true), { mode: 0o600 });

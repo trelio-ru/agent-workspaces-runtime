@@ -103,8 +103,14 @@ export function visualAttachmentRouter() {
  * HTTP fallback and cannot read a page/API response or an arbitrary model URL.
  * Source URLs and binary remain in the private extension channel, never MCP.
  */
-export function visualAudioReceiver() {
+export function visualAudioReceiver(fixtureOnly = false) {
   let pending;
+  // Synthetic native CI may observe fixed phases from this original arm only.
+  // This is neither source/DOM evidence nor permission to click/retry. Ordinary
+  // signed providers never enable this diagnostic channel.
+  const report = (nonce, stage) => {
+    if (fixtureOnly === true) void chrome.runtime.sendMessage({ kind: 'audio_fixture_stage', nonce, stage });
+  };
   // Only this fixed family table crosses the private channel on a refusal.
   // Never return the actual header value or a source URL as diagnostics.
   const mimeFamilies = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav',
@@ -173,6 +179,10 @@ export function visualAudioReceiver() {
     const current = { nonce: message.nonce, abort: new AbortController(), claimed: false };
     current.listener = event => {
       if (pending !== current || event.source !== window || event.data?.nonce !== current.nonce) return;
+      if (fixtureOnly === true && event.data.kind === 'trelio_audio_fixture_stage'
+        && ['main_received', 'main_play_changed', 'main_armed'].includes(event.data.stage)) {
+        report(current.nonce, event.data.stage); return;
+      }
       if (event.data.kind === 'trelio_audio_armed') { reply({ ready: true }); return; }
       if (event.data.kind !== 'trelio_audio_source' || current.claimed) return;
       current.claimed = true;
@@ -190,8 +200,9 @@ export function visualAudioReceiver() {
     // The full file transfer shares the original 30s/lease bound. A player
     // must identify its source within five seconds, never a future click.
     current.timer = setTimeout(() => {
-      if (pending === current) { void chrome.runtime.sendMessage({ kind: 'route_audio_source', nonce: current.nonce, reason: 'attachment_link_required' }); stop(); }
+      if (pending === current) { report(current.nonce, 'source_wait_expired'); void chrome.runtime.sendMessage({ kind: 'route_audio_source', nonce: current.nonce, reason: 'attachment_link_required' }); stop(); }
     }, Math.max(1, Math.min(5000, message.until - Date.now())));
+    report(current.nonce, 'arm_sent');
     window.postMessage({ kind: 'trelio_audio_arm', nonce: current.nonce, x: message.x, y: message.y }, '*');
     return true;
   });
@@ -204,7 +215,7 @@ export function visualAudioReceiver() {
  * untouched; this explicit download briefly mutes/pauses ONLY the selected
  * player, then restores its prior mute value without replaying the click.
  */
-export function visualAudioRouter() {
+export function visualAudioRouter(fixtureOnly = false) {
   const prototype = HTMLMediaElement.prototype;
   const nativePlay = Object.getOwnPropertyDescriptor(prototype, 'play');
   const nativePause = prototype.pause;
@@ -226,11 +237,15 @@ export function visualAudioRouter() {
     if (event.source !== window || typeof data?.nonce !== 'string' || data.nonce.length !== 36) return;
     if (data.kind === 'trelio_audio_cancel') { if (pending?.nonce === data.nonce) clean(pending); return; }
     if (data.kind !== 'trelio_audio_arm' || !Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+    const report = stage => {
+      if (fixtureOnly === true) window.postMessage({ kind: 'trelio_audio_fixture_stage', nonce: data.nonce, stage }, '*');
+    };
+    report('main_received');
     if (pending) clean(pending);
     // Never overwrite a site's replacement or a nonconfigurable property.
     // A cached old wrapper keeps its own native method and cannot consume a
     // later operation. The page is an untrusted source, never authority.
-    if (prototype.play !== nativePlay.value || nativePlay.configurable !== true) return;
+    if (prototype.play !== nativePlay.value || nativePlay.configurable !== true) { report('main_play_changed'); return; }
     const current = { nonce: data.nonce, x: data.x, y: data.y, until: Date.now() + 5000, trusted: false };
     current.wrapper = function(...args) {
       if (pending !== current || !current.trusted || Date.now() >= current.until || !(this instanceof HTMLAudioElement)) return Reflect.apply(nativePlay.value, this, args);
@@ -254,6 +269,7 @@ export function visualAudioRouter() {
     pending = current;
     Object.defineProperty(prototype, 'play', { ...nativePlay, value: current.wrapper });
     current.timer = setTimeout(() => clean(current), 5000);
+    report('main_armed');
     window.postMessage({ kind: 'trelio_audio_armed', nonce: current.nonce }, '*');
   });
   document.addEventListener('click', event => {

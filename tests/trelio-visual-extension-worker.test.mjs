@@ -158,7 +158,7 @@ test('document response guard distinguishes redirects from final resources witho
   assert.equal(visualDocumentResponsePolicy(200, [header('content-type', 'text/html'), header('irrelevant', 'x'.repeat(65536))]), 'block');
 });
 
-test('audio source delivery rechecks navigation and credentials, consumes its frame and never reads an arbitrary body', async () => {
+for (const fixtureOnly of [false, true]) test(`audio source delivery rechecks navigation and credentials without body reads or diagnostic authority (fixture=${fixtureOnly})`, async () => {
   const events = { addListener() {} }, sent = [];
   let socket, nativeEvent, messageEvent, currentUrl = 'about:blank', clicks = 0, armed, mode = 'navigate', blocked = false;
   const context = { URL, Date, TextEncoder, performance, setTimeout, clearTimeout, crypto: { randomUUID }, chrome: {
@@ -195,11 +195,19 @@ test('audio source delivery rechecks navigation and credentials, consumes its fr
       async sendMessage(_id, message) {
         if (message.kind === 'authentication-guard') return { blocked };
         if (message.kind === 'resolve_audio_link') return null;
-        if (message.kind === 'arm_audio_click') { armed = message; return { ready: true }; }
+        if (message.kind === 'arm_audio_click') {
+          armed = message;
+          const sender = { id: 'fixture', tab: { id: 1 }, frameId: 0 };
+          const report = (stage, patch = {}) => messageEvent({ kind: 'audio_fixture_stage', nonce: armed.nonce, stage,
+            privateValue: 'PRIVATE_AUDIO_DIAGNOSTIC', ...patch }, sender);
+          report('PRIVATE_AUDIO_DIAGNOSTIC'); report('main_armed', { nonce: 'foreign' });
+          for (let i = 0; i < 12; i++) report('main_armed');
+          return { ready: true };
+        }
         return { text: 'synthetic', controls: [], nextOffset: null, scanLimited: false };
       } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
-  startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text', audioDownloads: true, deadlineAt: Date.now() + 10_000 }, context);
+  startWorker({ fixtureOnly, origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text', audioDownloads: true, deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -221,6 +229,10 @@ test('audio source delivery rechecks navigation and credentials, consumes its fr
     assert.equal((await dispatch('download-audio', args)).reason, 'stale_frame');
   }
   assert.equal(clicks, 5, 'each independent source dispatch gets exactly one original click');
+  const diagnostics = sent.filter(value => value.kind === 'audio_fixture_stage');
+  assert.equal(diagnostics.length, fixtureOnly ? 5 * 8 : 0, 'only a synthetic operation admits a bounded phase tail');
+  for (const item of diagnostics) assert.deepEqual(item, { kind: 'audio_fixture_stage', stage: 'main_armed' });
+  assert.doesNotMatch(JSON.stringify(sent), /PRIVATE_AUDIO_DIAGNOSTIC|"nonce"/u);
 });
 
 for (const externalNavigation of [false, true]) test(`extension applies signed navigation policy before bootstrap (external=${externalNavigation})`, async () => {
