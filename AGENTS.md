@@ -427,6 +427,7 @@ publication tooling также остаются вне этого публичн
   symlink entries в package/private storage. Проверяй всю signed loader →
   entrypoint → hook цепочку через Windows shells, а не только stub loader.
 - Запуск новых чатов Codex в общем `trelio-codex-conversation.mjs` – [личная привязка папки](docs/agent-workspace-runtime.md#codex-new-chat); company задачи не определяет launch root. Без existing managed binding hook молчит: чтение задачи не запускает onboarding и не просит выбрать или привязать папку.
+- Явный setup Codex использует [локальный мастер](docs/agent-workspace-runtime.md#codex-connection-wizard): native admission → App-only выбор папки → общий CAS planner → обязательный registration read-back. Сохранённый receipt не заменяет свежую проверку; название подключения остаётся локальным.
 - Синхронизация названия связанного чата – optional механика runtime после Run lifecycle,
   без модели, для task/project/company Workspace, включая unfiled:
   [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).

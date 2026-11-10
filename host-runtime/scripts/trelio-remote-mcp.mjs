@@ -14,6 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -4046,6 +4047,17 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
+  { name: "open_codex_connection_wizard", description: "Open only the exact bridge.action returned by prepare_codex_connection. Select the permanent folder in the App; no business Workspace or Run is created.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["companySlug", "runtimeSessionId"],
+      properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 }, runtimeSessionId: { type: "string", format: "uuid" } } },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    _meta: { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } },
+  { name: CODEX_CONNECTION_ACTION, description: "Local Codex connection wizard action.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["capabilityToken", "action"],
+      properties: { capabilityToken: { type: "string", minLength: 40, maxLength: 100 },
+        action: { type: "string", enum: ["state", "pick", "save", "connect"] }, settings: { type: "object" } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    _meta: { ui: { visibility: ["app"] }, "openai/visibility": "private", "trelio/sensitiveInput": true } },
   TRELIO_LOCAL_ACTION_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
   TRELIO_WORKSPACE_ACTION_TOOL,
@@ -5979,6 +5991,17 @@ export const handleToolCall = async (
       },
     );
   }
+  if (name === CODEX_CONNECTION_ACTION) return handleCodexConnectionAction(origin, rawArguments, { signal });
+  if (name === "open_codex_connection_wizard") {
+    try {
+      return await openCodexConnectionWizard(origin, { schemaVersion: 1, operation: "codex_connection_open", parameters: rawArguments }, { signal });
+    } catch (error) {
+      const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "CODEX_CONNECTION_FAILED";
+      const reason = error?.reason ?? error?.payload?.reason;
+      throw new RemoteMcpHostError(code, "Мастер подключения не подготовлен. Сохраните код ошибки и повторите настройку в этом чате.",
+        ["missing", "invalid", "expired", "replayed"].includes(reason) ? { reason } : {});
+    }
+  }
   if (name === TRELIO_WORKSPACE_ACTION_TOOL.name) {
     return buildWorkspaceActionResult(await workspaceActionOperation(
       origin,
@@ -6656,7 +6679,8 @@ export const handleLocalMcpMessage = async (
       jsonrpc: "2.0",
       id: message.id,
       result: {
-        resources: [{
+        resources: [{ uri: CODEX_CONNECTION_RESOURCE, name: "trelio-codex-connection", title: "Подключение Codex",
+          mimeType: "text/html;profile=mcp-app", _meta: codexConnectionAppResource()._meta }, {
           uri: TRELIO_LOCAL_PROPOSAL_RESOURCE_URI,
           name: "trelio-local-task-proposals",
           title: "Trelio encrypted task proposals",
@@ -6673,7 +6697,7 @@ export const handleLocalMcpMessage = async (
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          contents: [await readResource(
+          contents: [message.params?.uri === CODEX_CONNECTION_RESOURCE ? codexConnectionAppResource() : await readResource(
             origin,
             String(message.params?.uri || ""),
             { signal },
@@ -6723,7 +6747,8 @@ export const handleLocalMcpMessage = async (
       const args = message.params?.arguments;
       const workspace = name === TRELIO_WORKSPACE_ACTION_TOOL.name ? args
         : name === TRELIO_LOCAL_ACTION_TOOL.name && args?.route === "workspace" ? args.parameters : null;
-      const ownsLifetime = ["connect_remote_agent_skill", "call_remote_agent_skill_tool", TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name].includes(name)
+      const ownsLifetime = (name === CODEX_CONNECTION_ACTION && args?.action === "connect")
+        || ["connect_remote_agent_skill", "call_remote_agent_skill_tool", TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name].includes(name)
         || workspace && ["login", "encryption_setup", "skill_run", "secret_skill_run", "secret_exec"].includes(workspace.operation);
       const value = await (ownsLifetime ? execute(signal)
         : withTrelioCallBudget(execute, { signal, timeoutMs: toolCallBudgetMs }));

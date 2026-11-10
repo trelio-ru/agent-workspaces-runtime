@@ -2916,6 +2916,8 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   });
 
   assert.deepEqual(response.result.tools.map(({ name }) => name), [
+    "open_codex_connection_wizard",
+    "codex_connection_app_action",
     "continue_trelio_local_action",
     "render_trelio_local_proposal",
     "continue_trelio_workspace_action",
@@ -2962,8 +2964,8 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.match(tool.description, /exact Trelio settings URL/u);
   }
-  const providerTools = response.result.tools.slice(0, 3);
-  const appOnlyProposalTools = response.result.tools.slice(3, 17);
+  const providerTools = response.result.tools.slice(2, 5);
+  const appOnlyProposalTools = response.result.tools.slice(5, 19);
   const actionTool = providerTools.find(({ name }) => name === "continue_trelio_local_action");
   const workspaceActionTool = providerTools.find(({ name }) => (
     name === "continue_trelio_workspace_action"
@@ -4278,7 +4280,7 @@ test("local MCP exposes the proposal App resource without adding its HTML to too
     params: {},
   });
   const uri = "ui://trelio/task-proposals/v14.html";
-  assert.deepEqual(listed.result.resources.map((resource) => resource.uri), [uri]);
+  assert.deepEqual(listed.result.resources.map((resource) => resource.uri), ["ui://trelio/codex-connection-v1.html", uri]);
   assert.equal(listed.result.resources[0]._meta.ui.csp.frameDomains, undefined);
   assert.equal(listed.result.resources[0]._meta["openai/widgetCSP"].frame_domains, undefined);
   // resources/read uses this exact builder too. Assert both metadata dialects

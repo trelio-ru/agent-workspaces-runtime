@@ -91,7 +91,9 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // in each triggered onboarding or diagnostics skill.
   // The prefixed ceiling counts the client's worst-case repetition of the
   // initialize instructions once per schema, not extra runtime instructions.
-  modelVisibleLocalToolSchemasBytes: 15_500,
+  // New setup-only opener: its own reviewed 672-byte/160-token ceiling is
+  // additive. Existing method limits and normal task-Run ceilings stay fixed.
+  modelVisibleLocalToolSchemasBytes: 15_500 + 672,
   // +schemaToolName lets doctor load one exact schema instead of every schema;
   // skill section routing adds one bounded initialize prefix, not response data.
   clientPrefixedLocalToolSchemasBytes: 75_000,
@@ -114,8 +116,8 @@ export const PLUGIN_CONTEXT_TOKEN_LIMITS = Object.freeze({
   encryptedCompanyTaskRunPluginLayer: 17_600,
   localProviderToolSchemas: 600,
   localMcpInstructions: 650,
-  modelVisibleLocalToolSchemas: 3_500,
-  clientPrefixedLocalToolSchemas: 13_000,
+  modelVisibleLocalToolSchemas: 3_500 + 160,
+  clientPrefixedLocalToolSchemas: 13_000 + 160 + 650,
   clientPrefixedTaskRunLocalToolSchemas: 750,
   representativeLocalProposalResult: 1_650,
   representativeLocalAttachmentResult: 200,

@@ -3466,3 +3466,70 @@ development/audit/diagnostics такой authority не создают. Backend 
 публикуется раньше dependent runtime; old backend refusal не запускает fallback.
 Browser кнопка и выбор другого компьютера/папки принадлежат Trelio frontend,
 не local runtime; новая ссылка не создаёт relation задачи с Codex thread.
+
+
+<a id="codex-connection-wizard"></a>
+
+## Мастер подключения Codex
+
+Владелец алгоритма – generic runtime в `trelio-codex-conversation.mjs`.
+Backend `prepare_codex_connection({companySlug})` проверяет read/workspaces:read,
+точную компанию и допущенную observed Codex hook session и возвращает только
+open metadata и exact `open_codex_connection_wizard` action. Нет business Run,
+нового hook/matcher, изменения config Codex или автоматизации trust. Установка
+плагина и native OAuth предшествуют доступности мастера; чужой grant не копируется.
+Отсутствующий tool означает несовместимую опубликованную версию, а не разрешение
+копировать implementation в plugin или имитировать успешное подключение.
+
+Это единственный явный setup flow, где постоянная папка выбирается ПОСЛЕ plugin/
+OAuth/admission. Browser deep link открывает projectless чат с неотправленным
+setup prompt; он не подставляет process cwd/home/temp как выбранную папку.
+Пользователь выбирает папку в App и нажимает «Подключить». Название подключения
+сохраняется только в owner-private локальном state и показывается в этом мастере;
+оно не регистрирует и не переименовывает sidebar project Codex. Поддерживаемый
+переход в выбранную папку – documented `codex://threads/new?path=…&prompt=…`.
+
+Локальный UI `ui://trelio/codex-connection-v1.html` offline, без network/assets.
+Host передаёт пути, название и random capability только через App-only `_meta`.
+`codex_connection_app_action` скрыт от модели, capability живёт 30 минут,
+привязана к exact origin/company/member/bridge credential и runtime session.
+Каждый action повторяет bridge-only `GET codex-connection?runtimeSessionId=…`:
+live membership/modules/client/model policy, текущую session и encryption state.
+Повторный OAuth под другим аккаунтом/device не переносит старую карточку.
+Один company/device writer исключает двойное нажатие и параллельные карточки.
+
+Fixed native picker использует macOS choose-folder, Windows FolderBrowserDialog,
+Linux zenity/kdialog. Данные пользователя не интерполируются в код/argv; shell=false,
+bounded captured output/deadline; cancel сохраняет выбор. Без GUI остаётся ручной
+absolute path. Создание разрешено только явным App choice, symlink ancestors/root
+отказываются. Actual folder classification и AGENTS/CLAUDE/Git isolation используют
+существующий planner/apply/CAS/read-back; другая company/project binding, чужие
+файлы, Git history и неизвестный override не перепривязываются автоматически.
+
+Явная регистрация делит immutable HMAC ID/GET-before-PUT/E2EE writer с optional
+hook sync. В отличие от hook, wizard требует повторный GET и exact locally
+hydrated path/platform/scope match; неизвестный PUT проверяется чтением, без replay.
+Encrypted setup может открыть штатный local unlock, hook по-прежнему existingOnly.
+Поле `folder_path` использует прежнюю signed personal-content matrix; новых DB
+content fields, plaintext caches или path hash на сервере нет. Переход encryption
+и незавершённая регистрация не дают «Готово». Смена локального binding во время
+HTTP также блокирует успех. Retry повторно читает состояние и сохраняет тот же ID.
+
+Draft path/name/create choice живут в bounded owner-private local file по HMAC
+company/member/device key. При повторном открытии они восстанавливаются, но старый
+успех не восстанавливается без проверки. Явный Save настроек имеет local dirty
+flag/beforeunload; busy отключает native controls. App actions не создают новые App
+карточки. Неотображённая App – не подтверждённая готовность: доступен прежний ручной
+onboarding в Trelio. Backend/source интеграция не означает публикацию runtime;
+активация подписанной версии и backend deploy идут отдельным release flow.
+
+Проверки находятся в существующем `trelio-codex-launch.test.mjs`, который входит
+в Linux/macOS и Windows full lanes: actual planner/apply, lost PUT, encrypted
+read-back, scope/conflict/revocation, native picker vectors и App RPC lifecycle.
+
+
+Контекст мастера загружается только по setup intent. Новый model-visible opener
+имеет отдельный schema ceiling 672 bytes / 160 o200k tokens; App-only action –
+560 bytes / 128 tokens. Общий catalog allowance добавляет ровно этот opener и
+один прежний bounded initialize prefix (650 tokens), не повышая budgets прежних
+методов или обычного task Run. Полный HTML и private draft туда не входят.

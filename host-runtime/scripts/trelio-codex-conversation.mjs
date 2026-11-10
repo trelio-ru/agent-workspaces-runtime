@@ -376,17 +376,35 @@ export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, s
     const token = await bridge.loadToken(origin, { signal });
     if (!token || !token.startsWith("twb_")) return null;
     signal?.throwIfAborted();
-    const id = codexLaunchFolderId(token, origin, folder);
-    const routing = await bridge.resolveBridgeDataPlaneRouting({ origin, token, companySlug: folder.company.slug, signal });
-    const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(folder.company.slug)}/codex-folders`;
+    await registerAndVerifyCodexLaunchFolder({ origin, token, folder, state, signal, readBack: false }, dependencies);
+    await remember();
+    return null;
+  } catch { return null; }
+};
+
+/** Explicit setup shares the hook's immutable registration algorithm, but it
+ * requires a positive GET read-back. A lost PUT response is reconciled once by
+ * GET, never blindly replayed. An encrypted path is hydrated only locally. */
+export const registerAndVerifyCodexLaunchFolder = async ({ origin, token, folder, state, signal,
+  readBack = true, interactive = false }, dependencies = {}) => {
+  const bridge = dependencies.bridge ?? await import("./trelio-workspace.mjs");
+  const id = codexLaunchFolderId(token, origin, folder);
+  const routing = await bridge.resolveBridgeDataPlaneRouting({ origin, token, companySlug: folder.company.slug, signal });
+  if (!["plain", "encrypted"].includes(routing.encryptionState)) throw wizardError("COMPANY_ENCRYPTION_TRANSITION");
+  const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(folder.company.slug)}/codex-folders`;
+  const read = async () => {
     const snapshot = await (await bridge.request(routing.requestOrigin, token, endpoint, { signal })).json();
-    if (!Array.isArray(snapshot?.folders)) return null;
-    if (snapshot.folders.some(item => item.id === id)) { await remember(); return null; }
-    const companyEncryption = routing.encryptionState === "plain" ? null : await bridge.ensureCompanyEncryptionContext({
-      origin, requestOrigin: routing.requestOrigin, token, company: folder.company, existingOnly: true, signal,
-    });
-    // An encryption transition between routing and runtime never falls back.
-    if ((routing.encryptionState === "encrypted") !== Boolean(companyEncryption)) return null;
+    if (!Array.isArray(snapshot?.folders)) throw wizardError("CODEX_CONNECTION_INVALID_RESPONSE");
+    return snapshot.folders.find(item => item.id === id) ?? null;
+  };
+  let existing = await read();
+  let companyEncryption = null;
+  if ((!existing || readBack) && routing.encryptionState === "encrypted") {
+    companyEncryption = await bridge.ensureCompanyEncryptionContext({ origin, requestOrigin: routing.requestOrigin,
+      token, company: folder.company, existingOnly: !interactive, signal });
+    if (!companyEncryption) throw wizardError("CODEX_CONNECTION_ENCRYPTION_REQUIRED");
+  }
+  if (!existing) {
     let folderPath = folder.folderPath;
     if (companyEncryption) {
       const local = dependencies.local ?? await import("./trelio-local-context.mjs");
@@ -396,13 +414,420 @@ export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, s
         payloads: protectedValues.payloads, expectedPayloadValues: protectedValues.expectedPayloadValues, signal });
       folderPath = protectedValues.value.folderPath;
     }
-    signal?.throwIfAborted();
-    const result = await (await bridge.request(routing.requestOrigin, token, `${endpoint}/${id}`, {
-      method: "PUT", headers: { "content-type": "application/json" }, signal,
-      body: JSON.stringify({ runtimeSessionId: state.runtimeSessionId, folderPath,
-        platform: process.platform, ...(folder.project ? { projectSlug: folder.project.slug } : {}) }),
-    })).json();
-    if (result?.registered === true && result.id === id) await remember();
-    return null;
-  } catch { return null; }
+    try {
+      const result = await (await bridge.request(routing.requestOrigin, token, `${endpoint}/${id}`, {
+        method: "PUT", headers: { "content-type": "application/json" }, signal,
+        body: JSON.stringify({ runtimeSessionId: state.runtimeSessionId, folderPath,
+          platform: process.platform, ...(folder.project ? { projectSlug: folder.project.slug } : {}) }),
+      })).json();
+      if (result?.registered !== true || result.id !== id) throw wizardError("CODEX_CONNECTION_INVALID_RESPONSE");
+    } catch (error) {
+      if (!readBack || signal?.aborted) throw error;
+      existing = await read();
+      if (!existing) throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
+    }
+    if (!readBack) return { id, registered: true };
+    existing ??= await read();
+  }
+  if (readBack) {
+    const opened = companyEncryption ? await bridge.hydrateAgentCompanyEncryptedJson({ value: existing,
+      origin: routing.requestOrigin, token, companyEncryption, signal }) : existing;
+    if (!opened || opened.id !== id || opened.folderPath !== folder.folderPath
+      || opened.platform !== process.platform || (!folder.project && opened.projectId != null)) {
+      throw wizardError("CODEX_CONNECTION_READBACK_FAILED");
+    }
+  }
+  return { id, registered: true, verified: readBack };
 };
+
+const wizardError = code => Object.assign(new Error(code), { code });
+
+// The wizard belongs to the signed runtime, alongside existing Codex folder
+// navigation. It neither changes the stable plugin shell nor uses a business Run.
+export const CODEX_CONNECTION_RESOURCE = "ui://trelio/codex-connection-v1.html";
+export const CODEX_CONNECTION_ACTION = "codex_connection_app_action";
+const wizardCapabilities = new Map();
+const wizardBusy = new Set();
+const WIZARD_LIFETIME_MS = 30 * 60 * 1000;
+const object = value => value && typeof value === "object" && !Array.isArray(value);
+const safeFolderPath = value => typeof value === "string" && value.length <= 4096
+  && path.isAbsolute(value) && !/[\u0000-\u001f\u007f]/u.test(value)
+  && path.resolve(value) !== path.parse(value).root;
+const safeConnectionName = value => typeof value === "string" && value.trim().length > 0
+  && value.length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value);
+
+/** Fixed native programs and fixed scripts only. User paths/names never become
+ * shell source, AppleScript/PowerShell code, a prompt, an environment or a log.
+ * Cancellation preserves the form; unavailable GUI leaves manual path input. */
+export const chooseCodexConnectionFolder = async ({ signal, platform = process.platform,
+  environment = process.env, filesystem = fs, run = null } = {}) => {
+  if (!run) {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    run = promisify(execFile);
+  }
+  let executable, args;
+  if (platform === "darwin") {
+    executable = "/usr/bin/osascript";
+    args = ["-e", 'POSIX path of (choose folder with prompt "Выберите отдельную рабочую папку Trelio")'];
+  } else if (platform === "win32") {
+    if (typeof environment.SystemRoot !== "string" || !path.win32.isAbsolute(environment.SystemRoot)) {
+      throw wizardError("CODEX_CONNECTION_PICKER_UNAVAILABLE");
+    }
+    executable = path.win32.join(environment.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const script = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description="Выберите отдельную рабочую папку Trelio"; try { if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Write($d.SelectedPath)} } finally {$d.Dispose()}';
+    args = ["-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+  } else if (platform === "linux") {
+    if (await filesystem.access("/usr/bin/zenity").then(() => true, () => false)) {
+      executable = "/usr/bin/zenity"; args = ["--file-selection", "--directory", "--title=Рабочая папка Trelio"];
+    } else if (await filesystem.access("/usr/bin/kdialog").then(() => true, () => false)) {
+      executable = "/usr/bin/kdialog"; args = ["--getexistingdirectory", ".", "--title", "Рабочая папка Trelio"];
+    } else throw wizardError("CODEX_CONNECTION_PICKER_UNAVAILABLE");
+  } else throw wizardError("CODEX_CONNECTION_PICKER_UNAVAILABLE");
+  try {
+    const result = await run(executable, args, { shell: false, windowsHide: true, timeout: 45_000,
+      maxBuffer: 16_384, encoding: "utf8", signal, env: titleEnvironment(environment, { platform }) });
+    // Remove the native record delimiter, never meaningful path whitespace.
+    const selected = String(result.stdout ?? "").replace(/\r?\n$/u, "");
+    if (!selected) return null;
+    const nativePath = platform === "win32" ? path.win32 : path.posix;
+    if (!nativePath.isAbsolute(selected) || selected.length > 4096 || /[\u0000-\u001f\u007f]/u.test(selected)) {
+      throw wizardError("CODEX_CONNECTION_PICKER_INVALID");
+    }
+    return nativePath.normalize(selected);
+  } catch (error) {
+    if ((platform === "linux" && error?.code === 1)
+      || (platform === "darwin" && /\(-128\)/u.test(String(error?.stderr ?? "")))) return null;
+    throw wizardError("CODEX_CONNECTION_PICKER_UNAVAILABLE");
+  }
+};
+
+const wizardDependencies = async dependencies => ({
+  bridge: dependencies.bridge ?? await import("./trelio-workspace.mjs"),
+  filesystem: dependencies.filesystem ?? fs,
+});
+const liveWizardContext = async (origin, parameters, dependencies, signal) => {
+  const { bridge } = await wizardDependencies(dependencies);
+  const token = await bridge.loadToken(origin, { signal });
+  if (!token?.startsWith("twb_")) throw wizardError("CODEX_CONNECTION_PAIRING_REQUIRED");
+  const routing = await bridge.resolveBridgeDataPlaneRouting({ origin, token, companySlug: parameters.companySlug, signal });
+  if (!["plain", "encrypted"].includes(routing.encryptionState)) throw wizardError("COMPANY_ENCRYPTION_TRANSITION");
+  const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(parameters.companySlug)}/codex-connection?runtimeSessionId=${parameters.runtimeSessionId}`;
+  const context = await (await bridge.request(routing.requestOrigin, token, endpoint, { signal })).json();
+  if (context?.company?.slug !== parameters.companySlug || !UUID.test(context?.company?.id ?? "")
+    || !UUID.test(context?.memberId ?? "") || typeof context.company.name !== "string"
+    || context.company.name.length > 255 || context.encryptionState !== routing.encryptionState) {
+    throw wizardError("CODEX_CONNECTION_INVALID_RESPONSE");
+  }
+  return { context, token, bridge };
+};
+const wizardBindingKey = (origin, token, context) => crypto.createHmac("sha256", token)
+  .update(`${origin}\n${context.company.id}\n${context.memberId}`).digest("hex");
+const wizardResult = (capabilityToken, capability, state, mount = false) => ({
+  content: [{ type: "text", text: state.stage === "ready"
+    ? "Codex connection verified: the selected folder was registered in Trelio and read back."
+    : "Codex connection wizard is open. Complete the folder selection in the App." }],
+  structuredContent: { stage: state.stage, verified: state.stage === "ready" },
+  _meta: { ...(mount ? { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } : {}),
+    "trelio/codexConnection": { capabilityToken, companyName: capability.company.name, ...state } },
+});
+
+export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) => {
+  if (!object(raw) || raw.schemaVersion !== 1 || raw.operation !== "codex_connection_open"
+    || Object.keys(raw).some(key => !["schemaVersion", "operation", "parameters"].includes(key))
+    || !object(raw.parameters) || Object.keys(raw.parameters).some(key => !["companySlug", "runtimeSessionId"].includes(key))
+    || typeof raw.parameters.companySlug !== "string" || !/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(raw.parameters.companySlug)
+    || !UUID.test(raw.parameters.runtimeSessionId ?? "")) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+  const { context, token, bridge } = await liveWizardContext(origin, raw.parameters, dependencies, dependencies.signal);
+  const key = wizardBindingKey(origin, token, context);
+  const stateFile = path.join(bridge.resolveWorkspaceBridgeConfigDirectory(), "codex-connections", `${key}.json`);
+  const previous = await bridge.readPrivateJsonFile(stateFile, { maximumBytes: 16_384 });
+  if (Object.keys(previous).length && (previous.schemaVersion !== 1 || !safeFolderPath(previous.folderPath)
+    || !safeConnectionName(previous.displayName) || typeof previous.createFolder !== "boolean")) {
+    throw wizardError("CODEX_CONNECTION_LOCAL_STATE_INVALID");
+  }
+  const { homedir } = await import("node:os");
+  const state = { stage: "folder", folderPath: previous.folderPath ?? path.join(homedir(), "Documents", "Trelio", context.company.slug),
+    displayName: previous.displayName ?? `Trelio · ${context.company.name}`.slice(0, 199).replace(/[\uD800-\uDBFF]$/u, ""),
+    createFolder: previous.createFolder ?? true };
+  const now = Date.now();
+  for (const [key, value] of wizardCapabilities) if (value.expiresAt <= now) wizardCapabilities.delete(key);
+  if (wizardCapabilities.size >= 32) throw wizardError("CODEX_CONNECTION_LIMIT");
+  const capabilityToken = crypto.randomBytes(32).toString("base64url");
+  const capability = { origin, parameters: raw.parameters, company: context.company, memberId: context.memberId, stateFile, state,
+    busyKey: key, expiresAt: now + WIZARD_LIFETIME_MS };
+  wizardCapabilities.set(capabilityToken, capability);
+  return wizardResult(capabilityToken, capability, state, true);
+};
+
+/** Walk every existing ancestor without following symlinks. Recursive mkdir is
+ * allowed only by the App's explicit create choice, then the planner rechecks
+ * the actual root and its Git ownership before any instruction write. */
+const prepareWizardDirectory = async (folderPath, createFolder, filesystem, signal) => {
+  const root = path.parse(folderPath).root;
+  let current = root;
+  for (const part of path.relative(root, folderPath).split(path.sep)) {
+    signal?.throwIfAborted();
+    current = path.join(current, part);
+    let stat;
+    try { stat = await filesystem.lstat(current); }
+    catch (error) {
+      if (error.code !== "ENOENT" || !createFolder) throw wizardError("CODEX_CONNECTION_FOLDER_UNAVAILABLE");
+      await filesystem.mkdir(current, { mode: 0o700 });
+      stat = await filesystem.lstat(current);
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw wizardError("CODEX_CONNECTION_FOLDER_UNSAFE");
+  }
+  if (await filesystem.realpath(folderPath) !== folderPath) throw wizardError("CODEX_CONNECTION_FOLDER_UNSAFE");
+};
+
+export const handleCodexConnectionAction = async (origin, input, dependencies = {}) => {
+  if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
+    || !["state", "pick", "save", "connect"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+  const cap = wizardCapabilities.get(input.capabilityToken);
+  if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw wizardError("CODEX_CONNECTION_EXPIRED");
+  if (wizardBusy.has(cap.busyKey)) throw wizardError("CODEX_CONNECTION_BUSY");
+  wizardBusy.add(cap.busyKey);
+  try {
+    // Expiry, revoked membership, bridge grant and model policy are independent
+    // of the hidden local capability and are checked again before every action.
+    const { context, bridge, token } = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
+    const liveKey = wizardBindingKey(origin, token, context);
+    if (context.company.id !== cap.company.id || context.memberId !== cap.memberId || liveKey !== cap.busyKey) {
+      throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
+    }
+    dependencies.signal?.throwIfAborted();
+    const { filesystem } = await wizardDependencies(dependencies);
+    if (input.settings !== undefined) {
+      if (!["save", "pick", "connect"].includes(input.action) || !object(input.settings)
+        || Object.keys(input.settings).some(key => !["folderPath", "displayName", "createFolder"].includes(key))
+        || !safeFolderPath(input.settings.folderPath) || !safeConnectionName(input.settings.displayName)
+        || typeof input.settings.createFolder !== "boolean") throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+      cap.state = { stage: "folder", folderPath: path.resolve(input.settings.folderPath),
+        displayName: input.settings.displayName.trim(), createFolder: input.settings.createFolder };
+    }
+    // Persist the user's typed choice before opening a native modal. A cancel,
+    // unavailable GUI or interrupted modal must not lose the edited name/path.
+    if (input.settings !== undefined) await bridge.writePrivateJsonFile(cap.stateFile, {
+      schemaVersion: 1, folderPath: cap.state.folderPath, displayName: cap.state.displayName, createFolder: cap.state.createFolder,
+    });
+    if (input.action === "pick") {
+      const selected = await (dependencies.chooseFolder ?? chooseCodexConnectionFolder)({ signal: dependencies.signal });
+      if (selected) {
+        if (!safeFolderPath(selected)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+        cap.state = { ...cap.state, stage: "folder", folderPath: selected, createFolder: false };
+      }
+    }
+    if (input.action === "pick") await bridge.writePrivateJsonFile(cap.stateFile, {
+      schemaVersion: 1, folderPath: cap.state.folderPath, displayName: cap.state.displayName, createFolder: cap.state.createFolder,
+    });
+    if (input.action === "state" && cap.state.stage === "ready") {
+      cap.state.stage = "folder"; delete cap.state.openUrl;
+    }
+    if (input.action === "connect") {
+      // A previously rendered success never grants a blind registration replay.
+      // The same deterministic ID and fresh GET reconcile interrupted setup.
+      cap.state.stage = "checking";
+      await prepareWizardDirectory(cap.state.folderPath, cap.state.createFolder, filesystem, dependencies.signal);
+      const folderModule = dependencies.onboarding ?? await import("./trelio-folder-onboarding.mjs");
+      const existing = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
+      if (existing?.state === "bound" && (existing.company.slug !== cap.company.slug || existing.project)) {
+        throw wizardError("CODEX_CONNECTION_BINDING_CONFLICT");
+      }
+      const plan = await folderModule.prepareTrelioFolderOnboarding({ folderPath: cap.state.folderPath, company: cap.company });
+      if (!plan.plan) throw wizardError("CODEX_CONNECTION_FOLDER_REVIEW_REQUIRED");
+      dependencies.signal?.throwIfAborted();
+      if (plan.plan.apply) await folderModule.applyTrelioFolderOnboarding(plan.plan.apply.arguments.parameters);
+      const folder = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
+      if (folder?.state !== "bound" || folder.company.slug !== cap.company.slug || folder.project) {
+        throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+      }
+      dependencies.signal?.throwIfAborted();
+      cap.state.stage = "registering";
+      const receipt = await (dependencies.register ?? registerAndVerifyCodexLaunchFolder)({ origin, token, folder,
+        state: { runtimeSessionId: cap.parameters.runtimeSessionId }, signal: dependencies.signal, interactive: true }, dependencies);
+      if (receipt?.verified !== true) throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
+      const verifiedFolder = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
+      if (verifiedFolder?.state !== "bound" || verifiedFolder.folderPath !== folder.folderPath
+        || verifiedFolder.company.slug !== cap.company.slug || verifiedFolder.project) {
+        throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+      }
+      // Registration read-back and local CAS are distinct from live admission.
+      // A policy/account change during HTTP must not leave an old green screen.
+      const finalContext = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
+      if (wizardBindingKey(origin, finalContext.token, finalContext.context) !== cap.busyKey) {
+        throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
+      }
+      dependencies.signal?.throwIfAborted();
+      cap.state.stage = "ready";
+      const link = new URL("codex://threads/new");
+      link.searchParams.set("path", folder.folderPath);
+      link.searchParams.set("prompt", `[@Trelio Agent Workspaces](plugin://trelio-agent-workspaces@trelio-plugins) Работаем с компанией Trelio ${cap.company.slug}. Прочитай инструкции выбранной рабочей папки.`);
+      cap.state.openUrl = link.href;
+    }
+    return wizardResult(input.capabilityToken, cap, cap.state);
+  } catch (error) {
+    cap.state.stage = "folder";
+    delete cap.state.openUrl;
+    // Paths and native exception text belong only to local IO. Expose closed
+    // codes so a permission/network failure cannot leak private directory names.
+    const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "CODEX_CONNECTION_FAILED";
+    return { ...wizardResult(input.capabilityToken, cap, cap.state), isError: true,
+      content: [{ type: "text", text: `Codex connection not verified (${code}).` }],
+      structuredContent: { stage: "folder", verified: false, code,
+        ...(["missing", "invalid", "expired", "replayed"].includes(error?.reason ?? error?.payload?.reason)
+          ? { reason: error?.reason ?? error?.payload?.reason } : {}) },
+      _meta: { "trelio/codexConnection": { capabilityToken: input.capabilityToken, companyName: cap.company.name,
+        ...cap.state, errorCode: code } } };
+  } finally { wizardBusy.delete(cap.busyKey); }
+};
+
+/** Offline MCP App: all private values arrive through host-only tool metadata.
+ * No fetch, remote scripts, filesystem API or user HTML is available here.
+ * Native folder selection and writes are fixed, capability-bound runtime calls. */
+export const codexConnectionAppResource = () => ({
+  uri: CODEX_CONNECTION_RESOURCE, mimeType: "text/html;profile=mcp-app",
+  _meta: { ui: { prefersBorder: false, csp: { connectDomains: [], resourceDomains: [] } },
+    "openai/widgetPrefersBorder": false, "openai/widgetCSP": { connect_domains: [], resource_domains: [] },
+    "openai/widgetDescription": "Мастер подключения Codex: рабочая папка и проверенная регистрация в Trelio." },
+  text: String.raw`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Подключение Codex</title>
+<style>
+:root{color-scheme:light dark;font:15px/1.5 Arial,sans-serif;color:var(--color-text-primary,light-dark(#20242b,#f1f3f6));background:var(--color-background-primary,light-dark(#fff,#181b20))}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:640px;margin:auto}h1{font-size:22px;line-height:1.3;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}p{margin:0 0 16px}.muted{color:var(--color-text-secondary,light-dark(#555e6e,#b7c0cf));font-size:14px}.surface{border:1px solid var(--color-border-primary,light-dark(#dfe3e9,#3c4350));border-radius:12px;padding:18px;margin:16px 0}.row{display:flex;align-items:center;justify-content:space-between;gap:12px}.path{overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:13px}.check{margin:8px 0}.check span{margin-right:8px}button,input{font:inherit}button{min-height:44px;padding:10px 16px;border:1px solid var(--color-border-primary,light-dark(#ccd2dc,#515b6e));border-radius:8px;cursor:pointer;color:inherit;background:transparent}button.primary{background:light-dark(#303d8f,#adbaff);color:light-dark(#fff,#10183c);border-color:transparent}button.text{border:0;text-decoration:underline;padding:8px}button:disabled{cursor:wait;opacity:.6}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid light-dark(#6672cc,#aab8ff);outline-offset:3px}label{display:block;font-weight:600;margin:14px 0 6px}input[type=text]{width:100%;min-height:44px;border:1px solid var(--color-border-primary,light-dark(#bbc4d3,#596579));border-radius:8px;padding:10px;background:inherit;color:inherit}label.choice{font-weight:400;display:flex;gap:8px;align-items:center;min-height:44px;margin:0}input[type=checkbox]{width:18px;height:18px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}#status{margin:12px 0;overflow-wrap:anywhere}#status.error{color:light-dark(#a52429,#ffabb0)}[hidden]{display:none!important}summary{cursor:pointer;min-height:44px;display:flex;align-items:center;text-decoration:underline}@media(max-width:420px){body{padding:12px}.surface{padding:14px}.actions>*{width:100%}.row{align-items:flex-start}}
+</style></head><body><main aria-busy="false">
+<h1 id="title">Подключить Trelio к Codex</h1><p class="muted" id="company">Загрузка подключения…</p>
+<div id="setup" hidden><div class="check"><span aria-hidden="true">✓</span>Вход в Trelio подтверждён</div><div class="check"><span aria-hidden="true">✓</span>Разрешение Codex проверено</div>
+<section class="surface" aria-labelledby="folder-heading"><div class="row"><h2 id="folder-heading">Рабочая папка</h2><button class="text" id="modify" type="button" aria-controls="settings" aria-expanded="false">Изменить</button></div>
+<p id="name"></p><p id="path" class="path"></p><p class="muted">Здесь будут файлы настройки и рабочие материалы Trelio</p>
+<form id="settings" hidden><label for="display-name">Название подключения</label><input id="display-name" type="text" maxlength="200" required aria-describedby="name-help"><p class="muted" id="name-help">Сохраняется на этом компьютере. Проект в боковой панели Codex не создаётся</p>
+<label for="folder-path">Локальная папка</label><input id="folder-path" type="text" maxlength="4096" required autocomplete="off" aria-describedby="path-help"><p class="muted" id="path-help">Отдельная постоянная папка для Trelio. Репозиторий с кодом не подойдёт</p>
+<label class="choice"><input id="create" type="checkbox">Создать папку, если её ещё нет</label><div class="actions"><button id="pick" type="button">Выбрать существующую</button><button type="submit">Сохранить выбор</button></div></form></section>
+<p class="muted">По кнопке «Подключить» сохраним в папке файлы AGENTS.md и CLAUDE.md и зарегистрируем путь в вашем аккаунте Trelio. Файлы настройки сохраняют существующий текст</p>
+<div class="actions"><button id="connect" class="primary" type="button">Подключить</button></div></div>
+<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p>Откройте задачу в Trelio и нажмите «Начать в Codex». При первом запуске выберите эту папку – Trelio запомнит выбор в этом браузере</p><div class="actions"><button class="primary" id="open" type="button">Открыть рабочую папку в Codex</button><button id="recheck" type="button">Проверить ещё раз</button></div></section>
+<p id="status" role="status" aria-live="polite"></p>
+</main><script>
+(function(){'use strict';
+var cap = '', state = null, busy = false, dirty = false, rpcId = 0, pending = new Map();
+var $ = function(id) { return document.getElementById(id) };
+
+// Only the parent host transports tool calls. No network API is available in
+// the App. Match response IDs, reject unknown senders, and retain a longer
+// human budget only for the existing protected encryption/unlock interaction.
+function rpc(method, params) {
+  var id = ++rpcId;
+  return new Promise(function(resolve, reject) {
+    var human = method === 'tools/call' && params.arguments.action === 'connect';
+    var timer = setTimeout(function() {
+      pending.delete(id); reject(new Error('HOST_TIMEOUT'));
+    }, human ? 900000 : 60000);
+    pending.set(id, {resolve: resolve, reject: reject, timer: timer});
+    window.parent.postMessage({jsonrpc:'2.0', id:id, method:method, params:params || {}}, '*');
+  });
+}
+function notice(text, error) {
+  $('status').textContent = text;
+  $('status').className = error ? 'error' : '';
+  $('status').setAttribute('role', error ? 'alert' : 'status');
+}
+function fields() {
+  return {folderPath:$('folder-path').value, displayName:$('display-name').value, createFolder:$('create').checked};
+}
+function resize() {
+  window.parent.postMessage({jsonrpc:'2.0', method:'ui/notifications/size-changed',
+    params:{height:document.documentElement.scrollHeight}}, '*');
+}
+function render(result) {
+  var meta = result && result._meta && result._meta['trelio/codexConnection'];
+  if (!meta) return;
+  dirty = false; state = meta; cap = meta.capabilityToken;
+  $('company').textContent = meta.companyName;
+  $('name').textContent = meta.displayName;
+  $('path').textContent = meta.folderPath;
+  $('done-path').textContent = meta.folderPath;
+  $('display-name').value = meta.displayName;
+  $('folder-path').value = meta.folderPath;
+  $('create').checked = meta.createFolder;
+  var done = meta.stage === 'ready' && !result.isError;
+  $('setup').hidden = done; $('done').hidden = !done;
+  if (meta.errorCode) {
+    var messages = {
+      CODEX_CONNECTION_PICKER_UNAVAILABLE:'Окно выбора папки недоступно. Укажите абсолютный путь в поле «Локальная папка»',
+      CODEX_CONNECTION_BINDING_CONFLICT:'Эта папка связана с другой компанией или проектом. Выберите отдельную папку',
+      CODEX_CONNECTION_REGISTRATION_UNCONFIRMED:'Trelio пока не подтвердил регистрацию. Проверьте соединение и повторите проверку',
+      CODEX_CONNECTION_READBACK_FAILED:'Не удалось подтвердить путь в Trelio. Повторите проверку',
+      CODEX_CONNECTION_FOLDER_UNSAFE:'Папка содержит символическую ссылку. Выберите обычную локальную папку'
+    };
+    notice((messages[meta.errorCode] || 'Настройка не завершена. Выбор сохранён. Повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
+  } else notice(done ? 'Подключение проверено' : '', false);
+  resize();
+}
+function setBusy(value) {
+  busy = value;
+  document.querySelector('main').setAttribute('aria-busy', String(value));
+  document.querySelectorAll('button,input').forEach(function(el) { el.disabled = value });
+}
+function unconfirmed(text) {
+  // A timeout, expired card or host-level refusal must hide the previous ready
+  // screen too. Retain the input so reopening/rechecking can reconcile it.
+  $('done').hidden = true; $('setup').hidden = false; notice(text, true);
+}
+async function action(kind, settings) {
+  if (busy || !cap) return;
+  var requestCap = cap;
+  setBusy(true);
+  notice(kind === 'connect' ? 'Проверяем папку, сохраняем настройки и подтверждаем регистрацию в Trelio…' : 'Проверяем подключение…', false);
+  try {
+    var args = {capabilityToken:requestCap, action:kind};
+    if (settings) args.settings = settings;
+    var result = await rpc('tools/call', {name:'codex_connection_app_action', arguments:args});
+    // A late response from a superseded card cannot restore an old connection.
+    if (requestCap !== cap) return;
+    render(result);
+    if (result && result.isError && !result._meta) {
+      unconfirmed('Проверка не завершена. Повторно откройте мастер через агента');
+    }
+  } catch (e) {
+    if (requestCap === cap) unconfirmed('Нет ответа от Codex. Повторно откройте мастер в этом чате: сохранённый выбор останется');
+  } finally { setBusy(false); resize() }
+}
+$('modify').onclick = function() {
+  var open = $('settings').hidden;
+  $('settings').hidden = !open;
+  $('modify').setAttribute('aria-expanded', String(open));
+  if (open) $('display-name').focus();
+  resize();
+};
+// Settings have one explicit local Save. Its pending/error lifecycle is the
+// same as Connect; beforeunload protects only the unsaved local draft.
+window.addEventListener('beforeunload', function(event) {
+  if (dirty) { event.preventDefault(); event.returnValue = '' }
+});
+$('settings').oninput = function() { dirty = true };
+$('settings').onsubmit = function(event) { event.preventDefault(); return action('save', fields()) };
+$('pick').onclick = function() { return action('pick', fields()) };
+$('connect').onclick = function() {
+  if ($('settings').hidden || $('settings').reportValidity()) return action('connect', fields());
+};
+$('recheck').onclick = function() { return action('connect') };
+$('open').onclick = async function() {
+  if (state && state.openUrl) try { await rpc('ui/open-link', {url:state.openUrl}) }
+  catch(e) { notice('Codex не открыл ссылку. Начните новую задачу в Trelio кнопкой «Начать в Codex»', true) }
+};
+window.addEventListener('message', function(event) {
+  if (event.source !== window.parent) return;
+  var m = event.data;
+  if (!m || m.jsonrpc !== '2.0') return;
+  if (m.id !== undefined && pending.has(m.id) && !m.method) {
+    var p = pending.get(m.id); pending.delete(m.id); clearTimeout(p.timer);
+    if (m.error) p.reject(new Error('HOST_ERROR')); else p.resolve(m.result);
+    return;
+  }
+  if (m.method === 'ui/notifications/tool-result') render(m.params);
+});
+rpc('ui/initialize', {appInfo:{name:'trelio-codex-connection', version:'1.0.0'},
+  appCapabilities:{tools:{}}, protocolVersion:'2026-01-26'}).then(function() {
+  window.parent.postMessage({jsonrpc:'2.0', method:'ui/notifications/initialized'}, '*'); resize();
+}).catch(function() { notice('Этот клиент не открыл MCP App. Используйте ручную настройку в Trelio', true) });
+})();
+</script></body></html>`,
+});

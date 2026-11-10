@@ -203,6 +203,20 @@
       "maxBytes": 768,
       "baselineTokens": 147,
       "maxTokens": 176
+    },
+    "open_codex_connection_wizard": {
+      "modelVisible": true,
+      "baselineBytes": 660,
+      "maxBytes": 672,
+      "baselineTokens": 155,
+      "maxTokens": 160
+    },
+    "codex_connection_app_action": {
+      "modelVisible": false,
+      "baselineBytes": 552,
+      "maxBytes": 560,
+      "baselineTokens": 128,
+      "maxTokens": 128
     }
   }
 }
