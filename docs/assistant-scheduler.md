@@ -2076,6 +2076,12 @@ missing/inaccessible shell is not replaced by a cache scan or human OAuth.
 A proven missing loaded shell reports `plugin_restart_required` directly over
 the retained protected diagnostic client, even when no loader can be spawned.
 Runtime/code updates do not need plugin installation or a Codex restart.
+An automatic plugin candidate failure uses the existing `runtime_update_failed`
+servicing incident, including when its known-good rollback retains a failed
+version. It is not `plugin_update_required`: the independent native version and
+installation checks establish that requirement. Missing loaded shell retains its separate restart
+reason. This classification never clears the failed candidate, repeats installation,
+approves hooks, or reports business recovery; a compatible old worker may continue.
 
 The health API remains independent of business minimum/model policy but retains
 live device/owner/lifecycle/expiry. It returns shared plugin/runtime minimums;

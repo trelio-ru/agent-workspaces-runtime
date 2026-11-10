@@ -817,6 +817,32 @@ test('maintenance has no model turn, retries only signed update and cannot clear
   assert.ok(!JSON.stringify(f.reports).includes('PRIVATE'));
 });
 
+test('a retained failed plugin candidate reports automatic servicing failure while the compatible old worker continues',async()=>{
+  for(const state of ['current','rolled_back']){
+    const f=fixture(),effects=[];
+    f.state={...snapshot(),code:'hook_review_required'};
+    // This is the actual updater result after its known-good rollback. The
+    // failed version must remain latched; neither this report nor polling can
+    // reinstall it, clear trust, or turn metadata into business completion.
+    const retained={state,version:'0.1.9',failedVersion:'0.1.11'};
+    const result=await runAssistantBackgroundTick({
+      pluginMaintenance:async()=>structuredClone(retained),
+      codexMaintenance:async()=>({state:'disabled'}),
+      createHost:async()=>({coordinator:{pollOnce:async()=>effects.push('poll'),
+        workOnce:async()=>{effects.push('work');return null;},dispatchStatus:async()=>({state:'ready'})},
+        reportDispatchFailure:error=>reportAssistantMaintenanceFailure(error,f.client),
+        close:async()=>effects.push('close')})});
+    assert.equal(result.state,'idle');
+    assert.deepEqual(effects,['poll','work','close']);
+    assert.equal(f.state.code,'runtime_update_failed','a candidate failure is not a hard plugin minimum or a manual restart requirement');
+    assert.ok(f.state.latchedCodes.includes('hook_review_required'),'servicing cannot approve hooks');
+    assert.deepEqual(retained,{state,version:'0.1.9',failedVersion:'0.1.11'});
+    assert.ok(!f.reports.some(value=>value.code==='ready'||value.clearedReason));
+  }
+  assert.equal(assistantHealthFailure({code:'ASSISTANT_PLUGIN_UPDATE_REQUIRED'}),'plugin_update_required');
+  assert.equal(assistantHealthFailure({code:'TRELIO_PLUGIN_RESTART_REQUIRED'}),'plugin_restart_required');
+});
+
 test('confirmed plugin floor requests owner action even if updater fails; unknown network error never reports recovery',async()=>{
   const f=fixture();f.state={...f.state,compatibility:{minimumPluginVersion:'3.3.0',minimumRuntimeVersion:'4.9.0'}};
   await maintainAssistantHost({client:f.client,versions,update:async()=>{throw new Error();},probe:async()=>assert.fail('obsolete plugin must not probe business')});

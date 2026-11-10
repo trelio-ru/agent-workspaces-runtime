@@ -1555,7 +1555,13 @@ const assistantHealthCodes = Object.freeze({
   AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:'plugin_update_required',
   TRELIO_PLUGIN_RESTART_REQUIRED:'plugin_restart_required',
   ASSISTANT_PLUGIN_UPDATE_REQUIRED:'plugin_update_required',
-  ASSISTANT_PLUGIN_UPDATE_FAILED:'plugin_update_required',
+  // A failed optional candidate (including a latched failure after rollback)
+  // is automatic servicing failure, not proof that the working plugin is below
+  // its native minimum or that its loaded shell disappeared. Keep the incident
+  // visible through the existing recovery-window code without telling owners
+  // to reinstall/restart. The updater's failed-version/no-replay journal stays
+  // untouched; the separate hard-minimum and missing-shell codes stay above.
+  ASSISTANT_PLUGIN_UPDATE_FAILED:'runtime_update_failed',
   ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE:'plugin_restart_required',
   ASSISTANT_RUNTIME_UPDATE_REQUIRED:'runtime_update_failed',
   AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED:'runtime_update_failed',
