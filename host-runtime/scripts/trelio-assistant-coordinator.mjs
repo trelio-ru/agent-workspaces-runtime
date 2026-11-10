@@ -811,7 +811,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // This observation grants no retry: the next profile rereads native
         // scope/receipt/capability and certifies the entire terminal itself.
         if(outcome.readConfirmed===true&&outcome.ownerPrivateRead===true
-          &&outcome.readOnlyCancelledContextRecoveryProtocolVersion===1&&row.scope.provider==='telegram'
+          &&(outcome.readOnlyCancelledContextRecoveryProtocolVersion===1||outcome.readOnlyCancelledSourceRecoveryProtocolVersion===1)&&row.scope.provider==='telegram'
           &&row.retry_of_id===null&&row.retry_ordinal===0&&row.model_capacity_json===null
           &&row.reply_abandon_receipt_id===null&&typeof row.intake_prerequisite==='string'){
           inspectCancelledRead=true;continue;
@@ -855,7 +855,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const continuation=row.outcome_state==='cancelled';
         if(outcome.readOnlyRecoveryProtocolVersion!==1||correction&&outcome.readOnlyReplyCorrectionProtocolVersion!==1
           ||continuation&&outcome.readOnlyContinuationProtocolVersion!==1
-          ||cancelledContextRead&&outcome.readOnlyCancelledContextRecoveryProtocolVersion!==1
+          ||cancelledContextRead&&outcome.readOnlyCancelledContextRecoveryProtocolVersion!==1&&outcome.readOnlyCancelledSourceRecoveryProtocolVersion!==1
           ||cancelledContextRead&&!Number.isFinite(Date.parse(outcome.leaseExpiresAt))
           ||generation&&outcome.readOnlyGenerationCorrectionProtocolVersion!==1
           ||dispatch&&outcome.readOnlyReplyDispatchCorrectionProtocolVersion!==1
@@ -880,8 +880,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             visited.add(child.id);
             const binding=child.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(child.readonly_recovery_json),{local:true}):null;
             // The old continuation capability deliberately refuses ordinary
-            // cancellations. A separate native capability admits only this
-            // original-root FILE-read certificate:
+            // cancellations. Independent native capabilities admit only their
+            // original-root FILE/SOURCE read certificates:
             // no earlier recovery/capacity episode or local provider fence may
             // borrow it. The whole native terminal is still certified below,
             // after fresh scope/receipt/prerequisite checks, before any append.
@@ -919,7 +919,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
                 ||ancestor.reply_abandon_receipt_id!==null||prior&&binding.previousPrerequisiteKey!==prior.prerequisiteKey)
                 fail('ASSISTANT_INTAKE_CHANGED');
             }else if(binding.readOnlyContinuation){
-              const cancelledRoot=current.readOnlyCancelledContextRecoveryProtocolVersion===1&&prior===null
+              const cancelledRoot=(current.readOnlyCancelledContextRecoveryProtocolVersion===1||current.readOnlyCancelledSourceRecoveryProtocolVersion===1)&&prior===null
                 &&ancestor.readonly_recovery_json===null&&ancestor.retry_of_id===null&&ancestor.retry_ordinal===0
                 &&ancestor.model_capacity_json===null&&current.readOnlyRecovery===undefined
                 &&binding.previousPrerequisiteKey===ancestor.intake_prerequisite
@@ -1004,14 +1004,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }
         const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row),settledCreationSuccessors,
           ...(dispatch?{settledReplySuccessors}:{}),
-          ...(cancelledContextRead?{cancelledContextRead:true}:continuation?{readOnlyContinuation:true}:{}),...(dispatch?{replyDispatchCorrection:true}:{}),
+          ...(cancelledContextRead?{
+            ...(outcome.readOnlyCancelledContextRecoveryProtocolVersion===1?{cancelledContextRead:true}:{}),
+            ...(outcome.readOnlyCancelledSourceRecoveryProtocolVersion===1?{cancelledSourceRead:true}:{})
+          }:continuation?{readOnlyContinuation:true}:{}),...(dispatch?{replyDispatchCorrection:true}:{}),
           ...(correction?{[generation?'generationReplyCorrection':'technicalReplyCorrection']:{receiptId:outcome.receiptId,eventId:outcome.eventId,sourceRevision:outcome.sourceRevision,threadId:outcome.threadId}}:{})});lease();
         // Positive technical replies have two distinct whole-turn certificates.
         // Both still require the SAME native correction capability/receipt above;
         // a label alone cannot cross the full-history reader or append a child.
         const matchesFailure=correction&&!generation
           ?['company_context_rate_limited_reply','company_context_exact_read_failed_reply'].includes(terminal.readOnlyFailure)
-          :terminal.readOnlyFailure===(cancelledContextRead?'company_context_file_read_cancelled':dispatch?'owner_reply_dispatch_refused'
+          :cancelledContextRead
+            ?terminal.readOnlyFailure==='company_context_file_read_cancelled'&&outcome.readOnlyCancelledContextRecoveryProtocolVersion===1
+              ||terminal.readOnlyFailure==='owner_source_read_deadline_cancelled'&&outcome.readOnlyCancelledSourceRecoveryProtocolVersion===1
+          :terminal.readOnlyFailure===(dispatch?'owner_reply_dispatch_refused'
             :generation?'company_context_generation_changed_reply':continuation?'company_context_read_cancelled':'company_context_preparation_timeout');
         if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??'')||!matchesFailure)continue;
         await intakeSource(row,signal);

@@ -2647,6 +2647,7 @@ const intakeProjection=(value,expected)=>{
     ||value.readOnlyReplyCorrectionProtocolVersion!==undefined&&value.readOnlyReplyCorrectionProtocolVersion!==1
     ||value.readOnlyContinuationProtocolVersion!==undefined&&value.readOnlyContinuationProtocolVersion!==1
     ||value.readOnlyCancelledContextRecoveryProtocolVersion!==undefined&&value.readOnlyCancelledContextRecoveryProtocolVersion!==1
+    ||value.readOnlyCancelledSourceRecoveryProtocolVersion!==undefined&&value.readOnlyCancelledSourceRecoveryProtocolVersion!==1
     ||value.readOnlyGenerationCorrectionProtocolVersion!==undefined&&value.readOnlyGenerationCorrectionProtocolVersion!==1
     ||value.readOnlyReplyDispatchCorrectionProtocolVersion!==undefined&&value.readOnlyReplyDispatchCorrectionProtocolVersion!==1
     ||value.preparedOwnerReplyDeliveryProtocolVersion!==undefined&&value.preparedOwnerReplyDeliveryProtocolVersion!==1)
@@ -2663,6 +2664,7 @@ const intakeProjection=(value,expected)=>{
     // certified cancelled-context root. Never infer it from continuation v1 or
     // a caller field: the coordinator needs the fresh device-codec observation.
     ...(value.readOnlyCancelledContextRecoveryProtocolVersion===1?{readOnlyCancelledContextRecoveryProtocolVersion:1}:{}),
+    ...(value.readOnlyCancelledSourceRecoveryProtocolVersion===1?{readOnlyCancelledSourceRecoveryProtocolVersion:1}:{}),
     ...(value.readOnlyGenerationCorrectionProtocolVersion===1?{readOnlyGenerationCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyReplyDispatchCorrectionProtocolVersion===1?{readOnlyReplyDispatchCorrectionProtocolVersion:1}:{}),
     ...(value.preparedOwnerReplyDeliveryProtocolVersion===1?{preparedOwnerReplyDeliveryProtocolVersion:1}:{}),

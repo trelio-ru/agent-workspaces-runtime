@@ -612,6 +612,76 @@ const dispatchReplyFailure=(turn,options)=>readonlyOwnerReplyHistory(turn,option
 export const assistantSettledOwnerReply=(turn,witness,options={})=>readonlyOwnerReplyHistory(turn,{
   environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyShell??verifyAssistantPowerShellReadExecutable,
   deliveryId:witness.deliveryId,intakePass:{companyId:witness.companyId,sourceId:witness.sourceId,intakeId:witness.intakeId},settledReply:witness});
+/** A source READ deadline is distinct from a company-file failure. Accept only
+ * the complete native read-only prefix and the exact final local preparation
+ * refusal, before native reply reservation. Failed metadata/setup discovery
+ * never becomes a provider launch; arbitrary tools, successful discovery,
+ * selected files and unknown send results refuse. This certificate alone does
+ * not admit a child: its independent native capability, immutable cancelled
+ * receipt, absent provider fences and changed trusted prerequisite are required.
+ */
+const cancelledSourceReadFailure=async(turn,{deliveryId,intakePass,environment,signal,verifyShell})=>{
+ if(!UUID.test(deliveryId??'')||!intakePass||Object.getPrototypeOf(intakePass)!==Object.prototype
+   ||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+   ||Object.values(intakePass).some(value=>!UUID.test(value??''))||!UUID.test(turn?.id??'')
+   ||turn.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)||turn.items.length<4||turn.items.length>512
+   ||turn.items[0]?.type!=='userMessage')return false;
+ const failed=(item,code)=>item.status==='failed'&&item.result&&item.result.isError!==false
+   &&(item.result.structuredContent===undefined||item.result.structuredContent?.code===code)
+   &&(item.error==null||item.error.message===code)
+   &&(item.result.structuredContent?.code===code||item.error?.message===code
+     ||item.result.content?.length===1&&item.result.content[0]?.type==='text'&&item.result.content[0].text===code);
+ const matches=args=>args.intakePass&&Object.getPrototypeOf(args.intakePass)===Object.prototype
+   &&Object.keys(args.intakePass).sort().join(',')==='companyId,intakeId,sourceId'
+   &&Object.keys(intakePass).every(key=>args.intakePass[key]===intakePass[key]);
+ let users=0,contexts=0,reads=0,commands=0,lists=0,guidance=0,deadline=false,resolved=false;
+ for(const item of turn.items){
+  if(item.type==='userMessage'){
+   if(++users!==1||item.content?.length!==1||item.content[0]?.type!=='text'
+     ||typeof item.content[0].text!=='string'||!item.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return false;
+  }else if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+  else if(item.type==='commandExecution'){
+   if(++commands>1||contexts||!await publicBootstrapRead(item,environment,verifyShell,signal))return false;
+  }else if(item.type==='mcpToolCall'){
+   const args=item.arguments;
+   if(resolved||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype)return false;
+   const keys=Object.keys(args).sort().join(',');
+   if(item.tool==='get_assistant_intake_context'){
+    if(!contexts){
+     if(keys!=='intakePass,runtimeSessionProof'||!matches(args)||item.status!=='completed'
+       ||item.error!=null||!item.result||item.result.isError===true)return false;
+     contexts=1;continue;
+    }
+    // Only this known reader may have a refused empty-schema attempt. It can
+    // neither reserve a reply nor execute a business operation. Require the
+    // independently scoped literal source deadline in the same native turn;
+    // no failure prose is inspected or promoted to authority.
+    if(++reads>3||item.status!=='failed'||!item.result||item.result.isError===false
+      ||keys!==''&&(keys!=='intakePass,runtimeSessionProof'||!matches(args)))return false;
+    if(keys!==''&&failed(item,'ASSISTANT_SOURCE_DEADLINE'))deadline=true;
+   }else if(item.tool==='list_assistant_skills'){
+    if(!deadline||++lists>1||keys!=='companyId,limit,offset,projectId,skillId'
+      ||args.companyId!==intakePass.companyId||args.projectId!==null
+      ||args.skillId!==null&&args.skillId!=='audio-transcription'||!Number.isSafeInteger(args.limit)||args.limit<1||args.limit>100
+      ||args.offset!==0||!failed(item,'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'))return false;
+   }else if(item.tool==='search_agent_guidance'){
+    if(!deadline||++guidance>1||keys!=='companySlug,hints,limit,query'
+      ||typeof args.companySlug!=='string'||!args.companySlug.length||args.companySlug.length>128
+      ||typeof args.query!=='string'||!args.query.trim()||args.query.length>2000
+      ||!Array.isArray(args.hints)||args.hints.length>5||args.hints.some(x=>typeof x!=='string'||x.length>200)
+      ||!Number.isSafeInteger(args.limit)||args.limit<1||args.limit>20
+      ||!failed(item,'ASSISTANT_CAPABILITY_UNAVAILABLE'))return false;
+   }else if(item.tool==='resolve_assistant_intake'){
+    if(!deadline||!['clientRequestId,decision,replyText','clientRequestId,decision,intakePass,replyText,runtimeSessionProof'].includes(keys)
+      ||args.intakePass!==undefined&&!matches(args)||args.clientRequestId!==intakePass.intakeId||args.decision!=='reply_owner'
+      ||typeof args.replyText!=='string'||!args.replyText.trim()||args.replyText.length>4096||args.replyText.includes('\0')
+      ||!failed(item,'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_409'))return false;
+    resolved=true;
+   }else return false;
+  }else return false;
+ }
+ return users===1&&contexts===1&&reads>0&&deadline&&resolved;
+};
 /** Separate terminal certificate for an ordinary cancelled owner FILE read.
  * This does not reopen that intake or admit a model/send. The coordinator must
  * additionally hold an expired immutable native cancellation, no local provider
@@ -756,7 +826,11 @@ const exactReadTechnicalReplyFailure=(turn,{intakePass,witness})=>{
   }
   return users===1&&contexts===1&&ready&&fetches>0&&selectedFailure&&resolved;
 };
-export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection,cancelledContextRead}={})=>{
+export const assistantReadOnlyPreparationFailure=async(turn,{deliveryId,intakePass,environment=process.env,signal,verifyShell=verifyAssistantPowerShellReadExecutable,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection,cancelledContextRead,cancelledSourceRead}={})=>{
+ if(cancelledSourceRead!==undefined){
+  if(cancelledSourceRead!==true||[cancelledContextRead,technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection].some(value=>value!==undefined))return false;
+  return cancelledSourceReadFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell});
+ }
  if(cancelledContextRead!==undefined){
   if(cancelledContextRead!==true||[technicalReplyCorrection,readOnlyContinuation,generationReplyCorrection,replyDispatchCorrection].some(value=>value!==undefined))return false;
   return cancelledContextReadFailure(turn,{deliveryId,intakePass,environment,signal,verifyShell});
@@ -878,6 +952,9 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     if(options.readOnlyPreparation!==undefined){
+      if(options.cancelledSourceRead!==undefined&&(options.cancelledSourceRead!==true
+        ||[options.technicalReplyCorrection,options.readOnlyContinuation,options.generationReplyCorrection,
+          options.replyDispatchCorrection].some(value=>value!==undefined)))return {state:'uncertain'};
       if(options.cancelledContextRead!==undefined&&(options.cancelledContextRead!==true
         ||[options.technicalReplyCorrection,options.readOnlyContinuation,options.generationReplyCorrection,
           options.replyDispatchCorrection].some(value=>value!==undefined)))return {state:'uncertain'};
@@ -927,11 +1004,24 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
           }else if(successors.length)return {state:'uncertain'};
         }
         if(response.nextCursor===null){
-          if(matches!==1||!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
+          if(matches!==1)return {state:'uncertain'};
+          const common={deliveryId,intakePass:options.readOnlyPreparation,
+            environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable};
+          // Read the native history once, but certify the two disjoint root
+          // modes independently. Each option comes only from its own fresh
+          // native capability. A file-only server can never earn a source-read
+          // witness, and neither selector crosses HTTP/model/journal boundaries.
+          let cancelledFailure=null;
+          if(options.cancelledContextRead===true&&await assistantReadOnlyPreparationFailure(selected,{...common,cancelledContextRead:true}))
+            cancelledFailure='company_context_file_read_cancelled';
+          if(!cancelledFailure&&options.cancelledSourceRead===true&&await assistantReadOnlyPreparationFailure(selected,{...common,cancelledSourceRead:true}))
+            cancelledFailure='owner_source_read_deadline_cancelled';
+          if(options.cancelledContextRead||options.cancelledSourceRead){if(!cancelledFailure)return {state:'uncertain'};}
+          else if(!await assistantReadOnlyPreparationFailure(selected,{deliveryId,intakePass:options.readOnlyPreparation,
             environment:options.environment??process.env,signal:options.signal,verifyShell:options.verifyReadOnlyShell??verifyAssistantPowerShellReadExecutable,
-            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection,replyDispatchCorrection:options.replyDispatchCorrection,cancelledContextRead:options.cancelledContextRead}))return {state:'uncertain'};
-          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:options.cancelledContextRead?'company_context_file_read_cancelled':options.replyDispatchCorrection?'owner_reply_dispatch_refused':options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
-            ?(selected.items.some(item=>item.type==='mcpToolCall'&&item.tool==='fetch')?'company_context_exact_read_failed_reply':'company_context_rate_limited_reply'):options.readOnlyContinuation?'company_context_read_cancelled':'company_context_preparation_timeout'};
+            technicalReplyCorrection:options.technicalReplyCorrection,readOnlyContinuation:options.readOnlyContinuation,generationReplyCorrection:options.generationReplyCorrection,replyDispatchCorrection:options.replyDispatchCorrection}))return {state:'uncertain'};
+          return {state:selected.status,turnId:selected.id,receipt:`codex:${threadId}:${selected.id}`,readOnlyFailure:cancelledFailure??(options.replyDispatchCorrection?'owner_reply_dispatch_refused':options.generationReplyCorrection?'company_context_generation_changed_reply':options.technicalReplyCorrection
+            ?(selected.items.some(item=>item.type==='mcpToolCall'&&item.tool==='fetch')?'company_context_exact_read_failed_reply':'company_context_rate_limited_reply'):options.readOnlyContinuation?'company_context_read_cancelled':'company_context_preparation_timeout')};
         }
         if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))return {state:'uncertain'};
         cursor=response.nextCursor;seen.add(cursor);

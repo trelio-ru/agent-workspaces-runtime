@@ -889,6 +889,65 @@ const readonlyPreparationFixture=()=>{
  * not an interpretation of an assistant's explanation. No production message,
  * locator, answer or company material is used by this regression.
  */
+const cancelledSourceReadFixture=()=>{
+ const f=readonlyPreparationFixture();
+ const call=(tool,args,code)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:code?'failed':'completed',arguments:args,
+  result:code?{structuredContent:{code},content:[{type:'text',text:code}]}:{content:[]}});
+ const scoped={intakePass:f.intakePass,runtimeSessionProof:{}};
+ f.turn.items=[f.turn.items[0],call('get_assistant_intake_context',scoped),
+  call('get_assistant_intake_context',scoped,'ASSISTANT_SOURCE_DEADLINE'),
+  call('list_assistant_skills',{companyId:f.intakePass.companyId,projectId:null,skillId:null,limit:50,offset:0},'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'),
+  call('search_agent_guidance',{companySlug:'synthetic',query:'SYNTHETIC_ASR_QUERY',hints:[],limit:5},'ASSISTANT_CAPABILITY_UNAVAILABLE'),
+  {...call('get_assistant_intake_context',{}),status:'failed'},
+  call('resolve_assistant_intake',{clientRequestId:f.intakePass.intakeId,decision:'reply_owner',replyText:'SYNTHETIC_REPLY'},
+   'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_409')];
+ return f;
+};
+test('cancelled source-read certificate is separate from file, legacy and successful business turns',async()=>{
+ const f=cancelledSourceReadFixture();
+ assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,cancelledSourceRead:true}),true);
+ for(const options of [{},{cancelledContextRead:true},{readOnlyContinuation:true},
+  {cancelledSourceRead:false},{cancelledSourceRead:true,cancelledContextRead:true},
+  {cancelledSourceRead:true,replyDispatchCorrection:true},{cancelledSourceRead:true,technicalReplyCorrection:{}}])
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,...options}),false);
+});
+test('cancelled source-read certificate refuses provider attempts, foreign reads, extra actions and unknown reply results',async()=>{
+ const changes=[t=>{t.status='failed';},t=>{t.error={code:'OTHER'};},t=>{t.items.push(structuredClone(t.items[0]));},
+  t=>{t.items[1].arguments.intakePass={...t.items[1].arguments.intakePass,intakeId:randomUUID()};},
+  t=>{t.items[2].result.structuredContent.code='ASSISTANT_INTAKE_CHANGED';},
+  t=>{t.items[2].status='completed';},t=>{t.items[3].status='completed';},
+  t=>{t.items[3].arguments.companyId=randomUUID();},t=>{t.items[3].arguments.skillId='other';},
+  t=>{t.items[4].result.structuredContent.code='ASSISTANT_SOURCE_UNAVAILABLE';},
+  t=>{t.items[5].status='completed';},t=>{t.items[5].arguments={arbitrary:true};},
+  t=>{t.items.at(-1).status='completed';},t=>{t.items.at(-1).result.isError=false;},
+  t=>{t.items.at(-1).result.structuredContent.code='ASSISTANT_INTAKE_CHANGED';},
+  t=>{t.items.at(-1).arguments.clientRequestId=randomUUID();},
+  t=>{t.items.at(-1).arguments.replyFile={workspaceId:randomUUID()};},
+  t=>{t.items.at(-1).arguments.decision='create_task';},t=>{t.items.at(-1).arguments.replyText='x'.repeat(4097);},
+  t=>{t.items.splice(-1,0,{type:'mcpToolCall',server:'trelio-assistant',tool:'continue_assistant_workspace_action',status:'failed',arguments:{},result:{}});},
+  t=>{t.items.splice(2,0,{type:'commandExecution',status:'completed',exitCode:0,command:'provider start',commandActions:[]});},
+  t=>{t.items.splice(2,0,{type:'unknown'});},t=>{t.items.pop();},t=>{t.items.push(structuredClone(t.items.at(-1)));}];
+ for(const change of changes){const f=cancelledSourceReadFixture();change(f.turn);
+  assert.equal(await assistantReadOnlyPreparationFailure(f.turn,{...f,cancelledSourceRead:true}),false,String(change));}
+});
+test('native cancelled-source reader requires its independent selector and complete unique history',async()=>{
+ const f=cancelledSourceReadFixture();
+ const read=(options={},pages=()=>({data:[f.turn],nextCursor:null}))=>readAssistantCodexDelivery(f.threadId,f.deliveryId,{
+  executable:process.execPath,environment:f.environment,readOnlyPreparation:f.intakePass,...options,
+  spawnProcess:nativeRpc(request=>{
+   if(request.method==='thread/read')return {result:{thread:{id:f.threadId,cwd:process.cwd()}}};
+   assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');return {result:pages(request.params)};
+  })});
+ const witness=await read({cancelledSourceRead:true});
+ assert.equal(witness.readOnlyFailure,'owner_source_read_deadline_cancelled');assert.equal(witness.turnId,f.turn.id);
+ assert.equal(JSON.stringify(witness).includes('SYNTHETIC_REPLY'),false,'only the closed structural witness leaves the native reader');
+ assert.deepEqual(await read({cancelledContextRead:true}),{state:'uncertain'},'a file-only backend cannot admit a source deadline');
+ assert.equal((await read({cancelledContextRead:true,cancelledSourceRead:true})).readOnlyFailure,witness.readOnlyFailure);
+ for(const options of [{cancelledSourceRead:false},{cancelledSourceRead:true,readOnlyContinuation:true},
+  {cancelledSourceRead:true,replyDispatchCorrection:true}])assert.deepEqual(await read(options),{state:'uncertain'});
+ assert.deepEqual(await read({cancelledSourceRead:true},()=>({data:[f.turn,f.turn],nextCursor:null})),{state:'uncertain'});
+ assert.deepEqual(await read({cancelledSourceRead:true},()=>({data:[f.turn],nextCursor:'same'})),{state:'uncertain'},'incomplete/repeated pages never certify a prefix');
+});
 const cancelledContextReadFixture=()=>{
  const f=readonlyPreparationFixture(),code='ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED';
  f.turn.items=f.turn.items.filter(item=>item.type!=='commandExecution');

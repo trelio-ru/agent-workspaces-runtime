@@ -1384,6 +1384,10 @@ same runtime contract. Cover actual skill/import/bootstrap child processes.
   and exact pre-reservation whole-turn certificate. Legacy continuation never
   borrows that root; no provider attempt, ready result or arbitrary action qualifies.
   Independent native capabilities must cross the actual begin/read/cancel device codec; mocked coordinator DTOs are insufficient. Missing fields stay unsupported, and malformed versions refuse without retry.
+  Cancelled source READ deadlines have their own native capability and complete
+  read-only terminal certificate. Never borrow the file capability, infer an
+  absent send from a generic error, replay a decoder or give the child Task/Run
+  authority; see the same scheduler contract. Backend support precedes activation.
   A later independent task creation may be skipped only with SAME settled local
   original, fresh native created/task/receipt and whole exact completed native
   context/resolve chain. Inventory unknown rows before the eight-row bound;

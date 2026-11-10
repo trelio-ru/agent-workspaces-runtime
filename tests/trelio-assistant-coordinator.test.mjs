@@ -2550,8 +2550,10 @@ test('an unknown next READY restores ordinary dispatch review, never a repeated 
   }finally{await f.coordinator.close();}
 });
 
-for(const mode of ['success','lost_committed','lost_unknown','legacy_capability','wrong_terminal','unchanged_prerequisite',
- 'bad_receipt','provider_attempt','unexpired','foreign_owner','capability_revoked','invalid_capability','invalid_lease'])test(`ordinary cancelled file-read recovery uses its own native capability and one begin (${mode})`,async t=>{
+for(const certificate of ['file','source'])for(const mode of ['success','lost_committed','lost_unknown','legacy_capability','wrong_terminal','other_certificate','unchanged_prerequisite',
+ 'bad_receipt','provider_attempt','unexpired','foreign_owner','capability_revoked','invalid_capability','invalid_lease'])test(`ordinary cancelled ${certificate}-read recovery uses its own native capability and one begin (${mode})`,async t=>{
+ const capability=certificate==='file'?'readOnlyCancelledContextRecoveryProtocolVersion':'readOnlyCancelledSourceRecoveryProtocolVersion';
+ const failure=certificate==='file'?'company_context_file_read_cancelled':'owner_source_read_deadline_cancelled';
  const f=fixture(t);await f.coordinator.close();
  const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID();
  const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,
@@ -2576,7 +2578,7 @@ for(const mode of ['success','lost_committed','lost_unknown','legacy_capability'
  const common={schemaVersion:1,companyId:f.companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,
   taskId:null,readConfirmed:true,ownerPrivateRead:true,execution:f.execution.configuration,
   leaseExpiresAt:new Date(f.options.now()+(mode==='unexpired'?1800000:-1)).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyContinuationProtocolVersion:1,
-  ...(mode==='legacy_capability'?{}:{readOnlyCancelledContextRecoveryProtocolVersion:mode==='invalid_capability'?2:1})};
+  ...(mode==='legacy_capability'?{}:{[capability]:mode==='invalid_capability'?2:1})};
  if(mode==='foreign_owner')common.ownerPrivateRead=false;
  if(mode==='invalid_lease')common.leaseExpiresAt='UNKNOWN';
  const outcomes=new Map([[original.id,{...common,id:original.id,state:'cancelled',receiptId:mode==='bad_receipt'?randomUUID():receiptId}]]);
@@ -2586,7 +2588,7 @@ for(const mode of ['success','lost_committed','lost_unknown','legacy_capability'
  f.options.client.readSourceIntake=async input=>{
   const value=outcomes.get(input.intakeId);if(!value)throw Object.assign(new Error('unknown admission'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
   const result=structuredClone(value);
-  if(input.intakeId===original.id&&++originalReads>1&&mode==='capability_revoked')delete result.readOnlyCancelledContextRecoveryProtocolVersion;
+  if(input.intakeId===original.id&&++originalReads>1&&mode==='capability_revoked')delete result[capability];
   return result;
  };
  f.options.client.beginSourceIntake=async input=>{
@@ -2605,8 +2607,10 @@ for(const mode of ['success','lost_committed','lost_unknown','legacy_capability'
  f.options.native.readDelivery=async(thread,marker,options)=>{
   assert.equal(thread,threadId);
   if(marker===original.delivery_id){
-   assert.equal(options.cancelledContextRead,true);assert.equal(options.readOnlyContinuation,undefined);
-   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:'company_context_file_read_cancelled'})};
+   assert.equal(options[certificate==='file'?'cancelledContextRead':'cancelledSourceRead'],true);assert.equal(options.readOnlyContinuation,undefined);
+   assert.equal(options[certificate==='file'?'cancelledSourceRead':'cancelledContextRead'],undefined,'the other capability is never inferred');
+   return {state:'completed',turnId:randomUUID(),...(mode==='wrong_terminal'?{}:{readOnlyFailure:mode==='other_certificate'
+    ?certificate==='file'?'owner_source_read_deadline_cancelled':'company_context_file_read_cancelled':failure})};
   }
   return f.deliveries.get(marker)??{state:'uncertain'};
  };

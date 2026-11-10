@@ -4136,6 +4136,31 @@ input never infer support. A present value other than exact numeric 1 refuses
 the response without retry. This response metadata changes no request ABI,
 recovery witness, model authority or provider/SQL admission.
 
+An ordinary cancelled owner-source READ has a separate native negotiation:
+`readOnlyCancelledSourceRecoveryProtocolVersion:1`. It never borrows the file
+capability. Its complete error-free terminal witness permits one successful
+scoped intake context, up to three failed context reads including one literal
+scoped `ASSISTANT_SOURCE_DEADLINE`, and one final `reply_owner` refused by the
+exact local arguments-preparation HTTP409 code before native reply reservation.
+One failed empty-schema context read remains only that known read operation;
+its prose is not interpreted. The only additional MCP calls are one refused
+same-company setup inventory (`ASSISTANT_LOCAL_SETUP_TASK_ACTIVE`) and one
+refused guidance read (`ASSISTANT_CAPABILITY_UNAVAILABLE`). Neither launches a
+provider. Successful discovery, arbitrary tools/commands, files, other decisions,
+foreign selectors and successful/unknown final replies fail closed.
+
+The same ordinary-root immutable native cancellation/receipt, original expired
+lease, private confirmed source, absent provider fences, changed trusted
+prerequisite, one-child/20-chain bounds and begin-before-HTTP journal apply.
+The new selector and witness label stay host-only; native HTTP retains the
+existing `readOnlyContinuation:true` metadata and independently guarded SQL
+root. The child is unread and REPLY-ONLY: no Task, Run, route, dialogue, old lease
+renewal or replay. It must reread the exact current original and ASR through the
+ordinary signed source engine. A completed matching transcription may be reused
+by a compatible provider only after fresh original admission/full-byte checks;
+an unknown decoder claim never permits a second decoder. Backend capability
+publication must precede runtime activation. Existing minima stay unchanged.
+
 
 A positively delivered generation-only technical reply has one independent
 post-fix certificate, `generationReplyCorrection:true`, requiring native
