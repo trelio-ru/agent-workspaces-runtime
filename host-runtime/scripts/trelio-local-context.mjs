@@ -8654,7 +8654,7 @@ export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, 
   };
   const open = () => {
     let environment = sanitizeAgentSkillInheritedEnvironment();
-    for (const key of ["TRELIO_PLUGIN_ROOT", "TRELIO_PLUGIN_VERSION", "TRELIO_HOST_RUNTIME_VERSION", "TRELIO_HOST_RUNTIME_DIRECTORY"])
+    for (const key of ["TRELIO_PLUGIN_ROOT", "TRELIO_PLUGIN_VERSION", "TRELIO_HOST_RUNTIME_VERSION", "TRELIO_HOST_RUNTIME_DIRECTORY", "TRELIO_WORKSPACE_CLIENT_PROFILE"])
       if (process.env[key] !== undefined) environment[key] = process.env[key];
     child = spawnReader ? spawnReader() : fork(fileURLToPath(import.meta.url), ["--company-search-reader"], {
       execPath: process.execPath, execArgv: ["--max-old-space-size=2048"],

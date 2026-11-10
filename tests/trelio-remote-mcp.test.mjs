@@ -3035,7 +3035,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.clientKind.enum,
-    ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"],
+    ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"],
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.intent.enum,
@@ -3317,7 +3317,7 @@ test("diagnostics prepare an exact native read despite an independent folder blo
 });
 
 test("diagnostic next read selects an existing scope or company discovery without executing a proxy", async () => {
-  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"]) {
+  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"]) {
     const scope = { companySlug: "company", projectSlug: "project" };
     for (const workingFolder of [{ status: "ready", scope }, { status: "not_checked" }]) {
       const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {

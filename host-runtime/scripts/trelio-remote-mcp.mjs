@@ -84,6 +84,7 @@ import {
   request,
   requireToken,
   resolveWorkspaceBridgeConfigDirectory,
+  workspaceBridgeClientEnvironment,
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
 import { diagnosePublicTrelioService } from "./trelio-public-service-diagnostic.mjs";
@@ -4073,7 +4074,7 @@ const LOCAL_TOOLS = [
       properties: {
         clientKind: {
           type: "string",
-          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"],
+          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"],
           description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
         },
         intent: {
@@ -6016,7 +6017,7 @@ export const handleToolCall = async (
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding", "readTarget"].includes(key))
-      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"].includes(rawArguments.clientKind)
+      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
@@ -6034,7 +6035,7 @@ export const handleToolCall = async (
       const prepared = await folderOnboardingPrepare({
         ...rawArguments.folderOnboarding,
         // Select native clients' file format without changing legacy plans.
-        ...(["cursor", "antigravity", "deepseek-harness"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
+        ...(["cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
       });
       return buildTextResult(prepared);
     }
@@ -6042,7 +6043,7 @@ export const handleToolCall = async (
       origin,
       clientKind: rawArguments.clientKind,
       includeHookStartup: rawArguments.intent === "diagnostics"
-        && !["cursor", "antigravity", "deepseek-harness"].includes(rawArguments.clientKind),
+        && !["cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(rawArguments.clientKind),
       signal,
     });
     let codexRouting = null;
@@ -6826,6 +6827,7 @@ export const runStdioHost = async ({
   handleMessage = handleLocalMcpMessage,
   environment = process.env,
   legacyMcpMigration = removeCodexLegacyTrelioMcpRegistration,
+  migrateClientConfiguration = migrateCodexLegacyTrelioMcpForRuntime,
   startRuntimeDelegate = startHostRuntimeMcpDelegate,
   spawnProcess = spawn,
   statFile = fs.lstat,
@@ -6837,7 +6839,7 @@ export const runStdioHost = async ({
   // Antigravity's exact native shell selects text delivery. No client/model
   // self-report changes admission, and Codex/Claude/Cursor keep their bytes.
   const textCompatibility = await resolveLocalMcpTextCompatibility(environment);
-  const codexLegacyMcpMigration = await migrateCodexLegacyTrelioMcpForRuntime({
+  const codexLegacyMcpMigration = await migrateClientConfiguration({
     environment,
     migrate: legacyMcpMigration,
   });
@@ -7043,6 +7045,7 @@ export const runStdioHost = async ({
         clientCapabilities,
         textCompatibility,
         requestClient,
+        notifyClient: enqueueResponse,
         codexLegacyMcpMigration,
         recordDiagnostic: diagnosticReporter.record,
         runtimeUpgradeRecovery: async (_error, rejectedMessage, recoverySignal) => {
@@ -7351,8 +7354,12 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
    */
   const createHarnessConnection = ({
     httpRequest = remoteMcpHttpRequest, httpJson = oauthHttpJson,
-    connectOAuth = connectRemoteMcpOAuth, vault,
+    connectOAuth = connectRemoteMcpOAuth, vault, nativeClient = "deepseek-harness",
   } = {}) => {
+    if (!["deepseek-harness", "kimi-work"].includes(nativeClient)) {
+      throw fail("TRELIO_NATIVE_CLIENT_INVALID", "Неизвестный native OAuth client.");
+    }
+    const isKimi = nativeClient === "kimi-work";
     let configuration, identity, session, initializing, sequence = 0;
     const config = () => configuration ??= { schemaVersion: 3, endpoint: RESOURCE, protocolVersion: PROTOCOL,
       headers: Object.fromEntries(buildBridgeRequestHeaders(null)), authentication: { type: "oauth2_pkce", scopes: [] } };
@@ -7366,16 +7373,17 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       }
       config().authentication.scopes = [...new Set(scopes)].sort();
       identity = { remoteMcp: { configFingerprint: crypto.createHash("sha256")
-        .update(JSON.stringify({ endpoint: RESOURCE, protocolVersion: PROTOCOL, scopes: config().authentication.scopes })).digest("hex") } };
+        .update(JSON.stringify({ endpoint: RESOURCE, protocolVersion: PROTOCOL, scopes: config().authentication.scopes,
+          ...(isKimi ? { nativeClient } : {}) })).digest("hex") } };
       return identity;
     };
-    const store = vault ?? createRemoteMcpOAuthVault({ nativeClient: "deepseek-harness",
-      namespace: "native-trelio-deepseek-harness-v1", credentialFile:
-        path.join(resolveWorkspaceBridgeConfigDirectory(), "native-clients", "deepseek-harness", "credential.json") });
+    const store = vault ?? createRemoteMcpOAuthVault({ nativeClient,
+      namespace: `native-trelio-${nativeClient}-v1`, credentialFile:
+        path.join(resolveWorkspaceBridgeConfigDirectory(), "native-clients", nativeClient, "credential.json") });
     const credential = async signal => {
       if (!identity) await readMetadata(signal);
       const current = await store.read(ORIGIN, identity);
-      if (!current || current.expiresAt <= Date.now()) throw fail("TRELIO_HARNESS_AUTH_REQUIRED",
+      if (!current || current.expiresAt <= Date.now()) throw fail(isKimi ? "TRELIO_KIMI_AUTH_REQUIRED" : "TRELIO_HARNESS_AUTH_REQUIRED",
         "Подключите Trelio инструментом trelio_connect. Вход выполняется только в браузере.");
       return current.accessToken;
     };
@@ -7414,7 +7422,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       initializing = (async () => {
         const token = await credential(signal);
         const { response, result } = await rpcOnce("initialize", { protocolVersion: PROTOCOL, capabilities: {},
-          clientInfo: { name: "trelio-deepseek-harness", version: getHostRuntimeVersion() } }, signal, token, null);
+          clientInfo: { name: `trelio-${nativeClient}`, version: getHostRuntimeVersion() } }, signal, token, null);
         if (result?.protocolVersion !== PROTOCOL) throw fail("TRELIO_HARNESS_PROTOCOL_INVALID", "Trelio не согласовал MCP protocol.");
         const next = { sessionId: response.sessionId ?? null, instructions: result.instructions ?? "" };
         await httpRequest({ config: config(), credential: token, sessionId: next.sessionId,
@@ -7431,7 +7439,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         const current = await store.read(ORIGIN, target);
         if (reauthorize || !current || current.expiresAt <= Date.now()) {
           const created = await connectOAuth(config(), { signal, resolveEndpoint: resolveSafeRemoteMcpEndpoint,
-            clientName: "Trelio – DeepSeek Harness", resource: RESOURCE,
+            clientName: isKimi ? "Trelio – Kimi Work" : "Trelio – DeepSeek Harness", resource: RESOURCE,
+            ...(isKimi ? { publicClientId: "trelio_kimi_work_agent_workspaces_v1" } : {}),
             maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
           await store.write(ORIGIN, target, created);
           const saved = await store.read(ORIGIN, target);
@@ -7589,3 +7598,131 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     createHarnessContinuations, createHarnessConnection, applyHarnessAdapter,
     deepseekHarnessPlugin: { name, inject, apply } };
 })();
+
+/** Kimi Work's stdio carrier shares the native OAuth/HTTP/session engine above.
+ * Its separate, explicitly consented public profile is model-independent:
+ * Kimi hooks, authored arguments and inherited Codex/Claude state never mint
+ * runtime proofs. Object ACL, current company policy and the paired data plane
+ * still run on the server for every operation, including downloads and saves.
+ */
+export const createKimiMcpHandler = ({ connection = createHarnessConnection({ nativeClient: "kimi-work" }) } = {}) => {
+  const connectTool = { name: "trelio_connect", description:
+    "Connect Trelio in Kimi Work using browser OAuth, or refresh the catalogue using the existing grant. Set reauthorize only for an explicitly requested replacement of a revoked or insufficient grant. Never supply tokens or codes; previous business operations are not replayed.",
+    inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false } };
+  const denied = tool => tool?.name === "prepare_agent_secret_browser_fill"
+    || (tool?._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app"));
+  const publicTool = tool => {
+    const result = structuredClone(tool);
+    // These runtime-owned fields cannot be authored through this OAuth profile.
+    // Keep native input/output schemas and annotations otherwise unchanged.
+    for (const key of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) {
+      if (result.inputSchema?.properties) delete result.inputSchema.properties[key];
+      if (result.inputSchema?.required) result.inputSchema.required = result.inputSchema.required.filter(value => value !== key);
+    }
+    delete result._meta;
+    return result;
+  };
+  const catalogue = async signal => {
+    try { return [connectTool, ...(await connection.listTools(signal)).filter(tool => !denied(tool)).map(publicTool)]; }
+    catch (error) {
+      if (["TRELIO_KIMI_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(error.code)) return [connectTool];
+      throw error;
+    }
+  };
+  const instructions = "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
+  return async (message, { signal, notifyClient } = {}) => {
+    if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
+    const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
+    try {
+      if (message.method === "initialize") return reply({ protocolVersion: message.params?.protocolVersion || REMOTE_MCP_PROTOCOL_VERSION,
+        serverInfo: { name: "trelio-kimi-work", version: getHostRuntimeVersion() },
+        capabilities: { tools: { listChanged: true } }, instructions: instructions + connection.instructions() });
+      if (message.method === "ping") return reply({});
+      if (message.method === "tools/list") return reply({ tools: await catalogue(signal) });
+      if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } };
+      const method = message.params?.name, input = message.params?.arguments ?? {};
+      if (!input || typeof input !== "object" || Array.isArray(input) || Buffer.byteLength(JSON.stringify(input)) > 512 * 1024) {
+        throw Object.assign(new Error(), { code: "TRELIO_KIMI_INPUT_INVALID" });
+      }
+      if (method === "trelio_connect") {
+        if (Object.keys(input).some(key => key !== "reauthorize") || (input.reauthorize !== undefined && typeof input.reauthorize !== "boolean")) {
+          throw Object.assign(new Error(), { code: "TRELIO_KIMI_INPUT_INVALID" });
+        }
+        const result = await withPrivateProcessSession(async () => {
+          const connected = await connection.connect(signal, input.reauthorize === true);
+          // Verify the real catalogue before announcing its change. A callback
+          // alone does not prove authentication, protected read or saving.
+          await connection.listTools(signal);
+          return { ...connected, instructions: instructions + connection.instructions() };
+        }, signal);
+        await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+        return reply({ content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+      }
+      const tools = await catalogue(signal);
+      if (!tools.some(tool => tool.name === method) || method === "prepare_agent_secret_browser_fill") {
+        throw Object.assign(new Error(), { code: "TRELIO_KIMI_TOOL_UNAVAILABLE" });
+      }
+      const args = structuredClone(input);
+      for (const key of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) delete args[key];
+      const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(() => connection.call(method, args, callSignal), callSignal), { signal });
+      // Kimi preserves structuredContent and native media. Hidden App metadata
+      // must never become model text; no converter retries the original call.
+      return reply({ content: result.content, ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+        ...(result.isError === true ? { isError: true } : {}) });
+    } catch (error) {
+      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : "TRELIO_KIMI_CONNECTION_FAILED";
+      if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id,
+        error: { code: -32000, message: code, data: { code } } };
+      return reply({ isError: true, content: [{ type: "text", text: `${code}: подключение Trelio в Kimi Work не завершено. Проверьте доступ и повторите только безопасное чтение; неизвестный результат изменения требует read-back.` }], structuredContent: { code } });
+    }
+  };
+};
+
+export const runKimiStdioHost = (options = {}) => {
+  // Source tests may inject a synthetic connection. Real startup must enter
+  // through the generated bootstrap before importing any private state reader.
+  if (!options.connection && workspaceBridgeClientEnvironment().TRELIO_WORKSPACE_CLIENT_PROFILE !== "kimi-work") {
+    throw new Error("TRELIO_KIMI_PROFILE_REQUIRED");
+  }
+  return runStdioHost({ ...options,
+  origin: DEFAULT_ORIGIN, handleMessage: createKimiMcpHandler(options),
+  // Kimi has its own installer/profile. Even inherited CODEX_* values cannot
+  // authorize migration of another client's configuration or plugin cache.
+  migrateClientConfiguration: async () => null, preservePlugin: () => null,
+  });
+};
+
+export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage } = {}) => async (message, options) => {
+  if (!message || message.jsonrpc !== "2.0") return null;
+  const input = message.params?.arguments;
+  // The shared dispatcher must not accidentally grant a browser fill through
+  // a nested native action after the remote catalogue hid the direct tool.
+  // Kimi has no trusted browser delivery surface or MCP App action channel.
+  if (message.method === "tools/call" && (message.params?.name === "prepare_agent_secret_browser_fill"
+    || input?.parameters?.nativeTool === "prepare_agent_secret_browser_fill"
+    || [input?.operation, input?.parameters?.operation].some(value => ["secret_browser_prepare", "secret_browser_fill"].includes(value)))) {
+    return { jsonrpc: "2.0", id: message.id, result: { isError: true,
+      content: [{ type: "text", text: "TRELIO_KIMI_UNSUPPORTED_OPERATION: browser-fill недоступен в Kimi Work." }] } };
+  }
+  if (message.method === "resources/list") return { jsonrpc: "2.0", id: message.id, result: { resources: [] } };
+  if (message.method === "resources/read") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "MCP Apps are unavailable in Kimi Work" } };
+  const sanitized = structuredClone(message);
+  if (sanitized.method === "tools/call" && sanitized.params?.arguments) {
+    for (const key of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) delete sanitized.params.arguments[key];
+  }
+  // The generic delegate starts the ordinary local MCP, which would lose this
+  // Work profile's guards. An upgrade therefore keeps its exact refusal and
+  // waits for a new signed-loader startup instead of switching profiles.
+  const response = await localMessage(sanitized, { ...options, runtimeUpgradeRecovery: null });
+  if (message.method === "tools/list" && response?.result?.tools) response.result.tools = response.result.tools.filter(tool =>
+    !(tool._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app")));
+  return response;
+};
+
+export const runKimiLocalStdioHost = (options = {}) => {
+  if (workspaceBridgeClientEnvironment().TRELIO_WORKSPACE_CLIENT_PROFILE !== "kimi-work") throw new Error("TRELIO_KIMI_PROFILE_REQUIRED");
+  return runStdioHost({ ...options,
+  handleMessage: createKimiLocalMcpHandler(options),
+  origin: DEFAULT_ORIGIN, migrateClientConfiguration: async () => null, preservePlugin: () => null,
+  });
+};

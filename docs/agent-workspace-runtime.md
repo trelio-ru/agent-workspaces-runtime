@@ -3395,6 +3395,60 @@ not_checked. Actual native core fixture + shared proof/installer/OAuth tests
 является live readiness. Fixture зависимости не входят в runtime artifact.
 Qualification fixture rc.3 содержит Zod 4.4.3 с [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5); bundle не исправляет Harness.
 
+## Kimi Work
+
+`bridge kimi install` creates an immutable private `kimi.plugin.json` and
+bootstrap around the existing official stable loader. Both stdio profiles
+(`trelio`, `trelio-remote-skills`) verify the selected signed runtime before
+import, using exact Node and a permanent plugin root. The installer never
+modifies Kimi configuration, another client's trust/hooks, or an existing changed
+bundle. Native plugin installation remains Work's ordinary user-facing flow.
+No stable plugin change, copied provider implementation or new package file is
+required; the signed package retains its 100-file ceiling.
+Kimi's manifest uses the executable basename on PATH, as required by its native
+schema. Before runtime selection the bootstrap compares the real executable
+with the installer's Node; a different GUI PATH fails with
+`TRELIO_KIMI_NODE_PATH_MISMATCH`, without copying binaries or escaping plugin paths.
+
+The remote stdio profile reuses the SAME native connection/session transport
+and OAuth S256/state/loopback engine. Host-only fixed public client
+`trelio_kimi_work_agent_workspaces_v1` has an exact IPv4 loopback template;
+arbitrary skill declarations cannot select this profile. Separate native
+Keychain/DPAPI/Secret Service storage precedes company selection without invented
+company/skill IDs. Credentials never enter MCP, prompt, manifest, argv or env.
+The bootstrap's closed `TRELIO_WORKSPACE_CLIENT_PROFILE=kimi-work` marker selects
+only a local namespace, never admission. Bridge files, pairings, Run registry,
+encrypted device state and Keychain account are isolated from common human
+clients. Kimi never adopts a legacy/common bridge or OAuth credential. Exact
+bridge children, isolated search and signed provider callbacks retain this
+observed namespace; arbitrary inherited provider values cannot select it.
+Valid grants are reused; revoked/insufficient grants require explicit
+`trelio_connect(reauthorize=true)`. Only positive pre-dispatch session rejection
+permits the existing one-handshake retry; ambiguous mutations never replay.
+
+Company `kimiWorkAction` defaults to allow, including old policy revisions
+without this field, while explicit deny is preserved. Server-owned OAuth
+provenance, scopes/object ACL and live paired-data-plane policy remain the
+authority. This profile makes no model/effort claim and creates no hook proof.
+Kimi hooks cannot substitute for Codex/Claude updatedInput or native Harness
+observation. Authored proof/reuse hints are removed, not trusted.
+
+After connect the actual remote catalogue is read before
+`notifications/tools/list_changed`; protected read and saving remain
+`not_checked` until their independent evidence. Complete structuredContent and
+native media remain native MCP values; hidden App grants are never flattened
+into text. App-only methods and secret browser-fill are unavailable, including
+nested local continuations. Exact textual human decisions keep their normal
+backend guards. Diagnosis/folder setup use `clientKind=kimi-work`, AGENTS.md and
+the SAME planner/apply/CAS without foreign configuration migration.
+
+Tests compose the actual OAuth callback/PKCE, native credential separation,
+serial stdio, catalogue notification, structured authority and immutable bundle.
+Backend acceptance composes exchanged OAuth, pairing, real HTTP draft/handoff/
+candidate acceptance and exact Git file read-back. These synthetic fixtures are
+not a live user login in Work. Native Work qualification and production save
+require the signed runtime/backend rollout and independent app read-back.
+
 <a id="skill-awareness"></a>
 ## Company skill awareness
 

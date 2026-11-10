@@ -57,12 +57,12 @@ const binding = {
   project: { name: "Рабочий проект", slug: "work-project" },
 };
 
-for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"]) {
+for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"]) {
   test(`${clientKind} binds and refreshes the folder without replacing personal instructions`, async () => {
     const root = await makeRoot();
     const personal = "# Personal\n\nKeep my formatting.\n";
     await fs.writeFile(path.join(root, "AGENTS.md"), personal);
-    const native = ["cursor", "antigravity", "deepseek-harness"].includes(clientKind);
+    const native = ["cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(clientKind);
     const response = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
       clientKind, intent: "folder_onboarding", folderOnboarding: { folderPath: root, ...binding },
     });
@@ -96,7 +96,7 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
 test("native clients reject a Codex override instead of claiming an unloaded binding", async () => {
   const root = await makeRoot();
   await fs.writeFile(path.join(root, "AGENTS.override.md"), "# Existing override\n");
-  for (const clientKind of ["cursor", "antigravity"]) {
+  for (const clientKind of ["cursor", "antigravity", "deepseek-harness", "kimi-work"]) {
     await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, clientKind, ...binding }),
       { code: "TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET" });
   }

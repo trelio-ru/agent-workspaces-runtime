@@ -349,18 +349,40 @@ const MACOS_SECURITY_EXECUTABLE = "/usr/bin/security";
 const USE_MACOS_KEYCHAIN = process.platform === "darwin"
   && process.env.TRELIO_WORKSPACE_DISABLE_KEYCHAIN !== "1";
 
+/** Local namespace only, never runtime/OAuth admission. The generated Kimi
+ * bootstrap sets this closed discriminator before importing the host. Work
+ * must not adopt or replace a Codex/Claude device grant from the same user:
+ * their server-owned source OAuth families have different policy boundaries.
+ */
+export const workspaceBridgeClientProfile = (environment = process.env) => {
+  const value = environment.TRELIO_WORKSPACE_CLIENT_PROFILE;
+  if (value === undefined) return null;
+  if (value !== "kimi-work") throw new Error("TRELIO_WORKSPACE_CLIENT_PROFILE_INVALID");
+  return value;
+};
+const WORKSPACE_CLIENT_PROFILE = workspaceBridgeClientProfile();
+export const workspaceBridgeClientEnvironment = () => WORKSPACE_CLIENT_PROFILE
+  ? { TRELIO_WORKSPACE_CLIENT_PROFILE: WORKSPACE_CLIENT_PROFILE } : {};
+export const workspaceBridgeCredentialAccount = (origin, environment) => {
+  const profile = environment === undefined ? WORKSPACE_CLIENT_PROFILE : workspaceBridgeClientProfile(environment);
+  return profile ? `${profile}:${origin}` : origin;
+};
+
 export const resolveWorkspaceBridgeConfigDirectory = ({
   platform = process.platform,
   environment = process.env,
   homeDirectory = os.homedir(),
 } = {}) => {
+  const profile = workspaceBridgeClientProfile(environment);
   if (platform === "win32") {
     const localAppData = environment.LOCALAPPDATA
       || path.win32.join(environment.USERPROFILE || homeDirectory, "AppData", "Local");
-    return path.win32.join(localAppData, "Trelio", "workspace-bridge");
+    const base = path.win32.join(localAppData, "Trelio", "workspace-bridge");
+    return profile ? path.win32.join(base, "native-clients", profile) : base;
   }
 
-  return path.posix.join(homeDirectory, ".config", "trelio", "workspace-bridge");
+  const base = path.posix.join(homeDirectory, ".config", "trelio", "workspace-bridge");
+  return profile ? path.posix.join(base, "native-clients", profile) : base;
 };
 
 const LEGACY_HOME_CONFIG_DIRECTORY = path.join(
@@ -1251,10 +1273,10 @@ export const inspectLocalBridgeConnection = async ({
     try {
       keychainSessionConfigured = Boolean(
         await getMacosBridgeSessionToken(normalizedOrigin)
-        || await readMacosBridgeSessionToken(
+        || (!WORKSPACE_CLIENT_PROFILE && await readMacosBridgeSessionToken(
           LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE,
           normalizedOrigin,
-        ),
+        )),
       );
     } catch {
       if (fileSessionConfigured) {
@@ -1318,7 +1340,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   const [git, plugin, runtimeSessions, connection] = await withPrivateProcessSession(() => Promise.all([
     verifyGitRuntime(gitOptions),
     inspectBundledPlugin({ pluginDirectory, loadedPluginVersion, clientKind }),
-    ["cursor", "antigravity"].includes(clientKind) ? { status: "not_applicable" }
+    ["cursor", "antigravity", "kimi-work"].includes(clientKind) ? { status: "not_applicable" }
       : skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
     skipPrivateInspection ? skippedPrivateState : inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
   ]), signal);
@@ -2206,7 +2228,7 @@ const readMacosBridgeSessionToken = async (service, origin) => {
 };
 
 export const getMacosBridgeSessionToken = (origin) => (
-  readMacosBridgeSessionToken(BRIDGE_SESSION_KEYCHAIN_SERVICE, origin)
+  readMacosBridgeSessionToken(BRIDGE_SESSION_KEYCHAIN_SERVICE, workspaceBridgeCredentialAccount(origin))
 );
 
 // Other trusted host features may use the same reviewed stdin-only Keychain
@@ -2237,7 +2259,7 @@ const setMacosBridgeSessionToken = async (origin, value) => {
   const response = await executeMacosBridgeKeychainHelper({
     operation: "set",
     service: BRIDGE_SESSION_KEYCHAIN_SERVICE,
-    account: origin,
+    account: workspaceBridgeCredentialAccount(origin),
     value,
     ...(MACOS_BRIDGE_KEYCHAIN_TEST_PATH
       ? { keychainPath: MACOS_BRIDGE_KEYCHAIN_TEST_PATH }
@@ -2267,7 +2289,7 @@ const deleteMacosBridgeSessionTokenForService = async (service, origin) => {
 };
 
 export const deleteMacosBridgeSessionToken = (origin) => (
-  deleteMacosBridgeSessionTokenForService(BRIDGE_SESSION_KEYCHAIN_SERVICE, origin)
+  deleteMacosBridgeSessionTokenForService(BRIDGE_SESSION_KEYCHAIN_SERVICE, workspaceBridgeCredentialAccount(origin))
 );
 
 export const deleteMacosPrivateKeychainValue = deleteMacosBridgeSessionTokenForService;
@@ -4901,6 +4923,7 @@ const loadBridgeSessionToken = async (origin, options = {}) => {
     // v1.4.1 moved sessions into the owner-only file. Keep that source until a
     // separately named helper-owned item was written and read back, then
     // delete only the old service. This avoids ACL ambiguity between binaries.
+    if (WORKSPACE_CLIENT_PROFILE) return null;
     const legacyKeychainToken = await readMacosBridgeSessionToken(
       LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE,
       origin,
@@ -4962,7 +4985,7 @@ const loadBridgeSessionToken = async (origin, options = {}) => {
   // проверенный обычный файл, затем сохраняем ciphertext в LOCALAPPDATA и
   // удаляем старый plaintext лишь после DPAPI read-back.
   if (
-    process.platform === "win32"
+    !WORKSPACE_CLIENT_PROFILE && process.platform === "win32"
     && LEGACY_HOME_CREDENTIAL_FILE !== CREDENTIAL_FILE
     && await assertPrivateFileIfPresent(LEGACY_HOME_CREDENTIAL_FILE)
   ) {
@@ -4988,6 +5011,7 @@ const loadBridgeSessionToken = async (origin, options = {}) => {
 };
 
 const loadLegacyOAuthToken = async (origin) => {
+  if (WORKSPACE_CLIENT_PROFILE) return null;
   const keychainToken = await getKeychainValue(LEGACY_KEYCHAIN_SERVICE, origin);
   const credentials = await readFallbackCredentials();
   return keychainToken || credentials[origin]?.accessToken || null;
@@ -9228,6 +9252,9 @@ export const buildAgentSkillRuntimeEnvironment = ({
         }
       : {}),
     TRELIO_LOCAL_FORM_MODULE_URL: import.meta.url,
+    // Signed provider callbacks re-enter this same host module. Preserve only
+    // its observed namespace, never an inherited arbitrary profile or token.
+    ...workspaceBridgeClientEnvironment(),
     TRELIO_LOCAL_FORM_NODE_EXECUTABLE: process.execPath,
     // Public code location only. Private mail/browser admission is checked
     // again by this host bridge against the current bound actor and attempt.
@@ -20010,6 +20037,59 @@ export const installDeepseekBundle = async ({ pluginRoot = process.env.TRELIO_PL
     installedInHarness: false, nextAction: "Use dsh plugin --profile <actual-profile> add <bundleDirectory>; reload that profile, then call trelio_connect." };
 };
 
+/** Kimi Work installs its own small manifest; the official stable shell stays
+ * unchanged. Both stdio servers select and verify the current signed runtime
+ * before import. Keep this bootstrap at a permanent path, outside Workspace
+ * material, and never copy credentials or provider code into the bundle.
+ */
+export const buildKimiWorkBundle = ({ pluginRoot, nodePath = process.execPath }) => {
+  if (![pluginRoot, nodePath].every(value => typeof value === "string" && path.isAbsolute(value) && !value.includes("\0"))) {
+    throw new Error("TRELIO_KIMI_PLUGIN_ROOT_REQUIRED");
+  }
+  const loader = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-loader.mjs")).href;
+  const shell = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-shell.mjs")).href;
+  // Kimi rejects absolute command paths in plugin manifests. Use its documented
+  // PATH form, then verify the observed executable against the installer's Node
+  // before loading the signed host. A different GUI PATH fails explicitly;
+  // copying a binary or symlinking outside the plugin would violate its sandbox.
+  const server = profile => ({ command: path.basename(nodePath), args: ["./bootstrap.mjs", profile], cwd: "./", toolTimeoutMs: 360_000 });
+  return {
+    "kimi.plugin.json": `${JSON.stringify({ name: "trelio-agent-workspaces", version: "0.1.0",
+      description: "Trelio Agent Workspaces for Kimi Work", interface: { displayName: "Trelio Agent Workspaces" },
+      mcpServers: { trelio: server("remote"), "trelio-remote-skills": server("local") },
+      systemPrompt: `Use Trelio in Kimi Work with clientKind=kimi-work. Connect via trelio_connect; never use Codex/Claude hooks or author runtimeSessionProof. Read the applicable Trelio workflow from ${path.join(pluginRoot, "skills", "trelio-workspace-worker", "SKILL.md")} before Workspace work. MCP Apps and secret browser-fill are unavailable. OAuth, protected read, bridge and saved Workspace are separate checks; report only verified results.` }, null, 2)}\n`,
+    "bootstrap.mjs": `// Generated bootstrap; all execution remains in the verified signed runtime.\nimport { pathToFileURL } from 'node:url';\nimport path from 'node:path';\nimport fs from 'node:fs/promises';\nimport { selectHostRuntime } from ${JSON.stringify(loader)};\nimport { PLUGIN_VERSION } from ${JSON.stringify(shell)};\nconst profile = process.argv[2];\nif (process.argv.length !== 3 || !['remote','local'].includes(profile)) throw new Error('TRELIO_KIMI_PROFILE_INVALID');\nif (await fs.realpath(process.execPath) !== await fs.realpath(${JSON.stringify(nodePath)})) throw new Error('TRELIO_KIMI_NODE_PATH_MISMATCH');\nconst selected = await selectHostRuntime();\nif (!selected) throw new Error('TRELIO_HOST_RUNTIME_REQUIRED');\nprocess.env.TRELIO_PLUGIN_ROOT = ${JSON.stringify(pluginRoot)};\nprocess.env.TRELIO_PLUGIN_VERSION = PLUGIN_VERSION;\nprocess.env.TRELIO_HOST_RUNTIME_VERSION = selected.runtimeVersion;\nprocess.env.TRELIO_WORKSPACE_CLIENT_PROFILE = 'kimi-work';\nconst runtime = await import(pathToFileURL(path.join(selected.runtimeDirectory,'scripts','trelio-remote-mcp.mjs')).href);\nconst start = profile === 'remote' ? runtime.runKimiStdioHost : runtime.runKimiLocalStdioHost;\nif (typeof start !== 'function') throw new Error('TRELIO_KIMI_RUNTIME_REQUIRED');\nawait start();\n`,
+  };
+};
+
+export const installKimiWorkBundle = async ({ pluginRoot = process.env.TRELIO_PLUGIN_ROOT,
+  configDirectory = resolveWorkspaceBridgeConfigDirectory(), nodePath = process.execPath } = {}) => {
+  if (!pluginRoot) throw new Error("TRELIO_KIMI_PLUGIN_ROOT_REQUIRED");
+  const root = await fs.realpath(pluginRoot);
+  const manifest = JSON.parse(await fs.readFile(path.join(root, ".claude-plugin", "plugin.json"), "utf8"));
+  if (manifest.name !== "trelio-agent-workspaces") throw new Error("TRELIO_KIMI_PLUGIN_ROOT_REQUIRED");
+  const files = buildKimiWorkBundle({ pluginRoot: root, nodePath });
+  const digest = crypto.createHash("sha256").update(JSON.stringify(files)).digest("hex");
+  const directory = path.join(configDirectory, "native-clients", "kimi-work", "bundles", digest);
+  await ensurePrivateDirectory(directory);
+  for (const [name, bytes] of Object.entries(files)) {
+    const file = path.join(directory, name);
+    let handle;
+    try {
+      handle = await fs.open(file, "wx", 0o600);
+      await handle.writeFile(bytes); await handle.close(); handle = null;
+      if (process.platform === "win32") await hardenWindowsPrivatePath(file, "file");
+    } catch (error) {
+      await handle?.close();
+      if (error.code !== "EEXIST") throw error;
+      await assertPrivatePathKind(file, "file");
+      if (await fs.readFile(file, "utf8") !== bytes) throw new Error("TRELIO_KIMI_BUNDLE_CHANGED");
+    }
+  }
+  return { bundleDirectory: directory, installedInKimiWork: false,
+    nextAction: "Install this exact directory through Kimi Work Plugins → Personal, open a new local project task, then call trelio_connect." };
+};
+
 const printHelp = () => {
   process.stdout.write(
     `Trelio Agent Workspace Runtime ${HOST_RUNTIME_VERSION} (plugin ${PLUGIN_VERSION})\n\n`,
@@ -20356,6 +20436,11 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2)) 
       throw new Error("Команда deepseek поддерживает только install без параметров.");
     }
     process.stdout.write(`${JSON.stringify(await installDeepseekBundle(), null, 2)}\n`);
+  } else if (command === "kimi") {
+    if (positional.length !== 1 || positional[0] !== "install" || Object.keys(options).length) {
+      throw new Error("Команда kimi поддерживает только install без параметров.");
+    }
+    process.stdout.write(`${JSON.stringify(await installKimiWorkBundle(), null, 2)}\n`);
   } else if (command === "doctor") {
     await doctor(options);
   } else if (command === "login") {

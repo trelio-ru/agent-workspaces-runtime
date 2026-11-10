@@ -1383,6 +1383,8 @@ replay after display failure. Test real registry/storage reopening and refusals.
 Folder planner и apply dispatcher используют общий exact client predicate;
 проверяй returned action целиком для setup и refresh, а не только file writer.
 Public plugin shell для этого клиента не меняется.
+Kimi Work uses its own default-allow OAuth profile, immutable native bundle and
+the SAME bridge/data plane, without foreign hooks. See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
 Node children reconstruct `ELECTRON_RUN_AS_NODE=1` only for the currently observed
 Electron executable, after environment sanitization. Standalone fallbacks,
 Python/executable packages and Secret bindings cannot select that mode; see the

@@ -317,42 +317,52 @@ export const connectRemoteMcpOAuth = async (
   { resolveEndpoint, openBrowserFn = openBrowser, httpJson = oauthHttpJson, signal,
     // Host-only options: the native Trelio client shares this SAME S256/state/
     // origin-bound callback engine. External skill declarations cannot set them.
-    clientName = "Trelio Remote MCP host", resource = null, maximumLifetimeSeconds = 86_400 } = {},
+    clientName = "Trelio Remote MCP host", resource = null, maximumLifetimeSeconds = 86_400,
+    publicClientId = null } = {},
 ) => {
+  // A fixed public profile is a host-owned choice, never part of an external
+  // skill declaration. Keep the exact resource/id pair closed so this option
+  // cannot turn another provider into Trelio's model-independent channel.
+  if (publicClientId !== null && (publicClientId !== "trelio_kimi_work_agent_workspaces_v1"
+    || config.endpoint !== "https://trelio.ru/mcp" || resource !== config.endpoint)) {
+    throw fail("REMOTE_MCP_OAUTH_PROFILE_INVALID", "Недопустимый public OAuth profile.");
+  }
   const metadata = await discoverRemoteMcpOAuth(config, { resolveEndpoint, httpJson, signal });
   const verifier = crypto.randomBytes(32).toString("base64url");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
   const scopes = config.authentication.scopes.join(" ");
-  let clientId = null;
+  let clientId = publicClientId;
   const { code, redirectUri } = await waitForOAuthCallback({
     issuer: metadata.issuer,
     openBrowserFn,
     signal,
     buildAuthorizeUrl: async ({ redirectUri: callbackUrl, state }) => {
-      const registration = await httpJson(metadata.registrationEndpoint, {
-        method: "POST",
-        contentType: "application/json",
-        body: JSON.stringify({
-          client_name: clientName,
-          application_type: "native",
-          redirect_uris: [callbackUrl],
-          grant_types: ["authorization_code", "refresh_token"],
-          response_types: ["code"],
-          token_endpoint_auth_method: "none",
-          scope: scopes,
-        }),
-        signal,
-      }, { resolveEndpoint });
-      clientId = registration.body?.client_id;
-      if (
-        typeof clientId !== "string"
-        || !clientId
-        || clientId.length > 1_024
-        || registration.body?.token_endpoint_auth_method !== "none"
-        || (Array.isArray(registration.body?.redirect_uris)
-          && !registration.body.redirect_uris.includes(callbackUrl))
-      ) {
-        throw fail("REMOTE_MCP_OAUTH_REGISTRATION_INVALID", "OAuth client registration не вернул client_id.");
+      if (publicClientId === null) {
+        const registration = await httpJson(metadata.registrationEndpoint, {
+          method: "POST",
+          contentType: "application/json",
+          body: JSON.stringify({
+            client_name: clientName,
+            application_type: "native",
+            redirect_uris: [callbackUrl],
+            grant_types: ["authorization_code", "refresh_token"],
+            response_types: ["code"],
+            token_endpoint_auth_method: "none",
+            scope: scopes,
+          }),
+          signal,
+        }, { resolveEndpoint });
+        clientId = registration.body?.client_id;
+        if (
+          typeof clientId !== "string"
+          || !clientId
+          || clientId.length > 1_024
+          || registration.body?.token_endpoint_auth_method !== "none"
+          || (Array.isArray(registration.body?.redirect_uris)
+            && !registration.body.redirect_uris.includes(callbackUrl))
+        ) {
+          throw fail("REMOTE_MCP_OAUTH_REGISTRATION_INVALID", "OAuth client registration не вернул client_id.");
+        }
       }
       const url = new URL(metadata.authorizationEndpoint);
       url.searchParams.set("response_type", "code");
