@@ -454,6 +454,12 @@ publication tooling также остаются вне этого публичн
   после persist failure форма терминальна, exact native receipt читается без
   повторной записи. Открытие формы не является сохранением или входом.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
+  Website notifications are blocked and read back before provider navigation in
+  every owned profile, including restore. Native alert/confirm observation and
+  one-use Enter/Escape/button answers bypass renderer waits while retaining the
+  original input promise, never replaying it. Raster mode stays raster-only;
+  login/unsupported dialogs remain explicit manual handoffs. See the same
+  contract for immutable modal frames, bounds and real Chromium regressions.
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.

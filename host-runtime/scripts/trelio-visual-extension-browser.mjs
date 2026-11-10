@@ -74,7 +74,7 @@ export async function waitVisualBrowserStopped(child, closed, deadlineAt) {
 export function visualExtensionManifest(matches, port, observationMode = 'image', attachmentDownloads = false, audioDownloads = false) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw fault('invalid_input');
   return { manifest_version: 3, name: 'Trelio Visual Browser', version: '0.1.0', key: PUBLIC_KEY,
-    permissions: ['debugger', 'tabs', 'cookies', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
+    permissions: ['debugger', 'tabs', 'cookies', 'contentSettings', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
     content_security_policy: { extension_pages: `script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:${port}` },
     background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js', 'authentication.js', ...(observationMode === 'text' ? ['text-observer.js'] : []), ...(audioDownloads ? ['audio-receiver.js'] : [])], run_at: 'document_start', world: 'ISOLATED' }, ...(attachmentDownloads ? [{ matches, js: ['attachment-router.js'], run_at: 'document_start', world: 'MAIN' }] : []), ...(audioDownloads ? [{ matches, js: ['audio-router.js'], run_at: 'document_start', world: 'MAIN' }] : [])],
   };
@@ -770,16 +770,33 @@ export class ExtensionVisualBrowser {
         ...(operation === 'download-audio' && value.reason === 'attachment_unsupported' && value.audioDiagnostic
           ? { audioDiagnostic: validateVisualAudioDiagnostic(value.audioDiagnostic) } : {}),
         ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
+      // A native prompt outside the supported alert/confirm contract is a
+      // concrete handoff, not a successful click or a generic transport error.
+      // Keep the browser and original attempt alive; the caller can ask its
+      // owner through the existing task/intake workflow without replaying input.
+      if (value.state === 'manual_input_required') {
+        this.#state = value.state; this.#setupReason = 'manual_control_active';
+        return visualStatus(value.state, 'manual_control_active', { sessionId: this.sessionId });
+      }
       if (value.state !== 'ready') throw fault('operation_failed');
-      this.#state = 'ready';
+      this.#state = 'ready'; this.#setupReason = undefined;
+      // A dialog answer may finish the original coordinate-selected download.
+      // This label comes only from the authenticated extension's retained
+      // execution, never a model argument. Strip it at the private boundary.
+      const completedOperation = value.completedOperation;
+      delete value.completedOperation;
+      if (completedOperation !== undefined && (!['key', 'click'].includes(operation)
+        || !['download-attachment', 'download-audio'].includes(completedOperation)
+        || completedOperation === 'download-attachment' && !this.attachmentDownloads
+        || completedOperation === 'download-audio' && !this.audioDownloads)) throw fault('invalid_input');
       // An ordinary HTML viewer is an observation, not a downloaded original.
       // Preserve the same strict text/image validators and credential guard;
       // only the file-shaped branch below may mint a local file receipt.
-      if ((operation === 'download-attachment' || operation === 'download-audio')
-        && !(operation === 'download-attachment' && (value.kind === TEXT_KIND || value.image))) {
+      if ((operation === 'download-attachment' || operation === 'download-audio' || completedOperation)
+        && !(value.kind === TEXT_KIND || value.image)) {
         if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
         if (Object.keys(value).sort().join() !== 'file,state') throw fault('attachment_unsupported');
-        return await saveVisualAttachment(this.store.directory, value.file, this.sessionId, { audioOnly: operation === 'download-audio' });
+        return await saveVisualAttachment(this.store.directory, value.file, this.sessionId, { audioOnly: (completedOperation || operation) === 'download-audio' });
       }
       const response = { kind: value.kind || VISUAL_RESULT_KIND, sessionId: this.sessionId, reason: 'none', ...value };
       return value.kind === TEXT_KIND ? validateTextResult(response) : normalizeBrowserVisualResult(response);

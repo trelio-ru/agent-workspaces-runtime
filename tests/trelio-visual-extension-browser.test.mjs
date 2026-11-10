@@ -25,6 +25,68 @@ test('lifecycle failure callbacks contain closed original errno/syscall only, ne
   assert.doesNotMatch(JSON.stringify(visualLifecycleFailureEvidence(error)), /PRIVATE|SECRET|path|cookie|message|stack/u);
 });
 
+test('native alert/confirm is observed and answered without replay in text/image modes and restored profiles deny notifications', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-native-dialog-')));
+  const effects = []; let snapshot, browser;
+  t.signal.addEventListener('abort', () => browser?.abort(), { once: true });
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://fixture.test');
+    if (url.pathname === '/effect') { effects.push({ answer: url.searchParams.get('answer'), count: url.searchParams.get('count'), permission: url.searchParams.get('permission') }); response.end(); return; }
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end(`<!doctype html><title>Native dialog fixture</title><body>
+      <p>Notification state: <span id="permission"></span></p>
+      <button style="position:absolute;left:20px;top:100px;width:300px;height:60px" onclick="
+        window.clicks=(window.clicks||0)+1;
+        const accepted=confirm('Synthetic confirm?');
+        alert('Synthetic follow-up alert');
+        fetch('/effect?answer='+accepted+'&amp;count='+window.clicks+'&amp;permission='+Notification.permission);
+        document.getElementById('result').textContent='ORIGINAL_ACTION_FINISHED';">Open confirm</button>
+      <p id="result" style="position:absolute;top:200px"></p>
+      <button style="position:absolute;left:20px;top:300px;width:300px;height:60px"
+        onclick="prompt('PRIVATE_UNSUPPORTED_PROMPT','PRIVATE_DEFAULT')">Open unsupported prompt</button>
+      <script>document.getElementById('permission').textContent=Notification.permission;</script>`);
+  });
+  const listener = ownFixtureHttpServer(server, t.signal); t.after(() => listener.stop()); await listener.listen();
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
+  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason })); return value; };
+  try {
+    for (const observationMode of ['text', 'image']) {
+      browser = new ExtensionVisualBrowser({ dependencies, store, observationMode,
+        policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin],
+        lease: { deadlineAt: Date.now() + 75_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+      let view = ready(await browser.call('navigate', { url: origin }));
+      if (observationMode === 'text') assert.match(view.text, /Notification state:\s+denied/);
+      view = ready(await browser.call('click', { frameId: view.frameId, x: 100, y: 125 }));
+      if (observationMode === 'text') assert.match(view.text, /Synthetic confirm/);
+      else { assert.ok(view.image); assert.equal(view.text, undefined); }
+      const spent = view.frameId;
+      view = ready(await browser.call('key', { frameId: view.frameId, key: 'Escape' }));
+      if (observationMode === 'text') assert.match(view.text, /Synthetic follow-up alert/);
+      else assert.ok(view.image);
+      assert.notEqual(view.frameId, spent);
+      view = ready(await browser.call('key', { frameId: view.frameId, key: 'Enter' }));
+      if (observationMode === 'text') assert.match(view.text, /ORIGINAL_ACTION_FINISHED/);
+      else assert.ok(view.image);
+      assert.equal((await browser.call('key', { frameId: spent, key: 'Enter' })).state, 'error');
+      const expected = observationMode === 'text' ? 1 : 2;
+      for (let attempt = 0; effects.length < expected && attempt < 40; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(effects.length, expected);
+      assert.deepEqual(effects.at(-1), { answer: 'false', count: '1', permission: 'denied' });
+      const unsupported = await browser.call('click', { frameId: view.frameId, x: 100, y: 325 });
+      assert.equal(unsupported.state, 'manual_input_required');
+      assert.equal((await browser.call('status')).state, 'manual_input_required');
+      assert.doesNotMatch(JSON.stringify(unsupported), /PRIVATE_/);
+      await browser.close(); browser = undefined;
+      assert.ok(snapshot, 'the second mode exercises an actually restored profile');
+    }
+  } finally {
+    await listener.stop(); await browser?.close().catch(() => browser.abort());
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
 test('a linked HTML office viewer exposes safe menus and downloads the complete DOCX from one native iframe/same-tab GET', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-docx-viewer-')));
   const docx = syntheticDocx(), hits = [], evidence = [], observations = [];
@@ -48,7 +110,7 @@ test('a linked HTML office viewer exposes safe menus and downloads the complete 
         <div role="menuitem" style="position:absolute;left:20px;top:100px" onclick="document.getElementById('download').hidden=false">File</div>
         <div role="menuitem" aria-disabled="true" style="position:absolute;left:300px;top:100px">DISABLED_MENU</div>
         <div id="download" role="menuitem" hidden style="position:absolute;left:20px;top:150px" onclick="document.getElementById('word').hidden=false">Download</div>
-        <div id="word" role="menuitem" hidden style="position:absolute;left:20px;top:200px" onclick="${action}">Microsoft Word (.docx)</div>`); return;
+        <div id="word" role="menuitem" hidden style="position:absolute;left:20px;top:200px" onclick="if(confirm('Download the selected original?')){${action}}">Microsoft Word (.docx)</div>`); return;
     }
     response.end(`<!doctype html><title>Synthetic article</title><body style="font:24px sans-serif">
       <a href="/preview?mode=${url.searchParams.get('mode') || 'iframe'}" style="position:absolute;left:20px;top:80px">Original DOCX</a>`);
@@ -98,7 +160,9 @@ test('a linked HTML office viewer exposes safe menus and downloads the complete 
       assert.match(view.title, /\.docx/); assert.equal(view.controls.some(c => c.label === 'DISABLED_MENU'), false);
       view = await call('file_menu', 'click', control(view, 'File'));
       view = await call('download_menu', 'click', control(view, 'Download'));
-      const file = await call('original', 'download-attachment', control(view, 'Microsoft Word (.docx)'));
+      const confirmation = await call('original', 'download-attachment', control(view, 'Microsoft Word (.docx)'));
+      assert.match(confirmation.text, /Download the selected original/);
+      const file = await call('confirm_original', 'key', { frameId: confirmation.frameId, key: 'Enter' });
       assert.equal(file.state, 'ready', JSON.stringify({ mode, reason: file.reason, requestCount: hits.length }));
       assert.equal(file.kind, 'trelio.browser-file/v1'); assert.equal(path.extname(file.filePath), '.docx');
       assert.deepEqual(await fs.readFile(file.filePath), docx); assert.equal(file.sha256, createHash('sha256').update(docx).digest('hex'));
