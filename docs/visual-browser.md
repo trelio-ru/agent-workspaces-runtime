@@ -4,6 +4,39 @@ API v1 принадлежит generic host. Signed provider задаёт
 HTTPS origins/domains, optional externalNavigation, начальный адрес и явный observationMode; binary, профиль, ключ и executable
 выбирает host. Source не означает stable release или завершённую native-проверку.
 
+## Выбор представления и восстановление UI
+
+`VISUAL_PRESENTATION_API = trelio.visual-presentation/v1` подтверждает signed
+`runVisualSession({ presentation: 'hidden' })`. Default `windowed` сохраняет
+прежний запуск всех существующих providers. Выбор задаёт подписанный source,
+не CLI/MCP flag или environment, и он закреплён в live owner. Другой выбор
+не переиспользует live worker для content/input; status/wait/ready/close остаются
+доступны. Общие scopes, AEAD snapshot, OS key, account CAS и lease не меняются.
+
+Обычная работа `hidden` запускает managed Chromium с `--headless=new`: text,
+PNG, ввод и safeguards остаются теми же. Это не native SW_HIDE, не минимизация
+и не обещание работы при выключенной ОС. Hidden startup не делает предварительную
+попытку входа и не служит fallback после отказа windowed browser.
+
+Явный `setup` предназначен для входа человеком и всегда запускает обычное
+видимое окно. Из активного hidden процесса он сначала штатно останавливает и
+сохраняет auth profile, затем один раз открывает reviewed setup URL под прежней
+owner/session identity и исходной lease. Ошибка stop/persist блокирует переход;
+неизвестное browser input не повторяется. Перезапуск переносит сохранённую
+авторизацию, а не произвольный несохранённый черновик/transaction: до setup
+необходимо установить исход предыдущих бизнес-действий. `show-login` показывает
+уже открытый ручной setup, не является автоматическим новым входом.
+После human `ready`/window-close прежний save gate сохраняет профиль до снятия
+блокировки снимков; следующая явно порученная navigate работает скрыто.
+
+Для сбоя UI recipe действует общий browser recovery default из
+[общего skill recovery](agent-skills-and-secrets.md#живой-каталог):
+агент использует доступные text/image/input этой же допущенной сессии, если
+навык не ограничивает это. Это смысловой выбор по свежему интерфейсу, не новая
+capability или обход site/auth/ACL gate. Host сохраняет все deterministic guards;
+unknown write сначала требует read-back. Проверенный дефект и результат recovery
+могут стать предложением баг-репорта с отдельным human publication.
+
 Signed authentication recipe может добавить `setup: {paragraphs, links}` для
 защищённой формы через `trelio.protected-browser-auth-setup/v1`. До четырёх
 plain-text абзацев и четырёх ссылок `{label,url}` на уже разрешённые exact
@@ -247,7 +280,8 @@ WebSocket transport также закреплены отдельным npm lockf
 компании не требуется обслуживать собственный browser binary. Системные
 Opera/Chrome и пользовательские профили автоматически не импортируются.
 
-Chromium запускается как обычный headed browser с собственным приватным профилем.
+По умолчанию Chromium запускается как обычный headed browser с собственным
+приватным профилем; signed hidden presentation описан выше.
 GUI child запускается с `windowsHide: false`: на Windows `SW_HIDE` в native
 startup info может оставить белую поверхность вместо нормального окна Chromium,
 включая ручной вход. Это общий launcher визуальных навыков для обычных

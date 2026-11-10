@@ -455,6 +455,9 @@ publication tooling также остаются вне этого публичн
   после persist failure форма терминальна, exact native receipt читается без
   повторной записи. Открытие формы не является сохранением или входом.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
+  Signed presentation по умолчанию windowed; hidden opt-in, owner pinning и
+  видимый human setup сохраняют исходную lease и stop/save-before-relaunch.
+  Общий UI fallback использует только уже допущенные controls, без write replay.
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.

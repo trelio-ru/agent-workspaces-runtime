@@ -1,13 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualBrowserHeadless, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+test('signed hidden presentation never hides human setup or changes the legacy windowed default', () => {
+  assert.equal(visualBrowserHeadless('hidden', false), true);
+  assert.equal(visualBrowserHeadless('hidden', true), false);
+  assert.equal(visualBrowserHeadless('windowed', false), false);
+  assert.equal(visualBrowserHeadless('windowed', true), false);
+  for (const mode of [true, false, 'headless', '', null, undefined]) {
+    assert.throws(() => visualBrowserHeadless(mode, false), { code: 'invalid_input' });
+  }
+  assert.throws(() => visualBrowserHeadless('hidden', 'false'), { code: 'invalid_input' });
+});
 
 test('GUI browser launch does not send native Windows SW_HIDE startup presentation', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   // Read the actual CreateProcess startup contract inside a real native child.

@@ -332,7 +332,12 @@ async function fixtureCookieEvidence(snapshot, directory, name) {
   return result;
 }
 
-test('ordinary Chromium extension clicks, types, scrolls and restores auth without a page-code reader', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
+// Execute the same real native browser assertions through both the unchanged
+// headed/fixture path and the signed production hidden presentation. A fixture
+// override alone cannot establish that a provider's ordinary path works.
+for (const presentation of ['windowed', 'hidden']) test(presentation === 'windowed'
+  ? 'ordinary Chromium extension clicks, types, scrolls and restores auth without a page-code reader'
+  : 'signed hidden Chromium clicks, types, scrolls and restores auth through the production presentation', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-fixture-')));
   const received = [], webdriverAtInput = [];
   let cookieRestored = false, persistentRestored = false, storageRestored = false, detailSeen = false, snapshot;
@@ -352,7 +357,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
   const diagnostics = [];
-  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
+  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], presentation, lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
   let browser = create();
   const originalCall = ExtensionVisualBrowser.prototype.call;
   // A native headed Mac run independently samples the OS foreground identity.
@@ -369,7 +374,9 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
   };
   const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
   try {
+    const startupFocus = focus();
     let f = ready(await browser.call('navigate', { url: `${origin}/login` }));
+    if (presentation === 'hidden' && startupFocus) assert.equal(focus(), startupFocus, 'hidden startup must preserve the foreground application');
     assert.equal(cookieRestored, true, 'the first document accepted its synthetic cookie before shutdown');
     // Chromium can finish its one permitted startup activation just after the
     // first picture. Sample input focus only after the app has settled.
@@ -392,7 +399,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     f = ready(await browser.call('type-text', { frameId: f.frameId, text: 'Второй ввод' }));
     f = ready(await browser.call('click', { frameId: f.frameId, x: 500, y: 85 }));
     assert.deepEqual(received, ['Проверка ввода 123', 'Второй ввод']);
-    if (process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') assert.deepEqual(webdriverAtInput, ['false', 'false']);
+    if (presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') assert.deepEqual(webdriverAtInput, ['false', 'false']);
     f = ready(await browser.call('click', { frameId: f.frameId, x: 730, y: 75 }));
     assert.equal(detailSeen, true); assert.equal(f.scroll.down, false);
     await browser.close();
@@ -415,6 +422,49 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     server.closeAllConnections(); // Fixture keep-alive cannot conceal a failed owned browser shutdown.
     await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
+test('signed hidden presentation preserves auth and original lease through visible setup and hidden resume', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-hidden-setup-')));
+  let snapshot, writes = 0, restored = false;
+  const server = http.createServer((request, response) => {
+    if (request.url === '/login') response.setHeader('Set-Cookie', 'fixture_hidden=SYNTHETIC_SESSION; HttpOnly; SameSite=Strict; Path=/');
+    if (request.url === '/after' && request.headers.cookie?.includes('fixture_hidden=SYNTHETIC_SESSION')) restored = true;
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end('<!doctype html><body><h1>Visible setup fixture</h1><button>Ordinary control</button></body>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const lease = { deadlineAt: Date.now() + 150_000 }, deadline = lease.deadlineAt;
+  const store = { directory, async prepare() {}, async read() { return snapshot; },
+    async write(value) { snapshot = structuredClone(value); writes++; }, close() {} };
+  // Use the new signed presentation, not testHeadless. The explicit setup must
+  // launch a genuine headed browser on every native OS before returning to
+  // hidden work; normal input and observations stay closed during human input.
+  const browser = new ExtensionVisualBrowser({ dependencies, store, presentation: 'hidden', origins: [origin],
+    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), lease });
+  const sessionId = browser.sessionId;
+  try {
+    const first = await browser.call('navigate', { url: origin });
+    assert.equal(first.state, 'ready');
+    assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required');
+    assert.equal(writes, 1, 'the stopped hidden profile was persisted before visible setup');
+    assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+    assert.equal((await browser.call('ready')).state, 'saved_unverified');
+    assert.equal(writes, 2, 'human completion persisted before observations can resume');
+    const resumed = await browser.call('navigate', { url: `${origin}/after` });
+    assert.equal(resumed.state, 'ready');
+    assert.equal(restored, true, 'the hidden resumed document receives the exact synthetic auth');
+    assert.equal(browser.sessionId, sessionId);
+    assert.equal(lease.deadlineAt, deadline, 'human setup never renews the original lease');
+    assert.notEqual(resumed.frameId, first.frameId);
+    assert.equal((await browser.call('click', { frameId: first.frameId, x: 10, y: 10 })).reason, 'stale_frame');
+  } finally {
+    await browser.close().catch(() => browser.abort());
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 

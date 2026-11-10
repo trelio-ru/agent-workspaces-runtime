@@ -17,6 +17,38 @@ import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnosti
   processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 
+test('presentation validation precedes identity/storage and an old worker cannot silently become hidden', async t => {
+  const unreadable = new Proxy({}, { get() { throw Error('identity must not be accessed'); } });
+  assert.equal((await runVisualSession({ origins: ['https://example.test'], operation: 'status', presentation: 'invalid', env: unreadable })).reason, 'invalid_input');
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-presentation-')));
+  const now = Date.now();
+  const env = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-presentation',
+    TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(),
+    TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({
+      apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 120000 }),
+    TRELIO_BROWSER_SESSION_STARTED_AT: String(now), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(now + 120000) };
+  let calls = 0;
+  const server = http.createServer((_request, response) => { calls++; response.end(JSON.stringify(visualStatus('closed'))); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+  const origin = `http://127.0.0.1:${server.address().port}`, binding = visualSessionBinding(env);
+  const active = path.join(directory, 'visual-browser', binding.scope, 'active');
+  await fs.mkdir(active, { recursive: true, mode: 0o700 });
+  const file = path.join(active, 'owner.json');
+  const legacy = { schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash,
+    token: 'a'.repeat(64), pid: process.pid, port: server.address().port, deadlineAt: binding.deadlineAt };
+  await writePrivateJsonFile(file, legacy);
+  const invoke = (operation, presentation) => runVisualSession({ origins: [origin], operation, presentation,
+    args: operation === 'navigate' ? { url: origin } : {}, env, fixture: { directory } });
+  assert.equal((await invoke('navigate', 'hidden')).reason, 'observation_mode_mismatch');
+  assert.equal(calls, 0, 'mode mismatch must not dispatch any browser operation');
+  assert.equal((await invoke('status', 'hidden')).state, 'closed', 'the original owner can still inspect/close safely');
+  assert.equal((await invoke('navigate', 'windowed')).state, 'closed', 'omitted legacy presentation stays windowed');
+  await writePrivateJsonFile(file, { ...legacy, presentation: 'hidden' });
+  assert.equal((await invoke('navigate', 'windowed')).reason, 'observation_mode_mismatch');
+  assert.equal((await readVisualOwner(file)).deadlineAt, binding.deadlineAt, 'presentation never renews the original lease');
+});
+
 test('two chats on one visual account address different workers and close only their own session', async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-two-chats-')));
   const start = Date.now(), hits = [[], []], servers = [];

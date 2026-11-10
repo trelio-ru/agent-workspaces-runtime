@@ -44,6 +44,15 @@ const PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKPrbp7ylW5XVUNt
 const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY, 'base64')).digest('hex').slice(0, 32)].map(c => String.fromCharCode(97 + parseInt(c, 16))).join('');
 const fault = code => Object.assign(new Error(code), { code });
 
+/** Presentation belongs to signed provider policy. Human setup always gets a
+ * normal window: a headless process cannot be made visible by focusing it.
+ * Never use native SW_HIDE, minimise another app or retry a failed windowed
+ * launch in hidden mode. Fixture-only overrides stay outside this policy. */
+export function visualBrowserHeadless(presentation, manual) {
+  if (!['windowed', 'hidden'].includes(presentation) || typeof manual !== 'boolean') throw fault('invalid_input');
+  return presentation === 'hidden' && !manual;
+}
+
 /** Fixture logging already has its private --log-file. Keep the SAME ignored
  * stdio as an ordinary browser: a diagnostic-only stderr pipe can be inherited
  * by Chromium helpers after the browser exits and manufacture a stop timeout.
@@ -258,12 +267,13 @@ export class ExtensionVisualBrowser {
   #authenticationTask; #mailAttempt;
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
-  #startupStage; #startupDiagnostic;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, lease, observationMode = 'image', attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
+  #startupStage; #startupDiagnostic; #headless = false;
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, lease, observationMode = 'image', presentation = 'windowed', attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
+    visualBrowserHeadless(presentation, false);
     if (typeof externalNavigation !== 'boolean' || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
+    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, lease, presentation, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
     // The diagnostic native.log may remain locked after browser exit on Windows
@@ -300,6 +310,7 @@ export class ExtensionVisualBrowser {
   }
   async #start(url, manual) {
     if (this.#child) return;
+    this.#headless = visualBrowserHeadless(this.presentation, manual) || this.testHeadless;
     this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false; this.#authHandshake = false; this.#authSnapshotReady = false; this.#windowsClosed = false;
     this.#startupStage = 'storage_read';
     const snapshot = await this.store.read();
@@ -427,7 +438,7 @@ export class ExtensionVisualBrowser {
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
     this.#startupStage = 'browser_spawn';
-    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], visualChildEnvironment());
+    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], visualChildEnvironment());
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
     // Reduce only the existing bounded private log, without adding a native
@@ -744,6 +755,24 @@ export class ExtensionVisualBrowser {
       if (operation === 'ready') return this.#manual ? this.#finishManual() : this.#status();
       if (operation === 'show-login') { if (this.#manual && this.#child) await this.#send('manual'); return this.#status(); }
       if (operation === 'setup' || operation === 'navigate') this.policy.navigate(args.url);
+      if (operation === 'setup' && this.#child && this.#headless && !this.testHeadless) {
+        // Explicit human setup is a navigation to the reviewed setup URL, not
+        // recovery of a business submission. Persist the stopped auth profile
+        // before one visible launch; keep this owner/session and original lease.
+        // No screenshot/input crosses the human gate, and no original action
+        // is replayed. Uncertain business writes must be reconciled beforehand.
+        this.#starting = true;
+        this.#manual = false; // Owned window-close must not race manual finish.
+        try { await this.#stopBrowser(); await this.#saveStopped(); }
+        catch (error) {
+          this.#state = 'error';
+          this.#terminal = error.code === 'browser_process_lost' ? error.code : 'storage_unavailable';
+          throw error;
+        }
+        finally { this.#starting = false; }
+        await this.#start(args.url, true);
+        return this.#status();
+      }
       if (operation === 'setup' && this.#manual) { await this.#send('manual'); return this.#status(); }
       if (operation === 'setup' && this.#child) {
         this.#manual = true; this.#state = 'manual_input_required';
