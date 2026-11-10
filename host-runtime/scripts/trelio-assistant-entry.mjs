@@ -929,7 +929,11 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
     TRELIO_BROWSER_SESSION_STARTED_AT:String(startedAt),TRELIO_BROWSER_SESSION_DEADLINE_AT:String(deadlineAt)};
   // Existing workers retain their original absolute deadline. New calls do
   // not change it; a stopped window may open afresh only on explicit navigate.
-  const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,
+  // The autonomous first-party route opts into the existing signed hidden
+  // presentation. Native JS dialogs remain observable through the same engine
+  // without raising a window over the person's desktop. This is fixed host
+  // policy, never a model flag or a fallback from another live presentation.
+  const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,presentation:'hidden',
     operation,args:input,env:environment});
   return visualMcpResult(visual);
 };

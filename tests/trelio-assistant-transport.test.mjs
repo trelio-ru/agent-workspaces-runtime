@@ -105,6 +105,7 @@ test('managed browser binds local profile and input to its genuine runtime, with
  await invoke({operation:'navigate',args:{url:'https://example.test/article'}},{expiresAt:new Date(clock+65000).toISOString()});assert.equal(ran,1);
  assert.equal(selected.env.TRELIO_SKILL_RUNTIME_SESSION_ID,runtimeSessionId);
  assert.equal(selected.env.TRELIO_SKILL_COMPANY_ID,pass.companyId);
+ assert.equal(selected.presentation,'hidden','the trusted digital route selects production hidden presentation, never a caller flag');
  const originalAccount=selected.env.TRELIO_SKILL_ACCOUNT_JSON;
  await invoke({operation:'screenshot',args:{}},{expiresAt:new Date(clock-55000).toISOString()});assert.equal(ran,2,
   'a server clock one minute ahead or behind does not change a genuinely fresh local admission');

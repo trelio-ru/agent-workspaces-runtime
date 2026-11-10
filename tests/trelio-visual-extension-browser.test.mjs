@@ -120,11 +120,15 @@ test('a linked HTML office viewer exposes safe menus and downloads the complete 
   await listener.listen();
   const origin = `http://127.0.0.1:${server.address().port}`;
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
-  const browser = new ExtensionVisualBrowser({ dependencies, observationMode: 'text', attachmentDownloads: true,
+  // Exercise the actual signed hidden route used by digital assistants, even
+  // on a headed CI desktop. A native confirm is allowed to activate a windowed
+  // Chromium; the background route must preserve foreground through BOTH the
+  // confirmation and the original download, with no Save As or second GET.
+  const browser = new ExtensionVisualBrowser({ dependencies, observationMode: 'text', attachmentDownloads: true, presentation: 'hidden',
     testDiagnostics: value => evidence.push(value),
     store: { directory, async read() {}, async prepare() {}, async write() {}, close() {} },
     policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin],
-    lease: { deadlineAt: Date.now() + 165_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+    lease: { deadlineAt: Date.now() + 165_000 } });
   const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1'
     ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
   const control = (view, label) => { const matches = view.controls.filter(c => c.label === label); assert.equal(matches.length, 1, label);

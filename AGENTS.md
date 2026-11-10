@@ -473,8 +473,9 @@ publication tooling также остаются вне этого публичн
   wait and heartbeats never do. In-flight bounded work finishes first; manual
   login cannot disable idle. The original absolute lease never slides.
   Digital assistants default to matching signed browser skills or the native
-  managed browser, never silent ordinary Chrome/computer fallback. Native
-  browser admission is structural only; URL/input stay local. Owner intake is
+  managed browser with fixed hidden presentation, never silent ordinary
+  Chrome/computer fallback. Native browser admission is structural only;
+  URL/input stay local. Owner intake is
   read-only and each command repeats genuine pass/proof checks. Its local
   five-second admission budget is monotonic from before native HTTP, including
   private I/O; server/device wall-clock skew never renews or rejects it. See

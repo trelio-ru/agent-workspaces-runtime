@@ -328,6 +328,10 @@ sites with the SAME visual engine. Ordinary Chrome/computer/shell is not a silen
 fallback. Codex may still advertise its own native APIs; this host does not
 change their availability or pretend to intercept calls outside its namespace.
 The default route and refusal recovery are explicit execution policy.
+The first-party digital route fixes `presentation: hidden` in trusted host code:
+native JS confirmations stay observable without raising a window over the
+person's desktop. Models cannot select presentation; signed provider defaults
+and independently authorized visible human setup retain their existing policy.
 
 The browser definition is obtained from the small native source_intake view for
 either genuine origin, keeping near-bound task/company catalogues unchanged.

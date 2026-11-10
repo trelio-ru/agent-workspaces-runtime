@@ -12,6 +12,10 @@ HTTPS origins/domains, optional externalNavigation, начальный адре�
 не CLI/MCP flag или environment, и он закреплён в live owner. Другой выбор
 не переиспользует live worker для content/input; status/wait/ready/close остаются
 доступны. Общие scopes, AEAD snapshot, OS key, account CAS и lease не меняются.
+First-party `use_assistant_browser` цифрового ассистента явно выбирает `hidden`
+в trusted host source: системный JS confirm наблюдается тем же engine, не
+поднимая окно на desktop человека. Это не меняет default signed providers
+и не добавляет model-controlled presentation или fallback после отказа.
 
 Обычная работа `hidden` запускает managed Chromium с `--headless=new`: text,
 PNG, ввод и safeguards остаются теми же. Это не native SW_HIDE, не минимизация
