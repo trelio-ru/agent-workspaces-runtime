@@ -1291,6 +1291,7 @@ publication tooling также остаются вне этого публичн
   not module auto-discovery; fixed phase diagnostics never extend its deadline.
 
 
+- Owner commands reuse one accepted task through the [existing intake](docs/assistant-inbox.md#verified-owner-intake-schema-v9-reply-receipts-v16-unread-recovery-v17); compact state/noChange follows the [goal contract](docs/assistant-scheduler.md#durable-human-goal).
 - Verified owner source intake is taskless, uses the SAME observer/proof/native
   creator/question/account engines; private owner replies use signed exact peer
   and schema16 attempt/positive receipts without task/Run. Lost provider results

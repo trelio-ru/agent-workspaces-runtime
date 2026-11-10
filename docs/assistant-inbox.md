@@ -770,7 +770,17 @@ reference, missing/duplicate marker or absent message authorizes a resend.
 Missing/ambiguous provider evidence stays fenced; the original is not resent.
 Reply receipt alone does not borrow the task-material processing/ACK path.
 
-Clear owner commands use the SAME native creator/BOTH ACL and commit task,
+A direct owner command about existing tasks first reads those sources, then
+selects `route_existing` with one already accepted `taskId`. The backend repeats
+BOTH task ACL/source scope and commits one structural `routed` receipt/route.
+`finishOwnerIntake` accepts this result only for one whole original/one target,
+without ignored originals, a reply attempt or reply-only recovery. The coordinator
+settles it through its existing native read-back, accepted task inventory and
+permanent-chat source route, including across restart. No second card, assignment,
+provider action, ACK or processed bit follows from routing. Other tasks remain
+read-only context for that worker; no fanout of one calendar/send action.
+
+Only a new independent owner goal uses the SAME native creator/BOTH ACL and commits task,
 accepted new assignment, receipt and per-event route atomically. Ordinary task
 provision subsequently creates its permanent chat. Multiple commands in one owner
 conversation remain independent events/tasks; no whole-conversation route is

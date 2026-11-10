@@ -210,7 +210,12 @@ Workspace keep different files. READY probes have no task-state instruction.
 The installed task-worker skill owns the Markdown format and continuation flow:
 read shared context and own state, preserve the human goal and completion criteria,
 record confirmed progress, pending replies/owner decisions, uncertain sends and
-the next justified action/wake. Save with the common Workspace Run/CAS; this is
+the next justified action/wake. Keep one compact current business state and the
+minimum exact recovery references; shared facts stay only in canonical material.
+Do not duplicate tool output, old error/UI inventories or diagnostic history in
+WORK.md, shared context and handoff. An unchanged blocker or review timestamp
+alone uses accepted state/noChange without another Run/worklog. New answers,
+decisions, changed blockers and deliverables remain substantive saves. Save with the common Workspace Run/CAS; this is
 ordinary company task data, not AGENTS, a local transcript or new authority. The
 coordinator does not read/cache the Markdown or store goal text in SQLite.
 
@@ -3372,7 +3377,12 @@ coverage stages. These codes expose no field values,
 identifiers, counts, paths or native exceptions, and never permit a read retry. Source rules remain
 context and the answer cites the verified native source in the original chat.
 Self-contained greetings/arithmetic need no company search. Clear direct
-work commands alone select `create_task`. The native one-attempt receipt, exact
+work commands about existing tasks select one native accepted assignment via
+`route_existing`/`taskId`, after exact source reads. Other tasks are context for
+that worker; missing assignment/access needs the owner question, never a duplicate
+card. A new independent goal alone selects `create_task`. The intake itself
+still cannot execute external mutations; ordinary task-pass authority owns the
+action. One original has one executor, preserving existing goal/cadence. The native one-attempt receipt, exact
 peer/revision/key and signed provider >=2.16.0 fence native rich conversational
 sending. V2 private stdin uses the SAME Telethon Markdown parser for send and
 read-only text/entity verification; v1 literal compatibility is verify-only.

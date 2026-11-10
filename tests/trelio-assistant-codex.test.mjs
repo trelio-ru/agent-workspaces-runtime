@@ -403,6 +403,8 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
   assert.ok(input.includes('get_assistant_owner_question'));
   assert.match(input,/This is a scheduled task pass/);
+  assert.match(input,/unchanged blocker.*noChange.*without a new Run\/worklog/);
+  assert.match(input,/only the exact recovery references needed for safe continuation/);
   assert.match(input,/failed read-only tab attachment/u);
   for(const invariant of ['SAME existing window on this assistant computer','verify the application, site and account',
     'never bypasses a provider refusal','read back that exact result before any further input',
@@ -1135,6 +1137,8 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  assert.match(input,/failed read-only tab attachment/u);
  assert.match(input,/In a source intake it remains read-only/u);
  assert.match(input,/A personal question does not require a task or Workspace Run/);
+ assert.match(input,/route_existing with taskId for ONE already accepted assignment/);
+ assert.match(input,/Missing assignment or access needs ask_owner, never a new workaround card/);
  assert.match(input,/real ACL and current login/);assert.match(input,/fresh current company sources again/);
  assert.match(input,/does not establish that a prior response was delivered/);
  assert.doesNotMatch(input,/prior technical limitation reply was positively delivered/);

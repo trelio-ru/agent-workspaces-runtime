@@ -1301,7 +1301,7 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
   }finally{await f.coordinator.close();}
 });
 
-test('owner command intake composes SAME SQLite/native provision, per-event task routing and restart dedup',async t=>{
+for(const reuseExisting of [false,true])test(`owner command intake ${reuseExisting?'reuses the existing task':'creates a new goal'} with SAME SQLite/native routing and restart dedup`,async t=>{
   const database=new DatabaseSync(':memory:');
   let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0,intakeReads=0;
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
@@ -1333,10 +1333,11 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
       const result={state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};turns.set(input.deliveryId,result);return result;},
     run:async(input,options)=>{
       assert.ok(input.intakeContext,'the fixture stops before normal task business work');intakeTurns++;options.startInvocation();
-      const current=intakes.get(input.intakeContext.intakeId),taskId=randomUUID(),bindingId=randomUUID();created++;
-      tasks.set(taskId,{id:bindingId,taskId,state:'accepted',revision:0});
-      Object.assign(current,{state:'created',taskId,receiptId:randomUUID(),readConfirmed:true,route:{id:randomUUID(),sourceId,
-        sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key}});
+      const current=intakes.get(input.intakeContext.intakeId),reuse=reuseExisting&&intakeTurns>1;
+      const taskId=reuse?[...tasks.keys()][0]:randomUUID(),bindingId=reuse?tasks.get(taskId).id:randomUUID();
+      if(!reuse){created++;tasks.set(taskId,{id:bindingId,taskId,state:'accepted',revision:0});}
+      Object.assign(current,{state:reuse?'routed':'created',taskId,receiptId:randomUUID(),readConfirmed:true,route:{id:randomUUID(),sourceId,
+        sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key,eventIds:[current.eventId]}});
       const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};turns.set(input.deliveryId,result);return result;
     }};
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
@@ -1362,9 +1363,10 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
   // route can hijack it into the first task.
   clock+=300000;await coordinator.pollOnce();
   await coordinator.workOnce().catch(()=>{});
-  assert.equal(created,2);assert.equal(intakeTurns,2);assert.equal(provisions,2,'one intake chat plus first permanent task chat');
+  assert.equal(created,reuseExisting?1:2);assert.equal(intakeTurns,2);assert.equal(provisions,2,'one intake chat plus first permanent task chat');
   assert.equal(new Set([...intakes.values()].map(value=>value.threadId)).size,1);
-  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'created\'').get().n,2);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'created\'').get().n,reuseExisting?1:2);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'routed\'').get().n,reuseExisting?1:0);
 });
 
 

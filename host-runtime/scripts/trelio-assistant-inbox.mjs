@@ -1398,7 +1398,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(state==='routed'){
         const selected=routes??(route?[{...route,taskId,eventIds:row.eventIds}]:[]);
         const ids=[...selected.flatMap(item=>item.eventIds??[]),...ignoredEventIds];
-        if(row.kind!=='route_existing'||!selected.length||selected.length>100
+        // A native owner-command receipt may reuse one existing assignment.
+        // It never becomes batch triage: keep its one original on one worker,
+        // and preserve reply/recovery fences even after a lost result/restart.
+        const ownerRoute=row.kind==='owner_command';
+        if(ownerRoute&&(selected.length!==1||ignoredEventIds.length!==0
+          ||row.readonly_recovery_json!==null||row.reply_receipt_id!==null||row.reply_message_id!==null
+          ||taskId!==selected[0]?.taskId))fail('ASSISTANT_INBOX_CONFLICT');
+        if(!selected.length||selected.length>100
           ||selected.some(item=>item.sourceId!==row.scope.bindingId||item.sourceRevision!==row.source_revision||!Array.isArray(item.eventIds)||!item.eventIds.length)
           ||ids.length!==row.eventIds.length||new Set(ids).size!==ids.length||ids.some(id=>!row.eventIds.includes(id)))fail('ASSISTANT_INBOX_CONFLICT');
         for(const item of selected){uuid(item.id);uuid(item.taskId);}

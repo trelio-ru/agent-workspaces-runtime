@@ -1902,3 +1902,36 @@ test('schema26 preserves a settled v25 negative original and consumes dispatch c
  assert.equal(database.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,2);
  assert.equal(database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
 });
+
+
+test('owner command reuses one native existing-task route across SQLite reopen without new work or ACK',async t=>{
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-owner-existing-')),file=path.join(directory,'inbox.sqlite');
+ let database=new DatabaseSync(file),inbox=createAssistantInbox({database});
+ t.after(async()=>{database.close();await fs.rm(directory,{recursive:true,force:true});});
+ const source=scope({provider:'telegram'}),canonical={...source,provider:'trelio',accountId:randomUUID(),bindingId:randomUUID()};
+ inbox.register(source);inbox.register(canonical);inbox.observeExternalSourceRevision(source,0);
+ const key=`telegram-conversation/v1.${'a'.repeat(64)}`;
+ page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
+  conversationKey:key,ownerIdentityId:randomUUID()}]);
+ const row=inbox.ownerIntakes()[0],taskId=randomUUID(),bindingId=randomUUID();
+ inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);inbox.bindOwnerIntakeThread(row.id,randomUUID());
+ inbox.readyOwnerIntake(row.id);inbox.startOwnerIntake(row.id);
+ inbox.applyTaskState(canonical,{taskId,state:'accepted',expectedRevision:0,authority:{bindingId,revision:0}});
+ const route={id:randomUUID(),sourceId:source.bindingId,sourceRevision:0,conversationKey:key,taskId,bindingId,
+  bindingRevision:0,eventIds:[row.original_event_id]},receipt={state:'routed',receiptId:randomUUID(),taskId,routes:[route]};
+ assert.throws(()=>inbox.finishOwnerIntake(row.id,{...receipt,taskId:randomUUID()}),/CONFLICT/);
+ assert.throws(()=>inbox.finishOwnerIntake(row.id,{...receipt,routes:[route,{...route,id:randomUUID(),taskId:randomUUID()}]}),/CONFLICT/,
+  'one command must not execute in two task workers');
+ assert.throws(()=>inbox.finishOwnerIntake(row.id,{...receipt,ignoredEventIds:[row.original_event_id]}),/CONFLICT/);
+ inbox.finishOwnerIntake(row.id,receipt);
+ database.close();database=new DatabaseSync(file);inbox=createAssistantInbox({database});
+ assert.equal(inbox.ownerIntake(row.id).outcome_state,'routed');
+ assert.equal(inbox.ownerIntake(row.id).outcome_receipt,receipt.receiptId);
+ inbox.routeExternalEvents(source,{canonicalSource:canonical,sourceRevision:0,eventKeys:[row.event_key],routes:[route],intakeId:row.id});
+ inbox.settleOwnerIntake(row.id);
+ const stored=inbox.ownerIntake(row.id);assert.equal(stored.settled,1);assert.equal(stored.outcome_task_id,taskId);
+ assert.equal(database.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,1);
+ assert.equal(database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0,
+  'routing is not execution, material completion or provider ACK');
+ assert.throws(()=>inbox.finishOwnerIntake(row.id,receipt),/CONFLICT/,'terminal read-back never dispatches the command twice');
+});
