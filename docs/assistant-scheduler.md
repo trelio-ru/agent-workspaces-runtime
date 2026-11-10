@@ -1515,6 +1515,18 @@ interactive Windows user this path cannot run; ordinary OS logon/restart policy
 remains independent. Later work resumes through the original supervisor and its
 unchanged native reconciliation, never by replaying a business tool or message.
 
+Native recovery acceptance records each executed fixture start as immutable JSON
+published atomically under a fresh name. Parent polling never races replacement
+of its already-open first proof: Windows can refuse rename-over-existing while
+that destination is being read, causing the fixture itself to exit before its
+second counter is visible. The cross-platform child regression and real Task
+Scheduler fixture both hold the first proof open through second execution.
+Temporary/partial records do not count; duplicate ordinals fail. Native exit 1,
+the original fifteen-second execution wait, the held second process, exact two
+starts and stale-snapshot/IgnoreNew checks remain mandatory. Closed failure
+diagnostics distinguish the observed scheduler state/result from published
+execution evidence without another Run(), paths or native output.
+
 The pairing coordinator owns the independent owner decision, active-pass fence,
 quiescing journal and identity CAS. A snapshot alone grants no replacement. An
 older already-running supervisor may not understand graceful shutdown; it must

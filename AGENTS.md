@@ -1268,7 +1268,10 @@ publication tooling также остаются вне этого публичн
 
 - Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
-- Native scheduled-fixture counters publish complete JSON atomically before polling; preserve real Task Scheduler starts, failure receipts and stale-snapshot assertions.
+- Native scheduled-fixture start evidence is immutable JSON published under a
+  fresh name before polling; never replace a file held by the reader. Keep the
+  first proof open across real recovery and preserve Task Scheduler starts,
+  failure receipts, exact counts and stale-snapshot assertions.
 - Assistant Remote MCP reuses the SAME resolver/forms/vault/doctor/call with a managed namespace, native-selected encrypted config and one-use owner attempt fence. Presentation views never grant authority; see [contract](docs/assistant-scheduler.md#managed-remote-mcp-profile).
   OAuth refresh joins only the SAME canonical vault-account/declaration promise
   and native cross-process transaction, including company/skill/device namespace;

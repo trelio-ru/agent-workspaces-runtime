@@ -756,6 +756,67 @@ test('a real scheduled supervisor survives a failed native startup-read pipe wit
     assert.equal(JSON.parse(await fs.readFile(starts,'utf8')),1,'no second Task Scheduler start or MCP supplies recovery');
   });
 
+// Executed-flow evidence must not replace a file that the parent is polling.
+// On Windows, atomic rename-over-existing can fail while that destination has
+// an open read handle. The child then exits before publishing count 2, making
+// a real scheduler launch look like a missing launch. Publish each start once
+// under a fresh name; readers only ever open immutable, complete JSON records.
+const recoveryFixtureSource=(startsDirectory,release)=>`import fs from 'node:fs';
+  import path from 'node:path';import {randomUUID} from 'node:crypto';
+  if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);
+  const directory=${JSON.stringify(startsDirectory)},release=${JSON.stringify(release)};
+  const ordinal=fs.readdirSync(directory).filter(name=>name.endsWith('.json')).length+1;
+  const committed=path.join(directory,ordinal+'-'+randomUUID()+'.json'),pending=committed+'.tmp';
+  fs.writeFileSync(pending,JSON.stringify({ordinal}),{flag:'wx'});fs.renameSync(pending,committed);
+  if(ordinal===1)process.exit(1);
+  const deadline=setTimeout(()=>process.exit(8),30000);
+  const timer=setInterval(()=>{if(fs.existsSync(release)){clearTimeout(deadline);clearInterval(timer);}},25);
+`;
+const readRecoveryFixtureStarts=async directory=>{
+  const names=(await fs.readdir(directory)).filter(name=>name.endsWith('.json'));
+  const records=await Promise.all(names.map(async name=>{
+    const match=/^([1-9][0-9]*)-[a-f0-9-]{36}\.json$/u.exec(name);
+    assert.ok(match,'only an exact committed fixture record is executed-flow evidence');
+    const value=JSON.parse(await fs.readFile(path.join(directory,name),'utf8'));
+    assert.deepEqual(value,{ordinal:Number(match[1])},'partial or changed committed evidence must fail');
+    return {name,ordinal:value.ordinal};
+  }));
+  records.sort((a,b)=>a.ordinal-b.ordinal);
+  assert.deepEqual(records.map(value=>value.ordinal),records.map((_,index)=>index+1),
+    'duplicate/concurrent starts must not collapse into one successful counter');
+  return records;
+};
+
+test('scheduled fixture publishes the second executed start while the first proof stays open and unchanged',
+  {timeout:15_000},async t=>{
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-recovery-evidence-'));
+    const starts=path.join(directory,'starts'),release=path.join(directory,'release'),loader=path.join(directory,'loader.mjs');
+    await fs.mkdir(starts);await fs.writeFile(loader,recoveryFixtureSource(starts,release));
+    let firstProof,second;
+    const launch=()=>{
+      const child=spawn(process.execPath,[loader,'bridge','assistant','background'],{stdio:'ignore'});
+      return new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
+    };
+    t.after(async()=>{
+      await fs.writeFile(release,'release');await firstProof?.close();
+      if(second)assert.deepEqual(await second,{code:0,signal:null},'retain a failed/unknown owned child before fixture removal');
+      await fs.rm(directory,{recursive:true,force:true});
+    });
+    assert.deepEqual(await launch(),{code:1,signal:null});
+    const [first]=await readRecoveryFixtureStarts(starts);assert.equal(first.ordinal,1);
+    firstProof=await fs.open(path.join(starts,first.name),'r');
+    // A genuinely incomplete publication is invisible, not empty JSON or a
+    // second executed start. The second child never replaces the held proof.
+    await fs.writeFile(path.join(starts,'not-published.json.tmp'),'{');
+    second=launch();let records;
+    const deadline=performance.now()+5000;
+    do{records=await readRecoveryFixtureStarts(starts);if(records.length===2)break;
+      await new Promise(resolve=>setTimeout(resolve,25));}while(performance.now()<deadline);
+    assert.equal(records.length,2,'actual child execution must publish independent evidence');
+    assert.deepEqual(JSON.parse(await firstProof.readFile('utf8')),{ordinal:1});
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(starts,first.name),'utf8')),{ordinal:1});
+  });
+
 test('native Windows recovery runs the same failed registered fixture once and rejects a stale start snapshot',
   {skip:process.platform!=='win32',timeout:120_000},async t=>{
     // Hosted disposable task only. Actual exit 1 / Task Scheduler history and
@@ -764,25 +825,14 @@ test('native Windows recovery runs the same failed registered fixture once and r
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-native-recovery-'));
     const fixture={...identity,assistantId:randomUUID(),deviceId:randomUUID()};
     const loader=path.join(directory,'scripts','trelio-host-runtime-loader.mjs');
-    const countFile=path.join(directory,'starts.json'),release=path.join(directory,'release');
-    await fs.mkdir(path.dirname(loader),{recursive:true});
-    await fs.writeFile(loader,`import fs from 'node:fs';
-      if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);
-      const countFile=${JSON.stringify(countFile)},release=${JSON.stringify(release)};
-      let count=0;try{count=JSON.parse(fs.readFileSync(countFile,'utf8'));}catch{}
-      // Pollers must observe the previous or next complete counter. An in-place
-      // write truncates the public file first, so a genuine scheduled second
-      // process can otherwise expose empty JSON before its executed-flow proof.
-      const next=countFile+'.'+process.pid+'.tmp';
-      fs.writeFileSync(next,JSON.stringify(++count));fs.renameSync(next,countFile);
-      if(count===1)process.exit(1);
-      const deadline=setTimeout(()=>process.exit(8),30000);
-      const timer=setInterval(()=>{if(fs.existsSync(release)){clearTimeout(deadline);clearInterval(timer);}},25);
-    `);
+    const starts=path.join(directory,'starts'),release=path.join(directory,'release');
+    await fs.mkdir(path.dirname(loader),{recursive:true});await fs.mkdir(starts);
+    await fs.writeFile(loader,recoveryFixtureSource(starts,release));
+    let firstProof;
     const common={readIdentity:async()=>fixture,verifyContact:async()=>{},resolveLoader:async()=>loader};
     const manage=createAssistantWindowsBackground(common);
     t.after(async()=>{
-      await fs.writeFile(release,'release');let removed=false;
+      await fs.writeFile(release,'release');await firstProof?.close();let removed=false;
       for(let attempt=0;attempt<40;attempt++){
         try{await manage('remove');removed=true;break;}catch(error){if(error.code!=='ASSISTANT_BACKGROUND_BUSY')throw error;}
         await new Promise(resolve=>setTimeout(resolve,250));
@@ -800,7 +850,11 @@ test('native Windows recovery runs the same failed registered fixture once and r
       await new Promise(resolve=>setTimeout(resolve,100));
     }
     assert.equal(observed.state,'registered');assert.equal(observed.lastResult,1);
-    assert.equal(JSON.parse(await fs.readFile(countFile,'utf8')),1,'first real action must fail before recovery');
+    const [first]=await readRecoveryFixtureStarts(starts);
+    assert.equal((await readRecoveryFixtureStarts(starts)).length,1,'first real action must fail before recovery');
+    // Keep a real read handle across the native recovery launch. A completed
+    // first proof must remain readable without racing any later publication.
+    firstProof=await fs.open(path.join(starts,first.name),'r');
     let state=null;
     const options={identity:fixture,fingerprint:'a'.repeat(64),guard:async()=>{},inspect:()=>native.inspect(),start:snapshot=>native.start(snapshot),
       readState:async()=>state,writeState:async(expected,next)=>{assert.deepEqual(expected,state);state=structuredClone(next);}};
@@ -808,13 +862,24 @@ test('native Windows recovery runs the same failed registered fixture once and r
     assert.match(state.instanceId,/^[a-f0-9-]{36}$/u);
     const startedDeadline=Date.now()+15_000;
     while(Date.now()<startedDeadline){
-      try{if(JSON.parse(await fs.readFile(countFile,'utf8'))===2)break;}catch(error){if(error.code!=='ENOENT')throw error;}
+      if((await readRecoveryFixtureStarts(starts)).length===2)break;
       await new Promise(resolve=>setTimeout(resolve,100));
     }
-    assert.equal(JSON.parse(await fs.readFile(countFile,'utf8')),2,'a positive scheduler receipt alone is not executed-flow evidence');
+    const completed=(await readRecoveryFixtureStarts(starts)).length;
+    if(completed!==2){
+      // A subsequent native failure must distinguish missing execution from a
+      // failed publication, without logging task XML, paths, process output or
+      // instance IDs. Read-only evidence never grants another scheduler Run().
+      try{const current=await native.inspect();t.diagnostic(JSON.stringify({fixture:'background_recovery',completed,
+        nativeState:current.state,lastResult:current.lastResult,lastRunChanged:current.lastRunAt!==observed.lastRunAt,
+        definitionChanged:current.definitionSha256!==observed.definitionSha256}));}
+      catch{t.diagnostic(JSON.stringify({fixture:'background_recovery',completed,nativeReadFailed:true}));}
+    }
+    assert.equal(completed,2,'a positive scheduler receipt alone is not executed-flow evidence');
+    assert.deepEqual(JSON.parse(await firstProof.readFile('utf8')),{ordinal:1},'recovery cannot replace evidence held by another reader');
     assert.equal((await maintainAssistantBackgroundRecovery(options)).state,'running');
     assert.deepEqual(await native.start(observed),{schemaVersion:1,state:'changed'},'late native snapshot CAS must not launch over the held real process');
-    assert.equal(JSON.parse(await fs.readFile(countFile,'utf8')),2);
+    assert.equal((await readRecoveryFixtureStarts(starts)).length,2);
   });
 
 test('native plugin handoff retargets only the exact scheduled action and preserves its running old process', {skip:process.platform!=='win32'},async t=>{
