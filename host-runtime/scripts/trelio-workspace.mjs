@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { rememberDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 
 /**
@@ -1504,6 +1505,9 @@ export class TrelioApiError extends Error {
     this.retryAfterMilliseconds = retryAfterMilliseconds;
     this.code = code;
     this.payload = payload;
+    if (statusCode === 409 && code === "LOCAL_CONTEXT_GENERATION_CHANGED") {
+      try { rememberDiagnosticDetail(this, payload?.diagnosticEvidence); } catch { /* Preserve the original HTTP error. */ }
+    }
   }
 }
 

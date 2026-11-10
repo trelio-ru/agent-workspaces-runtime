@@ -9,6 +9,7 @@ import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
+import { rememberDiagnosticDetail, readDiagnosticDetail, diagnosticValueType } from "./trelio-diagnostic-observation.mjs";
 import { parseProcessDiagnostic, ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
@@ -929,6 +930,7 @@ export const createEncryptedSearchFileCache = async ({
 export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish, onProgress = () => {} }) => {
   let failureStage = "starting_manifest";
   let failureReason = "revision_conflict";
+  let diagnosticReason = failureReason;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let candidate;
     try {
@@ -950,6 +952,7 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
       const finishingManifest = await readManifest();
       if (finishingManifest.generation !== startingManifest.generation) {
         failureReason = "generation_mismatch";
+        diagnosticReason = failureReason;
         // This private candidate is not published. The next build selects only
         // records still present in its fresh manifest with matching revision/head.
         // Mark it ineligible for the no-change shortcut until validated afresh.
@@ -960,6 +963,8 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
       if (!["LOCAL_CONTEXT_GENERATION_CHANGED", "WORKSPACE_OUTDATED"].includes(error?.code)
         || (error instanceof TrelioApiError && error.statusCode !== 409)) throw error;
       failureReason = "revision_conflict";
+      diagnosticReason = readDiagnosticDetail(error)?.reason
+        ?? (error instanceof TrelioApiError && error.code === "WORKSPACE_OUTDATED" ? "workspace_head_changed" : failureReason);
       // A conflict in the final manifest leaves a complete but unverified
       // candidate. Reuse its exact records without ever treating it as a
       // readable generation, just as when the final generation differs.
@@ -971,11 +976,11 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
     onProgress("publishing");
     return { mirror: await publish(candidate), changed: true };
   }
-  throw new TrelioLocalContextError(
+  throw rememberDiagnosticDetail(new TrelioLocalContextError(
     "LOCAL_CONTEXT_GENERATION_CHANGED",
     "A consistent company search snapshot could not be assembled after three bounded attempts. This does not establish a task access denial or a business content change.",
     { stage: failureStage, reason: failureReason, attempts: 3 },
-  );
+  ), { kind: "generation", stage: failureStage, reason: diagnosticReason });
 };
 
 const buildEncryptedPayloadSignatureRecord = (payload) => ({
@@ -8677,7 +8682,9 @@ export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, 
       else if (message.type === "result" && Buffer.byteLength(JSON.stringify(message)) <= 512 * 1024) pending.resolve(message.value);
       else if (message.type === "failure") {
         const code = diagnosticContract.errorCodes.includes(message.code) ? message.code : "LOCAL_CONTEXT_SEARCH_FAILED";
-        pending.reject(error(code, "Локальный поиск остановлен на этапе " + pending.stage + ". Автоматического повтора нет."));
+        const failure = error(code, "Локальный поиск остановлен на этапе " + pending.stage + ". Автоматического повтора нет.");
+        if (code === "LOCAL_CONTEXT_GENERATION_CHANGED") rememberDiagnosticDetail(failure, message.diagnosticEvidence);
+        pending.reject(failure);
       } else pending.reject(error("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный ответ процесса поиска."));
     });
   };
@@ -8792,7 +8799,8 @@ const readFreshManagedContextDocument = async ({origin,companySlug,selection,pro
   if(document?.id!==selection.documentId||document.type!==selection.documentType||document.revisionToken!==descriptor.revisionToken
     ||document.projectId!==null&&document.projectId!==undefined&&(!UUID_PATTERN.test(document.projectId)
       ||!/^e-[a-f0-9-]{36}$/u.test(document.projectSlug??"")))
-    throw new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED","Exact source coordinates changed.");
+    throw rememberDiagnosticDetail(new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED","Exact source coordinates changed."),
+      { kind: "generation", stage: "exact_source", reason: "source_coordinates_changed" });
   const hydrated=await hydrateAgentCompanyEncryptedJson({value:raw,origin:provider.requestOrigin,token:provider.token,
     companyEncryption:provider.companyEncryption,signal});
   const rules=await profile.readCompanyContextExact({nativeTool:"get_agent_instructions",input:{companySlug,
@@ -8804,7 +8812,8 @@ const readFreshManagedContextDocument = async ({origin,companySlug,selection,pro
   const final=(await read())?.document;
   if(final?.id!==document.id||final.type!==document.type||final.revisionToken!==document.revisionToken
     ||final.projectId!==document.projectId||final.projectSlug!==document.projectSlug)
-    throw new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED","Exact source changed during the read.");
+    throw rememberDiagnosticDetail(new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED","Exact source changed during the read."),
+      { kind: "generation", stage: "exact_source", reason: "source_revision_changed" });
   signal?.throwIfAborted();
   return {schemaVersion:1,provider:"local_company_context",sourceRevision:document.revisionToken,document:hydrated.document,
     sourceScope:{company:rules.company,project:rules.project},
@@ -10049,48 +10058,54 @@ const runWorkspaceBridge = async (origin, argumentsList, options = {}) => {
 
 // The diagnostic field comes from OUR validator label, never an unknown input
 // key. Strip fixed nesting/index syntax and reduce to the reviewed wire enum.
-const workspaceInputError = (message, field, reason = "INVALID_VALUE") => {
+const unknownInputType = Symbol("unknown input type");
+const workspaceInputError = (message, field, reason = "INVALID_VALUE", expectedType = "unknown", value = unknownInputType, key = null) => {
   const candidate = String(field).replace(/^(?:parameters|runIdentity)\./u, "").split(/[.[]/u)[0];
   const safeField = diagnosticContract.validationFields.includes(candidate) ? candidate : "unknown";
   const error = new TrelioLocalContextError("TRELIO_WORKSPACE_ACTION_INVALID_INPUT", message,
     { failureCode: "TRELIO_WORKSPACE_INPUT_" + reason, field: safeField });
   error.diagnosticCode = error.details.failureCode;
   error.diagnosticField = safeField;
-  return error;
+  // Inspect only the container's type and a reviewed structural key. Neither
+  // its value, arbitrary unknown key nor an array index enters the annotation.
+  return rememberDiagnosticDetail(error, { kind: "input", reason,
+    stage: reason === "UNKNOWN_FIELD" ? "unknown_parameter" : String(field).includes("[") ? "array_item" : "parameter",
+    key: diagnosticContract.detailEvidence.inputFields.includes(key ?? safeField) ? key ?? safeField : "unknown",
+    expectedType, actualType: value === unknownInputType ? "unknown" : diagnosticValueType(value) });
 };
 
 const normalizeWorkspaceActionParameters = value => {
   if (!value || typeof value !== "object" || Array.isArray(value))
-    throw workspaceInputError("parameters must contain one structured Trelio Workspace action object.", "parameters", value === undefined ? "MISSING_FIELD" : "WRONG_TYPE");
+    throw workspaceInputError("parameters must contain one structured Trelio Workspace action object.", "parameters", value === undefined ? "MISSING_FIELD" : "WRONG_TYPE", "object", value);
   return value;
 };
 const assertWorkspaceActionKeys = (parameters, allowedKeys) => {
   const unknownKey = Object.keys(parameters).find(key => !allowedKeys.has(key));
-  if (unknownKey) throw workspaceInputError(`parameters.${unknownKey} is not supported for this Trelio Workspace action.`, "parameters", "UNKNOWN_FIELD");
+  if (unknownKey) throw workspaceInputError(`parameters.${unknownKey} is not supported for this Trelio Workspace action.`, "parameters", "UNKNOWN_FIELD", "object", parameters, unknownKey);
 };
 const normalizeWorkspaceActionString = (value, fieldName, {
   required = true, maximumLength = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENT_LENGTH, trim = true, allowEmpty = false,
 } = {}) => {
   if (value === undefined && !required) return null;
-  if (value === undefined) throw workspaceInputError(fieldName + " is required.", fieldName, "MISSING_FIELD");
-  if (typeof value !== "string") throw workspaceInputError(fieldName + " must be a string.", fieldName, "WRONG_TYPE");
-  if (value.includes("\0")) throw workspaceInputError(fieldName + " must not contain NUL bytes.", fieldName);
+  if (value === undefined) throw workspaceInputError(fieldName + " is required.", fieldName, "MISSING_FIELD", "string", value);
+  if (typeof value !== "string") throw workspaceInputError(fieldName + " must be a string.", fieldName, "WRONG_TYPE", "string", value);
+  if (value.includes("\0")) throw workspaceInputError(fieldName + " must not contain NUL bytes.", fieldName, "INVALID_VALUE", "string", value);
   const normalized = trim ? value.trim() : value;
-  if (!allowEmpty && !normalized) throw workspaceInputError(fieldName + " must not be empty.", fieldName);
-  if (normalized.length > maximumLength) throw workspaceInputError(fieldName + " exceeds the maximum length.", fieldName, "LIMIT_EXCEEDED");
+  if (!allowEmpty && !normalized) throw workspaceInputError(fieldName + " must not be empty.", fieldName, "INVALID_VALUE", "string", value);
+  if (normalized.length > maximumLength) throw workspaceInputError(fieldName + " exceeds the maximum length.", fieldName, "LIMIT_EXCEEDED", "string", value);
   return normalized;
 };
 const normalizeWorkspaceActionBoolean = (value, fieldName, defaultValue = false) => {
   if (value === undefined) return defaultValue;
-  if (typeof value !== "boolean") throw workspaceInputError(fieldName + " must be a boolean.", fieldName, "WRONG_TYPE");
+  if (typeof value !== "boolean") throw workspaceInputError(fieldName + " must be a boolean.", fieldName, "WRONG_TYPE", "boolean", value);
   return value;
 };
 const normalizeWorkspaceActionStringArray = (value, fieldName, {
   maximumItems = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENTS, allowEmptyValues = false,
 } = {}) => {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw workspaceInputError(fieldName + " must be an array of strings.", fieldName, "WRONG_TYPE");
-  if (value.length > maximumItems) throw workspaceInputError(fieldName + " exceeds the maximum number of items.", fieldName, "LIMIT_EXCEEDED");
+  if (!Array.isArray(value)) throw workspaceInputError(fieldName + " must be an array of strings.", fieldName, "WRONG_TYPE", "array", value);
+  if (value.length > maximumItems) throw workspaceInputError(fieldName + " exceeds the maximum number of items.", fieldName, "LIMIT_EXCEEDED", "array", value);
   return value.map((item, index) => normalizeWorkspaceActionString(item, fieldName + "[" + index + "]",
     { trim: !allowEmptyValues, allowEmpty: allowEmptyValues }));
 };
@@ -11483,6 +11498,7 @@ const executeTrelioWorkspaceActionOperation = async (
     // Retain the public wrapper ABI and local stdout/stderr recovery context.
     // Telemetry sees only the closed category, never that private context.
     actionError.diagnosticCode = failureCode;
+    if (failureCode === "LOCAL_CONTEXT_GENERATION_CHANGED") rememberDiagnosticDetail(actionError, httpDiagnostic?.diagnosticEvidence);
     throw actionError;
   } finally {
     heartbeatManager?.endAction(activeHeartbeatEntry);
@@ -12954,7 +12970,8 @@ if (IS_HUMAN_SEARCH_READER) {
           : error instanceof BridgeTransportError ? "TRELIO_BRIDGE_TRANSPORT_FAILED" : "LOCAL_CONTEXT_SEARCH_FAILED";
       // Flush the small closed failure before exiting. Private-session and all
       // started file workers have settled; no unknown child is kept warm.
-      await new Promise(resolve => process.send?.({ id: message.id, type: "failure", code }, () => resolve()));
+      await new Promise(resolve => process.send?.({ id: message.id, type: "failure", code,
+        ...(readDiagnosticDetail(error) ? { diagnosticEvidence: readDiagnosticDetail(error) } : {}) }, () => resolve()));
     } finally {
       running = null;
       if (failed || controller.signal.aborted) process.exit(0);

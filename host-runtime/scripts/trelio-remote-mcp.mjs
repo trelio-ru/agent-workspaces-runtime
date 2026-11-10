@@ -29,7 +29,7 @@ import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
 } from "./trelio-host-runtime-recovery.mjs";
-import { observationCode } from "./trelio-diagnostic-observation.mjs";
+import { observationCode, readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
 import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import { spawn } from "node:child_process";
@@ -6788,7 +6788,8 @@ export const handleLocalMcpMessage = async (
       try {
         recordDiagnostic?.(message.params?.name, message.params?.arguments,
           diagnosticCode,
-          { field: effectiveError instanceof TrelioLocalContextError ? effectiveError.diagnosticField : undefined });
+          { field: effectiveError instanceof TrelioLocalContextError ? effectiveError.diagnosticField : undefined,
+            evidence: readDiagnosticDetail(effectiveError) });
       } catch { /* Telemetry must preserve the original result. */ }
       const isProposalCardError = errorPayload.code.startsWith("LOCAL_CONTEXT_PROPOSAL_");
       return {

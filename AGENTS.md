@@ -787,6 +787,10 @@ publication tooling также остаются вне этого публичн
   не request content; запись initialize не доказывает получение клиентом.
   только закрытые технические dimensions, без input/message/paths и без
   auth recovery. Сбой сборщика не меняет ответ исходной операции.
+  Negotiated detailEvidence v1 retains closed generation guards, argument
+  container types/known keys and collector/journal phases under the SAME paired
+  counters. Old servers strip details only; preserve UUIDs, bounds and retries.
+  The canonical vocabulary is backend-owned; see the same diagnostics contract.
   Failed child допускает только closed failure category; classification не
   разрешает повтор mutation или передачу stdout/message в telemetry.
   Typed HTTP failure bridge передаётся отдельным final frame: только exact

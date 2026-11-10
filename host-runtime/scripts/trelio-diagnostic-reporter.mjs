@@ -1,11 +1,15 @@
 import contract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { readExistingBridgeSessionToken } from "./trelio-workspace.mjs";
-import { buildDiagnosticObservation, observationCode, observationCount } from "./trelio-diagnostic-observation.mjs";
+import { buildDiagnosticObservation, observationCode, observationCount, addDiagnosticDetail, projectDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { readDiagnosticJournal, acknowledgeDiagnosticJournal, writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
 
 class DeliveryError extends Error {
-  constructor(reason, retryable = false) { super(reason); this.reason = reason; this.retryable = retryable; }
+  constructor(reason, retryable = false, evidence = null) {
+    super(reason); this.reason = reason; this.retryable = retryable;
+    this.evidence = projectDiagnosticDetail(evidence);
+  }
 }
+const deliveryDetail = (context, reason, status = 0) => ({ kind: "delivery", stage: context.stage ?? "unknown", reason, httpStatus: status });
 const discardBody = async response => { await response.body?.cancel(); };
 // Compatibility lifecycle: diagnostics-v2-loss-catalog in Trelio's legacy registry.
 // Original v2 servers did not advertise loss reasons. This fixed baseline
@@ -19,46 +23,50 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
     // It shares cancellation with its invocation-local Windows worker. A read
     // error is terminal for telemetry; it never initiates OAuth or pairing.
     signal?.throwIfAborted();
-    context.token ??= readToken(origin, { signal });
+    context.stage = "credential"; context.httpStatus = 0;
     let token;
-    try { token = await context.token; } catch { throw new DeliveryError("credential_unavailable"); }
+    try { context.token ??= readToken(origin, { signal }); token = await context.token; }
+    catch { throw new DeliveryError("credential_unavailable", false, deliveryDetail(context, "credential_read_failed")); }
     signal?.throwIfAborted();
-    if (!token) throw new DeliveryError("credential_unavailable");
+    if (!token) throw new DeliveryError("credential_unavailable", false, deliveryDetail(context, "credential_missing"));
     const headers = { authorization: "Bearer " + token, "content-type": "application/json" };
     if (capabilities?.expires <= Date.now()) capabilities = undefined;
     if (!capabilities) {
+      context.stage = "capabilities_headers";
       const response = await fetchImpl(new URL("/api/agent-workspaces/diagnostics/capabilities", origin), {
         method: "GET", headers, redirect: "error", signal,
       });
       if (response.status === 404 || response.status === 405) {
         await discardBody(response); capabilities = { version: 1, expires: Date.now() + 60000 };
       } else if (response.status === 200) {
+        context.stage = "capabilities_body";
         // Bound decoding before JSON parsing. A proxy/provider response is not
         // a source of new codes: only the intersection of two closed catalogs.
         const reader = response.body?.getReader();
-        if (!reader) throw new DeliveryError("delivery_rejected");
+        if (!reader) throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "body_missing"));
         const chunks = []; let length = 0;
         try {
           while (true) {
             const { done, value } = await reader.read(); if (done) break;
             length += value.length;
-            if (length > 65536) throw new DeliveryError("delivery_rejected");
+            if (length > 65536) throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "body_limit"));
             chunks.push(Buffer.from(value));
           }
         } finally { await reader.cancel().catch(() => {}); }
         let data;
-        try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new DeliveryError("delivery_rejected"); }
-        if (data.schemaVersion !== 2 || !Array.isArray(data.errorCodes) || data.errorCodes.length > 2000
-          || !data.errorCodes.includes("DIAGNOSTICS_CODE_UNSUPPORTED")) throw new DeliveryError("delivery_rejected");
+        try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "body_json_invalid")); }
+        if (!data || data.schemaVersion !== 2 || !Array.isArray(data.errorCodes) || data.errorCodes.length > 2000
+          || !data.errorCodes.includes("DIAGNOSTICS_CODE_UNSUPPORTED")) throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "capabilities_schema_invalid"));
         if (data.lossReasons !== undefined && (!Array.isArray(data.lossReasons) || data.lossReasons.length > 256)) {
-          throw new DeliveryError("delivery_rejected");
+          throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "loss_catalog_invalid"));
         }
         capabilities = { version: 2, codes: new Set(data.errorCodes.filter(code => contract.errorCodes.includes(code))),
           losses: new Set((data.lossReasons ?? LEGACY_LOSS_REASONS).filter(reason => contract.lossReasons.includes(reason))),
+          details: data.detailEvidenceVersion === contract.detailEvidence.version,
           expires: Date.now() + 300000 };
       } else {
         await discardBody(response);
-        throw new DeliveryError("delivery_rejected", response.status >= 500);
+        throw new DeliveryError("delivery_rejected", response.status >= 500, deliveryDetail(context, "http_rejected", response.status));
       }
     }
     const selected = capabilities;
@@ -81,23 +89,41 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
           if (code !== row.code) unsupported += row.count;
           const key = code + ":" + row.field;
           const prior = outcomes.get(key);
-          if (prior) prior.count += row.count; else outcomes.set(key, { ...row, code });
+          // Compatibility: diagnostics-v2-detail-evidence in the backend legacy
+          // registry. Build a projection; never mutate the frozen sample
+          // shared by retries/journal acknowledgement. Old v2 servers receive
+          // exactly the original strict schema with the SAME UUID and counts.
+          const target = prior ?? { code, field: row.field, count: 0 };
+          target.count += row.count;
+          if (!prior) outcomes.set(key, target);
+          if (selected.details && code === row.code) for (const detail of row.details ?? [])
+            addDiagnosticDetail(target, detail, { outcomes: [...outcomes.values()], losses: [] });
         }
         const losses = new Map();
         for (const row of sample.losses) {
           const reason = selected.losses.has(row.reason) ? row.reason : "catalog_mismatch";
-          losses.set(reason, Math.min(1000000, (losses.get(reason) || 0) + row.count));
+          const target = losses.get(reason) ?? { reason, count: 0 };
+          target.count = Math.min(1000000, target.count + row.count); losses.set(reason, target);
+          if (selected.details && reason === row.reason) for (const detail of row.details ?? [])
+            addDiagnosticDetail(target, detail, { outcomes: [...outcomes.values()], losses: [...losses.values()] });
         }
-        if (unsupported) losses.set("catalog_mismatch", Math.min(1000000, (losses.get("catalog_mismatch") || 0) + unsupported));
-        return { ...sample, outcomes: [...outcomes.values()], losses: [...losses].map(([reason, count]) => ({reason, count})) };
+        if (unsupported) {
+          const target = losses.get("catalog_mismatch") ?? { reason: "catalog_mismatch", count: 0 };
+          target.count = Math.min(1000000, target.count + unsupported); losses.set("catalog_mismatch", target);
+        }
+        return { ...sample, outcomes: [...outcomes.values()], losses: [...losses.values()] };
       }) }; endpoint = "observations";
     }
     signal?.throwIfAborted();
+    context.stage = selected.version === 1 ? "legacy_headers" : "observations_headers"; context.httpStatus = 0;
     const response = await fetchImpl(new URL("/api/agent-workspaces/diagnostics/" + endpoint, origin), {
       method: "POST", headers, redirect: "error", signal, body: JSON.stringify(payload),
     });
+    context.stage = selected.version === 1 ? "legacy_body" : "observations_body";
+    context.httpStatus = response.status >= 400 ? response.status : 0;
     await discardBody(response);
-    if (response.status !== 204) throw new DeliveryError("delivery_rejected", response.status >= 500);
+    if (response.status !== 204) throw new DeliveryError("delivery_rejected", response.status >= 500,
+      deliveryDetail(context, "http_rejected", context.httpStatus));
     return { legacy: selected.version === 1 };
   };
 };
@@ -109,8 +135,15 @@ export const createAgentDiagnosticReporter = ({
 } = {}) => {
   const pending = new Map(), losses = new Map();
   let timer, active, occupied, controller, closed = false;
-  const loss = (reason, count = 1) => {
-    if (contract.lossReasons.includes(reason) && count > 0) losses.set(reason, Math.min(1000000, (losses.get(reason) || 0) + count));
+  const loss = (reason, count = 1, evidence = null) => {
+    if (!contract.lossReasons.includes(reason) || count <= 0) return;
+    const row = losses.get(reason) ?? { reason, count: 0 };
+    row.count = Math.min(1000000, row.count + count); losses.set(reason, row);
+    if (evidence) addDiagnosticDetail(row, { ...evidence, count }, { outcomes: [], losses: [...losses.values()] });
+  };
+  const restoreLoss = row => {
+    loss(row.reason, row.count);
+    for (const detail of row.details ?? []) addDiagnosticDetail(losses.get(row.reason), detail, { outcomes: [], losses: [...losses.values()] });
   };
   const schedule = () => {
     if (!closed && !timer && !active && !occupied && pending.size) {
@@ -122,16 +155,18 @@ export const createAgentDiagnosticReporter = ({
     if (journal) {
       try { const result = await journal.read(); journalSamples = result.samples.slice(0, 10);
         for (const [reason, count] of Object.entries(result.losses)) loss(reason, count);
-      } catch { loss("journal_invalid"); }
+        for (const row of result.details ?? []) for (const detail of row.details ?? [])
+          if (losses.has(row.reason)) addDiagnosticDetail(losses.get(row.reason), detail, { outcomes: [], losses: [...losses.values()] });
+      } catch { loss("journal_invalid", 1, { kind: "journal", stage: "directory", reason: "directory_unavailable", ageBucket: "unknown" }); }
     }
     if (closed || occupied) return;
     const local = [...pending.values()].slice(0, 19 - journalSamples.length);
     for (const sample of local) pending.delete(sample.key);
     const samples = [...journalSamples, ...local.map(({ key, ...sample }) => sample)];
-    const carriedLosses = [...losses];
+    const carriedLosses = structuredClone([...losses.values()]);
     if (losses.size && samples.length) {
       const health = buildDiagnosticObservation("unknown", {}, null, { boundary: "collector", environment });
-      health.losses = [...losses].map(([reason, count]) => ({reason, count})); losses.clear(); samples.push(health);
+      health.losses = [...losses.values()]; losses.clear(); samples.push(health);
     }
     if (!samples.length) return;
     const count = local.reduce((sum, sample) => sum + observationCount(sample), 0);
@@ -147,18 +182,25 @@ export const createAgentDiagnosticReporter = ({
       void sending.then(release, release);
       try {
         const result = await Promise.race([sending, new Promise((_, reject) => {
-          timeout = setTimeout(() => { controller.abort(); reject(new DeliveryError("delivery_timeout", true)); }, timeoutMs);
+          timeout = setTimeout(() => {
+            // Abort listeners may synchronously settle an adapter and change
+            // its phase. Capture the observed timeout boundary BEFORE abort.
+            const failure = new DeliveryError("delivery_timeout", true,
+              deliveryDetail(context, "timeout", context.httpStatus ?? 0));
+            controller.abort(); reject(failure);
+          }, timeoutMs);
           timeout.unref?.();
         })]);
         if (result?.legacy) loss("catalog_mismatch", samples.reduce((sum, sample) => sum + observationCount(sample), 0));
-        if (journalSamples.length) await journal?.acknowledge(journalSamples);
+        if (journalSamples.length) { context.stage = "acknowledgement"; await journal?.acknowledge(journalSamples); }
         return;
       } catch (error) { failed = error; }
       finally { clearTimeout(timeout); }
       const reason = failed instanceof DeliveryError ? failed.reason : "delivery_transport";
       if (!settled || (failed instanceof DeliveryError && !failed.retryable) || attempt === retryDelays.length || closed) {
-        for (const [kind, amount] of carriedLosses) loss(kind, amount);
-        if (count) loss(reason, count);
+        for (const row of carriedLosses) restoreLoss(row);
+        if (count) loss(reason, count, failed instanceof DeliveryError && failed.evidence
+          ? failed.evidence : deliveryDetail(context, context.stage === "acknowledgement" ? "acknowledgement_failed" : "transport", context.httpStatus ?? 0));
         return;
       }
       await new Promise(resolve => { const id = setTimeout(resolve, retryDelays[attempt]); id.unref?.(); });
@@ -190,11 +232,12 @@ export const createAgentDiagnosticReporter = ({
       if (previous.outcomes.length >= 63 && !previous.outcomes.some(item => item.code === row.code && item.field === row.field))
         row = { code: "DIAGNOSTICS_DETAIL_OVERFLOW", field: "unknown", count: 1 };
       const match = previous.outcomes.find(item => item.code === row.code && item.field === row.field);
-      if (match) match.count++; else previous.outcomes.push(row);
+      if (match) { match.count++; row = match; } else previous.outcomes.push(row);
+      addDiagnosticDetail(row, details.evidence, previous);
       schedule();
     },
     flush,
-    health() { return { pendingGroups: pending.size, inFlight: Boolean(occupied), losses: Object.fromEntries(losses) }; },
+    health() { return { pendingGroups: pending.size, inFlight: Boolean(occupied), losses: Object.fromEntries([...losses].map(([reason, row]) => [reason, row.count])) }; },
     close() {
       closed = true; clearTimeout(timer); clearInterval(poll); controller?.abort();
       loss("shutdown", [...pending.values()].reduce((sum, sample) => sum + observationCount(sample), 0)); pending.clear();
@@ -203,7 +246,7 @@ export const createAgentDiagnosticReporter = ({
       // those losses remain unknowable and must not be claimed as measured.
       if (journal?.write && losses.size) {
         const health = buildDiagnosticObservation("unknown", {}, null, { boundary: "collector", environment });
-        health.losses = [...losses].map(([reason, count]) => ({ reason, count }));
+        health.losses = [...losses.values()];
         void Promise.resolve().then(() => journal.write(health)).catch(() => {});
       }
     },

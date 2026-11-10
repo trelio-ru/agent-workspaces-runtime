@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { outsideTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 import { canonicalJson } from "./trelio-company-encryption.mjs";
+import { rememberDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 
 const PREFIX = "TRELIO_FINISH_PROGRESS ";
 const STAGES = new Set([
@@ -239,7 +240,8 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
         // Completion is undelivered data, not a reusable authorization cache.
         // Fresh native manifest equality and recipient identity fence delivery.
         if (!await validate(origin, input, value, admission, { signal }))
-          fail("LOCAL_CONTEXT_GENERATION_CHANGED", "Контекст изменился во время поиска. Выполните новый native поиск.");
+          throw rememberDiagnosticDetail(errorFactory("LOCAL_CONTEXT_GENERATION_CHANGED", "Контекст изменился во время поиска. Выполните новый native поиск."),
+            { kind: "generation", stage: "search_delivery", reason: "search_generation_changed" });
         signal?.throwIfAborted();
         if (entry.delivered || current !== entry)
           fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Этот результат поиска уже выдан. Выполните новый native поиск.");

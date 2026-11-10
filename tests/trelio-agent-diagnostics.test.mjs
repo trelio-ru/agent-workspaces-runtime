@@ -3,7 +3,7 @@ import test from "node:test";
 import {randomUUID} from 'node:crypto';
 import { buildAgentDiagnosticEvent, createAgentDiagnosticReporter, sendAgentDiagnosticBatch } from "../host-runtime/scripts/trelio-agent-diagnostics.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
-import { TrelioLocalContextError } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { TrelioLocalContextError, buildStableCompanyMirror, buildTrelioWorkspaceActionInvocation } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { ProcessDiagnosticError, PROCESS_DIAGNOSTIC_CODES, parseProcessDiagnostic, skillRuntimeExitError, skillSetupExitError } from "../host-runtime/scripts/trelio-process-diagnostics.mjs";
 import { formatBridgeCommandError, runMaterializedAgentSkill, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { formatRuntimeHookFailure } from "../host-runtime/scripts/trelio-runtime-session.mjs";
@@ -231,7 +231,7 @@ test("dispatcher uses the fixed child category while preserving local recovery a
 // Regression for the observed amplification bug: timeout must not start four
 // parallel protected-store reads, and a late read must never initiate HTTP.
 import { createObservationTransport } from "../host-runtime/scripts/trelio-diagnostic-reporter.mjs";
-import { buildDiagnosticObservation, isDiagnosticObservation } from "../host-runtime/scripts/trelio-diagnostic-observation.mjs";
+import { buildDiagnosticObservation, isDiagnosticObservation, projectDiagnosticDetail, rememberDiagnosticDetail, readDiagnosticDetail } from "../host-runtime/scripts/trelio-diagnostic-observation.mjs";
 import { writeDiagnosticJournal, readDiagnosticJournal, acknowledgeDiagnosticJournal } from "../host-runtime/scripts/trelio-diagnostic-journal.mjs";
 import { recordRuntimeHookDiagnostic } from "../host-runtime/scripts/trelio-runtime-session.mjs";
 import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -337,4 +337,239 @@ test("HTTP failures keep closed backend codes or an exact status class without r
     await handleLocalMcpMessage(request,{callTool:async()=>{throw new TrelioApiError(status,"PRIVATE_CANARY",null,code);},recordDiagnostic:(_tool,_args,code)=>reports.push(code)});
     assert.equal(reports.at(-1),expected);
   }
+});
+
+const generationDetail = { kind:'generation', stage:'candidate', reason:'task_revision_changed', count:1 };
+test('closed details reject extra fields/getters and cannot change paired counters', async () => {
+  let getters=0;
+  assert.equal(projectDiagnosticDetail({kind:'generation',get stage(){getters++;throw Error('PRIVATE');},reason:'unknown'}),null);
+  assert.equal(getters,0);
+  for(const extra of [{message:'PRIVATE'}, {scopeId:randomUUID()}, {stage:'PRIVATE'}, {count:null}, {count:0}])
+    assert.equal(projectDiagnosticDetail({...generationDetail,...extra}),null);
+  const bodies=[];
+  const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',journal:null,delayMs:60000,
+    send:async(_origin,samples)=>{bodies.push(structuredClone(samples));}});
+  try{
+    for(let i=0;i<2;i++)reporter.record('continue_trelio_local_action',{route:'context'},'LOCAL_CONTEXT_GENERATION_CHANGED',{evidence:generationDetail});
+    reporter.record('continue_trelio_local_action',{route:'context'},'LOCAL_CONTEXT_GENERATION_CHANGED');
+    await reporter.flush();
+    const row=bodies[0][0].outcomes[0];
+    assert.equal(row.count,3);assert.equal(row.details[0].count,2);assert.equal(isDiagnosticObservation(bodies[0][0]),true);
+    for(const details of [[{...generationDetail,count:4}],[generationDetail,generationDetail],[{...generationDetail,message:'PRIVATE'}]])
+      assert.equal(isDiagnosticObservation({...bodies[0][0],outcomes:[{...row,details}]}),false);
+    assert.equal(isDiagnosticObservation({...bodies[0][0],outcomes:[{code:'OK',field:'unknown',count:1,details:[generationDetail]}]}),false);
+  }finally{reporter.close();}
+});
+
+test('details negotiate old v2 without changing UUID/counts, and exact retries remain immutable', async () => {
+  for(const advertised of [true,false]){
+    const bodies=[];
+    const transport=createObservationTransport({readToken:async()=> 'synthetic',fetchImpl:async(url,options)=>{
+      if(url.pathname.endsWith('capabilities'))return new Response(JSON.stringify({schemaVersion:2,errorCodes:contract.errorCodes,
+        lossReasons:contract.lossReasons,...(advertised?{detailEvidenceVersion:1}:{})}));
+      bodies.push(options.body);return new Response(null,{status:204});
+    }});
+    const sample=buildDiagnosticObservation('continue_trelio_local_action',{route:'context'},'LOCAL_CONTEXT_GENERATION_CHANGED');
+    sample.outcomes[0].details=[generationDetail];
+    const original=JSON.stringify(sample);
+    await transport('https://fixture.invalid',[sample]);await transport('https://fixture.invalid',[sample]);
+    assert.equal(new Set(bodies).size,1);assert.equal(JSON.stringify(sample),original);
+    const delivered=JSON.parse(bodies[0]).samples[0];
+    assert.equal(delivered.id,sample.id);assert.equal(delivered.outcomes[0].count,1);
+    assert.deepEqual(delivered.outcomes[0].details,advertised?[generationDetail]:undefined);
+    assert.equal(isDiagnosticObservation(delivered),true);
+  }
+});
+
+test('real finish argument guards retain expected/actual types, nested item stage and closed aliases before any child', async () => {
+  const base={schemaVersion:1,operation:'finish',workingDirectory:os.tmpdir(),parameters:{summary:'PRIVATE_SUMMARY'}};
+  for(const [change,key,actual,expected,stage] of [
+    [{evidence:{}},'evidence','object','array','parameter'],
+    [{evidence:'PRIVATE_EVIDENCE'},'evidence','string','array','parameter'],
+    [{evidence:[{}]},'evidence','object','string','array_item'],
+    [{nextAction:{}},'nextAction','object','string','parameter'],
+    [{files:['PRIVATE_PATH']},'files','object','object','unknown_parameter'],
+    [{PRIVATE_UNKNOWN:'PRIVATE_VALUE'},'unknown','object','object','unknown_parameter'],
+  ]){
+    let caught;
+    assert.throws(()=>buildTrelioWorkspaceActionInvocation({...base,parameters:{...base.parameters,...change}}),error=>{caught=error;return true;});
+    const detail=readDiagnosticDetail(caught);
+    assert.deepEqual([detail.kind,detail.key,detail.actualType,detail.expectedType,detail.stage],['input',key,actual,expected,stage]);
+    assert.doesNotMatch(JSON.stringify(detail),/PRIVATE/);
+    const reports=[];
+    await handleLocalMcpMessage({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'continue_trelio_workspace_action',arguments:base}},
+      {callTool:async()=>{throw caught;},recordDiagnostic:(...args)=>reports.push(args)});
+    assert.equal(reports[0][2],caught.diagnosticCode);assert.deepEqual(reports[0][3].evidence,detail);
+  }
+});
+
+test('three-attempt mirror conflicts preserve originating backend reason and final assembly stage', async () => {
+  let reads=0,builds=0,publishes=0;
+  const backend=()=>new TrelioApiError(409,'fixed',null,'LOCAL_CONTEXT_GENERATION_CHANGED',{
+    diagnosticEvidence:{kind:'generation',stage:'backend_manifest',reason:'manifest_deadlock'},private:'PRIVATE'});
+  await assert.rejects(buildStableCompanyMirror({readManifest:async()=>{reads++;throw backend();},
+    buildCandidate:async()=>{builds++;},publish:async()=>{publishes++;}}),error=>{
+      assert.deepEqual(readDiagnosticDetail(error),{kind:'generation',stage:'starting_manifest',reason:'manifest_deadlock',count:1});
+      assert.equal(error.details.reason,'revision_conflict','public recovery ABI stays unchanged');return true;
+    });
+  assert.equal(reads,3);assert.equal(builds,0);assert.equal(publishes,0);
+  reads=0;
+  await assert.rejects(buildStableCompanyMirror({readManifest:async()=>({generation:String(reads++)}),buildCandidate:async()=>({}),
+    publish:async()=>assert.fail('never publish a mixed generation')}),error=>{
+      assert.deepEqual(readDiagnosticDetail(error),{kind:'generation',stage:'finishing_manifest',reason:'generation_mismatch',count:1});return true;
+    });
+  assert.equal(reads,6);
+  assert.equal(readDiagnosticDetail(new Error('LOCAL_CONTEXT_GENERATION_CHANGED')),undefined);
+});
+
+const captureDeliveryLoss=async({readToken=async()=> 'synthetic',failureFetch})=>{
+  let failed=true;const delivered=[];
+  const transport=createObservationTransport({readToken,fetchImpl:async(url,options)=>{
+    if(failed)return failureFetch(url,options);
+    if(url.pathname.endsWith('capabilities'))return new Response(JSON.stringify({schemaVersion:2,errorCodes:contract.errorCodes,lossReasons:contract.lossReasons,detailEvidenceVersion:1}));
+    delivered.push(JSON.parse(options.body));return new Response(null,{status:204});
+  }});
+  const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',journal:null,delayMs:60000,retryDelays:[],send:transport});
+  try{
+    reporter.record('continue_trelio_workspace_action',{operation:'finish'},'OK');await reporter.flush();failed=false;
+    reporter.record('continue_trelio_workspace_action',{operation:'finish'},'OK');await reporter.flush();
+    return delivered[0].samples.flatMap(sample=>sample.losses);
+  }finally{reporter.close();}
+};
+test('delivery refusals distinguish capabilities/body/schema and HTTP status without reading error prose',async()=>{
+  for(const [response,stage,reason,status] of [
+    [()=>new Response(null,{status:401}),'capabilities_headers','http_rejected',401],
+    [()=>new Response(null,{status:200}),'capabilities_body','body_missing',0],
+    [()=>new Response('PRIVATE_NOT_JSON'),'capabilities_body','body_json_invalid',0],
+    [()=>new Response('null'),'capabilities_body','capabilities_schema_invalid',0],
+    [()=>new Response(JSON.stringify({schemaVersion:2,errorCodes:['DIAGNOSTICS_CODE_UNSUPPORTED'],lossReasons:{private:'PRIVATE'}})),
+      'capabilities_body','loss_catalog_invalid',0],
+  ]){
+    const losses=await captureDeliveryLoss({failureFetch:async()=>response()});
+    assert.equal(losses[0].reason,'delivery_rejected');assert.equal(losses[0].count,1);
+    assert.deepEqual(losses[0].details,[{kind:'delivery',stage,reason,httpStatus:status,count:1}]);
+    assert.doesNotMatch(JSON.stringify(losses),/PRIVATE|Bearer|fixture/);
+  }
+  const losses=await captureDeliveryLoss({failureFetch:async url=>url.pathname.endsWith('capabilities')
+    ?new Response(JSON.stringify({schemaVersion:2,errorCodes:contract.errorCodes,lossReasons:contract.lossReasons,detailEvidenceVersion:1}))
+    :new Response('PRIVATE_PROVIDER_BODY',{status:429})});
+  assert.deepEqual(losses[0].details,[{kind:'delivery',stage:'observations_body',reason:'http_rejected',httpStatus:429,count:1}]);
+});
+
+test('journal expiry/decoding/schema reasons retain only age buckets and survive the actual reporter',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-detail-journal-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const sample=buildDiagnosticObservation('runtime_hook',{operation:'PreToolUse'},'OK',{boundary:'hook'});
+  await writeDiagnosticJournal('fixture',sample,{directory});
+  const now=Date.now();await fs.utimes(path.join(directory,sample.id+'.json'),new Date(now-30*3600000),new Date(now-30*3600000));
+  await fs.writeFile(path.join(directory,randomUUID()+'.json'),'PRIVATE_INVALID_JSON');
+  await fs.writeFile(path.join(directory,randomUUID()+'.json'),JSON.stringify({...sample,message:'PRIVATE_CONTENT'}));
+  const read=await readDiagnosticJournal('fixture',{directory,now});
+  assert.deepEqual(read.losses,{journal_expired:1,journal_invalid:2});
+  assert.deepEqual(read.details.find(row=>row.reason==='journal_expired').details,[{kind:'journal',stage:'entry',reason:'entry_ttl_expired',ageBucket:'24h_to_48h',count:1}]);
+  assert.deepEqual(read.details.find(row=>row.reason==='journal_invalid').details.map(d=>d.reason).sort(),['json_invalid','schema_invalid']);
+  const samples=[];const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',delayMs:60000,
+    journal:{read:async()=>read,acknowledge:async()=>{}},send:async(_o,value)=>samples.push(...structuredClone(value))});
+  try{
+    reporter.record('continue_trelio_workspace_action',{operation:'status'},'OK');await reporter.flush();
+    assert.ok(samples.every(isDiagnosticObservation));assert.doesNotMatch(JSON.stringify(samples),/PRIVATE|trelio-detail-journal|fixture/);
+    const health=samples.find(s=>s.boundary==='collector');assert.equal(health.losses.find(x=>x.reason==='journal_invalid').details.length,2);
+  }finally{reporter.close();}
+});
+
+test('generation evidence crosses the actual bridge HTTP frame with fixed code and no raw payload',async()=>{
+  const {parseBridgeHttpDiagnostic}=await import('../host-runtime/scripts/trelio-bridge-http-diagnostics.mjs');
+  const native={kind:'generation',stage:'backend_task',reason:'task_revision_changed'};
+  const error=new TrelioApiError(409,'fixed',null,'LOCAL_CONTEXT_GENERATION_CHANGED',{diagnosticEvidence:native,private:'PRIVATE_LOCATOR'});
+  const frame=formatBridgeCommandError(error);
+  assert.doesNotMatch(frame,/PRIVATE/);
+  assert.deepEqual(parseBridgeHttpDiagnostic('PRIVATE_EARLIER_TRACE\nОшибка: '+frame).diagnosticEvidence,{...native,count:1});
+  assert.equal(parseBridgeHttpDiagnostic('Ошибка: '+frame+'\nlate provider text'),null);
+  assert.equal(readDiagnosticDetail(new TrelioApiError(409,'fixed',null,'OTHER',{diagnosticEvidence:native})),undefined);
+  assert.equal(readDiagnosticDetail(new TrelioApiError(409,'fixed',null,'LOCAL_CONTEXT_GENERATION_CHANGED',{
+    diagnosticEvidence:{...native,token:'PRIVATE'}})),undefined);
+});
+
+test('credential and body timeouts retain the phase in the shutdown journal without late HTTP or a second reader',async()=>{
+  for(const phase of ['credential','capabilities_body']){
+    let release,reads=0,requests=0;const written=[];
+    const transport=createObservationTransport({readToken:async()=>{reads++;return phase==='credential'?new Promise(resolve=>{release=resolve;}):'synthetic';},
+      fetchImpl:async()=>{requests++;return new Response(new ReadableStream({start(controller){release=()=>controller.close();}}));}});
+    const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',delayMs:60000,timeoutMs:5,retryDelays:[],send:transport,
+      journal:{read:async()=>({samples:[],losses:{}}),write:async sample=>written.push(structuredClone(sample))}});
+    const keep=setInterval(()=>{},1000);
+    try{
+      reporter.record('continue_trelio_workspace_action',{operation:'finish'},'OK');await reporter.flush();
+      assert.equal(reporter.health().losses.delivery_timeout,1);assert.equal(reporter.health().inFlight,true);
+      await reporter.flush();assert.equal(reads,1);reporter.close();await sleep(0);
+      const detail=written[0].losses.find(row=>row.reason==='delivery_timeout').details[0];
+      assert.deepEqual(detail,{kind:'delivery',stage:phase,reason:'timeout',httpStatus:0,count:1});
+      assert.ok(isDiagnosticObservation(written[0]));
+      release(phase==='credential'?'synthetic':undefined);await sleep(10);
+      assert.equal(requests,phase==='credential'?0:1);assert.equal(reads,1);
+    }finally{reporter.close();clearInterval(keep);}
+  }
+});
+
+test('network and credential-read failures retain their distinct closed boundaries',async()=>{
+  const network=await captureDeliveryLoss({failureFetch:async()=>{throw new Error('PRIVATE_ENDPOINT_AND_TOKEN');}});
+  assert.deepEqual(network[0],{reason:'delivery_transport',count:1,details:[{kind:'delivery',stage:'capabilities_headers',reason:'transport',httpStatus:0,count:1}]});
+  let reads=0;
+  const credential=await captureDeliveryLoss({readToken:()=>{if(++reads===1)throw new Error('PRIVATE_KEYCHAIN');return 'synthetic';},
+    failureFetch:async()=>assert.fail('a failed credential must never start HTTP')});
+  assert.equal(reads,2,'one original read per batch, no read recovery');
+  assert.deepEqual(credential[0],{reason:'credential_unavailable',count:1,details:[{kind:'delivery',stage:'credential',reason:'credential_read_failed',httpStatus:0,count:1}]});
+});
+
+test('detail overflow drops no paired outcomes and keeps every sample inside the unchanged journal byte limit',async()=>{
+  const batches=[];const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',journal:null,delayMs:60000,
+    send:async(_origin,samples)=>batches.push(structuredClone(samples))});
+  try{
+    for(const field of ['summary','evidence','nextAction','filePaths','questions'])
+      for(const reason of contract.detailEvidence.generationReasons.slice(0,6))
+        reporter.record('continue_trelio_local_action',{route:'context'},'LOCAL_CONTEXT_GENERATION_CHANGED',
+          {field,evidence:{kind:'generation',stage:'candidate',reason}});
+    await reporter.flush();
+    const sample=batches[0][0];assert.equal(sample.outcomes.reduce((n,row)=>n+row.count,0),30);
+    assert.equal(sample.outcomes.reduce((n,row)=>n+(row.details?.length??0),0),16);
+    assert.ok(sample.outcomes.every(row=>(row.details?.length??0)<=4));assert.ok(isDiagnosticObservation(sample));
+    assert.ok(Buffer.byteLength(JSON.stringify(sample))<=16384);
+  }finally{reporter.close();}
+});
+
+test('the actual HTTP retry retains negotiated details, one credential read and frozen UUID/counts',async()=>{
+  let reads=0;const bodies=[];
+  const transport=createObservationTransport({readToken:async()=>{reads++;return 'synthetic';},fetchImpl:async(url,options)=>{
+    if(url.pathname.endsWith('capabilities'))return new Response(JSON.stringify({schemaVersion:2,errorCodes:contract.errorCodes,
+      lossReasons:contract.lossReasons,detailEvidenceVersion:1}));
+    bodies.push(options.body);return new Response(null,{status:bodies.length===1?503:204});
+  }});
+  const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',journal:null,delayMs:60000,retryDelays:[0],send:transport});
+  const keep=setInterval(()=>{},1000);
+  try{
+    reporter.record('continue_trelio_local_action',{route:'context'},'LOCAL_CONTEXT_GENERATION_CHANGED',{evidence:generationDetail});
+    await reporter.flush();
+    assert.equal(reads,1);assert.equal(bodies.length,2);assert.equal(bodies[0],bodies[1]);
+    assert.deepEqual(JSON.parse(bodies[0]).samples[0].outcomes[0].details,[generationDetail]);
+    assert.equal(reporter.health().losses.delivery_rejected,undefined,'a successful original retry is not a new loss');
+  }finally{reporter.close();clearInterval(keep);}
+});
+
+test('timeout evidence freezes its original phase before synchronous abort listeners run',async()=>{
+  const written=[];
+  const reporter=createAgentDiagnosticReporter({origin:'https://fixture.invalid',delayMs:60000,timeoutMs:5,retryDelays:[],
+    journal:{read:async()=>({samples:[],losses:{}}),write:async sample=>written.push(structuredClone(sample))},
+    send:async(_origin,_samples,{signal,context})=>{
+      context.stage='observations_body';context.httpStatus=429;
+      await new Promise(resolve=>signal.addEventListener('abort',()=>{
+        context.stage='acknowledgement';context.httpStatus=0;resolve();
+      },{once:true}));
+    }});
+  const keep=setInterval(()=>{},1000);
+  try{
+    reporter.record('continue_trelio_workspace_action',{operation:'finish'},'OK');await reporter.flush();
+    reporter.close();await sleep(0);
+    assert.deepEqual(written[0].losses.find(row=>row.reason==='delivery_timeout').details,
+      [{kind:'delivery',stage:'observations_body',reason:'timeout',httpStatus:429,count:1}]);
+  }finally{reporter.close();clearInterval(keep);}
 });

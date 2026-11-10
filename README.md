@@ -531,9 +531,19 @@ process-start evidence, совпадение времени само по себ
 
 Content-free v2 объединяет success/error в immutable sample с UUID, boundary,
 OS/architecture, tool/operation, versions, закрытыми code/field и loss counters.
-Нет company/user/session/run/skill IDs, message/stack/details, аргументов, paths,
+Нет company/user/session/run/skill IDs, message/stack/произвольных details, аргументов, paths,
 proofs, credentials или provider content. Legacy error-only записи остаются
 без знаменателя. Backend OS unknown, не ОС сервера вместо клиента.
+
+Negotiated `detailEvidenceVersion=1` добавляет только закрытые `details`:
+generation stage/guard reason; argument container types и known structural key;
+collector stage/fixed reason/HTTP status; journal validation reason/age bucket.
+Это не arbitrary details или исходные аргументы. До 4 tuples/row и 16/sample;
+detail counts – подмножество родительского счётчика. Старый сервер получает
+прежний v2 без details, с тем же UUID и counters. Никаких новых retries,
+deadlines, credentials/Hook trust changes либо переинтерпретации старых rows.
+Report v6 хранит полную разбивку/coverage/omissions, loss reasons отдельно по
+единицам; Telegram – bounded subset. [Контракт](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
 
 Local MCP считает returned isError без чтения payload, typed exceptions и
 TrelioApiError с закрытым code/HTTP-классом. Отдельная hook boundary включает

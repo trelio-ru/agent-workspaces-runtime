@@ -2275,6 +2275,62 @@ accepted revision и история Run остаются на сервере Tre
 
 ## Диагностика transport bridge
 
+<a id="closed-runtime-diagnostic-details"></a>
+
+### Закрытые runtime diagnostic details v1
+
+Канонический словарь `trelio-agent-diagnostics-contract.json.detailEvidence`
+синхронизируется с backend `agent-diagnostics/contract.json`. При capability
+`detailEvidenceVersion=1` optional row `details` содержат только один из четырёх
+строгих вариантов: generation stage/guard reason, input stage/reason/known key/
+expectedType/actualType, delivery stage/reason/httpStatus либо journal stage/
+reason/ageBucket. Каждый tuple имеет count, не более 4/row и 16/sample;
+tuple counts не превосходят исходный counter. Parent code/field и loss reason
+остаются уникальны. Новые dimensions с company/user/device/Run/skill IDs,
+хешами, путями, значениями, headers, exception/provider prose запрещены.
+
+`trelio-diagnostic-observation.mjs` повторно валидирует каждую boundary и
+держит annotation Error в private WeakMap. Getter/extra fields и чужие code-
+shaped properties не считаются evidence. Typed HTTP 409 принимает generation
+reason только из strict native envelope. Общий final child frame и isolated
+search IPC сохраняют его, повторяя projection; поздние/посторонние frames
+сохраняют прежние отказы. Native grants, HTTP status и эти причины никогда
+не разрешают повтор business action.
+
+Mirror фиксирует stage и originating reason последней из прежних трёх попыток:
+starting manifest, candidate, final manifest либо explicit generation mismatch.
+Backend guards различают scope/missing projection, task/document/section
+revision и rolled-back manifest serialization/deadlock. Локальные exact source
+и delivery fences имеют собственные причины. Public codes/recovery details,
+число попыток и запрет mixed publication прежние. История предыдущих попыток
+и nativeTool исторических отказов не восстанавливаются.
+
+Finish/checkpoint `evidence`/`nextAction` и общие валидаторы сохраняют только
+container types. Array item не содержит index/value; unknown key сверяется
+с reviewed vocabulary (`files/filesChanged/openQuestions/checkpointType` и
+остальные structural keys), произвольное имя становится `unknown`.
+Parent diagnosticCode/field и validation-before-child остаются прежними.
+
+Collector запоминает фазу credential, capabilities headers/body, observations
+headers/body, legacy и acknowledgement. Rejection различает body limit/JSON/
+schema/catalog, credential missing/read failure и полученный HTTP error status.
+Status 0 означает отсутствие сохранённого error status, не успешную доставку.
+Timeout фиксирует фазу до abort; occupancy и один credential read сохраняются
+до actual settle. Error body/headers/URL и native exception не анализируются.
+Journal reader различает temporary expiry, entry TTL, type/size/read limit,
+JSON/schema/filename и I/O/directory refusal. Age – только bucket из stat,
+не timestamp/path/UUID. Failed writer/kill до записи остаются best-effort gap.
+
+Details агрегируются отдельно внутри прежних outcome/loss rows; overflow
+теряет только подробность, не paired count. Backend report v6 показывает
+coverage/missing/omitted groups и сохраняет разные loss units отдельно.
+Если сервер не объявил exact capability, sender убирает только details из
+нового wire projection, не меняя frozen sample/journal/UUID/counters. Все
+повторы batch идентичны. Старые v2 journal rows принимаются без details.
+Backend rollout предшествует signed runtime; stable plugin и minimum версии
+не меняются. Source merge не доказывает, что следующий отчёт уже получит
+новые facts от обновлённых клиентов.
+
 `BridgeTransportError` до HTTP-ответа сохраняет публичный
 `TRELIO_BRIDGE_TRANSPORT_FAILED`, `phase` (`api_request` либо
 `bridge_compatibility`) и закрытый `causeCode`. Неизвестные значения

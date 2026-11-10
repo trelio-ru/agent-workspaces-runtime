@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
-import { isDiagnosticObservation } from "./trelio-diagnostic-observation.mjs";
+import { isDiagnosticObservation, addDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 
 const LIMIT = 256, MAX_BYTES = 16384, TTL = 86400_000;
 const leafPattern = /^[0-9a-f-]{36}\.json$/u;
@@ -50,8 +50,16 @@ export const writeDiagnosticJournal = async (origin, sample, { directory = diagn
 };
 
 export const readDiagnosticJournal = async (origin, { directory = diagnosticJournalDirectory(origin), now = Date.now() } = {}) => {
-  const samples = [], losses = {};
-  const drop = reason => { losses[reason] = (losses[reason] || 0) + 1; };
+  const samples = [], losses = {}, detailRows = new Map();
+  const ageBucket = stat => !stat ? "unknown" : now - stat.mtimeMs < TTL ? "under_24h"
+    : now - stat.mtimeMs <= 2 * TTL ? "24h_to_48h" : "over_48h";
+  const drop = (reason, stage, cause, stat) => {
+    losses[reason] = (losses[reason] || 0) + 1;
+    const row = detailRows.get(reason) ?? { reason, count: 0 };
+    row.count++; detailRows.set(reason, row);
+    addDiagnosticDetail(row, { kind: "journal", stage, reason: cause, ageBucket: ageBucket(stat) },
+      { outcomes: [], losses: [...detailRows.values()] });
+  };
   try {
     await openDirectory(directory);
     for (const entry of await entries(directory)) {
@@ -65,16 +73,16 @@ export const readDiagnosticJournal = async (origin, { directory = diagnosticJour
       }
       if (/^[0-9a-f-]{36}\.tmp$/u.test(entry.name) && entry.isFile() && !entry.isSymbolicLink()) {
         const stat = await fs.lstat(target);
-        if (now - stat.mtimeMs > 60000) { await fs.unlink(target); drop("journal_invalid"); }
+        if (now - stat.mtimeMs > 60000) { await fs.unlink(target); drop("journal_invalid", "temporary", "temporary_expired", stat); }
         continue;
       }
       if (!leafPattern.test(entry.name) || !entry.isFile() || entry.isSymbolicLink()) continue;
-      let handle;
+      let handle, stat, stage = "entry", reason = "io_failed";
       try {
         handle = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-        const stat = await handle.stat();
-        if (!stat.isFile() || stat.size > MAX_BYTES) { drop("journal_invalid"); await handle.close(); handle = undefined; await fs.unlink(target).catch(() => {}); continue; }
-        if (now - stat.mtimeMs > TTL) { drop("journal_expired"); await handle.close(); handle = undefined; await fs.unlink(target); continue; }
+        stat = await handle.stat();
+        if (!stat.isFile() || stat.size > MAX_BYTES) { drop("journal_invalid", "entry", !stat.isFile() ? "file_type_invalid" : "file_limit", stat); await handle.close(); handle = undefined; await fs.unlink(target).catch(() => {}); continue; }
+        if (now - stat.mtimeMs > TTL) { drop("journal_expired", "entry", "entry_ttl_expired", stat); await handle.close(); handle = undefined; await fs.unlink(target); continue; }
         // Recheck the byte bound while reading: stat alone cannot prevent a
         // concurrently growing local file from allocating an unbounded buffer.
         const bytes = Buffer.alloc(MAX_BYTES + 1);
@@ -84,15 +92,18 @@ export const readDiagnosticJournal = async (origin, { directory = diagnosticJour
           if (!read.bytesRead) break;
           length += read.bytesRead;
         }
-        if (length > MAX_BYTES) throw new Error("JOURNAL_INVALID");
+        if (length > MAX_BYTES) { reason = "read_limit"; throw new Error("JOURNAL_INVALID"); }
+        stage = "decode"; reason = "json_invalid";
         const sample = JSON.parse(bytes.subarray(0, length).toString("utf8"));
-        if (!isDiagnosticObservation(sample) || entry.name !== sample.id + ".json") { drop("journal_invalid"); await handle.close(); handle = undefined; await fs.unlink(target); continue; }
+        stage = "validation"; reason = "io_failed";
+        if (!isDiagnosticObservation(sample) || entry.name !== sample.id + ".json") { drop("journal_invalid", stage,
+          !isDiagnosticObservation(sample) ? "schema_invalid" : "filename_mismatch", stat); await handle.close(); handle = undefined; await fs.unlink(target); continue; }
         samples.push(sample);
-      } catch { drop("journal_invalid"); await handle?.close(); handle = undefined; await fs.unlink(target).catch(() => {}); }
+      } catch { drop("journal_invalid", stage, reason, stat); await handle?.close(); handle = undefined; await fs.unlink(target).catch(() => {}); }
       finally { await handle?.close(); }
     }
-  } catch (error) { if (error.code !== "ENOENT") drop("journal_full"); }
-  return { samples, losses };
+  } catch (error) { if (error.code !== "ENOENT") drop("journal_full", "directory", "directory_unavailable"); }
+  return { samples, losses, ...(detailRows.size ? { details: [...detailRows.values()] } : {}) };
 };
 export const acknowledgeDiagnosticJournal = async (origin, samples, { directory = diagnosticJournalDirectory(origin) } = {}) => {
   // Delete only UUID files whose immutable sample was acknowledged by the
