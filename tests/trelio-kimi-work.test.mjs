@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { buildKimiWorkBundle, installKimiWorkBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { connectRemoteMcpOAuth } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
@@ -38,13 +39,13 @@ test("Kimi bundle uses both signed stdio profiles, no foreign hooks, and preserv
   const bootstrap = await fs.readFile(path.join(result.bundleDirectory, "bootstrap.mjs"), "utf8");
   assert.match(bootstrap, /await selectHostRuntime\(\)/u);
   assert.match(bootstrap, /selected.runtimeDirectory/u);
-  assert.match(bootstrap, /TRELIO_KIMI_NODE_PATH_MISMATCH/u);
+  assert.match(bootstrap, /TRELIO_NODE_22_REQUIRED/u);
   assert.doesNotMatch(bootstrap, /accessToken|runtimeSessionProof|CODEX_THREAD_ID/u);
   await fs.appendFile(path.join(result.bundleDirectory, "bootstrap.mjs"), "// own modification\n");
   await assert.rejects(installKimiWorkBundle(options), /TRELIO_KIMI_BUNDLE_CHANGED/u);
 });
 
-test("generated Kimi bootstrap runs both profiles and refuses a different Node before runtime selection", async t => {
+test("generated Kimi bootstrap runs both profiles and enforces Node 22+ before runtime selection", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-kimi-bootstrap-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const scripts = path.join(root, "scripts"); await fs.mkdir(scripts);
@@ -56,8 +57,8 @@ test("generated Kimi bootstrap runs both profiles and refuses a different Node b
   await fs.writeFile(path.join(scripts, "trelio-host-runtime-shell.mjs"), "export const PLUGIN_VERSION='test';");
   await fs.writeFile(path.join(scripts, "trelio-remote-mcp.mjs"),
     "if(process.env.TRELIO_WORKSPACE_CLIENT_PROFILE!=='kimi-work')throw Error('profile lost'); export const runKimiStdioHost=()=>process.stdout.write('remote'); export const runKimiLocalStdioHost=()=>process.stdout.write('local');");
-  const run = profile => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["./bootstrap.mjs", profile], { cwd: root, shell: false,
+  const run = (profile, preloads = []) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...preloads, "./bootstrap.mjs", profile], { cwd: root, shell: false,
       stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 });
     let stdout = "", stderr = "";
     child.stdout.on("data", bytes => { stdout += bytes; }); child.stderr.on("data", bytes => { stderr += bytes; });
@@ -68,10 +69,17 @@ test("generated Kimi bootstrap runs both profiles and refuses a different Node b
   for (const profile of ["remote", "local"]) {
     const result = await run(profile); assert.equal(result.code, 0, result.stderr); assert.equal(result.stdout, profile);
   }
-  const otherNode = path.join(root, "other-node"); await fs.writeFile(otherNode, "synthetic different executable");
-  await fs.writeFile(path.join(root, "bootstrap.mjs"), buildKimiWorkBundle({ pluginRoot: root, nodePath: otherNode })["bootstrap.mjs"]);
-  const refused = await run("remote"); assert.notEqual(refused.code, 0); assert.equal(refused.stdout, "");
-  assert.match(refused.stderr, /TRELIO_KIMI_NODE_PATH_MISMATCH/u);
+  // Only the reported major is synthetic; parsing, import ordering and both
+  // startup functions still execute in real Node. No obsolete binary or PATH
+  // mutation is needed to check this pre-loader compatibility boundary.
+  const versionFile = path.join(root, "node-version.mjs");
+  await fs.writeFile(versionFile, "Object.defineProperty(process.versions,'node',{value:'20.19.0'});");
+  const refused = await run("remote", ["--import", pathToFileURL(versionFile).href]);
+  assert.notEqual(refused.code, 0); assert.equal(refused.stdout, "");
+  assert.match(refused.stderr, /TRELIO_NODE_22_REQUIRED/u);
+  await fs.writeFile(versionFile, "Object.defineProperty(process.versions,'node',{value:'24.1.0'});");
+  const compatible = await run("remote", ["--import", pathToFileURL(versionFile).href]);
+  assert.equal(compatible.code, 0, compatible.stderr); assert.equal(compatible.stdout, "remote");
 });
 
 test("Kimi uses the real S256/state/loopback OAuth engine and a distinct native vault cell", async () => {
