@@ -556,6 +556,9 @@ publication tooling также остаются вне этого публичн
   operation/result buckets from original calls, never an extra probe or input retry.
   Parallel detached fixture failure tails are execution-owner-specific; ready
   retains closed stop/snapshot/persist/cleanup cause without retry or raw errors.
+  Parallel fixture cleanup preserves the first assertion even if either worker
+  fails shutdown, closes each own sibling independently and stops its synthetic
+  listener on cancellation; failed evidence/active profiles remain intact.
   Authentication fixtures assert the first native navigation before input, distinguish its exact error/manual_control_active observation gate from startup failure, retain only common validated diagnostics and reset evidence per browser generation; no readiness inference, retry or deadline extension.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
   Native manual-close regression shares the auth fixture's owned HTTP abort

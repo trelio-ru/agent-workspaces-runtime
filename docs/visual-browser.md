@@ -188,6 +188,12 @@ execution owner. Failed ready reports its original reason and that worker's
 stop/snapshot/persist/cleanup stage, allowed errno/syscall and owned-file category.
 No Error text/path, owner descriptor, extra native observation, input/save retry
 or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
+Parallel fixture shutdown preserves the first body/close assertion if later
+cleanup also fails, attempts each owned sibling independently and closes its
+synthetic listener on cancellation through the existing HTTP helper. Failure
+retains both closed worker tails and the disposable profiles; missing claim
+confirmation never authorizes their removal. The original deadlines and native
+assertions remain unchanged.
 
 Этап – место наблюдения отказа, не установленная первопричина:
 

@@ -17,6 +17,7 @@ import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-n
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
   processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 
 test('presentation validation precedes identity/storage and an old worker cannot silently become hidden', async t => {
   const unreadable = new Proxy({}, { get() { throw Error('identity must not be accessed'); } });
@@ -488,13 +489,14 @@ test('detached worker keeps its original lease and encrypted storage across shor
 // these are separate synthetic lifecycles, never retries of a failed action.
 for (const repetition of [1, 2, 3]) test(`native browser workers of two chats keep separate contexts, frames and shutdown on one saved account (fresh ${repetition})`, {
   skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180000,
-}, async () => {
+}, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-native-two-chats-')));
   const server = http.createServer((_request, response) => {
     response.setHeader('content-type', 'text/html');
     response.end('<!doctype html><body style="background:#45cc77;height:2000px">Synthetic parallel browser</body>');
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const ownedServer = ownFixtureHttpServer(server, t.signal);
+  await ownedServer.listen();
   const origin = `http://127.0.0.1:${server.address().port}`, started = Date.now();
   const base = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-parallel-native',
     TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(),
@@ -516,7 +518,7 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
     }
     throw Error('Synthetic parallel worker cleanup was not confirmed');
   };
-  let cleanupComplete = false;
+  let cleanupComplete = false, failure;
   try {
     const starts = await Promise.all(owners.map((_, index) => call(index, 'setup', { url: origin })));
     assert.deepEqual(starts.map(value => value.state), ['preparing', 'preparing']);
@@ -546,16 +548,40 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
     const next = await call(1, 'navigate', { url: origin });
     assert.equal(next.state, 'ready', 'closing the sibling preserves this browser');
     assert.equal((await call(1, 'scroll', { frameId: next.frameId, x: 300, y: 300, deltaY: 100 })).state, 'ready');
-  } finally {
+  } catch (error) { failure = error; }
+  finally {
+    // Stop this fixture's listener even if a browser's queue never settles.
+    // The shared helper also runs on test cancellation, which does not resume
+    // a blocked async finally. No foreign worker/claim is touched here.
+    try { await ownedServer.stop(); } catch (error) { failure ||= error; }
     try {
-      for (let index = 0; index < 2; index++) { await call(index, 'close'); await closed(index); }
-      const { AsyncEntry } = await loadVisualDependencies();
-      const store = new ProtectedVisualStore({ directory, scope: binding.scope, AsyncEntry });
-      try { await store.remove(); } finally { store.close(); }
-      cleanupComplete = true;
-    } finally {
-      server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-      if (cleanupComplete) await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      let allClosed = true;
+      for (let index = 0; index < 2; index++) {
+        try { await call(index, 'close'); await closed(index); }
+        catch (error) {
+          // A second shutdown failure must not replace the original ready,
+          // navigation or close assertion. Still close the other OWN worker;
+          // one failed sibling must not skip its independent cleanup.
+          failure ||= error; allClosed = false;
+        }
+      }
+      if (allClosed) {
+        const { AsyncEntry } = await loadVisualDependencies();
+        const store = new ProtectedVisualStore({ directory, scope: binding.scope, AsyncEntry });
+        try { await store.remove(); } finally { store.close(); }
+        cleanupComplete = true;
+      }
+    } catch (error) { failure ||= error; }
+    finally {
+      // Keep failed native evidence and any still-owned profile intact. Both
+      // tails contain only the worker's existing closed diagnostic vocabulary;
+      // owner.json contains a bearer and must never be printed instead.
+      if (failure) failure.message += `; synthetic parallel worker evidence: ${JSON.stringify(await Promise.all(owners.map((_, index) => evidence(index))))}`;
+      if (cleanupComplete && !failure) {
+        try { await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+        catch (error) { failure ||= error; }
+      }
     }
+    if (failure) throw failure;
   }
 });
