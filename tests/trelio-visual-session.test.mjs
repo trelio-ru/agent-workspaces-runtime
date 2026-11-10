@@ -392,6 +392,8 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
   const call = (index, operation, args = {}) => runVisualSession({ origins: [origin], operation, args,
     env: owners[index], fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } });
   const binding = visualSessionBinding(owners[0]);
+  const evidence = index => fs.readFile(path.join(directory,
+    `fixture-diagnostic-${visualSessionBinding(owners[index]).executionOwner}.json`), 'utf8').catch(() => 'unavailable');
   const active = index => path.join(browserExecutionDirectory(path.join(directory, 'visual-browser', binding.scope), owners[index]), 'active');
   const closed = async index => {
     for (let attempt = 0; attempt < 160; attempt++) {
@@ -415,8 +417,13 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
       // Keep only the production closed startup diagnostic. A failed native
       // child must expose its stage/cause, never owner.json or control tokens.
       assert.equal(status.state, 'manual_input_required', JSON.stringify({ reason: status.reason, diagnostic: status.diagnostic,
-        workerEvidence: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') }));
-      assert.equal((await call(index, 'ready')).state, 'saved_unverified');
+        workerEvidence: await evidence(index) }));
+      const ready = await call(index, 'ready');
+      // Observe the original response once. A failure must retain its closed
+      // reason and SAME worker tail without another ready/status/native input,
+      // a longer deadline or a weaker snapshot assertion.
+      assert.equal(ready.state, 'saved_unverified', JSON.stringify({ index, reason: ready.reason,
+        diagnostic: ready.diagnostic, workerEvidence: await evidence(index) }));
     }
     const [a, b] = await Promise.all(owners.map((_, index) => call(index, 'navigate', { url: origin })));
     assert.equal(a.state, 'ready'); assert.equal(b.state, 'ready');

@@ -8,11 +8,22 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualLifecycleFailureEvidence } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 import { syntheticDocx } from './fixtures/visual-docx.mjs';
+
+test('lifecycle failure callbacks contain closed original errno/syscall only, never native errors or profile data', () => {
+  const error = Object.assign(new Error('PRIVATE_ERROR_PROSE'), { code: 'EBUSY', syscall: 'rmdir',
+    path: 'PRIVATE_PROFILE_PATH', cookie: 'PRIVATE_AUTH_VALUE', diagnostic: { causeCode: 'SECRET' } });
+  assert.deepEqual(visualLifecycleFailureEvidence(error), { causeCode: 'EBUSY', ioOperation: 'rmdir' });
+  assert.deepEqual(visualLifecycleFailureEvidence({ code: 'VISUAL_STORAGE_CONFLICT', syscall: 'UNKNOWN_PRIVATE_OP' }),
+    { causeCode: 'UNKNOWN', storageCode: 'VISUAL_STORAGE_CONFLICT' });
+  assert.deepEqual(visualLifecycleFailureEvidence({ code: 'operation_failed', syscall: 'PRIVATE_OP', message: 'PRIVATE' }),
+    { causeCode: 'UNKNOWN', reason: 'operation_failed' });
+  assert.doesNotMatch(JSON.stringify(visualLifecycleFailureEvidence(error)), /PRIVATE|SECRET|path|cookie|message|stack/u);
+});
 
 test('a linked HTML office viewer exposes safe menus and downloads the complete DOCX from one native iframe/same-tab GET', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-docx-viewer-')));

@@ -121,6 +121,12 @@ prose, URL/paths, native output, credentials и diagnostic на успешном
 отклоняются. Text-mode ошибки используют тот же status DTO без текста страницы.
 Новых файлов журналов, native logging и telemetry dimensions нет.
 
+Parallel detached native fixtures keep one closed diagnostic tail per verified
+execution owner. Failed ready reports its original reason and that worker's
+stop/snapshot/persist/cleanup stage, allowed errno/syscall and owned-file category.
+No Error text/path, owner descriptor, extra native observation, input/save retry
+or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
+
 Этап – место наблюдения отказа, не установленная первопричина:
 
 | stage | code и смысл |

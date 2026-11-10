@@ -20,6 +20,23 @@ import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartu
 import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
 import { acquireBrowserMailLock } from './trelio-browser-session.mjs';
 
+/** Reduce a lifecycle failure BEFORE invoking any fixture callback. Some
+ * in-process fixtures serialize that callback directly; forwarding a native
+ * Error would leak its enumerable path/syscall fields even if the detached
+ * worker later sanitizes its own file. Reuse the common errno/process parser;
+ * retain only fixed storage/reason/syscall names, never messages or paths.
+ */
+export const visualLifecycleFailureEvidence = error => {
+  const diagnostic = visualStartupDiagnostic('storage_prepare', undefined, error);
+  return {
+    causeCode: diagnostic.causeCode ?? 'UNKNOWN',
+    ...(diagnostic.failureCode ? { failureCode: diagnostic.failureCode } : {}),
+    ...(['operation_failed', 'storage_unavailable', 'browser_process_lost', 'lease_expired'].includes(error?.code) ? { reason: error.code } : {}),
+    ...(['VISUAL_STORAGE_UNAVAILABLE', 'VISUAL_STORAGE_UNSAFE', 'VISUAL_STORAGE_CORRUPT', 'VISUAL_STORAGE_CONFLICT', 'VISUAL_STORAGE_BUSY', 'VISUAL_STORAGE_TOO_LARGE'].includes(error?.code) ? { storageCode: error.code } : {}),
+    ...(['open', 'rename', 'lstat', 'stat', 'mkdir', 'unlink', 'rmdir', 'scandir', 'read'].includes(error?.syscall) ? { ioOperation: error.syscall } : {}),
+  };
+};
+
 // A public manifest identity fixes the extension Origin across private
 // profiles. This is not a credential/signing secret; the independent random
 // transport token is generated per launch and never committed or projected.
@@ -553,7 +570,7 @@ export class ExtensionVisualBrowser {
         : relative.startsWith('profile/Crashpad/') ? 'crashpad'
         : relative.startsWith('profile/') ? 'profile_other'
         : relative.startsWith('extension/') ? 'extension' : 'other';
-      this.testDiagnostics?.({ stage: `stopped_profile_${phase}_failed`, target });
+      this.testDiagnostics?.({ stage: `stopped_profile_${phase}_failed`, target, ...visualLifecycleFailureEvidence(error) });
       throw error;
     }
   }
@@ -563,7 +580,7 @@ export class ExtensionVisualBrowser {
     this.#finishing = (async () => {
       this.#starting = true;
       try { await this.#stopBrowser(); await this.#saveStopped(); this.#manual = false; this.#state = 'saved_unverified'; return this.#status(); }
-      catch (error) { this.#state = 'error'; this.#terminal = error.code === 'browser_process_lost' ? error.code : 'storage_unavailable'; throw error; }
+      catch (error) { this.testDiagnostics?.({ stage: 'manual_finish_failed', ...visualLifecycleFailureEvidence(error) }); this.#state = 'error'; this.#terminal = error.code === 'browser_process_lost' ? error.code : 'storage_unavailable'; throw error; }
       finally { this.#starting = false; this.#finishing = undefined; }
     })();
     return this.#finishing;

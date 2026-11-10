@@ -29,8 +29,18 @@ function fixtureDiagnostic(value) {
   // a short chronological tail so a detached startup has the same closed
   // evidence as the in-process native fixture, including early browser exit.
   const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed', 'browser_quit', 'browser_stop_timeout', 'close_queue', 'close_manual', 'close_browser', 'close_snapshot', 'shutdown_start', 'shutdown_claim', 'shutdown_complete'];
-  if (!stages.includes(value.stage)) return;
+  const finishingStages = ['stopped_profile_snapshot_failed', 'stopped_profile_persist_failed', 'stopped_profile_cleanup_failed', 'manual_finish_failed'];
+  if (!stages.includes(value.stage) && !finishingStages.includes(value.stage)) return;
   const record = { stage: value.stage };
+  const finishing = finishingStages.includes(value.stage);
+  // A ready/save failure is not startup. Preserve only its closed original
+  // operation/errno and owned-file category; never serialize the Error, path,
+  // profile or bearer. This adds evidence, not a save/input/cleanup retry.
+  if (finishing) {
+    if (['native_log', 'cookie_store', 'crashpad', 'profile_other', 'extension', 'other'].includes(value.target)) record.target = value.target;
+    if (['operation_failed', 'storage_unavailable', 'browser_process_lost', 'lease_expired'].includes(value.reason)) record.reason = value.reason;
+    if (['VISUAL_STORAGE_UNAVAILABLE', 'VISUAL_STORAGE_UNSAFE', 'VISUAL_STORAGE_CORRUPT', 'VISUAL_STORAGE_CONFLICT', 'VISUAL_STORAGE_BUSY', 'VISUAL_STORAGE_TOO_LARGE'].includes(value.storageCode)) record.storageCode = value.storageCode;
+  }
   for (const key of ['sandboxUnavailable', 'displayUnavailable', 'extensionUnavailable']) if (typeof value[key] === 'boolean') record[key] = value[key];
   for (const key of ['exitCode', 'osCryptErrors', 'cookieErrors', 'sqliteErrors', 'networkSandboxErrors']) if (Number.isSafeInteger(value[key])) record[key] = value[key];
   if (['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV', null].includes(value.signal)) record.signal = value.signal;
@@ -53,6 +63,7 @@ function fixtureDiagnostic(value) {
       && ['open', 'rename', 'lstat', 'stat', 'mkdir', 'unlink'].includes(value.error?.syscall)) {
     record.ioOperation = value.error.syscall;
   }
+  if (finishing && ['open', 'rename', 'lstat', 'stat', 'mkdir', 'unlink', 'rmdir', 'scandir', 'read'].includes(value.ioOperation)) record.ioOperation = value.ioOperation;
   if (value.error instanceof ProcessDiagnosticError) {
     // The SAME canonical parser strips even a typed error's message before
     // copying its allowed native operation/phase/timeout/cause dimensions.
@@ -61,7 +72,13 @@ function fixtureDiagnostic(value) {
   }
   fixtureEvidence.push(record); if (fixtureEvidence.length > 32) fixtureEvidence.shift();
   const snapshot = fixtureEvidence.slice();
-  fixtureWrites = fixtureWrites.then(() => writePrivateJsonFile(path.join(owner.directory, 'fixture-diagnostic.json'), { evidence: snapshot })).catch(() => {});
+  // Parallel synthetic workers must not replace each other's failure tail.
+  // The verified host execution hash selects only this fixture's filename;
+  // legacy single-worker evidence keeps its existing path. No extra write or
+  // production journal is introduced, and the active claim stays untouched.
+  const name = /^[a-f0-9]{64}$/u.test(owner.executionOwner ?? '')
+    ? `fixture-diagnostic-${owner.executionOwner}.json` : 'fixture-diagnostic.json';
+  fixtureWrites = fixtureWrites.then(() => writePrivateJsonFile(path.join(owner.directory, name), { evidence: snapshot })).catch(() => {});
 }
 async function stop() {
   if (stopping) return; stopping = true; clearTimeout(timer);
