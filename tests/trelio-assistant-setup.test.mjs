@@ -8,7 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup, maintainAssistantPlugin, runAssistantWindowsDesktop, ASSISTANT_WINDOWS_DESKTOP_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantDeviceClient,createAssistantHttp,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 import {createForwardingAssistantMcp,createAssistantWorkspaceExecutor,executeAssistantCompanyContextRequest,
   assistantProductionContextSignal} from '../host-runtime/scripts/trelio-assistant-entry.mjs';
@@ -3431,5 +3431,112 @@ test(`production worker restores one reply-only original with no blind begin rep
    assert.equal(inspect.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
    assert.equal(inspect.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
   }finally{inspect.close();}
+ }finally{await host?.close();}
+});
+
+for(const scenario of ['success','fresh','lost_committed','lost_unknown','no_capability','bad_claim','unknown_child_read','existing_child','impure_history','provider_attempt','setup_changed'])
+test(`answered source recovery crosses production factory, HTTP and SQLite reopen (${scenario})`,async t=>{
+ const {createAssistantInbox,assistantOwnerReadOnlyRecovery}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+ const {readAssistantCodexDelivery}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+ const {EventEmitter}=await import('node:events');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-answered-factory-'));
+ t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+ const file=path.join(directory,'inbox.sqlite'),identity={origin:'https://answered.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ const companyId=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID(),claimId=randomUUID();
+ const source={id:sourceId,companyId,deviceId:identity.deviceId,localAccountId:accountId,projectId:null,
+  skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ let clock=Date.now(),active=null,host=null;
+ const seed=new DatabaseSync(file),inbox=createAssistantInbox({database:seed,now:()=>clock});
+ const scope={origin:identity.origin,assistantId:identity.assistantId,companyId,provider:'telegram',accountId,bindingId:sourceId};
+ inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+ inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'original',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),
+  taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'c'.repeat(64)}`}]});
+ const root=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(root.id);inbox.startOwnerIntakeProvision(root.id);
+ inbox.bindOwnerIntakeThread(root.id,threadId);inbox.readyOwnerIntake(root.id);inbox.rememberIntakePrerequisite(root.id,'a'.repeat(64));
+ inbox.startOwnerIntake(root.id);inbox.confirmIntakeModelRead(root.id);
+ const receiptId=randomUUID(),terminalTurnId=randomUUID();inbox.finishOwnerIntake(root.id,{state:'cancelled',receiptId});inbox.settleOwnerIntake(root.id);
+ const pending=inbox.retryReadonlyOwnerIntake(root.id,{receiptId,terminalTurnId,previousPrerequisiteKey:'a'.repeat(64),
+  prerequisiteKey:(scenario==='fresh'?'c':'b').repeat(64),readOnlyContinuation:true,cancelledContextRead:true});
+ if(scenario!=='fresh')inbox.startReadonlyIntakeBegin(pending.id); // An OLD fenced begin can no longer admit dialogue; never repeat it.
+ if(scenario==='provider_attempt')seed.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(randomUUID(),pending.id);
+ createAssistantInbox({database:seed});
+ const before=seed.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(root.id),frozen=inbox.ownerIntake(pending.id).readonly_recovery_json;
+ seed.close();
+ const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},locator={companyId,sourceId,intakeId:root.id};
+ const parent={schemaVersion:1,id:root.id,companyId,sourceId,sourceRevision:0,eventId:root.original_event_id,threadId,
+  state:'cancelled',taskId:null,receiptId,ownerPrivateRead:true,readConfirmed:true,execution,
+  leaseExpiresAt:new Date(clock-1).toISOString(),readOnlyRecoveryProtocolVersion:1,readOnlyContinuationProtocolVersion:1,
+  readOnlyCancelledSourceRecoveryProtocolVersion:1,...(scenario==='no_capability'?{}:{answeredSourceRecoveryProtocolVersion:1,
+   answeredSourceRecoveryClaimId:scenario==='bad_claim'?'INVALID':claimId})};
+ const failed=code=>({isError:true,structuredContent:{code},content:[{type:'text',text:code}]});
+ const call=(tool,args,result,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+  arguments:{intakePass:locator,runtimeSessionProof:{},...args},result});
+ const terminal={id:terminalTurnId,status:'completed',items:[
+  {type:'userMessage',content:[{type:'text',text:`TRELIO_ASSISTANT_DELIVERY ${root.delivery_id}\nSYNTHETIC_SOURCE`}]},
+  call('get_assistant_intake_context',{}, {structuredContent:{schemaVersion:1}}),
+  call('get_assistant_intake_context',{},failed('ASSISTANT_SOURCE_DEADLINE'),'failed'),
+  {type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',status:'failed',
+   arguments:{decision:'reply_owner',clientRequestId:root.id,replyText:'SYNTHETIC_NOT_SENT'},
+   result:failed('ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_TRELIO_BACKEND_HTTP_409')}]};
+ if(scenario==='impure_history')terminal.items.splice(2,0,call('create_task',{},{}));
+ const rpc=()=>{const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};let buffer='';
+  child.stdin.on('data',chunk=>{buffer+=chunk;let at;while((at=buffer.indexOf('\n'))>=0){const q=JSON.parse(buffer.slice(0,at));buffer=buffer.slice(at+1);if(!q.id)continue;
+   assert.ok(['initialize','thread/read','thread/turns/list'].includes(q.method));
+   const result=q.method==='initialize'?{}:q.method==='thread/read'?{thread:{id:threadId,cwd:directory}}:{data:[terminal],nextCursor:null};
+   queueMicrotask(()=>child.stdout.write(JSON.stringify({id:q.id,result})+'\n'));}});return child;};
+ let posts=0,runs=0,child=null,reads=0;
+ const credential=`tda_${'x'.repeat(43)}`;
+ const client=createAssistantDeviceClient({...identity,store:{get:async()=>({...identity,credential,expiresAt:1})},
+  http:createAssistantHttp({origin:identity.origin,fetchImpl:async(url,options)=>{
+   const body=JSON.parse(options.body);assert.equal(options.headers.authorization,`Bearer ${credential}`);
+   const response=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json'}});
+   if(url.endsWith('/intake/read')){
+    if(body.intakeId===root.id)return response(parent);
+    assert.equal(body.intakeId,pending.id);reads++;
+    if(child)return response(child);
+    if(scenario==='unknown_child_read')throw Error('synthetic incomplete read');
+    if(scenario==='existing_child')return response({...parent,id:pending.id,state:'leased',receiptId:null,readConfirmed:false,
+     ownerPrivateRead:false,leaseExpiresAt:new Date(clock+1800000).toISOString()});
+    return response({code:'ASSISTANT_INTAKE_CHANGED'},409);
+   }
+   assert.equal(url,identity.origin+'/api/digital-assistants/runtime/source-skills/intake/answered-recovery','legacy begin must NEVER replay');
+   assert.equal(++posts,1);assert.equal(body.intakeId,pending.id);assert.equal(body.answerClaimReceiptId,claimId);
+   const db=new DatabaseSync(file,{readOnly:true});try{
+    const row=db.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(pending.id);
+    assert.equal(row.readonly_recovery_json,frozen,'original attempted intent remains byte-for-byte immutable');
+    assert.equal(JSON.parse(row.answered_recovery_json).claimReceiptId,claimId,'new intent commits BEFORE its own HTTP');
+    assert.equal(assistantOwnerReadOnlyRecovery(row).answerClaimReceiptId,claimId);
+   }finally{db.close();}
+   if(scenario!=='lost_unknown')child={...parent,id:pending.id,state:'leased',receiptId:null,readConfirmed:false,ownerPrivateRead:false,
+    leaseExpiresAt:new Date(clock+1800000).toISOString(),readOnlyRecovery:{...body.readOnlyRecovery,answerClaimReceiptId:claimId,replyOnly:true}};
+   if(scenario.startsWith('lost_'))throw Error('synthetic uncertain independent admission');
+   return response(child);
+  }})});
+ const create=()=>createAssistantRuntimeHost({context:async action=>action({...client,identity,heartbeat:async()=>({}),
+  companies:async()=>[{companyId,memberId:ownerId,execution:{state:'ready',configuration:execution}}],tasks:async()=>({bindings:[],nextCursor:null}),
+  sourceAccounts:async()=>[source],sourceRoutes:async()=>[],ownerIdentities:async()=>({identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]})},
+  {readIdentity:async()=>identity,readActivation:async()=>scenario==='setup_changed'?{stage:'quiescing'}:null,
+   readActivePass:async()=>active,withSetupLock:action=>action(),activatePass:async pass=>{assert.equal(active,null);active=pass;},
+   releasePass:async()=>assert.fail('unknown actual native work retains its pass')}),dependencies:{directory,ensureDirectory:async()=>{},now:()=>clock,timeZone:'UTC',
+   openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
+   readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:ownerId,
+    businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
+   readHookReadiness:async()=>({fingerprint:'c'.repeat(64)}),native:{provision:async()=>assert.fail('no extra chat'),
+    readDelivery:(thread,marker,options)=>readAssistantCodexDelivery(thread,marker,{...options,executable:process.execPath,environment:{},spawnProcess:rpc}),
+    run:async(input,options)=>{assert.equal(++runs,1);assert.equal(input.threadId,threadId);assert.equal(input.intakeContext.eventId,root.original_event_id);
+     assert.equal(options.replyOnlyRecovery,true);options.startInvocation();throw Object.assign(Error('synthetic native pending'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});}}}});
+ try{
+  host=await create();await host.coordinator.workOnce().catch(()=>{});await host.close();host=null;
+  clock+=300001;host=await create();await host.coordinator.workOnce().catch(()=>{});
+  const ok=['success','fresh','lost_committed','lost_unknown'].includes(scenario);
+  assert.equal(posts,ok?1:0);assert.equal(runs,['success','fresh','lost_committed'].includes(scenario)?1:0);
+  if(scenario.startsWith('lost_'))assert.ok(reads>=2,'restart reads the SAME independently fenced child');
+  const db=new DatabaseSync(file,{readOnly:true});try{
+   const {next_check_at,...after}=db.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(root.id);
+   const {next_check_at:oldNext,...old}=before;assert.deepEqual(after,old);
+   assert.equal(db.prepare('SELECT readonly_recovery_json FROM assistant_owner_intakes WHERE id=?').get(pending.id).readonly_recovery_json,frozen);
+   assert.equal(db.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,2,'no new child or original');
+   assert.equal(db.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+  }finally{db.close();}
  }finally{await host?.close();}
 });

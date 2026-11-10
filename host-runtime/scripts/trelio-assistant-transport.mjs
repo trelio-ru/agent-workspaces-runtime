@@ -362,6 +362,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['ownerIdentities',['GET','/runtime/owner-identities']],
     ['sourceAccounts',['GET','/runtime/source-skills/accounts']],
     ['intakeUnsubscribeStart',['POST','/runtime/source-skills/intake/unsubscribe/start']],
+    ['intakeAnsweredRecovery',['POST','/runtime/source-skills/intake/answered-recovery']],
     ['intakeUnsubscribeFinish',['POST','/runtime/source-skills/intake/unsubscribe/finish']],
     ['prepareLocalConnection',['POST','/runtime/source-skills/accounts/prepare']],
     ['sourceRoutes',['POST','/runtime/source-skills/routing']],
@@ -2648,6 +2649,8 @@ const intakeProjection=(value,expected)=>{
     ||value.readOnlyContinuationProtocolVersion!==undefined&&value.readOnlyContinuationProtocolVersion!==1
     ||value.readOnlyCancelledContextRecoveryProtocolVersion!==undefined&&value.readOnlyCancelledContextRecoveryProtocolVersion!==1
     ||value.readOnlyCancelledSourceRecoveryProtocolVersion!==undefined&&value.readOnlyCancelledSourceRecoveryProtocolVersion!==1
+    ||value.answeredSourceRecoveryProtocolVersion!==undefined&&value.answeredSourceRecoveryProtocolVersion!==1
+    ||value.answeredSourceRecoveryClaimId!==undefined&&(!UUID.test(value.answeredSourceRecoveryClaimId)||routing||value.answeredSourceRecoveryProtocolVersion!==1)
     ||value.readOnlyGenerationCorrectionProtocolVersion!==undefined&&value.readOnlyGenerationCorrectionProtocolVersion!==1
     ||value.readOnlyReplyDispatchCorrectionProtocolVersion!==undefined&&value.readOnlyReplyDispatchCorrectionProtocolVersion!==1
     ||value.preparedOwnerReplyDeliveryProtocolVersion!==undefined&&value.preparedOwnerReplyDeliveryProtocolVersion!==1)
@@ -2665,6 +2668,8 @@ const intakeProjection=(value,expected)=>{
     // a caller field: the coordinator needs the fresh device-codec observation.
     ...(value.readOnlyCancelledContextRecoveryProtocolVersion===1?{readOnlyCancelledContextRecoveryProtocolVersion:1}:{}),
     ...(value.readOnlyCancelledSourceRecoveryProtocolVersion===1?{readOnlyCancelledSourceRecoveryProtocolVersion:1}:{}),
+    ...(value.answeredSourceRecoveryProtocolVersion===1?{answeredSourceRecoveryProtocolVersion:1}:{}),
+    ...(value.answeredSourceRecoveryClaimId!==undefined?{answeredSourceRecoveryClaimId:id(value.answeredSourceRecoveryClaimId)}:{}),
     ...(value.readOnlyGenerationCorrectionProtocolVersion===1?{readOnlyGenerationCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyReplyDispatchCorrectionProtocolVersion===1?{readOnlyReplyDispatchCorrectionProtocolVersion:1}:{}),
     ...(value.preparedOwnerReplyDeliveryProtocolVersion===1?{preparedOwnerReplyDeliveryProtocolVersion:1}:{}),
@@ -2973,9 +2978,23 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if(!/^[1-9]\d{0,18}$/u.test(body.senderExternalUserId)||!(/^(telegram|max)-conversation\/v1\.[0-9a-f]{64}$/u).test(body.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(input.readOnlyRecovery!==undefined){
         const recovery=assistantReadOnlyRecoveryMetadata(input.readOnlyRecovery);
-        if(!recovery)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');body.readOnlyRecovery=recovery;
+        if(!recovery||recovery.answerClaimReceiptId!==undefined)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');body.readOnlyRecovery=recovery;
       }
       return intakeProjection(await call('intakeBegin',body,signal),body);
+    },
+    async reconcileAnsweredSourceIntake(input,signal){
+      const keys=['companyId','sourceId','intakeId','sourceRevision','eventId','threadId','ownerIdentityId',
+        'senderExternalUserId','conversationKey','readOnlyRecovery'];
+      if(!object(input)||Object.keys(input).sort().join(',')!==keys.sort().join(','))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const metadata=assistantReadOnlyRecoveryMetadata(input.readOnlyRecovery);
+      if(!metadata?.answerClaimReceiptId||metadata.readOnlyContinuation!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const {answerClaimReceiptId,...readOnlyRecovery}=metadata;
+      const body={...intakeLocator(input),sourceRevision:revision(input.sourceRevision),eventId:id(input.eventId),threadId:id(input.threadId),
+        ownerIdentityId:id(input.ownerIdentityId),senderExternalUserId:text(input.senderExternalUserId,19),conversationKey:text(input.conversationKey,96),
+        readOnlyRecovery,answerClaimReceiptId};
+      if(!/^[1-9]\d{0,18}$/u.test(body.senderExternalUserId)||!(/^telegram-conversation\/v1\.[0-9a-f]{64}$/u).test(body.conversationKey))
+        fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      return intakeProjection(await call('intakeAnsweredRecovery',body,signal),{...body,readOnlyRecovery:metadata});
     },
     async cancelSourceIntake(input,signal){const body=intakeLocator(input);return intakeProjection(await call('intakeCancel',body,signal),body);},
     async readSourceIntake(input,signal){

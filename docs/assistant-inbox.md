@@ -1198,3 +1198,14 @@ answer or body hash is stored. Pending receipt uncertainty joins the existing
 SELECT-only device diagnostic and idle/new-work fences. Schema26 and all older
 upgrades preserve their exact historical fences. See the separate first-delivery
 contract in `assistant-scheduler.md`; this is not another read-only retry mode.
+
+### Independent answered-source admission (schema28)
+
+The nullable structural `answered_recovery_json` cell retains one native claim
+UUID, legacy prerequisite and effective current prerequisite. It is written
+ONCE before the independent native admission. The old recovery JSON/start bits,
+root/event/receipt/lease and uncertain provider fences are never rewritten.
+The strict common effective-binding codec refuses mixed/damaged intents.
+Restart/upgrade permits only SAME-child read-back, never an old/new POST retry.
+See the scheduler's reply-only recovery contract for complete native/history
+admission; SQLite is never domain authority or permission to replay a decoder.

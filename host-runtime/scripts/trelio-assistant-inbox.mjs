@@ -86,15 +86,39 @@ export const assistantReadOnlyRecoveryMetadata=(value,{local=false,response=fals
     ...(value?.technicalReplyCorrection===true?['technicalReplyCorrection']:[]),
     ...(value?.readOnlyContinuation===true?['readOnlyContinuation']:[]),
     ...(value?.generationReplyCorrection===true?['generationReplyCorrection']:[]),
-    ...(value?.replyDispatchCorrection===true?['replyDispatchCorrection']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
+    ...(value?.replyDispatchCorrection===true?['replyDispatchCorrection']:[]),
+    ...(value?.answerClaimReceiptId!==undefined?['answerClaimReceiptId']:[]),...(local?['beginAttempted']:[]),...(response?['replyOnly']:[])];
   if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!==fields.sort().join(',')
     ||['parentIntakeId','receiptId','terminalTurnId'].some(key=>!UUID.test(value[key]??''))
     ||['previousPrerequisiteKey','prerequisiteKey'].some(key=>typeof value[key]!=='string'||!/^[0-9a-f]{64}$/u.test(value[key]))
     ||[value.technicalReplyCorrection,value.readOnlyContinuation,value.generationReplyCorrection,value.replyDispatchCorrection].filter(value=>value===true).length>1
+    ||value.answerClaimReceiptId!==undefined&&(!UUID.test(value.answerClaimReceiptId)||value.readOnlyContinuation!==true)
     ||value.previousPrerequisiteKey===value.prerequisiteKey||local&&typeof value.beginAttempted!=='boolean'
     ||response&&value.replyOnly!==true)return null;
   return Object.freeze({...Object.fromEntries(fields.map(key=>[key,['parentIntakeId','receiptId','terminalTurnId'].includes(key)?value[key].toLowerCase():value[key]]))});
 };
+/** The original begin intent is never edited after HTTP. A separately
+ * journaled answered-source admission binds the SAME child to a newer trusted
+ * prerequisite and one native answer-claim UUID. Derive its effective binding
+ * centrally, including after restart; malformed/mixed intent never falls back
+ * to a fresh legacy begin or resets its consumed attempt. */
+export const assistantOwnerReadOnlyRecovery=row=>{
+  const legacy=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
+  if(row.readonly_recovery_json&&!legacy)fail('ASSISTANT_INBOX_CONFLICT');
+  if(row.answered_recovery_json==null)return legacy;
+  const intent=JSON.parse(row.answered_recovery_json);
+  if(!legacy||legacy.readOnlyContinuation!==true||legacy.answerClaimReceiptId!==undefined
+    ||!intent||Object.getPrototypeOf(intent)!==Object.prototype
+    ||Object.keys(intent).sort().join(',')!=='claimReceiptId,legacyPrerequisiteKey,prerequisiteKey,schemaVersion'
+    ||intent.schemaVersion!==1||!UUID.test(intent.claimReceiptId??'')
+    ||intent.legacyPrerequisiteKey!==legacy.prerequisiteKey
+    ||typeof intent.prerequisiteKey!=='string'||!/^[0-9a-f]{64}$/u.test(intent.prerequisiteKey)
+    ||intent.prerequisiteKey===legacy.previousPrerequisiteKey||legacy.beginAttempted&&intent.prerequisiteKey===legacy.prerequisiteKey)
+    fail('ASSISTANT_INBOX_CONFLICT');
+  return assistantReadOnlyRecoveryMetadata({...legacy,prerequisiteKey:intent.prerequisiteKey,
+    answerClaimReceiptId:intent.claimReceiptId,beginAttempted:true},{local:true});
+};
+
 /** Unread capacity recovery carries its CONSUMED pacing episode into the
  * fresh child so restart cannot reset backoff. That older marker is history,
  * not a cancellation fence on the newly admitted delivery. A waiting episode,
@@ -211,7 +235,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -316,7 +340,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -556,8 +580,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // Additive only. The original cancellation/start/lease/receipt and every
     // unknown legacy provider attempt stay byte-for-byte unchanged.
     if(!preparedColumns.includes('prepared_reply_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN prepared_reply_json TEXT');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=27');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (27)');
+    const answeredColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version>=28&&!answeredColumns.includes('answered_recovery_json'))fail('ASSISTANT_INBOX_CONFLICT');
+    // Independent pre-HTTP intent. Never replace the old readonly JSON, start
+    // bit, parent receipt or original event during this nullable-only upgrade.
+    if(!answeredColumns.includes('answered_recovery_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN answered_recovery_json TEXT');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=28');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (28)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1090,7 +1119,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND json_extract(s.scope_json,'$.provider')='telegram'
         AND i.native_started=1 AND i.outcome_receipt IS NOT NULL AND i.outcome_task_id IS NULL
         AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL AND i.reply_abandon_receipt_id IS NULL
-        AND i.readonly_recovery_json IS NOT NULL AND i.source_revision=s.configuration_revision AND s.state='active'
+        AND i.readonly_recovery_json IS NOT NULL AND i.answered_recovery_json IS NULL AND i.source_revision=s.configuration_revision AND s.state='active'
         AND i.retry_ordinal<20 AND i.next_check_at<=? AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
     cancelledContextReadIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
@@ -1104,22 +1133,26 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND i.source_revision=s.configuration_revision AND s.state='active' AND i.next_check_at<=?
         AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
       ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
-    readonlyRecoverySuccessors(id){
+    readonlyRecoverySuccessors(id,excludeIntakeId=null){
       const row=this.ownerIntake(id);
       // Inventory, not eligibility: include unsettled/foreign/attempted rows so
       // they cannot disappear behind a SQL success filter. The coordinator
       // validates each row and its fresh native receipt. A ninth row refuses
       // the bounded eight-successor exception; nothing is truncated to success.
-      return all(`SELECT id FROM assistant_owner_intakes WHERE thread_id=? AND id!=? AND created_at>=?
-        ORDER BY created_at DESC,id DESC LIMIT 9`,row.thread_id,row.id,row.created_at).map(value=>this.ownerIntake(value.id));
+      if(excludeIntakeId!==null)uuid(excludeIntakeId);
+      return all(`SELECT id FROM assistant_owner_intakes WHERE thread_id=? AND id!=? AND created_at>=? AND (? IS NULL OR id!=?)
+        ORDER BY created_at DESC,id DESC LIMIT 9`,row.thread_id,row.id,row.created_at,excludeIntakeId,excludeIntakeId).map(value=>this.ownerIntake(value.id));
     },
     rememberIntakePrerequisite(id,key){return transaction(()=>{
       const row=this.ownerIntake(id);
       if(typeof key!=='string'||!/^[0-9a-f]{64}$/u.test(key)||row.state!=='ready'||row.native_started
         ||row.source_state!=='active'||row.source_revision!==row.configuration_revision)fail('ASSISTANT_INBOX_CONFLICT');
-      const recovery=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
+      const recovery=assistantOwnerReadOnlyRecovery(row);
       if(row.readonly_recovery_json&&(!recovery||recovery.prerequisiteKey!==key))fail('ASSISTANT_INBOX_CONFLICT');
-      run('UPDATE assistant_owner_intakes SET intake_prerequisite=? WHERE id=?',key,row.id);
+      // The separately frozen binding owns its current prerequisite. Preserve
+      // the original attempted row's historical prerequisite cell as well as
+      // its old JSON; neither is a renewable native-admission certificate.
+      if(row.answered_recovery_json===null)run('UPDATE assistant_owner_intakes SET intake_prerequisite=? WHERE id=?',key,row.id);
     });},
     retryReadonlyOwnerIntake(id,witness){return transaction(()=>{
       // This host-only discriminator is deliberately NOT persisted or sent as
@@ -1196,9 +1229,32 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         next,original.original_event_id,original.event_key,original.account_key,original.native_event_id,original.native_revision,original.ordinal);
       return this.ownerIntake(next);
     });},
+    startAnsweredSourceAdmission(id,{claimReceiptId,prerequisiteKey}){return transaction(()=>{
+      const row=this.ownerIntake(id),legacy=assistantOwnerReadOnlyRecovery(row);
+      if(row.answered_recovery_json!==null||!legacy||legacy.readOnlyContinuation!==true
+        ||row.kind!=='owner_command'||row.state!=='ready'||row.native_started||row.retry_ordinal!==1
+        ||row.retry_of_id!==legacy.parentIntakeId||row.scope.provider!=='telegram'
+        ||row.source_state!=='active'||row.source_revision!==row.configuration_revision
+        ||row.model_capacity_json!==null||row.prepared_reply_json!==null||row.reply_receipt_id!==null
+        ||row.reply_message_id!==null||row.reply_abandon_receipt_id!==null||row.outcome_receipt!==null
+        ||row.outcome_state!==null||row.outcome_task_id!==null)fail('ASSISTANT_INBOX_CONFLICT');
+      const parent=this.ownerIntake(row.retry_of_id);
+      if(parent.state!=='complete'||parent.settled!==1||parent.native_started!==1||parent.outcome_state!=='cancelled'
+        ||parent.readonly_recovery_json!==null||parent.answered_recovery_json!==null||parent.retry_of_id!==null
+        ||parent.retry_ordinal!==0||parent.model_capacity_json!==null||parent.prepared_reply_json!==null
+        ||parent.reply_receipt_id!==null||parent.reply_message_id!==null||parent.reply_abandon_receipt_id!==null
+        ||parent.outcome_task_id!==null||parent.outcome_receipt!==legacy.receiptId
+        ||parent.intake_prerequisite!==legacy.previousPrerequisiteKey
+        ||['source_key','source_revision','account_key','owner_identity_id','conversation_key','thread_id','original_event_id']
+          .some(key=>parent[key]!==row[key]))fail('ASSISTANT_INBOX_CONFLICT');
+      const intent={schemaVersion:1,claimReceiptId:uuid(claimReceiptId),legacyPrerequisiteKey:legacy.prerequisiteKey,prerequisiteKey};
+      assistantOwnerReadOnlyRecovery({...row,answered_recovery_json:JSON.stringify(intent)});
+      run('UPDATE assistant_owner_intakes SET answered_recovery_json=? WHERE id=?',JSON.stringify(intent),row.id);
+      return this.ownerIntake(row.id);
+    });},
     startReadonlyIntakeBegin(id){return transaction(()=>{
       const row=this.ownerIntake(id),metadata=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
-      if(!metadata||metadata.beginAttempted||row.state!=='ready'||row.native_started||row.source_state!=='active'
+      if(row.answered_recovery_json!==null||!metadata||metadata.beginAttempted||row.state!=='ready'||row.native_started||row.source_state!=='active'
         ||row.source_revision!==row.configuration_revision)fail('ASSISTANT_INBOX_CONFLICT');
       run('UPDATE assistant_owner_intakes SET readonly_recovery_json=? WHERE id=?',JSON.stringify({...metadata,beginAttempted:true}),row.id);
     });},

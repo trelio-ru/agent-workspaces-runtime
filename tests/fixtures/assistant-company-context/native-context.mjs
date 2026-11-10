@@ -59,7 +59,8 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
       if(response.ok&&!preparedReplyConfirmFaults.lostCommitted){await response.arrayBuffer();preparedReplyConfirmFaults.lostCommitted=true;
         throw new TypeError('synthetic committed prepared confirmation transport loss');}
     }
-    if(configuration.loseContinuationBegin&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/begin'
+    if((configuration.loseContinuationBegin&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/begin'
+      ||configuration.loseAnsweredRecovery&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/answered-recovery')
       &&options.method==='POST'&&typeof options.body==='string'&&(JSON.parse(options.body).readOnlyRecovery?.readOnlyContinuation===true||JSON.parse(options.body).readOnlyRecovery?.generationReplyCorrection===true||JSON.parse(options.body).readOnlyRecovery?.replyDispatchCorrection===true)){
       continuationBeginFaults.attempts++;
       if(response.ok&&!continuationBeginFaults.lostCommitted){

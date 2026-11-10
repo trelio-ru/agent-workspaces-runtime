@@ -4179,6 +4179,36 @@ an unknown decoder claim never permits a second decoder. Backend capability
 publication must precede runtime activation. Existing minima stay unchanged.
 
 
+A genuinely consumed SOURCE answer has its own independent
+`answeredSourceRecoveryProtocolVersion:1`. Fresh native root reads return an
+`answeredSourceRecoveryClaimId` only for exactly one ANSWERED source question,
+no owner action, its immutable native answer-claim receipt and expired claimed
+clock, private confirmed source and post-answer native runtime observation.
+The complete source-deadline terminal witness still must match the frozen
+original turn. A saved answer is data, never new approval or lease renewal.
+
+Legacy begin remains permanently dialogue-denying. The SAME never-started
+reply-only child may instead receive ONE separate fixed device admission through
+`reconcileAnsweredSourceIntake`; it cannot borrow a pending/unknown old begin.
+Fresh native changed/409 child read, sole consumed parent, exact root/source/
+account/owner/event/thread and absent local send/prepared/capacity/task fences
+are mandatory before this independent attempt. Service and SQL repeat the
+claim and unique-parent/global-chain fences. Another native binding refuses.
+
+Schema28 adds nullable `answered_recovery_json`, never rewrites the original
+`readonly_recovery_json` or its beginAttempted bit. It records only native claim
+UUID and frozen legacy/current trusted prerequisites before its ONE HTTP call.
+A common strict codec derives the effective binding across restarts. The new
+unknown outcome is forever SAME-child GET-only, including after later updates;
+a changed runtime cannot reset/rebind that intent. Fresh untouched children use
+the new protocol directly; legacy attempted children additionally require a
+changed current prerequisite. Missing/malformed capability or claim refuses.
+The child remains unread/reply-only under ordinary current source/recipient/
+ACL/proof, original-byte/completed-ASR and signed one-send guards. No new Task,
+Run, question, old lease, ACK, decoder/provider replay or recovered health claim.
+Backend/SQL capability deploy precedes runtime activation; minima stay unchanged.
+
+
 A positively delivered generation-only technical reply has one independent
 post-fix certificate, `generationReplyCorrection:true`, requiring native
 `readOnlyGenerationCorrectionProtocolVersion:1` and journal25. This is separate

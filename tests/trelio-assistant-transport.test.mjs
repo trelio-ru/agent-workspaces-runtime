@@ -4617,7 +4617,7 @@ test('cancelled reply-only continuation keeps its separate strict witness and na
  assert.equal(calls,before,'no mixed/forged certificate reaches HTTP');
 });
 
-for(const field of ['readOnlyCancelledContextRecoveryProtocolVersion','readOnlyCancelledSourceRecoveryProtocolVersion','preparedOwnerReplyDeliveryProtocolVersion'])
+for(const field of ['readOnlyCancelledContextRecoveryProtocolVersion','readOnlyCancelledSourceRecoveryProtocolVersion','answeredSourceRecoveryProtocolVersion','preparedOwnerReplyDeliveryProtocolVersion'])
 test(`independent owner capability survives the real device codec (${field})`,async()=>{
  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
  const locator={companyId,sourceId,intakeId},input={...locator,sourceRevision:2,eventId:randomUUID(),threadId:randomUUID(),

@@ -1,6 +1,6 @@
 /** Model-free coordinator. Provider authority and native execution stay behind
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
-import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata, assistantOwnerReplyCapacityOpen } from './trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata, assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -841,6 +841,38 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }finally{if(!inspectCancelledRead)inbox.deferOwnerIntake(row.id);}
     }
   };
+  const recoverySuccessors=async(row,signal,{dispatch=false,excludeIntakeId=null}={})=>{
+    const successors=inbox.readonlyRecoverySuccessors(row.id,excludeIntakeId),settledCreationSuccessors=[],settledReplySuccessors=[];
+    if(successors.length>8)fail('ASSISTANT_INTAKE_CHANGED');
+    for(const successor of successors){
+      // A later independent original never proves the old question ran.
+      // The dispatch-only profile may also skip a separately settled
+      // positive reply, but only with its OWN durable provider observation
+      // and fresh native receipt. Unknown sends and recovery rows refuse.
+      // `created` historically leaves local outcome_task_id null; require
+      // the real task UUID from its fresh immutable native receipt instead.
+      const reply=dispatch&&successor.outcome_state==='replied';
+      if(successor.kind!=='owner_command'||successor.state!=='complete'||successor.settled!==1
+        ||!reply&&successor.outcome_state!=='created'||successor.native_started!==1
+        ||successor.source_key!==row.source_key||successor.source_revision!==row.source_revision
+        ||successor.account_key!==row.account_key||successor.owner_identity_id!==row.owner_identity_id
+        ||successor.conversation_key!==row.conversation_key||successor.thread_id!==row.thread_id
+        ||successor.original_event_id===row.original_event_id||successor.reply_abandon_receipt_id!==null
+        ||(reply?successor.reply_receipt_id!==successor.outcome_receipt||successor.outcome_task_id!==null
+          ||!Number.isSafeInteger(successor.reply_message_id)||successor.reply_message_id<1||successor.reply_message_id>2147483647
+          ||!assistantOwnerReplyCapacityOpen(successor):successor.reply_receipt_id!==null||successor.reply_message_id!==null)
+        ||successor.readonly_recovery_json!==null||!uuid.test(successor.outcome_receipt??''))fail('ASSISTANT_INTAKE_CHANGED');
+      const created=await client.readSourceIntake(intakeLocator(successor),signal);lease();
+      if(created.id!==successor.id||created.companyId!==row.scope.companyId||created.sourceId!==row.scope.bindingId
+        ||created.sourceRevision!==row.source_revision||created.eventId!==successor.original_event_id
+        ||created.threadId!==row.thread_id||created.state!==(reply?'replied':'created')||created.receiptId!==successor.outcome_receipt
+        ||created.ownerPrivateRead!==true||created.readConfirmed!==true||(reply?created.taskId!==null:!uuid.test(created.taskId??''))
+        ||successor.outcome_task_id!==null&&successor.outcome_task_id!==created.taskId)fail('ASSISTANT_INTAKE_CHANGED');
+      (reply?settledReplySuccessors:settledCreationSuccessors).push({...intakeLocator(successor),sourceRevision:created.sourceRevision,
+        eventId:created.eventId,threadId:created.threadId,deliveryId:successor.delivery_id,taskId:created.taskId,receiptId:created.receiptId});
+    }
+    return {settledCreationSuccessors,settledReplySuccessors};
+  };
   const recoverReadonlyOwnerIntake=async signal=>{
     if(typeof native.readPrerequisites!=='function'||await native.ready(identity,signal)!==true)return;lease();
     for(const {row,generation=false,dispatch=false,cancelledContextRead=false} of [
@@ -973,35 +1005,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
         const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
         if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||prerequisite.fingerprint===previous)continue;
-        const successors=inbox.readonlyRecoverySuccessors(row.id),settledCreationSuccessors=[],settledReplySuccessors=[];
-        if(successors.length>8)continue;
-        for(const successor of successors){
-          // A later independent original never proves the old question ran.
-          // The dispatch-only profile may also skip a separately settled
-          // positive reply, but only with its OWN durable provider observation
-          // and fresh native receipt. Unknown sends and recovery rows refuse.
-          // `created` historically leaves local outcome_task_id null; require
-          // the real task UUID from its fresh immutable native receipt instead.
-          const reply=dispatch&&successor.outcome_state==='replied';
-          if(successor.kind!=='owner_command'||successor.state!=='complete'||successor.settled!==1
-            ||!reply&&successor.outcome_state!=='created'||successor.native_started!==1
-            ||successor.source_key!==row.source_key||successor.source_revision!==row.source_revision
-            ||successor.account_key!==row.account_key||successor.owner_identity_id!==row.owner_identity_id
-            ||successor.conversation_key!==row.conversation_key||successor.thread_id!==row.thread_id
-            ||successor.original_event_id===row.original_event_id||successor.reply_abandon_receipt_id!==null
-            ||(reply?successor.reply_receipt_id!==successor.outcome_receipt||successor.outcome_task_id!==null
-              ||!Number.isSafeInteger(successor.reply_message_id)||successor.reply_message_id<1||successor.reply_message_id>2147483647
-              ||!assistantOwnerReplyCapacityOpen(successor):successor.reply_receipt_id!==null||successor.reply_message_id!==null)
-            ||successor.readonly_recovery_json!==null||!uuid.test(successor.outcome_receipt??''))fail('ASSISTANT_INTAKE_CHANGED');
-          const created=await client.readSourceIntake(intakeLocator(successor),signal);lease();
-          if(created.id!==successor.id||created.companyId!==row.scope.companyId||created.sourceId!==row.scope.bindingId
-            ||created.sourceRevision!==row.source_revision||created.eventId!==successor.original_event_id
-            ||created.threadId!==row.thread_id||created.state!==(reply?'replied':'created')||created.receiptId!==successor.outcome_receipt
-            ||created.ownerPrivateRead!==true||created.readConfirmed!==true||(reply?created.taskId!==null:!uuid.test(created.taskId??''))
-            ||successor.outcome_task_id!==null&&successor.outcome_task_id!==created.taskId)fail('ASSISTANT_INTAKE_CHANGED');
-          (reply?settledReplySuccessors:settledCreationSuccessors).push({...intakeLocator(successor),sourceRevision:created.sourceRevision,
-            eventId:created.eventId,threadId:created.threadId,deliveryId:successor.delivery_id,taskId:created.taskId,receiptId:created.receiptId});
-        }
+        const {settledCreationSuccessors,settledReplySuccessors}=await recoverySuccessors(row,signal,{dispatch});
         const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal,readOnlyPreparation:intakeLocator(row),settledCreationSuccessors,
           ...(dispatch?{settledReplySuccessors}:{}),
           ...(cancelledContextRead?{
@@ -1189,6 +1193,50 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       onThreadStarted:()=>fail('ASSISTANT_COORDINATOR_THREAD_CONFLICT')});lease();
     return result.state==='completed'&&result.threadId===row.thread_id;
   };
+  /** The old begin protocol always refused dialogue. A genuinely consumed
+   * source answer permits ONE independently advertised admission of the SAME
+   * never-started child, not replay of that old request. Native SQL separately
+   * verifies the sole answered question/claim and unique parent. The complete
+   * original terminal certificate and all current/local fences remain required.
+   * A lost new response leaves this separate intent GET-only forever. */
+  const prepareAnsweredSourceAdmission=async(row,prerequisite,signal)=>{
+    if(row.answered_recovery_json!==null||typeof client.reconcileAnsweredSourceIntake!=='function')return false;
+    const old=assistantOwnerReadOnlyRecovery(row);
+    if(!old||old.readOnlyContinuation!==true||row.kind!=='owner_command'||row.state!=='ready'||row.native_started!==0
+      ||row.scope.provider!=='telegram'||row.retry_ordinal!==1||row.retry_of_id!==old.parentIntakeId)return false;
+    const parent=inbox.ownerIntake(old.parentIntakeId);
+    if(parent.state!=='complete'||parent.settled!==1||parent.native_started!==1||parent.outcome_state!=='cancelled'
+      ||parent.outcome_receipt!==old.receiptId||parent.outcome_task_id!==null||parent.retry_of_id!==null||parent.retry_ordinal!==0
+      ||parent.readonly_recovery_json!==null||parent.answered_recovery_json!==null||parent.model_capacity_json!==null
+      ||parent.prepared_reply_json!==null||parent.reply_receipt_id!==null||parent.reply_message_id!==null||parent.reply_abandon_receipt_id!==null
+      ||parent.intake_prerequisite!==old.previousPrerequisiteKey
+      ||['source_key','source_revision','account_key','owner_identity_id','conversation_key','thread_id','original_event_id']
+        .some(key=>parent[key]!==row[key]))return false;
+    const closed=await client.readSourceIntake(intakeLocator(parent),signal);lease();
+    if(closed.answeredSourceRecoveryProtocolVersion!==1||!uuid.test(closed.answeredSourceRecoveryClaimId??'')
+      ||closed.readOnlyCancelledSourceRecoveryProtocolVersion!==1||closed.readOnlyRecovery!==undefined
+      ||closed.id!==parent.id||closed.companyId!==row.scope.companyId||closed.sourceId!==row.scope.bindingId
+      ||closed.sourceRevision!==row.source_revision||closed.eventId!==row.original_event_id||closed.threadId!==row.thread_id
+      ||closed.state!=='cancelled'||closed.receiptId!==old.receiptId||closed.taskId!==null
+      ||closed.ownerPrivateRead!==true||closed.readConfirmed!==true
+      ||!Number.isFinite(Date.parse(closed.leaseExpiresAt))||Date.parse(closed.leaseExpiresAt)>now()
+      ||!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')
+      ||prerequisite.fingerprint===old.previousPrerequisiteKey||old.beginAttempted&&prerequisite.fingerprint===old.prerequisiteKey)return false;
+    // A positive existing child belongs to its ORIGINAL intent. A transport,
+    // auth or unknown result never proves missing admission. Even the exact
+    // native changed/409 read is not permission by itself: the independent
+    // service repeats all predicates atomically and refuses another binding.
+    try{await client.readSourceIntake(intakeLocator(row),signal);lease();return false;}
+    catch(error){if(error?.code!=='ASSISTANT_INTAKE_CHANGED'||error.status!==409)throw error;lease();}
+    const {settledCreationSuccessors}=await recoverySuccessors(parent,signal,{excludeIntakeId:row.id});
+    const terminal=await native.readDelivery(parent.thread_id,parent.delivery_id,{signal,readOnlyPreparation:intakeLocator(parent),
+      settledCreationSuccessors,cancelledSourceRead:true});lease();
+    if(!['completed','failed'].includes(terminal.state)||terminal.readOnlyFailure!=='owner_source_read_deadline_cancelled'
+      ||terminal.turnId!==old.terminalTurnId)return false;
+    await intakeSource(parent,signal);await intakeSource(row,signal);lease();
+    inbox.startAnsweredSourceAdmission(row.id,{claimReceiptId:closed.answeredSourceRecoveryClaimId,prerequisiteKey:prerequisite.fingerprint});
+    return true;
+  };
   const workIntake=async(signal,visited)=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
@@ -1336,10 +1384,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       owner=(await client.ownerIdentities(signal)).identities.find(value=>value.provider===row.scope.provider);lease();
       if(!owner||owner.bindingId!==row.owner_identity_id)fail('ASSISTANT_INTAKE_OWNER_UNVERIFIED');
     }
-    const recovery=row.readonly_recovery_json?assistantReadOnlyRecoveryMetadata(JSON.parse(row.readonly_recovery_json),{local:true}):null;
-    if(row.readonly_recovery_json&&!recovery)fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    let recovery=assistantOwnerReadOnlyRecovery(row),answeredAdmission=false;
     if(typeof native.readPrerequisites==='function'){
       const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
+      answeredAdmission=await prepareAnsweredSourceAdmission(row,prerequisite,signal);
+      row=inbox.ownerIntake(row.id);recovery=assistantOwnerReadOnlyRecovery(row);
       inbox.rememberIntakePrerequisite(row.id,prerequisite.fingerprint);
     }
     const input={...intakeLocator(row),sourceRevision:row.source_revision,eventId:row.original_event_id,
@@ -1351,7 +1400,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // After a lost response, only exact child read-back is allowed across restart;
     // even an idempotent endpoint is not blindly replayed or allocated another ID.
     let admitted;
-    if(recovery?.beginAttempted)admitted=await client.readSourceIntake(intakeLocator(row),signal);
+    if(answeredAdmission)admitted=await client.reconcileAnsweredSourceIntake(input,signal);
+    else if(recovery?.beginAttempted)admitted=await client.readSourceIntake(intakeLocator(row),signal);
     else{
       if(recovery)inbox.startReadonlyIntakeBegin(row.id);
       admitted=await client.beginSourceIntake(input,signal);

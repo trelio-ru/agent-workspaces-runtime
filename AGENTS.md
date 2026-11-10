@@ -1416,6 +1416,10 @@ same runtime contract. Cover actual skill/import/bootstrap child processes.
   unknown/attempted/provider/intervening/duplicate history still refuses. Tests
   compose worker/factory/device codec/SQLite restart and content-only context;
   a synthetic success is never live Telegram acceptance.
+  Already consumed SOURCE answers use a separate native claim-bound admission;
+  legacy begin stays dialogue-denying and is never retried. Schema28 keeps its
+  independent pre-HTTP intent without rewriting the old attempted binding.
+  Lost outcomes remain SAME-child read-only; see the same recovery contract.
 
 - One positive technical reply after READY plus exact-reader refusals may use the
   SAME native one-child correction protocol only after full terminal evidence:

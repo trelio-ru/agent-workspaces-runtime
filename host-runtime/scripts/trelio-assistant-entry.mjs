@@ -1750,7 +1750,7 @@ const productionContext = async (action, options = {}) => {
 // production factory. This does not add it to the model-visible MCP catalogue.
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
-  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
+  'beginSourceIntake','reconcileAnsweredSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
   'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
 /** Reuse the host setup mutex at the final NEW-work HTTP boundary. This is a
@@ -1816,7 +1816,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     return value.value;
   };
   const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
-    ['claimTaskHost','beginTaskPass','beginSourceIntake','prepareOwnerReplyDelivery'].includes(name))]))};
+    ['claimTaskHost','beginTaskPass','beginSourceIntake','reconcileAnsweredSourceIntake','prepareOwnerReplyDelivery'].includes(name))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
   const configDirectory=dependencies.configurationDirectory??dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();
   const root=dependencies.directory??path.join(configDirectory,'digital-assistants','runtime');
