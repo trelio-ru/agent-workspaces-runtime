@@ -332,7 +332,10 @@ The default route and refusal recovery are explicit execution policy.
 The browser definition is obtained from the small native source_intake view for
 either genuine origin, keeping near-bound task/company catalogues unchanged.
 Each command has a fresh native proof and structural five-second receipt bound
-to device/company/member/pass/runtime. The complete command is checked against
+to device/company/member/pass/runtime. Its local five-second budget starts on
+the monotonic clock before native HTTP and is checked again after private I/O;
+server/device wall-clock skew cannot renew or reject a fresh admission.
+The complete command is checked against
 that SAME fresh native schema before HTTP; URL/text/page data stay local in
 plain and encrypted companies. The receipt is not a provider/Secret/action grant.
 The host checks its private active pass and observed session again before input.

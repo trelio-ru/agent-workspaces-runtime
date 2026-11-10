@@ -3747,6 +3747,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         // only native structural admission over HTTP after validating the
         // complete original command against this SAME fresh native schema.
         // No callback-less transport can accidentally send its raw arguments.
+        // Keep the one-command admission budget on this process's monotonic
+        // clock, starting BEFORE native HTTP. Server/device wall-clock skew
+        // must neither reject a fresh receipt nor renew a slow admission when
+        // its callback finally arrives. This timestamp never leaves the host.
+        const browserAdmissionStartedAt=name==='use_assistant_browser'?performance.now():undefined;
         const value=name==='use_assistant_browser'
           ?typeof materializeBrowser==='function'
             ?await send({localBrowserAction:true,...(argumentsSnapshot.intakePass?{intakePass:argumentsSnapshot.intakePass}:{taskPass:argumentsSnapshot.taskPass}),runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
@@ -3761,7 +3766,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || (value.isError !== undefined && typeof value.isError !== "boolean")
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > ASSISTANT_MCP_RESULT_MAX_BYTES) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         if(name==='use_assistant_browser'&&value.isError!==true)
-          return localOperation('browser',()=>materializeBrowser({result:value,arguments:argumentsSnapshot,signal}));
+          return localOperation('browser',()=>materializeBrowser({result:value,arguments:argumentsSnapshot,signal,admissionStartedAt:browserAdmissionStartedAt}));
         if(typeof onBrowserScopeSettled==='function'&&value.isError!==true
           &&(name==='complete_assistant_pass'&&value.structuredContent?.state==='confirmed'
             ||name==='resolve_assistant_intake'&&value.structuredContent?.receiptId

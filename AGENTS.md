@@ -475,7 +475,9 @@ publication tooling также остаются вне этого публичн
   Digital assistants default to matching signed browser skills or the native
   managed browser, never silent ordinary Chrome/computer fallback. Native
   browser admission is structural only; URL/input stay local. Owner intake is
-  read-only and each command repeats genuine pass/proof checks. See
+  read-only and each command repeats genuine pass/proof checks. Its local
+  five-second admission budget is monotonic from before native HTTP, including
+  private I/O; server/device wall-clock skew never renews or rejects it. See
   [routing](docs/assistant-scheduler.md#native-browser-observation-recovery).
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable

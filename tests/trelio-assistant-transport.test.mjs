@@ -17,7 +17,7 @@ test('managed browser sends only structural admission and never replays an unkno
  const credential=`tda_${'b'.repeat(43)}`,taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},runtimeSessionProof={runtimeSessionId:randomUUID()};
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
  const args={siteOrigin:'https://private.example',command:{operation:'type-text',args:{frameId:'synthetic',text:'PRIVATE_INPUT'}},taskPass,runtimeSessionProof};
- let admissions=0,executions=0,unknown=false,changedContract=false;
+ let admissions=0,executions=0,unknown=false,changedContract=false,nativeAdmissionAt;
  const canonical={type:'object',properties:{siteOrigin:{type:'string'},command:{type:'object'},taskPass:{},runtimeSessionProof:{}},required:['siteOrigin','command'],additionalProperties:false};
  const wire={type:'object',anyOf:[canonical,{type:'object',properties:{localBrowserAction:{const:true},taskPass:{},intakePass:{},runtimeSessionProof:{}},additionalProperties:false}]};
  const httpRequest=async input=>{
@@ -32,6 +32,7 @@ test('managed browser sends only structural admission and never replays an unkno
    const schema=changedContract?{...canonical,properties:{...canonical.properties,command:{type:'object',properties:{operation:{const:'navigate'}}}}}:canonical;
    return response({content:[],structuredContent:{schemaVersion:1,name:'use_assistant_browser',inputSchema:schema}});
   }
+  nativeAdmissionAt=performance.now();
   admissions++;assert.deepEqual(input.payload.params.arguments,{localBrowserAction:true,taskPass,runtimeSessionProof});
   assert.doesNotMatch(JSON.stringify(input.payload),/PRIVATE_INPUT|private\.example|frameId|type-text/u);
   return response({content:[{type:'text',text:'Native structural receipt'}],structuredContent:{kind:'assistant_browser'}});
@@ -43,6 +44,8 @@ test('managed browser sends only structural admission and never replays an unkno
  const delivered={content:[{type:'image',mimeType:'image/png',data:'synthetic'}]};
  const client=createAssistantMcpClient({...options,materializeBrowser:async request=>{
   executions++;assert.deepEqual(request.arguments,args);
+  assert.ok(Number.isFinite(request.admissionStartedAt)&&request.admissionStartedAt<=nativeAdmissionAt,
+   'the trusted local deadline begins before native HTTP, never at callback arrival');
   if(unknown)throw new AssistantTransportError('ASSISTANT_BROWSER_OUTCOME_UNKNOWN');return delivered;
  }});
  const tool=(await client.listTools()).find(tool=>tool.name==='use_assistant_browser');
@@ -89,27 +92,36 @@ test('managed browser binds local profile and input to its genuine runtime, with
  const {visualStatus}=await import('../host-runtime/scripts/trelio-visual-result.mjs');
  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
  let pass={schemaVersion:1,...identity,companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};delete pass.origin;
- const runtimeSessionId=randomUUID(),memberId=randomUUID(),store=memoryStore(),clock=Date.now();let ran=0,selected;
+ const runtimeSessionId=randomUUID(),memberId=randomUUID(),store=memoryStore(),clock=Date.now();let ran=0,selected,monotonicClock=1000;
  const host={readActivePass:async()=>structuredClone(pass)};
  const save=()=>store.put({origin:identity.origin,kind:'runtime',id:pass.passId},{passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId,expiresAt:new Date(clock+3600000).toISOString()}});
  await save();
  const grant=()=>({schemaVersion:1,kind:'assistant_browser',companyId:pass.companyId,memberId,scopeId:pass.passId,runtimeSessionId,
   assistantUserId:identity.assistantId,deviceId:identity.deviceId,readOnly:pass.kind==='source_intake',expiresAt:new Date(clock+5000).toISOString()});
- const invoke=(command,patch={})=>materializeAssistantBrowser({identity,host,store,now:()=>clock,
+ const invoke=(command,patch={},local={})=>materializeAssistantBrowser({identity,host,store,now:()=>clock,
+  admissionStartedAt:monotonicClock,monotonic:()=>monotonicClock,
   result:{structuredContent:{...grant(),...patch}},arguments:{siteOrigin:'https://example.test',command,runtimeSessionProof:{runtimeSessionId}},
-  run:async value=>{ran++;selected=value;return visualStatus('ready');}});
- await invoke({operation:'navigate',args:{url:'https://example.test/article'}});assert.equal(ran,1);
+  run:async value=>{ran++;selected=value;return visualStatus('ready');},...local});
+ await invoke({operation:'navigate',args:{url:'https://example.test/article'}},{expiresAt:new Date(clock+65000).toISOString()});assert.equal(ran,1);
  assert.equal(selected.env.TRELIO_SKILL_RUNTIME_SESSION_ID,runtimeSessionId);
  assert.equal(selected.env.TRELIO_SKILL_COMPANY_ID,pass.companyId);
  const originalAccount=selected.env.TRELIO_SKILL_ACCOUNT_JSON;
+ await invoke({operation:'screenshot',args:{}},{expiresAt:new Date(clock-55000).toISOString()});assert.equal(ran,2,
+  'a server clock one minute ahead or behind does not change a genuinely fresh local admission');
  await assert.rejects(invoke({operation:'key',args:{frameId:'frame',key:'Enter'}},{scopeId:randomUUID()}),/ADMISSION_CHANGED/);
- await assert.rejects(invoke({operation:'key',args:{frameId:'frame',key:'Enter'}},{expiresAt:new Date(clock).toISOString()}),/ADMISSION_CHANGED/);
+ await assert.rejects(invoke({operation:'key',args:{frameId:'frame',key:'Enter'}},{expiresAt:'invalid'}),/ADMISSION_CHANGED/);
+ for(const admissionStartedAt of [undefined,monotonicClock+1,monotonicClock-5000])
+  await assert.rejects(invoke({operation:'screenshot',args:{}},{},{admissionStartedAt}),/ADMISSION_CHANGED/);
+ await assert.rejects(invoke({operation:'screenshot',args:{}},{},{store:{get:async input=>{
+  const value=await store.get(input);monotonicClock+=5000;return value;
+ }}}),/ADMISSION_CHANGED/);
+ assert.equal(ran,2,'late HTTP or private I/O cannot renew the local five-second budget');
  await store.put({origin:identity.origin,kind:'runtime',id:pass.passId},{ended:true});
- await assert.rejects(invoke({operation:'screenshot',args:{}}),/ADMISSION_CHANGED/);assert.equal(ran,1);
+ await assert.rejects(invoke({operation:'screenshot',args:{}}),/ADMISSION_CHANGED/);assert.equal(ran,2);
  pass={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:pass.companyId,
   sourceId:randomUUID(),sourceRevision:0,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};await save();
  for(const operation of ['click','type-text','key'])await assert.rejects(invoke({operation,args:{}}),/READ_ONLY/);
- await invoke({operation:'screenshot',args:{}});assert.equal(ran,2);
+ await invoke({operation:'screenshot',args:{}});assert.equal(ran,3);
  assert.equal(selected.env.TRELIO_SKILL_ACCOUNT_JSON,originalAccount,'same assistant/company/site can reuse its saved login across own passes');
  pass={...pass,companyId:randomUUID()};await save();await invoke({operation:'screenshot',args:{}});
  assert.notEqual(selected.env.TRELIO_SKILL_ACCOUNT_JSON,originalAccount,'company contexts never share a generic saved browser profile');

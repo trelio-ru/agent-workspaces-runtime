@@ -879,27 +879,32 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
  * the existing owner-private browser transport, never native HTTP or a ledger.
  */
 export const materializeAssistantBrowser = async ({identity,host,store,result,arguments:args,signal,
-  run, now=Date.now}) => {
+  admissionStartedAt,run,now=Date.now,monotonic=()=>performance.now()}) => {
   const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
   const {runVisualSession}=await import('./trelio-visual-session.mjs');
   const {DEFAULT_LEASE_MS}=await import('./trelio-browser-session.mjs');
   const pass=validateAssistantActivePass(await host.readActivePass(),identity),grant=result.structuredContent;
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
   const failBrowser=()=>{throw new AssistantTransportError('ASSISTANT_BROWSER_ADMISSION_CHANGED');};
+  // Native proof/receipt timestamps belong to the server's wall clock. The
+  // local one-command budget instead begins just before its HTTP admission in
+  // the SAME process. Recheck after private I/O as well: slow keychain/journal
+  // access cannot revive or extend a receipt. No model argument supplies it.
+  const admissionIsFresh=()=>{const elapsed=monotonic()-admissionStartedAt;
+    return Number.isFinite(admissionStartedAt)&&Number.isFinite(elapsed)&&elapsed>=0&&elapsed<5000;};
   if(!grant||Object.keys(grant).sort().join(',')!=='assistantUserId,companyId,deviceId,expiresAt,kind,memberId,readOnly,runtimeSessionId,schemaVersion,scopeId'
     ||grant.schemaVersion!==1||grant.kind!=='assistant_browser'||grant.assistantUserId!==identity.assistantId
     ||grant.deviceId!==identity.deviceId||grant.companyId!==pass.companyId||grant.scopeId!==pass.passId
     ||!uuid.test(grant.memberId??'')||!uuid.test(grant.runtimeSessionId??'')
     ||grant.runtimeSessionId!==args.runtimeSessionProof?.runtimeSessionId||grant.readOnly!==(pass.kind==='source_intake')
-    ||!Number.isFinite(Date.parse(grant.expiresAt))||Date.parse(grant.expiresAt)<=now()
-    ||Date.parse(grant.expiresAt)>now()+5000||pass.intakeKind==='route_existing')failBrowser();
+    ||!Number.isFinite(Date.parse(grant.expiresAt))||!admissionIsFresh()||pass.intakeKind==='route_existing')failBrowser();
   if(Object.keys(args).some(key=>!['siteOrigin','command','taskPass','intakePass','runtimeSessionProof'].includes(key))
     ||!args.command||Object.keys(args.command).sort().join(',')!=='args,operation')failBrowser();
   const saved=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
   if(saved?.ended||saved?.state?.runtimeSessionId!==grant.runtimeSessionId
     ||saved.threadId!==pass.threadId||!Number.isFinite(Date.parse(saved.state.expiresAt))||Date.parse(saved.state.expiresAt)<=now()
     ||JSON.stringify(await host.readActivePass())!==JSON.stringify(pass)
-    ||Date.parse(grant.expiresAt)<=now())failBrowser();
+    ||!admissionIsFresh())failBrowser();
   const {operation,args:input}=args.command;
   if(!['navigate','screenshot','status','close','scroll','click','type-text','key'].includes(operation)
     ||grant.readOnly&&!['navigate','screenshot','status','close','scroll'].includes(operation))
