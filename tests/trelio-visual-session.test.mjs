@@ -63,6 +63,15 @@ test('presentation validation precedes identity/storage and an old worker cannot
     presentation: 'hidden', semanticControls: true, fieldCheckPolicy: { origins: [origin], labels: ['End date'] },
     env, fixture: { directory } });
   assert.equal(changed.reason, 'observation_mode_mismatch'); assert.equal(calls, before);
+  const completion = { success: [{ origin, pathPrefix: '/', selectors: ['#account'], blocked: ['#challenge'] }] };
+  await writePrivateJsonFile(file, { ...legacy, manualCompletion: completion });
+  const withCompletion = policy => runVisualSession({ origins: [origin], operation: 'navigate', args: { url: origin },
+    manualCompletion: policy, env, fixture: { directory } });
+  const dispatches = calls;
+  assert.equal((await withCompletion(null)).reason, 'observation_mode_mismatch');
+  assert.equal((await withCompletion({ success: [{ ...completion.success[0], selectors: ['#different'] }] })).reason, 'observation_mode_mismatch');
+  assert.equal(calls, dispatches, 'changed completion evidence cannot control an old human window');
+  assert.equal((await withCompletion(completion)).state, 'closed');
   assert.equal((await invoke('close', 'hidden')).state, 'closed', 'cleanup does not require widening the pinned policy');
 
 });

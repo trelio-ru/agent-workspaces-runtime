@@ -637,3 +637,7 @@ setup registers the paired user's supervisor and reads its actual OS state;
 it does not provide automatic logon or establish business readiness.
 
 Maintainer integration and release reservation use the [shared FIFO coordinator](docs/git-coordination.md).
+
+Signed visual `manualCompletion` can close its own human-login window after two
+stable exact-origin UI confirmations, through the existing stop/save gate.
+Unknown challenges remain manual; see [visual contract](docs/visual-browser.md).

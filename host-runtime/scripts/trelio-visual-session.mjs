@@ -191,18 +191,47 @@ export const VISUAL_EXTERNAL_NAVIGATION_API = 'trelio.visual-external-navigation
 export const VISUAL_PRESENTATION_API = 'trelio.visual-presentation/v1';
 export const VISUAL_SEMANTIC_CONTROLS_API = 'trelio.visual-semantic-controls/v1';
 export const VISUAL_FORM_CHECKS_API = 'trelio.visual-form-checks/v1';
+export const VISUAL_MANUAL_COMPLETION_API = 'trelio.visual-manual-completion/v1';
+
+/** Read-only, signed completion evidence for a human login. Every selector in
+ * one alternative must be uniquely visible on its exact origin/path. Separate
+ * from credential recipes: no fields, secrets or inputs become available, and
+ * model argv cannot select a completion rule. */
+export function normalizeVisualManualCompletion(value, { origins, fixtureOnly = false }) {
+  if (value == null) return null;
+  if (!exact(value, ['success']) || !Array.isArray(value.success) || !value.success.length
+      || value.success.length > 4 || Buffer.byteLength(JSON.stringify(value)) > 8192) fail('invalid_input');
+  return { success: value.success.map(item => {
+    if (!exact(item, ['origin', 'pathPrefix', 'selectors', 'blocked'])
+        || typeof item.origin !== 'string' || !origins.includes(item.origin)) fail('invalid_input');
+    const url = new URL(item.origin);
+    if (url.origin !== item.origin || url.username || url.password
+        || url.protocol !== 'https:' && !fixtureOnly) fail('invalid_input');
+    if (typeof item.pathPrefix !== 'string' || !item.pathPrefix.startsWith('/')
+        || item.pathPrefix.startsWith('//') || item.pathPrefix.length > 1024
+        || /[\x00-\x20\x7f?#\\]/u.test(item.pathPrefix)
+        || new URL(item.pathPrefix, item.origin).pathname !== item.pathPrefix
+        || !Array.isArray(item.selectors) || !item.selectors.length || item.selectors.length > 8
+        || !item.selectors.every(selector) || new Set(item.selectors).size !== item.selectors.length
+        || !Array.isArray(item.blocked) || item.blocked.length > 8 || !item.blocked.every(selector)) fail('invalid_input');
+    return { origin: item.origin, pathPrefix: item.pathPrefix,
+      selectors: item.selectors.slice(), blocked: item.blocked.slice() };
+  }) };
+}
 
 /**
  * Short-lived provider invocations talk to one private, absolute-lease worker.
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], externalNavigation = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], externalNavigation = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, env = process.env, fixture }) {
   if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || !semanticControls && operation === 'read-text'
     && ['controlQuery', 'controlOffset'].some(key => Object.hasOwn(args || {}, key))) return visualStatus('error', 'invalid_input');
   // Validate the signed comparison policy before identity/storage/browser I/O.
   // Its canonical form is pinned to the SAME live owner as disclosure mode.
   try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); }
+  catch { return visualStatus('error', 'invalid_input'); }
+  try { manualCompletion = normalizeVisualManualCompletion(manualCompletion, { origins, fixtureOnly: Boolean(fixture) }); }
   catch { return visualStatus('error', 'invalid_input'); }
   if (fieldCheckPolicy && !semanticControls || !validBusinessFieldChecks(args?.checks, fieldCheckPolicy)) return visualStatus('error', 'invalid_input');
   if (!['windowed', 'hidden'].includes(presentation)) return visualStatus('error', 'invalid_input');
@@ -269,7 +298,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
       // Upgrading a provider may reuse its saved auth but must not silently
       // reuse an older live worker with a different content-disclosure mode.
       // Cleanup/status remain available so the exact owner can finish it safely.
-      if (((owner.externalNavigation === true) !== externalNavigation || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      if (((owner.externalNavigation === true) !== externalNavigation || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       // Do not slide the original deadline when another CLI invocation arrives.
       if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
@@ -329,7 +358,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
         schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
         ...(binding.executionOwner ? { executionOwner: binding.executionOwner } : {}),
         pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-        origins, domains, externalNavigation, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint,
+        origins, domains, externalNavigation, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint, manualCompletion,
         mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
         ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
       };
@@ -728,7 +757,7 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
  * Top-frame origin, document token, uniqueness, form destination and the whole
  * challenge are checked again immediately before each field and submission.
  */
-export function installVisualAuthentication(definition) {
+export function installVisualAuthentication(definition, manualCompletion = null) {
   if (window.top !== window) return;
   const documentId = crypto.randomUUID(), spent = new Set();
   const visible = element => {
@@ -780,6 +809,16 @@ export function installVisualAuthentication(definition) {
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== chrome.runtime.id) return;
     try {
+      if (message?.kind === 'manual-completion-probe') {
+        // Scalar-only private evidence. Do not expose selectors, page text,
+        // identity/credential values or a general DOM reader while manual.
+        const success = manualCompletion && document.readyState === 'complete' && !sensitive()
+          && manualCompletion.success.some(item => location.origin === item.origin
+            && (location.pathname === item.pathPrefix || location.pathname.startsWith(item.pathPrefix.endsWith('/') ? item.pathPrefix : item.pathPrefix + '/'))
+            && item.selectors.every(selector => unique(selector))
+            && !item.blocked.some(selector => [...document.querySelectorAll(selector)].some(visible)));
+        respond(success ? { state: 'success', documentId } : { state: 'unknown' }); return;
+      }
       if (message?.kind === 'authentication-guard') { respond({ blocked: sensitive() || Boolean(definition?.steps.some(step => challenge(step))) }); return; }
       if (!definition) return;
       if (message?.kind === 'authentication-probe') { respond(probe(message.method)); return; }

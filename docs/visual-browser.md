@@ -37,6 +37,27 @@ owner/session identity и исходной lease. Ошибка stop/persist бл
 После human `ready`/window-close прежний save gate сохраняет профиль до снятия
 блокировки снимков; следующая явно порученная navigate работает скрыто.
 
+Signed `manualCompletion` (`trelio.visual-manual-completion/v1`) добавляет
+автоматическое завершение **ручного** входа без пароля/OTP automation. Default
+null сохраняет прежнее поведение. Provider объявляет до четырёх альтернатив
+`{origin,pathPrefix,selectors,blocked}`: exact HTTPS origin из signed origins,
+bounded pathname, до восьми уникальных positive selectors (все одновременно
+видимы и однозначны) и до восьми blockers. Policy проверяется до identity/IO,
+закреплена в owner и не принимается из CLI/MCP или сайта.
+
+Фиксированный isolated observer возвращает только private success/document token,
+без DOM, текста, полей или identity values. Незавершённая загрузка, видимый
+password/OTP, blocker, ambiguous control, другой origin/path, MIME/HTTP failure
+или смена top document не подтверждают вход. Host ждёт два положительных чтения
+того же документа с интервалом не меньше секунды; unknown/read failure обнуляет
+это evidence. Никакого input, нового входа, callback replay или продления lease.
+Одно чтение выполняется в общей очереди; close/expiry/manual window-close
+сохраняют прежние join/fencing. После подтверждения используется прежний
+`finishManual`: stop own browser → protected snapshot/CAS → saved_unverified.
+Ошибка сохранения остаётся ошибкой; image/input gate не открывается раньше.
+После этого отдельный разрешённый navigate проверяет восстановление кабинета
+в обычном (в том числе hidden) режиме. Другие навыки opt-in не получают.
+
 Для сбоя UI recipe действует общий browser recovery default из
 [общего skill recovery](agent-skills-and-secrets.md#живой-каталог):
 агент использует доступные text/image/input этой же допущенной сессии, если

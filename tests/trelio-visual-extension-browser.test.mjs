@@ -731,3 +731,54 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
+
+
+test('signed manual completion closes only a stable authenticated document, saves once and resumes hidden without chat acknowledgement', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-manual-complete-')));
+  let phase = 'password', snapshot, writes = 0, restored = false, window;
+  const server = http.createServer((request, response) => {
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (request.url === '/after') {
+      restored = Boolean(request.headers.cookie?.includes('fixture_completion=SYNTHETIC_SESSION'));
+      response.end('<!doctype html><body>Hidden authenticated fixture</body>'); return;
+    }
+    const challenge = phase === 'password' ? '<input type="password">' : phase === 'challenge' ? '<div role="dialog">Human challenge</div>' : '';
+    if (phase === 'success') response.setHeader('Set-Cookie', 'fixture_completion=SYNTHETIC_SESSION; HttpOnly; SameSite=Strict; Path=/');
+    // Synthetic human progress is controlled only by this fixture's server.
+    // The production observer sends no clicks, values, navigation or submit.
+    response.end(`<!doctype html><body><nav id="account">Account</nav><main id="calendar">Calendar</main>${challenge}${phase === 'success' ? '' : '<script>setTimeout(()=>location.reload(),250)</script>'}</body>`);
+  });
+  const controller = new AbortController(), owned = ownFixtureHttpServer(server, controller.signal);
+  await owned.listen();
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const lease = { deadlineAt: Date.now() + 150_000 }, deadline = lease.deadlineAt;
+  const browser = new ExtensionVisualBrowser({ dependencies, origins: [origin], presentation: 'hidden', lease,
+    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+    manualCompletion: { success: [{ origin, pathPrefix: '/login', selectors: ['#account', '#calendar'], blocked: ['[role="dialog"]'] }] },
+    store: { directory, async prepare() {}, async read() { return snapshot; }, async write(value) { snapshot = structuredClone(value); writes++; }, close() {} },
+    testWindowController: value => { window = value; } });
+  const sessionId = browser.sessionId;
+  try {
+    assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required');
+    for (const next of ['password', 'challenge']) {
+      phase = next; await new Promise(resolve => setTimeout(resolve, 3000));
+      assert.equal((await browser.call('status')).state, 'manual_input_required');
+      assert.equal(window.running(), true); assert.equal(writes, 0);
+      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+    }
+    phase = 'success';
+    const until = Date.now() + 25_000; let status;
+    do { await new Promise(resolve => setTimeout(resolve, 100)); status = await browser.call('status'); }
+    while (status.state === 'manual_input_required' && Date.now() < until);
+    assert.equal(status.state, 'saved_unverified');
+    assert.equal(window.running(), false, 'the owned visible process has actually stopped');
+    assert.equal(writes, 1, 'one stopped-profile save, without ready/chat input');
+    assert.equal((await browser.call('ready')).state, 'saved_unverified'); assert.equal(writes, 1);
+    assert.equal((await browser.call('navigate', { url: `${origin}/after` })).state, 'ready');
+    assert.equal(restored, true); assert.equal(browser.sessionId, sessionId); assert.equal(lease.deadlineAt, deadline);
+  } finally {
+    await browser.close().catch(() => browser.abort()); controller.abort(); await owned.stop();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

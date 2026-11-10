@@ -457,6 +457,9 @@ publication tooling также остаются вне этого публичн
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
   Signed presentation по умолчанию windowed; hidden opt-in, owner pinning и
   видимый human setup сохраняют исходную lease и stop/save-before-relaunch.
+  Signed manualCompletion reuses the SAME manual stop/save gate after two stable
+  readonly exact-origin/document observations; blockers/unknown/expiry never
+  authorize close, input, credential access or lease renewal. Default remains off.
   Общий UI fallback использует только уже допущенные controls, без write replay.
   Signed semantic controls/field comparisons pin exact owner policy before IO;
   compare business intent privately, return enums only, preserve auth/manual gates.

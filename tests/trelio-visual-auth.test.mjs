@@ -5,9 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { once } from 'node:events';
+import vm from 'node:vm';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials, VISUAL_AUTHENTICATION_TRANSITIONS_API, VISUAL_AUTHENTICATION_COMPATIBILITY_API } from '../host-runtime/scripts/trelio-visual-session.mjs';
+import { normalizeVisualAuthentication, normalizeVisualManualCompletion, installVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials, VISUAL_AUTHENTICATION_TRANSITIONS_API, VISUAL_AUTHENTICATION_COMPATIBILITY_API } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { deriveAgentSecretTotp } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
@@ -647,4 +648,51 @@ test('detached authentication uses the same account vault, pins the recipe and e
       throw failure;
     }
   }
+});
+
+
+test('manual completion accepts only bounded signed exact-origin conditions before identity/storage I/O', async () => {
+  const origin = 'https://app.example.test';
+  const value = { success: [{ origin, pathPrefix: '/calendar/', selectors: ['#account', '#calendar'], blocked: ['#challenge'] }] };
+  assert.deepEqual(normalizeVisualManualCompletion(value, { origins: [origin] }), value);
+  for (const bad of [ { ...value, script: 'PRIVATE' }, { success: [] },
+    { success: [{ ...value.success[0], origin: 'https://foreign.test' }] },
+    { success: [{ ...value.success[0], pathPrefix: '//foreign.test/' }] },
+    { success: [{ ...value.success[0], pathPrefix: '/calendar/?token=PRIVATE' }] },
+    { success: [{ ...value.success[0], selectors: ['#account', '#account'] }] },
+    { success: [{ ...value.success[0], blocked: ['a'.repeat(513)] }] } ]) {
+    assert.throws(() => normalizeVisualManualCompletion(bad, { origins: [origin] }), { code: 'invalid_input' });
+    assert.equal((await runVisualSession({ origins: [origin], manualCompletion: bad,
+      operation: 'setup', args: { url: origin }, env: {} })).reason, 'invalid_input');
+  }
+});
+
+test('manual completion isolated probe returns only scalar evidence and refuses loading, challenges, duplicates and other pages', () => {
+  const origin = 'https://app.example.test'; let listener;
+  class Element {
+    hidden = false;
+    closest() { return null; }
+    getBoundingClientRect() { return { width: 30, height: 20 }; }
+    get value() { throw Error('credential values must never be read'); }
+  }
+  const nodes = new Map([['#account', [new Element()]], ['#calendar', [new Element()]]]);
+  const window = {}; window.top = window;
+  const location = { origin, pathname: '/calendar/day' };
+  const document = { readyState: 'complete', querySelectorAll: selector => nodes.get(selector) || [] };
+  const scope = { window, document, location, HTMLElement: Element,
+    crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000001' },
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    chrome: { runtime: { id: 'fixture', onMessage: { addListener(fn) { listener = fn; } } } } };
+  const policy = { success: [{ origin, pathPrefix: '/calendar/', selectors: ['#account', '#calendar'], blocked: ['#challenge'] }] };
+  vm.runInNewContext(`(${installVisualAuthentication.toString()})(null,${JSON.stringify(policy)})`, scope);
+  const probe = () => { let result; listener({ kind: 'manual-completion-probe' }, { id: 'fixture' }, value => { result = value; }); return JSON.parse(JSON.stringify(result)); };
+  assert.deepEqual(probe(), { state: 'success', documentId: '00000000-0000-4000-8000-000000000001' });
+  for (const state of ['loading', 'interactive']) { document.readyState = state; assert.deepEqual(probe(), { state: 'unknown' }); }
+  document.readyState = 'complete';
+  nodes.set('input[type="password"],input[autocomplete="one-time-code" i]', [new Element()]);
+  assert.deepEqual(probe(), { state: 'unknown' }); nodes.delete('input[type="password"],input[autocomplete="one-time-code" i]');
+  nodes.set('#challenge', [new Element()]); assert.deepEqual(probe(), { state: 'unknown' }); nodes.delete('#challenge');
+  nodes.set('#calendar', [new Element(), new Element()]); assert.deepEqual(probe(), { state: 'unknown' }); nodes.set('#calendar', [new Element()]);
+  location.origin = 'https://foreign.test'; assert.deepEqual(probe(), { state: 'unknown' }); location.origin = origin;
+  location.pathname = '/login'; assert.deepEqual(probe(), { state: 'unknown' });
 });

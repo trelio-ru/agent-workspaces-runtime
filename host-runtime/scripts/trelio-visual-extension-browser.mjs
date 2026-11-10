@@ -11,7 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter, visualAttachmentRouter, visualAudioReceiver, visualAudioRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
-import { installVisualAuthentication, normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
+import { installVisualAuthentication, normalizeVisualAuthentication, normalizeVisualManualCompletion, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
 import { visualStartupDiagnostic, visualStartupReason, validateVisualAudioDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
@@ -277,10 +277,11 @@ export class ExtensionVisualBrowser {
   #windowsClosed = false;
   #credentialSetup; #setupReason;
   #authenticationTask; #mailAttempt;
+  #manualCompletionTimer; #manualCompletionPending = false; #manualCompletionEvidence;
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic; #headless = false;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
     visualBrowserHeadless(presentation, false);
     if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); } catch { throw fault('invalid_input'); }
@@ -289,6 +290,7 @@ export class ExtensionVisualBrowser {
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
     Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, lease, presentation, semanticControls, fieldCheckPolicy, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
+    this.manualCompletion = normalizeVisualManualCompletion(manualCompletion, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
     // The diagnostic native.log may remain locked after browser exit on Windows
     // and fail disposal on a file an ordinary production launch never creates.
@@ -420,7 +422,7 @@ export class ExtensionVisualBrowser {
     // Give those launches a deterministic extension event instead of relying
     // on the timing of Chrome's new-tab page versus lazy worker installation.
     const bootstrap = process.platform !== 'darwin' || this.#headless ? visualExtensionBootstrapPage() : null;
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     if (bootstrap) {
@@ -433,7 +435,7 @@ export class ExtensionVisualBrowser {
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
     // Only the value-free signed recipe is materialized; credentials never
     // enter extension resources, process environment or command-line arguments.
-    await fs.writeFile(path.join(extension, 'authentication.js'), `(${installVisualAuthentication.toString()})(${JSON.stringify(this.authentication)});`, { mode: 0o600 });
+    await fs.writeFile(path.join(extension, 'authentication.js'), `(${installVisualAuthentication.toString()})(${JSON.stringify(this.authentication)},${JSON.stringify(this.manualCompletion)});`, { mode: 0o600 });
     if (this.attachmentDownloads) await fs.writeFile(path.join(extension, 'attachment-router.js'), `(${visualAttachmentRouter.toString()})();`, { mode: 0o600 });
     if (this.audioDownloads) {
       await fs.writeFile(path.join(extension, 'audio-receiver.js'), `(${visualAudioReceiver.toString()})(${this.policy.fixtureOnly === true});`, { mode: 0o600 });
@@ -498,6 +500,7 @@ export class ExtensionVisualBrowser {
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#startupStage = undefined;
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';
+    if (manual) this.#watchManualCompletion();
   }
   #send(operation, args = {}) {
     if (!this.#socket || this.#socket.readyState !== 1) return Promise.reject(fault('operation_failed'));
@@ -536,7 +539,8 @@ export class ExtensionVisualBrowser {
     finally { await file?.close().catch(() => {}); }
   }
   async #stopBrowser() {
-    clearInterval(this.#heartbeat);
+    clearInterval(this.#heartbeat); clearInterval(this.#manualCompletionTimer);
+    this.#manualCompletionEvidence = undefined;
     const child = this.#child; if (!child) return;
     if (this.#socket && this.#extensionReady && !this.#terminal && !this.#windowsClosed && child.exitCode === null) {
       try {
@@ -612,6 +616,36 @@ export class ExtensionVisualBrowser {
       this.testDiagnostics?.({ stage: `stopped_profile_${phase}_failed`, target, ...visualLifecycleFailureEvidence(error) });
       throw error;
     }
+  }
+  #watchManualCompletion() {
+    clearInterval(this.#manualCompletionTimer); this.#manualCompletionEvidence = undefined;
+    if (!this.manualCompletion) return;
+    this.#manualCompletionTimer = setInterval(() => {
+      // One in-flight read, in the SAME command queue. No detached provider,
+      // new lease, focus change, credential fill or business action is added.
+      if (this.#manualCompletionPending || this.#closed || !this.#manual || this.#starting
+          || this.#terminal || !this.#child || Date.now() >= this.lease.deadlineAt) return;
+      this.#manualCompletionPending = true;
+      const task = this.#tail.then(async () => {
+        if (this.#closed || !this.#manual || this.#starting || this.#terminal
+            || Date.now() >= this.lease.deadlineAt) return;
+        const evidence = await this.#send('manual-completion-probe');
+        if (this.#closed || !this.#manual || this.#starting || this.#terminal
+            || Date.now() >= this.lease.deadlineAt) return;
+        if (evidence?.state !== 'success') { this.#manualCompletionEvidence = undefined; return; }
+        const previous = this.#manualCompletionEvidence;
+        this.#manualCompletionEvidence = { documentId: evidence.documentId, at: performance.now() };
+        // Two positive reads at least one second apart in the SAME document.
+        // Navigation, ambiguous UI, errors and a visible challenge reset this
+        // evidence. Saving/closing uses the existing one-shot manual finish.
+        if (previous?.documentId === evidence.documentId && performance.now() - previous.at >= 1000) {
+          await this.#finishManual();
+        }
+      });
+      this.#tail = task.catch(() => { this.#manualCompletionEvidence = undefined; });
+      void this.#tail.finally(() => { this.#manualCompletionPending = false; });
+    }, 1100);
+    this.#manualCompletionTimer.unref();
   }
   #finishManual() {
     if (this.#finishing) return this.#finishing;
@@ -802,7 +836,7 @@ export class ExtensionVisualBrowser {
       if (operation === 'setup' && this.#manual) { await this.#send('manual'); return this.#status(); }
       if (operation === 'setup' && this.#child) {
         this.#manual = true; this.#state = 'manual_input_required';
-        await this.#send('manual'); return this.#status();
+        await this.#send('manual'); this.#watchManualCompletion(); return this.#status();
       }
       let fresh = false;
       if (!this.#child) {
@@ -879,7 +913,7 @@ export class ExtensionVisualBrowser {
     });
   }
   async close() {
-    if (this.#closed) return; this.#closed = true; clearTimeout(this.#deadline);
+    if (this.#closed) return; this.#closed = true; clearTimeout(this.#deadline); clearInterval(this.#manualCompletionTimer);
     this.#launchAbort.abort();
     this.#mailAttempt?.cancel();
     this.testDiagnostics?.({ stage: 'close_queue' });
@@ -906,7 +940,7 @@ export class ExtensionVisualBrowser {
     }
   }
   abort() {
-    this.#closed = true; clearTimeout(this.#deadline); clearInterval(this.#heartbeat);
+    this.#closed = true; clearTimeout(this.#deadline); clearInterval(this.#manualCompletionTimer); clearInterval(this.#heartbeat);
     this.#launchAbort.abort();
     this.#mailAttempt?.cancel();
     const child = this.#child; if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');

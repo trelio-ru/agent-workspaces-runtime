@@ -718,6 +718,21 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
+    if (op === 'manual-completion-probe') {
+      if (!config.manualCompletion || !manual || authenticating || Object.keys(args).length) throw Error('invalid_input');
+      await guardUpdate;
+      if (guardFailed) throw Error('document_blocked');
+      const tab = await selected(), generation = navigationGeneration;
+      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
+      const evidence = await chrome.tabs.sendMessage(tab.id, { kind: op }, { frameId: 0 });
+      // A stale top document or changed selected tab cannot close a new human
+      // challenge. This private read never detaches guards or sends input.
+      const after = await selected();
+      if (generation !== navigationGeneration || after.id !== tab.id || after.url !== tab.url
+          || guardFailed || documentFailures.has(tab.id) || httpFailures.has(tab.id)) return { state: 'unknown' };
+      return evidence?.state === 'success' && /^[a-f0-9-]{36}$/u.test(evidence.documentId || '')
+        ? { state: 'success', documentId: evidence.documentId } : { state: 'unknown' };
+    }
     if (['authentication-start', 'authentication-probe', 'authentication-fill', 'authentication-follow', 'authentication-end'].includes(op)) {
       if (!config.authentication) throw Error('invalid_input');
       if (op === 'authentication-start') {
