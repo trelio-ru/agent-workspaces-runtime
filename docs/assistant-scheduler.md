@@ -2427,7 +2427,14 @@ results are observed, never applied to another generation. This also closes a
 failed GUI MCP when the parent already uses the previous version.
 `rollback_retargeting` then reuses the existing registered-task CAS/quiescing
 handoff. Only the next previous-version parent performs the native rollback and
-ordinary GUI/hook/MCP verification. Missing/changed snapshots refuse before GUI
+ordinary GUI/hook/MCP verification. A positively pruned SAME previous caller can
+first restore its exact protected
+full-digest snapshot through the common verifier; requiring the vanished caller
+manifest first would deadlock rollback. The exact current-user cache family,
+original receipt and unchanged hook dependency are checked before publication.
+A missing newer caller, partial/changed tree, foreign root or corrupt snapshot
+still refuses. Native inventory is not rewritten or called a successful downgrade.
+Missing/changed snapshots refuse before GUI
 effects. Unknown close/retarget remains in its phase; no live-code pruning,
 failed-version reset, trust write, second supervisor or business replay occurs.
 

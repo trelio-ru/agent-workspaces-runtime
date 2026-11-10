@@ -357,6 +357,14 @@ Codex layout и не создают retention store. Integrity/type/permission f
 сохраняет обычный fail-closed отказ, а не обход admission. Повторная очистка
 cache обрабатывается тем же живым MCP без restart.
 
+Native source remove/add может временно удалить весь marketplace parent,
+на котором стоял watcher. Свежий no-follow `ENOENT` exact parent сохраняет тот
+же периодический observer, без создания marketplace или повторного source add.
+Инвалидированный Windows watch handle закрывается; первоначальный timer ждёт
+возврата native parent и восстанавливает только свой original snapshot. Ошибки
+доступа, unsafe type и повреждение копии остаются terminal. EOF останавливает
+оба observer-а; отсутствие parent не разрешает выбирать другую версию.
+
 Windows cleanup может оставить regular version directory без единого child.
 Watcher распознаёт этот exact случай как in-place prune. После проверки полной
 retained-копии публикация удаляет только положительно пустой nonsymlink root
@@ -379,6 +387,14 @@ watchers. Human/hook-компоненты и явный bulk-restore сохра�
 version/full digest из защищённого journal и SAME retained-code verifier в той
 же native cache family. Разрешён только этот проверенный предыдущий snapshot,
 без выбора соседней версии, удаления живого кода или изменения hook dependency.
+Если уже удалён exact loader текущего parent и этот caller совпадает с
+защищённой previous version, сначала проверяются cache family, полная старая
+квитанция, immutable snapshot и прежний hook component. Только положительное
+отсутствие самого root допускает его обычное восстановление перед проверкой
+manifest. Missing файл внутри существующего root, другой/newer caller,
+неверная квитанция или чужой HOME не получают это восстановление. Native
+inventory при этом честно продолжает показывать новую установленную версию;
+сохранение старого loader не считается downgrade или активацией.
 Далее bounded `rollback_closing` закрывает только известную GUI generation через
 прежний native graceful-close и сохраняет неизвестный результат. Фаза
 `rollback_retargeting` передаёт SAME зарегистрированную задачу проверенному old

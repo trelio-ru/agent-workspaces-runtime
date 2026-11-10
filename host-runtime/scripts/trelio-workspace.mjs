@@ -3715,6 +3715,7 @@ export const startLoadedCodexPluginPreservation = ({
   let watcher = null;
   let timer = null;
   let pendingCheck = null;
+  let pendingWatchFailure = null;
   const stop = () => {
     stopped = true;
     watcher?.close();
@@ -3729,6 +3730,11 @@ export const startLoadedCodexPluginPreservation = ({
     loadedPluginDirectory, loadedPluginVersion, retentionDirectory, profile,
   }).then((entry) => {
     if (stopped) return entry;
+    const marketplaceDirectory=path.dirname(path.dirname(entry.installedPath));
+    const marketplaceAbsent=async()=>{
+      try {await fs.lstat(marketplaceDirectory);return false;}
+      catch(error){if(error.code==='ENOENT')return true;throw error;}
+    };
     const check = () => {
       if (stopped || pendingCheck) return;
       // A cheap existence check covers watcher event coalescing and parent
@@ -3748,24 +3754,40 @@ export const startLoadedCodexPluginPreservation = ({
         }
         if (!stopped) await restoreOneRetainedCodexPlugin(entry);
       })().catch((error) => {
-        // Another refresh may remove the destination while a second live MCP
-        // verifies the concurrently restored tree. Only that known cache path
-        // disappearing is retryable on the next observation. Missing retained
-        // bytes, integrity failures and permissions still stop preservation.
+        // Native source replacement can prune the entire marketplace parent
+        // between remove/add, not just this version. Its positive absence is
+        // NOT permission to create a marketplace. Keep the same timer alive
+        // and wait for native Codex to recreate it; the normal publisher then
+        // restores only this caller's original verified snapshot. An arbitrary
+        // ENOENT, inaccessible parent, changed tree or missing snapshot stays
+        // terminal. Never retry the source mutation from this observation.
+        const parentDisappeared=error.code==='ENOENT'&&typeof error.path==='string'
+          &&sameLocalPath(error.path,marketplaceDirectory);
         const relative = typeof error.path === "string"
           ? path.relative(path.dirname(entry.installedPath), path.resolve(error.path)) : "..";
         const first = relative.split(path.sep)[0];
         const cacheDisappeared = error.code === "ENOENT"
           && (first === entry.version || first.startsWith(`.${entry.version}.trelio-retain-`));
-        if (!cacheDisappeared) failed(error);
+        if (!cacheDisappeared&&!parentDisappeared) failed(error);
       }).finally(() => { pendingCheck = null; });
     };
-    // Watch the marketplace parent, which survives removal of the version
-    // AND its immediate plugin directory. Ignore event filenames: only our
-    // previously verified exact destination is ever inspected/restored.
-    watcher = watchDirectory(path.dirname(path.dirname(entry.installedPath)), check);
-    watcher.on("error", failed);
-    watcher.unref();
+    const watchFailed=error=>{
+      // Windows may invalidate a watched directory handle when native Codex
+      // removes that directory. A fresh no-follow absence distinguishes this
+      // from access denial; the original periodic observer supplies continuity
+      // without creating paths, rearming against another root or changing ACLs.
+      watcher?.close();watcher=null;
+      pendingWatchFailure=marketplaceAbsent().then(absent=>{if(!absent)failed(error);},failed)
+        .finally(()=>{pendingWatchFailure=null;});
+    };
+    // The parent normally survives pruning. If native source replacement
+    // removes it in the snapshot -> watch gap, the SAME periodic observer is
+    // sufficient until its positive return; no substitute directory is watched.
+    try {
+      watcher = watchDirectory(marketplaceDirectory, check);
+      watcher.on("error", watchFailed);
+      watcher.unref();
+    } catch(error) {watchFailed(error);}
     timer = setInterval(check, checkIntervalMs);
     timer.unref();
     check(); // Close the copy -> watch race if refresh happened meanwhile.
@@ -3780,6 +3802,7 @@ export const startLoadedCodexPluginPreservation = ({
       stop();
       await ready.catch(() => {});
       await pendingCheck;
+      await pendingWatchFailure;
     },
   };
 };
@@ -4574,17 +4597,33 @@ export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha25
   const current=await readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,allowMissingMarketplace,
     receipt:{version,treeSha256}});
   if(!['installed','marketplace_absent'].includes(current.state))throw new Error('Rollback plugin is not enabled.');
-  const loaded=await inspectImmutableCodexPluginTree(loadedPluginDirectory,loadedPluginVersion,{profile});
+  // Establish the SAME exact current-user native cache family lexically
+  // before consulting the protected receipt. The live caller's old cache can
+  // already have been positively pruned; requiring that vanished manifest
+  // before restoring its own saved receipt deadlocks automatic rollback.
+  const loadedPath=assertCodexPluginVersionPath(loadedPluginDirectory,loadedPluginVersion,profile);
   const home=environment.CODEX_HOME||path.join(environment.USERPROFILE||environment.HOME||'','.codex');
-  if(!path.isAbsolute(home)||!sameLocalPath(path.dirname(loaded.installedPath),path.join(home,'plugins','cache',selected.marketplace,selected.name)))
+  if(!path.isAbsolute(home)||!sameLocalPath(path.dirname(loadedPath),path.join(home,'plugins','cache',selected.marketplace,selected.name)))
     throw new Error('Rollback host cache family differs.');
-  const installedPath=path.join(path.dirname(loaded.installedPath),version);
+  const installedPath=path.join(path.dirname(loadedPath),version);
   const entries=(await readRetainedCodexPluginEntries(retentionDirectory??selected.directory,profile))
     .filter(entry=>entry.version===version&&entry.treeSha256===treeSha256&&sameLocalPath(entry.installedPath,installedPath));
   if(entries.length!==1)throw new Error('Original rollback host receipt is unavailable.');
   const retained=await assertRetainedCodexPluginEntry(entries[0]);
   const hookComponent=await readAssistantHookComponentRequirement(entries[0].pluginDirectory);
-  const loadedHook=await readAssistantHookComponentRequirement(loaded.installedPath);
+  let loaded=null;
+  try {loaded=await inspectImmutableCodexPluginTree(loadedPath,loadedPluginVersion,{profile});}
+  catch(error){
+    // ONLY the positively absent SAME previous caller can use its original
+    // receipt. A nested missing file in an existing tree is not absence, and
+    // a missing failed/newer loader cannot borrow this previous snapshot.
+    if(error.code!=='ENOENT'||!sameLocalPath(loadedPath,installedPath))throw error;
+    let absent=false;
+    try {await fs.lstat(loadedPath);}
+    catch(observation){if(observation.code!=='ENOENT')throw observation;absent=true;}
+    if(!absent)throw error;
+  }
+  const loadedHook=loaded?await readAssistantHookComponentRequirement(loaded.installedPath):hookComponent;
   if(['pluginId','version','integritySha256'].some(key=>hookComponent?.[key]!==loadedHook?.[key]
     ||current.state==='installed'&&hookComponent?.[key]!==current.hookComponent?.[key]))
     throw new Error('Rollback would change the hook component.');
@@ -4594,7 +4633,7 @@ export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha25
   const tree=await inspectImmutableCodexPluginTree(installedPath,version,{profile});
   if(!await matchesRetainedCodexPluginTree(entries[0],retained,tree))throw new Error('Rollback host receipt bytes differ.');
   await guard();signal?.throwIfAborted();
-  if(sameLocalPath(loaded.installedPath,installedPath))return null;
+  if(sameLocalPath(loadedPath,installedPath))return null;
   return {state:'retained',version,installedPath,treeSha256,...(hookComponent?{hookComponent}:{})};
 };
 

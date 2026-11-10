@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/scripts/trelio-assistant-entry.mjs";
 import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation,
-  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion, resolveInstalledCodexPluginBridge,
+  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion, prepareAssistantCodexPluginRollbackHost, resolveInstalledCodexPluginBridge,
   validateCodexHookComponentRequirement, verifyAssistantHookComponentIntegrity,
   inspectHumanCodexHookComponent, inspectBundledPlugin, startHumanCodexPluginPreservation,
   migrateHumanCodexHookComponent, readAssistantPluginPublishedRef } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -393,6 +393,89 @@ for (const lostResult of [false, true]) {
       JSON.stringify({name: "trelio-digital-assistant", version: "0.1.4"}));
   });
 }
+
+// A source switch can remove the entire watched marketplace, not only the
+// old version. Keep the SAME live observer across a positively absent parent;
+// it must neither recreate that parent nor stop forever on its transient gap.
+test("assistant live preservation survives native marketplace removal and restores only its caller after return", async t => {
+  const f=await fixture("assistant"),errors=[];
+  t.after(()=>fs.rm(f.root,{recursive:true,force:true}));
+  const preservation=startLoadedCodexPluginPreservation({environment:f.environment,
+    retentionDirectory:f.retentionDirectory,checkIntervalMs:20,onError:error=>errors.push(error)});
+  try {
+    const entry=await preservation.ready;
+    const market=path.dirname(path.dirname(f.plugin)),displaced=path.join(f.root,"displaced-marketplace");
+    const lstat=fs.lstat;let missingParentObservations=0;
+    fs.lstat=async(...args)=>{try{return await lstat(...args);}
+      catch(error){if(args[0]===market&&error.code==='ENOENT')missingParentObservations++;throw error;}};
+    try {
+      await fs.rename(market,displaced);
+      // Witness genuine filesystem absence rather than infer that a slow
+      // runner finished a check from elapsed time. No injected error or retry.
+      await waitUntil(()=>missingParentObservations>=2||errors.length>0);
+      await assert.rejects(lstat(market),{code:"ENOENT"});
+      assert.deepEqual(errors,[]);
+    } finally {fs.lstat=lstat;}
+    await fs.rm(path.join(displaced,path.basename(path.dirname(f.plugin)),entry.version),{recursive:true});
+    await fs.rename(displaced,market);
+    await waitUntil(()=>fs.readFile(path.join(f.plugin,"scripts/hook.mjs"),"utf8").then(v=>v.includes("exact-old-hook"),()=>false));
+    assert.deepEqual(errors,[]);
+    assert.deepEqual(await fs.readFile(path.join(f.plugin,".codex-plugin/plugin.json")),
+      await fs.readFile(path.join(entry.pluginDirectory,".codex-plugin/plugin.json")));
+  } finally {await preservation.close();}
+});
+
+// Reproduce the independent rollback deadlock AFTER an old observer has
+// already stopped: the updater has the original full receipt, but its own
+// loader root was pruned. Native inventory remains the installed NEW version.
+// Repair is limited to the positively missing SAME previous caller, never a
+// changed existing tree, a missing failed candidate, another HOME or receipt.
+test("assistant rollback prepares a pruned previous caller from its exact protected receipt",async t=>{
+  const f=await fixture("assistant");t.after(()=>fs.rm(f.root,{recursive:true,force:true}));
+  await fs.rm(path.join(f.plugin,"hooks"),{recursive:true});
+  await fs.writeFile(path.join(f.plugin,"package-integrity.json"),JSON.stringify({schemaVersion:1,
+    plugin:"trelio-digital-assistant",hookComponent:{pluginId:"trelio-digital-assistant-hooks@trelio-digital-assistants",
+      version:"0.1.1",integritySha256:"a".repeat(64)}}));
+  const saved=await retainLoadedCodexPluginInstallation({profile:"assistant",loadedPluginDirectory:f.plugin,
+    loadedPluginVersion:"0.1.3",retentionDirectory:f.retentionDirectory});
+  const receiptBytes=await fs.readFile(path.join(saved.entryDirectory,"metadata.json"));
+  const newer=path.join(path.dirname(f.plugin),"0.1.4");await fs.cp(f.plugin,newer,{recursive:true});
+  await fs.writeFile(path.join(newer,".codex-plugin/plugin.json"),JSON.stringify({name:"trelio-digital-assistant",version:"0.1.4"}));
+  const market=path.join(f.root,"market");await fs.mkdir(path.join(market,".agents/plugins"),{recursive:true});
+  await fs.writeFile(path.join(market,".agents/plugins/marketplace.json"),JSON.stringify({name:"trelio-digital-assistants",
+    plugins:[{name:"trelio-digital-assistant",source:{source:"url",url:"https://github.com/trelio-ru/digital-assistants.git",ref:"plugin-v0.1.4"}}]}));
+  const execFileCommand=async(_command,args)=>{
+    let value;
+    if(args[1]==="marketplace"&&args[2]==="list")value={marketplaces:[{name:"trelio-digital-assistants",root:market,
+      marketplaceSource:{sourceType:"git",source:"https://github.com/trelio-ru/digital-assistants.git"}}]};
+    else {assert.equal(args[1],"list","rollback preparation cannot mutate native installation");
+      value={installed:[{pluginId:"trelio-digital-assistant@trelio-digital-assistants",version:"0.1.4",installed:true,enabled:true}]};}
+    return {stdout:JSON.stringify(value),stderr:""};
+  };
+  const options={version:"0.1.3",treeSha256:saved.treeSha256,loadedPluginDirectory:f.plugin,loadedPluginVersion:"0.1.3",
+    retentionDirectory:f.retentionDirectory,environment:f.environment,execFileCommand};
+  await fs.rm(f.plugin,{recursive:true});
+  await assert.rejects(prepareAssistantCodexPluginRollbackHost({...options,treeSha256:"f".repeat(64)}));
+  await assert.rejects(fs.lstat(f.plugin),{code:"ENOENT"});
+  await assert.rejects(prepareAssistantCodexPluginRollbackHost({...options,environment:{...f.environment,CODEX_HOME:path.join(f.root,"foreign")}}));
+  await assert.rejects(fs.lstat(f.plugin),{code:"ENOENT"});
+  // The missing NEW caller may not borrow the previous version's receipt.
+  await assert.rejects(prepareAssistantCodexPluginRollbackHost({...options,
+    loadedPluginDirectory:path.join(path.dirname(f.plugin),"0.1.5"),loadedPluginVersion:"0.1.5"}));
+  await assert.rejects(fs.lstat(f.plugin),{code:"ENOENT"});
+  // A damaged retained snapshot cannot be repaired or used as loader bytes.
+  const retainedFile=path.join(saved.pluginDirectory,"scripts/hook.mjs"),retainedBytes=await fs.readFile(retainedFile);
+  await fs.writeFile(retainedFile,"corrupted snapshot; never executed");
+  await assert.rejects(prepareAssistantCodexPluginRollbackHost(options));
+  await assert.rejects(fs.lstat(f.plugin),{code:"ENOENT"});
+  await fs.writeFile(retainedFile,retainedBytes);
+  assert.equal(await prepareAssistantCodexPluginRollbackHost(options),null);
+  assert.deepEqual(await fs.readFile(path.join(saved.entryDirectory,"metadata.json")),receiptBytes);
+  assert.equal((await readCodexPluginUpdateInventory({profile:"assistant",environment:f.environment,execFileCommand})).version,"0.1.4");
+  await fs.writeFile(path.join(f.plugin,"scripts/hook.mjs"),"changed caller bytes; never executed");
+  await assert.rejects(prepareAssistantCodexPluginRollbackHost(options));
+  assert.equal(await fs.readFile(path.join(f.plugin,"scripts/hook.mjs"),"utf8"),"changed caller bytes; never executed");
+});
 
 test("hook-free main rollback reconciles a real native re-clone against its original receipt without rewriting Git or trust", async t => {
   const f = await fixture("assistant");

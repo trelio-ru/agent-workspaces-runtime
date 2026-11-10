@@ -1124,6 +1124,12 @@ publication tooling также остаются вне этого публичн
   source metadata is never edited by hand. Native bundled marketplace rows
   need only their common name/root shape; Git provenance belongs to the exact
   selected assistant source, never to unrelated bundled metadata.
+  A positively absent marketplace parent keeps the SAME live preservation timer;
+  never create that parent or turn access/integrity errors into prune evidence.
+  Native return permits only the original caller's verified restoration. A
+  rollback whose SAME previous caller was already pruned uses its exact protected
+  full receipt before requiring that missing manifest; changed/partial trees,
+  a missing newer caller, foreign cache roots and corrupt snapshots still refuse.
   Positive source gaps recover only
   through the protected intent, explicit enabled setting and original previous
   receipt. Native failed-version reselection preserves its latch and hook basis.

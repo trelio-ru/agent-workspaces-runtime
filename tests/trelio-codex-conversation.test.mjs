@@ -337,6 +337,17 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
   assert.equal(rollbacks,1);assert.deepEqual(errors,[]);
   restored=await flow.inventory();
  }else{
+  // A formerly stopped observer cannot restore a pruned old caller. Exercise
+  // the real native inventory + protected receipt recovery BEFORE rollback;
+  // this must restore only the same old loader, without another plugin add or
+  // claiming the still-installed candidate has already been downgraded.
+  await preservation.close();preservation=null;
+  await fs.rm(previous.installedPath,{recursive:true});
+  assert.equal(await prepareAssistantCodexPluginRollbackHost({...options,version:previous.version,treeSha256:saved.treeSha256}),null);
+  assert.equal((await readCodexPluginUpdateInventory(options)).version,candidate.version);
+  preservation=startLoadedCodexPluginPreservation({environment:{...environment,TRELIO_PLUGIN_ROOT:previous.installedPath,
+    TRELIO_PLUGIN_VERSION:'3.2.3'},retentionDirectory,checkIntervalMs:20,onError:error=>preservationErrors.push(error)});
+  await preservation.ready;assert.deepEqual(preservationErrors,[]);
   // A verified dormant candidate is not evidence that a caller loaded it.
   restored=await restoreAssistantCodexPluginVersion({...options,version:previous.version,treeSha256:saved.treeSha256});
  }
