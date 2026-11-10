@@ -129,7 +129,7 @@ test('native discussion prompt uses only task/comment locators and never a mater
   assert.match(input,/restricted native discussion pass/u);assert.match(input,/replyCommentId/u);
   assert.match(input,/Do not create\/read a Workspace or WORK\.md/u);
   assert.doesNotMatch(input,/Use the assistant-task-worker skill|workStatePath|Save confirmed progress/u);
-  assert.doesNotMatch(input,/failed read-only tab attachment/u);
+  assert.doesNotMatch(input,/use_assistant_browser/u);
 });
 const nativeRpc = handler => (_executable, args, options) => {
   assert.deepEqual(args,['app-server','--listen','stdio://']); assert.equal(options.shell,false);
@@ -361,7 +361,7 @@ test('initial native chat persists its ID synchronously and consumes no business
   assert.equal(confirmed,1);
   assert.equal(result.threadId,threadId);assert.match(input,/Do not use tools/u);
   assert.doesNotMatch(input,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
-  assert.doesNotMatch(input,/failed read-only tab attachment/u,'READY stays exactly tool-free');
+  assert.doesNotMatch(input,/use_assistant_browser/u,'READY stays exactly tool-free');
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd,execution},{...options,onThreadStarted:()=>{throw new Error('private disk failure');}}),/DELIVERY_UNCERTAIN/);
   assert.equal(confirmed,1,'an unknown provision never reports login recovery');
@@ -405,10 +405,10 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.match(input,/This is a scheduled task pass/);
   assert.match(input,/unchanged blocker.*noChange.*without a new Run\/worklog/);
   assert.match(input,/only the exact recovery references needed for safe continuation/);
-  assert.match(input,/failed read-only tab attachment/u);
-  for(const invariant of ['SAME existing window on this assistant computer','verify the application, site and account',
-    'never bypasses a provider refusal','read back that exact result before any further input',
-    'does not authorize restarting or killing Chrome/Codex','actual result is verified'])assert.ok(input.includes(invariant));
+  assert.match(input,/use_assistant_browser/u);
+  for(const invariant of ['matching published skill retains its declared routing','already authorized action',
+    'independent persisted owner decision','Read back an uncertain result before further input',
+    'Do not use ordinary Chrome','Verify the actual site outcome','closes idle windows after ten minutes'])assert.ok(input.includes(invariant));
   assert.match(input,/separate last successfully reviewed message position for each task\/account\/conversation\/topic/);
   assert.match(input,/advance that position only together with successfully accepted task material/);
   assert.match(input,/never use the background monitor cursor/);
@@ -1134,8 +1134,10 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  assert.deepEqual(JSON.parse(scope.slice('TRELIO_ASSISTANT_INTAKE '.length)),{kind:'source_intake',...intakeContext});
  assert.match(input,/Only reply_owner is permitted/);
  assert.match(input,/already available external sources/);
- assert.match(input,/failed read-only tab attachment/u);
- assert.match(input,/In a source intake it remains read-only/u);
+ assert.match(input,/use_assistant_browser covers sites without a specialized browser skill/u);
+ assert.match(input,/Source intake stays read-only/u);
+ assert.match(input,/Do not use ordinary Chrome, native computer tools or a shell\/browser script as a silent fallback/u);
+ assert.match(input,/closes idle windows after ten minutes/u);
  assert.match(input,/A personal question does not require a task or Workspace Run/);
  assert.match(input,/route_existing with taskId for ONE already accepted assignment/);
  assert.match(input,/explicit owner request for a separate card/);
@@ -1157,7 +1159,7 @@ test('routing-only intake receives no browser observation recovery or wider tool
   readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
   openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,cwd,onInput:text=>{input=text;}})});
  assert.equal(starts,1);assert.match(input,/restricted source_triage\/v1/u);
- assert.doesNotMatch(input,/failed read-only tab attachment|native app\/computer interface/u);
+ assert.doesNotMatch(input,/use_assistant_browser|native app\/computer interface/u);
  assert.match(input,/Use only get_assistant_intake_context and resolve_assistant_intake/u);
 });
 test('native recovery reader requires complete latest unique marker coverage and returns only a closed witness',async()=>{

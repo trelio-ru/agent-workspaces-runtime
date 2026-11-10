@@ -318,27 +318,55 @@ provider operation. A completed verification alone clears no business/ACK health
 
 <a id="native-browser-observation-recovery"></a>
 
-### Native browser observation recovery
+### Managed browser routing and cleanup
 
 The SAME handoff producer selects this guidance only for ordinary task and
-owner-intake passes, never READY, source triage or discussion. A read-only tab
-attachment failure does not prove that an already authorized site/account is
-unavailable. The agent first inspects Codex's actually advertised capabilities
-and, when supported, observes the SAME existing assistant-computer window via
-its native app/computer interface. It verifies application, site and account
-before continuing under the original authority; owner intake remains read-only.
+owner-intake passes, never READY, source triage or discussion. Digital assistants
+use the managed browser for sites: matching signed skills retain their routing,
+and `use_assistant_browser(siteOrigin, command:{operation,args})` covers other
+sites with the SAME visual engine. Ordinary Chrome/computer/shell is not a silent
+fallback. Codex may still advertise its own native APIs; this host does not
+change their availability or pretend to intercept calls outside its namespace.
+The default route and refusal recovery are explicit execution policy.
 
-Codex owns these tools, their live capability declarations and window content.
-The dispatcher has no callback for their observations and must not invoke a
-second GUI writer. Consequently window recognition and semantic result checks
-remain model work; native pass selection is deterministic in the shared prompt
-producer. No runtime browser fallback, new session, account or tool method is
-invented. Signed-provider routing, ACL/login challenges and sealed decisions
-remain independent. Prior possible input requires exact read-back before more
-input, never replay. The failure alone grants no app restart/kill, browser or
-extension/debugger setting change, profile/credential extraction or manual-owner
-handoff before the available observation path is checked. Delivery tests cover
-eligible and restricted profiles; they do not prove a real calendar write.
+The browser definition is obtained from the small native source_intake view for
+either genuine origin, keeping near-bound task/company catalogues unchanged.
+Each command has a fresh native proof and structural five-second receipt bound
+to device/company/member/pass/runtime. The complete command is checked against
+that SAME fresh native schema before HTTP; URL/text/page data stay local in
+plain and encrypted companies. The receipt is not a provider/Secret/action grant.
+The host checks its private active pass and observed session again before input.
+The compact initial browser definition defers its full command variants/policy
+to `get_trelio_tool_contract(name=use_assistant_browser)`. The host also fetches
+that exact current schema itself before every admission and validates the
+original local arguments. No native schema/policy is truncated or inferred;
+the combined task/intake/discovery catalogue retains its 64-KiB ceiling.
+The fresh-worker reply pipe retains 768 KiB for ordinary content/metadata. Only
+`use_assistant_browser` permits a 3-MiB envelope for the existing 2-MiB PNG plus
+base64/framing. A larger-than-ordinary reply must reconstruct exactly through
+the SAME visual PNG/MCP validator; another MIME, arbitrary large JSON/prose,
+extra fields or malformed UTF-8 refuse. There is no disk/base64-to-text fallback.
+Owner intake exposes navigate/screenshot/scroll/status/close only. Working tasks
+also expose click/type-text/key; sensitive external actions keep independent
+owner decisions. No JavaScript/DOM/CDP, arbitrary paths or credential arguments.
+
+Existing OS-keyring encrypted visual storage is separated by assistant/device/
+company/site; live workers use the observed runtime owner. It is a first-party
+storage realm, not a fabricated enabled skill or imported human Chrome session.
+Login/Secret setup remains separately authorized. Unsupported auth/OS prompts
+return a concrete blocker through the existing owner dialogue, never indefinite
+waiting or a transport switch. Modal observations/answers, notification blocking,
+frame/credential/no-replay guards remain the shared visual engine's responsibility.
+The model still decides the meaning of the dialog and verifies the site result:
+mechanics alone cannot determine whether a payment/publication was authorized.
+
+A positive native task/intake settlement receipt requests only this runtime's
+graceful browser close. A cleanup error never masks that committed business
+outcome or authorizes replay. Independently, detached workers close after ten
+idle minutes; passive status/wait/heartbeats do not renew idle, bounded work
+finishes first and manual/owner waiting cannot disable it. Auth snapshots are
+preserved. The original absolute lease never slides. See
+[visual lifecycle](visual-browser.md#worker-и-lease).
 
 ### Exact independent READY prompt reconciliation
 

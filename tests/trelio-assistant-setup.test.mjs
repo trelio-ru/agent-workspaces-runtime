@@ -424,9 +424,9 @@ test('request transport preserves closed failure boundaries through real native 
   // This is an isolated synthetic signed-loader stand-in. The request parser,
   // native process/stdin/stdout lifetime, bounds and error projection are real;
   // no OS credential, Trelio account, network or model turn is involved.
-  const invoke=async(source,{timeoutMs=5000,signal,spawnProcess}={})=>{
+  const invoke=async(source,{timeoutMs=5000,signal,spawnProcess,request={operation:'list'}}={})=>{
     await fs.writeFile(loader,source);let launches=0,closed=null;
-    try{return await requestCurrentAssistantRuntime({operation:'list'},
+    try{return await requestCurrentAssistantRuntime(request,
       {resolveLoader:async()=>loader,timeoutMs,signal,spawnProcess:(executable,args,options)=>{
         launches++;assert.equal(options.shell,false);assert.equal(options.windowsHide,true);
         assert.deepEqual(options.stdio,['pipe','pipe','ignore']);
@@ -490,6 +490,22 @@ test('request transport preserves closed failure boundaries through real native 
   });
   await t.test('original output bound stops the producer without reflecting its bytes',async()=>{
     await refuses(`process.stdout.write(Buffer.alloc(768*1024+1,65));setInterval(()=>{},1000);`,'OUTPUT_TOO_LARGE');
+  });
+  await t.test('only a canonical browser PNG crosses the image pipe above the ordinary content ceiling',async()=>{
+    const source=`import {randomBytes,randomUUID} from 'node:crypto';import {crc32,deflateSync} from 'node:zlib';
+      const width=640,height=480,header=Buffer.alloc(13);header.writeUInt32BE(width);header.writeUInt32BE(height,4);header[8]=8;header[9]=6;
+      const chunk=(type,data)=>{const out=Buffer.alloc(data.length+12);out.writeUInt32BE(data.length);out.write(type,4);data.copy(out,8);out.writeUInt32BE(crc32(out.subarray(4,-4)),out.length-4);return out;};
+      const rows=randomBytes((width*4+1)*height);for(let y=0;y<height;y++)rows[y*(width*4+1)]=0;
+      const png=Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',header),chunk('IDAT',deflateSync(rows)),chunk('IEND',Buffer.alloc(0))]);
+      const metadata={state:'ready',reason:'none',sessionId:randomUUID(),frameId:randomUUID(),width,height,scroll:{up:false,down:false,left:false,right:false}};
+      const result={content:[{type:'text',text:JSON.stringify(metadata)},{type:'image',mimeType:'image/png',data:png.toString('base64')}]};`;
+    const request={operation:'call',name:'use_assistant_browser',arguments:{siteOrigin:'https://example.test',command:{operation:'screenshot',args:{}}}};
+    const response=await invoke(source+`process.stdout.write(JSON.stringify({value:result}));`,{request});
+    assert.equal(response.content[1].mimeType,'image/png');assert.ok(response.content[1].data.length>768*1024);
+    await refuses(source+`process.stdout.write(JSON.stringify({value:result}));`,'OUTPUT_TOO_LARGE');
+    await refuses(source+`result.content[1].mimeType='text/plain';process.stdout.write(JSON.stringify({value:result}));`,'INVALID_VALUE_FRAME',{request});
+    await refuses(`process.stdout.write(JSON.stringify({value:{content:[{type:'text',text:'PRIVATE_PIPE_CANARY'.repeat(60000)}]}}));`,'INVALID_VALUE_FRAME',{request});
+    await refuses(`process.stdout.write(Buffer.alloc(3*1024*1024+1,65));setInterval(()=>{},1000);`,'OUTPUT_TOO_LARGE',{request});
   });
   await t.test('failed input and output pipes settle once instead of crashing the host',async()=>{
     const {EventEmitter}=await import('node:events');let disposed=0;

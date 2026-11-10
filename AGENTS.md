@@ -468,6 +468,15 @@ publication tooling также остаются вне этого публичн
   original input promise, never replaying it. Raster mode stays raster-only;
   login/unsupported dialogs remain explicit manual handoffs. See the same
   contract for immutable modal frames, bounds and real Chromium regressions.
+  Detached workers close owned windows after ten idle minutes through the SAME
+  graceful save/cleanup path. Only valid working commands reset idle; status,
+  wait and heartbeats never do. In-flight bounded work finishes first; manual
+  login cannot disable idle. The original absolute lease never slides.
+  Digital assistants default to matching signed browser skills or the native
+  managed browser, never silent ordinary Chrome/computer fallback. Native
+  browser admission is structural only; URL/input stay local. Owner intake is
+  read-only and each command repeats genuine pass/proof checks. See
+  [routing](docs/assistant-scheduler.md#native-browser-observation-recovery).
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.

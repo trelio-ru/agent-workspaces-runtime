@@ -8,7 +8,7 @@ import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { ExtensionVisualBrowser } from './trelio-visual-extension-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, visualStartupPhase, visualStatus } from './trelio-visual-result.mjs';
 import { createVisualControlServer, withVisualOwnerFileLock, readVisualOwner,
-  publishVisualWorkerOwner } from './trelio-visual-session.mjs';
+  publishVisualWorkerOwner, createVisualIdleSupervisor } from './trelio-visual-session.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
   processDiagnosticCauseCode } from './trelio-process-diagnostics.mjs';
 
@@ -16,7 +16,7 @@ import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnosti
 // the private descriptor path enters argv; token/session values stay in the
 // owner-checked file. No browser or native output is forwarded to the model.
 const file = process.argv[2];
-let engine, server, timer, owner, current = visualStatus('preparing'), stopping = false;
+let engine, server, timer, idle, owner, current = visualStatus('preparing'), stopping = false;
 const startupAbort = new AbortController();
 let startup, startupFailed = false;
 let startupPhase = 'owner_read';
@@ -82,6 +82,7 @@ function fixtureDiagnostic(value) {
 }
 async function stop() {
   if (stopping) return; stopping = true; clearTimeout(timer);
+  idle?.stop();
   fixtureDiagnostic({ stage: 'shutdown_start' });
   startupAbort.abort();
   // One bounded in-flight input may take 40s to fail; allow its graceful
@@ -110,7 +111,13 @@ try {
   const policy = createVisualOriginPolicy(owner);
   fixtureOnly = policy.fixtureOnly === true;
   timer = setTimeout(() => { void stop(); }, owner.deadlineAt - Date.now());
+  // The detached owner, rather than a model turn or a source poll, owns this
+  // clock. Idle expiry follows the SAME flush/own-child/claim cleanup path as
+  // explicit close. It preserves the encrypted login and never touches another
+  // chat's browser or the user's Chrome. The absolute lease remains unchanged.
+  idle = createVisualIdleSupervisor({ onIdle: () => { void stop(); } });
   async function dispatch(operation, args) {
+    if (stopping) return visualStatus('closed');
     if (operation === 'close') { setTimeout(() => { void stop(); }, 50); return visualStatus('closed'); }
     if (operation === 'wait') {
       // Wait only for the current manual/preparation phase; never invent login
@@ -125,7 +132,7 @@ try {
       return current;
     }
     if (!engine || startupFailed) return current;
-    return engine.call(operation, args);
+    return idle.run(operation, args, () => engine.call(operation, args));
   }
   startupPhase = 'control_server';
   server = createVisualControlServer({ token: owner.token, dispatch,
@@ -151,7 +158,7 @@ try {
   // closed process/extension events do not require native log-file switches.
   startupPhase = 'browser';
   engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, externalNavigation: owner.externalNavigation === true, authentication: owner.authentication || null, mailIdentity: owner.mailIdentity || null, observationMode: owner.observationMode || 'image', presentation: owner.presentation || 'windowed', semanticControls: owner.semanticControls === true, fieldCheckPolicy: owner.fieldCheckPolicy || null, attachmentDownloads: owner.attachmentDownloads === true, audioDownloads: owner.audioDownloads === true, fileUploads: owner.fileUploads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
-  current = await engine.call(owner.operation, owner.args);
+  current = await idle.run(owner.operation, owner.args, () => engine.call(owner.operation, owner.args));
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed', startupPhase, error, failureCode:error.diagnosticCode,
     causeCode:processDiagnosticCauseCode(error) });

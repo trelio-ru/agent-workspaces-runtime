@@ -7,7 +7,8 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 import { runVisualSession, withVisualOwnerFileLock, readVisualOwner,
-  publishVisualWorkerOwner, visualSessionBinding } from '../host-runtime/scripts/trelio-visual-session.mjs';
+  publishVisualWorkerOwner, visualSessionBinding, createVisualIdleSupervisor,
+  VISUAL_IDLE_TIMEOUT_MS, closeVisualExecutionSessions } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { browserExecutionDirectory } from '../host-runtime/scripts/trelio-browser-session.mjs';
 import { visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
@@ -66,6 +67,54 @@ test('presentation validation precedes identity/storage and an old worker cannot
 
 });
 
+test('idle closes once despite status polling, preserves in-flight work and rejects late input', async () => {
+  let clock = 0, sequence = 0, closed = 0;
+  const timers = new Map();
+  const advance = ms => {
+    clock += ms;
+    for (const [id, timer] of [...timers]) if (timer.at <= clock) {
+      timers.delete(id); timer.callback();
+    }
+  };
+  const idle = createVisualIdleSupervisor({ onIdle: () => { closed++; }, now: () => clock,
+    schedule: (callback, ms) => { const id = ++sequence; timers.set(id, { callback, at: clock + ms }); return id; },
+    cancel: id => timers.delete(id) });
+  const passive = async () => visualStatus('manual_input_required');
+  advance(VISUAL_IDLE_TIMEOUT_MS - 1);
+  for (const operation of ['status', 'wait', 'credentials-status', 'heartbeat', 'not-a-command'])
+    await idle.run(operation, {}, passive);
+  await idle.run('click', { unexpectedField: true }, passive);
+  advance(1); assert.equal(closed, 1, 'manual waiting and invalid inputs never renew idle');
+  let ran = false;
+  assert.equal((await idle.run('navigate', { url: 'https://example.test' }, () => { ran = true; })).reason, 'session_closed');
+  assert.equal(ran, false, 'late navigation cannot revive or replay a closed worker');
+  advance(VISUAL_IDLE_TIMEOUT_MS); assert.equal(closed, 1);
+});
+
+test('working commands reset only their own idle clock after completion; explicit stop cancels cleanup', async () => {
+  let clock = 0, closed = 0, otherClosed = 0, sequence = 0;
+  const timers = new Map();
+  const options = { now: () => clock,
+    schedule: (callback, ms) => { const id = ++sequence; timers.set(id, { callback, at: clock + ms }); return id; },
+    cancel: id => timers.delete(id) };
+  const advance = ms => { clock += ms; for (const [id, timer] of [...timers])
+    if (timer.at <= clock) { timers.delete(id); timer.callback(); } };
+  const own = createVisualIdleSupervisor({ ...options, onIdle: () => { closed++; } });
+  const other = createVisualIdleSupervisor({ ...options, onIdle: () => { otherClosed++; } });
+  let finish;
+  const result = own.run('type-text', { frameId: 'synthetic', text: 'hello' },
+    () => new Promise(resolve => { finish = resolve; }));
+  advance(VISUAL_IDLE_TIMEOUT_MS * 2);
+  assert.equal(closed, 0, 'bounded in-flight input is not interrupted by the idle clock');
+  assert.equal(otherClosed, 1, 'activity never renews another owner');
+  finish(visualStatus('ready')); await result;
+  advance(VISUAL_IDLE_TIMEOUT_MS - 1); assert.equal(closed, 0);
+  await own.run('screenshot', {}, async () => visualStatus('ready'));
+  advance(VISUAL_IDLE_TIMEOUT_MS - 1); assert.equal(closed, 0);
+  own.stop(); other.stop(); advance(VISUAL_IDLE_TIMEOUT_MS); assert.equal(closed, 0);
+  assert.equal(timers.size, 0);
+});
+
 test('two chats on one visual account address different workers and close only their own session', async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-two-chats-')));
   const start = Date.now(), hits = [[], []], servers = [];
@@ -91,6 +140,7 @@ test('two chats on one visual account address different workers and close only t
     await fs.mkdir(active, { recursive: true, mode: 0o700 });
     await writePrivateJsonFile(path.join(active, 'owner.json'), { schemaVersion: 1, scope: binding.scope,
       bindingHash: binding.bindingHash, token: 'a'.repeat(64), pid: process.pid,
+      executionOwner:binding.executionOwner,mailIdentity:{companyId:binding.companyId},
       port: server.address().port, deadlineAt: binding.deadlineAt });
   }
   const call = (index, operation) => runVisualSession({ origins: [`http://127.0.0.1:${servers[0].address().port}`], operation,
@@ -99,6 +149,11 @@ test('two chats on one visual account address different workers and close only t
   assert.deepEqual(hits, [['close'], []]);
   assert.equal((await call(1, 'status')).state, 'closed');
   assert.deepEqual(hits, [['close'], ['status']]);
+  const snapshot=path.join(directory,'visual-browser',visualSessionBinding(environments[0]).scope,'state.enc');
+  await fs.writeFile(snapshot,'SYNTHETIC_ENCRYPTED_AUTH',{mode:0o600});
+  await closeVisualExecutionSessions({companyId:base.TRELIO_SKILL_COMPANY_ID,runtimeSessionId:environments[0].TRELIO_SKILL_RUNTIME_SESSION_ID,directory});
+  assert.deepEqual(hits,[['close','close'],['status']],'native settlement closes only its observed execution owner');
+  assert.equal(await fs.readFile(snapshot,'utf8'),'SYNTHETIC_ENCRYPTED_AUTH','cleanup never disconnects the saved account');
 });
 
 test('an unsafe owner mutex root refuses before its operation without replacing the existing entry', async () => {

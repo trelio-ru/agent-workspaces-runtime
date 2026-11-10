@@ -24,6 +24,53 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const busy = () => visualStatus('error', 'session_busy');
 
+export const VISUAL_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+/** A host-owned idle clock, independent of the signed absolute browser lease.
+ * Status/wait and extension heartbeats cannot keep an abandoned window alive.
+ * Only validated working commands reserve activity; a bounded command already
+ * in progress finishes before its idle period begins. No browser input is
+ * retried, and a fired clock cannot be revived by a late queued invocation.
+ * Clock/timer injection is an in-process test seam, never a model/owner option.
+ */
+export function createVisualIdleSupervisor({ onIdle, now = () => performance.now(),
+  schedule = setTimeout, cancel = clearTimeout } = {}) {
+  if (typeof onIdle !== 'function') throw new Error('VISUAL_IDENTITY_INVALID');
+  let timer, stopped = false, pending = 0, lastActivity = now();
+  const working = new Set(['setup', 'ready', 'navigate', 'screenshot', 'read-text',
+    'click', 'type-text', 'key', 'scroll', 'submit', 'request-ready', 'show-login',
+    'download-attachment', 'download-audio', 'upload-files', 'authenticate', 'authenticate-mail',
+    'credentials-setup', 'credentials-forget']);
+  const arm = () => {
+    cancel(timer);
+    if (stopped || pending) return;
+    timer = schedule(() => {
+      if (stopped || pending) return;
+      if (now() - lastActivity < VISUAL_IDLE_TIMEOUT_MS) { arm(); return; }
+      stopped = true;
+      onIdle();
+    }, Math.max(1, VISUAL_IDLE_TIMEOUT_MS - (now() - lastActivity)));
+    timer?.unref?.();
+  };
+  arm();
+  return {
+    stop() { stopped = true; cancel(timer); },
+    async run(operation, args, action) {
+      // A suspended process can receive a command before its overdue timer
+      // callback is dispatched. Refuse that late input at the same boundary.
+      if(!stopped&&!pending&&now()-lastActivity>=VISUAL_IDLE_TIMEOUT_MS){
+        stopped=true;cancel(timer);onIdle();
+      }
+      if (stopped) return visualStatus('error', 'session_closed');
+      const active = working.has(operation) && validVisualArguments(operation, args);
+      if (!active) return action();
+      pending++; cancel(timer);
+      try { return await action(); }
+      finally { pending--; lastActivity = now(); arm(); }
+    },
+  };
+}
+
 /** Serialize ONLY the small owner descriptor, never browser/network work.
  * Windows MoveFileEx can refuse replacement while a reader has the original
  * file open, despite delete sharing. The parent startup poll and child publish
@@ -91,15 +138,49 @@ function validOwner(owner, binding) {
     && Number.isSafeInteger(owner.pid) && owner.pid > 0;
 }
 
-async function request(owner, operation, args) {
+async function request(owner, operation, args, signal) {
   const response = await fetch(`http://127.0.0.1:${owner.port}/command`, {
     method: 'POST', headers: { authorization: `Bearer ${owner.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ operation, args }), signal: AbortSignal.timeout(50_000), redirect: 'error',
+    body: JSON.stringify({ operation, args }), signal: signal?AbortSignal.any([signal,AbortSignal.timeout(50_000)]):AbortSignal.timeout(50_000), redirect: 'error',
   });
   if (response.status !== 200 || Number(response.headers.get('content-length') || 0) > 3 * 1024 * 1024) throw new Error('VISUAL_WORKER_UNAVAILABLE');
   const text = await response.text();
   if (Buffer.byteLength(text) > 3 * 1024 * 1024) throw new Error('VISUAL_RESULT_INVALID');
   return validateVisualResult(JSON.parse(text));
+}
+
+/** Cleanup needs no business authority: it can only stop this exact observed
+ * execution's windows, never erase auth or input into a page. Inspect private
+ * structural claims without following symlinks; request their authenticated
+ * graceful close rather than killing a PID recovered from disk. The caller
+ * invokes this only after a genuine native pass/intake settlement receipt.
+ */
+export async function closeVisualExecutionSessions({ companyId, runtimeSessionId, directory=resolveWorkspaceBridgeConfigDirectory() }) {
+  if(!uuid.test(companyId??'')||!uuid.test(runtimeSessionId??''))throw new Error('VISUAL_IDENTITY_INVALID');
+  const executionOwner=browserExecutionOwner({TRELIO_SKILL_RUNTIME_SESSION_ID:runtimeSessionId});
+  const root=path.join(directory,'visual-browser');
+  try{await assertPrivatePathKind(root,'directory');}catch(error){if(error.code==='ENOENT')return;throw error;}
+  const entries=await fs.readdir(root,{withFileTypes:true});
+  if(entries.length>1024)throw new Error('VISUAL_IDENTITY_INVALID');
+  let failed=false;
+  const signal=AbortSignal.timeout(10_000);
+  for(const entry of entries){
+    if(signal.aborted){failed=true;break;}
+    if(!entry.isDirectory()||!/^[a-f0-9]{64}$/u.test(entry.name))continue;
+    const account=path.join(root,entry.name),session=path.join(account,'sessions',executionOwner);
+    try{
+      for(const value of [account,path.join(account,'sessions'),session,path.join(session,'active')])await assertPrivatePathKind(value,'directory');
+      const owner=await readVisualOwner(path.join(session,'active','owner.json'));
+      if(owner.executionOwner!==executionOwner||owner.mailIdentity?.companyId!==companyId
+        ||owner.scope!==entry.name||!/^[a-f0-9]{64}$/u.test(owner.token??'')
+        ||!Number.isInteger(owner.port)||owner.port<1||owner.port>65535)continue;
+      await request(owner,'close',{},signal);
+    }catch(error){if(error.code!=='ENOENT')failed=true;}
+  }
+  // One already stopped/unreachable owner must not strand this execution's
+  // other windows. Report only a fixed cleanup category after visiting all
+  // claims; the committed business result and saved auth remain untouched.
+  if(failed)throw new Error('VISUAL_CLEANUP_PENDING');
 }
 
 export const VISUAL_AUDIO_DOWNLOAD_API = 'trelio.visual-audio-download/v1';

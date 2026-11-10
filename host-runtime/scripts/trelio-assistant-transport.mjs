@@ -3208,6 +3208,7 @@ const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "ge
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS,
+  'use_assistant_browser',
   // Native task-local mapping only. Live schema/proof/CAS remain backend-owned;
   // exposing the name does not read a provider body or create a new task.
   'bind_assistant_source_conversation','execute_assistant_operation',
@@ -3265,7 +3266,7 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...new Set([
  * into the raw call before the backend's mandatory validation/admission.
  * No domain schema, scope or permission is inferred/copied by this projection.
  */
-const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent','localContextRead']);
+const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent','localContextRead','localBrowserAction']);
 /** A login declaration is capability metadata, never evidence that an account
  * needs login. One pure presentation decision is shared by fresh workers and
  * the long-lived facade; it does not consume consent or authorize execution. */
@@ -3294,14 +3295,17 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    if(Array.isArray(node.anyOf)&&node.anyOf.some(branch=>Object.hasOwn(branch?.properties??{},'localContextRead'))){
+    const negotiation=['localContextRead','localBrowserAction'].find(field=>Array.isArray(node.anyOf)
+      &&node.anyOf.some(branch=>Object.hasOwn(branch?.properties??{},field)));
+    if(negotiation){
       // Only the exact native structural negotiation alternative is host-only.
       // Never delete a business alternative merely because a nested field has
       // a similar name. The surviving canonical native schema stays intact.
       node.anyOf=node.anyOf.filter(branch=>{
-        if(!Object.hasOwn(branch?.properties??{},'localContextRead'))return true;
-        if(branch.properties.localContextRead?.const!==true||branch.additionalProperties!==false
-          ||!['localContextRead,runtimeSessionProof,taskPass','intakePass,localContextRead,runtimeSessionProof','intakePass,localContextRead,runtimeSessionProof,taskPass'].includes(Object.keys(branch.properties).sort().join(',')))
+        if(!Object.hasOwn(branch?.properties??{},negotiation))return true;
+        if(branch.properties[negotiation]?.const!==true||branch.additionalProperties!==false
+          ||![[negotiation,'runtimeSessionProof','taskPass'],['intakePass',negotiation,'runtimeSessionProof'],['intakePass',negotiation,'runtimeSessionProof','taskPass']]
+            .some(keys=>keys.sort().join(',')===Object.keys(branch.properties).sort().join(',')))
           fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return false;
       });
@@ -3481,7 +3485,7 @@ export const validateAssistantNativeInputShape=(nativeSchema,raw,{omittedRootFie
   };
   if(!walk(root,input))fail('ASSISTANT_MCP_INPUT_INVALID');
 };
-export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, materializeCompanyFile,
+export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, materializeCompanyFile, materializeBrowser, onBrowserScopeSettled,
   materializeEncryptedTask, materializeEncryptedSkill, materializeEncryptedCompanyContext, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, materializeSourceReply=null, materializeSourceUnsubscribe=null, presentationProfile='task', timeoutMs = 30_000 }) => {
   if (!['task','remote_mcp','skill_setup','company_context'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
@@ -3496,7 +3500,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
     source_unsubscribe:'ASSISTANT_MCP_LOCAL_SOURCE_UNSUBSCRIBE_FAILED',source_read:'ASSISTANT_MCP_LOCAL_SOURCE_READ_FAILED',source_reply:'ASSISTANT_MCP_LOCAL_SOURCE_REPLY_FAILED',
     company_read:'ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED',task_read:'ASSISTANT_MCP_LOCAL_TASK_READ_FAILED',
     skill_read:'ASSISTANT_MCP_LOCAL_SKILL_READ_FAILED',company_file:'ASSISTANT_MCP_LOCAL_COMPANY_FILE_FAILED',
-    attachment_read:'ASSISTANT_MCP_LOCAL_ATTACHMENT_READ_FAILED'});
+    attachment_read:'ASSISTANT_MCP_LOCAL_ATTACHMENT_READ_FAILED',browser:'ASSISTANT_MCP_LOCAL_BROWSER_FAILED'});
   const localOperation=async(stage,action,nativeSendErrors)=>{
     try{return await action();}catch(error){
       // The arguments adapter invokes the SAME native send. Only that exact
@@ -3527,10 +3531,10 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   };
   const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
+    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update','use_assistant_browser',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
       ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
       :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
-      :presentationProfile==='company_context'?['get_assistant_status',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
+      :presentationProfile==='company_context'?['get_assistant_status','use_assistant_browser',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
       :[...ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)),...ASSISTANT_COMPANY_DISCOVERY_TOOLS];
   };
   const perform = async (action, signal, operationTimeoutMs = timeoutMs, metadataProfile=null) => {
@@ -3586,6 +3590,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           &&typeof tool.description==='string'&&tool.description.length<=4096&&object(tool.inputSchema)
           &&tool.inputSchema.type==='object'))refinementAvailable=true;
         const selected=tools.filter(tool=>(allowed.includes(tool?.name)||additional.includes(tool?.name))
+          &&(tool.name!=='use_assistant_browser'||typeof materializeBrowser==='function')
           &&(!['download_attachment','download_registry_document','download_knowledge_base_attachment'].includes(tool.name)||typeof materializeAttachment==='function')).map(tool=>{
           if(seen.has(tool.name)||typeof tool.description!=='string'||tool.description.length>4096||!object(tool.inputSchema)||tool.inputSchema.type!=='object')fail('ASSISTANT_MCP_INVALID_RESPONSE');
           seen.add(tool.name);
@@ -3605,7 +3610,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Profile planning is an optional native definition in that SAME bounded
       // view, usable with either genuine origin; never append its full schema
       // to the already near-bound task catalogue or invent it on old backends.
-      const intake=await catalogue(intakeToolNames,'source_intake',true,['request_assistant_profile_update']);
+      const intake=await catalogue(intakeToolNames,'source_intake',true,['request_assistant_profile_update','use_assistant_browser']);
       // Read native discovery definitions from their existing session-fixed
       // view BEFORE the client starts a model turn, not after a status call.
       // Older native catalogues may have none; partial sets fail closed.
@@ -3644,7 +3649,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Snapshot once before asynchronous private/network I/O, as in the shared
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
-      if(Object.hasOwn(argumentsSnapshot,'localContextRead'))fail('ASSISTANT_MCP_INPUT_INVALID');
+      if(['localContextRead','localBrowserAction'].some(key=>Object.hasOwn(argumentsSnapshot,key)))fail('ASSISTANT_MCP_INPUT_INVALID');
       // Reject a task writer in an intake before initializing any native MCP
       // session. Repeat after initialization too: the protected pass can change
       // during I/O, and metadata is never execution authority.
@@ -3666,6 +3671,19 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         const definitions=catalog.filter(tool=>tool?.name===name);
         if(definitions.length!==1)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         validateAssistantNativeInputShape(definitions[0].inputSchema,argumentsSnapshot);
+        if(name==='use_assistant_browser'){
+          // The complete browser command is conditional metadata, not another
+          // always-loaded schema. Fetch its SAME native validator on every
+          // invocation before admission, including when the model has not yet
+          // read the contract. Neither a cached model schema nor its prose is
+          // input authority; this metadata read contains no URL/page/input.
+          const response=await request({config,credential,sessionId:session.sessionId,payload:{jsonrpc:'2.0',id:session.nextRequestId(),
+            method:'tools/call',params:{name:'get_trelio_tool_contract',arguments:{name:'use_assistant_browser'}}}},{signal});
+          const contract=protocol.assertJsonRpcResult(response,'tools/call');
+          if(contract?.isError||contract?.structuredContent?.schemaVersion!==1
+            ||contract.structuredContent.name!==name||!object(contract.structuredContent.inputSchema))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          validateAssistantNativeInputShape(contract.structuredContent.inputSchema,argumentsSnapshot);
+        }
         if(name==='continue_assistant_workspace_action'&&argumentsSnapshot.operation==='external_account_admit'){
           if(!assistantExternalAccountAdmission(argumentsSnapshot.parameters))fail('ASSISTANT_MCP_INPUT_INVALID');
         }
@@ -3725,7 +3743,15 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             throw error;
           }
         };
-        const value=typeof withWorkspaceArguments==='function'
+        // Browser URL/text are ALWAYS local, even for a plain company. Use
+        // only native structural admission over HTTP after validating the
+        // complete original command against this SAME fresh native schema.
+        // No callback-less transport can accidentally send its raw arguments.
+        const value=name==='use_assistant_browser'
+          ?typeof materializeBrowser==='function'
+            ?await send({localBrowserAction:true,...(argumentsSnapshot.intakePass?{intakePass:argumentsSnapshot.intakePass}:{taskPass:argumentsSnapshot.taskPass}),runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
+            :fail('ASSISTANT_CAPABILITY_UNAVAILABLE')
+          :typeof withWorkspaceArguments==='function'
           ?await localOperation('workspace_arguments',()=>withWorkspaceArguments({name,args:argumentsSnapshot,signal},send),nativeSendErrors)
           :await send(argumentsSnapshot);
 
@@ -3734,6 +3760,20 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || (value.structuredContent !== undefined && !object(value.structuredContent))
           || (value.isError !== undefined && typeof value.isError !== "boolean")
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > ASSISTANT_MCP_RESULT_MAX_BYTES) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        if(name==='use_assistant_browser'&&value.isError!==true)
+          return localOperation('browser',()=>materializeBrowser({result:value,arguments:argumentsSnapshot,signal}));
+        if(typeof onBrowserScopeSettled==='function'&&value.isError!==true
+          &&(name==='complete_assistant_pass'&&value.structuredContent?.state==='confirmed'
+            ||name==='resolve_assistant_intake'&&value.structuredContent?.receiptId
+              &&['reply_pending','replied','ignored','waiting_owner','routed','created','redirected'].includes(value.structuredContent?.state))){
+          // Native completion is already committed. A local cleanup failure
+          // must NEVER turn it into an apparent failed business action or a
+          // replay instruction; the independent idle supervisor still stops
+          // abandoned windows. No prose/turn completion can enter this path.
+          try{await onBrowserScopeSettled(argumentsSnapshot);}catch{
+            value.content.push({type:'text',text:'The native outcome is committed. Browser cleanup is pending its idle timeout; do not repeat the completed action.'});
+          }
+        }
         if(name==='get_assistant_intake_context'&&value.isError!==true){
           if(typeof materializeSourceIntake!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           return localOperation('source_read',()=>materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal}));
@@ -3793,8 +3833,9 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
-      }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs,
-        name==='request_assistant_profile_update'?'source_intake':companyReadSession?'company_context':null);
+      }, signal, name==='connect_remote_agent_skill'?10*60*1000:name==='use_assistant_browser'?60_000:timeoutMs,
+        name==='request_assistant_profile_update'||name==='use_assistant_browser'
+          ||name==='get_trelio_tool_contract'&&argumentsSnapshot.name==='use_assistant_browser'?'source_intake':companyReadSession?'company_context':null);
     },
   };
 };

@@ -12,6 +12,109 @@ const memoryStore = () => {
     put:async(input,value)=>values.set(key(input),structuredClone(value)),remove:async input=>values.delete(key(input)) };
 };
 
+test('managed browser sends only structural admission and never replays an unknown local command',async()=>{
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+ const credential=`tda_${'b'.repeat(43)}`,taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},runtimeSessionProof={runtimeSessionId:randomUUID()};
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+ const args={siteOrigin:'https://private.example',command:{operation:'type-text',args:{frameId:'synthetic',text:'PRIVATE_INPUT'}},taskPass,runtimeSessionProof};
+ let admissions=0,executions=0,unknown=false,changedContract=false;
+ const canonical={type:'object',properties:{siteOrigin:{type:'string'},command:{type:'object'},taskPass:{},runtimeSessionProof:{}},required:['siteOrigin','command'],additionalProperties:false};
+ const wire={type:'object',anyOf:[canonical,{type:'object',properties:{localBrowserAction:{const:true},taskPass:{},intakePass:{},runtimeSessionProof:{}},additionalProperties:false}]};
+ const httpRequest=async input=>{
+  const response=result=>({sessionId:'fixture',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+  if(input.method==='DELETE')return response({});
+  if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+  if(input.payload.method==='notifications/initialized')return response({});
+  if(input.payload.method==='tools/list')return response({tools:['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake','use_assistant_browser'].map(name=>({name,description:'Live browser schema',inputSchema:name==='use_assistant_browser'?wire:{type:'object',properties:{}}}))});
+  if(input.payload.params.name==='get_trelio_tool_contract'){
+   assert.deepEqual(input.payload.params.arguments,{name:'use_assistant_browser'});
+   assert.equal(input.config.headers['x-trelio-assistant-capability-profile'],'source_intake');
+   const schema=changedContract?{...canonical,properties:{...canonical.properties,command:{type:'object',properties:{operation:{const:'navigate'}}}}}:canonical;
+   return response({content:[],structuredContent:{schemaVersion:1,name:'use_assistant_browser',inputSchema:schema}});
+  }
+  admissions++;assert.deepEqual(input.payload.params.arguments,{localBrowserAction:true,taskPass,runtimeSessionProof});
+  assert.doesNotMatch(JSON.stringify(input.payload),/PRIVATE_INPUT|private\.example|frameId|type-text/u);
+  return response({content:[{type:'text',text:'Native structural receipt'}],structuredContent:{kind:'assistant_browser'}});
+ };
+ const options={origin,assistantId,deviceId,store,httpRequest};
+ const closed=createAssistantMcpClient(options);
+ assert.ok(!(await closed.listTools()).some(tool=>tool.name==='use_assistant_browser'));
+ await assert.rejects(closed.callTool('use_assistant_browser',args),/CAPABILITY_UNAVAILABLE/);assert.equal(admissions,0);
+ const delivered={content:[{type:'image',mimeType:'image/png',data:'synthetic'}]};
+ const client=createAssistantMcpClient({...options,materializeBrowser:async request=>{
+  executions++;assert.deepEqual(request.arguments,args);
+  if(unknown)throw new AssistantTransportError('ASSISTANT_BROWSER_OUTCOME_UNKNOWN');return delivered;
+ }});
+ const tool=(await client.listTools()).find(tool=>tool.name==='use_assistant_browser');
+ assert.ok(tool);assert.doesNotMatch(JSON.stringify(tool.inputSchema),/localBrowserAction|taskPass|intakePass|runtimeSessionProof/u);
+ assert.deepEqual(await client.callTool('use_assistant_browser',args),delivered);
+ changedContract=true;await assert.rejects(client.callTool('use_assistant_browser',args),/INPUT_INVALID/);
+ assert.equal(admissions,1,'a changed live command schema refuses before its native one-use admission');changedContract=false;
+ await assert.rejects(client.callTool('use_assistant_browser',{...args,localBrowserAction:true}),/INPUT_INVALID/);
+ unknown=true;await assert.rejects(client.callTool('use_assistant_browser',args),/OUTCOME_UNKNOWN/);
+ assert.equal(admissions,2);assert.equal(executions,2,'an unknown action never earns an automatic second attempt');
+});
+
+test('exact browser schema read is content-free metadata without a Workspace or company-content preparation',async()=>{
+ const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+ let sent;
+ await withAssistantCompanyContentArguments({name:'get_trelio_tool_contract',args:{name:'use_assistant_browser',taskPass:{},runtimeSessionProof:{} }},
+  value=>{sent=value;return {content:[]};},{withProfile:()=>assert.fail('browser schema metadata must not construct a writable profile')});
+ assert.deepEqual(sent,{name:'use_assistant_browser'});
+});
+
+test('only a confirmed native outcome requests browser cleanup; cleanup failure never replays or masks completion',async()=>{
+ const origin='https://cleanup.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'c'.repeat(43)}`,expiresAt:1});
+ let state='pending',cleanups=0,calls=0;
+ const httpRequest=async input=>{
+  const response=result=>({sessionId:'fixture',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+  if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+  if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+  if(input.payload.method==='tools/list')return response({tools:['get_assistant_status','complete_assistant_pass'].map(name=>({name,description:'Native outcome',inputSchema:{type:'object',properties:{taskPass:{},runtimeSessionProof:{}}}}))});
+  calls++;return response({content:[{type:'text',text:'Native outcome'}],structuredContent:{state,receiptId:randomUUID()}});
+ };
+ const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest,onBrowserScopeSettled:async()=>{
+  cleanups++;throw Error('PRIVATE_CLEANUP_DETAIL');
+ }});
+ await client.callTool('complete_assistant_pass',{});assert.equal(cleanups,0);
+ state='confirmed';const result=await client.callTool('complete_assistant_pass',{});
+ assert.equal(cleanups,1);assert.equal(calls,2);assert.equal(result.isError,undefined);assert.equal(result.structuredContent.state,'confirmed');
+ assert.match(JSON.stringify(result.content),/native outcome is committed/);
+ assert.doesNotMatch(JSON.stringify(result),/PRIVATE_CLEANUP_DETAIL/);
+});
+
+test('managed browser binds local profile and input to its genuine runtime, with strict private-owner read-only mode',async()=>{
+ const {materializeAssistantBrowser}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+ const {visualStatus}=await import('../host-runtime/scripts/trelio-visual-result.mjs');
+ const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ let pass={schemaVersion:1,...identity,companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};delete pass.origin;
+ const runtimeSessionId=randomUUID(),memberId=randomUUID(),store=memoryStore(),clock=Date.now();let ran=0,selected;
+ const host={readActivePass:async()=>structuredClone(pass)};
+ const save=()=>store.put({origin:identity.origin,kind:'runtime',id:pass.passId},{passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId,expiresAt:new Date(clock+3600000).toISOString()}});
+ await save();
+ const grant=()=>({schemaVersion:1,kind:'assistant_browser',companyId:pass.companyId,memberId,scopeId:pass.passId,runtimeSessionId,
+  assistantUserId:identity.assistantId,deviceId:identity.deviceId,readOnly:pass.kind==='source_intake',expiresAt:new Date(clock+5000).toISOString()});
+ const invoke=(command,patch={})=>materializeAssistantBrowser({identity,host,store,now:()=>clock,
+  result:{structuredContent:{...grant(),...patch}},arguments:{siteOrigin:'https://example.test',command,runtimeSessionProof:{runtimeSessionId}},
+  run:async value=>{ran++;selected=value;return visualStatus('ready');}});
+ await invoke({operation:'navigate',args:{url:'https://example.test/article'}});assert.equal(ran,1);
+ assert.equal(selected.env.TRELIO_SKILL_RUNTIME_SESSION_ID,runtimeSessionId);
+ assert.equal(selected.env.TRELIO_SKILL_COMPANY_ID,pass.companyId);
+ const originalAccount=selected.env.TRELIO_SKILL_ACCOUNT_JSON;
+ await assert.rejects(invoke({operation:'key',args:{frameId:'frame',key:'Enter'}},{scopeId:randomUUID()}),/ADMISSION_CHANGED/);
+ await assert.rejects(invoke({operation:'key',args:{frameId:'frame',key:'Enter'}},{expiresAt:new Date(clock).toISOString()}),/ADMISSION_CHANGED/);
+ await store.put({origin:identity.origin,kind:'runtime',id:pass.passId},{ended:true});
+ await assert.rejects(invoke({operation:'screenshot',args:{}}),/ADMISSION_CHANGED/);assert.equal(ran,1);
+ pass={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:pass.companyId,
+  sourceId:randomUUID(),sourceRevision:0,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};await save();
+ for(const operation of ['click','type-text','key'])await assert.rejects(invoke({operation,args:{}}),/READ_ONLY/);
+ await invoke({operation:'screenshot',args:{}});assert.equal(ran,2);
+ assert.equal(selected.env.TRELIO_SKILL_ACCOUNT_JSON,originalAccount,'same assistant/company/site can reuse its saved login across own passes');
+ pass={...pass,companyId:randomUUID()};await save();await invoke({operation:'screenshot',args:{}});
+ assert.notEqual(selected.env.TRELIO_SKILL_ACCOUNT_JSON,originalAccount,'company contexts never share a generic saved browser profile');
+});
+
 test('prepared reply device wire is structural, closed and never retries an unknown outcome',async()=>{
  const {assistantPreparedOwnerReplyReceipt}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID();

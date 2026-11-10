@@ -23,7 +23,7 @@ import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
 import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from './trelio-skill-accounts.mjs';
-import { parseVisualSkillOutput, visualMcpResult } from './trelio-visual-result.mjs';
+import { parseVisualSkillOutput, visualMcpResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from './trelio-skill-secret-setup.mjs';
 import { browserControllerEnabled, parseBrowserControllerArguments, runBrowserControllerCommand } from './trelio-browser-session.mjs';
 
@@ -872,6 +872,63 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
   },{signal,sourceWorkspaceFile:locator});
 };
 
+/** Compose a genuine native receipt with the SAME browser engine. The receipt
+ * grants one local command, never a copied provider/account/Secret grant. Its
+ * ephemeral structural fields are checked against the private active pass and
+ * observed runtime slot immediately before input. URL/text stay in RAM until
+ * the existing owner-private browser transport, never native HTTP or a ledger.
+ */
+export const materializeAssistantBrowser = async ({identity,host,store,result,arguments:args,signal,
+  run, now=Date.now}) => {
+  const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+  const {runVisualSession}=await import('./trelio-visual-session.mjs');
+  const {DEFAULT_LEASE_MS}=await import('./trelio-browser-session.mjs');
+  const pass=validateAssistantActivePass(await host.readActivePass(),identity),grant=result.structuredContent;
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+  const failBrowser=()=>{throw new AssistantTransportError('ASSISTANT_BROWSER_ADMISSION_CHANGED');};
+  if(!grant||Object.keys(grant).sort().join(',')!=='assistantUserId,companyId,deviceId,expiresAt,kind,memberId,readOnly,runtimeSessionId,schemaVersion,scopeId'
+    ||grant.schemaVersion!==1||grant.kind!=='assistant_browser'||grant.assistantUserId!==identity.assistantId
+    ||grant.deviceId!==identity.deviceId||grant.companyId!==pass.companyId||grant.scopeId!==pass.passId
+    ||!uuid.test(grant.memberId??'')||!uuid.test(grant.runtimeSessionId??'')
+    ||grant.runtimeSessionId!==args.runtimeSessionProof?.runtimeSessionId||grant.readOnly!==(pass.kind==='source_intake')
+    ||!Number.isFinite(Date.parse(grant.expiresAt))||Date.parse(grant.expiresAt)<=now()
+    ||Date.parse(grant.expiresAt)>now()+5000||pass.intakeKind==='route_existing')failBrowser();
+  if(Object.keys(args).some(key=>!['siteOrigin','command','taskPass','intakePass','runtimeSessionProof'].includes(key))
+    ||!args.command||Object.keys(args.command).sort().join(',')!=='args,operation')failBrowser();
+  const saved=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+  if(saved?.ended||saved?.state?.runtimeSessionId!==grant.runtimeSessionId
+    ||saved.threadId!==pass.threadId||!Number.isFinite(Date.parse(saved.state.expiresAt))||Date.parse(saved.state.expiresAt)<=now()
+    ||JSON.stringify(await host.readActivePass())!==JSON.stringify(pass)
+    ||Date.parse(grant.expiresAt)<=now())failBrowser();
+  const {operation,args:input}=args.command;
+  if(!['navigate','screenshot','status','close','scroll','click','type-text','key'].includes(operation)
+    ||grant.readOnly&&!['navigate','screenshot','status','close','scroll'].includes(operation))
+    throw new AssistantTransportError('ASSISTANT_BROWSER_READ_ONLY');
+  let site;
+  try {site=new URL(args.siteOrigin);
+    if(site.origin!==args.siteOrigin||site.protocol!=='https:'||site.username||site.password)failBrowser();
+    if(operation==='navigate'){const target=new URL(input.url);if(target.protocol!=='https:'||target.username||target.password)failBrowser();}
+  }catch{failBrowser();}
+  signal?.throwIfAborted();
+  // This fixed namespace is an internal browser storage realm, NOT a fake
+  // enabled Agent Skill or a borrowed provider account. Per-company/site UUID
+  // separates credentials; the observed execution owner separates live windows.
+  const hex=createHash('sha256').update(JSON.stringify(['assistant-browser/v1',identity.origin,identity.assistantId,identity.deviceId,pass.companyId,site.origin])).digest('hex');
+  const accountId=`${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-a${hex.slice(17,20)}-${hex.slice(20,32)}`;
+  const startedAt=now(),deadlineAt=Math.min(startedAt+DEFAULT_LEASE_MS,Date.parse(saved.state.expiresAt));
+  if(deadlineAt-startedAt<60_000)failBrowser();
+  const environment={TRELIO_ORIGIN:identity.origin,TRELIO_SKILL_ID:'assistant-browser',
+    TRELIO_SKILL_ACCOUNT_JSON:JSON.stringify({id:accountId}),TRELIO_SKILL_COMPANY_ID:pass.companyId,
+    TRELIO_SKILL_MEMBER_ID:grant.memberId,TRELIO_SKILL_RUNTIME_SESSION_ID:grant.runtimeSessionId,
+    TRELIO_BROWSER_SESSION_POLICY_JSON:JSON.stringify({apiVersion:1,sessionClass:'protected-snapshot',manualAssist:true,leaseMs:deadlineAt-startedAt}),
+    TRELIO_BROWSER_SESSION_STARTED_AT:String(startedAt),TRELIO_BROWSER_SESSION_DEADLINE_AT:String(deadlineAt)};
+  // Existing workers retain their original absolute deadline. New calls do
+  // not change it; a stopped window may open afresh only on explicit navigate.
+  const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,
+    operation,args:input,env:environment});
+  return visualMcpResult(visual);
+};
+
 /** Schema discovery before enrollment needs no credential/private worker.
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
@@ -896,6 +953,12 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
   let proxy;
   const preparedReplyFiles=new WeakMap();
   proxy=createAssistantMcpClient({ ...identity, store, presentationProfile,httpRequest,
+    materializeBrowser:request=>materializeAssistantBrowser({...request,identity,host,store}),
+    onBrowserScopeSettled:async args=>{
+      const {closeVisualExecutionSessions}=await import('./trelio-visual-session.mjs');
+      const locator=args.taskPass??args.intakePass;
+      await closeVisualExecutionSessions({companyId:locator?.companyId,runtimeSessionId:args.runtimeSessionProof?.runtimeSessionId});
+    },
     withWorkspaceArguments:async(request,send)=>{
       // Discovery has its own native read session from startup. Ordinary task
       // get_task retains its existing adapter; only the protected owner intake
@@ -1653,6 +1716,12 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   const input=JSON.stringify(request);
   if(Buffer.byteLength(input)>131072) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
   const loader=await resolveLoader({environment});
+  // The ordinary content/metadata pipe remains 768 KiB. Only this dedicated
+  // browser call can carry the SAME existing 2-MiB PNG (base64 + framing), and
+  // its larger frame must reconstruct exactly through the visual validator.
+  // Naming the tool cannot admit arbitrary large JSON, another MIME or prose.
+  const browser=request.operation==='call'&&request.name==='use_assistant_browser';
+  const maximumOutputBytes=browser?3*1024*1024:768*1024;
   return new Promise((resolve,reject)=>{
     // Reject damaged/truncated UTF-8 instead of silently replacing bytes in a
     // content-bearing JSON string. Preserve a BOM so JSON's existing strict
@@ -1676,7 +1745,7 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
       // unhandled EventEmitter error that tears down the long-lived MCP host.
       child.stdout.on('error',()=>refuse('OUTPUT_FAILED'));
       child.stdout.on('data',chunk=>{
-        bytes+=chunk.length;if(bytes>768*1024)return refuse('OUTPUT_TOO_LARGE');
+        bytes+=chunk.length;if(bytes>maximumOutputBytes)return refuse('OUTPUT_TOO_LARGE');
         try{output+=decoder.decode(chunk,{stream:true});}catch{return refuse('INVALID_UTF8');}
       });
       child.once('close',code=>{
@@ -1695,6 +1764,16 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
             ...(value.setupRecovery?{setupRecovery:value.setupRecovery}:{}) ,...(value.status?{status:value.status}:{})}));
         }
         if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return refuse('INVALID_VALUE_FRAME');
+        if(browser&&(bytes>768*1024||value.value?.content?.some?.(item=>item.type==='image'))){
+          try{
+            const result=value.value,blocks=result.content;
+            if(!Array.isArray(blocks)||blocks.length!==2||blocks[0].type!=='text'
+              ||typeof blocks[0].text!=='string'||blocks[0].text.length>4096||blocks[1].type!=='image')throw new Error();
+            const metadata=JSON.parse(blocks[0].text);
+            const canonical=visualMcpResult({kind:VISUAL_RESULT_KIND,...metadata,image:{mimeType:blocks[1].mimeType,data:blocks[1].data}});
+            if(JSON.stringify(result)!==JSON.stringify(canonical))throw new Error();
+          }catch{return refuse('INVALID_VALUE_FRAME');}
+        }
         finish(null,value.value);
       });
       child.stdin.end(input);
@@ -2929,8 +3008,8 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
     // Contract lookup is metadata only when its locator is one of the native
     // names in this presentation. Reject arbitrary prose BEFORE HTTP even
     // though the backend's exact contract registry would also refuse it.
-    if(name==='get_trelio_tool_contract'&&(!companyContextRead&&!args.intakePass
-      ||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(metadata.name)
+    if(name==='get_trelio_tool_contract'&&(metadata.name!=='use_assistant_browser'&&(!companyContextRead&&!args.intakePass
+      ||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(metadata.name))
       ||Object.keys(metadata).some(key=>key!=='name')))
       throw new AssistantTransportError('ASSISTANT_MCP_INPUT_INVALID');
     return send(metadata);

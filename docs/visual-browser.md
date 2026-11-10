@@ -516,6 +516,15 @@ post-creation защитой. Сбой удаления блокирует да�
 процесс; crash не выдаётся за успешное сохранение. User browser process/PID из
 claim не убивается. SIGKILL/отключение ОС не позволяет выполнить finally: прежний
 durable auth snapshot сохраняется, unknown orphan state не удаляется вслепую.
+Detached worker также закрывает собственные окна после десяти минут простоя.
+Только валидные рабочие команды (наблюдение, навигация, ввод, загрузка и явный
+auth/setup) начинают новый idle interval; status, wait и extension heartbeat
+его не продлевают. Уже выполняющийся bounded command завершается до начала
+idle interval. Ручной вход и ожидание ответа не отключают этот предел.
+Idle использует тот же graceful stop, сохранение encrypted auth snapshot и
+exact-child watchdog, что explicit close; это не disconnect/logout. Следующий
+явный navigate восстанавливает сохранённую сессию без replay прежнего ввода.
+Исходная signed absolute lease остаётся независимой и никогда не продлевается.
 После подтверждённой остановки и сохранения snapshot только удаление собственного
 временного профиля допускает пять стандартных transient retries Node с линейной
 задержкой от 100 мс. Чтение auth/ACL, persist и browser input не

@@ -107,7 +107,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
         // a readOnlyHint supplied by a model. Native proof/owner/private-body
         // checks independently deny triage/group/unread and stale sources.
         const {ASSISTANT_COMPANY_CONTEXT_READ_TOOLS}=await import('./trelio-assistant-transport.mjs');
-        if(pass.intakeKind==='route_existing'||toolName!=='request_assistant_profile_update'
+        if(pass.intakeKind==='route_existing'||!['request_assistant_profile_update','use_assistant_browser'].includes(toolName)
           &&!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
       }
       if(!intake && ['get_assistant_intake_context','resolve_assistant_intake'].includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
