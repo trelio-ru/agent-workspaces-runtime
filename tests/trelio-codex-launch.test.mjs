@@ -144,7 +144,7 @@ test("encryption failure never uploads plaintext or starts a different transport
 // These cases exercise the actual planner/apply and navigation writer together.
 // Only the remote server, private state store and human native dialog are fakes.
 import { openCodexConnectionWizard, handleCodexConnectionAction, chooseCodexConnectionFolder,
-  registerAndVerifyCodexLaunchFolder, codexConnectionAppResource } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+  registerAndVerifyCodexLaunchFolder, codexConnectionAppResource, runCodexFolderPickerProcess } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import vm from "node:vm";
 
 const wizardFixture = async t => {
@@ -260,7 +260,7 @@ test("native folder dialog uses fixed code on macOS/Windows/Linux and preserves 
     const expected = platform === "win32" ? "C:\\Users\\Моя команда " : "/home/Моя команда ";
     const actual = await chooseCodexConnectionFolder({ platform, environment: { SystemRoot: "C:\\Windows" },
       filesystem: { access: async () => {} }, run: async (command, args, options) => {
-        assert.equal(options.shell, false); assert.ok(args.every(arg => !arg.includes(expected)));
+        assert.equal(options.shell, false); assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]); assert.ok(args.every(arg => !arg.includes(expected)));
         return { stdout: expected + "\n" };
       } });
     assert.equal(actual, expected);
@@ -311,4 +311,16 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   assert.equal(elements.get("done").hidden, true);
   assert.equal(elements.get("setup").hidden, false);
   assert.match(elements.get("status").textContent, /ACCESS_DENIED/u);
+});
+
+
+test("native picker child receives EOF without input and refuses partial early-exit output", async () => {
+  const options = { timeout: 3000, maxBuffer: 16384, shell: false };
+  const result = await runCodexFolderPickerProcess(process.execPath,
+    ["-e", "process.stdin.resume();process.stdin.on('end',()=>process.stdout.write('EOF'))"], options);
+  assert.equal(result.stdout, "EOF");
+  await assert.rejects(runCodexFolderPickerProcess(process.execPath,
+    ["-e", "process.stdout.write('partial');process.exitCode=7"], options), error => error.code === 7);
+  await assert.rejects(runCodexFolderPickerProcess(process.execPath,
+    ["-e", "process.stdout.write('x'.repeat(20000))"], options), /OUTPUT_LIMIT/u);
 });

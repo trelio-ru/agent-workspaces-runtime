@@ -456,16 +456,37 @@ const safeFolderPath = value => typeof value === "string" && value.length <= 409
 const safeConnectionName = value => typeof value === "string" && value.trim().length > 0
   && value.length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value);
 
+/** Native modal child has no input channel. Capture bounded bytes and settle
+ * only after close: an early exit, abort or output overflow cannot leave a live
+ * dialog behind while the App enables another picker or claim partial success. */
+export const runCodexFolderPickerProcess = (file, args, options) => new Promise((resolve, reject) => {
+  const child = spawn(file, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+  const stdout = [], stderr = [];
+  let bytes = 0, failure = null;
+  const collect = target => chunk => {
+    if (failure) return;
+    bytes += chunk.length;
+    if (bytes > (options.maxBuffer ?? 16_384)) {
+      failure = wizardError("CODEX_CONNECTION_PICKER_OUTPUT_LIMIT"); child.kill(); return;
+    }
+    target.push(Buffer.from(chunk));
+  };
+  child.stdout.on("data", collect(stdout)); child.stderr.on("data", collect(stderr));
+  child.on("error", error => { failure = error; });
+  child.on("close", (code, signal) => {
+    const output = { stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") };
+    if (failure) reject(failure);
+    else if (code !== 0 || signal) reject(Object.assign(new Error("Native folder picker did not finish."), { code, stderr: output.stderr }));
+    else resolve(output);
+  });
+});
+
 /** Fixed native programs and fixed scripts only. User paths/names never become
  * shell source, AppleScript/PowerShell code, a prompt, an environment or a log.
  * Cancellation preserves the form; unavailable GUI leaves manual path input. */
 export const chooseCodexConnectionFolder = async ({ signal, platform = process.platform,
   environment = process.env, filesystem = fs, run = null } = {}) => {
-  if (!run) {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    run = promisify(execFile);
-  }
+  run ??= runCodexFolderPickerProcess;
   let executable, args;
   if (platform === "darwin") {
     executable = "/usr/bin/osascript";
@@ -486,7 +507,7 @@ export const chooseCodexConnectionFolder = async ({ signal, platform = process.p
   } else throw wizardError("CODEX_CONNECTION_PICKER_UNAVAILABLE");
   try {
     const result = await run(executable, args, { shell: false, windowsHide: true, timeout: 45_000,
-      maxBuffer: 16_384, encoding: "utf8", signal, env: titleEnvironment(environment, { platform }) });
+      maxBuffer: 16_384, encoding: "utf8", signal, stdio: ["ignore", "pipe", "pipe"], env: titleEnvironment(environment, { platform }) });
     // Remove the native record delimiter, never meaningful path whitespace.
     const selected = String(result.stdout ?? "").replace(/\r?\n$/u, "");
     if (!selected) return null;
@@ -757,7 +778,7 @@ function render(result) {
       CODEX_CONNECTION_READBACK_FAILED:'Не удалось подтвердить путь в Trelio. Повторите проверку',
       CODEX_CONNECTION_FOLDER_UNSAFE:'Папка содержит символическую ссылку. Выберите обычную локальную папку'
     };
-    notice((messages[meta.errorCode] || 'Настройка не завершена. Выбор сохранён. Повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
+    notice((messages[meta.errorCode] || 'Настройка не завершена. Проверьте папку, повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
   } else notice(done ? 'Подключение проверено' : '', false);
   resize();
 }
@@ -787,7 +808,7 @@ async function action(kind, settings) {
       unconfirmed('Проверка не завершена. Повторно откройте мастер через агента');
     }
   } catch (e) {
-    if (requestCap === cap) unconfirmed('Нет ответа от Codex. Повторно откройте мастер в этом чате: сохранённый выбор останется');
+    if (requestCap === cap) unconfirmed('Нет ответа от Codex. Повторно откройте мастер в этом чате');
   } finally { setBusy(false); resize() }
 }
 $('modify').onclick = function() {
