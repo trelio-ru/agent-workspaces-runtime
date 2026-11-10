@@ -770,7 +770,12 @@ test('native Windows recovery runs the same failed registered fixture once and r
       if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);
       const countFile=${JSON.stringify(countFile)},release=${JSON.stringify(release)};
       let count=0;try{count=JSON.parse(fs.readFileSync(countFile,'utf8'));}catch{}
-      fs.writeFileSync(countFile,JSON.stringify(++count));if(count===1)process.exit(1);
+      // Pollers must observe the previous or next complete counter. An in-place
+      // write truncates the public file first, so a genuine scheduled second
+      // process can otherwise expose empty JSON before its executed-flow proof.
+      const next=countFile+'.'+process.pid+'.tmp';
+      fs.writeFileSync(next,JSON.stringify(++count));fs.renameSync(next,countFile);
+      if(count===1)process.exit(1);
       const deadline=setTimeout(()=>process.exit(8),30000);
       const timer=setInterval(()=>{if(fs.existsSync(release)){clearTimeout(deadline);clearInterval(timer);}},25);
     `);
