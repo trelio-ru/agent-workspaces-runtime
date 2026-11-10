@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {queue, assertPush, recover, status} from './git-coordinator.mjs';
 import {validateJobs, verifyHosted} from './git-hosted-ci.mjs';
+import {integrationLaunchResult} from './git-background.mjs';
 
 const source = fileURLToPath(new URL('.', import.meta.url));
 const command = (cwd, ...args) => {
@@ -70,17 +71,25 @@ execFileSync('git',['-C',${JSON.stringify(main)},'merge','--ff-only',sha],{stdio
     events: () => fs.existsSync(path.join(root, 'events')) ? fs.readFileSync(path.join(root, 'events'), 'utf8').trim().split('\n') : []};
 }
 
-test('background admission detaches and concurrent callers reuse one owner through FIFO completion', async t => {
+test('default admission detaches and the background alias reuses one owner through FIFO completion', async t => {
   const f = fixture(t), one = f.branch('one'), two = f.branch('two');
-  const background = async cwd => {
-    const result = await f.launch(cwd, '--background').done;
+  const background = async (cwd, ...args) => {
+    const result = await f.launch(cwd, ...args).done;
     assert.equal(result.code, 0, result.output); return JSON.parse(result.output);
   };
-  const [first, duplicate] = await Promise.all([background(one), background(one)]);
+  const [first, duplicate] = await Promise.all([background(one), background(one, '--background')]);
   assert.equal(first.id, duplicate.id); assert.equal(queue(one).length, 1);
+  assert.deepEqual(first.followUp, duplicate.followUp);
+  assert.equal(first.followUp.action, 'arrange_supported_chat_follow_up');
+  assert.equal(first.followUp.intervalMinutes, 15);
+  assert.equal(first.followUp.schedulingState, 'not_confirmed');
+  assert.equal(first.followUp.canonicalDirectory, f.main);
   await until(() => f.events().length === 1);
   assert.equal(fs.statSync(first.logPath).mode & 0o777, 0o600);
-  const original = command(two, 'rev-parse', 'HEAD'), second = await background(two);
+  // --tag without a launch-mode flag must detach as well; the same worker
+  // still reserves the exact version and performs the guarded atomic push.
+  const original = command(two, 'rev-parse', 'HEAD'), second = await background(two, '--tag', 'v9.9.8');
+  assert.equal(second.tag, 'v9.9.8');
   assert.equal(status(f.main, second.id).state, 'waiting');
   fs.writeFileSync(path.join(f.root, 'release'), 'go');
   await until(() => status(f.main, second.id).state === 'succeeded');
@@ -88,9 +97,43 @@ test('background admission detaches and concurrent callers reuse one owner throu
   assert.equal(status(f.main, second.id).sourceSha, original);
   assert.equal(status(f.main, second.id).sha, command(two, 'rev-parse', 'HEAD'));
   assert.equal(status(f.main, first.id).outcome, 'integrated');
+  assert.equal(command(f.main, 'rev-parse', 'v9.9.8^{}'), command(two, 'rev-parse', 'HEAD'));
   const observed = await f.launch(f.main, '--status', second.id).done;
   assert.equal(JSON.parse(observed.output).state, 'succeeded');
+  assert.equal(JSON.parse(observed.output).followUp, undefined, 'status is an observation, not another scheduling request');
   assert.equal(status(f.main, '999999999999').state, 'unknown');
+});
+
+test('explicit foreground waits for the worker and propagates its failure', async t => {
+  const f = fixture(t), cwd = f.branch('one');
+  const running = f.launch(cwd, '--foreground');
+  await until(() => f.events().length === 1);
+  assert.equal(running.child.exitCode, null, 'foreground remains attached while CI is held');
+  fs.writeFileSync(path.join(f.root, 'release'), 'go');
+  const completed = await running.done;
+  assert.equal(completed.code, 0, completed.output);
+  fs.writeFileSync(path.join(f.root, 'fail'), 'fail CI');
+  const failed = await f.launch(f.branch('failure'), '--foreground').done;
+  assert.notEqual(failed.code, 0);
+  assert.match(failed.output, /failed/);
+});
+
+test('conflicting launch modes refuse before admission', async t => {
+  const f = fixture(t), cwd = f.branch('modes');
+  for (const args of [['--foreground', '--background'], ['--background', '--foreground']]) {
+    const refused = await f.launch(cwd, ...args).done;
+    assert.notEqual(refused.code, 0); assert.match(refused.output, /Use git:integrate/);
+  }
+  assert.deepEqual(queue(cwd), []); assert.deepEqual(f.events(), []);
+});
+
+test('settled launch observations request outcome review without claiming a scheduled wake', () => {
+  for (const state of ['succeeded', 'failed', 'interrupted', 'recovery_required', 'recovered', 'unknown']) {
+    const value = integrationLaunchResult({id: '000000000001', state}, '/canonical');
+    assert.equal(value.followUp.action, 'review_integration_result');
+    assert.equal(value.followUp.intervalMinutes, undefined);
+    assert.equal(value.followUp.schedulingState, undefined);
+  }
 });
 
 test('background failure retains a private terminal result without assuming ticket disappearance is success', async t => {

@@ -7,6 +7,32 @@ import {randomBytes} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+/** Describe the next client step without pretending to have scheduled it.
+ * Both launchers use this projection, including reattachment to a live ticket.
+ * Admission proves only that the worker owns the integration; a client-owned
+ * wake needs its own saved/read-back result and must respect client policy.
+ * Keep this guidance out of durable tickets/receipts: it grants no Git rights.
+ */
+export function integrationLaunchResult(observation, canonicalDirectory) {
+  const active = ['waiting', 'running', 'verified'].includes(observation.state);
+  return {...observation, followUp: active ? {
+    action: 'arrange_supported_chat_follow_up',
+    intervalMinutes: 15,
+    schedulingState: 'not_confirmed',
+    canonicalDirectory,
+    instruction: 'Before ending this turn, arrange one supported follow-up in this same chat for this exact ticket. '
+      + 'Use a 15-minute native heartbeat only when client policy permits it, reuse an existing one and confirm it was saved. '
+      + 'Retain the ticket, canonical/task directories, branch, source SHA, authorised tag and remaining steps. '
+      + 'Do not loop over sleep/status or promise an automatic return from worker admission alone. '
+      + 'Without permitted scheduling, use a supported blocking wait or report the concrete follow-up blocker.',
+  } : {
+    action: 'review_integration_result',
+    canonicalDirectory,
+    instruction: 'Review this exact terminal outcome before any retry. For success, verify fresh remote state and finish the task worktree and remaining authorised steps. '
+      + 'Do not schedule a heartbeat for an already settled integration or infer success from a missing ticket.',
+  }};
+}
+
 function privateDirectory(directory) {
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.mode & 0o077

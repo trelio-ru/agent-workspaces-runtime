@@ -1241,9 +1241,11 @@ publication tooling также остаются вне этого публичн
   Shell transport retries only natural live-FIFO mutex acquisition under one fixed bound; never delete an unchanged dead/foreign claim, borrow authority or replay a push.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
-  При долгом ожидании использовать `git:integrate -- --background` и один
-  15-минутный heartbeat этого же чата по тому же контракту; без подтверждённого
-  admission и сохранённой автоматизации не обещать автоматическое продолжение.
+  `git:integrate` сразу запускает background; `--foreground` – только явная
+  диагностика. После admission сразу выполнить `followUp`: один подтверждённый
+  15-минутный heartbeat этого же чата, если клиент разрешает; иначе supported
+  blocking wait либо конкретный blocker. Не крутить модельный sleep/status;
+  `schedulingState=not_confirmed` не подтверждает автоматическое продолжение.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требует full с четырьмя visual OS jobs; обе macOS lanes используют явный
   GitHub-hosted `macos-15-intel` по [CI-контракту](docs/runtime-ci.md), без

@@ -230,7 +230,7 @@ fi
 
 AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_ONE_WORKTREE}" \
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture >/dev/null
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture --foreground >/dev/null
 
 task_one_sha="$(git -C "${TASK_ONE_WORKTREE}" rev-parse HEAD)"
 canonical_sha="$(git -C "${CANONICAL_REPOSITORY}" rev-parse HEAD)"
@@ -308,7 +308,7 @@ remote_before_blocked_push="$(
 
 if AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_TWO_WORKTREE}" \
   AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture >/dev/null 2>&1; then
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture --foreground >/dev/null 2>&1; then
   printf 'Guarded push ignored a dirty canonical main worktree.\n' >&2
   exit 1
 fi
@@ -324,7 +324,7 @@ fi
 git -C "${CANONICAL_REPOSITORY}" restore README.md
 AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_TWO_WORKTREE}" \
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture >/dev/null
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture --foreground >/dev/null
 
 (
   cd "${CANONICAL_REPOSITORY}"
@@ -369,7 +369,7 @@ fi
 AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_THREE_WORKTREE}" \
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
   bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture \
-    --tag v9.9.9 >/dev/null
+    --foreground --tag v9.9.9 >/dev/null
 
 release_sha="$(git -C "${TASK_THREE_WORKTREE}" rev-parse HEAD)"
 remote_tag_sha="$(

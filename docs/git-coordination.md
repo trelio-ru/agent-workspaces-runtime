@@ -75,14 +75,21 @@ invariant without replacing its mature runner/evidence implementation.
 
 ## Background integration and chat follow-up
 
-Use `npm run git:integrate -- --background` (or append `--tag EXACT_TAG` for an
-already authorised release) when integration will wait for FIFO or CI. The
-launcher exits only after the isolated worker acknowledges durable admission.
+`npm run git:integrate` always launches in the background; `--background` remains
+a compatible explicit alias. Append `--tag EXACT_TAG` for an already authorised
+release. Only explicit `--foreground` keeps the terminal attached for diagnostics;
+do not choose it for routine chat work or wait until a queue is already slow.
+The launcher exits only after the isolated worker acknowledges durable admission.
 Its JSON contains ticket ID, original/current SHA, worktree, branch and private
 log path. The worker inherits no terminal/stdin/output pipe, progresses FIFO
 without a model turn, and retains the existing repository CI/transport guards.
 It is not automatically restarted. The computer must stay on; local chat
-follow-up also needs the Codex desktop app running.
+follow-up also needs the Codex desktop app running. The launch JSON includes
+`followUp.action=arrange_supported_chat_follow_up`, a 15-minute interval, the
+canonical checkout and `schedulingState=not_confirmed`. These are next steps,
+never evidence that a scheduler was saved. Reattachment returns the same guidance;
+plain `--status` remains an observation without a new scheduling request. If the
+worker has already settled, launch instead requests `review_integration_result`.
 
 Repeating background launch for the same live candidate returns its existing
 ticket. Concurrent admission is serialized by the same mutex. Another candidate,
@@ -100,15 +107,18 @@ CI evidence or the canonical push guard. No state/log enters installed packages.
 An instruction to finish the development task authorises its temporary follow-up
 within the same scope; it does not authorise a new release or another task:
 
-1. After confirmed active admission, create or update ONE heartbeat in the SAME
-   chat for every 15 minutes, using the native automation tool. Save exact ticket,
+1. Immediately after confirmed active admission, arrange ONE follow-up in the SAME
+   chat. Where the client's native tools and policy permit scheduled follow-up,
+   create or update a heartbeat for every 15 minutes. Save exact ticket,
    canonical checkout, task worktree, branch, original SHA, authorised release tag
    (if any) and remaining post-integration steps in its readable prompt. A repeated
    wake/manual continuation reuses that automation and ticket.
-2. Confirm the automation was actually saved before ending the active turn.
-   Without a working scheduler, continue foreground observation or report the
-   concrete blocker; do not promise an automatic return. Other clients must use
-   their supported scheduler explicitly, never pretend Codex tools are present.
+2. Confirm the follow-up was actually saved before ending the active turn; an
+   intent, launch JSON or `not_confirmed` field is insufficient. Without permitted
+   scheduling, use a supported blocking wait or report the concrete follow-up
+   blocker; never replace it with repeated model `sleep`/`--status` calls or
+   promise an automatic return. Respect client restrictions; never invent a
+   scheduler or bypass its policy through another process or API.
 3. On each wake read exact ticket status from the same clone. While active, do no
    edits/rebase/new CI/enqueue and end the check quietly. Notify only on completion,
    failure, a meaningful change or required human action, never every 15 minutes.

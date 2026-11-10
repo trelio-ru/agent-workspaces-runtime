@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
-import {acknowledgeAdmission, launchBackground} from './git-background.mjs';
+import {acknowledgeAdmission, integrationLaunchResult, launchBackground} from './git-background.mjs';
 
 const SHA = /^[a-f0-9]{40}$/u;
 const ID = /^\d{12}$/u;
@@ -373,13 +373,14 @@ export async function main(args = process.argv.slice(2)) {
   if (args[0] === '--status' && args.length === 1) return console.log(JSON.stringify(queue(cwd), null, 2));
   if (args[0] === '--status' && args.length === 2) return console.log(JSON.stringify(status(cwd, args[1])));
   if (args[0] === '--recover' && args.length === 2) return recover(cwd, args[1]);
-  const worker = args[0] === '--worker', backgroundWorker = args[0] === '--background-worker', detached = args[0] === '--background';
+  const worker = args[0] === '--worker', backgroundWorker = args[0] === '--background-worker';
+  const detached = args[0] === '--background', foreground = args[0] === '--foreground';
   const expected = backgroundWorker ? {logFile: args[1], sha: args[2], branch: args[3]} : null;
   if (backgroundWorker && (!/^[a-f0-9]{32}\.log$/u.test(expected.logFile ?? '') || !SHA.test(expected.sha ?? '')
     || !/^codex\/[a-z0-9][a-z0-9._-]*$/u.test(expected.branch ?? ''))) throw Error('Invalid background worker identity');
   if (backgroundWorker) args = args.slice(4);
-  else if (worker || detached) args = args.slice(1);
-  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--background] [--tag TAG] | --status [TICKET] | --recover TICKET');
+  else if (worker || detached || foreground) args = args.slice(1);
+  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--background | --foreground] [--tag TAG] | --status [TICKET] | --recover TICKET');
   if (!['darwin', 'linux'].includes(process.platform) || Number(process.versions.node.split('.')[0]) < 22) throw Error('Coordinator requires native Linux/macOS and Node >=22');
   if (worker) return coordinate(cwd, args[1] ?? '');
   if (backgroundWorker) {
@@ -389,7 +390,12 @@ export async function main(args = process.argv.slice(2)) {
       throw error;
     }
   }
-  if (detached) return console.log(JSON.stringify(await background(cwd, args[1] ?? '')));
+  // The ordinary command must never keep the chat attached through FIFO/CI.
+  // --background remains a compatible alias; only an explicit diagnostic
+  // --foreground keeps the old terminal/signal lifecycle. Internal worker
+  // modes above must bypass this branch so they cannot recursively detach.
+  if (!foreground) return console.log(JSON.stringify(integrationLaunchResult(
+    await background(cwd, args[1] ?? ''), git(cwd, 'config', '--get', policy(cwd).canonicalKey))));
   // Each worker owns an observable group, including all ordinary Git/gh children.
   // A SIGKILL keeps its ticket until exact dead-group recovery is established.
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--worker', ...args], {cwd, stdio: 'inherit', detached: true});
