@@ -18,11 +18,16 @@ test('five tabs over the browser lifetime, not five more after a tab is closed',
 });
 
 test('native extension events remove popup overflow; close removes every owned window', async () => {
-  const noop = { addListener() {} }, sent = [], removed = [], closedWindows = [];
+  const noop = { addListener() {} }, sent = [], removed = [], closedWindows = [], notificationPolicy = [];
   let socket, onCreated, onRemoved;
   const config = { origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', deadlineAt: Date.now() + 10000, manual: true };
   const context = { URL, Date, TextEncoder, setTimeout, clearTimeout, chrome: {
     runtime: { id: 'fixture', onMessage: noop }, debugger: { onDetach: noop, onEvent: noop, async attach() {}, async detach() {}, async sendCommand() { return {}; } },
+    // Startup now verifies notification blocking before opening a site. Model
+    // the actual Chrome API here too: this popup/cleanup fixture must reach
+    // the ordinary ready boundary, rather than fail on an absent stub method.
+    contentSettings: { notifications: { async set(value) { notificationPolicy.push(JSON.parse(JSON.stringify(value))); },
+      async get({ primaryUrl }) { assert.equal(primaryUrl, config.initialUrl); return { setting: 'block' }; } } },
     webRequest: { onBeforeRequest: noop, onHeadersReceived: noop },
     cookies: { onChanged: noop, async getAll() { return []; } },
     declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
@@ -36,6 +41,7 @@ test('native extension events remove popup overflow; close removes every owned w
   socket.onmessage({ data: JSON.stringify({ id: 'auth', operation: 'restore-session-auth', args: { cookies: [], replace: false } }) });
   await tick(); await tick();
   assert.equal(sent.some(m => m.kind === 'hello'), true);
+  assert.deepEqual(notificationPolicy, [{ primaryPattern: '<all_urls>', setting: 'block', scope: 'regular' }]);
   for (let id = 2; id <= 12; id++) onCreated({ id, windowId: 2 });
   await tick(); await tick();
   assert.deepEqual(removed, [6, 7, 8, 9, 10, 11, 12]);
