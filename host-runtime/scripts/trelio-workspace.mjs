@@ -20047,7 +20047,6 @@ export const buildKimiWorkBundle = ({ pluginRoot, nodePath = process.execPath })
     throw new Error("TRELIO_KIMI_PLUGIN_ROOT_REQUIRED");
   }
   const loader = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-loader.mjs")).href;
-  const shell = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-shell.mjs")).href;
   // Kimi rejects absolute command paths in plugin manifests. Use its documented
   // PATH form and enforce the shared Node 22+ floor before runtime selection.
   // GUI and terminal PATHs may select different compatible Node installations;
@@ -20058,7 +20057,7 @@ export const buildKimiWorkBundle = ({ pluginRoot, nodePath = process.execPath })
       description: "Trelio Agent Workspaces for Kimi Work", interface: { displayName: "Trelio Agent Workspaces" },
       mcpServers: { trelio: server("remote"), "trelio-remote-skills": server("local") },
       systemPrompt: `Use Trelio in Kimi Work with clientKind=kimi-work. Connect via trelio_connect; never use Codex/Claude hooks or author runtimeSessionProof. Read the applicable Trelio workflow from ${path.join(pluginRoot, "skills", "trelio-workspace-worker", "SKILL.md")} before Workspace work. MCP Apps and secret browser-fill are unavailable. OAuth, protected read, bridge and saved Workspace are separate checks; report only verified results.` }, null, 2)}\n`,
-    "bootstrap.mjs": `// Generated bootstrap; all execution remains in the verified signed runtime.\nimport { pathToFileURL } from 'node:url';\nimport path from 'node:path';\nimport { selectHostRuntime } from ${JSON.stringify(loader)};\nimport { PLUGIN_VERSION } from ${JSON.stringify(shell)};\nconst profile = process.argv[2];\nif (process.argv.length !== 3 || !['remote','local'].includes(profile)) throw new Error('TRELIO_KIMI_PROFILE_INVALID');\nif (Number(process.versions.node.split('.')[0]) < 22) throw new Error('TRELIO_NODE_22_REQUIRED');\nconst selected = await selectHostRuntime();\nif (!selected) throw new Error('TRELIO_HOST_RUNTIME_REQUIRED');\nprocess.env.TRELIO_PLUGIN_ROOT = ${JSON.stringify(pluginRoot)};\nprocess.env.TRELIO_PLUGIN_VERSION = PLUGIN_VERSION;\nprocess.env.TRELIO_HOST_RUNTIME_VERSION = selected.runtimeVersion;\nprocess.env.TRELIO_WORKSPACE_CLIENT_PROFILE = 'kimi-work';\nconst runtime = await import(pathToFileURL(path.join(selected.runtimeDirectory,'scripts','trelio-remote-mcp.mjs')).href);\nconst start = profile === 'remote' ? runtime.runKimiStdioHost : runtime.runKimiLocalStdioHost;\nif (typeof start !== 'function') throw new Error('TRELIO_KIMI_RUNTIME_REQUIRED');\nawait start();\n`,
+    "bootstrap.mjs": `// Generated bootstrap; the official loader owns update, verification and startup.\nimport { runHostRuntimeLoader } from ${JSON.stringify(loader)};\nconst profile = process.argv[2];\nif (process.argv.length !== 3 || !['remote','local'].includes(profile)) throw new Error('TRELIO_KIMI_PROFILE_INVALID');\nif (Number(process.versions.node.split('.')[0]) < 22) throw new Error('TRELIO_NODE_22_REQUIRED');\nprocess.env.TRELIO_WORKSPACE_CLIENT_PROFILE = 'kimi-work';\nprocess.exitCode = await runHostRuntimeLoader({ rawArguments: ['mcp','--kimi-work',profile] });\n`,
   };
 };
 
@@ -20097,6 +20096,7 @@ const printHelp = () => {
   process.stdout.write("Команды:\n");
   process.stdout.write("  trelio-workspace doctor [--json] [--origin URL]\n");
   process.stdout.write("  trelio-workspace deepseek install\n");
+  process.stdout.write("  trelio-workspace kimi install\n");
   process.stdout.write("  trelio-workspace login [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace encryption setup --company SLUG [--json] [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace inspect --workspace UUID [--origin https://trelio.ru]\n");

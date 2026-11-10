@@ -3400,7 +3400,12 @@ Qualification fixture rc.3 содержит Zod 4.4.3 с [GHSA-mrhx-c7xc-m3w5](h
 `bridge kimi install` creates an immutable private `kimi.plugin.json` and
 bootstrap around the existing official stable loader. Both stdio profiles
 (`trelio`, `trelio-remote-skills`) verify the selected signed runtime before
-import, using Node 22+ and a permanent plugin root. The installer never
+import, using Node 22+ and a permanent plugin root. The bootstrap traverses the
+SAME stable loader's MCP startup/update path with its original bounded foreground
+budget, rather than merely reading a cached selection. Closed forwarded
+`mcp --kimi-work remote|local` selectors are checked at both executable boundaries;
+old/unknown runtime selectors refuse without starting ordinary local MCP. The
+installer never
 modifies Kimi configuration, another client's trust/hooks, or an existing changed
 bundle. Native plugin installation remains Work's ordinary user-facing flow.
 No stable plugin change, copied provider implementation or new package file is

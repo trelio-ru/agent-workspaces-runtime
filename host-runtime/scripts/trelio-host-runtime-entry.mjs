@@ -32,9 +32,14 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
     throw new Error("Trelio host runtime ожидает mode bridge, hook или mcp.");
   }
 
-  // A retired or unknown MCP profile must fail before spawning the ordinary
-  // skill host: falling through could read another client's configuration.
-  if (mode === "mcp" && argumentsAfterMode.length) {
+  // Kimi's generated bootstrap uses the SAME stable loader's MCP startup,
+  // including its bounded foreground update and signature verification. Keep
+  // the forwarded selector closed at both executable boundaries: an old
+  // runtime rejects these arguments instead of entering a foreign local host.
+  const kimiProfile = mode === "mcp" && argumentsAfterMode.length === 2
+    && argumentsAfterMode[0] === "--kimi-work"
+    && ["remote", "local"].includes(argumentsAfterMode[1]);
+  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile) {
     throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED");
   }
 
@@ -59,9 +64,19 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
 
   return {
     mode,
+    ...(kimiProfile ? { profile: "kimi-work" } : {}),
     entrypointPath: path.join(SCRIPT_DIRECTORY, entrypointName),
     arguments: argumentsAfterMode,
   };
+};
+
+const assertHostRuntimeNamespace = (invocation, environment) => {
+  // This marker selects storage only; it never grants OAuth or object access.
+  // Check before optional maintenance as well as spawn, since both may touch
+  // private state. A selector alone cannot borrow the common client's paths.
+  if (invocation.profile === "kimi-work" && environment.TRELIO_WORKSPACE_CLIENT_PROFILE !== "kimi-work") {
+    throw new Error("TRELIO_KIMI_PROFILE_REQUIRED");
+  }
 };
 
 export const runHostRuntime = async ({
@@ -71,6 +86,7 @@ export const runHostRuntime = async ({
   startupTrace = createMcpStartupTrace({ environment }),
 } = {}) => {
   const invocation = resolveHostRuntimeInvocation(rawArguments);
+  assertHostRuntimeNamespace(invocation, environment);
   const isHook = invocation.mode === "hook" || invocation.profile === "assistant" && invocation.arguments[0] === "hook";
   const isMcp = invocation.mode === "mcp" || invocation.profile === "assistant" && invocation.arguments[0] === "mcp";
   // A downloaded runtime is meaningful only together with the exact shell and
@@ -141,6 +157,7 @@ if (isDirectModuleInvocation(import.meta.url)) {
   Promise.resolve().then(() => {
     // Reject invalid modes/versions before even optional cache maintenance.
     const invocation = resolveHostRuntimeInvocation(process.argv.slice(2));
+    assertHostRuntimeNamespace(invocation, process.env);
     requireTrelioComponentVersions(process.env);
     if (invocation.profile !== "assistant") startMirrorCacheMaintenance();
     return runHostRuntime();

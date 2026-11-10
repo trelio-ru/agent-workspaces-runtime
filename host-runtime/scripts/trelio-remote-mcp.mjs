@@ -7120,18 +7120,6 @@ export const runStdioHost = async ({
   diagnosticReporter.close();
 };
 
-if (isDirectModuleInvocation(import.meta.url)) {
-  // The local MCP has no native-client subprofiles. Reject stale launch
-  // arguments before bootstrap, credential access or Codex configuration.
-  const start = process.argv.length === 2
-    ? runStdioHost : async () => { throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED"); };
-  start().catch((error) => {
-    process.stderr.write(`Remote MCP host failed: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
-}
-
-
 /** Native client entry alongside the ordinary stdio host.
  * Keep one shared transport implementation and the frozen 100-file package
  * inventory. This closure isolates native registration names from stdio state;
@@ -7726,3 +7714,19 @@ export const runKimiLocalStdioHost = (options = {}) => {
   origin: DEFAULT_ORIGIN, migrateClientConfiguration: async () => null, preservePlugin: () => null,
   });
 };
+
+if (isDirectModuleInvocation(import.meta.url)) {
+  // Repeat the signed entry's closed selector before any host bootstrap.
+  // An unknown/retired selector must never fall through to ordinary local MCP.
+  // This guard follows the native function declarations so neither carrier
+  // can observe a partially initialized module during direct Node startup.
+  const args = process.argv.slice(2);
+  const start = args.length === 0 ? runStdioHost
+    : args.length === 2 && args[0] === "--kimi-work" && args[1] === "remote" ? runKimiStdioHost
+      : args.length === 2 && args[0] === "--kimi-work" && args[1] === "local" ? runKimiLocalStdioHost
+        : async () => { throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED"); };
+  Promise.resolve().then(() => start()).catch((error) => {
+    process.stderr.write(`Remote MCP host failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

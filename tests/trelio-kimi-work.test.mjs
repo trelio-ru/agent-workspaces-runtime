@@ -37,15 +37,16 @@ test("Kimi bundle uses both signed stdio profiles, no foreign hooks, and preserv
   assert.deepEqual(manifest.mcpServers.trelio.args, ["./bootstrap.mjs", "remote"]);
   assert.deepEqual(manifest.mcpServers["trelio-remote-skills"].args, ["./bootstrap.mjs", "local"]);
   const bootstrap = await fs.readFile(path.join(result.bundleDirectory, "bootstrap.mjs"), "utf8");
-  assert.match(bootstrap, /await selectHostRuntime\(\)/u);
-  assert.match(bootstrap, /selected.runtimeDirectory/u);
+  assert.match(bootstrap, /await runHostRuntimeLoader\(/u);
+  assert.match(bootstrap, /\['mcp','--kimi-work',profile\]/u);
+  assert.doesNotMatch(bootstrap, /selectHostRuntime|selected.runtimeDirectory/u);
   assert.match(bootstrap, /TRELIO_NODE_22_REQUIRED/u);
   assert.doesNotMatch(bootstrap, /accessToken|runtimeSessionProof|CODEX_THREAD_ID/u);
   await fs.appendFile(path.join(result.bundleDirectory, "bootstrap.mjs"), "// own modification\n");
   await assert.rejects(installKimiWorkBundle(options), /TRELIO_KIMI_BUNDLE_CHANGED/u);
 });
 
-test("generated Kimi bootstrap runs both profiles and enforces Node 22+ before runtime selection", async t => {
+test("generated Kimi bootstrap runs both profiles through updating loader MCP and enforces Node 22+", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-kimi-bootstrap-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const scripts = path.join(root, "scripts"); await fs.mkdir(scripts);
@@ -53,10 +54,7 @@ test("generated Kimi bootstrap runs both profiles and enforces Node 22+ before r
   // real Node so invalid manifest commands, interpolation or import ordering
   // cannot pass as a successful native startup based on a string assertion.
   await fs.writeFile(path.join(scripts, "trelio-host-runtime-loader.mjs"),
-    `export const selectHostRuntime=async()=>({runtimeVersion:'test',runtimeDirectory:${JSON.stringify(root)}});`);
-  await fs.writeFile(path.join(scripts, "trelio-host-runtime-shell.mjs"), "export const PLUGIN_VERSION='test';");
-  await fs.writeFile(path.join(scripts, "trelio-remote-mcp.mjs"),
-    "if(process.env.TRELIO_WORKSPACE_CLIENT_PROFILE!=='kimi-work')throw Error('profile lost'); export const runKimiStdioHost=()=>process.stdout.write('remote'); export const runKimiLocalStdioHost=()=>process.stdout.write('local');");
+    "export const runHostRuntimeLoader=async({rawArguments})=>{if(process.env.TRELIO_WORKSPACE_CLIENT_PROFILE!=='kimi-work')throw Error('profile lost'); if(rawArguments.length!==3||rawArguments[0]!=='mcp'||rawArguments[1]!=='--kimi-work'||!['remote','local'].includes(rawArguments[2]))throw Error('loader MCP update bypassed'); process.stdout.write(rawArguments[2]); return 0;};");
   const run = (profile, preloads = []) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [...preloads, "./bootstrap.mjs", profile], { cwd: root, shell: false,
       stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 });
@@ -80,6 +78,50 @@ test("generated Kimi bootstrap runs both profiles and enforces Node 22+ before r
   await fs.writeFile(versionFile, "Object.defineProperty(process.versions,'node',{value:'24.1.0'});");
   const compatible = await run("remote", ["--import", pathToFileURL(versionFile).href]);
   assert.equal(compatible.code, 0, compatible.stderr); assert.equal(compatible.stdout, "remote");
+});
+
+test("actual signed-runtime entry selects both Kimi carriers and rejects malformed or unnamespaced startup", async t => {
+  const { spawnSync } = await import("node:child_process");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-kimi-entry-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const { fileURLToPath } = await import("node:url");
+  const entry = fileURLToPath(new URL("../host-runtime/scripts/trelio-host-runtime-entry.mjs", import.meta.url));
+  const remote = fileURLToPath(new URL("../host-runtime/scripts/trelio-remote-mcp.mjs", import.meta.url));
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory,
+    LOCALAPPDATA: path.join(directory, "local"), XDG_CACHE_HOME: path.join(directory, "cache"),
+    CODEX_HOME: path.join(directory, "foreign-codex"),
+    TRELIO_PLUGIN_VERSION: "3.2.5", TRELIO_HOST_RUNTIME_VERSION: "3.31.4",
+    TRELIO_WORKSPACE_CLIENT_PROFILE: "kimi-work" };
+  const input = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-03-26" } }) + "\n";
+  for (const profile of ["remote", "local"]) {
+    const result = spawnSync(process.execPath, [entry, "mcp", "--kimi-work", profile],
+      { env, input, encoding: "utf8", timeout: 20_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const messages = result.stdout.trim().split("\n").map(JSON.parse);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].id, 1);
+    assert.equal(messages[0].result.serverInfo.name, profile === "remote" ? "trelio-kimi-work" : "trelio-remote-skills");
+    assert.equal(messages[0].result.serverInfo.version, "3.31.4");
+  }
+  // Exercise BOTH actual executables: a selector alone never selects common
+  // OAuth/bridge storage, and an unknown argument never starts ordinary MCP.
+  for (const executable of [entry, remote]) {
+    for (const args of [["--kimi-work"], ["--kimi-work", "other"], ["--kimi-work", "local", "extra"]]) {
+      const result = spawnSync(process.execPath, [executable, ...(executable === entry ? ["mcp"] : []), ...args],
+        { env, input, encoding: "utf8", timeout: 20_000 });
+      assert.notEqual(result.status, 0); assert.equal(result.stdout, "");
+      assert.match(result.stderr, /TRELIO_MCP_ARGUMENTS_UNSUPPORTED/u);
+    }
+    for (const profile of ["remote", "local"]) {
+      const withoutNamespace = { ...env }; delete withoutNamespace.TRELIO_WORKSPACE_CLIENT_PROFILE;
+      const result = spawnSync(process.execPath, [executable, ...(executable === entry ? ["mcp"] : []), "--kimi-work", profile],
+        { env: withoutNamespace, input, encoding: "utf8", timeout: 20_000 });
+      assert.notEqual(result.status, 0); assert.equal(result.stdout, "");
+      assert.match(result.stderr, /TRELIO_KIMI_PROFILE_REQUIRED/u);
+    }
+  }
+  await assert.rejects(fs.stat(path.join(directory, "foreign-codex")), { code: "ENOENT" });
 });
 
 test("Kimi uses the real S256/state/loopback OAuth engine and a distinct native vault cell", async () => {
