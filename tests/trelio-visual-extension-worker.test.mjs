@@ -6,7 +6,190 @@ import vm from 'node:vm';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
 import { randomUUID } from 'node:crypto';
-const startWorker = (config, context) => vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
+const startWorker = (config, context) => {
+  context.chrome.contentSettings ??= { notifications: { async set() {}, async get() { return { setting: 'block' }; } } };
+  return vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
+};
+
+/** Execute the actual materialised worker with a native input whose reply is
+ * withheld until its dialog is answered. A listener-only mock would miss the
+ * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
+ * one or several independent model turns, without a second input dispatch. */
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false } = {}) {
+  const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
+  const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
+  let socket, nativeEvent, currentUrl = 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
+  const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
+    { type, message, url: currentUrl, ...extra });
+  const context = { URL, Date, TextEncoder, Uint8Array, DataView, performance, atob, btoa, crypto: { randomUUID },
+    // Real event-loop yields, without the unrelated post-input animation wait.
+    setTimeout(fn) { return setTimeout(fn, 0); }, clearTimeout,
+    OffscreenCanvas: class {
+      getContext() { return { fillRect() {}, fillText(value) { raster.push(value); } }; }
+      async convertToBlob() { return { async arrayBuffer() { return Uint8Array.of(1, 2, 3).buffer; } }; }
+    },
+    chrome: {
+      runtime: { id: 'fixture', onMessage: events },
+      contentSettings: { notifications: {
+        async set(value) { policy.push(JSON.parse(JSON.stringify(value))); if (policyFailure === 'write') throw Error('PRIVATE_NOTIFICATION_ERROR'); },
+        async get() { return { setting: policyFailure === 'read' ? 'ask' : 'block' }; },
+      } },
+      debugger: { onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
+        async sendCommand(_source, method, args) {
+          if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } }; }
+          if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
+          // Protocol-only native stub. Full PNG/MCP validation is independently
+          // exercised by the real Chromium fixture, not this header stand-in.
+          if (method === 'Page.captureScreenshot') return { data: pngHeader.toString('base64') };
+          if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
+            clicks++;
+            if (immediateAck) { queueMicrotask(() => open()); return {}; }
+            return new Promise((resolve, reject) => { release = resolve; rejectInput = reject; queueMicrotask(() => open()); });
+          }
+          if (method === 'Input.dispatchKeyEvent' && args.type === 'keyDown') {
+            keys++; return new Promise(resolve => { release = resolve; queueMicrotask(() => open()); });
+          }
+          if (method === 'Input.dispatchKeyEvent' && args.type === 'keyUp') keyUps++;
+          if (method === 'Page.handleJavaScriptDialog') {
+            answers.push(JSON.parse(JSON.stringify(args)));
+            if (answerFails) throw Error('PRIVATE_UNKNOWN_NATIVE_ANSWER');
+            nativeEvent({ tabId: 1 }, 'Page.javascriptDialogClosed', {});
+            if (nextDialog) { nextDialog = false; queueMicrotask(() => open('alert', 'Message sent')); }
+            else release?.({});
+          }
+          return {};
+        } },
+      webRequest: { onBeforeRequest: events, onHeadersReceived: events },
+      cookies: { onChanged: events, async getAll() { return []; } },
+      declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
+      windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
+      tabs: { onCreated: events, onRemoved: events,
+        async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
+        async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
+        async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
+        async sendMessage(_id, message) { return message.kind === 'authentication-guard' ? { blocked: false } : { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false }; },
+      },
+    }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } },
+  };
+  startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
+    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual,
+    observationMode: image ? 'image' : 'text', deadlineAt: Date.now() + 10_000 }, context);
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick(); socket.onopen(); let sequence = 0;
+  const dispatch = async (operation, args = {}) => {
+    const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
+    for (let i = 0; i < 300; i++) { await new Promise(resolve => setTimeout(resolve, 1)); const result = sent.find(value => value.id === id); if (result) return result.result; }
+    throw Error('synthetic_command_timeout');
+  };
+  if (!policyFailure) await dispatch('restore-session-auth', { cookies: [], replace: false });
+  return { dispatch, open, sent, answers, policy, raster, counts: () => ({ clicks, keys, keyUps, reads }),
+    set type(value) { nextType = value; }, set failAnswer(value) { answerFails = value; }, set chain(value) { nextDialog = value; },
+    humanClose() { nativeEvent({ tabId: 1 }, 'Page.javascriptDialogClosed', {}); release?.({}); },
+    failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
+  };
+}
+
+test('native confirm unblocks the original input through a separate observed answer, never a second click', async () => {
+  const worker = await dialogWorker();
+  assert.deepEqual(worker.policy, [{ primaryPattern: '<all_urls>', setting: 'block', scope: 'regular' }]);
+  const page = await worker.dispatch('read-text');
+  const modal = await worker.dispatch('click', { frameId: page.frameId, x: 20, y: 30 });
+  assert.match(modal.text, /Send the reviewed message/);
+  const reads = worker.counts().reads;
+  const fresh = await worker.dispatch('read-text');
+  assert.equal(worker.counts().reads, reads, 'observing a modal never waits for its blocked renderer');
+  assert.equal(fresh.frameId, modal.frameId, 'an unchanged native message retains its immutable one-use frame');
+  assert.equal((await worker.dispatch('key', { frameId: page.frameId, key: 'Enter' })).reason, 'stale_frame');
+  assert.equal((await worker.dispatch('navigate', { url: 'https://example.test/other' })).reason, 'stale_frame');
+  const result = await worker.dispatch('key', { frameId: fresh.frameId, key: 'Enter' });
+  assert.equal(result.text, 'Original site result');
+  assert.deepEqual(worker.answers, [{ accept: true }]); assert.equal(worker.counts().clicks, 1);
+  assert.equal((await worker.dispatch('key', { frameId: fresh.frameId, key: 'Enter' })).reason, 'stale_frame');
+});
+
+test('a dialog opened by Enter resumes its original key-up without a second key-down', async () => {
+  const worker = await dialogWorker();
+  const page = await worker.dispatch('read-text');
+  const modal = await worker.dispatch('key', { frameId: page.frameId, key: 'Enter' });
+  assert.match(modal.title, /confirm/);
+  const result = await worker.dispatch('key', { frameId: modal.frameId, key: 'Enter' });
+  assert.equal(result.text, 'Original site result');
+  assert.equal(worker.counts().keys, 1); assert.equal(worker.counts().keyUps, 1);
+  assert.equal(worker.counts().clicks, 0); assert.deepEqual(worker.answers, [{ accept: true }]);
+});
+
+test('an early native input acknowledgement cannot replace the delivered modal token with an unseen frame', async () => {
+  const worker = await dialogWorker({ immediateAck: true });
+  const page = await worker.dispatch('read-text');
+  const modal = await worker.dispatch('click', { frameId: page.frameId, x: 20, y: 30 });
+  await new Promise(resolve => setTimeout(resolve, 15));
+  const result = await worker.dispatch('key', { frameId: modal.frameId, key: 'Enter' });
+  assert.equal(result.text, 'Original site result'); assert.deepEqual(worker.answers, [{ accept: true }]);
+  assert.equal(worker.counts().clicks, 1);
+});
+
+test('a confirm cancellation and a following alert retain their distinct one-use observations', async () => {
+  const worker = await dialogWorker(); worker.chain = true;
+  const page = await worker.dispatch('read-text');
+  const confirm = await worker.dispatch('click', { frameId: page.frameId, x: 20, y: 30 });
+  const alert = await worker.dispatch('key', { frameId: confirm.frameId, key: 'Escape' });
+  assert.match(alert.title, /alert/); assert.notEqual(alert.frameId, confirm.frameId);
+  const button = alert.controls[0];
+  const result = await worker.dispatch('click', { frameId: alert.frameId, x: button.x, y: button.y });
+  assert.equal(result.text, 'Original site result'); assert.equal(worker.counts().clicks, 1);
+  assert.deepEqual(worker.answers, [{ accept: false }, { accept: true }]);
+});
+
+test('unknown answer outcome remains consumed; prompt defaults, unsupported dialogs and manual phases stay private', async () => {
+  const worker = await dialogWorker();
+  const page = await worker.dispatch('read-text');
+  const modal = await worker.dispatch('click', { frameId: page.frameId, x: 20, y: 30 });
+  worker.failAnswer = true;
+  assert.equal((await worker.dispatch('key', { frameId: modal.frameId, key: 'Enter' })).reason, 'operation_failed');
+  assert.equal((await worker.dispatch('key', { frameId: modal.frameId, key: 'Enter' })).reason, 'stale_frame');
+  assert.equal((await worker.dispatch('read-text')).state, 'manual_input_required');
+  assert.equal(worker.answers.length, 1); worker.humanClose();
+  for (const [type, message] of [['prompt', 'PRIVATE_PROMPT'], ['beforeunload', 'PRIVATE_UNSAVED'], ['confirm', 'x'.repeat(4001)]]) {
+    worker.open(type, message, { defaultPrompt: 'PRIVATE_DEFAULT' });
+    assert.equal((await worker.dispatch('read-text')).state, 'manual_input_required'); worker.humanClose();
+  }
+  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_/);
+  const manual = await dialogWorker({ manual: true }); manual.open('confirm', 'PRIVATE_LOGIN');
+  assert.equal((await manual.dispatch('read-text')).state, 'manual_input_required');
+  assert.doesNotMatch(JSON.stringify(manual.sent), /PRIVATE_LOGIN/);
+});
+
+test('image-mode dialog observation rasterises native text without a new page or text-valued model payload', async () => {
+  const worker = await dialogWorker({ image: true });
+  const page = await worker.dispatch('screenshot');
+  const modal = await worker.dispatch('click', { frameId: page.frameId, x: 20, y: 30 });
+  assert.equal(modal.image.mimeType, 'image/png'); assert.equal(modal.text, undefined);
+  assert.ok(worker.raster.includes('Send the reviewed message?'));
+  assert.doesNotMatch(JSON.stringify(worker.sent), /Send the reviewed message|Website text|dialogId/);
+  const result = await worker.dispatch('key', { frameId: modal.frameId, key: 'Enter' });
+  assert.ok(result.image); assert.equal(worker.counts().clicks, 1);
+  assert.deepEqual(worker.answers, [{ accept: true }]);
+});
+
+test('human closure invalidates the dialog frame and read-back never repeats its original action', async () => {
+  const worker = await dialogWorker();
+  const page = await worker.dispatch('read-text');
+  const modal = await worker.dispatch('click', { frameId: page.frameId, x: 20, y: 30 });
+  worker.humanClose();
+  const result = await worker.dispatch('read-text');
+  assert.equal(result.text, 'Original site result');
+  assert.equal((await worker.dispatch('key', { frameId: modal.frameId, key: 'Enter' })).reason, 'stale_frame');
+  assert.equal(worker.counts().clicks, 1); assert.equal(worker.answers.length, 0);
+});
+
+test('notification policy refusal stops startup before provider navigation with only a closed stage', async () => {
+  for (const policyFailure of ['write', 'read']) {
+    const worker = await dialogWorker({ policyFailure });
+    const failure = worker.sent.find(value => value.kind === 'bootstrap_failed');
+    assert.equal(failure.stage, policyFailure === 'write' ? 'policy_write' : 'policy_read');
+    assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_NOTIFICATION_ERROR/);
+  }
+});
 
 test('lost file-selection acknowledgement consumes the original frame and never replays native input', async () => {
   const events = { addListener() {} }, sent = [];

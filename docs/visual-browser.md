@@ -388,6 +388,70 @@ write и fail-closed при ошибке. Browser error document возвращ�
 Source/resource URLs и специальные схемы отклоняются. Browser downloads
 запрещены отдельно: suffix URL не доказывает тип ответа.
 
+### Уведомления и нативные подтверждения сайта
+
+Общий extension adapter применяется одинаково к human и managed assistant
+вызовам подписанных визуальных навыков. Это поведение только принадлежащего
+runtime Chromium: оно не перенастраивает пользовательский Chrome, Computer Use
+Codex или ОС и само по себе не переводит все browser actions ассистента в этот
+transport. Source commit не является публикацией установленного host runtime.
+
+Перед первой provider navigation extension устанавливает через штатный
+`contentSettings.notifications` profile-local `block` для `<all_urls>` и читает
+результат для initial URL. Это выполняется при каждом запуске, включая restore,
+до `hello`. Отказ записи/проверки остаётся закрытым `policy_write|policy_read`
+startup failure. Existing Preferences не переписываются host-ом; cookies,
+авторизация и OS notifications не меняются. Сайт получает denied, а не
+синтетический успех запроса. Если его функция требует notifications, блокировка
+не доказывает работоспособность этой функции и не разрешает тайный allow/fallback.
+
+Native `Page.javascriptDialogOpening/Closed` наблюдаются отдельно от renderer
+command queue. Для `alert` и `confirm` того же owned attached target доступны
+только native type/message и answer. Предыдущий успешный credential guard
+того же document generation обязателен: ожидающий диалог renderer не опрашивается
+через DOM, content script или новый page input. Manual/authentication phases,
+непроверенный новый документ, `prompt`, `beforeunload` и неизвестные types
+возвращают `manual_input_required/manual_control_active` без native text/defaults.
+Это handoff для штатного owner-question flow цифрового ассистента; runtime
+не получает права согласиться за владельца либо самостоятельно отправить вопрос.
+Touch ID, Keychain, CAPTCHA и иные OS/provider gates этим API не обходятся.
+
+Сообщение ограничено 4000 UTF-16 units, 40 строками по 88 units и полными
+Unicode code points. Управляющие/неполные строки и превышение лимита не
+обрезаются до другого смысла: применяется тот же content-free handoff.
+Image mode rasterises явно помеченную Trelio observation в extension-local
+OffscreenCanvas, без дополнительного tab/window и site injection. Native text
+не появляется в model JSON. Text mode использует прежний bounded text DTO.
+Оба варианта показывают untrusted website content и только OK/Cancel controls;
+смысловой выбор остаётся у модели в пределах реального поручения и независимых
+owner decisions. Никакого auto-accept всех подтверждений нет.
+
+Обычный `key Enter|Escape` либо coordinate click по показанной кнопке отвечает
+только exact observed native dialog. Immutable modal observation переиспользует
+один frame token до его расходования/60-second TTL, чтобы поздний внутренний
+capture исходного input не отзывал уже выданную модели карточку. Нативный answer
+расходует token ДО dispatch; human close, detach, document change и следующий
+диалог не позволяют его использовать повторно. Other page input при открытом
+диалоге отклоняется. Hidden `dialogId`, native URL/defaultPrompt и raw CDP
+никогда не входят в public result/args.
+
+Исходный click/key/submit может ещё ждать native acknowledgement. Его model call
+возвращает modal observation, сохраняя тот же input promise. Answer освобождает
+именно его; следующий native dialog получает отдельное наблюдение. После
+закрытия возвращается fresh page observation или результат того же original
+download. Только private extension continuation передаёт закрытое имя исходной
+download operation; host проверяет signed opt-in, сохраняет original через
+прежний file validator и удаляет эту metadata до MCP. Это не новый file/read API.
+Lost answer/input outcome не разрешает повтор click, submit или native answer;
+consumed/unsupported dialog остаётся явным handoff, original lease не продлевается.
+
+Regressions исполняют materialized worker с действительно незавершённым native
+input promise, ранним acknowledgement, cancellation, consecutive dialogs,
+human close и unknown answer. Native Chromium fixture проходит text и PNG/MCP
+validators, исходное действие ровно один раз, notification denied и настоящий
+restore профиля; он включён в прежние visual OS lanes. Он не доказывает
+совместимость любого внешнего сайта или возможность unattended OS unlock.
+
 ### Внешние ссылки
 
 `VISUAL_EXTERNAL_NAVIGATION_API = trelio.visual-external-navigation/v1` подтверждает

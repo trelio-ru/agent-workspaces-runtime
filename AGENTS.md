@@ -462,6 +462,12 @@ publication tooling также остаются вне этого публичн
   compare business intent privately, return enums only, preserve auth/manual gates.
   Managed visual/persistent profiles disable Chromium sign-in with both current
   and next-startup preferences; website login and personal Chrome stay separate.
+  Website notifications are blocked and read back before provider navigation in
+  every owned profile, including restore. Native alert/confirm observation and
+  one-use Enter/Escape/button answers bypass renderer waits while retaining the
+  original input promise, never replaying it. Raster mode stays raster-only;
+  login/unsupported dialogs remain explicit manual handoffs. See the same
+  contract for immutable modal frames, bounds and real Chromium regressions.
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.
