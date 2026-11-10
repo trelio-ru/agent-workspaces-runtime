@@ -44,6 +44,18 @@ const PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKPrbp7ylW5XVUNt
 const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY, 'base64')).digest('hex').slice(0, 32)].map(c => String.fromCharCode(97 + parseInt(c, 16))).join('');
 const fault = code => Object.assign(new Error(code), { code });
 
+/** Starting a Chromium profile is not a service-worker readiness signal. An
+ * owned extension page sends one value-free runtime event to wake MV3 before
+ * the authenticated socket handshake. It contains no provider URL, token or
+ * credentials and does not retry a launch, input or failed handshake. The same
+ * tab is consumed as about:blank after policy/auth, never left as an extra UI.
+ */
+export const visualExtensionBootstrapPage = () => ({
+  url: `chrome-extension://${EXTENSION_ID}/bootstrap.html`,
+  html: '<!doctype html><meta charset="utf-8"><script src="bootstrap.js" defer></script>',
+  script: "void chrome.runtime.sendMessage({kind:'trelio_visual_bootstrap'}).catch(()=>{});",
+});
+
 /** Presentation belongs to signed provider policy. Human setup always gets a
  * normal window: a headless process cannot be made visible by focusing it.
  * Never use native SW_HIDE, minimise another app or retry a failed windowed
@@ -403,9 +415,18 @@ export class ExtensionVisualBrowser {
     // Content adapters follow the same signed navigation policy. Cookie restore
     // and protected authentication deliberately keep their original origins.
     const matches = this.externalNavigation ? ['http://*/*', 'https://*/*'] : [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
+    // Visible macOS startup deliberately has no initial window. Windows/Linux
+    // already open one internal tab; hidden presentation has no desktop window.
+    // Give those launches a deterministic extension event instead of relying
+    // on the timing of Chrome's new-tab page versus lazy worker installation.
+    const bootstrap = process.platform !== 'darwin' || this.#headless ? visualExtensionBootstrapPage() : null;
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
+    if (bootstrap) {
+      await fs.writeFile(path.join(extension, 'bootstrap.html'), bootstrap.html, { mode: 0o600 });
+      await fs.writeFile(path.join(extension, 'bootstrap.js'), bootstrap.script, { mode: 0o600 });
+    }
     // Only the ephemeral transport token is materialized here. Cookie values
     // stay in host/extension RAM and the AEAD snapshot, never in worker source.
     await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, { mode: 0o600 });
@@ -431,16 +452,17 @@ export class ExtensionVisualBrowser {
     // foreground. These scheduling switches neither activate the window nor
     // alter navigator.webdriver; mouse-wheel acknowledgements otherwise stall
     // in an occluded headed renderer on macOS.
-    // Windows/Linux start an ordinary internal new-tab window instead of relying on the
-    // background-only lifetime of an application without an initial window.
+    // Windows/Linux start an owned internal extension tab instead of relying
+    // on the background-only lifetime/lazy activation of a windowless app.
     // The extension installs policy before navigating it; the provider URL and
-    // private transport token never enter the process command line. Startup
+    // private transport token never enter the process command line. Only the
+    // public constant bootstrap URL may do so. Startup
     // may focus this owned window once, as agreed for visible workflows.
     // The extension privately navigates the internal new-tab surface after
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
     this.#startupStage = 'browser_spawn';
-    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], visualChildEnvironment());
+    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment());
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
     // Reduce only the existing bounded private log, without adding a native

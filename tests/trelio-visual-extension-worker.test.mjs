@@ -15,10 +15,11 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
-  let socket, nativeEvent, currentUrl = 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
+  const navigation=[];
+  let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
   const context = { URL, Date, TextEncoder, Uint8Array, DataView, performance, atob, btoa, crypto: { randomUUID },
@@ -66,14 +67,14 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
       tabs: { onCreated: events, onRemoved: events,
         async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
         async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
-        async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
+        async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
         async sendMessage(_id, message) { return message.kind === 'authentication-guard' ? { blocked: false } : { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false }; },
       },
     }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } },
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual,
-    observationMode: image ? 'image' : 'text', deadlineAt: Date.now() + 10_000 }, context);
+    observationMode: image ? 'image' : 'text', ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -82,12 +83,19 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     throw Error('synthetic_command_timeout');
   };
   if (!policyFailure) await dispatch('restore-session-auth', { cookies: [], replace: false });
-  return { dispatch, open, sent, answers, policy, raster, counts: () => ({ clicks, keys, keyUps, reads }),
+  return { dispatch, open, sent, answers, policy, raster, navigation, counts: () => ({ clicks, keys, keyUps, reads }),
     set type(value) { nextType = value; }, set failAnswer(value) { answerFails = value; }, set chain(value) { nextDialog = value; },
     humanClose() { nativeEvent({ tabId: 1 }, 'Page.javascriptDialogClosed', {}); release?.({}); },
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
 }
+
+test('the exact owned bootstrap page is reused only after policy/auth and commits blank before provider navigation', async () => {
+  const worker=await dialogWorker({bootstrapUrl:'chrome-extension://fixture/bootstrap.html'});
+  assert.deepEqual(worker.navigation,['about:blank','https://example.test/']);
+  assert.ok(worker.sent.some(value=>value.kind==='hello'));
+  assert.equal((await worker.dispatch('read-text')).state,'ready');
+});
 
 test('native confirm unblocks the original input through a separate observed answer, never a second click', async () => {
   const worker = await dialogWorker();

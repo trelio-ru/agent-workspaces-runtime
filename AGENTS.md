@@ -483,6 +483,10 @@ publication tooling также остаются вне этого публичн
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.
+  Windows/Linux and hidden startup use one public, value-free extension page
+  to wake MV3 through runtime messaging. Reuse that tab after policy/auth via
+  about:blank; provider URLs/tokens never enter argv, and the original handshake
+  deadline/single launch remain unchanged. Visible macOS retains windowless start.
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
   Missing API support is a runtime capability gap, not a ban on automatic login.

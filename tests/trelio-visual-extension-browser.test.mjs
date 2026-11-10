@@ -8,11 +8,24 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { ExtensionVisualBrowser, visualLifecycleFailureEvidence } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualLifecycleFailureEvidence, visualExtensionBootstrapPage } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 import { syntheticDocx } from './fixtures/visual-docx.mjs';
+import vm from 'node:vm';
+
+test('extension bootstrap sends exactly one value-free wake event without a network request or retry', async () => {
+  const page=visualExtensionBootstrapPage(),messages=[];
+  assert.match(page.url,/^chrome-extension:\/\/[a-p]{32}\/bootstrap\.html$/u);
+  assert.equal(page.html,'<!doctype html><meta charset="utf-8"><script src="bootstrap.js" defer></script>');
+  vm.runInNewContext(page.script,{chrome:{runtime:{sendMessage:async message=>{
+    messages.push(JSON.parse(JSON.stringify(message)));throw Error('synthetic unavailable receiver');
+  }}}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(messages,[{kind:'trelio_visual_bootstrap'}]);
+  assert.doesNotMatch(page.html+page.script,/https?:|WebSocket|fetch|token|password|setTimeout|setInterval/u);
+});
 
 test('lifecycle failure callbacks contain closed original errno/syscall only, never native errors or profile data', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR_PROSE'), { code: 'EBUSY', syscall: 'rmdir',

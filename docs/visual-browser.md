@@ -352,8 +352,18 @@ startup refusal не считается попыткой пароля и не р
 Штатный `error/manual_control_active` без startup diagnostic сохраняет закрытую
 форму и допускает следующий private authenticate, но сам не доказывает вход/готовность.
 
-Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
-Запуск без начального окна остаётся только на macOS с её app lifecycle.
+Windows/Linux и hidden startup открывают одну внутреннюю extension bootstrap
+вкладку. Её argv URL – только фиксированный публичный
+`chrome-extension://<public-extension-id>/bootstrap.html`, без адреса сайта,
+loopback endpoint, transport token или credentials. Статический self-script
+посылает один пустой по данным `runtime.sendMessage` для пробуждения MV3;
+это не новый browser command, retry или разрешение на input. Запуск профиля сам
+по себе не заменяет activation service worker –
+[lifecycle Chrome](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle).
+Тот же owned tab после прежних policy/auth guards переводится через about:blank
+на provider URL, не создавая забытый bootstrap tab. Исходные 25 секунд handshake,
+один browser child и fail-closed startup result сохраняются.
+Видимый macOS startup остаётся без начального окна с её app lifecycle.
 Для нового owned профиля host заранее устанавливает обычный continue-session
 preference: Chromium игнорирует restore switch у нового Profile. Эта настройка
 сама по себе не гарантирует сохранение session cookies на Windows; для них
@@ -383,7 +393,7 @@ navigation и не сохраняются как persistent extension ruleset. �
 MIME-only DNR rule нельзя применять к 301 без Content-Type: это обычный переход,
 не готовый файл. Host сначала включает Fetch guard exact owned tab, затем даёт
 только этому tab исключение из main-frame MIME rule. Первый URL открывается
-через blank после guard. Служебная new-tab Windows/Linux сначала коммитится в
+через blank после guard. Служебная bootstrap/new-tab вкладка сначала коммитится в
 инертную about:blank под прежним deadline; до Fetch нет provider HTTP.
 Новые незащищённые popups и subframes сохраняют строгий
 DNR default. При native detach exception отзывается, input/capture ждут policy

@@ -1044,12 +1044,16 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await new Promise((resolve, reject) => { authReady = { resolve, reject }; send({ kind: 'auth_required' }); });
       activeStartup();
       bootstrapStage = 'window';
-      // Windows host startup opens an internal new tab; other desktops let this
+      // Host startup may open an owned extension wake tab; visible macOS lets this
       // extension create the initial inactive window. Navigate the owned blank
       // tab after guards exist, without selecting/focusing a tab on every
       // command. Private auth stores exclude Sessions, so no user tab is reused.
       const tabs = await chrome.tabs.query({ windowType: 'normal' });
-      const blank = tabs.find(tab => ['about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'].includes(tab.url));
+      // Prefer the host's exact value-free wake page and reuse it. It is NOT a
+      // provider navigation exemption: commit about:blank before attaching or
+      // navigating HTTP, after the unchanged policy and auth handshake above.
+      const blank = (config.bootstrapUrl && tabs.find(tab => tab.url === config.bootstrapUrl))
+        || tabs.find(tab => ['about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'].includes(tab.url));
       const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
       activeStartup();
       let initial;
@@ -1057,8 +1061,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
       else if (!windows.length) initial = (await chrome.windows.create({ url: 'about:blank', focused: manual, width: 1440, height: 1000 })).tabs?.[0];
       else initial = await chrome.tabs.create({ url: 'about:blank', active: manual });
-      // Windows/Linux start with Chrome's privileged new-tab page. Its target
-      // cannot be attached like an ordinary document. Commit an owned inert
+      // An extension wake page or Chrome's privileged new-tab target cannot
+      // be attached like an ordinary document. Commit an owned inert
       // about:blank first; this performs no HTTP and leaves DNR fully strict.
       // tabs.update may acknowledge before that commit, so poll only the native
       // URL/status metadata under the original lease, never page code/selectors.
