@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, webcrypto } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import {
@@ -14,6 +14,7 @@ import {
 import { ensurePrivateDirectory, writePrivateJsonFile, resolveWorkspaceBridgeConfigDirectory } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { resolveMirrorPaths, syncCompanyContextMirror } from '../host-runtime/scripts/trelio-local-context.mjs';
+import { encryptCompanyPayload } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 const exec = promisify(execFile);
 const origin = 'a'.repeat(32);
 const company = '11111111-1111-4111-8111-111111111111';
@@ -41,6 +42,124 @@ const fixture = async t => {
   return { base, directory, companyRoot, schema };
 };
 const generations = root => fs.readdir(path.join(root, 'generations'));
+
+test('human search builds a fresh private snapshot alongside a live mirror writer', { timeout: 60_000 }, async t => {
+  if (process.env.TRELIO_HUMAN_SEARCH_WRITER_FIXTURE !== '1') {
+    // Exercise the real encrypted pointer/private-file/lock implementation in
+    // a disposable home on every OS. Never inspect or alter the user's writer.
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-search-writer-'));
+    try {
+      const environment = { ...process.env, HOME: home, USERPROFILE: home,
+        LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+        TRELIO_WORKSPACE_DISABLE_KEYCHAIN: '1', TRELIO_HUMAN_SEARCH_WRITER_FIXTURE: '1' };
+      delete environment.NODE_TEST_CONTEXT;
+      const child = await exec(process.execPath, ['--test', '--test-name-pattern',
+        '^human search builds a fresh private snapshot', fileURLToPath(import.meta.url)], {
+        env: environment,
+        timeout: 55_000, maxBuffer: 1024 * 1024,
+      });
+      assert.match(child.stdout, /HUMAN_SEARCH_WRITER_VERIFIED/u);
+    } finally { await fs.rm(home, { recursive: true, force: true }); }
+    return;
+  }
+  const origin = 'https://search-writer.example', companyId = randomUUID();
+  const keys = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const scope = { id: randomUUID(), epoch: 1,
+    publicEncryptionJwk: await webcrypto.subtle.exportKey('jwk', keys.publicKey) };
+  const encryption = { runtime: { company: { id: companyId, slug: 'synthetic' }, scope, device: { id: randomUUID() } },
+    scopePrivateEncryptionKey: { privateKey: keys.privateKey,
+      privateJwk: await webcrypto.subtle.exportKey('jwk', keys.privateKey) } };
+  const paths = resolveMirrorPaths({ origin, companyId });
+  await ensurePrivateDirectory(paths.generations);
+  const workspace = { id: randomUUID(), acceptedHead: 'b'.repeat(40),
+    documents: [{ path: 'synthetic.txt', text: 'Unchanged accepted source' }] };
+  const unchanged = { cacheKey: 'task:unchanged', id: 'unchanged', type: 'task', title: 'Unchanged',
+    revisionToken: 'same', fields: [{ source: 'task-title', values: ['Unchanged'] }] };
+  const publish = async n => {
+    const generation = name(n), serverGeneration = name(n + 100);
+    const payload = { schemaVersion: 8, generation, serverGeneration,
+      company: encryption.runtime.company, tasks: [], workspaces: [workspace], searchDocuments: [unchanged,
+        { ...unchanged, cacheKey: 'task:synthetic', revisionToken: 'old', title: 'Stale source' },
+        { ...unchanged, cacheKey: 'task:revoked', id: 'revoked' }] };
+    const encryptedPayload = await encryptCompanyPayload({ payload,
+      scopePublicEncryptionJwk: scope.publicEncryptionJwk,
+      aad: { companyId, scopeId: scope.id, scopeEpoch: scope.epoch,
+        entityType: 'agent_context.mirror', entityId: randomUUID(), entityRevision: 1, purpose: 'content' } });
+    await writePrivateJsonFile(path.join(paths.generations, `${generation}.json`), {
+      schemaVersion: 8, companyId, generation, serverGeneration, encryptedPayload });
+    await writePrivateJsonFile(paths.pointer, { schemaVersion: 8, companyId, generation, serverGeneration });
+    return payload;
+  };
+  const old = await publish(1);
+  await ensurePrivateDirectory(paths.lock);
+  const owner = { schemaVersion: 1, lockId: randomUUID(), pid: process.pid, createdAt: new Date().toISOString() };
+  await writePrivateJsonFile(path.join(paths.lock, 'owner.json'), owner);
+  await writePrivateJsonFile(path.join(paths.lock, `${owner.lockId}.heartbeat.json`), { schemaVersion: 1, lockId: owner.lockId });
+  const ownerBytes = await fs.readFile(path.join(paths.lock, 'owner.json'));
+  const pointerBytes = await fs.readFile(paths.pointer);
+  const generationNames = await generations(paths.root);
+  const rootNames = await fs.readdir(paths.root);
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  const freshDocument = { cacheKey: 'task:synthetic', id: 'synthetic', type: 'task', title: 'Current source',
+    revisionToken: 'fresh', fields: [{ source: 'task-title', values: ['Current source'] }] };
+  const manifest = { schemaVersion: 2, provider: 'local_company_context', generation: name(102),
+    company: encryption.runtime.company, viewer: { memberId: randomUUID() }, projects: [], tasks: [],
+    acceptedWorkspaces: [{ id: workspace.id, acceptedHead: workspace.acceptedHead }],
+    contextDocuments: [], searchDocuments: [unchanged, freshDocument], instructions: {} };
+  globalThis.fetch = async url => {
+    assert.equal(new URL(url).pathname, '/api/agent-workspaces/company-context/synthetic/manifest');
+    reads++;
+    return new Response(JSON.stringify(manifest), { status: 200 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const sync = options => syncCompanyContextMirror({ origin, token: 'synthetic-token',
+    companyEncryption: encryption, ...options });
+  // Ordinary detail reads retain their established immutable fallback. This
+  // proves the old generation is actually readable before testing the search.
+  const fallback = await sync({});
+  assert.equal(fallback.syncInProgress, true);
+  assert.equal(fallback.mirror.serverGeneration, old.serverGeneration);
+  assert.equal(reads, 0);
+
+  // The live owner never releases its claim. Human search still finishes from
+  // the current native inventory with both ordinary assembly fences, rather
+  // than waiting for that owner's downloads or serving its stale predecessor.
+  const result = await sync({ readOnlyOnContention: true, signal: AbortSignal.timeout(10_000) });
+  assert.equal(result.readOnlySnapshot, true);
+  assert.equal(result.mirror.serverGeneration, manifest.generation);
+  assert.match(result.mirror.generation, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(result.mirror.searchDocuments, [unchanged, freshDocument], 'Changed and revoked sources follow the fresh inventory');
+  assert.deepEqual(result.mirror.workspaces, [workspace], 'Unchanged accepted heads reuse complete existing bytes without a second download');
+  assert.equal(reads, 2, 'Starting and finishing native manifests still fence the complete snapshot');
+  assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
+  assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes, 'The parallel reader never publishes a pointer');
+  assert.deepEqual(await generations(paths.root), generationNames, 'No extra durable generation is written');
+  assert.deepEqual(await fs.readdir(paths.root), rootNames, 'The sibling writer retains sole ownership of its resumable scratchpad');
+
+  let conflictedReads = 0;
+  globalThis.fetch = async () => new Response(JSON.stringify({ ...manifest,
+    generation: name(200 + ++conflictedReads) }), { status: 200 });
+  await assert.rejects(sync({ readOnlyOnContention: true }), { code: 'LOCAL_CONTEXT_GENERATION_CHANGED' });
+  assert.equal(conflictedReads, 6, 'The parallel path keeps the same three bounded assembly attempts');
+  assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes, 'An inconsistent candidate is never published');
+
+  const cancelled = new AbortController();
+  let entered;
+  const atRead = new Promise(resolve => { entered = resolve; });
+  globalThis.fetch = async (_url, options) => {
+    entered();
+    await new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+  };
+  const refusal = assert.rejects(sync({ readOnlyOnContention: true, signal: cancelled.signal }),
+    error => error === cancelled.signal.reason);
+  await atRead;
+  cancelled.abort(new Error('Synthetic original search cancelled'));
+  await refusal;
+  assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
+  assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes);
+  console.log('HUMAN_SEARCH_WRITER_VERIFIED');
+});
 
 test('mirror writer recovers a confirmed dead owner without waiting for heartbeat age', async t => {
   if (process.env.TRELIO_MIRROR_DEAD_WRITER_FIXTURE !== '1') {

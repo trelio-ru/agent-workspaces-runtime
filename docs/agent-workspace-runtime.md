@@ -139,6 +139,18 @@ HTTP/body read по-прежнему ограничен минутой; poll и 
 начинают срок заново. Partial mirror не публикуется и не превращается в
 неполную успешную выдачу. Бизнес-Task/Run не создаётся; остальные local reads
 и mutations сохраняют обычную минуту.
+Если зеркало обновляет другой живой writer и есть complete previous generation,
+isolated human search не ждёт его завершения и не ищет по stale fallback.
+Он использует тот же complete-snapshot builder: свежий native manifest, reuse
+только exact revision/head, hydration изменившихся данных и финальный manifest
+fence. Полный current snapshot остаётся в RAM reader с прежним TTL; shared
+pointer, writer-owned scratchpad и cleanup не изменяются. Новые файлы читает
+обычный private staging/crypto engine. Original deadline, bounds и отдельный
+fresh recipient/generation fence перед выдачей сохраняются. Отмена закрывает
+только собственные reads, не чужой writer/lock. Обычные detail reads сохраняют
+readable fallback, а proven-stale refresh – прежний короткий срок. Без complete
+previous generation действует прежняя bounded cold preparation.
+
 Task-only `search_tasks` сохраняет отдельный native projection path без
 подготовки общего зеркала и без присоединения к pending full search.
 

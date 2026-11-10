@@ -368,7 +368,9 @@ publication tooling также остаются вне этого публичн
   ограничен 60 секундами; transport failure не запускает sleep/replay.
   Human company search готовит полный снимок и ищет в одном изолированном
   процессе под отдельным 10-минутным сроком; short waits продолжают exact
-  операцию без нового sync. Fresh recipient/generation fence предшествует
+  операцию без нового sync. При занятом mirror writer поиск строит current RAM
+  snapshot тем же builder/fences без ожидания, stale fallback или shared writes.
+  Fresh recipient/generation fence предшествует
   одноразовой выдаче; тяжёлый corpus не переносится в MCP-процесс.
   Human/provider lifetimes и зарегистрированный finish сохраняют отдельные
   границы: [контракт](docs/agent-workspace-runtime.md#call-time-budget).

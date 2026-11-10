@@ -712,23 +712,27 @@ const readMirrorGeneration = async (input) => {
   return result;
 };
 
+// Both durable publication and an isolated read use the SAME local snapshot
+// identity. The latter never publishes a pointer or writes the shared cache.
+const withMirrorGeneration = mirror => ({
+  ...mirror,
+  schemaVersion: MIRROR_SCHEMA_VERSION,
+  generation: sha256(JSON.stringify({
+    serverGeneration: mirror.serverGeneration,
+    taskRevisions: mirror.tasks.map((task) => [task.id, task.revisionToken]),
+    workspaceHeads: mirror.workspaces.map((workspace) => [workspace.id, workspace.acceptedHead]),
+    createdAt: mirror.createdAt,
+  })),
+});
+
 const publishMirrorGeneration = async ({
   paths,
   companyEncryption,
   mirror,
 }) => {
-  const generation = sha256(JSON.stringify({
-    serverGeneration: mirror.serverGeneration,
-    taskRevisions: mirror.tasks.map((task) => [task.id, task.revisionToken]),
-    workspaceHeads: mirror.workspaces.map((workspace) => [workspace.id, workspace.acceptedHead]),
-    createdAt: mirror.createdAt,
-  }));
+  const payload = withMirrorGeneration(mirror);
+  const { generation } = payload;
   const entityId = crypto.randomUUID();
-  const payload = {
-    ...mirror,
-    schemaVersion: MIRROR_SCHEMA_VERSION,
-    generation,
-  };
   const encryptedPayload = await encryptCompanyPayload({
     payload,
     scopePublicEncryptionJwk: companyEncryption.runtime.scope.publicEncryptionJwk,
@@ -4239,6 +4243,7 @@ export const syncCompanyContextMirror = async ({
   token,
   companyEncryption,
   requireFresh = false,
+  readOnlyOnContention = IS_HUMAN_SEARCH_READER,
   signal,
   onProgress = () => {},
 }) => {
@@ -4266,6 +4271,27 @@ export const syncCompanyContextMirror = async ({
       : MIRROR_FIRST_SYNC_WAIT_MS,
   });
   if (!writer) {
+    if (readOnlyOnContention) {
+      // A busy sibling must not make a human question wait for its full sync,
+      // nor make it search a known-stale readable fallback. Reuse the SAME
+      // complete-snapshot builder in this isolated reader, with fresh native
+      // manifests and exact revision/head reuse. It hydrates only changed
+      // records and NEVER publishes a pointer, prunes, or opens the shared
+      // writer-owned scratchpad. New files use the ordinary private read
+      // staging/crypto engine; all started readers still settle on cancellation.
+      // The caller's original deadline and final recipient/generation fence
+      // remain mandatory. This is neither a lock takeover nor a partial result.
+      const result = await buildStableCompanyMirror({
+        onProgress,
+        previous,
+        readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
+        buildCandidate: (rawManifest, reusable) => buildMirror({
+          origin, requestOrigin, token, companyEncryption, rawManifest, previous: reusable, signal,
+        }),
+        publish: async mirror => withMirrorGeneration(mirror),
+      });
+      return { ...result, syncInProgress: true, readOnlySnapshot: true, paths };
+    }
     return {
       mirror: previous,
       changed: false,
@@ -8541,7 +8567,11 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal, 
     // A readable fallback keeps this single request available while another
     // process owns the writer, but it is not proof of startup freshness. Do
     // not pin that fallback in RAM for the full ten-minute TTL: the next read
-    // must rejoin sync and observe the atomically published generation.
+    // must rejoin sync and observe the atomically published generation. An
+    // isolated read-only snapshot has instead passed the SAME fresh manifest
+    // fences and may use the ordinary bounded RAM cache. It never establishes
+    // durable startup freshness; eviction/child close forces a fresh sync again.
+    if (synced.readOnlySnapshot) cacheDecryptedMirror(sessionKey, synced.mirror);
     localCompanyMirrorObservedMutation.set(sessionKey, mutationToken);
     return { ...synced, token, companyEncryption, requestOrigin };
   }
