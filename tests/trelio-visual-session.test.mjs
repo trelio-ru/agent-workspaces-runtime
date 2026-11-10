@@ -19,6 +19,13 @@ import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scrip
 
 test('presentation validation precedes identity/storage and an old worker cannot silently become hidden', async t => {
   const unreadable = new Proxy({}, { get() { throw Error('identity must not be accessed'); } });
+  const fieldPolicy = { origins: ['https://example.test'], labels: ['Start date'] };
+  const fieldCheck = { id: 'date', label: 'Start date', match: 'equals', values: ['2030-05-12'] };
+  for (const change of [{ args: { checks: [fieldCheck] } }, { fieldCheckPolicy: fieldPolicy, args: { checks: [{ ...fieldCheck, label: 'Password' }] } },
+    { fieldCheckPolicy: { ...fieldPolicy, origins: ['https://foreign.test'] }, args: {} }]) {
+    assert.equal((await runVisualSession({ origins: ['https://example.test'], operation: 'read-text', observationMode: 'text', semanticControls: true,
+      env: unreadable, ...change })).reason, 'invalid_input');
+  }
   assert.equal((await runVisualSession({ origins: ['https://example.test'], operation: 'status', presentation: 'invalid', env: unreadable })).reason, 'invalid_input');
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-presentation-')));
   const now = Date.now();
@@ -47,6 +54,16 @@ test('presentation validation precedes identity/storage and an old worker cannot
   await writePrivateJsonFile(file, { ...legacy, presentation: 'hidden' });
   assert.equal((await invoke('navigate', 'windowed')).reason, 'observation_mode_mismatch');
   assert.equal((await readVisualOwner(file)).deadlineAt, binding.deadlineAt, 'presentation never renews the original lease');
+  const pinned = { ...legacy, presentation: 'hidden', observationMode: 'text', semanticControls: true,
+    fieldCheckPolicy: { origins: [origin], labels: ['Start date'] } };
+  await writePrivateJsonFile(file, pinned);
+  const before = calls;
+  const changed = await runVisualSession({ origins: [origin], operation: 'read-text', observationMode: 'text',
+    presentation: 'hidden', semanticControls: true, fieldCheckPolicy: { origins: [origin], labels: ['End date'] },
+    env, fixture: { directory } });
+  assert.equal(changed.reason, 'observation_mode_mismatch'); assert.equal(calls, before);
+  assert.equal((await invoke('close', 'hidden')).state, 'closed', 'cleanup does not require widening the pinned policy');
+
 });
 
 test('two chats on one visual account address different workers and close only their own session', async t => {

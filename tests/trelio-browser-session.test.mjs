@@ -334,7 +334,7 @@ test("background page binds its exact target, ignores another popup and avoids n
 });
 
 test("explicit foreground override and headless launch preserve the original Playwright lifecycle", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-launch-modes-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-launch-modes-")));
   const environment = { ...bindingEnvironment(), TRELIO_CACHE_HOME: path.join(root, "cache") };
   const prior = new Map(Object.keys(environment).map((name) => [name, process.env[name]]));
   const module = path.join(environment.TRELIO_CACHE_HOME, "browser-session", `playwright-${PLAYWRIGHT_VERSION}`, "node_modules", "playwright-core");
@@ -350,6 +350,9 @@ test("explicit foreground override and headless launch preserve the original Pla
       await withPersistentBrowserSession({ ...options, profileDirectory: path.join(root, "profile"),
         downloadsDirectory: path.join(root, "downloads"), lockPath: path.join(root, "lock"),
         prepareContext: (context) => {
+          const preferences = JSON.parse(fs.readFileSync(path.join(root, 'profile', 'Default', 'Preferences')));
+          assert.equal(preferences.signin.allowed, false);
+          assert.equal(preferences.signin.allowed_on_next_startup, false);
           assert.equal(context.launchOptions.headless, !options.headed);
           assert.equal(context.launchOptions.ignoreDefaultArgs, undefined);
           assert.deepEqual(context.launchOptions.viewport, { width: 1280, height: 900 });

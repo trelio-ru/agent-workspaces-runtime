@@ -428,9 +428,11 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
 test('signed hidden presentation preserves auth and original lease through visible setup and hidden resume', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-hidden-setup-')));
-  let snapshot, writes = 0, restored = false;
+  let snapshot, writes = 0, restored = false, persistentRestored = false;
   const server = http.createServer((request, response) => {
-    if (request.url === '/login') response.setHeader('Set-Cookie', 'fixture_hidden=SYNTHETIC_SESSION; HttpOnly; SameSite=Strict; Path=/');
+    if (request.url === '/login') response.setHeader('Set-Cookie', ['fixture_hidden=SYNTHETIC_SESSION; HttpOnly; SameSite=Strict; Path=/',
+      'fixture_persistent=SYNTHETIC_PERSISTENT; Max-Age=86400; HttpOnly; SameSite=Strict; Path=/']);
+    if (request.url === '/after' && request.headers.cookie?.includes('fixture_persistent=SYNTHETIC_PERSISTENT')) persistentRestored = true;
     if (request.url === '/after' && request.headers.cookie?.includes('fixture_hidden=SYNTHETIC_SESSION')) restored = true;
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end('<!doctype html><body><h1>Visible setup fixture</h1><button>Ordinary control</button></body>');
@@ -454,9 +456,14 @@ test('signed hidden presentation preserves auth and original lease through visib
     assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
     assert.equal((await browser.call('ready')).state, 'saved_unverified');
     assert.equal(writes, 2, 'human completion persisted before observations can resume');
+    const savedPreferences = JSON.parse(Buffer.from(JSON.parse(gunzipSync(Buffer.from(snapshot.profile, 'base64')))
+      .find(file => file.path === 'Default/Preferences').data, 'base64'));
+    assert.equal(savedPreferences.signin.allowed, false, 'native Chromium retained browser sign-in isolation');
+    assert.equal(savedPreferences.signin.allowed_on_next_startup, false, 'the next-startup preference cannot re-enable sign-in');
     const resumed = await browser.call('navigate', { url: `${origin}/after` });
     assert.equal(resumed.state, 'ready');
     assert.equal(restored, true, 'the hidden resumed document receives the exact synthetic auth');
+    assert.equal(persistentRestored, true, 'persistent auth also survives the visible-to-hidden restart');
     assert.equal(browser.sessionId, sessionId);
     assert.equal(lease.deadlineAt, deadline, 'human setup never renews the original lease');
     assert.notEqual(resumed.frameId, first.frameId);

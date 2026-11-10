@@ -10,18 +10,28 @@ import { prepareVisualPrivateDirectory } from '../host-runtime/scripts/trelio-vi
 const archive = files => ({ schemaVersion: 2, profile: gzipSync(JSON.stringify(files)).toString('base64') });
 const file = (name, value = 'SYNTHETIC_AUTH') => ({ path: name, data: Buffer.from(value).toString('base64') });
 
-test('fresh owned profile seeds ordinary startup preferences without overwriting an accepted profile', async () => {
+test('managed profile seeds startup and browser isolation without changing other accepted preferences', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-startup-')));
   try {
     await prepareVisualProfileStartup(root);
     const prefs = path.join(root, 'Default', 'Preferences');
-    assert.deepEqual(JSON.parse(await fs.readFile(prefs, 'utf8')), { session: { restore_on_startup: 1 } });
+    assert.deepEqual(JSON.parse(await fs.readFile(prefs, 'utf8')), { session: { restore_on_startup: 1 },
+      signin: { allowed: false, allowed_on_next_startup: false } });
     const existing = '{ "profile": { "name": "SYNTHETIC" }, "session": { "restore_on_startup": 5 } }';
     await fs.writeFile(prefs, existing); await prepareVisualProfileStartup(root);
-    assert.equal(await fs.readFile(prefs, 'utf8'), existing);
+    assert.deepEqual(JSON.parse(await fs.readFile(prefs, 'utf8')), { ...JSON.parse(existing),
+      signin: { allowed: false, allowed_on_next_startup: false } });
     await fs.rm(prefs); await fs.mkdir(prefs);
     await assert.rejects(prepareVisualProfileStartup(root), { code: 'VISUAL_STORAGE_CORRUPT' });
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('persistent caller disables sign-in without enabling visual session/tab restoration', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'persistent-profile-startup-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await prepareVisualProfileStartup(root, { restoreSessionOnFirstLaunch: false });
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, 'Default', 'Preferences'))),
+    { signin: { allowed: false, allowed_on_next_startup: false } });
 });
 
 test('stopped profile preserves selected auth stores and excludes history, cache and passwords', async () => {
@@ -38,6 +48,23 @@ test('stopped profile preserves selected auth stores and excludes history, cache
     assert.deepEqual((await fs.readdir(path.join(output, 'Default'))), ['LocalStorage']);
     assert.equal(await fs.readFile(path.join(output, 'Local State'), 'utf8'), 'SYNTHETIC_KEY');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('isolated presentation disables browser sign-in while preserving unrelated accepted preferences', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-signin-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await prepareVisualProfileStartup(root);
+  const preferences = path.join(root, 'Default', 'Preferences');
+  assert.equal(JSON.parse(await fs.readFile(preferences)).signin.allowed, false);
+  const prior = { session: { restore_on_startup: 5 }, profile: { name: 'SYNTHETIC' },
+    signin: { allowed: true, unrelated_setting: 7 }, website_setting: 'preserve' };
+  await fs.writeFile(preferences, JSON.stringify(prior));
+  await prepareVisualProfileStartup(root);
+  assert.deepEqual(JSON.parse(await fs.readFile(preferences)), { ...prior,
+    signin: { ...prior.signin, allowed: false, allowed_on_next_startup: false } });
+  await fs.writeFile(preferences, 'INVALID_JSON');
+  await assert.rejects(prepareVisualProfileStartup(root));
+  assert.equal(await fs.readFile(preferences, 'utf8'), 'INVALID_JSON');
 });
 
 test('invalid archive paths, duplicates and payloads fail before creating any profile file', async () => {

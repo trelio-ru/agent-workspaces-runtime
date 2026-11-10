@@ -458,6 +458,10 @@ publication tooling также остаются вне этого публичн
   Signed presentation по умолчанию windowed; hidden opt-in, owner pinning и
   видимый human setup сохраняют исходную lease и stop/save-before-relaunch.
   Общий UI fallback использует только уже допущенные controls, без write replay.
+  Signed semantic controls/field comparisons pin exact owner policy before IO;
+  compare business intent privately, return enums only, preserve auth/manual gates.
+  Managed visual/persistent profiles disable Chromium sign-in with both current
+  and next-startup preferences; website login and personal Chrome stay separate.
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.

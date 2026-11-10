@@ -964,6 +964,12 @@ export const withPersistentBrowserSession = async ({
     await execution.initialize?.();
     privateDirectory(profileDirectory);
     privateDirectory(downloadsDirectory);
+    // The same isolated-profile policy applies to visual and persistent
+    // browser sessions. Never bind a provider website login to Chrome Sync or
+    // borrow a user's browser profile. Load the shared helper only here, not
+    // during pure signed-command admission/parser startup.
+    const { prepareVisualProfileStartup } = await import('./trelio-visual-profile.mjs');
+    await prepareVisualProfileStartup(profileDirectory, { restoreSessionOnFirstLaunch: false });
     const resolvedBrowserExecutable = chromeExecutable || defaultBrowserExecutable();
     if (!fs.existsSync(resolvedBrowserExecutable)) {
       fail(

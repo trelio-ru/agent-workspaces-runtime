@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { prepareVisualPrivateDirectory } from './trelio-visual-bootstrap.mjs';
+import { readPrivateJsonFile, writePrivateJsonFile } from './trelio-workspace.mjs';
 
 const MAX_BYTES = 48 * 1024 * 1024;
 const MAX_FILES = 4096;
@@ -17,15 +18,31 @@ const directories = new Set(['Default/Local Storage', 'Default/LocalStorage', 'D
  * Chromium ignores --restore-last-session for a new Profile and Windows/Linux
  * delete its session cookies when the last window closes. Set the ordinary
  * "continue where you left off" preference before first profile construction.
- * Existing accepted preferences remain byte-for-byte unchanged. */
-export async function prepareVisualProfileStartup(directory) {
+ * Managed profiles disable browser-level sign-in, separately from website
+ * authentication: these profiles are not Chrome Sync/token-service archives.
+ * Chromium copies the next-startup setting over `allowed` during startup, so
+ * setting only `allowed` does not actually enforce this isolation. Persistent
+ * callers keep their prior startup behavior: only visual snapshots need the
+ * new-profile session-restore preference for native session cookies. */
+export async function prepareVisualProfileStartup(directory, { restoreSessionOnFirstLaunch = true } = {}) {
+  if (typeof restoreSessionOnFirstLaunch !== 'boolean') throw invalid();
   const target = path.join(directory, 'Default');
   await prepareVisualPrivateDirectory(target);
-  try { await fs.writeFile(path.join(target, 'Preferences'), JSON.stringify({ session: { restore_on_startup: 1 } }), { flag: 'wx', mode: 0o600 }); }
+  const preferences = path.join(target, 'Preferences');
+  try { await fs.writeFile(preferences, JSON.stringify({ ...(restoreSessionOnFirstLaunch ? { session: { restore_on_startup: 1 } } : {}),
+    signin: { allowed: false, allowed_on_next_startup: false } }), { flag: 'wx', mode: 0o600 }); }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    const previous = await fs.lstat(path.join(target, 'Preferences'));
+    const previous = await fs.lstat(preferences);
     if (!previous.isFile() || previous.isSymbolicLink()) throw invalid();
+    // This is a stopped, freshly restored, owned profile. Keep every other
+    // preference, including website settings; never change the user's Chrome
+    // or copy its refresh tokens/password database into the auth snapshot.
+    const value = await readPrivateJsonFile(preferences, { maximumBytes: 4 * 1024 * 1024 });
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || value.signin !== undefined && (!value.signin || typeof value.signin !== 'object' || Array.isArray(value.signin))) throw invalid();
+    if (value.signin?.allowed !== false || value.signin?.allowed_on_next_startup !== false) await writePrivateJsonFile(preferences,
+      { ...value, signin: { ...value.signin, allowed: false, allowed_on_next_startup: false } });
   }
 }
 

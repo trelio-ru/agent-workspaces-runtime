@@ -247,9 +247,11 @@ export function parseVisualSkillOutput(stdout) {
 
 // Value-free command schemas shared by the public controller and browser.
 // Reject unknown fields BEFORE private owner state or worker creation.
-const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], 'download-audio': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
+const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls', 'controlQuery', 'controlOffset', 'checks'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], 'download-audio': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
 fields['upload-files'] = ['frameId', 'x', 'y', 'files'];
 export const validVisualArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768
+  && (operation !== 'read-text' || (!Object.hasOwn(args, 'controlQuery') || typeof args.controlQuery === 'string' && args.controlQuery.length <= 120)
+    && (!Object.hasOwn(args, 'controlOffset') || Number.isInteger(args.controlOffset) && args.controlOffset >= 0 && args.controlOffset <= 1200))
   && (operation !== 'download-audio' || typeof args.frameId === 'string' && args.frameId.length > 0 && Number.isInteger(args.x) && args.x >= 0 && Number.isInteger(args.y) && args.y >= 0)
   && (operation !== 'authenticate-mail' || Object.keys(args).length === 1 && typeof args.mailAccountId === 'string' && uuid.test(args.mailAccountId))
   && (operation !== 'upload-files' || validVisualUploadFiles(args.files) && typeof args.frameId === 'string' && Number.isInteger(args.x) && Number.isInteger(args.y));

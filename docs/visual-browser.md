@@ -17,6 +17,10 @@ HTTPS origins/domains, optional externalNavigation, начальный адре�
 PNG, ввод и safeguards остаются теми же. Это не native SW_HIDE, не минимизация
 и не обещание работы при выключенной ОС. Hidden startup не делает предварительную
 попытку входа и не служит fallback после отказа windowed browser.
+Во всех managed visual/persistent профилях отключён browser-level sign-in Chromium
+(`signin.allowed` и `signin.allowed_on_next_startup`):
+это web-сессия навыка, не профиль Chrome Sync. Остальные preferences сохраняются;
+обычный профиль пользователя и OS/Bluetooth settings не меняются.
 
 Явный `setup` предназначен для входа человеком и всегда запускает обычное
 видимое окно. Из активного hidden процесса он сначала штатно останавливает и
@@ -232,6 +236,28 @@ scanLimited означает неполноту. Lazy loaded, iframe/canvas и �
 их после наблюдения. `screenshot` остаётся явным PNG fallback. Оба variants
 проходят closed validation в host/private HTTP/реальном typed MCP transport;
 страница и labels всегда untrusted data, не authority.
+
+Подписанный `semanticControls: true` (`trelio.visual-semantic-controls/v1`)
+добавляет combobox/option/checkbox/radio/menuitem, checked/selected и отдельную
+пагинацию viewport controls: `controlQuery` literal до 120, `controlOffset`
+0..1200, `nextControlsOffset`. Кандидатов не больше 1200; неоднозначность и
+scanLimited не доказывают отсутствие цели. Связанный native label может быть
+видимой целью clipped checkbox. Прозрачный native checkbox допускается лишь
+при собственной accessible label, видимом ancestor и успешном hit-test.
+Значения полей в controls не добавляются; legacy reader сохраняет прежнюю схему.
+
+`trelio.visual-form-checks/v1` разрешает отдельный signed `fieldCheckPolicy`:
+только exact подмножество origins provider-а и до 64 точных business labels.
+Политика канонизируется до private IO и закрепляется в SAME owner; изменение
+не переиспользует live worker. `read-text.checks` содержит до шести сравнений
+`{id,label,match,values}` с `equals`/`contains` и до восьми известных ожидаемых
+строк (до 512 символов). Пустая строка проверяет отсутствие business input.
+Фиксированный host adapter сравнивает значения только видимых hit-tested
+textbox/select/combobox на объявленном origin. Ответ `fieldChecks` содержит
+только id и `matches|different|missing|ambiguous`: без actual/expected, длины,
+hash, DOM или selector. Authentication/manual/password/OTP gates сохраняются.
+Это не универсальное разрешение читать формы: provider не выводит policy/checks
+в model argv и допускает только известные значения поручения в своих recipes.
 
 При signed `externalNavigation: true` видимый hit-tested HTML anchor может
 дополнительно вернуть `control.url`: точный HTTP(S) адрес для передачи обычному

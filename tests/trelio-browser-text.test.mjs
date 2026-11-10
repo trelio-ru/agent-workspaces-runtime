@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
-import { TEXT_KIND, buildTextObserverScript, readableLinkUrl, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
+import { TEXT_KIND, buildTextObserverScript, readableLinkUrl, validateTextResult, normalizeBusinessFieldPolicy, validBusinessFieldChecks } from '../host-runtime/scripts/trelio-browser-text.mjs';
 const sample = () => ({ kind: TEXT_KIND, state: 'ready', reason: 'none', sessionId: '12345678-1234-4234-8234-123456789012', frameId: '12345678-1234-4234-8234-123456789013', width: 1440, height: 1000, scroll: { up: false, down: true, left: false, right: false }, title: 'Fixture', text: 'Объявление', controls: [{ role: 'button', label: 'Найти', x: 200, y: 100 }], nextOffset: null, scanLimited: false });
 
 // Synthetic published-document markup, not a copy of any provider page. The
@@ -34,6 +34,106 @@ const readonlyDocumentFixture = () => `
 test('text projection rejects extra data, excessive content and invalid coordinates', () => {
   assert.equal(validateTextResult(sample()).kind, TEXT_KIND);
   for (const change of [{ html: '<div>' }, { text: 'a'.repeat(6001) }, { controls: [{ ...sample().controls[0], x: 1440 }] }, { controls: [{ ...sample().controls[0], value: 'SECRET' }] }, { scanLimited: 'false' }, { nextOffset: -1 }, { sessionId: 'invalid' }]) assert.throws(() => validateTextResult({ ...sample(), ...change }), /VISUAL_RESULT_INVALID/);
+});
+test('semantic controls retain closed state metadata and never accept field values or legacy capability widening', () => {
+  const control = { role: 'checkbox', label: 'Calendar', checked: true, x: 20, y: 30 };
+  const value = { ...sample(), nextControlsOffset: null, controls: [control,
+    { role: 'option', label: 'Work', selected: false, x: 20, y: 60 }] };
+  assert.equal(validateTextResult(value), value);
+  for (const change of [{ nextControlsOffset: -1 }, { nextControlsOffset: 1201 },
+    { controls: [{ ...control, value: 'PRIVATE_VALUE' }] }, { controls: [{ ...control, checked: 'true' }] },
+    { controls: [{ ...control, role: 'textbox' }] }]) assert.throws(() => validateTextResult({ ...value, ...change }));
+  assert.throws(() => validateTextResult({ ...sample(), controls: [control] }), /VISUAL_RESULT_INVALID/);
+});
+
+test('business comparisons are closed signed policy and return enums only', () => {
+  const policy = normalizeBusinessFieldPolicy({ origins: ['https://example.test'], labels: ['Start date'] }, ['https://example.test']);
+  const check = { id: 'date', label: 'Start date', match: 'equals', values: ['2030-05-12'] };
+  assert.ok(validBusinessFieldChecks([check], policy));
+  for (const invalid of [[{ ...check, label: 'Password' }], [{ ...check, selector: 'input' }],
+    [{ ...check, match: 'regex' }], [check, check], []]) assert.equal(validBusinessFieldChecks(invalid, policy), false);
+  assert.equal(validBusinessFieldChecks([check], null), false);
+  assert.throws(() => normalizeBusinessFieldPolicy({ origins: ['https://foreign.test'], labels: ['Start date'] }, ['https://example.test']));
+  const value = { ...sample(), nextControlsOffset: null, fieldChecks: [{ id: 'date', state: 'matches' }] };
+  assert.equal(validateTextResult(value), value);
+  for (const fieldChecks of [[{ id: 'date', state: 'matches', value: 'PRIVATE' }], [{ id: 'date', state: 'unknown' }]])
+    assert.throws(() => validateTextResult({ ...value, fieldChecks }));
+});
+
+test('native semantic controls page past long toolbars, follow layout changes and keep editable values private', {
+  skip: process.env.TRELIO_TEXT_TEST !== '1', timeout: 120_000,
+}, async t => {
+  const { ExtensionVisualBrowser } = await import('../host-runtime/scripts/trelio-visual-extension-browser.mjs');
+  const { loadVisualDependencies } = await import('../host-runtime/scripts/trelio-visual-bootstrap.mjs');
+  const { createVisualOriginPolicy } = await import('../host-runtime/scripts/trelio-visual-browser.mjs');
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'semantic-controls-')));
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (req.url === '/password') { res.end('<label>Start date<input value="2030-05-12"></label><input type="password" value="PRIVATE_PASSWORD">'); return; }
+    res.end('<!doctype html><body>' + Array.from({ length: 70 }, (_, i) => `<button>Action ${i}</button>`).join('')
+      + '<p><button id="target" onclick="this.textContent=\'TARGET_CLICKED\'">Late target</button>'
+      + '<button onclick="document.getElementById(\'target\').style.marginLeft=\'200px\'">Reflow</button></p>'
+      + '<label>Selected calendar<input type="checkbox" checked value="PRIVATE_CHECK_VALUE"></label>'
+      + '<label>Clipped calendar<input style="position:absolute;width:1px;height:1px;opacity:0" type="checkbox" checked value="PRIVATE_CLIPPED_VALUE"><textarea hidden>PRIVATE_LABEL_DRAFT</textarea></label>'
+      + '<p><input type="checkbox" checked aria-labelledby="painted-label" style="opacity:0;width:20px;height:20px"><span id="painted-label">Painted calendar</span></p>'
+      + '<input type="checkbox" checked aria-label="Native overlay" style="opacity:0;width:20px;height:20px">'
+      + '<label id="calendar-label">Calendar choice</label><div role="combobox" aria-labelledby="calendar-label">Current calendar</div>'
+      + '<div role="option" aria-selected="false">Work</div><button>Duplicate</button><button>Duplicate</button>'
+      + '<label>Start date<input value="2030-05-12"></label><label>Start time<input value="12:00"></label>'
+      + '<label>Duplicate field<input value="one"></label><label>Duplicate field<input value="two"></label>'
+      + '<div hidden><label>Hidden field<input value="PRIVATE_HIDDEN"></label></div>'
+      + '<div role="combobox" contenteditable="true" aria-label="Editable choice">PRIVATE_DRAFT_VALUE</div></body>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ install: false });
+  const browser = new ExtensionVisualBrowser({ dependencies, store: { directory, async prepare() {}, async read() {}, async write() {}, close() {} },
+    origins: [origin], policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+    observationMode: 'text', semanticControls: true, fieldCheckPolicy: { origins: [origin], labels: ['Start date', 'Start time', 'Duplicate field', 'Hidden field'] }, presentation: 'hidden', lease: { deadlineAt: Date.now() + 100_000 } });
+  t.after(async () => { await browser.close().catch(() => browser.abort()); server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+  const ready = value => { assert.equal(value.state, 'ready', value.reason); return value; };
+  let frame = ready(await browser.call('navigate', { url: origin }));
+  assert.equal(frame.controls.length, 40); assert.equal(frame.nextControlsOffset, 40);
+  const later = ready(await browser.call('read-text', { controlOffset: 40 }));
+  assert.ok(later.controls.some(c => c.label === 'Late target'));
+  frame = ready(await browser.call('read-text', { controlQuery: 'Selected calendar' }));
+  assert.equal(frame.controls.length, 1); assert.equal(frame.controls[0].role, 'checkbox'); assert.equal(frame.controls[0].checked, true);
+  frame = ready(await browser.call('read-text', { controlQuery: 'Clipped calendar' }));
+  assert.equal(frame.controls.length, 1); assert.equal(frame.controls[0].checked, true);
+  frame = ready(await browser.call('click', { frameId: frame.frameId, x: frame.controls[0].x, y: frame.controls[0].y }));
+  frame = ready(await browser.call('read-text', { controlQuery: 'Clipped calendar' }));
+  assert.equal(frame.controls[0].checked, false, 'the visible native label toggles its clipped associated checkbox');
+  frame = ready(await browser.call('read-text', { controlQuery: 'Native overlay' }));
+  assert.equal(frame.controls.length, 1); assert.equal(frame.controls[0].checked, true);
+  frame = ready(await browser.call('read-text', { controlQuery: 'Painted calendar' }));
+  assert.equal(frame.controls.length, 1); assert.equal(frame.controls[0].checked, true);
+  frame = ready(await browser.call('read-text', { controlQuery: 'Calendar choice' }));
+  assert.equal(frame.controls[0].role, 'combobox');
+  frame = ready(await browser.call('read-text', { controlQuery: 'Work' }));
+  assert.equal(frame.controls[0].role, 'option'); assert.equal(frame.controls[0].selected, false);
+  frame = ready(await browser.call('read-text', { controlQuery: 'Duplicate' }));
+  assert.equal(frame.controls.filter(control => control.role === 'button').length, 2, 'duplicate labels must remain visibly ambiguous');
+  const before = ready(await browser.call('read-text', { controlQuery: 'Late target' })).controls[0];
+  frame = ready(await browser.call('read-text', { controlQuery: 'Reflow' }));
+  ready(await browser.call('click', { frameId: frame.frameId, x: frame.controls[0].x, y: frame.controls[0].y }));
+  frame = ready(await browser.call('read-text', { controlQuery: 'Late target' }));
+  assert.notEqual(frame.controls[0].x, before.x, 'the recipe receives current geometry rather than a saved coordinate');
+  frame = ready(await browser.call('click', { frameId: frame.frameId, x: frame.controls[0].x, y: frame.controls[0].y }));
+  assert.match(frame.text, /TARGET_CLICKED/);
+  const check = (id, label, values) => ({ id, label, match: 'equals', values });
+  frame = ready(await browser.call('read-text', { checks: [check('date', 'Start date', ['2030-05-12']),
+    check('time', 'Start time', ['13:00']), check('duplicate', 'Duplicate field', ['one']), check('hidden', 'Hidden field', ['PRIVATE_HIDDEN'])] }));
+  assert.deepEqual(frame.fieldChecks, [{ id: 'date', state: 'matches' }, { id: 'time', state: 'different' },
+    { id: 'duplicate', state: 'ambiguous' }, { id: 'hidden', state: 'missing' }]);
+  assert.doesNotMatch(JSON.stringify(frame), /2030-05-12|12:00|13:00|PRIVATE_HIDDEN/);
+  assert.equal((await browser.call('read-text', { checks: [check('foreign', 'Password', ['x'])] })).reason, 'invalid_input');
+  assert.equal((await browser.call('navigate', { url: origin + '/password' })).reason, 'manual_control_active');
+  const blocked = await browser.call('read-text', { checks: [check('date', 'Start date', ['2030-05-12'])] });
+  assert.equal(blocked.reason, 'manual_control_active');
+  assert.equal(blocked.fieldChecks, undefined);
+  assert.doesNotMatch(JSON.stringify(blocked), /2030-05-12|PRIVATE_PASSWORD/);
+  assert.doesNotMatch(JSON.stringify(frame), /PRIVATE_CHECK_VALUE|PRIVATE_DRAFT_VALUE|PRIVATE_CLIPPED_VALUE|PRIVATE_LABEL_DRAFT/);
 });
 test('visible link handoff is generic, canonical and excludes credential/callback references', () => {
   for (const url of ['https://documents.example/contract.docx?download=1', 'https://social.example/post/123#section',
@@ -113,7 +213,7 @@ test('isolated observer pages and metadata keep emoji whole using the packaged c
 test('text crosses the actual typed MCP action handler without generic stdout truncation', async () => {
   const { handleToolCall } = await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
   const { handleTrelioWorkspaceActionOperation } = await import('../host-runtime/scripts/trelio-local-context.mjs');
-  const value = { ...sample(), text: 'Описание услуги '.repeat(350), controls: [
+  const value = { ...sample(), nextControlsOffset: null, fieldChecks: [{ id: 'date', state: 'matches' }], text: 'Описание услуги '.repeat(350), controls: [
     { role: 'link', label: 'Original', x: 20, y: 30, url: 'https://documents.example/original.docx?download=1' }] };
   const result = await handleToolCall('https://example.test', 'continue_trelio_workspace_action', { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: value.sessionId, skillId: 'synthetic-visual-fixture', releaseId: value.frameId, arguments: ['read-text'] } }, {
     workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, { runBridge: async () => ({ stdout: JSON.stringify(value), stderr: '' }) }),
@@ -121,6 +221,7 @@ test('text crosses the actual typed MCP action handler without generic stdout tr
   assert.equal(result.content.length, 1);
   assert.equal(JSON.parse(result.content[0].text).text, value.text);
   assert.deepEqual(JSON.parse(result.content[0].text).controls, value.controls);
+  assert.deepEqual(JSON.parse(result.content[0].text).fieldChecks, value.fieldChecks);
   assert.doesNotMatch(result.content[0].text, /stdout|stderr|html/);
 });
 

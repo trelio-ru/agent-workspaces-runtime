@@ -313,6 +313,9 @@ Windows Hello либо encrypted container, если они не реализо�
 browser/SDK state: нужен encrypted container либо in-memory context с AEAD
 snapshot, OS-protected key и предусмотренным владельцем unlock. Отсутствие
 заявленной защиты блокирует setup/read без plaintext/silent-unlock fallback.
+В managed visual/persistent профилях browser-level Chromium sign-in отключён
+общим host: оба signin preferences сохраняются до launch. Вход на сайты остаётся
+доступен; личный Chrome, Sync credentials и OS settings не используются.
 
 По умолчанию браузерная процедура использует один headed browser от первого запуска до
 завершения; headless auth/probe перед fallback запрещён. Явный signed opt-in
