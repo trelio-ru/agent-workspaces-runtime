@@ -404,11 +404,15 @@ export class ExtensionVisualBrowser {
           }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
           const pending = this.#pending.get(value.id); if (!pending) return;
+          pending.reportNavigation?.(value.result?.state === 'error' ? 'extension_error' : 'reply_received');
           this.#pending.delete(value.id); clearTimeout(pending.timer); pending.resolve(value.result);
         });
         ws.on('close', () => {
           if (this.#socket === ws) this.#socket = undefined;
-          for (const [id, pending] of this.#pending) { clearTimeout(pending.timer); pending.reject(fault('operation_failed')); this.#pending.delete(id); }
+          for (const [id, pending] of this.#pending) {
+            pending.reportNavigation?.('socket_closed');
+            clearTimeout(pending.timer); pending.reject(fault('operation_failed')); this.#pending.delete(id);
+          }
         });
         ws.on('error', () => {});
       });
@@ -503,12 +507,26 @@ export class ExtensionVisualBrowser {
     if (manual) this.#watchManualCompletion();
   }
   #send(operation, args = {}) {
-    if (!this.#socket || this.#socket.readyState !== 1) return Promise.reject(fault('operation_failed'));
+    // The detached native fixture needs the outcome of this exact request.
+    // A timeout, closed socket and an extension refusal all have the same
+    // public error on some paths. Keep only the fixed stage, never args or ids.
+    const reportNavigation = operation === 'navigate' && this.testDiagnostics
+      ? outcome => this.testDiagnostics({ stage: 'navigation_transport', outcome })
+      : undefined;
+    if (!this.#socket || this.#socket.readyState !== 1) {
+      reportNavigation?.('socket_unavailable');
+      return Promise.reject(fault('operation_failed'));
+    }
     const result = new Promise((resolve, reject) => {
       const id = crypto.randomUUID();
-      const timer = setTimeout(() => { this.#pending.delete(id); reject(fault('operation_failed')); }, 40_000);
-      this.#pending.set(id, { resolve, reject, timer });
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reportNavigation?.('response_timeout');
+        reject(fault('operation_failed'));
+      }, 40_000);
+      this.#pending.set(id, { resolve, reject, timer, ...(reportNavigation ? { reportNavigation } : {}) });
       this.#socket.send(JSON.stringify({ id, operation, args }));
+      reportNavigation?.('sent');
     });
     // Only the existing localhost-fixture callback can observe these closed
     // protocol buckets. Distinguish a lost input acknowledgement from a later

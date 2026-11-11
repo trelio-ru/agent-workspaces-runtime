@@ -268,7 +268,7 @@ test('native Windows characterizes atomic descriptor publication while the origi
   }
 });
 
-test('synthetic startup evidence retains closed native failure categories and drops arbitrary error/owner data',async()=>{
+test('synthetic worker evidence retains closed failure categories and drops arbitrary error/owner data',async()=>{
   const source=await fs.readFile(new URL('../host-runtime/scripts/trelio-visual-worker.mjs',import.meta.url),'utf8');
   const start=source.indexOf('function fixtureDiagnostic(value) {'),end=source.indexOf('\nasync function stop()',start);
   assert.ok(start>=0&&end>start);
@@ -300,6 +300,14 @@ test('synthetic startup evidence retains closed native failure categories and dr
     vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
     assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'startup_failed',startupPhase});
   }
+  scope.input={stage:'navigation_transport',outcome:'response_timeout',url:'PRIVATE URL',requestId:'PRIVATE ID'};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout'});
+  const beforeInvalidOutcome=snapshots.length;
+  scope.input={stage:'navigation_transport',outcome:'PRIVATE ERROR'};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.equal(snapshots.length,beforeInvalidOutcome);
+  scope.input={stage:'navigation_transport',outcome:'response_timeout'};
   scope.fixtureOnly=false;const count=snapshots.length;
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
   assert.equal(snapshots.length,count,'ordinary production never writes fixture evidence');
@@ -545,8 +553,15 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
     assert.notEqual(a.sessionId, b.sessionId);
     assert.equal((await call(1, 'scroll', { frameId: a.frameId, x: 300, y: 300, deltaY: 100 })).reason, 'stale_frame');
     assert.equal((await call(0, 'close')).state, 'closed'); await closed(0);
+    const navigationStarted = performance.now();
     const next = await call(1, 'navigate', { url: origin });
-    assert.equal(next.state, 'ready', 'closing the sibling preserves this browser');
+    // Capture the original closed result before cleanup. Time the failed
+    // request itself so setup and shutdown do not look like its timeout.
+    assert.equal(next.state, 'ready', 'closing the sibling preserves this browser: ' + JSON.stringify({
+      elapsedMs: Math.round(performance.now() - navigationStarted),
+      reason: next.reason,
+      diagnostic: next.diagnostic,
+    }));
     assert.equal((await call(1, 'scroll', { frameId: next.frameId, x: 300, y: 300, deltaY: 100 })).state, 'ready');
   } catch (error) { failure = error; }
   finally {

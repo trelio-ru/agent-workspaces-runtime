@@ -559,6 +559,8 @@ publication tooling также остаются вне этого публичн
   operation/result buckets from original calls, never an extra probe or input retry.
   Parallel detached fixture failure tails are execution-owner-specific; ready
   retains closed stop/snapshot/persist/cleanup cause without retry or raw errors.
+  Post-sibling navigation keeps the original validated reason, elapsed time and
+  closed extension transport outcome without changing deadlines or retrying.
   Parallel fixture cleanup preserves the first assertion even if either worker
   fails shutdown, closes each own sibling independently and stops its synthetic
   listener on cancellation; failed evidence/active profiles remain intact.

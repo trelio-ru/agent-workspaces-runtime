@@ -28,10 +28,16 @@ function fixtureDiagnostic(value) {
   // native exception, browser output, URLs, tokens or cookie values. Preserve
   // a short chronological tail so a detached startup has the same closed
   // evidence as the in-process native fixture, including early browser exit.
-  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed', 'browser_quit', 'browser_stop_timeout', 'close_queue', 'close_manual', 'close_browser', 'close_snapshot', 'shutdown_start', 'shutdown_claim', 'shutdown_complete'];
+  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed', 'browser_quit', 'browser_stop_timeout', 'close_queue', 'close_manual', 'close_browser', 'close_snapshot', 'shutdown_start', 'shutdown_claim', 'shutdown_complete', 'navigation_transport'];
   const finishingStages = ['stopped_profile_snapshot_failed', 'stopped_profile_persist_failed', 'stopped_profile_cleanup_failed', 'manual_finish_failed'];
   if (!stages.includes(value.stage) && !finishingStages.includes(value.stage)) return;
   const record = { stage: value.stage };
+  if (value.stage === 'navigation_transport') {
+    // Track only the original fixture navigation. Arbitrary extension errors,
+    // URLs and request identity must never reach the persisted tail.
+    if (!['sent', 'reply_received', 'extension_error', 'response_timeout', 'socket_unavailable', 'socket_closed'].includes(value.outcome)) return;
+    record.outcome = value.outcome;
+  }
   const finishing = finishingStages.includes(value.stage);
   // A ready/save failure is not startup. Preserve only its closed original
   // operation/errno and owned-file category; never serialize the Error, path,

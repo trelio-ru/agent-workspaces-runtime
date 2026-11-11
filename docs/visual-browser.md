@@ -186,6 +186,11 @@ prose, URL/paths, native output, credentials и diagnostic на успешном
 Parallel detached native fixtures keep one closed diagnostic tail per verified
 execution owner. Failed ready reports its original reason and that worker's
 stop/snapshot/persist/cleanup stage, allowed errno/syscall and owned-file category.
+If navigation after closing a sibling fails, the fixture keeps that one call's
+elapsed time and validated result reason/diagnostic. The surviving worker's
+closed navigation trace distinguishes an extension reply or refusal, a missing
+or closed socket, and the extension response timeout from the outer worker
+request failure.
 No Error text/path, owner descriptor, extra native observation, input/save retry
 or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
 Parallel fixture shutdown preserves the first body/close assertion if later
