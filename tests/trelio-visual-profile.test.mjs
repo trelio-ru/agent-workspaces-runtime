@@ -70,7 +70,9 @@ test('isolated presentation disables browser sign-in while preserving unrelated 
 test('invalid archive paths, duplicates and payloads fail before creating any profile file', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-invalid-')));
   try {
-    for (const bad of [file('../state'), file('/Local State'), file('Default/../History'), file('Default\\Cookies'), file('Local State/evil'), file('Default/History'), { path: 'Local State', data: 'not-base64' }]) {
+    const invalidPayloads = ['not-base64', 'A===', 'AA=A', 'AAAA=', 'AA\nA', 'AA_A']
+      .map(data => ({ path: 'Default/Network/Cookies', data }));
+    for (const bad of [file('../state'), file('/Local State'), file('Default/../History'), file('Default\\Cookies'), file('Local State/evil'), file('Default/History'), ...invalidPayloads]) {
       await assert.rejects(restoreVisualProfile(archive([file('Local State'), bad]), root), { code: 'VISUAL_STORAGE_CORRUPT' });
       assert.deepEqual(await fs.readdir(root), []);
     }
@@ -78,6 +80,15 @@ test('invalid archive paths, duplicates and payloads fail before creating any pr
     await assert.rejects(restoreVisualProfile({ schemaVersion: 1, profile: '' }, root), { code: 'VISUAL_STORAGE_CORRUPT' });
     assert.deepEqual(await fs.readdir(root), []);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('profile archive restores a valid multi-megabyte IndexedDB entry with padding', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-large-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const name = 'Default/IndexedDB/synthetic.indexeddb.leveldb/000003.ldb';
+  const input = Buffer.alloc(8 * 1024 * 1024, 0xa5);
+  await restoreVisualProfile(archive([file(name, input)]), root);
+  assert.equal((await fs.readFile(path.join(root, name))).equals(input), true);
 });
 
 test('network Cookie migration checkpoint survives alongside its exact database without admitting sibling network data', async () => {

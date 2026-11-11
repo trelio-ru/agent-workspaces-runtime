@@ -51,6 +51,15 @@ function permitted(name) {
     && roots.some(root => name === root || (directories.has(root) && name.startsWith(root + '/')));
 }
 
+function hasBase64Shape(value) {
+  if (value.length % 4 !== 0) return false;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  // Scan for disallowed bytes without a repeated regex group. V8 can run out
+  // of regex stack on valid multi-megabyte IndexedDB entries. Check padding
+  // separately so the permissive Base64 decoder cannot accept damaged entries.
+  return !/[^A-Za-z0-9+/]/u.test(padding ? value.slice(0, -padding) : value);
+}
+
 /** Snapshot only a stopped owned profile. Never read history, page code,
  * cache, downloads, saved passwords or a user's ordinary browser profile. */
 export async function snapshotVisualProfile(directory) {
@@ -99,7 +108,8 @@ export async function restoreVisualProfile(value, directory) {
     const seen = new Set(); let total = 0;
     // Validate the complete archive before creating any profile file.
     for (const file of files) {
-      if (!file || Object.keys(file).sort().join() !== 'data,path' || !permitted(file.path) || seen.has(file.path) || typeof file.data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(file.data)) throw invalid();
+      if (!file || Object.keys(file).sort().join() !== 'data,path' || !permitted(file.path)
+        || seen.has(file.path) || typeof file.data !== 'string' || !hasBase64Shape(file.data)) throw invalid();
       seen.add(file.path); total += Buffer.byteLength(file.data, 'base64');
       if (total > MAX_BYTES) throw invalid();
     }

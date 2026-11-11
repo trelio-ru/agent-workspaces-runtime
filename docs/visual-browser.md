@@ -963,6 +963,9 @@ sessionStorage/WebStorage; History, Login Data, browser sessions, обычные
 и downloads не включаются. Наличие storage не доказывает вход на конкретный сайт.
 Пути, duplicates, типы, file/byte counts и распакованный размер проверяются;
 symlink в том числе у промежуточного предка отклоняется.
+Проверка Base64 для каждого файла линейна и завершает валидацию всего архива
+до записи. Крупный разрешённый файл IndexedDB восстанавливается в прежних
+лимитах schema-v2. Алфавит и padding остаются строгими.
 
 Ключ находится в Keychain / Windows Credential Manager / desktop Linux Secret
 Service. AAD привязывает snapshot к Trelio origin, skill и personal account UUID.

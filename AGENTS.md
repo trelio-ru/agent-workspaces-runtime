@@ -626,6 +626,8 @@ publication tooling также остаются вне этого публичн
   async windows query после закрытия может не получить callback при teardown.
   Legacy snapshots сохраняют native cookies, explicit empty overlay удаляет stale
   session rows. NetworkDataMigrated сохраняется вместе с native Cookie DB.
+  Restore проверяет Base64 линейно до записи файлов: крупный IndexedDB entry
+  сохраняет schema-v2 limits, строгие alphabet/padding и исходные bytes.
   Никакие auth values не входят в worker.js. Локальный isolated link router
   читает href exact trusted click для same-tab navigation,
   не выдаёт модели DOM/код и не принимает произвольные scripts/selectors.
