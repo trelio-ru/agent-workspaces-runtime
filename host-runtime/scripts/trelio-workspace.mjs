@@ -11221,6 +11221,7 @@ const stageEncryptedDerivedArtifactInventory = async ({
           body: JSON.stringify({
             companySlug: companyEncryption.runtime.company.slug,
             writerDeviceId: companyEncryption.runtime.device.id,
+            runId: metadata.runId,
             payloads: inventory.payloads.slice(offset, offset + 100),
           }),
         },
@@ -15917,6 +15918,7 @@ export const protectAgentWorkspaceCheckpoint = async ({
       body: JSON.stringify({
         companySlug: companyEncryption.runtime.company.slug,
         writerDeviceId: companyEncryption.runtime.device.id,
+        runId: metadata.runId,
         payloads: [payload],
       }),
     },

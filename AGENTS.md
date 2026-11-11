@@ -1101,6 +1101,8 @@ publication tooling также остаются вне этого публичн
 
 ## Граница plugin/runtime
 
+- [Приватные задачи](docs/agent-workspace-runtime.md#приватные-задачи).
+
 - Human Codex main и его immutable hook-компонент используют тот же verifier и
   retention по [контракту](docs/agent-workspace-runtime.md#human-codex-hook-component).
   После initialize включённый native human main сам доустанавливает отсутствующий

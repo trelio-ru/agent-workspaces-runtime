@@ -3955,6 +3955,29 @@ test("one local dispatcher preserves exact native inputs across route families",
   }]);
 });
 
+
+test("server-selected private task operations reuse the exact local native transport", async () => {
+  const companySlug = "protected-company";
+  const requests = [
+    { nativeTool: "create_private_task", operation: "create_private_task", arguments: { companySlug, title: "Local title",
+      clientRequestId: "exact-request", userExplicitlyRequestedPrivateTask: true } },
+    { nativeTool: "get_task", operation: "read_private_task", arguments: { companySlug,
+      projectSlug: "private-11111111-1111-4111-8111-111111111111", taskNumber: 1 } },
+  ];
+  for (const input of requests) {
+    const payload = { schemaVersion: 1, route: "workspace", parameters: { companySlug, ...input } };
+    const result = await handleToolCall("https://trelio.example", "continue_trelio_local_action", payload, {
+      localActionOperation: async (_origin, args) => {
+        assert.deepEqual(args, { companySlug, nativeTool: input.nativeTool, arguments: input.arguments,
+          ...(input.operation === "read_private_task" ? { privateTaskRead: true } : {}) });
+        return { structuredContent: { ok: true }, content: [] };
+      },
+      localWorkspaceOperation: async () => assert.fail("Private native calls must not enter the Workspace history adapter."),
+    });
+    assert.deepEqual(result.structuredContent, { ok: true });
+  }
+});
+
 test("human search preparation keeps its original query and exact poll through the real MCP dispatcher", async () => {
   const { createCompanySearchOperations } = await import("../host-runtime/scripts/trelio-workspace-finish-progress.mjs");
   let release, launches = 0;

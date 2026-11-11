@@ -2384,6 +2384,42 @@ test("binary task attachment upload reopens the same file for three safe retries
   }
 });
 
+
+test("private task creation seals one owner-scoped payload and preserves semantic idempotency", async () => {
+  const device = await createAgentEncryptionDevice();
+  const companyEncryption = {
+    runtime: {
+      company: { id: "11111111-1111-4111-8111-111111111111", slug: "acme" },
+      viewer: { userId: "11111111-1111-4111-8111-111111111112" },
+      scope: { id: "22222222-2222-4222-8222-222222222222", epoch: 1,
+        publicEncryptionJwk: device.publicEncryptionJwk },
+      device: { id: "33333333-3333-4333-8333-333333333333" },
+    },
+    device,
+    scopePrivateEncryptionKey: {
+      privateKey: device.privateKeys.encryptionPrivateKey,
+      privateJwk: device.privateBundle.encryptionPrivateJwk,
+    },
+  };
+  const original = { companySlug: "acme", title: "Private owner title", descriptionMarkdown: "**Private note**",
+    userExplicitlyRequestedPrivateTask: true, clientRequestId: "private-task-request" };
+  const protect = (argumentsValue, encryption = companyEncryption) => protectLocalActionArguments({
+    nativeTool: "create_private_task", arguments: argumentsValue, companyEncryption: encryption,
+  });
+  const sealed = await protect(original);
+  assert.equal(sealed.payloads.length, 1);
+  assert.equal(sealed.payloads[0].entityType, "api.private_task_mutation");
+  assert.doesNotMatch(JSON.stringify({ value: sealed.value, payloads: sealed.payloads }), /Private (owner title|note)/u);
+  assert.deepEqual((await protect(original)).value, sealed.value);
+  assert.notEqual((await protect({ ...original, title: "Edited title" })).value.title, sealed.value.title);
+  assert.notEqual((await protect(original, { ...companyEncryption, runtime: { ...companyEncryption.runtime,
+    viewer: { userId: "11111111-1111-4111-8111-111111111113" } } })).value.title, sealed.value.title);
+  const decoded = await decryptCompanyPayload({ encryptedPayload: sealed.payloads[0],
+    scopePrivateKey: device.privateKeys.encryptionPrivateKey, scopePrivateJwk: device.privateBundle.encryptionPrivateJwk });
+  assert.equal(decoded.values.title, original.title);
+  assert.equal(decoded.values.description_plain_text, "Private note");
+});
+
 test("local action protects nested task content and converts Markdown before upload", async () => {
   const device = await createAgentEncryptionDevice();
   const companyEncryption = {

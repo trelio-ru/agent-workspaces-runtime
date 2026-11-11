@@ -5918,6 +5918,20 @@ export const handleToolCall = async (
       });
     }
     if (rawArguments.route === "workspace") {
+      if (["create_private_task", "read_private_task"].includes(parameters.operation)) {
+        const expectedTools = parameters.operation === "create_private_task" ? ["create_private_task"]
+          : ["get_task", "get_task_sections", "get_task_activity", "get_task_instruction_page"];
+        if (!expectedTools.includes(parameters.nativeTool)) {
+          throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Private task route has a mismatched method.");
+        }
+        // Older runtimes stop at the unsupported Workspace operation before
+        // their generic company payload uploader sees any private content.
+        return runLocalNativeActionRoute({
+          companySlug: parameters.companySlug, nativeTool: parameters.nativeTool, arguments: nativeArguments,
+          ...(parameters.operation === "read_private_task" ? { privateTaskRead: true } : {}),
+          ...(rawArguments.runtimeSessionProof ? { runtimeSessionProof: rawArguments.runtimeSessionProof } : {}),
+        });
+      }
       if (parameters.operation === "checkpoint_native") {
         if (parameters.nativeTool !== "checkpoint_agent_workspace_run") {
           throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Native checkpoint route has a mismatched method.");
