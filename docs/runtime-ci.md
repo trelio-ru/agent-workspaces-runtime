@@ -25,7 +25,7 @@ platform-specific security assertions and Windows artifacts are part of release
 evidence. The release uses the exact tested commit.
 
 The native Linux browser lane probes the hosted Ubuntu suite over HTTPS before
-selecting its main or Azure archive. The probe only checks reachability. APT
+selecting the main archive or the Linux Kernel Archives mirror. The probe only checks reachability. APT
 still refreshes and validates signed indexes and packages before the unchanged
 desktop and Secret Service tests run.
 
