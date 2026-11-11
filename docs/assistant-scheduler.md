@@ -2438,6 +2438,25 @@ Missing/changed snapshots refuse before GUI
 effects. Unknown close/retarget remains in its phase; no live-code pruning,
 failed-version reset, trust write, second supervisor or business replay occurs.
 
+A newer facade's ordinary idle health may preserve the original registered
+parent's OLD bootstrap when native cache pruning already stopped its legacy
+watcher. This branch only handles an opted-in `rolling_back` with the original
+previous/full-target receipts, a positively absent SAME previous root, and the
+same freshly verified native installed candidate as the facade's loaded root.
+The SAME idle coordinator lease/setup mutex and fresh identity/pass/native-device
+contact remain mandatory. The common retained-code verifier checks the complete
+original snapshot/cache family/unchanged hook dependency BEFORE a host-only
+`beforeRestore` callback reads the exact native OLD registered action. Only its
+RUNNING observation admits preservation; stopped/queued/foreign/unknown tasks
+remain untouched. A fresh full-target read, native device/owner heartbeat, unchanged update journal,
+still-enabled opt-in and final guard precede publication.
+The literal old loader is only a native definition comparator until restoration.
+No Run(), GUI close/start, retarget, failed-version reset, journal/trust rewrite
+or business work occurs in this facade path. The ORIGINAL daemon regains its
+loader and resumes its next ordinary signed tick; its independent installer,
+GUI, rollback, handoff and receipt gates remain unchanged. A present/partial old
+root, unknown install/hook phase or changed code never acquires this repair.
+
 The implementation must pass native Windows manifest/process/CLI tests and a
 real dedicated Desktop update before unattended activation is called verified.
 Other operating systems leave this Windows policy inactive. Windows login is

@@ -395,6 +395,19 @@ manifest. Missing файл внутри существующего root, дру�
 неверная квитанция или чужой HOME не получают это восстановление. Native
 inventory при этом честно продолжает показывать новую установленную версию;
 сохранение старого loader не считается downgrade или активацией.
+
+Обычный idle health уже работающего нового facade может восстановить такой
+OLD bootstrap для существующего parent, который ещё не умеет исправлять потерю
+своего пути. Только `rolling_back` с original previous/full-target receipts,
+явный update opt-in, SAME coordinator/setup locks и свежий native RUNNING exact
+registered action допускают этот code-only publisher. Native old path служит
+только comparator; полная сохранённая копия, cache family и прежний hook component
+проверяются до наблюдения, а target/identity/pass — ещё раз до publication.
+Stopped/queued/foreign/unknown registration, changed/partial root и uncertain
+installer intent сохраняют отказ. Health не вызывает GUI/start/retarget и не
+переписывает journals/latches/trust. После возврата старого loader только
+исходный daemon продолжает свой обычный подписанный tick. Новый публичный
+инструмент, model turn, task/Run или второй scheduler не создаётся.
 Далее bounded `rollback_closing` закрывает только известную GUI generation через
 прежний native graceful-close и сохраняет неизвестный результат. Фаза
 `rollback_retargeting` передаёт SAME зарегистрированную задачу проверенному old

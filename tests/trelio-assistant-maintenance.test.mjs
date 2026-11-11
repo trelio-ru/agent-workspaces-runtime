@@ -13,6 +13,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
+import {retainLoadedCodexPluginInstallation,readCodexPluginUpdateInventory,prepareAssistantCodexPluginRollbackHost} from '../host-runtime/scripts/trelio-workspace.mjs';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
 
@@ -246,6 +247,129 @@ for(const previousRegistered of [false,true])test(`idle production recovery comp
     assert.equal(retainedReads,retainedBefore,'an unknown/failed read cannot select a second loader');assert.equal(starts,1);
   }
 });
+
+// Compose the actual immutable-code publisher with the production health
+// recovery factory. Only remote native observations/storage primitives are
+// synthetic; original snapshot bytes, receipt matching and restoration are real.
+const pendingBootstrapFixture=async t=>{
+  const directory=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'assistant-bootstrap-preservation-')));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const environment={CODEX_HOME:path.join(directory,'codex')},family=path.join(environment.CODEX_HOME,
+    'plugins','cache','trelio-digital-assistants','trelio-digital-assistant');
+  const previous=path.join(family,'0.1.9'),current=path.join(family,'0.1.12'),retentionDirectory=path.join(directory,'retention');
+  const loader=root=>path.join(root,'scripts','trelio-host-runtime-loader.mjs');
+  await fs.mkdir(path.join(previous,'.codex-plugin'),{recursive:true});await fs.mkdir(path.dirname(loader(previous)));
+  await fs.writeFile(path.join(previous,'.codex-plugin/plugin.json'),JSON.stringify({name:'trelio-digital-assistant',version:'0.1.9'}));
+  await fs.writeFile(loader(previous),'// synthetic original bootstrap; never executed\n');
+  await fs.writeFile(path.join(previous,'package-integrity.json'),JSON.stringify({schemaVersion:1,plugin:'trelio-digital-assistant',
+    hookComponent:{pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.1',integritySha256:'a'.repeat(64)}}));
+  const old=await retainLoadedCodexPluginInstallation({profile:'assistant',loadedPluginDirectory:previous,
+    loadedPluginVersion:'0.1.9',retentionDirectory});
+  await fs.cp(previous,current,{recursive:true});
+  await fs.writeFile(path.join(current,'.codex-plugin/plugin.json'),JSON.stringify({name:'trelio-digital-assistant',version:'0.1.12'}));
+  const candidate=await retainLoadedCodexPluginInstallation({profile:'assistant',loadedPluginDirectory:current,
+    loadedPluginVersion:'0.1.12',retentionDirectory});
+  await fs.rm(previous,{recursive:true});environment.TRELIO_PLUGIN_ROOT=current;
+  const market=path.join(directory,'market');await fs.mkdir(path.join(market,'.agents/plugins'),{recursive:true});
+  await fs.writeFile(path.join(market,'.agents/plugins/marketplace.json'),JSON.stringify({name:'trelio-digital-assistants',plugins:[
+    {name:'trelio-digital-assistant',source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref:'plugin-v0.1.12'}}]}));
+  const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()},files=new Map();
+  const state={idle:false,locked:false,active:null,inspections:0,restorations:0,reads:0,nativeEnabled:true,heartbeats:0,heartbeat:async()=>{},expectedFiles:null,afterInspect:async()=>{},
+    observation:{schemaVersion:1,state:'running',definitionSha256:'f'.repeat(64),lastResult:267009,lastRunAt:Date.now()-60000}};
+  const host=createAssistantHostState({directory:path.join(directory,'private'),store:{get:async()=>null},primitives:{
+    ensurePrivateDirectory:async()=>{},assertPrivatePathKind:async file=>{if(!files.has(file))throw Object.assign(Error(),{code:'ENOENT'});},
+    readPrivateJsonFile:async file=>structuredClone(files.get(file)),writePrivateJsonFile:async(file,value)=>files.set(file,structuredClone(value)),
+    withSetupLock:async action=>{assert.equal(state.locked,false);state.locked=true;try{return await action();}finally{state.locked=false;}},
+  }});
+  await host.saveIdentity(identity);host.readActivePass=async()=>state.active;
+  await host.recordPluginSupervisor('3.31.5',randomUUID(),identity);await host.setPluginUpdatesEnabled(true,identity);
+  await host.writePluginUpdate(null,{schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+    stage:'rolling_back',previousVersion:'0.1.9',previousTreeSha256:old.treeSha256,
+    targetVersion:'0.1.12',targetTreeSha256:candidate.treeSha256,desktopGeneration:'100:1000',restarts:1,failures:3,failedVersion:'0.1.12'});
+  const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{
+    state.idle=true;try{return await action(async()=>assert.equal(state.idle,true));}finally{state.idle=false;}
+  }},close:async()=>{}};
+  const execFileCommand=async(_command,args)=>{
+    assert.ok(state.idle&&state.locked);let value;
+    if(args[1]==='marketplace'&&args[2]==='list')value={marketplaces:[{name:'trelio-digital-assistants',root:market,
+      marketplaceSource:{sourceType:'git',source:'https://github.com/trelio-ru/digital-assistants.git'}}]};
+    else {assert.equal(args[1],'list','code preservation must NEVER invoke native install/remove/start');value={installed:[{
+      pluginId:'trelio-digital-assistant@trelio-digital-assistants',version:'0.1.12',installed:true,enabled:state.nativeEnabled}]};}
+    return {stdout:JSON.stringify(value),stderr:''};
+  };
+  const native={profile:'assistant',environment,retentionDirectory,execFileCommand};
+  const options={platform:'win32',environment,versions:()=>versions,createHost:async()=>runtime,
+    context:async action=>action({identity,readHealth:async()=>({code:'runtime_update_failed'}),heartbeat:async()=>{state.heartbeats++;await state.heartbeat();}},host),
+    readInventory:async(record,guard)=>{await guard();state.reads++;return readCodexPluginUpdateInventory({...native,
+      receipt:{version:record.targetVersion,treeSha256:record.targetTreeSha256}});},
+    prepareBootstrap:async settings=>{state.restorations++;assert.ok(state.idle&&state.locked);
+      return prepareAssistantCodexPluginRollbackHost({...native,...settings});},
+    createRecovery:settings=>({inspect:async()=>{await settings.guard();assert.ok(state.idle&&state.locked);
+      assert.equal(await settings.resolveLoader(),loader(previous),'the absent loader is ONLY a native definition comparator');
+      await assert.rejects(fs.lstat(previous),{code:'ENOENT'},'native observation precedes any code publication');
+      state.inspections++;await state.afterInspect();return structuredClone(state.observation);},
+      start:async()=>assert.fail('a bootstrap read must never start another supervisor')}),
+  };
+  return {directory,previous,current,old,candidate,loader,state,host,files,runtime,identity,options};
+};
+
+test('idle MCP health restores only the running previous parent bootstrap, keeping all original intents and latches',async t=>{
+  const f=await pendingBootstrapFixture(t),before=structuredClone(f.files);
+  const receipt=await fs.readFile(path.join(f.old.entryDirectory,'metadata.json'));
+  const result=await executeAssistantRuntimeRequest({operation:'health'},{
+    context:f.options.context,createRuntimeHost:f.options.createHost,
+    upgradeRuntime:async()=>{},requestRuntime:async()=>({state:'checked'}),
+    backgroundRecovery:settings=>runProductionAssistantBackgroundRecovery({...f.options,...settings}),
+  });
+  assert.deepEqual(result,{state:'checked'});assert.equal(f.state.inspections,1);assert.equal(f.state.reads,2);assert.equal(f.state.heartbeats,1);
+  assert.deepEqual(await fs.readFile(f.loader(f.previous)),await fs.readFile(f.loader(f.old.pluginDirectory)));
+  assert.deepEqual(f.files,before,'no update/recovery/pass/owner/health receipt may be rewritten');
+  assert.deepEqual(await fs.readFile(path.join(f.old.entryDirectory,'metadata.json')),receipt);
+  assert.equal(await f.host.readBackgroundRecovery(),null);
+  assert.equal((await runProductionAssistantBackgroundRecovery(f.options)).state,'maintenance_pending');
+  assert.equal(f.state.inspections,1,'a present bootstrap must not repeat native observation/publication');
+});
+
+for(const condition of ['not_running','disabled','wrong_facade','missing_receipt','corrupt_snapshot','active_pass',
+  'late_identity','late_cancellation','late_candidate_change','late_retention_guard','native_conflict','partial_previous','installing','native_disabled','queued_parent','late_device_denial','late_policy_off','late_journal_change'])
+  test(`pending bootstrap preservation refuses ${condition} without GUI, start or journal mutation`,async t=>{
+    const f=await pendingBootstrapFixture(t),controller=new AbortController();f.options.signal=controller.signal;
+    if(condition==='not_running')f.state.observation.state='registered';
+    if(condition==='queued_parent')f.state.observation.state='queued';
+    if(condition==='native_disabled')f.state.nativeEnabled=false;
+    if(condition==='installing'){const old=await f.host.readPluginUpdate();await f.host.writePluginUpdate(old,{...old,stage:'installing',failedVersion:null});}
+    if(condition==='disabled')await f.host.setPluginUpdatesEnabled(false,f.identity);
+    if(condition==='wrong_facade')f.options.environment={...f.options.environment,TRELIO_PLUGIN_ROOT:path.join(f.directory,'foreign')};
+    if(condition==='missing_receipt'){
+      const old=await f.host.readPluginUpdate();await f.host.writePluginUpdate(old,{...old,previousTreeSha256:'0'.repeat(64)});
+    }
+    if(condition==='corrupt_snapshot')await fs.writeFile(f.loader(f.old.pluginDirectory),'damaged saved bootstrap');
+    if(condition==='active_pass')f.state.active={kind:'source_intake'};
+    if(condition==='late_device_denial')f.state.heartbeat=async()=>{throw Error('synthetic native contact refusal');};
+    if(condition==='late_policy_off')f.state.afterInspect=async()=>{
+      await f.host.setPluginUpdatesEnabled(false,f.identity);f.state.expectedFiles=structuredClone(f.files);};
+    if(condition==='late_journal_change')f.state.afterInspect=async()=>{
+      const old=await f.host.readPluginUpdate();await f.host.writePluginUpdate(old,{...old,restarts:2});
+      f.state.expectedFiles=structuredClone(f.files);};
+    if(condition==='late_identity')f.state.afterInspect=async()=>{f.runtime.identity={...f.identity,deviceId:randomUUID()};};
+    if(condition==='late_retention_guard'){const prepare=f.options.prepareBootstrap;f.options.prepareBootstrap=settings=>prepare({...settings,
+      beforeRestore:async()=>{await settings.beforeRestore();f.runtime.identity={...f.identity,deviceId:randomUUID()};}});}
+    if(condition==='late_cancellation')f.state.afterInspect=async()=>controller.abort();
+    if(condition==='late_candidate_change')f.state.afterInspect=async()=>fs.appendFile(f.loader(f.current),'changed after native observation');
+    if(condition==='native_conflict')f.options.createRecovery=()=>({inspect:async()=>{throw Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_CONFLICT'});},
+      start:async()=>assert.fail('definition mismatch cannot start a task')});
+    if(condition==='partial_previous')await fs.mkdir(f.previous);
+    const before=structuredClone(f.files);
+    const call=()=>runProductionAssistantBackgroundRecovery(f.options);
+    if(['not_running','disabled','wrong_facade','partial_previous','installing','queued_parent'].includes(condition))assert.equal((await call()).state,'maintenance_pending');
+    else if(['active_pass','late_identity','late_retention_guard','late_policy_off'].includes(condition))await assert.rejects(call(),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+    else if(condition==='late_journal_change')await assert.rejects(call(),{code:'ASSISTANT_PLUGIN_UPDATE_STATE_INVALID'});
+    else if(condition==='native_conflict')await assert.rejects(call(),{code:'ASSISTANT_BACKGROUND_CONFLICT'});
+    else await assert.rejects(call());
+    if(condition==='partial_previous')assert.deepEqual(await fs.readdir(f.previous),[],'a partial existing root is never overwritten');
+    else await assert.rejects(fs.lstat(f.previous),{code:'ENOENT'});
+    assert.deepEqual(f.files,f.state.expectedFiles??before);assert.equal(await f.host.readBackgroundRecovery(),null);
+  });
 
 test('fresh idle health invokes automatic recovery after signed activation without replaying or changing the health ABI',async()=>{
   const effects=[];

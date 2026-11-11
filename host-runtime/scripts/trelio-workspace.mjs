@@ -4590,9 +4590,10 @@ export const updateCodexPluginMarketplace = async ({
  * installed-version/readiness evidence or permission to delete live code. */
 export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha256,
   loadedPluginDirectory,loadedPluginVersion,execFileCommand=execFileAsync,
-  environment=process.env,retentionDirectory,guard=async()=>{},signal,allowMissingMarketplace=false}={})=>{
+  environment=process.env,retentionDirectory,guard=async()=>{},signal,allowMissingMarketplace=false,beforeRestore=null}={})=>{
   await guard();signal?.throwIfAborted();
   if(!parseStableVersion(version)||!/^[a-f0-9]{64}$/u.test(treeSha256??''))throw new Error('Invalid rollback host receipt.');
+  if(beforeRestore!==null&&typeof beforeRestore!=='function')throw new Error('Invalid bootstrap preservation admission.');
   const profile='assistant',selected=codexRetentionProfile(profile);
   const current=await readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,allowMissingMarketplace,
     receipt:{version,treeSha256}});
@@ -4629,7 +4630,14 @@ export const prepareAssistantCodexPluginRollbackHost = async ({version,treeSha25
     throw new Error('Rollback would change the hook component.');
   // Restore only a positively absent exact previous path. The common publisher
   // refuses changed/nonempty/unsafe trees; no cache scan, merge or pruning.
-  await guard();signal?.throwIfAborted();await restoreOneRetainedCodexPlugin(entries[0]);
+  await guard();signal?.throwIfAborted();
+  // A surviving newer facade may preserve ONLY its still-running registered
+  // previous parent's lost bootstrap. Its native registration observation is
+  // host-owned and occurs after all receipt/hook/path checks, immediately before
+  // publication. It never starts/retargets a task or authorizes GUI/business work.
+  // Ordinary daemon rollback has no additional callback and retains its ABI.
+  if(beforeRestore!==null){await beforeRestore();await guard();signal?.throwIfAborted();}
+  await restoreOneRetainedCodexPlugin(entries[0]);
   const tree=await inspectImmutableCodexPluginTree(installedPath,version,{profile});
   if(!await matchesRetainedCodexPluginTree(entries[0],retained,tree))throw new Error('Rollback host receipt bytes differ.');
   await guard();signal?.throwIfAborted();

@@ -1130,6 +1130,12 @@ publication tooling также остаются вне этого публичн
   rollback whose SAME previous caller was already pruned uses its exact protected
   full receipt before requiring that missing manifest; changed/partial trees,
   a missing newer caller, foreign cache roots and corrupt snapshots still refuse.
+  A newer facade's ordinary idle health may preserve a positively pruned OLD
+  bootstrap only under the SAME idle/setup lease, explicit update opt-in,
+  original rollback/full-target receipts and fresh exact RUNNING native task
+  definition. No GUI, Run(), retarget, latch/journal rewrite or business work;
+  the original daemon alone resumes its next normal signed tick.
+
   Positive source gaps recover only
   through the protected intent, explicit enabled setting and original previous
   receipt. Native failed-version reselection preserves its latch and hook basis.

@@ -15,7 +15,7 @@ import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEX
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
-import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery } from './trelio-assistant-setup.mjs';
+import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery, validateAssistantBackgroundRecoveryObservation } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
@@ -2187,7 +2187,7 @@ export const resolveAssistantPluginHandoffLoaders = async ({installedPath,loaded
 export const runProductionAssistantBackgroundRecovery=async({context=productionContext,
   createHost=createAssistantRuntimeHost,environment=process.env,platform=process.platform,
   versions=requireTrelioComponentVersions,createRecovery=createAssistantWindowsBackgroundRecovery,
-  readInventory=null,retainLoaded=null,signal}={})=>{
+  readInventory=null,retainLoaded=null,prepareBootstrap=null,signal}={})=>{
   if(platform!=='win32')return {state:'unsupported'};
   const deadline=AbortSignal.timeout(45_000);signal=signal?AbortSignal.any([signal,deadline]):deadline;
   const prior=await context(async(client,host)=>({identity:client.identity,supervisor:await host.readPluginSupervisor()}),{signal});
@@ -2213,24 +2213,82 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
     const supervisor=await host.readPluginSupervisor();
     if(supervisor?.generation!==prior.supervisor.generation) return {state:'changed'};
     const plugin=await host.readPluginUpdate(),desktop=await host.readCodexUpdate();
-    // Uncertain installer/GUI effects keep THEIR independent journal and
-    // review boundary. Recovery never clears a failed candidate or trust latch.
+    const common=await import('./trelio-workspace.mjs');
+    const nativeOptions={environment,signal,guard,readIdentity:()=>host.readIdentity(),
+      verifyContact:async()=>{await guard();await client.heartbeat(signal);await guard();}};
+    // Keep one executable/environment selection for this invocation, never a
+    // permission or inventory cache. Every actual native read still rechecks
+    // the SAME current identity/pass/lease immediately before its fresh spawn.
+    let optionsPromise;
+    const pluginOptions=()=>optionsPromise??=(async()=>{
+      const {resolveCodexExecutable,buildCodexEnvironment}=await import('./trelio-codex-conversation.mjs');
+      const executable=await resolveCodexExecutable(environment,{signal});if(!executable)fail('ASSISTANT_CODEX_UNAVAILABLE');
+      const {promisify}=await import('node:util'),{execFile}=await import('node:child_process');
+      const execute=promisify(execFile),env=buildCodexEnvironment(environment);
+      return {profile:'assistant',environment:env,execFileCommand:async(_command,args,options)=>{
+        await guard();return execute(executable,args,{...options,env:{...env,GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat'},
+          timeout:30_000,signal,shell:false,windowsHide:true});}};
+    })();
+    const installed=async()=>{
+      if(!plugin?.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      return readInventory?readInventory(plugin,guard,signal):common.readCodexPluginUpdateInventory({
+        ...await pluginOptions(),receipt:{version:plugin.targetVersion,treeSha256:plugin.targetTreeSha256}});
+    };
+    // Uncertain installer/GUI effects keep THEIR independent journal. The only
+    // repair here is code preservation for a positively missing OLD bootstrap;
+    // all install/GUI/handoff/rollback remains the ORIGINAL daemon's next tick.
     if(plugin&&(!['ready','retargeting','verifying'].includes(plugin.stage)||plugin.failedVersion)
-      ||desktop&&desktop.phase!=='ready')return {state:'maintenance_pending'};
+      ||desktop&&desktop.phase!=='ready'){
+      if(plugin?.stage!=='rolling_back'||plugin.failedVersion!==plugin.targetVersion
+        ||plugin.previousVersion===plugin.targetVersion||desktop&&desktop.phase!=='ready'
+        ||typeof host.readPluginUpdatesEnabled!=='function'||await host.readPluginUpdatesEnabled()!==true)
+        return {state:'maintenance_pending'};
+      const current=await installed();
+      if(current.state!=='installed'||current.version!==plugin.targetVersion||current.treeSha256!==plugin.targetTreeSha256)
+        fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      // Only a facade actually loaded from this verified NEW native candidate
+      // may preserve its old parent's code. No arbitrary cache/sibling scan,
+      // previous facade, declared model path or guessed executable is admitted.
+      if(!sameLocalPath(environment.TRELIO_PLUGIN_ROOT,current.installedPath))return {state:'maintenance_pending'};
+      const previousRoot=path.join(path.dirname(current.installedPath),plugin.previousVersion);
+      try{await fs.lstat(previousRoot);return {state:'maintenance_pending'};}
+      catch(error){if(error.code!=='ENOENT')throw error;}
+      const bootstrapGuard=async()=>{
+        await guard();
+        if(await host.readPluginUpdatesEnabled()!==true)fail('ASSISTANT_HOST_REBIND_REQUIRED');
+        if(JSON.stringify(await host.readPluginUpdate())!==JSON.stringify(plugin))fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      };
+      const deferred=new Error('Original registered parent is not running.');
+      const beforeRestore=async()=>{
+        // This literal path is a native action comparator ONLY. The common
+        // verifier has already bound its cache family, immutable original full
+        // receipt and unchanged hook component before invoking this callback.
+        // Inspect validates the SAME registered principal/action/definition;
+        // a stopped, changed, removed or unknown task cannot become a start.
+        const previousLoader=path.join(previousRoot,'scripts','trelio-host-runtime-loader.mjs');
+        const native=createRecovery({...nativeOptions,guard:bootstrapGuard,resolveLoader:async()=>previousLoader});
+        const observation=validateAssistantBackgroundRecoveryObservation(await native.inspect());
+        await bootstrapGuard();if(observation.state!=='running')throw deferred;
+        const fresh=await installed();
+        if(fresh.state!=='installed'||fresh.version!==plugin.targetVersion||fresh.treeSha256!==plugin.targetTreeSha256
+          ||!sameLocalPath(fresh.installedPath,current.installedPath))fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+        // Preserve the common late native device/owner contact before this
+        // code-only publication too. A lost/denied heartbeat never becomes
+        // permission to repair, clear health or repeat a business operation.
+        await nativeOptions.verifyContact();await bootstrapGuard();
+      };
+      const restoration={version:plugin.previousVersion,treeSha256:plugin.previousTreeSha256,
+        loadedPluginDirectory:previousRoot,loadedPluginVersion:plugin.previousVersion,guard:bootstrapGuard,signal,beforeRestore};
+      let basis;
+      try{basis=prepareBootstrap?await prepareBootstrap(restoration):await common.prepareAssistantCodexPluginRollbackHost({
+        ...await pluginOptions(),...restoration});}
+      catch(error){if(error===deferred)return {state:'maintenance_pending'};throw error;}
+      if(basis!==null)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      await bootstrapGuard();return {state:'bootstrap_restored'};
+    }
     let loader,treeSha256,pluginVersion,previousRoot=null;
     if(plugin){
-      if(!plugin.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
-      const common=await import('./trelio-workspace.mjs');
-      const inventory=readInventory?await readInventory(plugin,guard,signal):await(async()=>{
-        const {resolveCodexExecutable,buildCodexEnvironment}=await import('./trelio-codex-conversation.mjs');
-        const executable=await resolveCodexExecutable(environment,{signal});if(!executable)fail('ASSISTANT_CODEX_UNAVAILABLE');
-        const {promisify}=await import('node:util'),{execFile}=await import('node:child_process');
-        const execute=promisify(execFile),env=buildCodexEnvironment(environment);
-        return common.readCodexPluginUpdateInventory({profile:'assistant',environment:env,
-          receipt:{version:plugin.targetVersion,treeSha256:plugin.targetTreeSha256},
-          execFileCommand:async(_command,args,options)=>{await guard();return execute(executable,args,{...options,
-            env:{...env,GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat'},timeout:30_000,signal,shell:false,windowsHide:true});}});
-      })();
+      const inventory=await installed();
       if(inventory.state!=='installed'||inventory.version!==plugin.targetVersion||inventory.treeSha256!==plugin.targetTreeSha256)
         fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
       // Use only the freshly verified native installed target from the SAME
@@ -2246,7 +2304,6 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
         previousRoot=path.join(path.dirname(inventory.installedPath),plugin.previousVersion);
     }else{
       loader=await resolveHostRuntimeLoader({environment});
-      const common=await import('./trelio-workspace.mjs');
       // The dedicated distribution embeds a separately versioned common
       // shell. Its exact cache basename/native manifest selects this version;
       // TRELIO_PLUGIN_VERSION must not be mistaken for that distribution.
@@ -2255,8 +2312,6 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
       treeSha256=retained.treeSha256;pluginVersion=retained.version;
     }
     const fingerprint=createHash('sha256').update(JSON.stringify({runtime:versions().hostRuntimeVersion,pluginVersion,treeSha256})).digest('hex');
-    const nativeOptions={environment,signal,guard,readIdentity:()=>host.readIdentity(),
-      verifyContact:async()=>{await guard();await client.heartbeat(signal);await guard();}};
     let native=createRecovery({...nativeOptions,resolveLoader:async()=>loader});
     return maintainAssistantBackgroundRecovery({identity:prior.identity,fingerprint,guard,
       inspect:async()=>{
@@ -2265,7 +2320,7 @@ export const runProductionAssistantBackgroundRecovery=async({context=productionC
           // the independently verified previous implementation. Never retry a
           // start, timeout, denied/I/O read or unknown native operation.
           if(error.code!=='ASSISTANT_BACKGROUND_CONFLICT'||!previousRoot)throw error;
-          await guard();const common=await import('./trelio-workspace.mjs');
+          await guard();
           const retained=await(retainLoaded??common.retainLoadedCodexPluginInstallation)({profile:'assistant',
             loadedPluginDirectory:previousRoot,loadedPluginVersion:plugin.previousVersion});
           if(retained?.version!==plugin.previousVersion||retained.treeSha256!==plugin.previousTreeSha256)

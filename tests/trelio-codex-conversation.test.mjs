@@ -16,6 +16,7 @@ import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateH
   inspectHumanCodexHookComponent, readAssistantPluginPublishedRef, restoreAssistantCodexPluginVersion,
   prepareAssistantCodexPluginRollbackHost, readCodexPluginUpdateInventory, startLoadedCodexPluginPreservation,
   updateCodexPluginMarketplace, readAssistantPluginLatestVersion } from "../host-runtime/scripts/trelio-workspace.mjs";
+import {runProductionAssistantBackgroundRecovery} from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import {readCodexAssistantMarketplaceSource} from '../host-runtime/scripts/trelio-codex-routing.mjs';
 import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import http from 'node:http';
@@ -343,7 +344,33 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
   // claiming the still-installed candidate has already been downgraded.
   await preservation.close();preservation=null;
   await fs.rm(previous.installedPath,{recursive:true});
-  assert.equal(await prepareAssistantCodexPluginRollbackHost({...options,version:previous.version,treeSha256:saved.treeSha256}),null);
+  const identity={origin:'https://trelio.ru',assistantId:id,deviceId:id};
+  const journal={schemaVersion:1,assistantId:id,deviceId:id,stage:'rolling_back',previousVersion:previous.version,
+    previousTreeSha256:saved.treeSha256,targetVersion:candidate.version,targetTreeSha256:archived.treeSha256,
+    failedVersion:candidate.version,failures:3,restarts:1,desktopGeneration:'100:1000'};
+  const before=JSON.stringify(journal);let idle=false,locked=false,nativeInspections=0;
+  const healthHost={readPluginSupervisor:async()=>({generation:'original-parent'}),readIdentity:async()=>identity,
+    readActivation:async()=>null,readActivePass:async()=>null,readPluginUpdate:async()=>structuredClone(journal),
+    readCodexUpdate:async()=>null,readPluginUpdatesEnabled:async()=>true,
+    withSetupLock:async action=>{locked=true;try{return await action();}finally{locked=false;}}};
+  // The ordinary newer facade's health uses the real native CLI/receipt/cache
+  // path. Only the Windows Task Scheduler observation is synthetic on this
+  // cross-platform fixture. No start/GUI/model/account operation is available.
+  assert.deepEqual(await runProductionAssistantBackgroundRecovery({platform:'win32',
+    environment:{...environment,TRELIO_PLUGIN_ROOT:candidate.installedPath},
+    context:async action=>action({identity,readHealth:async()=>({}),heartbeat:async()=>{}},healthHost),
+    createHost:async()=>({identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{
+      idle=true;try{return await action(async()=>assert.equal(idle,true));}finally{idle=false;}}},close:async()=>{}}),
+    readInventory:async record=>readCodexPluginUpdateInventory({...options,
+      receipt:{version:record.targetVersion,treeSha256:record.targetTreeSha256}}),
+    prepareBootstrap:settings=>prepareAssistantCodexPluginRollbackHost({...options,...settings}),
+    createRecovery:settings=>({inspect:async()=>{await settings.guard();assert.ok(idle&&locked);nativeInspections++;
+      assert.equal(await settings.resolveLoader(),path.join(previous.installedPath,'scripts','trelio-host-runtime-loader.mjs'));
+      await assert.rejects(fs.lstat(previous.installedPath),{code:'ENOENT'});
+      return {schemaVersion:1,state:'running',definitionSha256:'f'.repeat(64),lastRunAt:Date.now()-60000,lastResult:267009};},
+      start:async()=>assert.fail('code preservation must not start another parent')}),
+  }),{state:'bootstrap_restored'});
+  assert.equal(nativeInspections,1);assert.equal(JSON.stringify(journal),before);
   assert.equal((await readCodexPluginUpdateInventory(options)).version,candidate.version);
   preservation=startLoadedCodexPluginPreservation({environment:{...environment,TRELIO_PLUGIN_ROOT:previous.installedPath,
     TRELIO_PLUGIN_VERSION:'3.2.3'},retentionDirectory,checkIntervalMs:20,onError:error=>preservationErrors.push(error)});
