@@ -1160,11 +1160,17 @@ test('encrypted Workspace descriptors survive facade, coordinator, real child pi
     try{
       if(operation==='checkpoint'){
         selected={...plan,localAction:{...workspacePlan().localAction,parameters:{...identity,runtimeSessionId:randomUUID()}}};
-        await facade.callTool('continue_assistant_workspace_action',{operation:'open'});
+        const opened=await facade.callTool('continue_assistant_workspace_action',{operation:'open'});
+        assert.deepEqual(opened.structuredContent.authorityReads,
+          ['agent-instructions.md','user-profile.md'].map(path=>({tool:'use_assistant_workspace_files',arguments:{
+            runIdentity:identity,command:{action:'read',source:'authority',path}}})));
+        assert.match(opened.content[0].text,/nextOffset/);
+        assert.doesNotMatch(JSON.stringify(opened.structuredContent.authorityReads),/passId|runtimeSessionProof|workingDirectory/);
         selected=plan;
       }
       const result=await facade.callTool('continue_assistant_workspace_action',{operation});
       assert.deepEqual(JSON.parse(result.structuredContent.stdout),{descriptor,sentinel:'validated-real-child'});
+      assert.equal(result.structuredContent.authorityReads,undefined);
       if(operation==='checkpoint'){
         await scheduled();
         assert.equal(observed.at(-1).localAction.operation,'heartbeat');

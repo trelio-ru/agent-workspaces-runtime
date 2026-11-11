@@ -1407,7 +1407,9 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
         const {visualMcpResult}=await import('./trelio-visual-result.mjs');
         return visualMcpResult(executed.visual);
       }
-      return {content:[{type:'text',text:'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
+      return {content:[{type:'text',text:executed?.operation==='open'&&executed.authorityReads
+        ?'Read both pinned authority files in order using the exact structuredContent.authorityReads calls. If a response has nextOffset, repeat that read with command.offset set to nextOffset until null before proceeding to the next file.'
+        :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
     }};
 };
 
@@ -3711,8 +3713,17 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
             heartbeat.stop(directory);plans.set(opened,plans.get(directory));plans.delete(directory);
           }
           heartbeat.start({origin:expectedOrigin,...plan.runIdentity,workspaceDirectory:opened});
+          // The native file-tool schema advertises an opaque local command.
+          // Hand the model the exact read-only arguments from this verified
+          // open, including on reopen. Each call still needs fresh native
+          // admission and rechecks the same Run lease before reading bytes.
+          const {ASSISTANT_PINNED_AUTHORITY_FILES}=await import('./trelio-workspace-files.mjs');
+          return {...result,authorityReads:ASSISTANT_PINNED_AUTHORITY_FILES.map(path=>({
+            tool:'use_assistant_workspace_files',arguments:{runIdentity:plan.runIdentity,
+              command:{action:'read',source:'authority',path}},
+          }))};
         }
-        else heartbeat.markActionSuccess(entry,plan.localAction.operation,plan.localAction.parameters);
+        heartbeat.markActionSuccess(entry,plan.localAction.operation,plan.localAction.parameters);
         return result;
       } finally {heartbeat.endAction(entry);}
     };

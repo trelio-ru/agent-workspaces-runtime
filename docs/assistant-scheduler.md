@@ -308,7 +308,11 @@ proof. The host repeats native own-Run/lease and managed-recipient checks before
 reading or committing a local edit. `list` pages one relative directory,
 `read` pages UTF-8 text with a stable SHA-256 and `replace` requires that digest
 or null for a new path. `source:"authority"` allows only the fixed pinned
-rules, profile and checkpoint reads. Link targets, protected controls, absolute
+rules, profile and checkpoint reads. Successful open and reopen return the two
+ordered `authorityReads` calls with exact Run coordinates and the local
+`source:"authority"` selector. The model follows `nextOffset` to finish each
+file. These are read arguments only, with a fresh native admission per call.
+Link targets, protected controls, absolute
 paths and nontext bodies are refused. A local edit changes the draft only.
 Ordinary checkpoint/finish still performs durable submission and CAS.
 

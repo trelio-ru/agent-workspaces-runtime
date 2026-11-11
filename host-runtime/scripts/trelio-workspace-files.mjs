@@ -24,7 +24,8 @@ const fail = (code) => { const error = new Error(code); error.code = code; throw
 
 const RUN_FILE_LIMIT = 512 * 1024;
 const RUN_FILE_WRITE_LIMIT = 24 * 1024;
-const RUN_AUTHORITY_FILES = new Set(["agent-instructions.md", "user-profile.md", "run-checkpoint.json"]);
+export const ASSISTANT_PINNED_AUTHORITY_FILES = Object.freeze(["agent-instructions.md", "user-profile.md"]);
+const RUN_AUTHORITY_FILES = new Set([...ASSISTANT_PINNED_AUTHORITY_FILES, "run-checkpoint.json"]);
 const relativeRunPath = (value) => typeof value === "string" && value.length > 0
   && Buffer.byteLength(value) <= 512
   && !isProtectedWorkspaceControlPath(value)

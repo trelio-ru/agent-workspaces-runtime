@@ -146,6 +146,10 @@ publication tooling также остаются вне этого публичн
   invocation and thread overrides. Test the actual model-facing catalogue and
   native MCP call when a disposable model catalogue selects Code Mode.
   [Native invocation](docs/assistant-scheduler.md#native-invocation).
+- A successful assistant Run open/reopen returns both ordered pinned authority
+  read calls with the verified Run locators. Each call keeps independent native
+  admission and local lease validation. The suggested reads carry no absolute
+  filesystem path, proof or write authority.
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Assistant stdio получает read schemas только из dedicated backend catalog;
   fixed host allowlist и общий bounded MCP transport не создают domain authority.
