@@ -11,6 +11,10 @@ import path from 'node:path';
 export const ACCOUNT_CAPABILITY = 'local-accounts-v1';
 export const ACCOUNT_LIMIT = 64;
 export const ACCOUNT_MINIMUM_HOST_VERSION = '3.7.0';
+export const ACCOUNT_SETUP_REQUIRED = 'ACCOUNT_SETUP_REQUIRED';
+// Reserved for the bridge's own pre-dispatch refusal. Provider exits are
+// wrapped as process diagnostics and never become this outer exit status.
+export const ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT = 78;
 const MAX_BYTES = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -462,7 +466,7 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
       await io.ensureDirectory(root);
       const state = await read(), current = binding(state);
       const selected = id || current.defaultAccountId || (current.accountIds.length === 1 ? current.accountIds[0] : null);
-      requireThat(selected, current.accountIds.length ? 'ACCOUNT_SELECTION_REQUIRED' : 'ACCOUNT_SETUP_REQUIRED');
+      requireThat(selected, current.accountIds.length ? 'ACCOUNT_SELECTION_REQUIRED' : ACCOUNT_SETUP_REQUIRED);
       requireThat(current.accountIds.includes(selected), 'ACCOUNT_NOT_BOUND');
       const account = find(state, selected);
       // Internal native-intent receipts never enter provider environment or

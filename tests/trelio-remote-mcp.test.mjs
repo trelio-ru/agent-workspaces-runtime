@@ -49,6 +49,7 @@ import {
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { diagnosePublicTrelioService } from "../host-runtime/scripts/trelio-public-service-diagnostic.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
+import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
 // Ordinary diagnostic fixtures must never probe the real public service.
 const handleToolCall = (origin, name, args, options = {}) => handleToolCallProduction(origin, name, args, {
   publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }), ...options,
@@ -223,6 +224,67 @@ test("local MCP delivers action-argument recovery without a diagnostic detour", 
   assert.equal(error.details.argumentSource, "bridge.actions.turnCheck.arguments");
   assert.equal(error.details.suggestedOperation, "status");
   assert.equal(error.details.requiredAction, "execute_returned_action_arguments");
+});
+
+test("local MCP offers account discovery only for the bridge's own setup refusal", async () => {
+  const parameters = {
+    companyId: "11111111-1111-4111-8111-111111111111",
+    projectId: "22222222-2222-4222-8222-222222222222",
+    skillId: "fixture-browser",
+    releaseId: "33333333-3333-4333-8333-333333333333",
+    runtimeSessionId: "44444444-4444-4444-8444-444444444444",
+    arguments: ["write", "ORIGINAL-ARGUMENT-CANARY"],
+  };
+  const envelope = { schemaVersion: 1, operation: "skill_run", parameters };
+  const tool = "continue_trelio_workspace_action";
+  const nextArgs = { ...envelope, parameters: { ...parameters, arguments: ["account", "list"] } };
+  const refusal = "Ошибка: ACCOUNT_SETUP_REQUIRED\n";
+  const invocations = [];
+  let bridgeExit = ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT;
+  let stderr = refusal;
+  const call = (args) => handleLocalMcpMessage({
+    jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args },
+  }, {
+    callTool: (origin, name, input, options) => handleToolCall(origin, name, input, {
+      ...options,
+      workspaceActionOperation: (actionOrigin, actionArgs, actionOptions) =>
+        handleTrelioWorkspaceActionOperation(actionOrigin, actionArgs, {
+          ...actionOptions,
+          runBridge: async (_origin, argv) => {
+            invocations.push(argv.slice(argv.indexOf("--") + 1));
+            if (argv.at(-1) === "list") return {
+              stdout: JSON.stringify({ ok: true, revision: 1, accounts: [{ name: "Existing", bound: false }] }),
+            };
+            throw Object.assign(new Error("PRIVATE-NATIVE-CAUSE"), { code: bridgeExit, stderr });
+          },
+        }),
+    }),
+  });
+
+  const { result } = await call(envelope);
+  assert.equal(result.isError, true);
+  const error = JSON.parse(result.content[0].text);
+  assert.equal(error.code, "ACCOUNT_SETUP_REQUIRED");
+  assert.deepEqual(error.details, {
+    nextCall: { server: "trelio-remote-skills", tool, arguments: nextArgs },
+  });
+  assert.doesNotMatch(JSON.stringify(result), /ORIGINAL-ARGUMENT-CANARY|PRIVATE-NATIVE-CAUSE/u);
+  assert.deepEqual(invocations, [parameters.arguments], "The host must not replay or dispatch the follow-up itself.");
+  const listed = (await call(error.details.nextCall.arguments)).result;
+  assert.deepEqual(JSON.parse(JSON.parse(listed.content[0].text).stdout).accounts, [{ name: "Existing", bound: false }]);
+  assert.deepEqual(invocations, [parameters.arguments, ["account", "list"]]);
+
+  // Neither provider output under the normal wrapper exit nor another failure
+  // text paired with the reserved exit may acquire a trusted continuation.
+  for (const [code, line] of [[1, refusal], [ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, "OTHER_FAILURE\n"]]) {
+    bridgeExit = code;
+    stderr = line;
+    const { result: unrelated } = await call(envelope);
+    assert.equal(unrelated.isError, true);
+    const payload = JSON.parse(unrelated.content[0].text);
+    assert.equal(payload.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+    assert.equal(payload.details.nextCall, undefined);
+  }
 });
 
 test("local MCP preserves the known company-context HTTP conflict without exposing its payload", async () => {
