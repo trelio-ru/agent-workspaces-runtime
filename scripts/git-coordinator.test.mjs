@@ -31,7 +31,7 @@ function fixture(t) {
   fs.mkdirSync(path.join(main, 'scripts'));
   for (const name of ['git-coordinator.mjs', 'git-background.mjs', 'assert-coordination.mjs']) fs.copyFileSync(path.join(source, name), path.join(main, 'scripts', name));
   fs.writeFileSync(path.join(main, 'git-coordination.json'), JSON.stringify({schemaVersion: 1, repository: 'fixture/runtime',
-    canonicalKey: 'trelio.canonicalMainWorktree', mainMutex: 'main.lock', verify: ['node', 'scripts/ci.mjs'], transport: ['node', 'scripts/push.mjs']}));
+    canonicalKey: 'trelio.canonicalMainWorktree', mainMutex: 'main.lock', verify: ['node', 'scripts/ci.mjs'], verifyLocal: ['node', 'scripts/ci.mjs'], transport: ['node', 'scripts/push.mjs']}));
   fs.writeFileSync(path.join(main, 'scripts/ci.mjs'), `import fs from 'node:fs'; import {execFileSync} from 'node:child_process';
 const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim();
 fs.appendFileSync(${JSON.stringify(path.join(root, 'events'))},branch+'\\n');

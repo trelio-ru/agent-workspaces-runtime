@@ -67,6 +67,8 @@ export function policy(cwd) {
   if (value.schemaVersion !== 1 || !/^[\w.-]+\/[\w.-]+$/u.test(value.repository ?? '')
     || !/^[\w.-]+$/u.test(value.mainMutex ?? '') || typeof value.canonicalKey !== 'string'
     || !Array.isArray(value.verify) || !value.verify.length || value.verify.some(item => typeof item !== 'string')
+    || (value.verifyLocal !== undefined && (!Array.isArray(value.verifyLocal) || !value.verifyLocal.length
+      || value.verifyLocal.some(item => typeof item !== 'string')))
     || !Array.isArray(value.transport) || !value.transport.length || value.transport.some(item => typeof item !== 'string')) {
     throw Error('Invalid repository coordination policy');
   }
@@ -212,6 +214,9 @@ export function assertPush(cwd, sha, tag = '') {
     throw Error('Protected push requires the verified live FIFO owner; use git:integrate');
   }
   candidate(cwd, entry);
+  if (!tag && policy(cwd).verifyLocal && entry.localCheckBase !== git(cwd, 'rev-parse', 'refs/remotes/origin/main')) {
+    throw Error('Local checks must match the published base');
+  }
 }
 export async function recover(cwd, id) {
   if (!ID.test(id)) throw Error('Recovery requires one exact ticket');
@@ -305,8 +310,17 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       await command('git', ['merge', '--ff-only', entry.sha], canonical);
       observation = {state: 'succeeded', outcome: 'already_integrated'}; return;
     }
-    await command('git', ['push', `--force-with-lease=${remoteRef}:${remoteSha}`, 'origin', `HEAD:${remoteRef}`], cwd);
-    await command(config.verify[0], [...config.verify.slice(1), '--prepare', entry.sha], cwd);
+    const base = git(cwd, 'rev-parse', 'refs/remotes/origin/main');
+    if (!tag && config.verifyLocal) {
+      // An ordinary runtime integration neither publishes a task branch nor
+      // starts Actions. Only this live owner can advance its ticket to verified.
+      await command(config.verifyLocal[0], [...config.verifyLocal.slice(1), base, entry.sha], cwd);
+      if (git(cwd, 'rev-parse', 'refs/remotes/origin/main') !== base) throw Error('Local check base changed');
+      entry.localCheckBase = base;
+    } else {
+      await command('git', ['push', `--force-with-lease=${remoteRef}:${remoteSha}`, 'origin', `HEAD:${remoteRef}`], cwd);
+      await command(config.verify[0], [...config.verify.slice(1), '--prepare', entry.sha], cwd);
+    }
     if (cancelled) throw Error('Coordination interrupted');
     candidate(cwd, entry); owned(cwd, entry);
     entry.state = 'verified'; save(path.join(root(cwd), entry.id + '.json'), entry);

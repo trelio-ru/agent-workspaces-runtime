@@ -1,37 +1,15 @@
-# Runtime CI profiles
+# Runtime checks
 
-Policy v1 lives in `scripts/runtime-ci-plan.mjs`; it is maintainer code, outside
-the signed payload. `.github/workflows/runtime-tests.yml` still owns the same
-native build, Linux/macOS, Windows, ARM64, browser and tag jobs. There are no
-PR labels, workflow path filters, model-selected test commands or manual waivers.
+Ordinary `git:integrate` checks the complete diff against freshly fetched main
+inside its local ticket. The planner selects changed tests, tests of the
+affected runtime modules and syntax checks. Maintainer Markdown does not start
+runtime suites. The successful ticket binds the current base and exact commit.
+The canonical hook reads that ticket without launching tests or using GitHub
+Actions.
 
-## Complete source decision
-
-The `Runtime CI plan` job reads the pinned PR **base and head** commits with full
-history and a complete `git diff --raw -z --no-renames --no-ext-diff --no-textconv`
-between their trees. It does not restrict the path inventory or hide missing base
-changes with a merge-base. Every source checkout tests the exact PR head instead
-of an implicit merge tree. Failed/incomplete Git reads fail planning and block
-publication; unknown, empty, docs-only or test-only diffs require `full`.
-
-The only narrow source files are assistant `codex`, `coordinator`, `inbox` and
-`scheduler`. Their existing imports must be unchanged. The mixed assistant
-`entry` module admits only its existing lifecycle `const action` parameter block
-before `let nativeReason,...`: both anchors must occur once, complete old/new
-files are read, and every byte outside that block must match. Changes to its
-identity, encryption, Secret, admission, browser or other regions require full.
-
-Matching existing assistant tests may accompany these files. Modified maintainer
-`AGENTS.md`, `README.md` and `docs/*.md` are non-payload companions; they never
-make an otherwise broad code diff narrow. New/deleted/renamed/copied files,
-mode/type changes, imports and every unclassified path require full. In
-particular hook/private storage/transport, common Workspace, crypto, native
-sources, runtime-loaded instructions/policies, package/dependency files and any
-CI/planner changes always require full. The planner's own initial change is full.
-
-## Mandatory coverage
-
-Both profiles require these seven successful jobs:
+An explicit release ticket publishes its exact branch and dispatches
+`runtime-tests.yml`. The release workflow always selects the full matrix for
+the expected SHA, including when the candidate is already integrated.
 
 - `Runtime CI plan`
 - `Canonical main Git guard`
@@ -40,24 +18,11 @@ Both profiles require these seven successful jobs:
 - `Runtime tests (ubuntu-latest)`
 - `Runtime tests (macos-15-intel)`
 - `Windows runtime and private ACL`
+- All four `Native visual browser (...)` jobs
 
-Full adds the four existing `Native visual browser (...)` jobs and keeps every
-existing direct Node invocation and Windows group. The narrow profile skips
-those unchanged browser GUI jobs and selects existing suites inside the same
-Linux/macOS and Windows jobs, rather than reporting skipped suites as success.
-
-Both macOS matrices use the standard GitHub-hosted `macos-15-intel` pool.
-The floating `macos-latest` label selects ARM hardware and can be refused before
-any step when that pool lacks capacity. The explicit Intel lane retains every
-native Keychain/browser/focus assertion and the exact job/attempt guards; it
-does not claim hosted macOS ARM coverage or permit a local-runner fallback.
-
-Linux/macOS run all eleven assistant suites plus context budget, real native
-Codex adapter, runtime entry/recovery, signed hook/package chain, hook/private
-session/proof, common local context and Workspace action/process/finish/directory/
-files, instruction delivery and plugin preservation. The exact list is exported
-as `ASSISTANT_CI_TESTS`; each file runs in its own Node process. The existing
-first-protected-call regression runs separately with its ordinary name filter.
+Both macOS matrices use the hosted `macos-15-intel` pool. All native checks,
+platform-specific security assertions and Windows artifacts are part of release
+evidence. The release uses the exact tested commit.
 
 The owner-company composition suite is mandatory on macOS and Windows. Its
 serial stdio host launches actual request workers with the production factories,
@@ -169,24 +134,14 @@ numeric child exit plus closed filesystem/native failure categories on failure.
 Concurrent acquisition reports fixed subphases; raw errors, paths and child output
 remain private. The original assertion and deadlines are preserved.
 
-Planning uploads `runtime-ci-plan/ci-plan.json`, binding schema/policy version,
-base/head, complete diff digest, changed paths, selected profile/required jobs
-and native PR event/number plus run ID/attempt. A rerun replaces that report with its current attempt.
+Planning uploads `runtime-ci-plan/ci-plan.json`, binding the complete diff,
+base/head, full profile, required jobs and exact GitHub run/attempt. The tag job
+selects the latest dispatched workflow for the same repository and tagged SHA,
+recomputes the plan and verifies all paginated jobs from that attempt. Missing,
+failed, pending, stale or ambiguous evidence blocks the package build.
 
-The tag job selects a successful PR run for the same repository/exact tagged
-SHA, reads that run's plan and recomputes it from Git using the tagged policy.
-The isolated planner pins base/head from the native PR event. The authenticated
-run must itself be a successful PR run of the same exact SHA; GitHub's later
-`pull_requests` list is not authority because it may be empty after merge.
-Missing/stale/changed plans fail; a run status or another PR's green jobs never
-replace source evidence. All paginated jobs from the exact run attempt must be
-complete, unique and bound to that run/head/attempt; every required named job
-must be completed/successful, and failures/cancellations are rejected.
-
-Only then does the unchanged tag build download `windows-private-worker` from
-that exact verified run and build `host-runtime-package`. Main/tag do not replay
-the already successful tests. Expired/missing evidence or changed source needs
-a new valid PR gate, not a reduced-profile fallback.
+Only after verification does the tag job download the Windows worker binaries
+from that exact run and build the tagged host runtime package.
 
 Targeted planner/verifier regressions:
 

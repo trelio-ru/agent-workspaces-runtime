@@ -1,10 +1,17 @@
 name: Host runtime tests
 
 on:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: Exact release commit reserved by the queue
+        required: true
+        type: string
+      base_sha:
+        description: Published main commit used to prepare the release
+        required: true
+        type: string
   push:
-    branches:
-      - main
     tags:
       - "v*"
 
@@ -18,7 +25,7 @@ env:
 
 jobs:
   ci-plan:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     name: Runtime CI plan
     runs-on: ubuntu-latest
     outputs:
@@ -26,18 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Classify the complete pinned PR diff
+      - name: Plan the full release checks
         id: plan
         env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: node scripts/runtime-ci-plan.mjs create --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --output "$RUNNER_TEMP/ci-plan.json"
+          RELEASE_BASE_SHA: ${{ inputs.base_sha }}
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha }}
+          RELEASE_HEAD_SHA: ${{ github.sha }}
+        run: node scripts/runtime-ci-plan.mjs create --base "$RELEASE_BASE_SHA" --head "$RELEASE_HEAD_SHA" --expected "$EXPECTED_HEAD_SHA" --output "$RUNNER_TEMP/ci-plan.json"
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-ci-plan
@@ -46,7 +53,7 @@ jobs:
           overwrite: true
 
   visual-browser:
-    if: github.event_name == 'pull_request' && needs.ci-plan.outputs.profile == 'full'
+    if: github.event_name == 'workflow_dispatch' && needs.ci-plan.outputs.profile == 'full'
     name: Native visual browser (${{ matrix.os }})
     needs: [ci-plan, windows-private-build]
     runs-on: ${{ matrix.os }}
@@ -67,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - name: Read actual search pacing contract sources
         uses: actions/checkout@v4
         with:
@@ -162,14 +169,14 @@ jobs:
           '
 
   windows-private-build:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     name: Build native Windows private worker
     needs: ci-plan
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
@@ -187,14 +194,14 @@ jobs:
           if-no-files-found: error
 
   windows-native-arm:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     name: Native Windows private worker (arm64)
     needs: [ci-plan, windows-private-build]
     runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: windows-private-worker
@@ -214,7 +221,7 @@ jobs:
         run: node tests/trelio-assistant-windows-background.test.mjs
 
   git-main-guard:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     name: Canonical main Git guard
     needs: ci-plan
     runs-on: ubuntu-latest
@@ -223,13 +230,13 @@ jobs:
       - name: Check out runtime repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
 
       - name: Run canonical main guard regressions
         run: npm run test:worktree-bootstrap && npm run test:git-guard
 
   node-tests:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     name: Runtime tests (${{ matrix.os }})
     needs: [ci-plan, windows-private-build]
     runs-on: ${{ matrix.os }}
@@ -245,7 +252,7 @@ jobs:
       - name: Check out runtime repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
 
       # Cross-repository tests consume the real stable shell. The checkout is
       # read-only test input and is never copied into a runtime package.
@@ -387,7 +394,7 @@ jobs:
           cmp "$RUNNER_TEMP/runtime-a.skillpkg" "$RUNNER_TEMP/runtime-b.skillpkg"
 
   windows-acl:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     name: Windows runtime and private ACL
     needs: [ci-plan, windows-private-build]
     runs-on: windows-latest
@@ -396,7 +403,7 @@ jobs:
       - name: Check out runtime repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -718,11 +725,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Download the exact PR-tested native binaries
+      - name: Download native binaries from the verified release run
         uses: actions/download-artifact@v4
         with:
           name: windows-private-worker
@@ -741,7 +748,7 @@ jobs:
   verified-source:
     outputs:
       run-id: ${{ steps.gate.outputs.run-id }}
-    name: Verify exact hosted PR gate
+    name: Verify exact hosted release gate
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -752,13 +759,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Select an exact successful PR run
+      - name: Select an exact successful release run
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=pull_request&status=success&per_page=100" > "$RUNNER_TEMP/runs.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=workflow_dispatch&per_page=100" > "$RUNNER_TEMP/runs.json"
           node scripts/runtime-ci-plan.mjs select-run --runs "$RUNNER_TEMP/runs.json" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/selection.json"
       - name: Read the exact run's pinned CI plan
         uses: actions/download-artifact@v4

@@ -7,6 +7,10 @@
     "node",
     "scripts/verify-integration-ci.mjs"
   ],
+  "verifyLocal": [
+    "node",
+    "scripts/runtime-main-checks.mjs"
+  ],
   "transport": [
     "bash",
     "scripts/push-main.sh"

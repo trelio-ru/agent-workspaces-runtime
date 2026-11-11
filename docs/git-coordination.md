@@ -1,9 +1,9 @@
 # Maintainer Git coordination
 
 `npm run git:integrate` runs a FIFO shared by all linked worktrees of one clone.
-The first ticket alone fetches/rebases the final candidate, publishes its task
-branch, creates/reuses its PR, verifies exact hosted CI, pushes main and reads it
-back. Targeted tests may precede enqueue; final CI belongs inside the ticket.
+The first ticket fetches and rebases the final candidate, runs the affected
+local checks, then pushes main and reads it back. Release tickets publish their
+branch and dispatch full hosted checks. The final check runs inside the ticket.
 Do not edit a queued branch, HEAD or files. Another clone remains an external
 writer: remote advance stops transport and requires a deliberate new enqueue.
 
@@ -15,10 +15,9 @@ silently renumbers a release. Tag creation follows verified CI and main+tag push
 is atomic. Artifact signing/activation and their CAS/read-back remain separate
 existing release steps. This command alone is not a product/runtime release.
 
-For an already integrated exact main SHA, the hosted verifier reuses its PR gate
-without creating an empty PR. It still checks the latest exact run/attempt and
-every required job and native receipt. Missing or failed evidence blocks release;
-being on main is never a substitute for CI.
+For an already integrated exact main SHA the release ticket publishes its branch
+and uses the same full dispatch. It reuses successful evidence for the exact SHA
+and verifies the latest run, attempt, required jobs and native receipt.
 
 The short existing main mutex serializes FIFO admission and state changes;
 the durable ticket protects CI. Worktree creation therefore remains available.
@@ -45,8 +44,9 @@ overlap and preserve unrelated/dead claims before ordinary guarded tag transport
 Canonical pre-push checks live process ancestry, exact worktree/branch/SHA/tag
 and verified ticket state. A caller-authored boolean, direct main/tag push or
 old transport wrapper cannot borrow the slot. Required CI remains repository
-owned: runtime recomputes its full native PR plan and checks every required OS
-job/attempt before permitting transport. A new failed attempt never reuses an
+owned: ordinary runtime checks bind the live ticket to the published base and
+source. For releases, the verifier recomputes the full plan and checks every
+required OS job and attempt before permitting transport. A new failed attempt never reuses an
 older green run. No test runner or VM is started as a fallback by this package.
 
 `npm run git:integrate -- --status` reads retained tickets.
@@ -70,7 +70,7 @@ provider packages or runtime/model instructions. Repository-specific policy,
 CI adapters, hooks and transport stay with each owner; implementations are not
 copied across repositories. Updating this infrastructure does not release a
 runtime/plugin or change any minimum version. Trelio's existing product queue
-retains its hosted-pause/local-evidence policy and uses the same release-before-CI
+keeps its hosted-pause and local-evidence policy for releases and uses the same release-before-CI
 invariant without replacing its mature runner/evidence implementation.
 
 ## Background integration and chat follow-up

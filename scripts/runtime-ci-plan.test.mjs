@@ -173,6 +173,11 @@ test('run selection needs exact successful PR source and repository even when me
   const target = {headSha, repository: run.repository.full_name};
   assert.deepEqual(selectRuntimeCiRun([{workflow_runs: [run]}], target), setup().selection);
   assert.deepEqual(selectRuntimeCiRun([{workflow_runs: [{...run, pull_requests: []}]}], target), setup().selection);
+  const dispatched = {...run, event: 'workflow_dispatch'};
+  const releaseTarget = {...target, event: 'workflow_dispatch'};
+  assert.equal(selectRuntimeCiRun([{workflow_runs: [dispatched]}], releaseTarget).runId, run.id);
+  assert.throws(() => selectRuntimeCiRun([{workflow_runs: [dispatched,
+    {...dispatched, id: run.id + 1, conclusion: 'failure'}]}], releaseTarget), /successful hosted gate/u);
   for (const changed of [{head_sha: baseSha}, {event: 'push'}, {status: 'in_progress'}, {conclusion: 'failure'},
     {repository: {full_name: 'other/repository'}}, {run_attempt: 0}, {id: 0}])
     assert.throws(() => selectRuntimeCiRun([{workflow_runs: [{...run, ...changed}]}], target));
@@ -186,13 +191,13 @@ test('actual CLI creates and verifies an exact Git/run receipt; tampered source 
   const jobsPath = path.join(directory, 'jobs.json'), outputs = path.join(directory, 'outputs');
   const invoke = args => spawnSync(process.execPath, [path.join(root, 'scripts/runtime-ci-plan.mjs'), ...args], {
     cwd: root, encoding: 'utf8', env: {...process.env, GITHUB_RUN_ID: '50', GITHUB_RUN_ATTEMPT: '2',
-      GITHUB_EVENT_NAME: 'pull_request', PR_NUMBER: '7', GITHUB_OUTPUT: outputs},
+      GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: head, GITHUB_OUTPUT: outputs},
   });
-  let result = invoke(['create', '--base', head, '--head', head, '--output', output]);
+  let result = invoke(['create', '--base', head, '--head', head, '--expected', head, '--output', output]);
   assert.equal(result.status, 0, result.stderr);
   const receipt = JSON.parse(fs.readFileSync(output, 'utf8'));
   assert.equal(receipt.profile, 'full'); assert.match(fs.readFileSync(outputs, 'utf8'), /profile=full/u);
-  fs.writeFileSync(selectionPath, JSON.stringify({runId: 50, runAttempt: 2, headSha: head, event: 'pull_request'}));
+  fs.writeFileSync(selectionPath, JSON.stringify({runId: 50, runAttempt: 2, headSha: head, event: 'workflow_dispatch'}));
   const jobs = jobsFor('full').map(job => ({...job, head_sha: head}));
   fs.writeFileSync(jobsPath, JSON.stringify([{total_count: jobs.length, jobs}]));
   const args = ['verify', '--plan', output, '--selection', selectionPath, '--jobs', jobsPath, '--head', head];
@@ -210,8 +215,8 @@ test('workflow connects the planner, exact attempt artifact verification and sel
   const state = setup(plan([modified('.github/workflows/runtime-tests.yml')]));
   for (const job of state.jobsPages[0].jobs) job.name = job.name.replace('macos-15-intel', 'macos-latest');
   assert.throws(() => verifyRuntimeCiGate(state), /Incomplete exact CI gate/u);
-  assert.match(workflow, /PR_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u);
-  assert.match(workflow, /PR_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
+  assert.match(workflow, /RELEASE_BASE_SHA: \$\{\{ inputs\.base_sha \}\}/u);
+  assert.match(workflow, /RELEASE_HEAD_SHA: \$\{\{ github\.sha \}\}/u);
   assert.match(workflow, /fetch-depth: 0/u);
   assert.match(workflow, /attempts\/\$PR_RUN_ATTEMPT\/jobs\?per_page=100/u);
   assert.match(workflow, /runtime-ci-plan\.mjs verify --plan/u);

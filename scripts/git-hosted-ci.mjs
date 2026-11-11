@@ -41,7 +41,9 @@ async function pages(cwd, endpoint, key) {
   }
   throw Error('Hosted pagination exceeded bound');
 }
-export async function verifyHosted(cwd, sha, requirements, {prepare = false, validate, timeoutMs = 3_600_000, pollMs = 15_000} = {}) {
+export async function verifyHosted(cwd, sha, requirements, {prepare = false, validate, timeoutMs = 3_600_000, pollMs = 15_000,
+  event = 'pull_request', dispatch} = {}) {
+  if (!['pull_request', 'workflow_dispatch'].includes(event)) throw Error('Unsupported hosted CI event');
   const config = policy(cwd), repo = config.repository;
   const origin = read('git', ['config', '--get', 'remote.origin.url'], cwd);
   const identity = /^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?$/u.exec(origin)?.[1];
@@ -53,7 +55,7 @@ export async function verifyHosted(cwd, sha, requirements, {prepare = false, val
   // creation step for the exact freshly fetched main SHA; the mandatory run,
   // attempt, jobs and repository-specific proof below are still verified in
   // full. Equality is not CI evidence and never admits a missing/failed gate.
-  if (prepare && sha !== read('git', ['rev-parse', 'refs/remotes/origin/main'], cwd)) {
+  if (prepare && event === 'pull_request' && sha !== read('git', ['rev-parse', 'refs/remotes/origin/main'], cwd)) {
     const pulls = api(cwd, `repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':' + branch)}&base=main&state=open&per_page=100`);
     if (!Array.isArray(pulls) || pulls.length > 1) throw Error('Ambiguous pull-request inventory');
     if (!pulls.length) {
@@ -63,15 +65,22 @@ export async function verifyHosted(cwd, sha, requirements, {prepare = false, val
     }
   }
   const deadline = Date.now() + timeoutMs;
+  const dispatched = new Set();
   for (;;) {
     let pending = false;
     for (const requirement of requirements) {
-      const all = await pages(cwd, `repos/${repo}/actions/workflows/${requirement.file}/runs?head_sha=${sha}&event=pull_request`, 'workflow_runs');
-      const matching = all.flatMap(page => page.workflow_runs).filter(run => run.head_sha === sha && run.event === 'pull_request')
+      const all = await pages(cwd, `repos/${repo}/actions/workflows/${requirement.file}/runs?head_sha=${sha}&event=${event}`, 'workflow_runs');
+      const matching = all.flatMap(page => page.workflow_runs).filter(run => run.head_sha === sha && run.event === event)
         .sort((a, b) => b.id - a.id);
+      if (!matching.length && prepare && dispatch && !dispatched.has(requirement.file)) {
+        // Empty exact inventory is the only automatic dispatch path. A failed
+        // or still-discovering run is never replaced by a new attempt here.
+        await dispatch(requirement.file);
+        dispatched.add(requirement.file);
+      }
       if (!matching.length || matching[0].status !== 'completed') { pending = true; continue; }
       const run = api(cwd, `repos/${repo}/actions/runs/${matching[0].id}`);
-      if (run.repository?.full_name !== repo || run.head_sha !== sha || run.event !== 'pull_request'
+      if (run.repository?.full_name !== repo || run.head_sha !== sha || run.event !== event
         || run.path !== `.github/workflows/${requirement.file}` || run.conclusion !== 'success' || run.status !== 'completed') throw Error(`Exact PR gate failed: ${requirement.file}`);
       const jobsPages = await pages(cwd, `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, 'jobs');
       validateJobs(run, jobsPages, requirement.jobs);
@@ -97,7 +106,7 @@ export async function verifyRuntimePlan(cwd, {run, jobsPages}, implementation) {
       '--name', 'runtime-ci-plan', '--dir', directory], {cwd, stdio: 'inherit'});
     if (result.error || result.status !== 0) throw Error('Missing exact runtime CI plan');
     const receipt = JSON.parse(fs.readFileSync(path.join(directory, 'ci-plan.json'), 'utf8'));
-    const recomputedPlan = implementation.readRuntimeCiPlan({repository: cwd, baseSha: receipt.baseSha, headSha: run.head_sha});
+    const recomputedPlan = implementation.readRuntimeCiPlan({repository: cwd, baseSha: receipt.baseSha, headSha: run.head_sha, full: run.event === 'workflow_dispatch'});
     return implementation.verifyRuntimeCiGate({receipt, recomputedPlan, jobsPages,
       selection: {runId: run.id, runAttempt: run.run_attempt, headSha: run.head_sha, event: run.event}});
   } finally { fs.rmSync(directory, {recursive: true}); }

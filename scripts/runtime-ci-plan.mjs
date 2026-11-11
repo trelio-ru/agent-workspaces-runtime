@@ -123,7 +123,7 @@ const git = (repository, args, maximum = 4 * 1024 * 1024) => {
   if (result.error || result.status !== 0 || result.stderr !== '') throw Error('Cannot read complete CI Git evidence');
   return result.stdout;
 };
-export const readRuntimeCiPlan = ({repository = ROOT, baseSha, headSha}) => {
+export const readRuntimeCiPlan = ({repository = ROOT, baseSha, headSha, full = false}) => {
   if (!SHA.test(baseSha ?? '') || !SHA.test(headSha ?? '')) throw Error('Invalid CI revisions');
   for (const revision of [baseSha, headSha]) {
     if (git(repository, ['rev-parse', '--verify', `${revision}^{commit}`]).trim() !== revision) throw Error('Unknown CI revision');
@@ -132,24 +132,30 @@ export const readRuntimeCiPlan = ({repository = ROOT, baseSha, headSha}) => {
   // branch also includes the base's missing changes and conservatively goes full.
   const changes = parseRuntimeCiDiff(git(repository, ['diff', '--raw', '-z', '--no-abbrev', '--no-renames',
     '--no-ext-diff', '--no-textconv', baseSha, headSha, '--']));
-  return planRuntimeCi({baseSha, headSha, changes,
+  if (full) git(repository, ['merge-base', '--is-ancestor', baseSha, headSha]);
+  const plan = planRuntimeCi({baseSha, headSha, changes,
     readSource: (revision, name) => git(repository, ['show', `${revision}:${name}`], 2 * 1024 * 1024)});
+  // Release evidence always binds the full matrix, even for a docs-only,
+  // already-integrated candidate or an otherwise narrow assistant change.
+  return full ? {...plan, profile: 'full', reason: 'release-requested', requiredJobs: requiredRuntimeCiJobs('full')} : plan;
 };
 
 const positive = value => Number.isSafeInteger(value) && value > 0;
-export const selectRuntimeCiRun = (pages, {headSha, repository}) => {
+export const selectRuntimeCiRun = (pages, {headSha, repository, event = 'pull_request'}) => {
   if (!SHA.test(headSha ?? '') || typeof repository !== 'string') throw Error('Invalid CI run target');
   if (!Array.isArray(pages) || !pages.length || pages.some(page => !Array.isArray(page.workflow_runs))) throw Error('Incomplete CI runs');
   const candidates = pages.flatMap(page => page.workflow_runs).filter(run => run.head_sha === headSha
-    && run.event === 'pull_request' && run.status === 'completed' && run.conclusion === 'success'
+    && run.event === event
     && run.repository?.full_name === repository && positive(run.id) && positive(run.run_attempt));
   const run = candidates.sort((a, b) => b.id - a.id)[0];
-  if (!run) throw Error('Exact successful PR gate is required');
+  if (!run || run.status !== 'completed' || run.conclusion !== 'success') throw Error('Exact successful hosted gate is required');
   return {runId: run.id, runAttempt: run.run_attempt, headSha, event: run.event};
 };
 export const verifyRuntimeCiGate = ({receipt, selection, jobsPages, recomputedPlan}) => {
   if (!positive(selection?.runId) || !positive(selection?.runAttempt) || selection.headSha !== recomputedPlan.headSha
-    || selection.event !== 'pull_request' || receipt?.event !== 'pull_request' || !positive(receipt.pullRequestNumber)
+    || !['pull_request', 'workflow_dispatch'].includes(selection.event) || receipt?.event !== selection.event
+    || (selection.event === 'pull_request' && !positive(receipt.pullRequestNumber))
+    || (selection.event === 'workflow_dispatch' && (receipt.pullRequestNumber !== undefined || recomputedPlan.profile !== 'full'))
     || receipt?.runId !== selection.runId || receipt.runAttempt !== selection.runAttempt) throw Error('Stale CI run receipt');
   const {runId: _run, runAttempt: _attempt, event: _event, pullRequestNumber: _pr, ...recordedPlan} = receipt;
   assert.deepEqual(recordedPlan, recomputedPlan, 'CI plan must match complete exact Git diff');
@@ -189,22 +195,22 @@ const options = raw => {
 const main = () => {
   const [command, ...raw] = process.argv.slice(2), args = options(raw);
   if (command === 'create') {
-    const plan = readRuntimeCiPlan({baseSha: args.base, headSha: args.head});
+    const event = process.env.GITHUB_EVENT_NAME;
     const runId = Number(process.env.GITHUB_RUN_ID), runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
-    const event = process.env.GITHUB_EVENT_NAME, pullRequestNumber = Number(process.env.PR_NUMBER);
-    if (!positive(runId) || !positive(runAttempt) || event !== 'pull_request' || !positive(pullRequestNumber))
-      throw Error('Native CI PR/run identity is required');
-    write(args.output, {...plan, runId, runAttempt, event, pullRequestNumber});
+    if (!positive(runId) || !positive(runAttempt) || event !== 'workflow_dispatch' || args.head !== process.env.GITHUB_SHA || args.head !== args.expected)
+      throw Error('Exact dispatched release run identity is required');
+    const plan = readRuntimeCiPlan({baseSha: args.base, headSha: args.head, full: true});
+    write(args.output, {...plan, runId, runAttempt, event});
     if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `profile=${plan.profile}\n`);
     console.log(`Runtime CI profile: ${plan.profile} (${plan.reason})`);
   } else if (command === 'select-run') {
-    const selection = selectRuntimeCiRun(json(args.runs), {headSha: args.head, repository: process.env.GITHUB_REPOSITORY});
+    const selection = selectRuntimeCiRun(json(args.runs), {headSha: args.head, repository: process.env.GITHUB_REPOSITORY, event: 'workflow_dispatch'});
     write(args.output, selection);
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `run-id=${selection.runId}\nrun-attempt=${selection.runAttempt}\n`);
   } else if (command === 'verify') {
     const receipt = json(args.plan), selection = json(args.selection);
     if (selection.headSha !== args.head) throw Error('Wrong tagged source');
-    const recomputedPlan = readRuntimeCiPlan({baseSha: receipt.baseSha, headSha: args.head});
+    const recomputedPlan = readRuntimeCiPlan({baseSha: receipt.baseSha, headSha: args.head, full: selection.event === 'workflow_dispatch'});
     console.log(JSON.stringify(verifyRuntimeCiGate({receipt, selection, jobsPages: json(args.jobs), recomputedPlan})));
   } else if (command === 'assistant-tests') {
     for (const file of ASSISTANT_CI_TESTS) {

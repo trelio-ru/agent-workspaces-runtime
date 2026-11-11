@@ -1248,8 +1248,9 @@ publication tooling также остаются вне этого публичн
   создавая вторую ветку. `--skip-bootstrap` допустим только без локальных
   отчётов, сборок и тестов.
 - Завершённая правка получает commit на русском, затем `npm run git:integrate`.
-  Общая FIFO linked worktree удерживает место до fresh fetch/rebase, публикации
-  task branch/PR, exact hosted CI и guarded main push/read-back. Не менять HEAD
+  Общая FIFO linked worktree удерживает место до fresh fetch/rebase, локальных
+  проверок diff и guarded main push/read-back. Релиз отдельно публикует ветку
+  и запускает full hosted CI. Не менять HEAD
   или files ожидающей/работающей ветки. Старые wrappers и boolean-флаги не
   заменяют live owner ancestry и verified exact SHA в canonical pre-push.
   Waiter ticket/process observation shares the same short mutex as predecessor removal; dead/unknown owners still refuse. A disappeared/replaced mutex is freshly reacquired after owner exit; unchanged dead claims are never stolen.
@@ -1264,28 +1265,23 @@ publication tooling также остаются вне этого публичн
   разрешает его, иначе сразу подключись через `--wait <ticket>`.
   `--foreground` – диагностика, `not_confirmed` – автовозврат не подтверждён.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
-  CI требует full с четырьмя visual OS jobs; обе macOS lanes используют явный
-  GitHub-hosted `macos-15-intel` по [CI-контракту](docs/runtime-ci.md), без
-  local fallback или пропуска native fixtures. Узкий профиль сохраняет Windows,
-  ARM64, proof/signature/package и проверяется существующим native plan verifier.
+  CI требуют полной матрицы Windows, ARM64, macOS и browser jobs при релизе.
+  При обычном вливании их проверяет локальный план. [Контракт CI](docs/runtime-ci.md).
 - После интеграции выполни из canonical checkout
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
 - Stable runtime tag создаётся только по явной команде на runtime release и
   резервируется до CI через `npm run git:integrate -- --wait --tag vX.Y.Z` в Codex.
   Низкоуровневый `git:push-main` доступен только verified владельцу очереди.
-  Для уже влитого exact main SHA не создаётся пустой PR; обязательный latest
-  exact PR gate/attempt/jobs/native receipt проверяется без ослабления.
+  Для уже влитого exact main SHA release-ticket публикует свою ветку для
+  явного dispatch full. Пустой PR не нужен.
 
 ## Проверки
 
-- Сначала запускай узкие изменённые tests, затем required direct tests выбранного
-  CI-профиля; full сохраняет весь список из `.github/workflows/runtime-tests.yml`.
-  Versioned planner/tag verifier используют exact base/head и полный Git diff,
-  не labels/path filters. Narrow допускает только closed assistant orchestration;
-  imports/rename/delete/mode/неоднозначный entry block возвращают full. Maintainer
-  docs не расширяют code allowlist; docs-only остаётся full. Tag заново проверяет
-  diff, run/attempt и все required conclusions; старый/неполный receipt не waiver.
+- Обычный локальный gate проверяет затронутые тесты и синтаксис. Правка
+  maintainer Markdown проверяет полный Git diff без запуска runtime.
+  Полный набор из `.github/workflows/runtime-tests.yml` выполняет release.
+  Tag проверяет plan, SHA, run/attempt и все обязательные результаты.
 - Перед локальным gate `npm run check:dependencies` должен подтвердить exact
   dependency tree; `node_modules` разных worktree не объединяются.
 - Package builder проверяй двумя сборками одной версии и byte comparison.
