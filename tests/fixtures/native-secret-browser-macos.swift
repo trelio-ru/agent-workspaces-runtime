@@ -11,6 +11,8 @@ final class FixtureElement: NSObject {
     let role: String
     let id: String?
     var name: String?
+    var detail: String?
+    var placeholder: String?
     var secure = false
     var url: String?
     var parent: FixtureElement?
@@ -40,7 +42,8 @@ func text(_ element: AXUIElement, _ name: String) -> String? {
     if name == kAXSubroleAttribute { return element.secure ? kAXSecureTextFieldSubrole : nil }
     if name == "AXDOMIdentifier" { return element.id }
     if name == kAXTitleAttribute { return element.name }
-    if name == kAXDescriptionAttribute { return nil }
+    if name == kAXDescriptionAttribute { return element.detail }
+    if name == "AXPlaceholderValue" { return element.placeholder }
     preconditionFailure("Unexpected attribute read")
 }
 func attribute(_ element: AXUIElement, _ name: String) -> Any? {
@@ -153,6 +156,41 @@ func expect(_ reason: String, _ operation: () throws -> Void) {
     catch Stop.failed(let actual) { precondition(actual == reason, "Unexpected closed reason") }
     catch { preconditionFailure("Unexpected error") }
 }
+
+// An id-less login modal may expose the phone only as a placeholder. Use the
+// SAME production resolver with a second edit and a foreign iframe present.
+// The fixture has no AXValue reader, even if name and placeholder disagree.
+let login = FixtureElement("AXWebArea")
+let phone = FixtureElement("AXTextField"); phone.placeholder = "Телефон"; phone.name = ""; phone.detail = ""
+let secure = FixtureElement("AXTextField"); secure.secure = true; secure.placeholder = "Пароль"
+let decorativeLabel = FixtureElement("AXStaticText"); decorativeLabel.placeholder = phone.placeholder
+login.append(phone); login.append(secure); login.append(decorativeLabel)
+let unrelatedFrame = FixtureElement("AXWebArea"); unrelatedFrame.forbidChildren = true
+login.append(unrelatedFrame)
+let phoneField = Field(fieldKey: "phone", id: nil, passwordInput: nil, accessibleName: "Телефон")
+let loginStep = Step(targetOrigin: step.targetOrigin, targetUrlSha256: step.targetUrlSha256,
+                     fields: [phoneField, Field(fieldKey: "password", id: nil, passwordInput: true)],
+                     activationId: nil, submitId: nil)
+let loginFields = try Session.controls(login, loginStep)
+precondition(loginFields.0[0] === phone && loginFields.0[1] === secure && loginFields.1 == nil)
+precondition(!matchesField(secure, Field(fieldKey: "password", id: nil, passwordInput: nil, accessibleName: "Пароль")))
+precondition(!matchesField(phone, Field(fieldKey: "phone", id: nil, passwordInput: nil, accessibleName: "телефон")))
+phone.detail = "Other purpose"
+precondition(!matchesField(phone, phoneField))
+phone.detail = nil
+phone.name = "Other purpose"
+precondition(!matchesField(phone, phoneField))
+phone.name = nil
+let duplicatePlaceholder = FixtureElement("AXTextField"); duplicatePlaceholder.placeholder = phone.placeholder
+duplicatePlaceholder.shown = false; login.append(duplicatePlaceholder)
+expect("field_ambiguous") { _ = try Session.controls(login, loginStep) }
+duplicatePlaceholder.name = phone.placeholder // Explicit and placeholder matches must also conflict.
+expect("field_ambiguous") { _ = try Session.controls(login, loginStep) }
+login.nodes.removeLast()
+phone.writable = false
+expect("field_value_unsettable") { _ = try Session.controls(login, loginStep) }
+phone.writable = true; phone.shown = false
+expect("field_not_found") { _ = try Session.controls(login, loginStep) }
 
 // Synthetic family signup: a generated DOM id and a submit button without id.
 // Both exact-id and unique secure-role plans resolve the same native field,

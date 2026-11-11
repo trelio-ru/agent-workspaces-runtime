@@ -943,9 +943,11 @@ state останавливают выдачу/следующий setter. До co
 
 В `fields[]` допустим либо legacy `selector`, либо exact `accessibleName`
 наблюдённого native text field (до 120 символов, NFC, без control characters).
-Это AXTitle/AXDescription либо UIA Name конкретного edit, без AXValue/ValuePattern
-read, поиска соседнего текста или угадывания порядка. Так поддерживаются
-shadow-root inputs, доступные через native accessibility, без dynamic DOM id.
+Это AXTitle/AXDescription либо UIA Name конкретного edit. На macOS у обычного
+edit без title и description подходит точный AXPlaceholderValue того же поля;
+для secure edit без имени используется прежний unique password locator.
+AXValue/ValuePattern, соседний текст и порядок полей не читаются. Так
+поддерживаются поля без id, в том числе внутри shadow roots.
 Неоднозначные имена и пересечение name/id locators отклоняются до setter.
 Последний step может оставаться field-only для заранее определённого browser
 click в той же вкладке; MFA/SMS/push не обходятся, успешный fill не доказывает login.
@@ -956,7 +958,8 @@ click в той же вкладке; MFA/SMS/push не обходятся, ус�
 host не может проигнорировать неизвестные bindings и получить value. Existing
 id-only top-document grants сохраняют прежний ABI. Без `frames` вложенные
 документы по-прежнему исключены; macOS miss с видимой границей WebArea возвращает
-`nested_document_unbound` и направляет к новому exact плану до запроса секрета.
+`nested_document_unbound`: наличие iframe не доказывает, что поле в нём.
+Новый frame binding задаётся только после проверки пустой формы.
 Обычный bounded readiness grace основной формы и закрытые причины отказов сохранены.
 
 macOS discovery обходит native shell до границ HTTP(S) WebArea и не читает их
@@ -979,6 +982,10 @@ Apple team `EQHXZ8M8AV`, Windows – Authenticode `Google LLC` и product
 `Google Chrome`. Выбирается единственный exact документ среди разрешённых
 подписанных приложений, затем сохраняются окно/контейнер/объекты.
 Профиль, cookies и вкладка остаются прежними; приложения не активируются.
+Если Chrome не открыл native документ точного адреса, helper отличает это
+от смены уже закреплённого документа. Field-only план остаётся на исходной
+вкладке: показать её штатным browser tool, сверить адрес и повторить проверку
+один раз. Условия изолированного Chrome fallback и закрытый код аудита не меняются.
 Exact id и accessibleName не требуют добавлять password-role locator ради
 выбора Chrome. Совпавшие документы в разных разрешённых приложениях остаются
 неоднозначными. Field-only `embedded` – исходная native-вкладка, включая Chrome;

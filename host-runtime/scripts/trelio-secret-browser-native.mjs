@@ -472,15 +472,20 @@ const prepareSecretBrowserSessionInternal = async ({
       });
     }
     if (ready.status !== "ready") {
+      // Preserve the public/audit reason and the existing auto-mode fallback.
+      // The macOS helper can now distinguish an unobserved document from a
+      // document that was pinned and then changed during the same operation.
+      const missingDocument = ready.status === "failed" && ready.reasonCode === "target_document_unavailable";
+      const reasonCode = missingDocument ? "target_url_changed" : ready.reasonCode;
       // AX/UIA can omit an existing web document or a hidden mode control.
       // These two value-free misses may select a new isolated Chrome surface:
       // Chrome still has to verify its own exact URL and all fields before
       // the one-use grant is consumed. Ambiguity/write errors stay terminal.
       if (!boundPlan && mode === "auto" && ready.status === "failed"
-        && NATIVE_PREFLIGHT_CHROME_RETRY.has(ready.reasonCode)) {
+        && NATIVE_PREFLIGHT_CHROME_RETRY.has(reasonCode)) {
         await channel.close();
         channel = null;
-        return chrome(ready.reasonCode);
+        return chrome(reasonCode);
       }
       // This native-only diagnostic is deliberately terminal before checkout.
       // Do not fold it into the generic field_not_found fallback decision above:
@@ -490,9 +495,10 @@ const prepareSecretBrowserSessionInternal = async ({
       if (ready.status === "failed" && ready.reasonCode === "nested_document_unbound") {
         throw new SecretBrowserFillError(
           "В основном документе не найдены заданные поля или элемент входа. "
-            + "На странице есть вложенная форма (iframe), для которой не задана привязка. "
-            + "После проверки пустой формы подготовьте новый план: frames с точными HTTPS URL каждого вложенного документа того же origin, "
-            + "а для полей без стабильного id – точный accessibleName. Подстановка остаётся в исходной вкладке. "
+            + "Есть iframe без привязки, но helper не проверял, находится ли в нём форма. "
+            + "Проверьте пустую форму: для поля без id используйте точный accessibleName, "
+            + "а frames с точными HTTPS URL того же origin задавайте только для подтверждённой вложенной формы. "
+            + "Подстановка остаётся в исходной вкладке. "
             + "Секрет не запрошен этой попыткой для подстановки. Эта ошибка не означает, что сохранённый пароль неверный. "
             + "Не считывайте заполненные поля и не обходите штатные подтверждения сайта.",
           "field_not_found",
@@ -506,10 +512,14 @@ const prepareSecretBrowserSessionInternal = async ({
       // silently move the credential to a different Chrome profile.
       const message = ready.reasonCode === "submit_press_unavailable"
         ? "Кнопка submit не поддерживает AXPress. Для финального шага подготовьте новый field-only grant без submitSelector и после успешной подстановки нажмите ранее определённую кнопку в той же embedded-вкладке без чтения заполненных полей."
+        : missingDocument
+          ? "Не найден native документ с точным адресом исходной вкладки. Секрет не запрошен. "
+            + "Покажите уже открытую исходную вкладку штатным browser tool и проверьте адрес. "
+            + "Если адрес прежний, повторите ту же проверку один раз; не открывайте другую вкладку и не меняйте профиль."
         : traversalDiagnostic
           ? `Native обход остановлен: stage=${traversalDiagnostic.stage}; limit=${traversalDiagnostic.limit}. Секрет не запрошен этой попыткой для подстановки. Увеличение лимитов и повтор выдачи значения не разрешены этим отказом.`
           : "Проверка встроенной вкладки отклонена.";
-      throw new SecretBrowserFillError(message, ready.reasonCode);
+      throw new SecretBrowserFillError(message, reasonCode);
     }
     // An additive helper field identifies only a closed application class,
     // never a process id, bundle path, URL or arbitrary native text. Older

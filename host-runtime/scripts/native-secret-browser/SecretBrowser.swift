@@ -129,14 +129,21 @@ func visible(_ element: AXUIElement, in document: AXUIElement) -> Bool {
 
 func matchesField(_ element: AXUIElement, _ field: Field) -> Bool {
     if let name = field.accessibleName {
-        // Shadow-root inputs may have no AXDOMIdentifier. Match only the exact
-        // native field name observed on the empty page, never surrounding text,
-        // label order or AXValue. Native identity is still pinned before input.
+        // Inputs may have neither a DOM id nor a native title. Chromium can
+        // expose the only label of an ordinary input as AXPlaceholderValue.
+        // Use it only when the edit itself has no explicit title/description;
+        // never match surrounding text, position or the actual AXValue.
         guard field.id == nil, field.passwordInput != true,
               ["AXTextField", "AXTextArea"].contains(text(element, kAXRoleAttribute) ?? "") else { return false }
         let title = text(element, kAXTitleAttribute).flatMap { $0.isEmpty ? nil : $0 }
-        let actual = title ?? text(element, kAXDescriptionAttribute)
-        return actual?.precomposedStringWithCanonicalMapping == name
+        let description = title ?? text(element, kAXDescriptionAttribute).flatMap { $0.isEmpty ? nil : $0 }
+        if let description = description { return description.precomposedStringWithCanonicalMapping == name }
+        // A password without a native label keeps the separate secure-role
+        // locator. Do not reinterpret an unlabeled secure edit as an ordinary
+        // field based on its placeholder. controls() still checks ambiguity,
+        // visibility and writability, and fill() rechecks the same object.
+        guard text(element, kAXSubroleAttribute) != kAXSecureTextFieldSubrole else { return false }
+        return text(element, "AXPlaceholderValue")?.precomposedStringWithCanonicalMapping == name
     }
     // AXSecureTextField is Chromium's native representation of a password
     // input, not its accessible label or its (unread) current value. Reject
@@ -435,7 +442,9 @@ final class Session {
         }
         if candidates.isEmpty {
             if exposedDocuments == 0 { throw Stop.unavailable("accessibility_unavailable") }
-            throw Stop.failed("target_url_changed")
+            // Chrome may only expose the selected tab's document. Seeing a
+            // different WebArea does not prove that the intended tab navigated.
+            throw Stop.failed("target_document_unavailable")
         }
         guard candidates.count == 1 else { throw Stop.failed("field_ambiguous") }
         (application, appElement, rootDocument, requirement) = candidates[0]

@@ -428,12 +428,12 @@ test("Chrome refuses to dispatch mouse input when the bound button is obstructed
   assert.equal(requests.some(({ method }) => method === "Input.dispatchMouseEvent"), false);
   await assert.rejects(controller.fill({ secretValues: values }), /Повторная передача/u);
 });
-for (const reasonCode of ["target_url_changed", "field_not_found"]) {
+for (const reasonCode of ["target_url_changed", "target_document_unavailable", "field_not_found"]) {
   test("value-free native document/field miss may use a separately verified Chrome tab: " + reasonCode, async () => {
     const f = fixture({ status: "failed", reasonCode });
     const session = await prepareSecretBrowserSession(f.args);
     assert.equal(session.surface, "chrome");
-    assert.equal(session.fallbackReason, reasonCode);
+    assert.equal(session.fallbackReason, reasonCode === "target_document_unavailable" ? "target_url_changed" : reasonCode);
     assert.equal(f.chromePreflights, 1);
     assert.equal(f.chromeCalls, 0);
     assert.ok(f.closed);
@@ -441,6 +441,19 @@ for (const reasonCode of ["target_url_changed", "field_not_found"]) {
     assert.equal(f.chromeCalls, 1);
   });
 }
+test("an unobserved native document directs the agent to the same tab before checkout", async () => {
+  const f = fixture({ status: "failed", reasonCode: "target_document_unavailable" });
+  f.args.context.browserSteps[0].fields[0] = { fieldKey: "username", accessibleName: "Phone" };
+  delete f.args.context.browserSteps[0].submitSelector;
+  await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
+    error.reasonCode === "target_url_changed" && /уже открытую исходную вкладку/u.test(error.message)
+    && /Секрет не запрошен/u.test(error.message) && !error.message.includes(targetUrl)
+  ));
+  assert.deepEqual(f.requests.map(({ command }) => command), ["prepare"]);
+  assert.equal(f.chromePreflights, 0);
+  assert.equal(f.chromeCalls, 0);
+  assert.ok(f.closed);
+});
 test("Chrome preflight failure after a native miss never receives a secret", async () => {
   const f = fixture({ status: "failed", reasonCode: "target_url_changed" });
   f.args.prepareChrome = async () => {
@@ -551,8 +564,9 @@ for (const mode of ["auto", "embedded"]) {
       // The private helper's capability detail must not expand the server's
       // outcome schema or turn into the generic field-miss Chrome fallback.
       assert.equal(error.reasonCode, "field_not_found");
-      assert.match(error.message, /iframe.*не задана привязка/u);
-      assert.match(error.message, /frames.*accessibleName/u);
+      assert.match(error.message, /iframe без привязки, но helper не проверял/u);
+      assert.match(error.message, /frames.*только для подтверждённой вложенной формы/u);
+      assert.match(error.message, /точный accessibleName/u);
       assert.match(error.message, /Секрет не запрошен этой попыткой/u);
       assert.match(error.message, /ошибка не означает, что сохранённый пароль неверный/u);
       assert.match(error.message, /остаётся в исходной вкладке/u);

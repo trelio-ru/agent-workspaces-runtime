@@ -407,6 +407,9 @@ publication tooling также остаются вне этого публичн
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
   Signed Chrome discovery не зависит от locator; field-only сохраняет вкладку.
+  На macOS exact AXPlaceholderValue допустим для обычного edit без title/description;
+  дубликаты и смена pinned объекта останавливают выдачу. Ненаблюдаемый документ
+  просит показать исходную вкладку, без переключения приложения из helper.
   Preflight receipt не разрешает replay consume/fill: [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
   Вложенная форма требует explicit same-origin URL/hash path; native имена
   полей допустимы только с unique/object binding, без AX/UIA value reads.
