@@ -10803,7 +10803,15 @@ const truncateWorkspaceActionOutput = (value) => {
     : `${sliceUtf16CodePoints(output, 0, 64 * 1024)}\n[output truncated]`;
 };
 
-export const workspaceActionFailureCode = (error, operation) => {
+const workspaceActionProcessDiagnostic = (error, operation) => parseProcessDiagnostic(error?.stderr, {
+  // The bridge's final error handler exits with 1. A killed process, a
+  // cancelled call or a maxBuffer error cannot certify a complete long pipe.
+  completedSkillRun: operation === "skill_run" && error?.code === 1 && !error.killed && !error.signal,
+});
+
+export const workspaceActionFailureCode = (
+  error, operation, processDiagnostic = workspaceActionProcessDiagnostic(error, operation),
+) => {
   // A failed signed skill can emit one JSON error before the bridge reports
   // its exit. Extract only these fixed categories, never message/details,
   // arbitrary code-shaped text or successful provider results. No replay is
@@ -10818,7 +10826,6 @@ export const workspaceActionFailureCode = (error, operation) => {
       if (payload?.ok === false && providerCodes.includes(payload.code)) return payload.code;
     } catch { /* Unstructured/oversized provider output has no safe category. */ }
   }
-  const processDiagnostic = parseProcessDiagnostic(error?.stderr);
   if (processDiagnostic) return processDiagnostic.failureCode;
   const httpDiagnostic = parseBridgeHttpDiagnostic(error?.stderr);
   if (httpDiagnostic) return httpDiagnostic.failureCode;
@@ -11496,8 +11503,8 @@ const executeTrelioWorkspaceActionOperation = async (
         openRecovery.details,
       );
     }
-    const failureCode = workspaceActionFailureCode(error, invocation.operation);
-    const processDiagnostic = parseProcessDiagnostic(error?.stderr);
+    const processDiagnostic = workspaceActionProcessDiagnostic(error, invocation.operation);
+    const failureCode = workspaceActionFailureCode(error, invocation.operation, processDiagnostic);
     const httpDiagnostic = parseBridgeHttpDiagnostic(error?.stderr);
     const runtime = httpDiagnostic?.runtime;
     const recovery = runtimeAdmissionRecovery(runtime, invocation.operation);

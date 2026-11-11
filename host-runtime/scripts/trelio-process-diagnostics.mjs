@@ -136,18 +136,34 @@ export const skillSetupExitError = (exitCode, { skillId, stderr } = {}) => {
   } catch { return fallback; }
 };
 
-export const parseProcessDiagnostic = stderr => {
-  if (typeof stderr !== "string" || stderr.length > 64 * 1024
-      || Buffer.byteLength(stderr, "utf8") > 64 * 1024) return null;
-  // Providers may have written stderr before the bridge's final frame. Only
-  // that final complete line is eligible; an earlier lookalike followed by a
-  // legacy/plain failure cannot manufacture a structured bridge result.
-  const line = stderr.trimEnd().split("\n").at(-1);
-  if (!line.startsWith("Ошибка: {") || Buffer.byteLength(line, "utf8") > 8 * 1024) return null;
+const PROCESS_FRAME_MAX_BYTES = 8 * 1024;
+
+export const parseProcessDiagnostic = (stderr, { completedSkillRun = false } = {}) => {
+  if (typeof stderr !== "string") return null;
+  const withinLimit = stderr.length <= 64 * 1024 && Buffer.byteLength(stderr, "utf8") <= 64 * 1024;
+  // Only the final complete line is eligible. For a completed skill bridge
+  // failure the preceding provider output can exceed 64 KiB on the already
+  // bounded process pipe. Inspect only enough of its tail for one frame, both
+  // line delimiters and an optional CR. A missing leading delimiter means the
+  // suffix starts mid-line, even when the retained bytes look like a frame.
+  let line;
+  if (withinLimit) {
+    line = stderr.trimEnd().split("\n").at(-1);
+  } else {
+    if (!completedSkillRun || !stderr.endsWith("\n")) return null;
+    const tail = stderr.slice(-(PROCESS_FRAME_MAX_BYTES + 3), -1);
+    const start = tail.lastIndexOf("\n");
+    if (start < 0) return null;
+    line = tail.slice(start + 1).replace(/\r$/u, "");
+  }
+  if (!line.startsWith("Ошибка: {") || Buffer.byteLength(line, "utf8") > PROCESS_FRAME_MAX_BYTES) return null;
   try {
     const payload = JSON.parse(line.slice("Ошибка: ".length));
     const code = payload?.details?.failureCode;
     if (!codes.has(code) || payload.code !== publicCodeFor(code)) return null;
+    // The long-pipe exception is specific to skill diagnostics. For example,
+    // a Windows helper frame found here cannot diagnose a skill failure.
+    if (!withinLimit && (!SKILL_CODES.includes(code) || payload.details.operation !== "skill_run")) return null;
     return safeDetails(code, payload.details);
   } catch { return null; }
 };

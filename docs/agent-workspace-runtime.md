@@ -2364,6 +2364,13 @@ Child parser читает только последний complete `Ошибка
 при stderr до 64 KiB UTF-8. Предшествующие warnings не скрывают transport code;
 посторонний текст после frame, malformed и oversized frame его не подтверждают.
 
+Для завершённого `skill_run` с exit 1 bridge сохраняет closed process code
+из последней полной строки до 8 КиБ, даже если предыдущий provider stderr
+превысил 64 КиБ. Читается только ограниченный хвост уже захваченного pipe.
+Требуются оба разделителя строки и reviewed skill code с `operation=skill_run`.
+Отмена, сигнал и переполнение process buffer не расширяют прежний допуск.
+Предыдущие строки, provider content и новые telemetry dimensions не добавляются.
+
 ### HTTP-отказ через дочерний bridge
 
 Runtime admission использует тот же общий frame для Run, навыков и Secret:

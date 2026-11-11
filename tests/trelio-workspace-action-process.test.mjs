@@ -104,8 +104,12 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     message: "PRIVATE_CANARY", details: { secret: "PRIVATE_CANARY" } }));
   process.exitCode = 7;
 } else if (process.env.TRELIO_TEST_INNER_EXIT) {
+  const style = process.env.TRELIO_TEST_INNER_EXIT_STYLE;
   process.stderr.write("PRIVATE_CANARY provider stderr\\n");
-  process.stderr.write("Ошибка: " + JSON.stringify(skillRuntimeExitError(Number(process.env.TRELIO_TEST_INNER_EXIT))) + "\\n");
+  if (style !== "") process.stderr.write("я".repeat(33000) + "\\n");
+  const frame = "Ошибка: " + JSON.stringify(skillRuntimeExitError(Number(process.env.TRELIO_TEST_INNER_EXIT)));
+  process.stderr.write((style === "joined" ? "foreign " : "") + frame + "\\n");
+  if (style === "suffix") process.stderr.write("Later failure\\n");
   process.exitCode = 1;
 } else if (process.env.TRELIO_TEST_CHILD_FAILURE === "1") {
   process.stderr.write("synthetic bridge failure");
@@ -189,7 +193,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, transportStyle = "", runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", httpStatus = "", httpCode = "", runtimePayload = null, ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, transportStyle = "", runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", innerExitStyle = "", httpStatus = "", httpCode = "", runtimePayload = null, ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -201,6 +205,7 @@ const createFixture = async (t) => {
         TRELIO_TEST_CHILD_FAILURE: childFailure ? "1" : "0",
         TRELIO_TEST_PROVIDER_FAILURE: providerFailure,
         TRELIO_TEST_INNER_EXIT: String(innerExit),
+        TRELIO_TEST_INNER_EXIT_STYLE: innerExitStyle,
         TRELIO_TEST_HTTP_STATUS: String(httpStatus),
         TRELIO_TEST_HTTP_CODE: httpCode,
         TRELIO_TEST_RUNTIME_PAYLOAD: JSON.stringify(runtimePayload),
@@ -243,6 +248,22 @@ test("MCP sees the inner skill exit, not the bridge CLI exit, with no action rep
   assert.equal(outcome.error.diagnosticCode, "TRELIO_SKILL_RUNTIME_EXIT_5");
   assert.equal(outcome.error.details.process.exitCode, 5);
   assert.equal(outcome.executions, "started\n");
+});
+
+test("a completed skill exit preserves a final bounded diagnostic after a long UTF-8 prelude", async (t) => {
+  for (const [innerExitStyle, action, expected] of [
+    ["long", skillAction, "TRELIO_SKILL_RUNTIME_EXIT_2"],
+    ["suffix", skillAction, "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED"],
+    ["joined", skillAction, "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED"],
+    ["long", openAction, "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED"],
+  ]) {
+    const fixture = await createFixture(t);
+    const outcome = await fixture.run({ innerExit: 2, innerExitStyle, action });
+    assert.equal(outcome.error.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+    assert.equal(outcome.error.diagnosticCode, expected, innerExitStyle);
+    assert.equal(outcome.error.details.process?.exitCode, expected.endsWith("EXIT_2") ? 2 : undefined);
+    assert.equal(outcome.executions, "started\n");
+  }
 });
 
 test("HTTP diagnostics share the in-process projection and reject private or legacy frames", () => {
@@ -451,6 +472,19 @@ test("Workspace failure categories never export provider content or authorize a 
   assert.equal(workspaceActionFailureCode({ code: "EPERM" }, "skill_run"), "TRELIO_WORKSPACE_PERMISSION_DENIED");
   assert.equal(workspaceActionFailureCode({ killed: true }, "skill_run"), "TRELIO_WORKSPACE_PROCESS_TERMINATED");
   assert.equal(workspaceActionFailureCode({ killed: true, code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }, "skill_run"), "TRELIO_WORKSPACE_OUTPUT_LIMIT");
+  const oversizedPrelude = "я".repeat(33000) + "\n";
+  const skillExit = (details, message = "") => "Ошибка: " + JSON.stringify({
+    code: "TRELIO_SKILL_RUNTIME_EXIT_2", message, details: {
+      failureCode: "TRELIO_SKILL_RUNTIME_EXIT_2", operation: "skill_run", ...details,
+    },
+  }) + "\n";
+  const stderr = oversizedPrelude + skillExit({});
+  assert.equal(workspaceActionFailureCode({ code: 1, stderr }, "skill_run"), "TRELIO_SKILL_RUNTIME_EXIT_2");
+  assert.equal(workspaceActionFailureCode({ code: 1, stderr: stderr.slice(0, -1) }, "skill_run"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+  assert.equal(workspaceActionFailureCode({ code: 1, stderr: oversizedPrelude + skillExit({ operation: "local_state" }) }, "skill_run"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+  assert.equal(workspaceActionFailureCode({ code: 1, stderr: oversizedPrelude + skillExit({}, "я".repeat(4200)) }, "skill_run"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+  assert.equal(workspaceActionFailureCode({ code: 1, killed: true, stderr }, "skill_run"), "TRELIO_WORKSPACE_PROCESS_TERMINATED");
+  assert.equal(workspaceActionFailureCode({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stderr }, "skill_run"), "TRELIO_WORKSPACE_OUTPUT_LIMIT");
 });
 
 test("real failed skill preserves the action ABI, reports only a fixed category and is never replayed", async (t) => {
