@@ -29,7 +29,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
 import { browserControllerEnabled, parseBrowserControllerArguments, skillResourcePolicy, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
-import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
+import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment } from "./trelio-codex-conversation.mjs";
 import { readCodexPluginEnablement, readCodexAssistantMarketplaceSource } from "./trelio-codex-routing.mjs";
@@ -20640,7 +20640,12 @@ if (isDirectModuleInvocation(import.meta.url) && process.argv[2] === "local-form
   })().catch(() => { process.stderr.write("LOCAL_FORM_INVALID\n"); process.exitCode = 1; });
 } else if (isDirectModuleInvocation(import.meta.url)) {
   runEntrypoint()
-    .catch((error) => fail(formatBridgeCommandError(error, process.argv[2])))
+    .catch((error) => {
+      const command = process.argv[2];
+      const accountSetupRequired = command === "skill" && error instanceof SkillAccountError
+        && error.code === ACCOUNT_SETUP_REQUIRED;
+      fail(formatBridgeCommandError(error, command), accountSetupRequired ? ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT : 1);
+    })
     .then(async () => {
       if (process.argv[2] !== "finish") return;
       // finish is a one-shot writer owned by the MCP operation registry.

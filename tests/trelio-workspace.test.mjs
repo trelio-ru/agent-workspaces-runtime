@@ -21,6 +21,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
 
 const TEST_AGENT_RULES_MARKDOWN = "# Platform rules\n\nUse exact typed actions.\n";
 const TEST_AGENT_RULES_SHA256 = createHash("sha256")
@@ -9855,6 +9856,94 @@ test("skill host ignores a PATH python hijack and runs Python entrypoints in iso
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
+});
+
+test("only the bridge can emit the account setup refusal exit for a signed skill", { timeout: 30_000 }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-account-refusal-"));
+  const home = path.join(root, "home");
+  const source = path.join(root, "source");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(source, { recursive: true });
+  const refusal = "Ошибка: ACCOUNT_SETUP_REQUIRED\n";
+  // The signed provider can print the exact refusal and use the same numeric
+  // exit. Once dispatched, its exit must still be wrapped as a provider error.
+  await writeFile(path.join(source, "main.mjs"), `
+    if (process.argv[2] === "__trelio_accounts_import") {
+      console.log(JSON.stringify({schemaVersion: 1, accounts: []}));
+    } else {
+      process.stderr.write(${JSON.stringify(refusal)});
+      process.exitCode = ${ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT};
+    }
+  `);
+  const resolution = buildConnectionFreeRuntimeResolutionPayload();
+  const { companyId, skillId } = resolution.localIdentity;
+  const sourceCompanyId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const packageBytes = await buildAgentSkillPackage({
+    skillId, runtimeVersion: resolution.artifact.runtimeVersion, sourceDirectory: source,
+    entrypointPath: "main.mjs", interpreter: "node", capabilities: ["local-session", "local-accounts-v1"],
+  });
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  Object.assign(resolution.artifact, {
+    packageSha256: createHash("sha256").update(packageBytes).digest("hex"),
+    packageSizeBytes: packageBytes.byteLength,
+    packageSignature: sign(null, packageBytes, privateKey).toString("base64"),
+    signingPublicKeySpki: publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+  });
+
+  const server = createServer(async (request, response) => {
+    if (respondToPlainTestBridgeRouting(request, response)) return;
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/api/agent-workspaces/bridge-compatibility") {
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+      return;
+    } else if (request.url === resolution.packageUrl) {
+      response.end(packageBytes);
+      return;
+    } else if (!["/api/agent-workspaces/runtime-policy/admissions", "/api/agent-skills/runtime/resolve"].includes(request.url)) {
+      response.writeHead(404).end();
+      return;
+    }
+    const target = JSON.parse((await readRequestBody(request)).toString("utf8")).companyId;
+    if (![companyId, sourceCompanyId].includes(target)) {
+      response.writeHead(403).end();
+    } else if (request.url === "/api/agent-workspaces/runtime-policy/admissions") {
+      response.end(JSON.stringify({
+        schemaVersion: 1, company: { id: target, slug: "fixture-company" },
+        runtimePolicySnapshot: { schemaVersion: 1, revision: null, policy: { schemaVersion: 1, mode: "disabled" } },
+        evaluation: { enforced: false, satisfied: true },
+      }));
+    } else {
+      response.end(JSON.stringify({ ...resolution, localIdentity: { ...resolution.localIdentity, companyId: target } }));
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const environment = { ...workspaceFixtureEnvironment(home), TRELIO_CACHE_HOME: path.join(root, "cache") };
+  await writeTestCredential(home, origin, environment);
+  const runSkill = (target, ...argv) => execFileAsync(process.execPath,
+    [bridgePath, "skill", "run", "--origin", origin, "--company", target, "--skill", skillId,
+      "--release", resolution.releaseId, "--", ...argv],
+    { cwd: root, env: environment, encoding: "utf8", timeout: 10_000 });
+
+  const initial = JSON.parse((await runSkill(sourceCompanyId, "account", "list")).stdout);
+  const saved = JSON.parse((await runSkill(sourceCompanyId, "account", "create", "--name", "Fixture",
+    "--expected-revision", String(initial.revision))).stdout);
+  await assert.rejects(runSkill(companyId, "write"), { code: ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, stderr: refusal, stdout: "" });
+  const list = JSON.parse((await runSkill(companyId, "account", "list")).stdout);
+  assert.deepEqual(list.accounts, [{ id: saved.id, name: "Fixture", comment: "", bound: false, default: false }]);
+  await runSkill(companyId, "account", "bind", "--id", saved.id, "--expected-revision", String(list.revision));
+  await assert.rejects(runSkill(companyId, "write"), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /^Ошибка: ACCOUNT_SETUP_REQUIRED\n/u);
+    const frame = JSON.parse(error.stderr.trimEnd().split("\n").at(-1).slice("Ошибка: ".length));
+    assert.equal(frame.code, "TRELIO_SKILL_RUNTIME_EXIT_OTHER");
+    assert.equal(frame.details.exitCode, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT);
+    return true;
+  });
 });
 
 test("skill host reuses twelve-hour admission, verifies packages and repairs tampering", {

@@ -845,6 +845,9 @@ publication tooling также остаются вне этого публичн
   Explicit private exit DTO не переносится в Error/log и не принимает partial pipes.
   Справка и синтаксический отказ обрабатываются до account I/O/import;
   неизвестная операция не требует ревизии и не запускает provider.
+  Обычный `skill_run` при host-отказе `ACCOUNT_SETUP_REQUIRED` возвращает
+  точный `account list` в том же scope. Выбор и привязка остаются отдельными
+  действиями, а вывод provider не может выдать это продолжение.
   Ошибка importer сохраняет закрытую причину и numeric exit, без provider
   stdout/stderr или private paths; отказ не превращается в пустой импорт.
   Windows gate проверяет настоящий публичный Python provider как read-only input.
