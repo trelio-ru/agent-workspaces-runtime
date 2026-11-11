@@ -7612,27 +7612,70 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
   const connectTool = { name: "trelio_connect", description:
     "Connect Trelio in Kimi Work using browser OAuth, or refresh the catalogue using the existing grant. Set reauthorize only for an explicitly requested replacement of a revoked or insufficient grant. Never supply tokens or codes; previous business operations are not replayed.",
     inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false } };
+  // Work can reuse its first tools/list result in later chats, including ones
+  // started after OAuth succeeds. Keep discovery and invocation available from
+  // that first list, even if the client never consumes list_changed.
+  const findTool = { name: "trelio_find_tools", description:
+    "Find Trelio tools by capability or exact name after trelio_connect. An exact name returns one native schema; a capability search returns compact matches. Use this when the tool is absent from the current chat.",
+    inputSchema: { type: "object", properties: { query: { type: "string", minLength: 2, maxLength: 160 } },
+      required: ["query"], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } };
+  const callTool = { name: "trelio_call_tool", description:
+    "Call one exact native Trelio tool from trelio_find_tools when its direct definition is unavailable in this chat. Use the native schema, scope, and approval requirements. This can change data if the selected native tool does. Use returned local bridge actions as declared.",
+    inputSchema: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 120 },
+      arguments: { type: "object", additionalProperties: true } }, required: ["name", "arguments"], additionalProperties: false } };
+  const stableTools = [connectTool, findTool, callTool];
+  const stableNames = new Set(stableTools.map(tool => tool.name));
+  const privateArgumentKeys = ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"];
+  const authCodes = new Set(["TRELIO_KIMI_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"]);
+  const isArgumentObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const invalidInput = () => Object.assign(new Error(), { code: "TRELIO_KIMI_INPUT_INVALID" });
+  const unavailable = () => Object.assign(new Error(), { code: "TRELIO_KIMI_TOOL_UNAVAILABLE" });
   const denied = tool => tool?.name === "prepare_agent_secret_browser_fill"
+    || stableNames.has(tool?.name)
     || (tool?._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app"));
   const publicTool = tool => {
     const result = structuredClone(tool);
     // These runtime-owned fields cannot be authored through this OAuth profile.
     // Keep native input/output schemas and annotations otherwise unchanged.
-    for (const key of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) {
+    for (const key of privateArgumentKeys) {
       if (result.inputSchema?.properties) delete result.inputSchema.properties[key];
       if (result.inputSchema?.required) result.inputSchema.required = result.inputSchema.required.filter(value => value !== key);
     }
     delete result._meta;
     return result;
   };
-  const catalogue = async signal => {
-    try { return [connectTool, ...(await connection.listTools(signal)).filter(tool => !denied(tool)).map(publicTool)]; }
-    catch (error) {
-      if (["TRELIO_KIMI_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(error.code)) return [connectTool];
-      throw error;
-    }
+  const nativeCatalogue = async signal => (await connection.listTools(signal)).filter(tool => !denied(tool));
+  const textResult = (text, structuredContent) => ({ content: [{ type: "text", text }], structuredContent });
+  // Direct and stable invocation share this exact catalogue gate and the
+  // existing authenticated transport. The outer Kimi tool grants no access
+  // to hidden tools and cannot synthesize proof, confirmation, or a retry.
+  const invokeNative = async (tools, name, input, signal) => {
+    if (!tools.some(tool => tool.name === name)) throw unavailable();
+    const args = structuredClone(input);
+    for (const key of privateArgumentKeys) delete args[key];
+    const result = await connection.call(name, args, signal);
+    // Keep native structured results and media, but never pass App metadata
+    // through either invocation route.
+    return { content: result.content, ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+      ...(result.isError === true ? { isError: true } : {}) };
   };
-  const instructions = "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
+  const findNative = async (tools, query, signal) => {
+    const exact = tools.find(tool => tool.name === query);
+    if (exact) return textResult(`Native schema for ${exact.name} is in structuredContent.`, { tool: publicTool(exact) });
+    // Use the backend's ranked compact search and intersect with this Kimi
+    // session's live catalogue before returning any matches.
+    const result = await invokeNative(tools, "search_trelio_tools", { query, limit: 5 }, signal);
+    if (result.isError) return result;
+    const matches = result.structuredContent?.tools;
+    if (!Array.isArray(matches) || matches.length > 5) {
+      throw Object.assign(new Error(), { code: "TRELIO_HARNESS_CATALOG_INVALID" });
+    }
+    const available = new Set(tools.map(tool => tool.name));
+    return textResult("Use an exact result name with trelio_find_tools to read its schema.",
+      { tools: matches.filter(tool => available.has(tool?.name)) });
+  };
+  const instructions = "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat: for missing direct tools, use trelio_find_tools to get the exact native schema and trelio_call_tool to invoke it. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
   return async (message, { signal, notifyClient } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
     const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
@@ -7641,15 +7684,19 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
         serverInfo: { name: "trelio-kimi-work", version: getHostRuntimeVersion() },
         capabilities: { tools: { listChanged: true } }, instructions: instructions + connection.instructions() });
       if (message.method === "ping") return reply({});
-      if (message.method === "tools/list") return reply({ tools: await catalogue(signal) });
+      if (message.method === "tools/list") {
+        try { return reply({ tools: [...stableTools, ...(await nativeCatalogue(signal)).map(publicTool)] }); }
+        catch (error) {
+          if (authCodes.has(error.code)) return reply({ tools: stableTools });
+          throw error;
+        }
+      }
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } };
       const method = message.params?.name, input = message.params?.arguments ?? {};
-      if (!input || typeof input !== "object" || Array.isArray(input) || Buffer.byteLength(JSON.stringify(input)) > 512 * 1024) {
-        throw Object.assign(new Error(), { code: "TRELIO_KIMI_INPUT_INVALID" });
-      }
-      if (method === "trelio_connect") {
+      if (!isArgumentObject(input) || Buffer.byteLength(JSON.stringify(input)) > 512 * 1024) throw invalidInput();
+      if (method === connectTool.name) {
         if (Object.keys(input).some(key => key !== "reauthorize") || (input.reauthorize !== undefined && typeof input.reauthorize !== "boolean")) {
-          throw Object.assign(new Error(), { code: "TRELIO_KIMI_INPUT_INVALID" });
+          throw invalidInput();
         }
         const result = await withPrivateProcessSession(async () => {
           const connected = await connection.connect(signal, input.reauthorize === true);
@@ -7659,24 +7706,30 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
           return { ...connected, instructions: instructions + connection.instructions() };
         }, signal);
         await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
-        return reply({ content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+        return reply(textResult(JSON.stringify(result), result));
       }
-      const tools = await catalogue(signal);
-      if (!tools.some(tool => tool.name === method) || method === "prepare_agent_secret_browser_fill") {
-        throw Object.assign(new Error(), { code: "TRELIO_KIMI_TOOL_UNAVAILABLE" });
+      let name = method, args = input;
+      const isFind = method === findTool.name;
+      const query = isFind && typeof input.query === "string" ? input.query.trim() : "";
+      if (isFind && (Object.keys(input).length !== 1 || query.length < 2 || query.length > 160)) throw invalidInput();
+      if (method === callTool.name) {
+        if (Object.keys(input).length !== 2 || typeof input.name !== "string" || !/^[a-z][a-z0-9_]{0,119}$/u.test(input.name)
+          || !isArgumentObject(input.arguments)) throw invalidInput();
+        ({ name, arguments: args } = input);
       }
-      const args = structuredClone(input);
-      for (const key of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) delete args[key];
-      const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(() => connection.call(method, args, callSignal), callSignal), { signal });
-      // Kimi preserves structuredContent and native media. Hidden App metadata
-      // must never become model text; no converter retries the original call.
-      return reply({ content: result.content, ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
-        ...(result.isError === true ? { isError: true } : {}) });
+      const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(async () => {
+        const tools = await nativeCatalogue(callSignal);
+        return isFind ? await findNative(tools, query, callSignal) : await invokeNative(tools, name, args, callSignal);
+      }, callSignal), { signal });
+      return reply(result);
     } catch (error) {
       const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : "TRELIO_KIMI_CONNECTION_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id,
         error: { code: -32000, message: code, data: { code } } };
-      return reply({ isError: true, content: [{ type: "text", text: `${code}: подключение Trelio в Kimi Work не завершено. Проверьте доступ и повторите только безопасное чтение; неизвестный результат изменения требует read-back.` }], structuredContent: { code } });
+      const reason = code === "TRELIO_KIMI_AUTH_REQUIRED"
+        ? "Вызовите trelio_connect и продолжите исходный запрос после входа в этом чате."
+        : "Проверьте доступ и повторите только безопасное чтение. Неизвестный результат изменения требует read-back.";
+      return reply({ ...textResult(`${code}: ${reason}`, { code }), isError: true });
     }
   };
 };

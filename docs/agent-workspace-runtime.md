@@ -3578,7 +3578,15 @@ Kimi hooks cannot substitute for Codex/Claude updatedInput or native Harness
 observation. Authored proof/reuse hints are removed, not trusted.
 
 After connect the actual remote catalogue is read before
-`notifications/tools/list_changed`; protected read and saving remain
+`notifications/tools/list_changed`. Work may reuse the initial tool list in
+the same chat and in new chats after login. Either chat can run its request
+with the current grant using the tools available from that first listing.
+`trelio_find_tools` and `trelio_call_tool` are available from the first
+listing, alongside `trelio_connect`. The former uses native compact search
+and returns one exact schema on an exact name. The latter checks the live
+Kimi-filtered catalogue on every call and shares the direct invocation path,
+native authorization, argument handling and guarded decisions. A missing
+grant still requires browser OAuth. Protected read and saving remain
 `not_checked` until their independent evidence. Complete structuredContent and
 native media remain native MCP values; hidden App grants are never flattened
 into text. App-only methods and secret browser-fill are unavailable, including
@@ -3587,7 +3595,9 @@ backend guards. Diagnosis/folder setup use `clientKind=kimi-work`, AGENTS.md and
 the SAME planner/apply/CAS without foreign configuration migration.
 
 Tests compose the actual OAuth callback/PKCE, native credential separation,
-serial stdio, catalogue notification and structured authority. Installer
+serial stdio, catalogue notification and structured authority. A stdio client
+that keeps only the initial tool list can connect, find the exact schema and
+read overdue tasks in the first and later chats without re-listing. Installer
 regressions cover repeat and concurrent imports after manifest edits.
 Backend acceptance composes exchanged OAuth, pairing, real HTTP draft/handoff/
 candidate acceptance and exact Git file read-back. These synthetic fixtures are

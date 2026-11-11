@@ -199,9 +199,9 @@ test("Kimi uses the real S256/state/loopback OAuth engine and a distinct native 
     remoteMcpOAuthSessionAccount(origin, resolved, "native", "deepseek-harness"));
 });
 
-test("Kimi stdio announces real tools after connect and preserves complete structured authority", async () => {
+test("Kimi reads tasks in the first and later chats using a cached startup catalogue", async () => {
   const input = new PassThrough(), stream = new PassThrough();
-  let connected = false, calls = 0, sequence = 0, pending = new Map(), lineBuffer = "";
+  let connected = false, connects = 0, calls = 0, sequence = 0, pending = new Map(), lineBuffer = "";
   const notifications = [];
   stream.on("data", bytes => {
     lineBuffer += bytes.toString();
@@ -215,31 +215,79 @@ test("Kimi stdio announces real tools after connect and preserves complete struc
     const id = ++sequence; pending.set(id, resolve); input.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
   const connection = { instructions: () => "COMPLETE SERVER INSTRUCTIONS", connect: async () => {
+    connects++;
     connected = true; return { connected: true, protectedRead: "not_checked", saving: "not_checked" };
   }, listTools: async () => {
     if (!connected) throw Object.assign(new Error(), { code: "TRELIO_KIMI_AUTH_REQUIRED" });
     return [{ name: "get_agent_instructions", inputSchema: { type: "object", properties: { runtimeSessionProof: {} } } },
+      { name: "search_trelio_tools" },
+      { name: "list_my_tasks", inputSchema: { type: "object", properties: { companySlug: { type: "string" },
+        dueState: { enum: ["overdue"] }, runtimeSessionProof: {} }, required: ["companySlug", "runtimeSessionProof"] } },
       { name: "prepare_agent_secret_browser_fill" }, { name: "app_only", _meta: { ui: { visibility: ["app"] } } }];
-  }, call: async (method, args) => { calls++; assert.equal(method, "get_agent_instructions");
-    assert.deepEqual(args, { companySlug: "synthetic-company" }); return output({ effectiveInstructions: { markdown: "FULL AUTHORITY" } }); } };
+  }, call: async (method, args) => {
+    calls++;
+    if (method === "search_trelio_tools") {
+      assert.deepEqual(args, { query: "my overdue tasks", limit: 5 });
+      return output({ tools: [{ name: "list_my_tasks" }, { name: "app_only" }] });
+    }
+    if (method === "list_my_tasks") {
+      assert.deepEqual(args, { companySlug: "synthetic-company", dueState: "overdue" });
+      return output({ tasks: [{ title: "Overdue task" }] });
+    }
+    assert.equal(method, "get_agent_instructions");
+    assert.deepEqual(args, { companySlug: "synthetic-company" });
+    return output({ effectiveInstructions: { markdown: "FULL AUTHORITY" } });
+  } };
   const running = runKimiStdioHost({ inputStream: input, outputStream: stream, connection,
     startupTrace() {}, diagnosticReporter: { record() {}, close() {} },
     environment: { CODEX_HOME: "/must-not-migrate-codex", CODEX_THREAD_ID: "foreign" } });
   try {
     assert.equal((await request("initialize", { protocolVersion: "2025-03-26" })).result.capabilities.tools.listChanged, true);
-    assert.deepEqual((await request("tools/list")).result.tools.map(tool => tool.name), ["trelio_connect"]);
-    const connectedResult = await request("tools/call", { name: "trelio_connect", arguments: {} });
+    const initial = (await request("tools/list")).result.tools.map(tool => tool.name);
+    assert.deepEqual(initial, ["trelio_connect", "trelio_find_tools", "trelio_call_tool"]);
+    // Work had loaded only the initial catalogue in the affected chat. Simulate
+    // that client on the real line protocol, without a second tools/list call.
+    const initialCall = (name, args) => {
+      assert.ok(initial.includes(name), "the client can only call tools from its initial list");
+      return request("tools/call", { name, arguments: args });
+    };
+    const beforeLogin = await initialCall("trelio_find_tools", { query: "list_my_tasks" });
+    assert.equal(beforeLogin.result.structuredContent.code, "TRELIO_KIMI_AUTH_REQUIRED");
+    assert.equal(calls, 0);
+    const connectedResult = await initialCall("trelio_connect", {});
     assert.equal(connectedResult.result.structuredContent.saving, "not_checked");
+    assert.match(connectedResult.result.structuredContent.instructions, /same chat/u);
     assert.equal(notifications[0].method, "notifications/tools/list_changed");
-    const catalogue = (await request("tools/list")).result.tools;
-    assert.deepEqual(catalogue.map(tool => tool.name), ["trelio_connect", "get_agent_instructions"]);
-    assert.equal(catalogue[1].inputSchema.properties.runtimeSessionProof, undefined);
-    const result = await request("tools/call", { name: "get_agent_instructions", arguments: {
-      companySlug: "synthetic-company", runtimeSessionProof: { forged: true }, knownInstructionRevisionKey: "forged" } });
-    assert.equal(result.result.structuredContent.effectiveInstructions.markdown, "FULL AUTHORITY");
+    const found = await initialCall("trelio_find_tools", { query: "my overdue tasks" });
+    assert.deepEqual(found.result.structuredContent.tools, [{ name: "list_my_tasks" }]);
+    const selected = await initialCall("trelio_find_tools", { query: "list_my_tasks" });
+    const exact = selected.result.structuredContent.tool;
+    assert.deepEqual(exact.inputSchema.required, ["companySlug"]);
+    assert.equal(exact.inputSchema.properties.runtimeSessionProof, undefined);
+    const result = await initialCall("trelio_call_tool", { name: exact.name, arguments: {
+      companySlug: "synthetic-company", dueState: "overdue", runtimeSessionProof: { forged: true }, knownInstructionRevisionKey: "forged" } });
+    assert.deepEqual(result.result.structuredContent.tasks, [{ title: "Overdue task" }]);
     assert.equal(JSON.stringify(result).includes("must-never-be-serialized"), false);
-    const refused = await request("tools/call", { name: "prepare_agent_secret_browser_fill", arguments: {} });
-    assert.equal(refused.result.isError, true); assert.equal(calls, 1);
+    for (const name of ["prepare_agent_secret_browser_fill", "app_only", "trelio_connect", "trelio_call_tool"]) {
+      const refused = await initialCall("trelio_call_tool", { name, arguments: {} });
+      assert.equal(refused.result.structuredContent.code, "TRELIO_KIMI_TOOL_UNAVAILABLE");
+    }
+    const invalid = await initialCall("trelio_call_tool", { name: "list_my_tasks", arguments: [] });
+    assert.equal(invalid.result.structuredContent.code, "TRELIO_KIMI_INPUT_INVALID");
+    assert.equal(calls, 2);
+    // Work also reused the startup list in a second chat opened after the
+    // first chat had connected. That chat can read using the existing grant.
+    const later = await initialCall("trelio_call_tool", { name: exact.name, arguments: {
+      companySlug: "synthetic-company", dueState: "overdue" } });
+    assert.deepEqual(later.result.structuredContent.tasks, [{ title: "Overdue task" }]);
+    assert.equal(connects, 1);
+    // Clients that refresh can still call the same exact native definition.
+    const catalogue = (await request("tools/list")).result.tools;
+    assert.deepEqual(catalogue.map(tool => tool.name), [...initial, "get_agent_instructions", "search_trelio_tools", "list_my_tasks"]);
+    const direct = await request("tools/call", { name: "get_agent_instructions", arguments: {
+      companySlug: "synthetic-company", runtimeSessionProof: { forged: true }, knownInstructionRevisionKey: "forged" } });
+    assert.equal(direct.result.structuredContent.effectiveInstructions.markdown, "FULL AUTHORITY");
+    assert.equal(calls, 4);
   } finally { input.end(); await running; }
 });
 
@@ -247,9 +295,12 @@ test("Kimi never replays an ambiguous mutation and exposes only a closed failure
   let attempts = 0;
   const handler = createKimiMcpHandler({ connection: { instructions: () => "", listTools: async () => [{ name: "create_workspace" }],
     call: async () => { attempts++; throw Object.assign(new Error("private token or provider detail"), { code: "REMOTE_MCP_CONNECTION_FAILED" }); } } });
-  const reply = await handler(call("create_workspace"), { signal: signal() });
-  assert.equal(attempts, 1); assert.equal(reply.result.isError, true);
-  assert.equal(JSON.stringify(reply).includes("private token"), false);
+  for (const message of [call("create_workspace"), call("trelio_call_tool", { name: "create_workspace", arguments: {} })]) {
+    const before = attempts;
+    const reply = await handler(message, { signal: signal() });
+    assert.equal(attempts, before + 1); assert.equal(reply.result.isError, true);
+    assert.equal(JSON.stringify(reply).includes("private token"), false);
+  }
 });
 
 test("Kimi local dispatcher refuses nested browser fill before private I/O and cannot hand off to a foreign profile", async () => {
