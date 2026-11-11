@@ -1306,6 +1306,9 @@ publication tooling также остаются вне этого публичн
   maintainer Markdown проверяет полный Git diff без запуска runtime.
   Полный набор из `.github/workflows/runtime-tests.yml` выполняет release.
   Tag проверяет plan, SHA, run/attempt и все обязательные результаты.
+- The Linux native browser gate probes Ubuntu's primary HTTPS archive, then
+  its HTTPS Azure archive for the same suite if needed. Keep APT signatures,
+  mandatory index refresh, and the full native fixture lane.
 - Перед локальным gate `npm run check:dependencies` должен подтвердить exact
   dependency tree; `node_modules` разных worktree не объединяются.
 - Package builder проверяй двумя сборками одной версии и byte comparison.

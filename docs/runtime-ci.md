@@ -24,6 +24,11 @@ Both macOS matrices use the hosted `macos-15-intel` pool. All native checks,
 platform-specific security assertions and Windows artifacts are part of release
 evidence. The release uses the exact tested commit.
 
+The native Linux browser lane probes the hosted Ubuntu suite over HTTPS before
+selecting its main or Azure archive. The probe only checks reachability. APT
+still refreshes and validates signed indexes and packages before the unchanged
+desktop and Secret Service tests run.
+
 The owner-company composition suite is mandatory on macOS and Windows. Its
 serial stdio host launches actual request workers with the production factories,
 native Keychain/DPAPI store, private sessions and managed HPKE/mirror. Only remote

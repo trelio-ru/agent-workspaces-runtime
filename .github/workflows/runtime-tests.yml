@@ -102,7 +102,20 @@ jobs:
           # to the working official HTTPS archive. Change only that exact CI
           # mirror entry; keep normal signed APT metadata/package verification.
           if test -f /etc/apt/apt-mirrors.txt; then
-            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+            . /etc/os-release
+            archive=https://archive.ubuntu.com/ubuntu
+            azure_archive=https://azure.archive.ubuntu.com/ubuntu
+            # Ubuntu's main archive can also be unreachable from a hosted
+            # runner. Probe the same suite over HTTPS before using the image's
+            # Azure mirror. APT still validates every signed index and package.
+            probe_archive() {
+              curl --fail --silent --show-error --head --connect-timeout 5 --max-time 10 --output /dev/null "$1/dists/$VERSION_CODENAME/InRelease"
+            }
+            if ! probe_archive "$archive"; then
+              probe_archive "$azure_archive"
+              archive=$azure_archive
+            fi
+            sudo sed -Ei "s#^https?://(azure\\.)?archive\\.ubuntu\\.com/ubuntu([/[:space:]]|$)#$archive\\2#" /etc/apt/apt-mirrors.txt
           fi
           # Playwright's install-deps invokes APT again, so the same bounded
           # network policy must cover both installers. A failed index refresh
