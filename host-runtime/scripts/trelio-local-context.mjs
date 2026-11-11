@@ -2403,6 +2403,15 @@ export const protectLocalActionArguments = async ({
       : "";
   const createEntityId = (objectPath, purpose = "content") => {
     if (!stableRequestId) return crypto.randomUUID();
+    if (nativeTool === "create_private_task") {
+      // The per-company key keeps the content digest opaque. Including the
+      // viewer separates employees, while content changes fail replay CAS.
+      const viewerId = normalizeUuid(companyEncryption.runtime.viewer?.userId, "viewer.userId");
+      return deriveLocalActionEntityId(companyEncryption, JSON.stringify([
+        nativeTool, viewerId, stableRequestId, purpose, objectPath,
+        normalizedArguments.title, normalizedArguments.descriptionJson ?? null,
+      ]));
+    }
     if (nativeTool === "request_assistant_action" && normalizedArguments.operation === "create_external_account" && objectPath === "$.fields"
       || nativeTool === "continue_assistant_workspace_action" && normalizedArguments.operation === "external_account_admit" && objectPath === "$.parameters") {
       // Planning and admission describe the SAME original immutable plan.
@@ -2461,6 +2470,7 @@ export const protectLocalActionArguments = async ({
       entityId,
       values,
       source: { kind: "mcp_local_action", nativeTool, objectPath, sequence: objectSequence },
+      ...(nativeTool === "create_private_task" ? { entityType: "api.private_task_mutation" } : {}),
     }));
     expectedPayloadValues[entityId] = structuredClone(values);
   };
@@ -3668,6 +3678,8 @@ const uploadWorkspaceAuditPayload = async ({
   entityType,
   field,
   value,
+  runId,
+  workspaceId,
   signal,
 }) => {
   const entityId = crypto.randomUUID();
@@ -3683,6 +3695,8 @@ const uploadWorkspaceAuditPayload = async ({
       body: JSON.stringify({
         companySlug: companyEncryption.runtime.company.slug,
         writerDeviceId: companyEncryption.runtime.device.id,
+        ...(runId ? { runId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
         payloads: [payload],
       }),
       signal,
@@ -9817,6 +9831,45 @@ const executeTrelioLocalActionOperation = async (
       "arguments must contain the exact native MCP input object.",
     );
   }
+
+  if (nativeTool === "create_private_task" || rawInput.privateTaskRead === true) {
+    const { arguments: input } = rawInput;
+    const creating = nativeTool === "create_private_task";
+    if (creating && (input.userExplicitlyRequestedPrivateTask !== true || input.companySlug !== companySlug
+      || typeof input.title !== "string" || !input.title.trim()
+      || typeof input.clientRequestId !== "string" || !input.clientRequestId.trim())) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "An exact request to create a private task is required.");
+    }
+    const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal });
+    if (provider.nativeProvider) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Trelio no longer selects this company's encrypted provider.");
+    }
+    const { companyEncryption } = provider;
+    // This action seals and publishes one task atomically. The generic
+    // company payload endpoint is never used to stage its private content.
+    const protectedRequest = creating ? await protectLocalActionArguments({ nativeTool,
+      arguments: { ...input, title: input.title.trim(), clientRequestId: input.clientRequestId.trim() },
+      companyEncryption }) : null;
+    if (protectedRequest && protectedRequest.payloads.length !== 1) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Private task content requires one signed payload.");
+    }
+    const rawResult = await submitPreparedRuntimeProof({
+      preparation: proofPreparation,
+      submit: async proof => readJson(await request(
+        provider.requestOrigin, provider.token,
+        `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
+        { method: "POST", headers: { "content-type": "application/json" }, signal,
+          body: JSON.stringify({ nativeTool,
+            arguments: protectedRequest
+              ? { ...protectedRequest.value, privateTaskPayload: protectedRequest.payloads[0] }
+              : { ...input, privateTaskRead: true },
+            ...(proof ? { runtimeSessionProof: proof } : {}),
+          }) },
+      )),
+    });
+    return hydrateLocalActionResult({ rawResult, origin: provider.requestOrigin, token: provider.token,
+      companyEncryption, documentOrigin: origin, signal });
+  }
   if (nativeTool === "save_known_agent_secret") {
     // Secrets never enter the generic mirror, content-marker uploader or
     // native-provider fallback. Both company modes use one memory-only local
@@ -12772,6 +12825,7 @@ export const handleTrelioLocalWorkspaceOperation = async (
       entityType: "agent_workspace.cancellation",
       field: "cancellation_reason",
       value: reason,
+      runId,
       signal,
     });
     const pathname = `/api/agent-workspaces/runs/${runId}/cancel`;
@@ -12850,6 +12904,7 @@ export const handleTrelioLocalWorkspaceOperation = async (
       entityType: "agent_workspace.restore",
       field: "restore_reason",
       value: reason,
+      workspaceId,
       signal,
     });
     try {
