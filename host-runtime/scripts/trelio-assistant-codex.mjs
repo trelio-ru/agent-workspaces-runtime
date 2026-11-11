@@ -3,17 +3,150 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
+import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 import { validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
-import { openBrowser, readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity } from './trelio-workspace.mjs';
+import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity } from './trelio-workspace.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 const fail = code => { throw new AssistantCodexError(code); };
+/** An assistant owns its execution process, rather than borrowing Desktop's
+ * already configured writer. These public switches contain no account/source
+ * metadata and apply before a thread or a model can start. The native feature
+ * inventory is checked below: an old client silently ignoring a flag is not
+ * evidence that its command interpreter was disabled. Code Mode is unnecessary
+ * in this profile; signed skills and the browser remain native MCP tools. */
+const ASSISTANT_EXECUTION_FEATURES = Object.freeze(['shell_tool','apps','multi_agent','code_mode_host']);
+const ASSISTANT_PLUGIN_IDS = Object.freeze([
+  'trelio-digital-assistant@trelio-digital-assistants',
+  'trelio-digital-assistant-hooks@trelio-digital-assistants',
+]);
+export const assistantCodexExecutionArguments = () => ['app-server','--listen','stdio://',
+  ...ASSISTANT_EXECUTION_FEATURES.flatMap(name=>['--disable',name]),'-c','web_search="disabled"'];
+
+/** Native configuration stays in this invocation's RAM. Copy ONLY enablement
+ * decisions into the private JSON-RPC pipe, never commands, headers, credentials
+ * or arbitrary configuration values. Every existing standalone server is
+ * disabled; the sole permitted server must come from the verified assistant
+ * plugin. A user server with the same name must never impersonate that plugin.
+ * No config file, enabled setting or native hook trust is changed on disk. */
+export const assistantCodexExecutionOverrides = configuration => {
+  const object=value=>value!==null&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype;
+  if(!object(configuration))fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  const entries=key=>{
+    const value=configuration[key]??{};
+    if(!object(value)||Object.keys(value).length>1024)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+    return Object.entries(value).map(([name,row])=>{
+      if(!name.length||name.length>256||/[\0\r\n]/u.test(name)||!object(row))fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+      return [name,{enabled:key==='plugins'&&ASSISTANT_PLUGIN_IDS.includes(name)&&row.enabled===true}];
+    });
+  };
+  const plugins=Object.fromEntries(entries('plugins'));
+  if(plugins[ASSISTANT_PLUGIN_IDS[0]]?.enabled!==true)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  return {
+    features:Object.fromEntries(ASSISTANT_EXECUTION_FEATURES.map(name=>[name,false])),
+    web_search:'disabled',plugins,mcp_servers:Object.fromEntries(entries('mcp_servers')),
+  };
+};
+
+/** Verify native support in the SAME process that will own the model turn.
+ * A separate doctor process or a saved config cannot certify its capabilities.
+ * Complete pagination and exact false values are required; no prompt, missing
+ * field, unsupported response or older green probe grants execution authority. */
+const verifyAssistantExecutionFeatures = async request => {
+  const found=new Map(),cursors=new Set();let cursor;
+  for(let page=0;page<32;page++){
+    const result=await request('experimentalFeature/list',{limit:100,...(cursor?{cursor}:{})});
+    if(!Array.isArray(result?.data)||result.data.length>100)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+    for(const row of result.data)if(ASSISTANT_EXECUTION_FEATURES.includes(row?.name)){
+      if(found.has(row.name)||row.enabled!==false||row.stage==='removed')fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+      found.set(row.name,false);
+    }
+    if(result.nextCursor===null){
+      if(found.size!==ASSISTANT_EXECUTION_FEATURES.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+      return;
+    }
+    if(typeof result.nextCursor!=='string'||!result.nextCursor.length||result.nextCursor.length>1024||cursors.has(result.nextCursor))
+      fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+    cursor=result.nextCursor;cursors.add(cursor);
+  }
+  fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+};
+
+/** Discover the actual thread connections after its scoped overrides. The
+ * native plugin identity, live connection and complete catalogue must all
+ * agree. This is an executor boundary, not a tool-name blacklist: no foreign
+ * MCP/browser bridge is allowed to join the assistant's tool registry. */
+const verifyAssistantExecutionServer = async (request,threadId) => {
+  const result=await request('mcpServerStatus/list',{threadId,detail:'toolsAndAuthOnly',limit:100});
+  if(!Array.isArray(result?.data)||result.data.length>100||result.nextCursor!==null)
+    fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  const admitted=result.data.filter(row=>row?.runtimeStatus!=='disabled');
+  // Native inventory includes explicitly disabled standalone declarations.
+  // They must have NO tools and are not live connections. An unknown/null
+  // state is never accepted as disabled, nor is cached foreign tool metadata.
+  for(const row of result.data.filter(row=>row?.runtimeStatus==='disabled'))
+    if(!row.tools||Object.getPrototypeOf(row.tools)!==Object.prototype||Object.keys(row.tools).length||row.toolsError!==null)
+      fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  const server=admitted[0];
+  if(admitted.length!==1
+    ||server?.name!=='trelio-assistant'||server.pluginId!==ASSISTANT_PLUGIN_IDS[0]
+    ||server.runtimeStatus!=='connected'||server.toolsError!==null||!server.tools
+    ||Object.getPrototypeOf(server.tools)!==Object.prototype
+    ||Object.keys(server.tools).length>256
+    ||['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'].some(name=>server.tools[name]?.name!==name))
+    fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+};
+
+/** Load only the fixed platform skill of the running verified plugin. The
+ * exact two files are delivered in the turn's private developer instruction
+ * field, so the role remains usable even without a command interpreter. A
+ * same-name user skill or a linked replacement cannot supply the role. */
+const readAssistantWorkflow = async environment => {
+  const refused=()=>fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  // The stable loader supplies its exact root. Reuse that immutable release,
+  // never scan siblings or use global skills/list (a different presentation).
+  const plugin=environment.TRELIO_PLUGIN_ROOT;
+  const home=environment.CODEX_HOME??path.join(environment.USERPROFILE??environment.HOME??'','.codex');
+  if(typeof plugin!=='string'||!path.isAbsolute(plugin)||!path.isAbsolute(home)
+    ||!sameLocalPath(path.dirname(plugin),path.join(home,'plugins','cache','trelio-digital-assistants','trelio-digital-assistant'))
+    ||!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(path.basename(plugin)))refused();
+  const root=path.join(plugin,'skills','assistant-task-worker');
+  const read=async file=>{
+    const state=await fs.lstat(file,{bigint:true});
+    if(!state.isFile()||state.isSymbolicLink()||state.nlink!==1n||state.size<1n||state.size>32768n
+      ||!sameLocalPath(await fs.realpath(file),file))refused();
+    const handle=await fs.open(file,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW??0));
+    try {
+      const opened=await handle.stat({bigint:true});
+      if(!opened.isFile()||opened.dev!==state.dev||opened.ino!==state.ino||opened.size!==state.size)refused();
+      const buffer=Buffer.alloc(Number(opened.size)+1);
+      let position=0;
+      while(position<buffer.length){
+        const {bytesRead}=await handle.read(buffer,position,buffer.length-position,position);
+        if(!bytesRead)break;
+        position+=bytesRead;
+      }
+      const final=await handle.stat({bigint:true});
+      if(position!==Number(opened.size)||final.mtimeNs!==opened.mtimeNs||final.ctimeNs!==opened.ctimeNs)refused();
+      return new TextDecoder('utf-8',{fatal:true}).decode(buffer.subarray(0,position));
+    } finally {await handle.close();}
+  };
+  try{
+    const manifest=JSON.parse(await read(path.join(plugin,'.codex-plugin','plugin.json')));
+    if(manifest.name!=='trelio-digital-assistant'||manifest.version!==path.basename(plugin))refused();
+    const role=await read(path.join(root,'SKILL.md'));
+    const state=await read(path.join(root,'references','work-state.md'));
+    return [role,state,
+      'In this isolated execution, both installed platform documents are included above. Use the exact native accepted-file read for existing accepted material. For an opened Run, use use_assistant_workspace_files: runIdentity contains its workspaceId and runId. Read both pinned authority files in order with command {action:"read",source:"authority",path:"agent-instructions.md" or "user-profile.md"}; follow nextOffset until null, keeping one SHA-256 per file. Read, list and replace relative Run files through the same tool. Replace requires the last read expectedSha256, or null to create a new file. Keep the ordinary checkpoint and finish actions. When a signed skill directs you to its guides, use its admitted skill_run with arguments ["guides"] and guidePart:0; follow nextGuidePart until null. The complete text of each selected signed part is returned directly.'].join('\n\n');
+  }catch{refused();}
+};
 /** Only a native FAILED turn can establish capacity exhaustion. Never match a
  * tool result, assistant prose, generic 503/network error or a quota refusal.
  * Older Desktop versions used `other` with this exact public message. Project
@@ -131,7 +264,7 @@ const readNative = async (threadId, project, options = {}) => {
     const abort = () => finish(options.desktopOperation===true?'ASSISTANT_CODEX_DELIVERY_UNCERTAIN':'ASSISTANT_CODEX_READ_UNAVAILABLE');
     const request = (method, params) => new Promise((yes, no) => {
       if (done || waiting) return no(new AssistantCodexError('ASSISTANT_CODEX_READ_UNAVAILABLE'));
-      waiting = { id: ++requestId, yes, no };
+      waiting = { id: ++requestId, method, threadId:params?.threadId, yes, no };
       child.stdin.write(`${JSON.stringify({ id: requestId, method, params })}\n`);
     });
     const watchTerminal=thread=>{
@@ -142,7 +275,8 @@ const readNative = async (threadId, project, options = {}) => {
       promise.catch(()=>{});return promise;
     };
     try {
-      child = spawnProcess(executable, ['app-server','--listen','stdio://'], { env, ...(options.nativeCwd?{cwd:options.nativeCwd}:{}),shell: false, windowsHide: true, stdio: ['pipe','pipe','ignore'] });
+      child = spawnProcess(executable, options.controlledExecution===true?assistantCodexExecutionArguments():['app-server','--listen','stdio://'],
+        { env, ...(options.nativeCwd?{cwd:options.nativeCwd}:{}),shell: false, windowsHide: true, stdio: ['pipe','pipe','ignore'] });
       timer = setTimeout(abort, options.readTimeoutMs ?? 15_000);
       options.signal?.addEventListener('abort', abort, { once: true });
       child.on('error', abort); child.on('exit', abort); child.stdin.on('error', abort); child.stdout.on('error', abort);
@@ -155,6 +289,14 @@ const readNative = async (threadId, project, options = {}) => {
           const line = pending.slice(0,newline); pending = pending.slice(newline+1);
           let message; try { message = JSON.parse(line); } catch { return abort(); }
           if(!message || typeof message!=='object' || Array.isArray(message)) return abort();
+          if(options.controlledExecution===true&&typeof message.method==='string'&&message.id!==undefined){
+            // Autonomous input goes through persisted Trelio owner decisions.
+            // Never leave the process waiting for an invisible native approval,
+            // and never translate an MCP/browser prompt into approval here.
+            child.stdin.write(`${JSON.stringify({id:message.id,error:{code:-32000,
+              message:'This assistant uses persisted Trelio owner decisions; native interactive approval is unavailable.'}})}\n`);
+            continue;
+          }
           if(terminalWaiting&&message.method==='turn/completed'&&message.params?.threadId===terminalWaiting.threadId){
             const turn=message.params.turn;
             if(!UUID.test(turn?.id??'')||!['completed','failed','interrupted'].includes(turn.status))return abort();
@@ -163,7 +305,22 @@ const readNative = async (threadId, project, options = {}) => {
           }
           if (waiting && message.id === waiting.id) {
             const current = waiting; waiting = null;
-            if (message.error) { current.no(new AssistantCodexError('ASSISTANT_CODEX_READ_UNAVAILABLE')); return abort(); }
+            if (message.error) {
+              const policy=options.controlledExecution===true&&['experimentalFeature/list','config/read','mcpServerStatus/list'].includes(current.method);
+              // A second process can report notLoaded for a chat whose writer
+              // is held elsewhere. Only native resume acquires that writer.
+              // This protocol version uses a generic RPC error code, so match
+              // only its exact stable template and the original thread UUID.
+              const busy=options.controlledExecution===true&&current.method==='thread/resume'
+                &&UUID.test(current.threadId??'')&&message.error.code===-32600
+                &&message.error.message===`thread ${current.threadId} already has an active writer`;
+              current.no(new AssistantCodexError(busy?'ASSISTANT_CODEX_THREAD_BUSY'
+                :policy?'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE':'ASSISTANT_CODEX_READ_UNAVAILABLE'));
+              // Let the owning projection retain its closed failure before
+              // cleanup. In particular a refused policy read precedes any turn.
+              if(options.controlledExecution===true)continue;
+              return abort();
+            }
             current.yes(message.result);
           }
         }
@@ -187,7 +344,8 @@ const readNative = async (threadId, project, options = {}) => {
         // RPC errors, provider prose and unavailable history remain unknown;
         // none may become a request to sign in or expose native diagnostics.
         finish(error instanceof AssistantCodexError && ['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_HOOK_REVIEW_REQUIRED',
-          'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_MODEL_CAPACITY','ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_DELIVERY_NOT_STARTED','ASSISTANT_MCP_RECONNECT_REQUIRED'].includes(error.code)
+          'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_MODEL_CAPACITY','ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_DELIVERY_NOT_STARTED','ASSISTANT_MCP_RECONNECT_REQUIRED',
+          'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE','ASSISTANT_CODEX_THREAD_BUSY'].includes(error.code)
           ? error.code : options.desktopOperation===true?'ASSISTANT_CODEX_DELIVERY_UNCERTAIN':'ASSISTANT_CODEX_READ_UNAVAILABLE');
       });
     } catch { abort(); }
@@ -1248,12 +1406,10 @@ export const readAssistantCodexOwnerReply=(threadId,deliveryId,intakePass,option
 };
 
 /**
- * The runtime owns cyclic launches through the visible Desktop writer. The
- * permanent UUID is opened before its one queue submission; no exec/resume
- * fallback or invisible business chat exists. It does not override approvals, hooks,
- * sandbox, OAuth or saved rules. The structural delivery marker uses stdin, not
- * argv. An independent positive read-back remains mandatory; a timeout or an
- * accepted queue entry can never mark the inbox event processed.
+ * An owned App Server resumes the same permanent chat under the assistant's
+ * bounded tools. The native writer fence prevents overlap with Desktop. The
+ * one structural marker uses stdin; an independent positive native read-back
+ * is still required before an inbox event can be processed.
  */
 export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskContext, intakeContext, execution }, options = {}) => {
   threadId = id(threadId); deliveryId = id(deliveryId);
@@ -1397,12 +1553,11 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
   const rpcOptions={...options,executable:resolved.executable,environment:resolved.env,spawnProcess:resolved.spawnProcess,
     desktopOperation:true,nativeCwd:cwd,readTimeoutMs:passTimeoutMs,signal};
   let renewalFailure;
-  const desktopSession=async(thread,project)=>{
-    try{return await readNative(thread,project,rpcOptions);}
+  const ownedSession=async project=>{
+    try{return await readNative(null,project,{...rpcOptions,controlledExecution:true});}
     catch(error){
-      // A trusted native lease/CAS refusal precedes the irreversible bit and
-      // must retain its existing classification. Never apply this exception
-      // to RPC errors, native prose, GUI results or a callback after start.
+      // Preserve a real pre-invocation native lease refusal. RPC/prose and
+      // failures after the durable start never earn another invocation.
       if(renewalFailure)throw renewalFailure;
       throw error;
     }
@@ -1417,54 +1572,65 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     startNativeInvocation(options,threadId,deliveryId);
   };
   const newProvision=options.readinessProbe===true&&threadId===null;
-  if(newProvision){
-    // Zero-turn thread/settings alone is insufficient: Desktop restores the
-    // last executed turn's pair. Execute ONLY this empty tool-free bootstrap
-    // under the explicit owner-selected pair before handing the writer to GUI.
-    // Persist the UUID before the first model turn. Lost create/start/response
-    // keeps the SAME provision fence; no second thread is created on recovery.
-    await desktopSession(null,async(_thread,request,watchTerminal)=>{
+  await ownedSession(async(_unused,request,watchTerminal)=>{
+    await verifyAssistantExecutionFeatures(request);
+    const configuration=await request('config/read',{includeLayers:false,cwd});
+    const config=assistantCodexExecutionOverrides(configuration?.config);
+    if(!newProvision){
+      const read=await request('thread/read',{threadId,includeTurns:false}),thread=read?.thread;
+      if(thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+      sameDesktopConfiguration(thread,execution,cwd);
+      // A person may open this persistent chat in Desktop. That does not
+      // authorize stealing its writer or replacing its active turn. An absent
+      // runtime-status field is unsupported, not an idle ownership certificate.
+      if(thread.status?.type!=='notLoaded'||thread.canAcceptDirectInput!=null)
+        fail('ASSISTANT_CODEX_THREAD_BUSY');
+      const queued=await request('thread/queue/list',{threadId});
+      if(!Array.isArray(queued?.data)||queued.data.length||queued.nextCursor!==null)
+        fail('ASSISTANT_CODEX_THREAD_BUSY');
+      const resumed=await request('thread/resume',{threadId,cwd,excludeTurns:true,config,
+        approvalPolicy:'never',sandbox:'read-only'});
+      if(resumed?.thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+    }else{
+      // Preserve the original creation fence and UUID-before-turn journal.
+      // Native configuration is scoped to this process/thread; no user setting
+      // or plugin/hook enablement is persisted or silently approved.
       await beforeStart();
-      const created=await request('thread/start',{cwd,model:execution.modelId,ephemeral:false,allowProviderModelFallback:false});
+      const created=await request('thread/start',{cwd,model:execution.modelId,ephemeral:false,
+        allowProviderModelFallback:false,approvalPolicy:'never',sandbox:'read-only',
+        environments:[],selectedCapabilityRoots:[],config});
       threadId=id(created?.thread?.id);
       const saved=options.onThreadStarted(threadId);
       if(saved&&typeof saved.then==='function')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
-      const marker=`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}`;
-      // A new bootstrap has no persisted history yet. Observe its owning
-      // server's terminal event instead of querying a not-yet-materialized
-      // thread and killing the model on a transient native read refusal.
+    }
+    await verifyAssistantExecutionServer(request,threadId);
+    const workflow=options.readinessProbe===true?null
+      :await (options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
+    const run=async text=>{
+      // Only this owned server sends the model input. Desktop's queue has no
+      // tool-policy parameter and is never an alternative executor/fallback.
       const terminal=watchTerminal(threadId);
       const started=await request('turn/start',{threadId,model:execution.modelId,effort:execution.effortLevel,
-        collaborationMode:{mode:'default',settings:{model:execution.modelId,reasoning_effort:execution.effortLevel,developer_instructions:null}},
-        input:[{type:'text',text:`${marker}\nReply exactly READY. Do not use tools or access files, sites, accounts or integrations.`,text_elements:[]}]});
-      const prepared=await terminal;
-      if(started?.turn?.id===prepared.turnId&&prepared.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');
-      if(started?.turn?.id!==prepared.turnId||prepared.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+        approvalPolicy:'never',sandboxPolicy:{type:'readOnly',networkAccess:false},environments:[],
+        collaborationMode:{mode:'default',settings:{model:execution.modelId,reasoning_effort:execution.effortLevel,developer_instructions:workflow}},
+        input:[{type:'text',text,text_elements:[]}]});
+      const completed=await terminal;
+      if(started?.turn?.id===completed.turnId&&completed.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');
+      if(started?.turn?.id!==completed.turnId||!['completed','failed'].includes(completed.status))
+        fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+      return completed;
+    };
+    if(newProvision){
+      const marker=`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}`;
+      const prepared=await run(`${marker}\nReply exactly READY. Do not use tools or access files, sites, accounts or integrations.`);
+      if(prepared.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       const verified=await waitForNativeTurn(request,threadId,marker,signal);
       if(verified.turnId!==prepared.turnId||verified.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
-    });
-    // readNative has closed ONLY its owned bootstrap writer before the URI.
-  }
-  // Reuse the common cross-platform URI opener. Only a validated UUID is ever
-  // composed into this closed URI; no provider link, shell or GUI keystrokes.
-  // Failure blocks queue delivery. Handoff alone does not earn provisioning:
-  // the second READY must actually finish through the Desktop queue below.
-  try{await(options.openDesktop??openBrowser)(`codex://threads/${id(threadId)}`,{signal});}
-  catch{fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');}
-  await desktopSession(threadId,async(thread,request)=>{
-    sameDesktopConfiguration(thread,execution,cwd);
-    const pending=await request('thread/queue/list',{threadId});
-    if(!Array.isArray(pending?.data)||pending.data.length||pending.nextCursor!==null)
-      fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
-    if(!newProvision)await beforeStart();
-    // One provision bit covers creation/bootstrap/GUI handoff as one chain;
-    // task delivery crosses its bit immediately before its ONE queue write.
-    const submitted=await request('thread/queue/add',{threadId,clientUserMessageId:deliveryId,
-      input:[{type:'text',text:assistantNativePrompt(deliveryId,workStateContext,options),text_elements:[]}]});
-    if(!UUID.test(submitted?.queuedSubmission?.id??'')||submitted.queuedSubmission.clientUserMessageId!==deliveryId)
-      fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    }else await beforeStart();
+    // The second empty READY retains the established provision/read-back ABI.
+    // Existing chats keep their identity/history and unknown-delivery fences.
+    await run(assistantNativePrompt(deliveryId,workStateContext,options));
     await waitForNativeTurn(request,threadId,assistantDeliveryMarker(deliveryId),signal);
-
   });
   return threadId;
 };
@@ -1501,17 +1667,22 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
     ? options.technicalReplyCorrection===true
       ? 'This is ONE corrective reply to the SAME original private owner question after its prior technical limitation reply was positively delivered. Preserve that history and never repeat the prior send. Read the exact original and fresh current sources yourself. Recheck previously failed exact selections that are relevant to this question using current read-only tools; prior locators grant no access. Then answer the original question from the verified current source. Prior technical replies are not the answer. Only reply_owner is permitted; no Task, Workspace, Run, dialogue, route, ignore, redirect or direct provider sending. The host retains the original peer and fences this one corrective response.\n'
       : 'This is ONE reply-only recovery of the SAME original owner question after a verified read-only execution failure. This negative recovery does not establish that a prior response was delivered. Read the exact original and fresh current company sources again; prior failures and this recovery do not answer the question. Only reply_owner is permitted. Do not create/route/ignore a task, redirect, ask a new owner question, start a Workspace/Run or invoke provider sending. The host retains the original conversation and sends the one verified original reply.\n':'';
-  // The managed browser is the digital assistant's default site surface. Codex
-  // may still advertise native computer tools; their presence is not fallback
-  // authority. Browser mechanics live in the dedicated host tool and common
-  // engine, not a prompt instruction to click an invisible native dialog.
+  // Site mechanics live in the managed browser and the declared, admitted skill
+  // commands. A published human browser recipe does not make that recipe
+  // executable in the isolated assistant or grant access to its saved session.
   // Keep window/account recognition with the model, but select the eligible
   // native pass here. READY, routing-only and discussion never gain this hint.
   // A different observation surface is not a provider/auth or mutation retry.
   const browserRecovery=options.readinessProbe!==true&&workStateContext?.intakeKind!=='route_existing'
     &&workStateContext?.workMode!=='discussion'
     &&(workStateContext?.kind==='source_intake'||workStateContext?.workStatePath)
-    ? 'For websites use the Trelio managed browser: a matching published skill retains its declared routing, while use_assistant_browser covers sites without a specialized browser skill. Do not use ordinary Chrome, native computer tools or a shell/browser script as a silent fallback. If this tool is missing or refused, report the exact capability/access blocker through the existing owner dialogue; do not claim the site is unavailable or borrow another login. Browser notification prompts are blocked by the runtime. Observe alert/confirm and answer with its fresh frame/button or Enter/Escape only within the already authorized action. A sensitive action still requires its independent persisted owner decision. Unsupported authentication or OS prompts are concrete blockers, never an indefinite wait for somebody to click at this computer. Save progress, ask the owner the specific missing decision or setup and wait. Read back an uncertain result before further input; never replay it or switch transport. Source intake stays read-only. Close windows when this work finishes or enters owner waiting; saved login is retained and the runtime also closes idle windows after ten minutes. Closing a window is not a business result. Verify the actual site outcome before reporting success.\n':'';
+    ? [
+      'For websites, follow a matching published skill through its declared assistant commands. Use use_assistant_browser for ordinary site work that needs no specialized capability or existing skill session.',
+      'A skill that requires its own browser can use only its admitted commands or an explicitly supported fallback admitted for this assistant. Do not use ordinary Chrome, native computer tools or a shell/browser script as a silent fallback. If the required capability is unavailable, report that exact blocker through the existing owner dialogue. Keep the same authorized service, account and approvals.',
+      'Browser notification prompts are blocked by the runtime. Observe alert/confirm and answer with its fresh frame/button or Enter/Escape only within the already authorized action. A sensitive action still requires its independent persisted owner decision.',
+      'Unsupported authentication or OS prompts are concrete blockers. Save progress, ask the owner the specific missing decision or setup and wait. Read back an uncertain result before further input. Never replay it or switch transport.',
+      'Source intake stays read-only. Close windows when this work finishes or enters owner waiting. Saved login is retained, and the runtime also closes idle windows after ten minutes. Verify the actual site outcome before reporting success.\n',
+    ].join(' '):'';
   return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${replyOnly}${instruction}\n${browserRecovery}${conversationTracking}${scheduled}`;
 };
 

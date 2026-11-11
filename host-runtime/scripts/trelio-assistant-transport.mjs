@@ -3208,7 +3208,7 @@ const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "ge
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS,
-  'use_assistant_browser',
+  'use_assistant_browser','use_assistant_workspace_files',
   // Native task-local mapping only. Live schema/proof/CAS remain backend-owned;
   // exposing the name does not read a provider body or create a new task.
   'bind_assistant_source_conversation','execute_assistant_operation',
@@ -3266,7 +3266,7 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...new Set([
  * into the raw call before the backend's mandatory validation/admission.
  * No domain schema, scope or permission is inferred/copied by this projection.
  */
-const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent','localContextRead','localBrowserAction']);
+const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent','localContextRead','localBrowserAction','localFileAction']);
 /** A login declaration is capability metadata, never evidence that an account
  * needs login. One pure presentation decision is shared by fresh workers and
  * the long-lived facade; it does not consume consent or authorize execution. */
@@ -3295,7 +3295,7 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    const negotiation=['localContextRead','localBrowserAction'].find(field=>Array.isArray(node.anyOf)
+    const negotiation=['localContextRead','localBrowserAction','localFileAction'].find(field=>Array.isArray(node.anyOf)
       &&node.anyOf.some(branch=>Object.hasOwn(branch?.properties??{},field)));
     if(negotiation){
       // Only the exact native structural negotiation alternative is host-only.
@@ -3304,7 +3304,9 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
       node.anyOf=node.anyOf.filter(branch=>{
         if(!Object.hasOwn(branch?.properties??{},negotiation))return true;
         if(branch.properties[negotiation]?.const!==true||branch.additionalProperties!==false
-          ||![[negotiation,'runtimeSessionProof','taskPass'],['intakePass',negotiation,'runtimeSessionProof'],['intakePass',negotiation,'runtimeSessionProof','taskPass']]
+          ||!(negotiation==='localFileAction'
+            ? [[negotiation,'runIdentity','runtimeSessionProof','taskPass']]
+            : [[negotiation,'runtimeSessionProof','taskPass'],['intakePass',negotiation,'runtimeSessionProof'],['intakePass',negotiation,'runtimeSessionProof','taskPass']])
             .some(keys=>keys.sort().join(',')===Object.keys(branch.properties).sort().join(',')))
           fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return false;
@@ -3368,19 +3370,41 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
         };
         const leaf=node=>['string','integer','number','boolean','null'].includes(node.type)
           &&![...maps,...singles,...lists].some(key=>Object.hasOwn(node,key));
+        if(compactContainers){
+          // These are validation identities in both supported dialects.
+          // Unknown vocabularies and ref-bearing documents never reach this
+          // branch. Explicit defaults, descriptions and nonzero limits remain.
+          visit(schema,node=>{
+            if(node.additionalProperties===true
+              ||object(node.additionalProperties)&&Object.keys(node.additionalProperties).length===0)delete node.additionalProperties;
+            if(Array.isArray(node.required)&&node.required.length===0)delete node.required;
+            for(const key of ['minLength','minItems','minProperties'])if(node[key]===0)delete node[key];
+            if(node.uniqueItems===false)delete node.uniqueItems;
+            if(object(node.properties)&&Object.keys(node.properties).length===0)delete node.properties;
+            // A projected host-admission wrapper sometimes leaves one exact
+            // object branch under anyOf. Collapse only when the outer type is
+            // already guaranteed by the branch and there are no other fields.
+            const only=node.anyOf?.length===1?node.anyOf[0]:null;
+            if(only?.type==='object'&&node.type==='object'
+              &&Object.keys(node).every(key=>['type','anyOf','$schema'].includes(key))){
+              delete node.anyOf;
+              Object.assign(node,only);
+            }
+          });
+        }
         const counts=new Map();
         visit(schema,node=>{if(node!==schema&&(compactContainers||leaf(node))){const key=JSON.stringify(node);counts.set(key,(counts.get(key)??0)+1);}});
         const definitionsKey=schema.$schema==='http://json-schema.org/draft-07/schema#'?'definitions':'$defs';
         const definitions={...schema[definitionsKey]},references=new Map();
         for(const [key,count]of counts){
           if(count<2)continue;
-          let index=references.size,name=compactContainers?`ts${index}`:`trelio_scalar_${index}`;
-          while(Object.hasOwn(definitions,name))name=compactContainers?`ts${++index}`:`trelio_scalar_${++index}`;
+          let index=references.size,name=compactContainers?index.toString(36):`trelio_scalar_${index}`;
+          while(Object.hasOwn(definitions,name))name=compactContainers?(++index).toString(36):`trelio_scalar_${++index}`;
           const ref={$ref:`#/${definitionsKey}/${name}`};
           // Include the definition key, separator and every reference; small
           // repeated scalars must remain inline when sharing would cost more.
           if(count*Buffer.byteLength(key)<=Buffer.byteLength(JSON.stringify({[name]:JSON.parse(key)}))
-            +count*Buffer.byteLength(JSON.stringify(ref))+32)continue;
+            +count*Buffer.byteLength(JSON.stringify(ref))+(compactContainers?2:32))continue;
           definitions[name]=JSON.parse(key);references.set(key,ref);
         }
         // Sharing a parent reduces the number of its child occurrences.
@@ -3485,7 +3509,7 @@ export const validateAssistantNativeInputShape=(nativeSchema,raw,{omittedRootFie
   };
   if(!walk(root,input))fail('ASSISTANT_MCP_INPUT_INVALID');
 };
-export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, materializeCompanyFile, materializeBrowser, onBrowserScopeSettled,
+export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, materializeCompanyFile, materializeBrowser, materializeWorkspaceFiles, onBrowserScopeSettled,
   materializeEncryptedTask, materializeEncryptedSkill, materializeEncryptedCompanyContext, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, materializeSourceReply=null, materializeSourceUnsubscribe=null, presentationProfile='task', timeoutMs = 30_000 }) => {
   if (!['task','remote_mcp','skill_setup','company_context'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
@@ -3500,7 +3524,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
     source_unsubscribe:'ASSISTANT_MCP_LOCAL_SOURCE_UNSUBSCRIBE_FAILED',source_read:'ASSISTANT_MCP_LOCAL_SOURCE_READ_FAILED',source_reply:'ASSISTANT_MCP_LOCAL_SOURCE_REPLY_FAILED',
     company_read:'ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED',task_read:'ASSISTANT_MCP_LOCAL_TASK_READ_FAILED',
     skill_read:'ASSISTANT_MCP_LOCAL_SKILL_READ_FAILED',company_file:'ASSISTANT_MCP_LOCAL_COMPANY_FILE_FAILED',
-    attachment_read:'ASSISTANT_MCP_LOCAL_ATTACHMENT_READ_FAILED',browser:'ASSISTANT_MCP_LOCAL_BROWSER_FAILED'});
+    attachment_read:'ASSISTANT_MCP_LOCAL_ATTACHMENT_READ_FAILED',browser:'ASSISTANT_MCP_LOCAL_BROWSER_FAILED',
+    workspace_files:'ASSISTANT_MCP_LOCAL_WORKSPACE_FILES_FAILED'});
   const localOperation=async(stage,action,nativeSendErrors)=>{
     try{return await action();}catch(error){
       // The arguments adapter invokes the SAME native send. Only that exact
@@ -3591,6 +3616,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           &&tool.inputSchema.type==='object'))refinementAvailable=true;
         const selected=tools.filter(tool=>(allowed.includes(tool?.name)||additional.includes(tool?.name))
           &&(tool.name!=='use_assistant_browser'||typeof materializeBrowser==='function')
+          &&(tool.name!=='use_assistant_workspace_files'||typeof materializeWorkspaceFiles==='function')
           &&(!['download_attachment','download_registry_document','download_knowledge_base_attachment'].includes(tool.name)||typeof materializeAttachment==='function')).map(tool=>{
           if(seen.has(tool.name)||typeof tool.description!=='string'||tool.description.length>4096||!object(tool.inputSchema)||tool.inputSchema.type!=='object')fail('ASSISTANT_MCP_INVALID_RESPONSE');
           seen.add(tool.name);
@@ -3610,7 +3636,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Profile planning is an optional native definition in that SAME bounded
       // view, usable with either genuine origin; never append its full schema
       // to the already near-bound task catalogue or invent it on old backends.
-      const intake=await catalogue(intakeToolNames,'source_intake',true,['request_assistant_profile_update','use_assistant_browser']);
+      const intake=await catalogue(intakeToolNames,'source_intake',true,['request_assistant_profile_update','use_assistant_browser','use_assistant_workspace_files']);
       // Read native discovery definitions from their existing session-fixed
       // view BEFORE the client starts a model turn, not after a status call.
       // Older native catalogues may have none; partial sets fail closed.
@@ -3649,7 +3675,9 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Snapshot once before asynchronous private/network I/O, as in the shared
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
-      if(['localContextRead','localBrowserAction'].some(key=>Object.hasOwn(argumentsSnapshot,key)))fail('ASSISTANT_MCP_INPUT_INVALID');
+      if(['localContextRead','localBrowserAction','localFileAction'].some(key=>Object.hasOwn(argumentsSnapshot,key)))fail('ASSISTANT_MCP_INPUT_INVALID');
+      const workspaceFileAction=name==='use_assistant_workspace_files';
+      if(workspaceFileAction&&typeof materializeWorkspaceFiles!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
       // Reject a task writer in an intake before initializing any native MCP
       // session. Repeat after initialization too: the protected pass can change
       // during I/O, and metadata is never execution authority.
@@ -3671,6 +3699,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         const definitions=catalog.filter(tool=>tool?.name===name);
         if(definitions.length!==1)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         validateAssistantNativeInputShape(definitions[0].inputSchema,argumentsSnapshot);
+        if(workspaceFileAction){
+          const {parseAssistantRunFileCommand}=await import('./trelio-workspace-files.mjs');
+          try{parseAssistantRunFileCommand(argumentsSnapshot.command);}
+          catch{fail('ASSISTANT_WORKSPACE_FILE_INPUT_INVALID');}
+        }
         if(name==='use_assistant_browser'){
           // The complete browser command is conditional metadata, not another
           // always-loaded schema. Fetch its SAME native validator on every
@@ -3752,7 +3785,10 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         // must neither reject a fresh receipt nor renew a slow admission when
         // its callback finally arrives. This timestamp never leaves the host.
         const browserAdmissionStartedAt=name==='use_assistant_browser'?performance.now():undefined;
-        const value=name==='use_assistant_browser'
+        const value=workspaceFileAction
+          ?await send({localFileAction:true,runIdentity:argumentsSnapshot.runIdentity,taskPass:argumentsSnapshot.taskPass,
+            runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
+          :name==='use_assistant_browser'
           ?typeof materializeBrowser==='function'
             ?await send({localBrowserAction:true,...(argumentsSnapshot.intakePass?{intakePass:argumentsSnapshot.intakePass}:{taskPass:argumentsSnapshot.taskPass}),runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
             :fail('ASSISTANT_CAPABILITY_UNAVAILABLE')
@@ -3767,6 +3803,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > ASSISTANT_MCP_RESULT_MAX_BYTES) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         if(name==='use_assistant_browser'&&value.isError!==true)
           return localOperation('browser',()=>materializeBrowser({result:value,arguments:argumentsSnapshot,signal,admissionStartedAt:browserAdmissionStartedAt}));
+        if(workspaceFileAction&&value.isError!==true)
+          return localOperation('workspace_files',()=>materializeWorkspaceFiles({result:value,arguments:argumentsSnapshot,signal}));
         if(typeof onBrowserScopeSettled==='function'&&value.isError!==true
           &&(name==='complete_assistant_pass'&&value.structuredContent?.state==='confirmed'
             ||name==='resolve_assistant_intake'&&value.structuredContent?.receiptId
@@ -3839,7 +3877,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
       }, signal, name==='connect_remote_agent_skill'?10*60*1000:name==='use_assistant_browser'?60_000:timeoutMs,
-        name==='request_assistant_profile_update'||name==='use_assistant_browser'
+        name==='request_assistant_profile_update'||name==='use_assistant_browser'||workspaceFileAction
           ||name==='get_trelio_tool_contract'&&argumentsSnapshot.name==='use_assistant_browser'?'source_intake':companyReadSession?'company_context':null);
     },
   };

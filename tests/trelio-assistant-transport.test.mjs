@@ -12,6 +12,85 @@ const memoryStore = () => {
     put:async(input,value)=>values.set(key(input),structuredClone(value)),remove:async input=>values.delete(key(input)) };
 };
 
+test('assistant file commands keep authority read-only and never overwrite a stale file or linked path',async t=>{
+ const {executeAssistantRunFileCommand,parseAssistantRunFileCommand}=await import('../host-runtime/scripts/trelio-workspace-files.mjs');
+ const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-assistant-files-')));
+ t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ await fs.mkdir(path.join(root,'workspace'));await fs.mkdir(path.join(root,'context'));
+ const pinned='a'.repeat(7999)+'😀'+'end';
+ await fs.writeFile(path.join(root,'context','agent-instructions.md'),pinned);
+ const assertCurrent=async()=>{};
+ const invoke=input=>executeAssistantRunFileCommand({root,input,assertCurrent});
+ const read={action:'read',source:'authority',path:'agent-instructions.md'};
+ const first=await invoke(read);
+ assert.equal(first.nextOffset,7999);
+ const second=await invoke({...read,offset:first.nextOffset});
+ assert.equal(first.text+second.text,pinned);assert.equal(first.sha256,second.sha256);
+ for(const bad of ['../context/user-profile.md','.git/config','AGENTS.md','agents.md','C:/x','result.md:secret','folder/COM1.txt','folder/a.']){
+  assert.throws(()=>parseAssistantRunFileCommand({action:'read',path:bad}),{code:'ASSISTANT_WORKSPACE_FILE_INPUT_INVALID'});
+ }
+ assert.throws(()=>parseAssistantRunFileCommand({action:'replace',source:'authority',path:'agent-instructions.md',expectedSha256:null,text:'test'}),
+  {code:'ASSISTANT_WORKSPACE_FILE_INPUT_INVALID'});
+ const replace={action:'replace',path:'work/result.md',expectedSha256:null,text:'initial'};
+ const initial=await invoke(replace);
+ await assert.rejects(invoke({...replace,text:'stale'}),{code:'ASSISTANT_WORKSPACE_FILE_CHANGED'});
+ const changed=await invoke({...replace,expectedSha256:initial.sha256,text:'verified'});
+ const stored=await invoke({action:'read',path:replace.path});
+ assert.equal(stored.text,'verified');assert.equal(stored.sha256,changed.sha256);
+ await fs.link(path.join(root,'workspace',replace.path),path.join(root,'workspace','linked.md'));
+ await assert.rejects(invoke({action:'read',path:'linked.md'}),{code:'ASSISTANT_WORKSPACE_FILE_UNSAFE'});
+ assert.deepEqual((await invoke({action:'list'})).entries.map(entry=>entry.name),['linked.md','work']);
+});
+
+test('assistant signed guide pages never use provider paths as file authority',async()=>{
+ const {assistantSkillGuidePage}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+ const runtimeDirectory=path.resolve('synthetic-signed-skill');
+ const files=['scripts/instruction-guides/part-01.md','scripts/instruction-guides/part-02.md']
+  .map((file,index)=>({path:file,bytes:Buffer.from(`Signed part ${index}\n`)}));
+ const guides=files.map(file=>({path:path.join(runtimeDirectory,file.path),sizeBytes:file.bytes.length,
+  sha256:createHash('sha256').update(file.bytes).digest('hex')}));
+ const page=(rows,part=0)=>assistantSkillGuidePage({stdout:JSON.stringify({schemaVersion:1,requiredBeforeWork:'all_in_order',guides:rows}),
+  runtimeDirectory,parsedPackage:{files},part});
+ assert.equal(page(guides).text,'Signed part 0\n');assert.equal(page(guides).nextGuidePart,1);
+ assert.equal(page(guides,1).nextGuidePart,null);
+ for(const rows of [[{...guides[0],path:path.join(runtimeDirectory,'..','outside.md')}],
+   [{...guides[0],sha256:'0'.repeat(64)}],[guides[0],guides[0]]]){
+  assert.throws(()=>page(rows),{code:'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'});
+ }
+});
+
+test('assistant file transport sends only structural Run admission and excludes intake execution',async()=>{
+ const origin='https://files.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+ const taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+ const runIdentity={workspaceId:randomUUID(),runId:randomUUID()},runtimeSessionProof={runtimeSessionId:randomUUID()};
+ const args={runIdentity,taskPass,runtimeSessionProof,command:{action:'replace',path:'PRIVATE_FILENAME.md',
+  expectedSha256:null,text:'PRIVATE_DRAFT_TEXT'}};
+ const modelSchema={type:'object',properties:{runIdentity:{type:'object'},command:{}},required:['runIdentity','command'],additionalProperties:false};
+ const admission={type:'object',properties:{runIdentity:{type:'object'},localFileAction:{const:true},taskPass:{},runtimeSessionProof:{}},additionalProperties:false};
+ const wire={type:'object',anyOf:[modelSchema,admission]};
+ const name='use_assistant_workspace_files';let calls=0,materializations=0,pass=null;
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'a'.repeat(43)}`,expiresAt:1});
+ const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>pass,
+  materializeWorkspaceFiles:async request=>{materializations++;assert.deepEqual(request.arguments,args);return {content:[],structuredContent:{state:'draft_updated'}};},
+  httpRequest:async ({config,payload,method})=>{
+   const reply=result=>({sessionId:'fixture',message:{jsonrpc:'2.0',id:payload?.id,result}});
+   if(method==='DELETE'||payload.method==='notifications/initialized')return reply({});
+   if(payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+   if(payload.method==='tools/list')return reply({tools:[{name,description:'Native fixture',inputSchema:wire}]});
+   assert.equal(config.headers['x-trelio-assistant-capability-profile'],'source_intake');
+   assert.deepEqual(payload.params.arguments,{runIdentity,taskPass,runtimeSessionProof,localFileAction:true});
+   assert.doesNotMatch(JSON.stringify(payload),/PRIVATE_FILENAME|PRIVATE_DRAFT_TEXT|expectedSha256/u);
+   calls++;return reply({content:[],structuredContent:{kind:'assistant_workspace_files'}});
+  }});
+ assert.doesNotMatch(JSON.stringify(assistantModelInputSchema(wire)),/localFileAction|runtimeSessionProof|taskPass/u);
+ assert.equal((await client.callTool(name,args)).structuredContent.state,'draft_updated');
+ await assert.rejects(client.callTool(name,{...args,localFileAction:true}),/INPUT_INVALID/);
+ await assert.rejects(client.callTool(name,{...args,command:{...args.command,path:'../outside.md'}}),/INPUT_INVALID/);
+ pass={kind:'source_intake',intakeKind:'owner_question'};
+ await assert.rejects(client.callTool(name,args),/CAPABILITY_UNAVAILABLE/);
+ assert.equal(calls,1);assert.equal(materializations,1);
+});
+
 test('managed browser sends only structural admission and never replays an unknown local command',async()=>{
  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  const credential=`tda_${'b'.repeat(43)}`,taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},runtimeSessionProof={runtimeSessionId:randomUUID()};
@@ -3482,7 +3561,9 @@ test('assistant protected bootstrap specializes human-only clauses and never rea
   const assistant=common.buildAgentWorkspaceRuntimeAgentsMarkdown('WORKSPACE_CONTEXT.md',{assistant:true});
   assert.ok(assistant.includes('continue_assistant_workspace_action'));assert.ok(assistant.includes('complete_assistant_pass'));
   assert.ok(!assistant.includes('through `continue_trelio_workspace_action`'));
-  assert.ok(!assistant.includes('`get_task_review_context`'));assert.ok(assistant.includes('pinned ../context/agent-instructions.md'));
+  assert.ok(!assistant.includes('`get_task_review_context`'));
+  assert.ok(assistant.includes('pinned agent-instructions.md and user-profile.md'));
+  assert.ok(assistant.includes('use_assistant_workspace_files'));
   const profile={kind:'digital_assistant',requireToken:async()=>({}),prepareRequest:async()=>assert.fail('queue attempted HTTP')};
   const result=await common.withWorkspaceExecutionProfile(profile,()=>readUnfiledResponseContext('https://trelio.ru','fixture',{bridge:{
     currentWorkspaceExecutionProfile:common.currentWorkspaceExecutionProfile,

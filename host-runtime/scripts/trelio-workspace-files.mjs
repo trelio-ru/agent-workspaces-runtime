@@ -4,12 +4,16 @@ import { PassThrough } from "node:stream";
 import { once } from "node:events";
 import { chunkWorkspaceText } from "./trelio-workspace-text-chunks.mjs";
 import { isUtf8 } from "node:buffer";
+import { constants as fsConstants } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { sameLocalPath } from "./trelio-local-path.mjs";
 import {
   request, requireToken, ensureBridgeCompatibility, ensureCompanyEncryptionContext,
   readJsonResponse, currentWorkspaceExecutionProfile, resolveCompanyContextMirrorDirectory,
   resolveBridgeDataPlaneRouting, hydrateAgentCompanyEncryptedJson,
   ensurePrivateDirectory, hardenWindowsPrivatePath, resolveWorkspaceBridgeConfigDirectory,
   withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob,
+  isProtectedWorkspaceControlPath,
 } from "./trelio-workspace.mjs";
 import { decryptFileFromCompanyContainer, decryptFileFromCompanyContainerBytes } from "./trelio-company-encryption.mjs";
 import { materializeLocalAttachment, LOCAL_ATTACHMENT_MAX_BYTES } from "./trelio-local-attachments.mjs";
@@ -17,6 +21,150 @@ import { materializeLocalAttachment, LOCAL_ATTACHMENT_MAX_BYTES } from "./trelio
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const HEAD = /^[0-9a-f]{40,64}$/u;
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
+
+const RUN_FILE_LIMIT = 512 * 1024;
+const RUN_FILE_WRITE_LIMIT = 24 * 1024;
+const RUN_AUTHORITY_FILES = new Set(["agent-instructions.md", "user-profile.md", "run-checkpoint.json"]);
+const relativeRunPath = (value) => typeof value === "string" && value.length > 0
+  && Buffer.byteLength(value) <= 512
+  && !isProtectedWorkspaceControlPath(value)
+  && value.split("/").every(part => part && !part.startsWith(".") && !/[. ]$/u.test(part)
+    && !/[\\:<>"|?*\x00-\x1f\x7f]/u.test(part)
+    && !/^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\.|$)/iu.test(part))
+  && !["agents.md", "claude.md"].includes(value.toLowerCase());
+
+/** Close the local grammar before requesting a native receipt. The server's
+ * command placeholder does not grant an OS path, filesystem option or text
+ * payload on the wire. All model-facing coordinates are relative to one root
+ * selected by the verified own Run. */
+export const parseAssistantRunFileCommand = (input) => {
+  const invalid = () => fail("ASSISTANT_WORKSPACE_FILE_INPUT_INVALID");
+  if (!input || typeof input !== "object" || Object.getPrototypeOf(input) !== Object.prototype) invalid();
+  const { action, source = "workspace", path: relative, offset = 0, expectedSha256, text } = input;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > RUN_FILE_LIMIT) invalid();
+  const allowed = action === "list" ? ["action", "path", "offset"] : action === "read"
+    ? ["action", "source", "path", "offset"] : action === "replace"
+      ? ["action", "path", "expectedSha256", "text"] : [];
+  if (!allowed.length || Object.keys(input).some(key => !allowed.includes(key))) invalid();
+  if (source === "authority" ? action !== "read" || !RUN_AUTHORITY_FILES.has(relative)
+    : source !== "workspace" || (action !== "list" || relative !== undefined) && !relativeRunPath(relative)) invalid();
+  if (action === "replace") {
+    if (expectedSha256 !== null && (typeof expectedSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(expectedSha256))) invalid();
+    if (typeof text !== "string" || !text.isWellFormed() || text.includes("\0")
+      || Buffer.byteLength(text) > RUN_FILE_WRITE_LIMIT) invalid();
+    return { action, path: relative, expectedSha256, text };
+  }
+  return { action, ...(action === "read" ? { source } : {}), path: relative, offset };
+};
+
+// Every directory entry is checked before following it. realpath also catches
+// Windows junctions/reparse redirections. The Run root is selected and held
+// by the private host, not by the model or the opened site's filesystem.
+const assertRunFileDirectory = async (directory) => {
+  const state = await fs.lstat(directory);
+  if (!state.isDirectory() || state.isSymbolicLink() || !sameLocalPath(await fs.realpath(directory), directory))
+    fail("ASSISTANT_WORKSPACE_FILE_UNSAFE");
+};
+const resolveRunFileParent = async (base, parts, create = false) => {
+  await assertRunFileDirectory(base);
+  let current = base;
+  for (const part of parts) {
+    current = path.join(current, part);
+    if (create) {
+      try { await fs.mkdir(current, { mode: 0o700 }); }
+      catch (error) { if (error.code !== "EEXIST") throw error; }
+    }
+    await assertRunFileDirectory(current);
+  }
+  return current;
+};
+const sameEntry = (left, right) => left.dev === right.dev && left.ino === right.ino
+  && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+const readRunText = async (target) => {
+  const before = await fs.lstat(target, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n
+    || !sameLocalPath(await fs.realpath(target), target)) fail("ASSISTANT_WORKSPACE_FILE_UNSAFE");
+  if (before.size > BigInt(RUN_FILE_LIMIT)) fail("ASSISTANT_WORKSPACE_FILE_LIMIT");
+  const handle = await fs.open(target, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || !sameEntry(before, opened)) fail("ASSISTANT_WORKSPACE_FILE_CHANGED");
+    const bytes = Buffer.alloc(Number(opened.size) + 1);
+    let read = 0;
+    while (read < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, read, bytes.length - read, read);
+      if (!bytesRead) break;
+      read += bytesRead;
+    }
+    if (read !== Number(opened.size) || !sameEntry(opened, await handle.stat({ bigint: true })))
+      fail("ASSISTANT_WORKSPACE_FILE_CHANGED");
+    const source = bytes.subarray(0, read);
+    if (!isUtf8(source) || source.includes(0)) fail("ASSISTANT_WORKSPACE_FILE_NOT_TEXT");
+    return { text: source.toString("utf8"), sha256: createHash("sha256").update(source).digest("hex"), state: opened };
+  } finally { await handle.close(); }
+};
+const noSplitSurrogate = (text, at) => at <= 0 || at >= text.length || !(/[\uDC00-\uDFFF]/u.test(text[at]));
+
+/** Run under the existing finish lock and a fresh native lease check. The
+ * bytes stay in the private workspace, and ordinary checkpoint/finish remains
+ * the only way to persist them into the accepted history. */
+export const executeAssistantRunFileCommand = async ({ root, input, assertCurrent }) => {
+  const command = parseAssistantRunFileCommand(input);
+  await assertCurrent();
+  const base = path.join(root, command.source === "authority" ? "context" : "workspace");
+  const parts = command.path?.split("/") ?? [];
+  if (command.action === "list") {
+    const directory = await resolveRunFileParent(base, parts);
+    const items = [];
+    let visited = 0;
+    for await (const entry of await fs.opendir(directory)) {
+      if (++visited > 2048) fail("ASSISTANT_WORKSPACE_FILE_LIMIT");
+      if (relativeRunPath([...parts, entry.name].join("/")) && (entry.isDirectory() || entry.isFile()))
+        items.push({ name: entry.name, kind: entry.isDirectory() ? "directory" : "file" });
+    }
+    items.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    await assertCurrent();
+    const end = command.offset + 32;
+    return { entries: items.slice(command.offset, end), nextOffset: end < items.length ? end : null };
+  }
+  const name = parts.pop();
+  const directory = await resolveRunFileParent(base, parts, command.action === "replace" && command.expectedSha256 === null);
+  const target = path.join(directory, name);
+  if (command.action === "read") {
+    const { text, sha256 } = await readRunText(target);
+    if (command.offset > text.length || !noSplitSurrogate(text, command.offset)) fail("ASSISTANT_WORKSPACE_FILE_INPUT_INVALID");
+    let end = Math.min(command.offset + 8000, text.length);
+    if (!noSplitSurrogate(text, end)) end--;
+    await assertCurrent();
+    return { text: text.slice(command.offset, end), sha256, nextOffset: end < text.length ? end : null };
+  }
+
+  // Stage beside the private metadata, outside Git's working tree. A killed
+  // process cannot accidentally add an uncommitted temporary file to a Run.
+  await assertRunFileDirectory(root);
+  const temporary = path.join(root, `.trelio-edit-${randomUUID()}.tmp`);
+  const handle = await fs.open(temporary, "wx", 0o600);
+  try {
+    try { await handle.writeFile(command.text, "utf8"); await handle.sync(); }
+    finally { await handle.close(); }
+    await assertCurrent();
+    await resolveRunFileParent(base, parts);
+    let previous = null;
+    try { previous = await readRunText(target); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if ((previous?.sha256 ?? null) !== command.expectedSha256) fail("ASSISTANT_WORKSPACE_FILE_CHANGED");
+    // Existing destinations use atomic replacement. Creation uses a hard
+    // link to the closed temp file so it cannot clobber a newly created name.
+    if (previous) {
+      if (!sameEntry(previous.state, await fs.lstat(target, { bigint: true }))) fail("ASSISTANT_WORKSPACE_FILE_CHANGED");
+      await fs.rename(temporary, target);
+    } else {
+      try { await fs.link(temporary, target); }
+      catch (error) { if (error.code === "EEXIST") fail("ASSISTANT_WORKSPACE_FILE_CHANGED"); throw error; }
+    }
+    return { sha256: createHash("sha256").update(command.text, "utf8").digest("hex"), state: "draft_updated" };
+  } finally { await fs.unlink(temporary).catch(error => { if (error.code !== "ENOENT") throw error; }); }
+};
 
 export const validateWorkspaceFileLocator = ({ workspaceId, workspaceHead, filePath }) => {
   if (!UUID.test(String(workspaceId)) || !HEAD.test(String(workspaceHead))

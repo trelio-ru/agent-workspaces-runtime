@@ -1022,7 +1022,15 @@ publication tooling также остаются вне этого публичн
   Ordinary SCM ACLs only: no force, elevation, config/ACL changes or other users'
   process control. Lost stop/register/start results remain read-back-only;
   service_failed preserves the candidate latch and permits healthy old work.
-- Visible task chats reuse SAME native App Server + system URI opener. Empty bootstrap persists the explicit pair; ONLY the second GUI-queued READY earns provision. No exec/resume/hidden fallback, queue replay or model-mediated reconfiguration of old private history. See scheduler native invocation.
+- Isolated assistant execution reuses the SAME permanent Codex chat in its own
+  native App Server. Verify disabled execution features and the dedicated MCP
+  in that process before a model turn. No GUI queue, alternate writer or config
+  edits. Native resume must acquire the existing chat's writer even if the
+  reader reports `notLoaded`. Retain both empty READY markers, the one-use start
+  and read-back. Role documents come from the exact running plugin. Opened
+  Run UTF-8 files use the same native pass/recipient/lease and finish lock;
+  scoped local edits use expected SHA-256. Signed guides use verified package
+  bytes and bounded parts, never a provider path. See scheduler native invocation.
   An owner-private tool-free handoff may earn ONE independent readiness verification
   in that SAME chat after complete, exact, sole PREPARE/READY history. Schema22
   preserves the original provision/start/event and adds a separate one-use marker.

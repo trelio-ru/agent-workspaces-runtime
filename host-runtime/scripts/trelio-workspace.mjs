@@ -235,7 +235,7 @@ export const buildAgentWorkspaceRuntimeAgentsMarkdown = (
   return [...lines.filter(line => !humanPrefixes.some(prefix => line.startsWith(prefix))),
     "## Digital assistant execution",
     "",
-    "- Read the complete pinned ../context/agent-instructions.md and ../context/user-profile.md after open and every compaction. The versioned actor role specializes human-only clauses; it never expands company/task ACL, model policy or owner authority.",
+    "- Read the complete pinned agent-instructions.md and user-profile.md after open and every compaction. Use use_assistant_workspace_files with the opened runIdentity and command {action:\"read\",source:\"authority\",path:<file name>}. The versioned actor role specializes human-only clauses; it never expands company/task ACL, model policy or owner authority.",
     "- Use only the dedicated trelio-assistant MCP and returned continue_assistant_workspace_action. Never substitute human OAuth, approval flags or the human proposal App. Follow assistant-task-worker for your own accepted WORK.md and recurring pass lifecycle.",
     "- Profile/company-rule changes, sensitive actions and missing capabilities require the owner decision channel. If it is unavailable, preserve the blocker; do not fall back to a human flow on this computer.",
     "- Finish through the returned shared Workspace action with evidence and no_status_change. Accepted files do not publish a comment, change task state or close a pass. Use the dedicated task policy for task actions, then complete_assistant_pass with the accepted evidence.",
@@ -9954,13 +9954,54 @@ export const resolveAgentSkillRuntimeWithDeviceConsent = async ({
   }
 };
 
+/** Resolve only a complete guide manifest from the signed command, then use
+ * the already verified immutable package bytes. Provider stdout never
+ * becomes authority to open a local path. One part is small enough to read
+ * in full through MCP, independently of the total guide size. */
+export const assistantSkillGuidePage = ({ stdout, runtimeDirectory, parsedPackage, part }) => {
+  const invalid = () => { throw Object.assign(new Error("ASSISTANT_SKILL_GUIDE_RESULT_INVALID"), {
+    code: "ASSISTANT_SKILL_GUIDE_RESULT_INVALID",
+  }); };
+  if (!Number.isSafeInteger(part) || part < 0 || part > 63 || typeof stdout !== "string"
+    || Buffer.byteLength(stdout) > 64 * 1024) invalid();
+  let report;
+  try { report = JSON.parse(stdout); } catch { invalid(); }
+  if (!(report?.ok === true || (report?.schemaVersion === 1 && report.requiredBeforeWork === "all_in_order"))
+    || !Array.isArray(report.guides) || report.guides.length < 1 || report.guides.length > 64
+    || part >= report.guides.length) invalid();
+  const packageFiles = new Map(parsedPackage.files.map(file => [file.path, file]));
+  const seen = new Set();
+  const guides = report.guides.map(row => {
+    if (typeof row?.path !== "string" || !path.isAbsolute(row.path)) invalid();
+    const relative = path.relative(runtimeDirectory, row.path).split(path.sep).join("/");
+    if (!/^(?:scripts\/instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]+\.md)$/u.test(relative)
+      || seen.has(relative) || !sameLocalPath(row.path, path.join(runtimeDirectory, relative))) invalid();
+    seen.add(relative);
+    const bytes = packageFiles.get(relative)?.bytes;
+    if (!Buffer.isBuffer(bytes) || bytes.length > 24 * 1024 || bytes.length !== (row.sizeBytes ?? row.bytes)
+      || crypto.createHash("sha256").update(bytes).digest("hex") !== row.sha256) invalid();
+    return { relative, sha256: row.sha256, bytes };
+  });
+  const selected = guides[part];
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(selected.bytes); }
+  catch { invalid(); }
+  return { schemaVersion: 1, part, count: guides.length, nextGuidePart: part + 1 < guides.length ? part + 1 : null,
+    path: selected.relative, sha256: selected.sha256, text };
+};
+
 const skillCommand = async (
   origin,
   options,
   positional,
-  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null, humanInputSetup = null } = {},
+  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null, humanInputSetup = null, assistantGuidePart } = {},
 ) => {
   const skillSubcommand = positional[0];
+  if (assistantGuidePart !== undefined && (skillSubcommand !== "run"
+    || positional.length !== 2 || positional[1] !== "guides"
+    || currentWorkspaceExecutionProfile()?.kind !== "digital_assistant")) {
+    throw Object.assign(new Error("ASSISTANT_SKILL_GUIDE_INPUT_INVALID"), { code: "ASSISTANT_SKILL_GUIDE_INPUT_INVALID" });
+  }
 
   if (skillSubcommand === "pack") {
     const sourceDirectory = path.resolve(String(options.source || ""));
@@ -10168,7 +10209,7 @@ const skillCommand = async (
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
-  if (assistant) {
+  const verifyCurrentAssistantSkill = async () => {
     // Materialization/account discovery may cross I/O. Repeat only the native
     // read admission immediately before launch; never replay the provider.
     // The same resolver verifies live policy/pass and exact current release.
@@ -10192,7 +10233,8 @@ const skillCommand = async (
     // against the local cache digest (which would reject every private run).
     if (live.artifact.id !== resolution.artifact.id || live.artifact.packageSha256 !== resolution.artifact.packageSha256)
       throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
-  }
+  };
+  if (assistant) await verifyCurrentAssistantSkill();
   // Observe an exact queued body through the SAME signed process/account
   // engine. The private profile validates native source/task routing before
   // launch and after complete successful pipes; no provider output is saved
@@ -10224,7 +10266,12 @@ const skillCommand = async (
     // output is discarded independently and never enters this projection.
     const projected = outgoing !== null && typeof profile.projectOutgoingConversation === 'function'
       ? await profile.projectOutgoingConversation(outgoing, executed) : executed;
-    process.stdout.write(projected.stdout);
+    if (assistantGuidePart !== undefined) {
+      const page = assistantSkillGuidePage({ stdout: projected.stdout, runtimeDirectory,
+        parsedPackage: artifactForCache.parsedPackage, part: assistantGuidePart });
+      await verifyCurrentAssistantSkill();
+      process.stdout.write(`${JSON.stringify(page)}\n`);
+    } else process.stdout.write(projected.stdout);
   }
   // Provider setup stdout may contain private profile paths or handoff URLs.
   // Exit zero/window close is not a login proof. Only this closed structural
@@ -20431,7 +20478,7 @@ export const recoverBridgePluginUpgrade = async (
   }
 };
 
-export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2)) => {
+export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -20492,7 +20539,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2)) 
   } else if (command === "merge") {
     await mergeWorkspaceRun(options);
   } else if (command === "skill") {
-    await skillCommand(origin, options, positional);
+    await skillCommand(origin, options, positional, { assistantGuidePart });
   } else if (command === "secret") {
     if (positional[0] === "set") {
       await setSecretValue(options, positional);

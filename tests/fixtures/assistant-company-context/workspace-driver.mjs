@@ -84,6 +84,11 @@ export const createWorkspaceSystemDriver=async configuration=>{
   await send('initialize');
   const locator={companyId,taskId,passId:pass.passId};
   return {native,pass,locator,
+    async listTools(){
+      const response=await send('tools/list');
+      assert.equal(response.error,undefined,JSON.stringify(response.error));
+      return response.result.tools;
+    },
     managed:()=>native.context(()=>resolveAssistantCompanyEncryptionDevice({identity,companyId,store:native.store,
       lockDirectory:path.join(root,'company-key-locks'),assertCurrent:()=>native.client.readTaskPass(locator)})),
     directory:workspaceId=>path.join(assistantTaskStorageDirectory(directory,{origin:identity.origin,assistantId:identity.assistantId,

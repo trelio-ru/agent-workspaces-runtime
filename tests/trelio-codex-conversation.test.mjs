@@ -18,9 +18,204 @@ import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateH
   updateCodexPluginMarketplace, readAssistantPluginLatestVersion } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {readCodexAssistantMarketplaceSource} from '../host-runtime/scripts/trelio-codex-routing.mjs';
 import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+import http from 'node:http';
+import {randomUUID} from 'node:crypto';
+import {provisionAssistantCodexChat,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
+
+test('actual Codex isolated assistant refuses alternate tools across process restart without changing user configuration',
+ {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
+ const executable=process.env.TRELIO_TEST_CODEX_CLI,execute=promisify(execFile);
+ const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-native-isolation-')));
+ const home=path.join(root,'home'),repository=path.join(root,'repository');
+ for(const dir of [home,path.join(repository,'.agents/plugins')])await fs.mkdir(dir,{recursive:true});
+ const environment=buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
+   LOCALAPPDATA:path.join(home,'local'),APPDATA:path.join(home,'roaming')});
+ let business=false,attempt=0,allowedCalls=0,foreignRequests=0,foreignInitializations=0,modelRequests=0,toolName=null;
+ const advertised=[],toolResults=[],foreignPhases=[];let processPhase='setup',sawWorkflow=false;
+ // No account or OpenAI request participates: this loopback producer supplies
+ // synthetic Responses events to the real native tool registry. Malicious
+ // calls deliberately name tools absent from its advertised catalogue.
+ const server=http.createServer(async(req,res)=>{
+  let source='';for await(const chunk of req)source+=chunk;
+  const data=source?JSON.parse(source):{};
+  if(req.url.startsWith('/mcp/')){
+   if(req.url!=='/mcp/allowed'){
+    foreignRequests++;if(data.method==='initialize'||data.method==='tools/call')foreignInitializations++;
+    foreignPhases.push({process:processPhase,standalone:req.url==='/mcp/standalone',method:data.method??'stream'});
+   }
+   if(data.id===undefined){res.writeHead(204);res.end();return;}
+   let result={};
+   if(data.method==='initialize')result={protocolVersion:data.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'synthetic',version:'1'}};
+   if(data.method==='tools/list')result={tools:['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'].map(name=>({
+    name,description:'Synthetic admitted tool',inputSchema:{type:'object',properties:{}},
+    annotations:{readOnlyHint:true,destructiveHint:false,openWorldHint:false}}))};
+   if(data.method==='tools/call'){allowedCalls++;result={content:[{type:'text',text:'synthetic allowed result'}]};}
+   res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:data.id,result}));return;
+  }
+  if(req.url!=='/v1/responses'){res.writeHead(404,{'Content-Type':'application/json'});res.end('{"error":"synthetic_route"}');return;}
+  modelRequests++;
+  if(business){
+   const input=JSON.stringify(data);
+   sawWorkflow ||= input.includes('Synthetic role from the admitted plugin')&&input.includes('Synthetic reference from the admitted plugin');
+  }
+  for(const row of data.input??[])if(row.type==='function_call_output'){
+   const output=JSON.stringify(row.output).toLowerCase();
+   toolResults.push(['unknown','unrecognized','invalid','not found','unsupported','not registered','namespace','approval','denied','connection','closed','failed','no such','mcp']
+    .filter(word=>output.includes(word)));
+  }
+  const tools=data.tools??[];
+  const names=tools.flatMap(tool=>tool.type==='namespace'?(tool.tools??[]).map(child=>`${tool.name}.${child.name}`):[tool.name??tool.type]);
+  advertised.push(names);toolName??=tools.flatMap(tool=>tool.type==='namespace'
+   ?(tool.tools??[]).map(child=>({name:child.name,namespace:tool.name})):[{name:tool.name}])
+   .find(tool=>tool.name?.includes('get_assistant_status'));
+  const rejected=['shell_command','exec_command','mcp__cua_repl__js','mcp__foreign__get_assistant_status'];
+  let item;
+  if(business&&attempt<=rejected.length){
+   const selected=attempt<rejected.length?{name:rejected[attempt]}:toolName;attempt++;
+   const name=selected.name;
+   item={type:'function_call',id:`synthetic-call-${modelRequests}`,call_id:`call-${modelRequests}`,...selected,
+    arguments:JSON.stringify(name==='shell_command'?{command:'synthetic forbidden command'}:name==='exec_command'?{cmd:'synthetic forbidden command'}:{})};
+  }else item={id:`synthetic-message-${modelRequests}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'READY',annotations:[]}]};
+  const response={id:`synthetic-response-${modelRequests}`,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}};
+  res.writeHead(200,{'Content-Type':'text/event-stream'});
+  const events=[['response.created',{response:{...response,status:'in_progress',output:[]}}],
+    ['response.output_item.added',{output_index:0,item:item.type==='function_call'?{...item,arguments:''}:item}]];
+  if(item.type==='function_call')events.push(['response.function_call_arguments.delta',{item_id:item.id,output_index:0,delta:item.arguments}],
+   ['response.function_call_arguments.done',{item_id:item.id,output_index:0,arguments:item.arguments}]);
+  events.push(['response.output_item.done',{output_index:0,item}],['response.completed',{response}]);
+  for(const [type,fields] of events)
+   res.write(`event: ${type}\ndata: ${JSON.stringify({type,...fields})}\n\n`);
+  res.end();
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
+ const origin=`http://127.0.0.1:${server.address().port}`;
+ const foreignScript=path.join(root,'foreign.mjs'),foreignSentinel=path.join(root,'foreign-started');
+ await fs.writeFile(foreignScript,"import fs from 'node:fs';fs.writeFileSync(process.argv[2],'forbidden');\n");
+ const configuration=`model="synthetic-fixture"\nmodel_provider="fixture"\n[model_providers.fixture]\nname="fixture"\nbase_url="${origin}/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[features]\nplugins=true\nhooks=false\napps=true\nshell_tool=true\n[mcp_servers.foreign]\nurl="${origin}/mcp/standalone"\n[mcp_servers.foreign_stdio]\ncommand=${JSON.stringify(process.execPath)}\nargs=${JSON.stringify([foreignScript,foreignSentinel])}\n[projects.${JSON.stringify(root)}]\ntrust_level="trusted"\n`;
+ await fs.writeFile(path.join(home,'config.toml'),configuration);
+ const marketplace='trelio-digital-assistants';
+ for(const [name,endpoint] of [['trelio-digital-assistant','allowed'],['unrelated-fixture','foreign']]){
+  const plugin=path.join(repository,name);await fs.mkdir(path.join(plugin,'.codex-plugin'),{recursive:true});
+  await fs.writeFile(path.join(plugin,'.codex-plugin/plugin.json'),JSON.stringify({name,version:'1.0.0',
+   ...(name==='trelio-digital-assistant'?{skills:'./skills/'}:{})}));
+  await fs.writeFile(path.join(plugin,'.mcp.json'),JSON.stringify({mcpServers:{[name==='trelio-digital-assistant'?'trelio-assistant':'foreign']:{url:`${origin}/mcp/${endpoint}`}}}));
+  if(name==='trelio-digital-assistant'){
+   const skill=path.join(plugin,'skills','assistant-task-worker');
+   await fs.mkdir(path.join(skill,'references'),{recursive:true});
+   await fs.writeFile(path.join(skill,'SKILL.md'),'---\nname: assistant-task-worker\ndescription: Synthetic approved workflow\n---\nSynthetic role from the admitted plugin\n');
+   await fs.writeFile(path.join(skill,'references','work-state.md'),'Synthetic reference from the admitted plugin\n');
+  }
+ }
+ await fs.writeFile(path.join(repository,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:
+  ['trelio-digital-assistant','unrelated-fixture'].map(name=>({name,source:{source:'local',path:`./${name}`},policy:{installation:'AVAILABLE',authentication:'ON_USE'}}))}));
+ const native=async args=>JSON.parse((await execute(executable,args,{cwd:root,env:environment,timeout:30000})).stdout);
+ await native(['plugin','marketplace','add',repository,'--json']);
+ const installed=await native(['plugin','add',`trelio-digital-assistant@${marketplace}`,'--json']);
+ await native(['plugin','add',`unrelated-fixture@${marketplace}`,'--json']);
+ const before=await fs.readFile(path.join(home,'config.toml'));
+ // Plugin installation may inspect its newly installed synthetic endpoint.
+ // The assertion below measures execution, independently of that fixture setup.
+ foreignRequests=0;foreignInitializations=0;modelRequests=0;advertised.length=0;toolName=null;foreignPhases.length=0;
+ await fs.rm(foreignSentinel,{force:true});
+ const execution={modelId:'synthetic-fixture',effortLevel:'high',revision:1};let threadId=null,starts=0;
+ const phases=[];
+ const observedSpawn=(...args)=>{
+  processPhase=args[1].includes('--disable')?'controlled':'metadata';
+  const child=spawn(...args);let pending='';
+  child.stdout.on('data',chunk=>{
+   pending+=chunk.toString();let at;
+   while((at=pending.indexOf('\n'))>=0){const line=pending.slice(0,at);pending=pending.slice(at+1);
+    let value;try{value=JSON.parse(line);}catch{continue;}
+    if(value.result?.config)phases.push({stage:'config',ownEnabled:value.result.config.plugins?.['trelio-digital-assistant@trelio-digital-assistants']?.enabled===true,
+     pluginCount:Object.keys(value.result.config.plugins??{}).length});
+    if(value.result?.data?.some?.(row=>row?.name==='shell_tool'))phases.push({stage:'features',
+     disabled:value.result.data.filter(row=>['shell_tool','apps','multi_agent','code_mode_host'].includes(row.name)).map(row=>row.enabled===false),more:value.result.nextCursor!==null});
+    if(value.result?.data?.some?.(row=>row?.name==='trelio-assistant'))phases.push({stage:'server',rows:value.result.data.map(row=>({
+     own:row.name==='trelio-assistant',foreign:row.name==='foreign',ownPlugin:row.pluginId==='trelio-digital-assistant@trelio-digital-assistants',
+     status:row.runtimeStatus,tools:Object.keys(row.tools??{}).length,error:row.toolsError!==null}))});
+    if(value.error)phases.push({stage:'rpc_error',code:value.error.code});
+    if(value.id!==undefined&&value.method)phases.push({stage:'native_request',kind:value.method});
+    if(value.params?.item?.type==='mcpToolCall')phases.push({stage:'mcp_call',status:value.params.item.status,error:!!value.params.item.error});
+    if(phases.length>12)phases.shift();
+   }
+  });return child;
+ };
+ const options={executable,environment:{...environment,TRELIO_PLUGIN_ROOT:installed.installedPath},
+  spawnProcess:observedSpawn,passTimeoutMs:30000,readExecutionAvailability:async()=>true,
+  // Hook trust/proof has its independent native fixture; this fixture has no
+  // protected backend/account and must never manufacture approval for one.
+  readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),onThreadStarted:value=>{threadId=value;},
+  startInvocation:()=>{starts++;},openDesktop:()=>assert.fail('isolated work cannot use a Desktop queue or browser')};
+ let provision;
+ try{provision=await provisionAssistantCodexChat({deliveryId:randomUUID(),cwd:root,execution},options);}
+ catch(error){assert.fail(JSON.stringify({code:error.code,phases,foreignRequests,modelRequests}));}
+ assert.equal(provision.state,'completed');assert.equal(provision.threadId,threadId);
+ // A Desktop-style reader has its own App Server. Resume the persisted chat
+ // there first, then try to start the assistant from a different process. A
+ // local notLoaded report alone cannot authorize taking over the chat.
+ const attach=async()=>{
+  const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,stdio:['pipe','pipe','ignore']});
+  const closed=new Promise(resolve=>child.once('close',resolve));
+  const request=async(id,method,params)=>{
+   const result=new Promise((resolve,reject)=>{
+    let pending='';const timeout=setTimeout(()=>{child.stdout.off('data',receive);reject(new Error('native ownership probe timed out'));},5000);
+    function receive(chunk){
+     pending+=chunk.toString();let at;
+     while((at=pending.indexOf('\n'))>=0){
+      const frame=JSON.parse(pending.slice(0,at));pending=pending.slice(at+1);
+      if(frame.id!==id)continue;
+      clearTimeout(timeout);child.stdout.off('data',receive);resolve(frame);return;
+     }
+    }
+    child.stdout.on('data',receive);
+   });
+   child.stdin.write(`${JSON.stringify({id,method,params})}\n`);return result;
+  };
+  const close=async()=>{child.kill();await closed;};
+  try {
+   await request(1,'initialize',{clientInfo:{name:'ownership-probe',version:'1'},capabilities:{experimentalApi:true}});
+   child.stdin.write('{"method":"initialized"}\n');
+   return {request,close};
+  }catch(error){await close();throw error;}
+ };
+ const first=await attach();
+ const passInput={threadId,deliveryId:randomUUID(),cwd:root,execution,
+  taskContext:{assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID()}};
+ try {
+  const resumed=await first.request(2,'thread/resume',{threadId,cwd:root,excludeTurns:true});
+  assert.equal(resumed.result?.thread?.id,threadId);
+  const requestsBefore=modelRequests;
+  await assert.rejects(runAssistantCodexPass(passInput,options),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+  assert.equal(starts,1,'a competing writer cannot spend another invocation');
+  assert.equal(modelRequests,requestsBefore,'a competing writer cannot send a model request');
+ } finally {await first.close();}
+ // The ordinary native client above can connect its own foreign tools. The
+ // assistant execution below must independently deny those same tools.
+ foreignRequests=0;foreignInitializations=0;foreignPhases.length=0;
+ await fs.rm(foreignSentinel,{force:true});
+ // Production stopped its first owned writer. Resume that SAME persisted chat
+ // through a new process, with exactly the same restrictions and history.
+ business=true;
+ let result;
+ try{result=await runAssistantCodexPass(passInput,options);}
+ catch(error){assert.fail(JSON.stringify({code:error.code,phases}));}
+ assert.equal(result.state,'completed');assert.equal(starts,2);
+ assert.ok(sawWorkflow,'the model receives both admitted workflow documents without shell');
+ assert.ok(toolName,'the permitted signed-plugin MCP tool must actually reach the native model catalogue');
+ assert.equal(attempt,5,'all four forbidden tools and the allowed tool were emitted by the synthetic model');
+ assert.equal(allowedCalls,1,'only the permitted MCP operation executes '+JSON.stringify({toolName,phases,attempt,foreignRequests,toolResults}));
+ assert.equal(foreignInitializations,0,'foreign servers must not initialize or execute '+JSON.stringify(foreignPhases));
+ await assert.rejects(fs.stat(foreignSentinel),{code:'ENOENT'},'a foreign stdio executable cannot start');
+ for(const names of advertised){
+  assert.ok(names.some(name=>name.includes('get_assistant_status')));
+  assert.ok(!names.some(name=>/shell|exec_command|cua_repl|foreign|spawn_agent|web_search/.test(name)));
+ }
+ assert.deepEqual(await fs.readFile(path.join(home,'config.toml')),before,'execution policy cannot rewrite user configuration or trust');
+});
 
 for(const liveFailedParent of [false,true])test(liveFailedParent
  ?'actual Codex assistant rollback hands off a live failed-version parent before native downgrade'

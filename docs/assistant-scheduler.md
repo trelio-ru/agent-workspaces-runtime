@@ -259,43 +259,61 @@ structural presentation metadata, not another journal or an authorization flag.
 
 ### Native invocation
 
-The permanent task UUID is a **visible Desktop chat**. The runtime uses the
-public [App Server](https://learn.chatgpt.com/docs/app-server) methods and the
-registered `codex://threads/<UUID>` handler; it never executes business work
-through `codex exec`, resumes/steals the GUI writer or creates a hidden fallback.
-A tool-free native bootstrap first persists the new UUID and executes an empty
-READY with explicit company model/effort. Zero-turn settings alone do not suffice:
-Desktop restores the last executed pair. This initial turn has a distinct
-`TRELIO_ASSISTANT_DESKTOP_PREPARE` marker and earns no provisioning receipt.
+The isolated executor uses public [App Server](https://learn.chatgpt.com/docs/app-server)
+methods in an owned process. The permanent task chat retains its UUID and history.
+The assistant uses `turn/start` on that process so its tool policy is in effect
+for every turn. `thread/queue/add` inherits the existing Desktop writer's tools
+and does not expose a per-turn tool policy.
 
-After closing ONLY that owned bootstrap child, the SAME common system URI opener
-hands this exact UUID to Desktop. The public `thread/queue/add` (experimental
-capability) submits the second READY to its existing GUI writer. Exact native
-terminal read-back of the ordinary provision marker proves that the GUI queue
-actually ran. Closed/missing Desktop, a successful opener or an accepted queue
-alone cannot make a provision complete. The original one-use provision bit covers
-this entire chain; a lost create/start/queue response never creates another chat.
+The process disables shell, app connectors, delegation, Code Mode and built-in
+web search. Thread-local overrides disable other plugins and all standalone MCP
+servers. They copy only enabled flags. The owned process must verify its actual
+feature inventory and the one connected `trelio-assistant` server from the exact
+installed assistant plugin. An incomplete inventory or tools on a disabled server
+blocks execution. This does not update persisted Codex configuration, trust or
+human chat settings. The owned turn has a read-only sandbox with network disabled
+for commands, no execution environments and no native interactive approval.
 
-Every subsequent business/continuation uses that same exact UUID/cwd and GUI
-queue. Fresh native thread model/effort must match the server-selected pair;
-unknown/mismatched settings refuse before the task's irreversible start bit.
-A changed company choice never silently uses the old GUI model or a configuration
-model turn on old private history. Native hook observation remains independent.
-The queue API has no model-setting parameter: autonomous reconfiguration of an
-already GUI-owned chat must use a separately verified native Desktop capability,
-not an invented URI option, foreign resume, hidden helper chat or prompt command.
+New chats persist their UUID before the empty `TRELIO_ASSISTANT_DESKTOP_PREPARE`
+turn with the exact company model and effort. The same writer then runs the second
+empty READY under the ordinary provision marker. Exact terminal read-back earns
+provisioning. The original one-use provision bit covers both turns. An uncertain
+create/start never creates a replacement chat or repeats a marker.
 
-Only structural locators and the platform instruction cross private stdin; no
-prompt/content/credential is placed in argv or an extra transcript cache. The
-adapter never changes sandbox, approval, trust, saved rules or authentication.
-An owned reader polls bounded native turn summaries with backoff under the same
-absolute deadline. Timeout/cancellation closes only that reader, not the GUI
-turn/queue. Queue UUIDs correlate requests; they are not an idempotency guarantee,
-and an uncertain submission is never automatically requeued.
+On subsequent turns, the exact UUID, cwd, model and effort must still match.
+Native `thread/resume` acquires the writer. A `notLoaded` report from the current
+process cannot rule out a writer in another process. The native writer conflict
+or pending queue blocks the assistant before its start bit. No model turn or
+alternative chat is used to reconfigure private history. Hook admission remains
+independent of the tool inventory. Terminal observation and bounded marker reads
+share one absolute deadline. Stopping the owned process does not prove the result
+of a started pass. Its original uncertain outcome retains the no-replay fence.
+
+The owning process must see both `use_assistant_browser` and
+`use_assistant_workspace_files` in the native assistant catalogue. The full
+assistant role and work-state reference are loaded from the exact running plugin
+and passed as private turn instructions. They do not change the installed skill
+or other chats.
+
+Opened Run files use `use_assistant_workspace_files({runIdentity,command})`.
+The server receives only Run locators, the active pass and its one-use observed
+proof. The host repeats native own-Run/lease and managed-recipient checks before
+reading or committing a local edit. `list` pages one relative directory,
+`read` pages UTF-8 text with a stable SHA-256 and `replace` requires that digest
+or null for a new path. `source:"authority"` allows only the fixed pinned
+rules, profile and checkpoint reads. Link targets, protected controls, absolute
+paths and nontext bodies are refused. A local edit changes the draft only.
+Ordinary checkpoint/finish still performs durable submission and CAS.
+
+For an admitted signed `skill_run` command `arguments:["guides"]`, select
+`guidePart:0` then follow `nextGuidePart`. The host verifies the provider's
+manifest against the current signed package and delivers its exact text part.
+An absolute provider path cannot select a local read, and every part has fresh
+native admission. Accepted material continues to use exact accepted-file reads.
 
 Owner-private first-chat handoff has a separate bounded readiness-verification
-boundary. A completed PREPARE is not GUI readiness and does not prove why the
-handoff failed. Only complete single-turn native history with the EXACT empty
+boundary. A completed PREPARE does not establish readiness or diagnose a failure.
+Only complete single-turn native history with the EXACT empty
 bootstrap request, one exact `READY` answer and no tool/other items can expose a
 host-only `prepared` witness. Missing, partial, duplicate, running/interrupted,
 impure or ordinary business history remains uncertain.
@@ -307,9 +325,9 @@ body or grants task/provider authority. Fresh native source revision, company
 model/effort, cwd, absent protected pass and an empty native queue must precede
 the synchronous new start CAS. The original PREPARE witness and current native
 source/model are rechecked immediately before that CAS. A newly arrived original
-GUI receipt is adopted on a later tick instead of starting this verification.
+receipt is adopted on a later tick instead of starting this verification.
 
-Only the new marker's exact completed tool-free GUI `READY` earns readiness;
+Only the new marker's exact completed tool-free `READY` earns readiness;
 then ordinary native owner admission delivers the SAME original event once.
 Restart/lost/unknown verification outcomes use that SAME marker's read-back,
 never another submission, timeout extension, queue removal or local state reset.
@@ -324,10 +342,11 @@ The SAME handoff producer selects this guidance only for ordinary task and
 owner-intake passes, never READY, source triage or discussion. Digital assistants
 use the managed browser for sites: matching signed skills retain their routing,
 and `use_assistant_browser(siteOrigin, command:{operation,args})` covers other
-sites with the SAME visual engine. Ordinary Chrome/computer/shell is not a silent
-fallback. Codex may still advertise its own native APIs; this host does not
-change their availability or pretend to intercept calls outside its namespace.
-The default route and refusal recovery are explicit execution policy.
+sites with the SAME visual engine. Signed skill commands require their own
+assistant execution admission. A skill can declare a separate browser or require
+capabilities unavailable in the managed browser. There is no generic fallback
+for that flow. Expose the exact capability or access blocker and keep the
+original login, approval and unknown-result boundaries.
 The first-party digital route fixes `presentation: hidden` in trusted host code:
 native JS confirmations stay observable without raising a window over the
 person's desktop. Models cannot select presentation; signed provider defaults

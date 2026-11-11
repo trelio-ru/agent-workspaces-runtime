@@ -800,6 +800,85 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
   },{signal,workspaceRun,...(companyReadPreparation?{companyReadPreparation:true}:{})});
 };
 
+/** The native receipt contains only structural coordinates. Use the SAME
+ * private profile to get a fresh native Run view before touching its local
+ * files, then recheck both the native and local lease before commit/delivery.
+ * The command and any returned content stay on the local MCP path. */
+export const materializeAssistantWorkspaceFiles = async ({ result, arguments: args, signal },
+  { withProfile=withProductionAssistantWorkspace, context=productionContext } = {}) => {
+  const receipt=result.structuredContent;
+  const selected=args.runIdentity;
+  const keysMatch=(value,keys)=>value&&Object.getPrototypeOf(value)===Object.prototype
+    &&Object.keys(value).sort().join(',')===keys;
+  const idsMatch=(left,right,keys)=>keys.every(key=>left?.[key]===right?.[key]);
+  if(!keysMatch(receipt,receipt?.encryptedLifecycle
+    ?'encryptedLifecycle,kind,runIdentity,runtimeSessionId,schemaVersion,scope':'kind,runIdentity,runtimeSessionId,schemaVersion,scope')
+    ||receipt.schemaVersion!==1||receipt.kind!=='assistant_workspace_files'
+    ||!keysMatch(receipt.runIdentity,'runId,workspaceId')
+    ||!idsMatch(receipt.runIdentity,selected,['runId','workspaceId'])
+    ||!keysMatch(receipt.scope,'assistantUserId,companyId,deviceId,passId,taskId')
+    ||!idsMatch(receipt.scope,args.taskPass,['companyId','taskId','passId'])
+    ||receipt.runtimeSessionId!==args.runtimeSessionProof?.runtimeSessionId
+    ||!new RegExp(UUID,'u').test(receipt.runtimeSessionId??''))
+    fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  return withProfile(async({identity,host,store,prepareWorkspaceRun})=>{
+    const [common,files,{validateAssistantActivePass}]=await Promise.all([
+      import('./trelio-workspace.mjs'),import('./trelio-workspace-files.mjs'),import('./trelio-assistant-hook.mjs')]);
+    const checkPass=async()=>{
+      signal?.throwIfAborted();
+      const current=validateAssistantActivePass(await host.readActivePass(),identity);
+      if(!idsMatch(current,receipt.scope,['companyId','taskId','passId'])
+        ||identity.assistantId!==receipt.scope.assistantUserId||identity.deviceId!==receipt.scope.deviceId)
+        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      const runtime=await store.get({origin:identity.origin,kind:'runtime',id:current.passId});
+      if(runtime?.ended||runtime?.threadId!==current.threadId||runtime?.state?.runtimeSessionId!==receipt.runtimeSessionId)
+        fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+    };
+    await checkPass();
+    const encryption=await prepareWorkspaceRun();
+    if(Boolean(encryption)!==Boolean(receipt.encryptedLifecycle))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    if(receipt.encryptedLifecycle){
+      await validateAssistantEncryptedInspection({descriptor:receipt.encryptedLifecycle,identity,pass:receipt.scope});
+      if(receipt.encryptedLifecycle.workspaceId!==selected.workspaceId
+        ||receipt.encryptedLifecycle.requestOrigin!==encryption.requestOrigin
+        ||encryption.runtime.company.id!==receipt.scope.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    }
+    const token=await common.requireToken(identity.origin);
+    const config=host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory();
+    const plan={scope:receipt.scope,runIdentity:selected};
+    const readRun=async()=>{
+      const response=await common.request(encryption?.requestOrigin??identity.origin,token,
+        `/api/agent-workspaces/workspaces/${selected.workspaceId}/runs/${selected.runId}`,{signal});
+      const snapshot=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
+        :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant Run')).toString('utf8'));
+      const run=snapshot.run;
+      if(run?.id!==selected.runId||run.workspaceId!==selected.workspaceId||run.status!=='running'
+        ||!Number.isSafeInteger(run.fencingToken)||!new RegExp(UUID,'u').test(run.leaseId??'')
+        ||!(Date.parse(run.leaseExpiresAt)>Date.now()))fail('ASSISTANT_WORKSPACE_FILE_RUN_NOT_ACTIVE');
+      return run;
+    };
+    const value=await common.withWorkspaceFinishLock(selected.runId,async()=>{
+      const initial=await readRun();
+      await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan,identity.origin));
+      const root=await resolveAssistantWorkspaceRoot(config,plan,identity.origin);
+      await common.assertPrivatePathKind(root,'directory');
+      const assertCurrent=async()=>{
+        await checkPass();
+        const current=await readRun();
+        const metadata=await common.readPrivateJsonFile(path.join(root,'.trelio-run.json'),{maximumBytes:512*1024});
+        if(metadata.schemaVersion!==3||metadata.origin!==identity.origin||metadata.company?.id!==receipt.scope.companyId
+          ||!sameLocalPath(metadata.workspaceDirectory??'',path.join(root,'workspace'))||metadata.terminalStatus
+          ||!idsMatch(metadata,selected,['runId','workspaceId'])||!idsMatch(metadata,current,['leaseId','fencingToken'])
+          ||!idsMatch(initial,current,['leaseId','fencingToken'])||Boolean(metadata.encryption?.enabled)!==Boolean(encryption))
+          fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        await checkPass();
+      };
+      return files.executeAssistantRunFileCommand({root,input:args.command,assertCurrent});
+    });
+    return {content:[{type:'text',text:'Workspace file command completed locally.'}],structuredContent:value};
+  },{signal,workspaceRun:selected,context});
+};
+
 /** Same private process/OS identity composition as the Workspace engine,
  * without constructing a fake task profile for a taskless source intake. The
  * fixed companies reader selects current mode; unsupported transitions never
@@ -963,6 +1042,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
   const preparedReplyFiles=new WeakMap();
   proxy=createAssistantMcpClient({ ...identity, store, presentationProfile,httpRequest,
     materializeBrowser:request=>materializeAssistantBrowser({...request,identity,host,store}),
+    materializeWorkspaceFiles:request=>materializeAssistantWorkspaceFiles(request,{context}),
     onBrowserScopeSettled:async args=>{
       const {closeVisualExecutionSessions}=await import('./trelio-visual-session.mjs');
       const locator=args.taskPass??args.intakePass;
@@ -2850,6 +2930,20 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
 /** Internal server plan, never an arbitrary command/directory selected by a
  * model. Parse it before private I/O; the child repeats live pass/Run admission
  * before accessing local files, including the nominally local status action. */
+const assistantSkillGuidePart = parameters => {
+  const part=parameters?.guidePart;
+  if(part===undefined)return undefined;
+  if(!Number.isSafeInteger(part)||part<0||part>63
+    ||parameters.arguments?.length!==1||parameters.arguments[0]!=='guides')
+    fail('ASSISTANT_SKILL_GUIDE_INPUT_INVALID');
+  return part;
+};
+const assistantSkillActionWithoutGuidePart = action => {
+  if(action.operation!=='skill_run')return action;
+  assistantSkillGuidePart(action.parameters);
+  const {guidePart:_part,...parameters}=action.parameters;
+  return {...action,parameters};
+};
 export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https://trelio.ru'}={}) => {
   if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection','encryptedLifecycle'].includes(key))
     || raw.prepared!==true || !raw.scope || Object.keys(raw.scope).sort().join(',')!=='assistantUserId,companyId,deviceId,passId,taskId'
@@ -2906,7 +3000,7 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
     return {...snapshot,runIdentity:action.runIdentity,invocation:null};
   }
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
-  const invocation=buildTrelioWorkspaceActionInvocation(action);
+  const invocation=buildTrelioWorkspaceActionInvocation(assistantSkillActionWithoutGuidePart(action));
   if(action.operation==='skill_run'){
     if(action.runIdentity!==undefined || action.parameters.companyId!==snapshot.scope.companyId
       || !new RegExp(UUID,'u').test(action.parameters.runtimeSessionId??'')
@@ -2930,6 +3024,8 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
 export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs'),
     withManagedContent=withProductionAssistantManagedContent,companyContextRead=false}={})=>{
+  if(name==='continue_assistant_workspace_action'&&args.operation==='skill_run')
+    assistantSkillGuidePart(args.parameters);
   // Constant native schema metadata contains no company content or grant.
   // Do not require company keys or consume a task proof merely to inspect it.
   if(name==='get_assistant_operation_contract'){
@@ -3814,7 +3910,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     })();
     let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
     try {
-      const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{
+      const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
       resolveRunRootDirectory:async()=>root,
       selectOpenRecovery:opening?async error=>{
         const d=error.details,base=assistantWorkspaceRoot(config,plan,expectedOrigin);
@@ -3847,7 +3943,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           // command instead of selecting the authenticated native endpoint.
           const boundary=args.indexOf('--'),nativeArgs=[...args];
           nativeArgs.splice(boundary<0?args.length:boundary,0,'--origin',identity.origin);
-          await common.runWorkspaceCommand(nativeArgs);return {stdout,stderr:''};
+          const guidePart=skill?assistantSkillGuidePart(action.parameters):undefined;
+          await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart});return {stdout,stderr:''};
         }
         catch(error) {
           // Reuse the ordinary in-process -> CLI error projection so common
@@ -3857,7 +3954,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           // HTTP diagnosis. Preserve them across the common CLI wrapper so a
           // missing provider opt-in is not reported as a transport outage.
           if(['ASSISTANT_SKILL_COMMAND_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_POLICY_INVALID',
-            'ASSISTANT_SKILL_COMMAND_DENIED'].includes(error?.code))nativeCommandPolicyCause=error.code;
+            'ASSISTANT_SKILL_COMMAND_DENIED','ASSISTANT_SKILL_GUIDE_INPUT_INVALID',
+            'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'].includes(error?.code))nativeCommandPolicyCause=error.code;
           if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(error.payload?.reason))nativeReason=error.payload.reason;
           throw Object.assign(error,{stderr:'Ошибка: '+common.formatBridgeCommandError(error,args[0])});
         }
