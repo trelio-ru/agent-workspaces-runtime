@@ -1257,11 +1257,12 @@ publication tooling также остаются вне этого публичн
   Shell transport retries only natural live-FIFO mutex acquisition under one fixed bound; never delete an unchanged dead/foreign claim, borrow authority or replay a push.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
-  `git:integrate` сразу запускает background; `--foreground` – только явная
-  диагностика. После admission сразу выполнить `followUp`: один подтверждённый
-  15-минутный heartbeat этого же чата, если клиент разрешает; иначе supported
-  blocking wait либо конкретный blocker. Не крутить модельный sleep/status;
-  `schedulingState=not_confirmed` не подтверждает автоматическое продолжение.
+  В Codex запускай `npm run git:integrate -- --wait` и жди выхода команды в том же
+  tool session. Для существующего тикета используй `--wait <ticket>` из canonical
+  main. `waiting`/`running`/`verified` продолжают ход. При выходе разбери результат.
+  Обычный фоновый запуск требует подтверждённого follow-up там, где клиент
+  разрешает его, иначе сразу подключись через `--wait <ticket>`.
+  `--foreground` – диагностика, `not_confirmed` – автовозврат не подтверждён.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требует full с четырьмя visual OS jobs; обе macOS lanes используют явный
   GitHub-hosted `macos-15-intel` по [CI-контракту](docs/runtime-ci.md), без
@@ -1271,7 +1272,7 @@ publication tooling также остаются вне этого публичн
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
 - Stable runtime tag создаётся только по явной команде на runtime release и
-  резервируется до CI через `npm run git:integrate -- --tag vX.Y.Z`.
+  резервируется до CI через `npm run git:integrate -- --wait --tag vX.Y.Z` в Codex.
   Низкоуровневый `git:push-main` доступен только verified владельцу очереди.
   Для уже влитого exact main SHA не создаётся пустой PR; обязательный latest
   exact PR gate/attempt/jobs/native receipt проверяется без ослабления.

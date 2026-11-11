@@ -65,7 +65,7 @@ execFileSync('git',['-C',${JSON.stringify(main)},'merge','--ff-only',sha],{stdio
     processes.push(child); let output = '';
     child.stdout.on('data', value => { output += value; }); child.stderr.on('data', value => { output += value; });
     const done = new Promise(resolve => child.on('close', code => resolve({code, output})));
-    return {child, done};
+    return {child, done, output: () => output};
   };
   return {root, main, remote, branch, launch, start: (cwd, ...args) => launch(cwd, '--worker', ...args),
     events: () => fs.existsSync(path.join(root, 'events')) ? fs.readFileSync(path.join(root, 'events'), 'utf8').trim().split('\n') : []};
@@ -84,6 +84,7 @@ test('default admission detaches and the background alias reuses one owner throu
   assert.equal(first.followUp.intervalMinutes, 15);
   assert.equal(first.followUp.schedulingState, 'not_confirmed');
   assert.equal(first.followUp.canonicalDirectory, f.main);
+  assert.deepEqual(first.followUp.blockingWaitArgs, ['--wait', first.id]);
   await until(() => f.events().length === 1);
   assert.equal(fs.statSync(first.logPath).mode & 0o777, 0o600);
   // --tag without a launch-mode flag must detach as well; the same worker
@@ -102,6 +103,57 @@ test('default admission detaches and the background alias reuses one owner throu
   assert.equal(JSON.parse(observed.output).state, 'succeeded');
   assert.equal(JSON.parse(observed.output).followUp, undefined, 'status is an observation, not another scheduling request');
   assert.equal(status(f.main, '999999999999').state, 'unknown');
+});
+
+test('wait follows the exact ticket through FIFO and can reattach after cancellation', async t => {
+  const f = fixture(t), one = f.branch('one'), two = f.branch('two');
+  const first = await f.launch(one).done;
+  assert.equal(first.code, 0, first.output);
+  await until(() => f.events().length === 1);
+
+  const waiting = f.launch(two, '--wait');
+  await until(() => waiting.output().includes('Waiting for integration '));
+  const entry = queue(f.main)[1];
+  assert.equal(entry.branch, 'codex/two');
+  assert.equal(status(f.main, entry.id).state, 'waiting');
+  assert.match(waiting.output(), new RegExp(entry.id));
+  assert.equal(waiting.child.exitCode, null);
+  waiting.child.kill('SIGTERM');
+  assert.notEqual((await waiting.done).code, 0);
+  assert.equal(status(f.main, entry.id).pid, entry.pid, 'cancelling the reader leaves the original worker');
+
+  const resumed = f.launch(f.main, '--wait', entry.id);
+  await until(() => resumed.output().includes('Waiting for integration '));
+  assert.equal(resumed.child.exitCode, null);
+  assert.equal(queue(f.main).length, 2);
+  fs.writeFileSync(path.join(f.root, 'release'), 'go');
+  const result = await resumed.done;
+  assert.equal(result.code, 0, result.output);
+  const outcome = JSON.parse(result.output.trim().split('\n').at(-1));
+  assert.equal(outcome.id, entry.id);
+  assert.equal(outcome.state, 'succeeded');
+  assert.equal(outcome.sourceSha, entry.sourceSha);
+  assert.equal(command(f.main, 'ls-remote', 'origin', 'refs/heads/main'), `${outcome.sha}\trefs/heads/main`);
+  assert.deepEqual(f.events(), ['codex/one', 'codex/two']);
+  assert.deepEqual(queue(f.main), []);
+});
+
+test('wait propagates terminal failures and unknown tickets without a new worker', async t => {
+  const f = fixture(t), cwd = f.branch('failure');
+  fs.writeFileSync(path.join(f.root, 'fail'), 'fail CI');
+  const failed = await f.launch(cwd, '--wait', '--tag', 'v9.9.8').done;
+  assert.equal(failed.code, 1, failed.output);
+  const outcome = JSON.parse(failed.output.trim().split('\n').at(-1));
+  assert.equal(outcome.state, 'failed');
+  assert.equal(outcome.tag, 'v9.9.8');
+  const observed = await f.launch(f.main, '--wait', outcome.id).done;
+  assert.equal(observed.code, 1, observed.output);
+  assert.deepEqual(JSON.parse(observed.output), outcome);
+  const missing = await f.launch(f.main, '--wait', '999999999999').done;
+  assert.equal(missing.code, 1, missing.output);
+  assert.equal(JSON.parse(missing.output).state, 'unknown');
+  assert.deepEqual(f.events(), ['codex/failure']);
+  assert.deepEqual(queue(f.main), []);
 });
 
 test('explicit foreground waits for the worker and propagates its failure', async t => {

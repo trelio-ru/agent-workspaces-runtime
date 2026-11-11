@@ -77,8 +77,16 @@ invariant without replacing its mature runner/evidence implementation.
 
 `npm run git:integrate` always launches in the background; `--background` remains
 a compatible explicit alias. Append `--tag EXACT_TAG` for an already authorised
-release. Only explicit `--foreground` keeps the terminal attached for diagnostics;
-do not choose it for routine chat work or wait until a queue is already slow.
+release. Use `npm run git:integrate -- --wait [--tag EXACT_TAG]` in Codex.
+It starts or reuses the same detached worker, prints the admitted ticket when
+waiting, and keeps the current tool session open until the status is no longer
+active. `--foreground` remains a diagnostic mode whose signals reach its worker.
+To resume observation after interrupting the wait, run
+`npm run git:integrate -- --wait TICKET` from canonical main. This reads the
+exact ticket in the same clone without starting or signalling a worker.
+The final JSON has the same schema as `--status TICKET`. Only `succeeded` exits
+zero. Failure, interruption, recovery and unknown status require outcome review.
+There is no wait timeout while a ticket is active.
 The launcher exits only after the isolated worker acknowledges durable admission.
 Its JSON contains ticket ID, original/current SHA, worktree, branch and private
 log path. The worker inherits no terminal/stdin/output pipe, progresses FIFO
@@ -86,7 +94,8 @@ without a model turn, and retains the existing repository CI/transport guards.
 It is not automatically restarted. The computer must stay on; local chat
 follow-up also needs the Codex desktop app running. The launch JSON includes
 `followUp.action=arrange_supported_chat_follow_up`, a 15-minute interval, the
-canonical checkout and `schedulingState=not_confirmed`. These are next steps,
+canonical checkout, `blockingWaitArgs` for this ticket and
+`schedulingState=not_confirmed`. These are next steps,
 never evidence that a scheduler was saved. Reattachment returns the same guidance;
 plain `--status` remains an observation without a new scheduling request. If the
 worker has already settled, launch instead requests `review_integration_result`.
@@ -115,10 +124,11 @@ within the same scope; it does not authorise a new release or another task:
    wake/manual continuation reuses that automation and ticket.
 2. Confirm the follow-up was actually saved before ending the active turn; an
    intent, launch JSON or `not_confirmed` field is insufficient. Without permitted
-   scheduling, use a supported blocking wait or report the concrete follow-up
-   blocker; never replace it with repeated model `sleep`/`--status` calls or
-   promise an automatic return. Respect client restrictions; never invent a
-   scheduler or bypass its policy through another process or API.
+   scheduling, immediately attach `--wait TICKET` and keep the active tool session
+   until it exits. A tool yield returns control to the agent while the waiter
+   remains active. Continue waiting in that session. If the client cannot run
+   the command, report that concrete blocker. Do not substitute model
+   `sleep`/`--status` calls or promise an automatic return.
 3. On each wake read exact ticket status from the same clone. While active, do no
    edits/rebase/new CI/enqueue and end the check quietly. Notify only on completion,
    failure, a meaningful change or required human action, never every 15 minutes.
@@ -137,5 +147,6 @@ takeover, relax CI/ACL or enable broad retries to implement sleeping.
 
 Tests use real bare remotes, linked worktrees and isolated worker groups. CI
 evidence is synthetic only in fixtures; production hooks/rebase/transport are
-exercised, including concurrent CI, occupied version, waiting-source mutation
-and dead-owner/live-descendant recovery.
+exercised, including waiting behind another ticket, reattachment after stopping
+the reader, failure/unknown exit status, concurrent CI, occupied version,
+waiting-source mutation and dead-owner/live-descendant recovery.

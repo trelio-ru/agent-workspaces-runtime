@@ -6,6 +6,30 @@ import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
+
+const activeStates = new Set(['waiting', 'running', 'verified']);
+
+export async function waitForIntegration(id, observe) {
+  const readStatus = () => {
+    const observation = observe(id);
+    // A normal worker can release its ticket and exit between the queue and
+    // process reads. Recheck the exact ticket before reporting a dead owner.
+    return observation.state === 'recovery_required' ? observe(id) : observation;
+  };
+  let result = readStatus();
+  if (activeStates.has(result.state)) {
+    // Emit the locator before waiting so an interrupted client can reattach.
+    // This process only reads status. Its lifetime never controls the worker.
+    console.error(`Waiting for integration ${id}. Reattach with: npm run git:integrate -- --wait ${id}`);
+    do {
+      await delay(1000);
+      result = readStatus();
+    } while (activeStates.has(result.state));
+  }
+  console.log(JSON.stringify(result));
+  if (result.state !== 'succeeded') process.exitCode = 1;
+}
 
 /** Describe the next client step without pretending to have scheduled it.
  * Both launchers use this projection, including reattachment to a live ticket.
@@ -14,17 +38,18 @@ import path from 'node:path';
  * Keep this guidance out of durable tickets/receipts: it grants no Git rights.
  */
 export function integrationLaunchResult(observation, canonicalDirectory) {
-  const active = ['waiting', 'running', 'verified'].includes(observation.state);
+  const active = activeStates.has(observation.state);
   return {...observation, followUp: active ? {
     action: 'arrange_supported_chat_follow_up',
     intervalMinutes: 15,
     schedulingState: 'not_confirmed',
     canonicalDirectory,
+    blockingWaitArgs: ['--wait', observation.id],
     instruction: 'Before ending this turn, arrange one supported follow-up in this same chat for this exact ticket. '
       + 'Use a 15-minute native heartbeat only when client policy permits it, reuse an existing one and confirm it was saved. '
       + 'Retain the ticket, canonical/task directories, branch, source SHA, authorised tag and remaining steps. '
       + 'Do not loop over sleep/status or promise an automatic return from worker admission alone. '
-      + 'Without permitted scheduling, use a supported blocking wait or report the concrete follow-up blocker.',
+      + 'Without permitted scheduling, run npm run git:integrate -- --wait with this exact ticket from the canonical checkout and keep the tool session open until it exits.',
   } : {
     action: 'review_integration_result',
     canonicalDirectory,
