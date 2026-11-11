@@ -20088,10 +20088,9 @@ export const installDeepseekBundle = async ({ pluginRoot = process.env.TRELIO_PL
     installedInHarness: false, nextAction: "Use dsh plugin --profile <actual-profile> add <bundleDirectory>; reload that profile, then call trelio_connect." };
 };
 
-/** Kimi Work installs its own small manifest; the official stable shell stays
- * unchanged. Both stdio servers select and verify the current signed runtime
- * before import. Keep this bootstrap at a permanent path, outside Workspace
- * material, and never copy credentials or provider code into the bundle.
+/** Build the two files handed to Kimi Work. Both stdio servers start through
+ * the official loader at its permanent path and verify the signed runtime.
+ * The files contain no credentials or provider code.
  */
 export const buildKimiWorkBundle = ({ pluginRoot, nodePath = process.execPath }) => {
   if (![pluginRoot, nodePath].every(value => typeof value === "string" && path.isAbsolute(value) && !value.includes("\0"))) {
@@ -20119,25 +20118,29 @@ export const installKimiWorkBundle = async ({ pluginRoot = process.env.TRELIO_PL
   const manifest = JSON.parse(await fs.readFile(path.join(root, ".claude-plugin", "plugin.json"), "utf8"));
   if (manifest.name !== "trelio-agent-workspaces") throw new Error("TRELIO_KIMI_PLUGIN_ROOT_REQUIRED");
   const files = buildKimiWorkBundle({ pluginRoot: root, nodePath });
-  const digest = crypto.createHash("sha256").update(JSON.stringify(files)).digest("hex");
-  const directory = path.join(configDirectory, "native-clients", "kimi-work", "bundles", digest);
-  await ensurePrivateDirectory(directory);
-  for (const [name, bytes] of Object.entries(files)) {
+
+  // Plugin Builder can update a manifest during registration (for example,
+  // by adding interface.category). Once handed off, that directory may still
+  // be used by Kimi. Rebuild from signed code in a fresh private directory on
+  // every invocation, including concurrent requests. Never adopt, overwrite,
+  // or remove a previous import or an old content-addressed bundle.
+  const importsRoot = path.join(configDirectory, "native-clients", "kimi-work", "imports");
+  await ensurePrivateDirectory(importsRoot);
+  const directory = await fs.mkdtemp(path.join(importsRoot, "plugin-"));
+  await assertPrivatePathKind(directory, "directory");
+  for (const [name, content] of Object.entries(files)) {
     const file = path.join(directory, name);
-    let handle;
-    try {
-      handle = await fs.open(file, "wx", 0o600);
-      await handle.writeFile(bytes); await handle.close(); handle = null;
-      if (process.platform === "win32") await hardenWindowsPrivatePath(file, "file");
-    } catch (error) {
-      await handle?.close();
-      if (error.code !== "EEXIST") throw error;
-      await assertPrivatePathKind(file, "file");
-      if (await fs.readFile(file, "utf8") !== bytes) throw new Error("TRELIO_KIMI_BUNDLE_CHANGED");
-    }
+    await fs.writeFile(file, content, { flag: "wx", mode: 0o600 });
+    await assertPrivatePathKind(file, "file");
   }
-  return { bundleDirectory: directory, installedInKimiWork: false,
-    nextAction: "Install this exact directory through Kimi Work Plugins → Personal, open a new local project task, then call trelio_connect." };
+
+  // Return the path only after both files are complete and private. A failure
+  // midway cannot make the next invocation reuse a partial directory.
+  return {
+    bundleDirectory: directory,
+    installedInKimiWork: false,
+    nextAction: "Register this exact directory as a personal plugin in Kimi Work, install it from Plugins → Personal, then call trelio_connect.",
+  };
 };
 
 const printHelp = () => {

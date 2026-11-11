@@ -22,14 +22,15 @@ const call = (name, args = {}, id = 1) => ({ jsonrpc: "2.0", id, method: "tools/
 const output = value => ({ content: [{ type: "text", text: "routing summary" }], structuredContent: value,
   _meta: { privateAppGrant: "must-never-be-serialized" } });
 
-test("Kimi bundle uses both signed stdio profiles, no foreign hooks, and preserves changed files", async t => {
+test("Kimi installer prepares a fresh signed launch after Plugin Builder updates the previous manifest", async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-kimi-install-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const options = { pluginRoot: pluginDirectory, configDirectory: directory };
   const result = await installKimiWorkBundle(options);
   assert.equal(result.installedInKimiWork, false);
-  assert.deepEqual(await installKimiWorkBundle(options), result);
-  const manifest = JSON.parse(await fs.readFile(path.join(result.bundleDirectory, "kimi.plugin.json"), "utf8"));
+  const manifestPath = path.join(result.bundleDirectory, "kimi.plugin.json");
+  const originalManifest = await fs.readFile(manifestPath, "utf8");
+  const manifest = JSON.parse(originalManifest);
   assert.deepEqual(Object.keys(manifest.mcpServers), ["trelio", "trelio-remote-skills"]);
   assert.equal(manifest.hooks, undefined);
   assert.equal(manifest.mcpServers.trelio.command, path.basename(process.execPath));
@@ -42,8 +43,40 @@ test("Kimi bundle uses both signed stdio profiles, no foreign hooks, and preserv
   assert.doesNotMatch(bootstrap, /selectHostRuntime|selected.runtimeDirectory/u);
   assert.match(bootstrap, /TRELIO_NODE_22_REQUIRED/u);
   assert.doesNotMatch(bootstrap, /accessToken|runtimeSessionProof|CODEX_THREAD_ID/u);
-  await fs.appendFile(path.join(result.bundleDirectory, "bootstrap.mjs"), "// own modification\n");
-  await assert.rejects(installKimiWorkBundle(options), /TRELIO_KIMI_BUNDLE_CHANGED/u);
+  manifest.interface.category = "productivity";
+  const importedManifest = JSON.stringify(manifest, null, 2);
+  await fs.writeFile(manifestPath, importedManifest);
+  const next = await installKimiWorkBundle(options);
+  assert.notEqual(next.bundleDirectory, result.bundleDirectory);
+  assert.equal(await fs.readFile(manifestPath, "utf8"), importedManifest);
+  assert.equal(await fs.readFile(path.join(next.bundleDirectory, "kimi.plugin.json"), "utf8"), originalManifest);
+  assert.equal(await fs.readFile(path.join(next.bundleDirectory, "bootstrap.mjs"), "utf8"), bootstrap);
+});
+
+test("parallel Kimi installs succeed with a modified legacy digest bundle and leave it intact", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-kimi-legacy-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const pluginRoot = await fs.realpath(pluginDirectory);
+  const files = buildKimiWorkBundle({ pluginRoot });
+  const digest = crypto.createHash("sha256").update(JSON.stringify(files)).digest("hex");
+  const legacy = path.join(directory, "native-clients", "kimi-work", "bundles", digest);
+  await fs.mkdir(legacy, { recursive: true, mode: 0o700 });
+  const manifest = JSON.parse(files["kimi.plugin.json"]);
+  manifest.interface.category = "productivity";
+  const changedManifest = JSON.stringify(manifest);
+  await fs.writeFile(path.join(legacy, "kimi.plugin.json"), changedManifest, { mode: 0o600 });
+  await fs.writeFile(path.join(legacy, "bootstrap.mjs"), files["bootstrap.mjs"], { mode: 0o600 });
+
+  const options = { pluginRoot, configDirectory: directory };
+  const [first, second] = await Promise.all([installKimiWorkBundle(options), installKimiWorkBundle(options)]);
+  assert.equal(new Set([first.bundleDirectory, second.bundleDirectory, legacy]).size, 3);
+  for (const { bundleDirectory } of [first, second]) {
+    for (const [name, content] of Object.entries(files)) {
+      assert.equal(await fs.readFile(path.join(bundleDirectory, name), "utf8"), content);
+    }
+  }
+  assert.equal(await fs.readFile(path.join(legacy, "kimi.plugin.json"), "utf8"), changedManifest);
+  assert.equal(await fs.readFile(path.join(legacy, "bootstrap.mjs"), "utf8"), files["bootstrap.mjs"]);
 });
 
 test("generated Kimi bootstrap runs both profiles through updating loader MCP and enforces Node 22+", async t => {

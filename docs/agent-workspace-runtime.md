@@ -3479,17 +3479,22 @@ Qualification fixture rc.3 содержит Zod 4.4.3 с [GHSA-mrhx-c7xc-m3w5](h
 
 ## Kimi Work
 
-`bridge kimi install` creates an immutable private `kimi.plugin.json` and
-bootstrap around the existing official stable loader. Both stdio profiles
+`bridge kimi install` builds a fresh private import directory from signed code
+and returns it as `bundleDirectory`. Plugin Builder may add presentation
+metadata such as `interface.category` when registering it. Each invocation,
+including concurrent installs, writes its own directory. Prior imports and
+legacy digest bundles are preserved and never reused as install input.
+The directory contains `kimi.plugin.json` and a bootstrap for the existing
+official stable loader. Both stdio profiles
 (`trelio`, `trelio-remote-skills`) verify the selected signed runtime before
 import, using Node 22+ and a permanent plugin root. The bootstrap traverses the
 SAME stable loader's MCP startup/update path with its original bounded foreground
 budget, rather than merely reading a cached selection. Closed forwarded
 `mcp --kimi-work remote|local` selectors are checked at both executable boundaries;
-old/unknown runtime selectors refuse without starting ordinary local MCP. The
-installer never
-modifies Kimi configuration, another client's trust/hooks, or an existing changed
-bundle. Native plugin installation remains Work's ordinary user-facing flow.
+old/unknown runtime selectors refuse without starting ordinary local MCP.
+Native registration and installation remain Work's ordinary user-facing flow.
+The installer only writes the new import directory and preserves other clients'
+configuration and trust.
 No stable plugin change, copied provider implementation or new package file is
 required; the signed package retains its 100-file ceiling.
 Kimi's manifest uses the executable basename on PATH, as required by its native
@@ -3530,7 +3535,8 @@ backend guards. Diagnosis/folder setup use `clientKind=kimi-work`, AGENTS.md and
 the SAME planner/apply/CAS without foreign configuration migration.
 
 Tests compose the actual OAuth callback/PKCE, native credential separation,
-serial stdio, catalogue notification, structured authority and immutable bundle.
+serial stdio, catalogue notification and structured authority. Installer
+regressions cover repeat and concurrent imports after manifest edits.
 Backend acceptance composes exchanged OAuth, pairing, real HTTP draft/handoff/
 candidate acceptance and exact Git file read-back. These synthetic fixtures are
 not a live user login in Work. Native Work qualification and production save

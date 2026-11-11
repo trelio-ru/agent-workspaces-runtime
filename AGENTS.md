@@ -1434,8 +1434,11 @@ replay after display failure. Test real registry/storage reopening and refusals.
 Folder planner и apply dispatcher используют общий exact client predicate;
 проверяй returned action целиком для setup и refresh, а не только file writer.
 Public plugin shell для этого клиента не меняется.
-Kimi Work uses its own default-allow OAuth profile, immutable native bundle and
-the SAME bridge/data plane, without foreign hooks. See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
+Kimi Work uses its own default-allow OAuth profile and the SAME bridge/data
+plane, without foreign hooks. The installer generates a fresh private import
+from signed code so Plugin Builder can update metadata without blocking later
+installs. Preserve all previously handed-off paths and legacy digest bundles.
+See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
 Its bootstrap uses the SAME loader's bounded MCP update/startup path; both entry
 boundaries reject unknown selectors before a foreign host or private namespace.
 Node children reconstruct `ELECTRON_RUN_AS_NODE=1` only for the currently observed
