@@ -35,7 +35,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const environment=buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
    LOCALAPPDATA:path.join(home,'local'),APPDATA:path.join(home,'roaming')});
  let business=false,attempt=0,allowedCalls=0,foreignRequests=0,foreignInitializations=0,modelRequests=0,toolName=null;
- const advertised=[],toolResults=[],foreignPhases=[];let processPhase='setup',sawWorkflow=false;
+ const advertised=[],toolResults=[],foreignPhases=[];let processPhase='setup',sawWorkflow=false,sawDirectInstruction=false;
  // No account or OpenAI request participates: this loopback producer supplies
  // synthetic Responses events to the real native tool registry. Malicious
  // calls deliberately name tools absent from its advertised catalogue.
@@ -61,20 +61,22 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   if(business){
    const input=JSON.stringify(data);
    sawWorkflow ||= input.includes('Synthetic role from the admitted plugin')&&input.includes('Synthetic reference from the admitted plugin');
+   sawDirectInstruction ||= input.includes('Call the exposed Trelio assistant MCP tools directly');
   }
   for(const row of data.input??[])if(row.type==='function_call_output'){
    const output=JSON.stringify(row.output).toLowerCase();
    toolResults.push(['unknown','unrecognized','invalid','not found','unsupported','not registered','namespace','approval','denied','connection','closed','failed','no such','mcp']
     .filter(word=>output.includes(word)));
   }
-  const tools=data.tools??[];
+  // Responses Lite can deliver model-visible tools in a developer input item.
+  const tools=[...(data.tools??[]),...(data.input??[]).filter(item=>item.type==='additional_tools').flatMap(item=>item.tools??[])];
   const names=tools.flatMap(tool=>tool.type==='namespace'?(tool.tools??[]).map(child=>`${tool.name}.${child.name}`):[tool.name??tool.type]);
   advertised.push(names);toolName??=tools.flatMap(tool=>tool.type==='namespace'
    ?(tool.tools??[]).map(child=>({name:child.name,namespace:tool.name})):[{name:tool.name}])
    .find(tool=>tool.name?.includes('get_assistant_status'));
   const rejected=['shell_command','exec_command','mcp__cua_repl__js','mcp__foreign__get_assistant_status'];
   let item;
-  if(business&&attempt<=rejected.length){
+  if(business&&(attempt<rejected.length||(attempt===rejected.length&&toolName))){
    const selected=attempt<rejected.length?{name:rejected[attempt]}:toolName;attempt++;
    const name=selected.name;
    item={type:'function_call',id:`synthetic-call-${modelRequests}`,call_id:`call-${modelRequests}`,...selected,
@@ -96,7 +98,19 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const origin=`http://127.0.0.1:${server.address().port}`;
  const foreignScript=path.join(root,'foreign.mjs'),foreignSentinel=path.join(root,'foreign-started');
  await fs.writeFile(foreignScript,"import fs from 'node:fs';fs.writeFileSync(process.argv[2],'forbidden');\n");
- const configuration=`model="synthetic-fixture"\nmodel_provider="fixture"\n[model_providers.fixture]\nname="fixture"\nbase_url="${origin}/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[features]\nplugins=true\nhooks=false\napps=true\nshell_tool=true\n[mcp_servers.foreign]\nurl="${origin}/mcp/standalone"\n[mcp_servers.foreign_stdio]\ncommand=${JSON.stringify(process.execPath)}\nargs=${JSON.stringify([foreignScript,foreignSentinel])}\n[projects.${JSON.stringify(root)}]\ntrust_level="trusted"\n`;
+ // Codex can select Code Mode from model metadata even when both local routing
+ // flags are disabled. Force that mode in a synthetic catalogue so the direct
+ // tool must come from the namespace override, not the disabled feature flags.
+ const modelCatalog=path.join(root,'models.json');
+ await fs.writeFile(modelCatalog,JSON.stringify({models:[{
+  slug:'synthetic-fixture',display_name:'Synthetic fixture',default_reasoning_level:'high',
+  supported_reasoning_levels:[{effort:'high',description:'Synthetic reasoning'}],
+  shell_type:'shell_command',visibility:'list',supported_in_api:true,priority:0,
+  support_verbosity:false,truncation_policy:{mode:'tokens',limit:10000},
+  model_messages:{instructions_template:'Synthetic model instructions'},
+  experimental_supported_tools:[],tool_mode:'code_mode_only',supports_search_tool:true,use_responses_lite:true,
+ }]}));
+ const configuration=`model="synthetic-fixture"\nmodel_catalog_json=${JSON.stringify(modelCatalog)}\nmodel_provider="fixture"\n[model_providers.fixture]\nname="fixture"\nbase_url="${origin}/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[features]\nplugins=true\nhooks=false\napps=true\nshell_tool=true\ncode_mode_only=true\n[features.code_mode]\nenabled=true\n[mcp_servers.foreign]\nurl="${origin}/mcp/standalone"\n[mcp_servers.foreign_stdio]\ncommand=${JSON.stringify(process.execPath)}\nargs=${JSON.stringify([foreignScript,foreignSentinel])}\n[projects.${JSON.stringify(root)}]\ntrust_level="trusted"\n`;
  await fs.writeFile(path.join(home,'config.toml'),configuration);
  const marketplace='trelio-digital-assistants';
  for(const [name,endpoint] of [['trelio-digital-assistant','allowed'],['unrelated-fixture','foreign']]){
@@ -134,7 +148,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
     if(value.result?.config)phases.push({stage:'config',ownEnabled:value.result.config.plugins?.['trelio-digital-assistant@trelio-digital-assistants']?.enabled===true,
      pluginCount:Object.keys(value.result.config.plugins??{}).length});
     if(value.result?.data?.some?.(row=>row?.name==='shell_tool'))phases.push({stage:'features',
-     disabled:value.result.data.filter(row=>['shell_tool','apps','multi_agent','code_mode_host'].includes(row.name)).map(row=>row.enabled===false),more:value.result.nextCursor!==null});
+     disabled:value.result.data.filter(row=>['shell_tool','apps','multi_agent','code_mode_host','code_mode_only','code_mode'].includes(row.name)).map(row=>row.enabled===false),more:value.result.nextCursor!==null});
     if(value.result?.data?.some?.(row=>row?.name==='trelio-assistant'))phases.push({stage:'server',rows:value.result.data.map(row=>({
      own:row.name==='trelio-assistant',foreign:row.name==='foreign',ownPlugin:row.pluginId==='trelio-digital-assistant@trelio-digital-assistants',
      status:row.runtimeStatus,tools:Object.keys(row.tools??{}).length,error:row.toolsError!==null}))});
@@ -206,14 +220,16 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  catch(error){assert.fail(JSON.stringify({code:error.code,phases}));}
  assert.equal(result.state,'completed');assert.equal(starts,2);
  assert.ok(sawWorkflow,'the model receives both admitted workflow documents without shell');
- assert.ok(toolName,'the permitted signed-plugin MCP tool must actually reach the native model catalogue');
+ assert.ok(sawDirectInstruction,'the model is directed to use the native route');
+ assert.ok(toolName,'the permitted signed-plugin MCP tool must actually reach the native model catalogue '+JSON.stringify(advertised[0]));
  assert.equal(attempt,5,'all four forbidden tools and the allowed tool were emitted by the synthetic model');
  assert.equal(allowedCalls,1,'only the permitted MCP operation executes '+JSON.stringify({toolName,phases,attempt,foreignRequests,toolResults}));
  assert.equal(foreignInitializations,0,'foreign servers must not initialize or execute '+JSON.stringify(foreignPhases));
  await assert.rejects(fs.stat(foreignSentinel),{code:'ENOENT'},'a foreign stdio executable cannot start');
  for(const names of advertised){
+  assert.ok(names.some(name=>/(?:^|\.)exec$/u.test(name)),'the synthetic model still selects Code Mode');
   assert.ok(names.some(name=>name.includes('get_assistant_status')));
-  assert.ok(!names.some(name=>/shell|exec_command|cua_repl|foreign|spawn_agent|web_search/.test(name)));
+  assert.ok(!names.some(name=>/shell|exec_command|cua_repl|foreign|spawn_agent|web_search/.test(name)),JSON.stringify(names));
  }
  assert.deepEqual(await fs.readFile(path.join(home,'config.toml')),before,'execution policy cannot rewrite user configuration or trust');
 });

@@ -126,7 +126,7 @@ const nativeRpc = (handler, executionPolicy=()=>null) => (_executable, args, opt
       if (!request.id) continue;
       queueMicrotask(() => {
         try {
-          const policy=controlled&&request.method==='experimentalFeature/list'?{result:{data:['shell_tool','apps','multi_agent','code_mode_host'].map(name=>({name,enabled:false,stage:'stable'})),nextCursor:null}}
+          const policy=controlled&&request.method==='experimentalFeature/list'?{result:{data:['shell_tool','apps','multi_agent','code_mode_host','code_mode_only','code_mode'].map(name=>({name,enabled:false,stage:'stable'})),nextCursor:null}}
             :controlled&&request.method==='config/read'?{result:{config:{plugins:{'trelio-digital-assistant@trelio-digital-assistants':{enabled:true},'unrelated@fixture':{enabled:true}},mcp_servers:{unrelated:{command:'PRIVATE'}}}}}
             :controlled&&request.method==='mcpServerStatus/list'?{result:{data:[{name:'trelio-assistant',pluginId:'trelio-digital-assistant@trelio-digital-assistants',runtimeStatus:'connected',toolsError:null,
               tools:Object.fromEntries(['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'].map(name=>[name,{name}]))}],nextCursor:null}}:null;
@@ -576,6 +576,8 @@ test('scoped overrides preserve disabled hooks and never copy user configuration
     'foreign@market':{enabled:true,config:'PRIVATE'}},mcp_servers:{'trelio-assistant':{command:'PRIVATE',enabled:true}}};
   const before=structuredClone(config);
   const overrides=assistantCodexExecutionOverrides(config);
+  assert.equal(overrides.features.code_mode_only,false);
+  assert.deepEqual(overrides.features.code_mode,{enabled:false,direct_only_tool_namespaces:['mcp__trelio_assistant']});
   assert.deepEqual(overrides.plugins,{[own]:{enabled:true},[hooks]:{enabled:false},'foreign@market':{enabled:false}});
   assert.deepEqual(overrides.mcp_servers,{'trelio-assistant':{enabled:false}});
   assert.deepEqual(config,before);
@@ -635,6 +637,7 @@ test('one isolated writer runs both empty readiness turns and persists the UUID 
       assert.equal(request.params.sandbox,'read-only');assert.equal(request.params.approvalPolicy,'never');
       assert.deepEqual(request.params.environments,[]);assert.deepEqual(request.params.selectedCapabilityRoots,[]);
       assert.equal(request.params.config.features.shell_tool,false);
+      assert.deepEqual(request.params.config.features.code_mode,{enabled:false,direct_only_tool_namespaces:['mcp__trelio_assistant']});
       assert.equal(request.params.config.plugins['unrelated@fixture'].enabled,false);
     },onInput:(text,phase)=>{
       assert.ok(saved);assert.doesNotMatch(text,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);

@@ -22,13 +22,22 @@ const fail = code => { throw new AssistantCodexError(code); };
  * inventory is checked below: an old client silently ignoring a flag is not
  * evidence that its command interpreter was disabled. Code Mode is unnecessary
  * in this profile; signed skills and the browser remain native MCP tools. */
-const ASSISTANT_EXECUTION_FEATURES = Object.freeze(['shell_tool','apps','multi_agent','code_mode_host']);
+const ASSISTANT_EXECUTION_FEATURES = Object.freeze(['shell_tool','apps','multi_agent','code_mode_host','code_mode_only']);
+// The execution host and model-facing tool routing are independent. Disabling
+// the interpreter alone can leave an unusable exec wrapper in the model's
+// catalogue and hide the only admitted MCP server behind it. Model metadata
+// can select wrapped tools even with both local routing flags disabled, so
+// keep the admitted namespace directly callable in either mode.
+const ASSISTANT_DIRECT_TOOL_NAMESPACE = 'mcp__trelio_assistant';
+const ASSISTANT_REQUIRED_DISABLED_FEATURES = Object.freeze([...ASSISTANT_EXECUTION_FEATURES,'code_mode']);
 const ASSISTANT_PLUGIN_IDS = Object.freeze([
   'trelio-digital-assistant@trelio-digital-assistants',
   'trelio-digital-assistant-hooks@trelio-digital-assistants',
 ]);
 export const assistantCodexExecutionArguments = () => ['app-server','--listen','stdio://',
-  ...ASSISTANT_EXECUTION_FEATURES.flatMap(name=>['--disable',name]),'-c','web_search="disabled"'];
+  ...ASSISTANT_EXECUTION_FEATURES.flatMap(name=>['--disable',name]),
+  '-c',`features.code_mode={enabled=false,direct_only_tool_namespaces=["${ASSISTANT_DIRECT_TOOL_NAMESPACE}"]}`,
+  '-c','web_search="disabled"'];
 
 /** Native configuration stays in this invocation's RAM. Copy ONLY enablement
  * decisions into the private JSON-RPC pipe, never commands, headers, credentials
@@ -50,7 +59,8 @@ export const assistantCodexExecutionOverrides = configuration => {
   const plugins=Object.fromEntries(entries('plugins'));
   if(plugins[ASSISTANT_PLUGIN_IDS[0]]?.enabled!==true)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
   return {
-    features:Object.fromEntries(ASSISTANT_EXECUTION_FEATURES.map(name=>[name,false])),
+    features:{...Object.fromEntries(ASSISTANT_EXECUTION_FEATURES.map(name=>[name,false])),
+      code_mode:{enabled:false,direct_only_tool_namespaces:[ASSISTANT_DIRECT_TOOL_NAMESPACE]}},
     web_search:'disabled',plugins,mcp_servers:Object.fromEntries(entries('mcp_servers')),
   };
 };
@@ -64,12 +74,12 @@ const verifyAssistantExecutionFeatures = async request => {
   for(let page=0;page<32;page++){
     const result=await request('experimentalFeature/list',{limit:100,...(cursor?{cursor}:{})});
     if(!Array.isArray(result?.data)||result.data.length>100)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
-    for(const row of result.data)if(ASSISTANT_EXECUTION_FEATURES.includes(row?.name)){
+    for(const row of result.data)if(ASSISTANT_REQUIRED_DISABLED_FEATURES.includes(row?.name)){
       if(found.has(row.name)||row.enabled!==false||row.stage==='removed')fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
       found.set(row.name,false);
     }
     if(result.nextCursor===null){
-      if(found.size!==ASSISTANT_EXECUTION_FEATURES.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+      if(found.size!==ASSISTANT_REQUIRED_DISABLED_FEATURES.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
       return;
     }
     if(typeof result.nextCursor!=='string'||!result.nextCursor.length||result.nextCursor.length>1024||cursors.has(result.nextCursor))
@@ -144,6 +154,7 @@ const readAssistantWorkflow = async environment => {
     const role=await read(path.join(root,'SKILL.md'));
     const state=await read(path.join(root,'references','work-state.md'));
     return [role,state,
+      'Call the exposed Trelio assistant MCP tools directly. The Code Mode execution host is disabled, so use the direct tools even if Codex also advertises exec.',
       'In this isolated execution, both installed platform documents are included above. Use the exact native accepted-file read for existing accepted material. For an opened Run, use use_assistant_workspace_files: runIdentity contains its workspaceId and runId. Read both pinned authority files in order with command {action:"read",source:"authority",path:"agent-instructions.md" or "user-profile.md"}; follow nextOffset until null, keeping one SHA-256 per file. Read, list and replace relative Run files through the same tool. Replace requires the last read expectedSha256, or null to create a new file. Keep the ordinary checkpoint and finish actions. When a signed skill directs you to its guides, use its admitted skill_run with arguments ["guides"] and guidePart:0; follow nextGuidePart until null. The complete text of each selected signed part is returned directly.'].join('\n\n');
   }catch{refused();}
 };

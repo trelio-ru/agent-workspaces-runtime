@@ -141,6 +141,11 @@ publication tooling также остаются вне этого публичн
   и exact protected pass journal; без live task-pass registration даёт JSON deny
   с exit 0. Ключ до HTTP сохраняется в OS-backed runtime slot, не human state. Контракт –
   [assistant setup](docs/assistant-scheduler.md#dedicated-plugin-entry-and-setup).
+- Owned Codex execution disables local Code Mode routing flags and its host and
+  exposes only the admitted `mcp__trelio_assistant` namespace directly through
+  invocation and thread overrides. Test the actual model-facing catalogue and
+  native MCP call when a disposable model catalogue selects Code Mode.
+  [Native invocation](docs/assistant-scheduler.md#native-invocation).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Assistant stdio получает read schemas только из dedicated backend catalog;
   fixed host allowlist и общий bounded MCP transport не создают domain authority.

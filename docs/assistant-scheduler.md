@@ -266,13 +266,20 @@ for every turn. `thread/queue/add` inherits the existing Desktop writer's tools
 and does not expose a per-turn tool policy.
 
 The process disables shell, app connectors, delegation, Code Mode and built-in
-web search. Thread-local overrides disable other plugins and all standalone MCP
-servers. They copy only enabled flags. The owned process must verify its actual
+web search. Code Mode routing and its execution host have independent switches.
+Both the owned process and the thread disable the local routing flags and
+designate `mcp__trelio_assistant` as direct-only. Codex can still advertise a
+wrapper when model metadata selects Code Mode. The wrapper's execution host
+stays disabled, and the assistant's tools remain directly callable.
+Thread-local overrides disable other plugins and all standalone MCP servers.
+They copy only enabled flags. The owned process must verify its actual
 feature inventory and the one connected `trelio-assistant` server from the exact
 installed assistant plugin. An incomplete inventory or tools on a disabled server
 blocks execution. This does not update persisted Codex configuration, trust or
 human chat settings. The owned turn has a read-only sandbox with network disabled
 for commands, no execution environments and no native interactive approval.
+The native regression selects Code Mode in a disposable model catalogue and
+checks the model-facing tool list and a direct MCP call across process restart.
 
 New chats persist their UUID before the empty `TRELIO_ASSISTANT_DESKTOP_PREPARE`
 turn with the exact company model and effort. The same writer then runs the second
