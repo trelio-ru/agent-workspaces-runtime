@@ -6,8 +6,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
-import { ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -494,10 +494,55 @@ test('the entire interrupted history must confirm an exact own draft and exclude
   }
 });
 
-for(const state of ['confirmed','busy','changed','unfiltered'])test(`native Workspace draft recovery requires its own writer and restricted catalogue (${state})`,async()=>{
-  const {turn,...workspaceDraftRecovery}=draftHistory();
+const acceptedHistory=()=>{
+  const {turn,terminalMarkerId,terminalTurnId,taskPass,workspaceDraft}=draftHistory();
+  const operationId=randomUUID(),acceptedHead='a'.repeat(40);
+  const [prepare,open]=turn.items.slice(1);
+  delete prepare.arguments.runId; // The normal prepare call selected the Run.
+  open.arguments.schemaVersion=open.result.structuredContent.schemaVersion=1;
+  const call=(operation,parameters,result)=>({type:'mcpToolCall',server:'trelio-assistant',
+    tool:'continue_assistant_workspace_action',status:'completed',
+    arguments:{schemaVersion:1,operation,parameters,runIdentity:workspaceDraft,taskPass},
+    result:{structuredContent:{schemaVersion:1,...result}}});
+  turn.items.push(
+    call('checkpoint',{type:'draft'},{operation:'checkpoint'}),
+    call('finish',{taskOutcome:'no_status_change'},{operation:'finish',operationId,state:'running'}),
+    call('status',{finishOperationId:operationId},{operation:'finish',operationId,state:'completed'}),
+    call('status',{},{operation:'status',stdout:JSON.stringify({...workspaceDraft,terminalStatus:'accepted',
+      candidateHead:acceptedHead,baseHead:'b'.repeat(40),dirty:false})}),
+  );
+  return {turn,terminalMarkerId,terminalTurnId,taskPass,workspaceDraft:{...workspaceDraft,acceptedHead}};
+};
+
+test('interruption after exact finish and accepted readback offers only outcome settlement',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=acceptedHistory();
+  const {acceptedHead,...runIdentity}=workspaceDraft;
+  assert.deepEqual(assistantInterruptedAcceptedWorkspace(turn,terminalMarkerId,taskPass),{...workspaceDraft,acceptedHead});
+  for(const change of [
+    value=>{value.items.at(-2).result.structuredContent.operationId=randomUUID();},
+    value=>{value.items.at(-2).result.structuredContent.state='running';},
+    value=>{value.items.at(-3).arguments.parameters.taskOutcome='work_completed';},
+    value=>{value.items.at(-1).arguments.runIdentity={...runIdentity,runId:randomUUID()};},
+    value=>{const result=value.items.at(-1).result.structuredContent;
+      result.stdout=JSON.stringify({...JSON.parse(result.stdout),terminalStatus:'submitted'});},
+    value=>{value.items.push({type:'mcpToolCall',server:'trelio-assistant',tool:'use_assistant_browser',status:'completed'});},
+  ]){
+    const edited=structuredClone(turn);change(edited);
+    assert.equal(assistantInterruptedAcceptedWorkspace(edited,terminalMarkerId,taskPass),null);
+  }
+  const pluginId='trelio-digital-assistant@trelio-digital-assistants';
+  const config=assistantCodexExecutionOverrides({plugins:{[pluginId]:{enabled:true}}},'accepted');
+  const tools=config.plugins[pluginId].mcp_servers['trelio-assistant'].enabled_tools;
+  assert.ok(tools.includes('complete_assistant_pass'));
+  for(const tool of ['prepare_assistant_workspace_run','continue_assistant_workspace_action','use_assistant_workspace_files','use_assistant_browser'])
+    assert.ok(!tools.includes(tool),tool);
+});
+
+for(const state of ['confirmed','busy','changed','unfiltered','accepted'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
+  const {turn,...workspaceDraftRecovery}=state==='accepted'?acceptedHistory():draftHistory();
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
   const pluginId='trelio-digital-assistant@trelio-digital-assistants';
+  const tools=state==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
   let reads=0,starts=0;
   const operation=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{
     executable:process.execPath,environment:{},workspaceDraftRecovery,requireAbsentMarker:true,
@@ -510,19 +555,27 @@ for(const state of ['confirmed','busy','changed','unfiltered'])test(`native Work
       onRequest:request=>{
         if(request.method==='thread/resume'){
           steps.push('writer');
-          assert.deepEqual(request.params.config.plugins[pluginId].mcp_servers['trelio-assistant'].enabled_tools,ASSISTANT_WORKSPACE_DRAFT_TOOLS);
+          assert.deepEqual(request.params.config.plugins[pluginId].mcp_servers['trelio-assistant'].enabled_tools,tools);
         }
         if(request.method==='thread/turns/list'&&request.params.limit===1)steps.push('draft');
       },
       executionPolicy:(request,policy)=>{
         if(request.method!=='mcpServerStatus/list'||state==='unfiltered')return policy;
-        policy.result.data[0].tools=Object.fromEntries(ASSISTANT_WORKSPACE_DRAFT_TOOLS.map(name=>[name,{name}]));
+        policy.result.data[0].tools=Object.fromEntries(tools.map(name=>[name,{name}]));
         return policy;
       },
-      onInput:text=>{assert.match(text,/only to preserve its interrupted Workspace draft/u);assert.match(text,/Do not repeat the browser check/u);},
+      onInput:text=>{
+        if(state==='accepted'){
+          assert.match(text,/Only confirm the result already accepted/u);
+          assert.ok(text.includes(workspaceDraftRecovery.workspaceDraft.acceptedHead));
+        }else{
+          assert.match(text,/only to preserve its interrupted Workspace draft/u);
+          assert.match(text,/Do not repeat the browser check/u);
+        }
+      },
     }),
   });
-  if(state==='confirmed'){
+  if(state==='confirmed'||state==='accepted'){
     assert.equal((await operation()).state,'completed');
     assert.deepEqual(steps,['writer','draft','renew']);assert.equal(starts,1);
   }else{

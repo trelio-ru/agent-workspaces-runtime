@@ -32,12 +32,19 @@ const integer = (value, min, max) => {
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId']);
-  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId)};
+  object(value,['workspaceId','runId','acceptedHead']);
+  if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
+  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
+    ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead})};
 };
 export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',
   'prepare_assistant_workspace_run','continue_assistant_workspace_action','use_assistant_workspace_files','complete_assistant_pass',
+]);
+// The accepted variant has no writable Workspace capability, even if an
+// older client advertises the draft catalogue while the device updates.
+export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
+  'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract','complete_assistant_pass',
 ]);
 const continuationIntent = value => {
   const fields=['passId','expectedLeaseRevision','clientRequestId','terminalTurnId','terminalMarkerId','reviewId','resumeAttempted','resumed','started'];

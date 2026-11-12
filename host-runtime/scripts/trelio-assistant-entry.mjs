@@ -2800,21 +2800,24 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
  * list filtering hides unrelated tools; this check also rejects stale
  * catalogues and disallowed operations of the generic continuation tool. */
 const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
-  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS}=await import('./trelio-assistant-inbox.mjs');
+  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS}=await import('./trelio-assistant-inbox.mjs');
+  const accepted=draft.acceptedHead!==undefined;
   const same=value=>value?.workspaceId===draft.workspaceId&&value?.runId===draft.runId;
-  let permitted=ASSISTANT_WORKSPACE_DRAFT_TOOLS.includes(name);
-  if(name==='prepare_assistant_workspace_run')permitted=same(args)&&args.relatedWorkspaceIds===undefined;
-  if(name==='continue_assistant_workspace_action')permitted=
+  let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS).includes(name);
+  if(!accepted&&name==='prepare_assistant_workspace_run')permitted=same(args)&&args.relatedWorkspaceIds===undefined;
+  if(!accepted&&name==='continue_assistant_workspace_action')permitted=
     ['open','status','heartbeat','checkpoint','finish'].includes(args.operation)
     &&same(args.operation==='open'?args.parameters:args.runIdentity)
     &&(args.operation!=='checkpoint'||args.parameters?.type==='draft')
     &&(args.operation!=='finish'||args.parameters?.taskOutcome==='no_status_change');
-  if(name==='use_assistant_workspace_files'){
+  if(!accepted&&name==='use_assistant_workspace_files'){
     const {parseAssistantRunFileCommand}=await import('./trelio-workspace-files.mjs');
     permitted=same(args.runIdentity)&&['list','read','replace'].includes(parseAssistantRunFileCommand(args.command).action);
   }
   if(name==='complete_assistant_pass')permitted=args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
-    &&args.goalState==='completed'&&args.noChange===false&&args.replyCommentId===undefined&&args.ownerDecisionId===undefined
+    &&(accepted?args.workspaceHead===draft.acceptedHead&&['active','waiting_external','waiting_owner','blocked','completed'].includes(args.goalState)
+      :args.goalState==='completed')
+    &&args.noChange===false&&args.replyCommentId===undefined&&args.ownerDecisionId===undefined
     &&(args.processedSourceReferences===undefined||Array.isArray(args.processedSourceReferences)&&args.processedSourceReferences.length===0);
   if(!permitted)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
 };

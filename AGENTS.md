@@ -156,7 +156,9 @@ publication tooling также остаются вне этого публичн
   pass, only after its exact lease expires and the full latest native history
   proves an existing canonical Run and settled local-only draft edits. The
   owned App Server must acquire the writer and reread that history before
-  renewal. Keep only Workspace/Run UUIDs in the existing continuation intent.
+  renewal. Keep only Workspace/Run UUIDs in the existing continuation intent,
+  plus the exact head for a positively accepted Run. An already accepted Run
+  only permits outcome confirmation on that head, without Workspace writes.
   Native tool filtering plus signed argument checks limit recovery to that
   Run; no external work, comment, source processing or retry of an attempted
   turn. Only native acceptance/outcome and the normal receipt close the pass.

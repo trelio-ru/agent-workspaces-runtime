@@ -576,16 +576,25 @@ they do not substitute for a supported Windows end-to-end activation test.
 
 A stored `interrupted` is still uncertainty. The one narrow exception is a
 candidate for settling a known task continuation after its exact pass lease
-expires. It requires the latest complete native turn and its unique existing
+expires. It requires the latest complete native history and its unique existing
 delivery marker, an exact existing canonical Workspace Run, and at least one
 successful local draft replacement whose returned digest matches its bytes.
 Only settled reads, the existing prepare/open, local file operations and the
 literal pre-dispatch input refusals qualify. Unknown or unfinished actions,
 external source inputs, browser use, published comments and submitted material
-retain the original review fence.
+retain the original review fence for draft preservation.
+
+If the latest interrupted turn finished the Run, verify its exact finish
+operation and the same Run's clean accepted status with a new candidate head.
+One accepted-material continuation may use the ordinary outcome tool on that
+exact head and Run. The native catalogue and signed argument check disallow
+opening, editing or submitting a Workspace in this mode. The outcome gate
+still verifies live acceptance and the assistant's own material. A confirmed
+pass may preserve an active or blocked task goal.
 
 Reserve one new marker in the existing indexed continuation journal. Persist
-only the exact Run and Workspace UUIDs alongside the existing intent. The
+only the exact Run and Workspace UUIDs and, for accepted material, its head
+alongside the existing intent. The
 isolated App Server acquires the native exclusive writer and reads the same
 latest full turn again before the existing pass renewal and start CAS. A busy
 writer, changed history or lost renewal result cannot spend that start. The

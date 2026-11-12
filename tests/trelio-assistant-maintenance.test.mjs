@@ -46,6 +46,28 @@ test('a stale catalogue cannot escape the exact Workspace draft recovery boundar
     'continue_assistant_workspace_action','complete_assistant_pass']);
 });
 
+test('an accepted Workspace recovery can confirm only the exact accepted head without opening the Run',async()=>{
+  const draft={workspaceId:randomUUID(),runId:randomUUID(),acceptedHead:'a'.repeat(40)},calls=[];
+  const health={revision:1,code:'ready',compatibility:{minimumPluginVersion:'3.0.0',minimumRuntimeVersion:null}};
+  const run=(name,args)=>executeAssistantRuntimeRequest({operation:'call',name,arguments:args},{
+    context:async action=>action({identity:{},readHealth:async()=>health,reportHealth:async()=>health},{}),
+    versions:()=>versions,readDraftRecovery:async()=>draft,
+    proxyFor:async()=>({callTool:async name=>{calls.push(name);return {content:[]};}}),
+  });
+  const complete={workspaceId:draft.workspaceId,acceptedRunId:draft.runId,workspaceHead:draft.acceptedHead,goalState:'active',noChange:false};
+  for(const [name,args] of [
+    ['prepare_assistant_workspace_run',draft],
+    ['continue_assistant_workspace_action',{operation:'open',parameters:draft}],
+    ['use_assistant_workspace_files',{runIdentity:draft,command:{action:'replace'}}],
+    ['complete_assistant_pass',{...complete,workspaceHead:'b'.repeat(40)}],
+    ['complete_assistant_pass',{...complete,processedSourceReferences:[{}]}],
+    ['complete_assistant_pass',{...complete,goalState:'cancelled'}],
+  ])await assert.rejects(run(name,args),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  assert.deepEqual(calls,[]);
+  await run('complete_assistant_pass',complete);
+  assert.deepEqual(calls,['complete_assistant_pass']);
+});
+
 test('the registered supervisor survives failed startup reads without an MCP or a premature business tick',async()=>{
   for(const stage of ['identity','registration']){
     const controller=new AbortController(),identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};

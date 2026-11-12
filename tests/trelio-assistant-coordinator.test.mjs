@@ -2141,10 +2141,11 @@ test('done settlement still blocks a NEW recovery invocation under a changed mod
   }finally{await f.coordinator.close();}
 });
 
-test('interrupted Workspace settlement waits for expiry and native ownership, then uses one new marker on the same pass',async t=>{
+for(const alreadyAccepted of [false,true])test(`interrupted Workspace settlement waits for expiry and native ownership, then uses one new marker on the same pass (accepted=${alreadyAccepted})`,async t=>{
   const f=fixture(t),originalRun=f.options.native.run,originalOutcome=f.options.client.readBusinessOutcome;
   const terminalTurnId=randomUUID(),priorMarker=randomUUID(),reviewId=randomUUID();
-  const workspaceDraft={workspaceId:randomUUID(),runId:randomUUID()};
+  const workspaceDraft={workspaceId:randomUUID(),runId:randomUUID(),
+    ...(alreadyAccepted?{acceptedHead:'a'.repeat(40)}:{})};
   let outcome=false,busy=true,resumes=0,reviews=0,ownAttempts=0;
   f.authority.workMode='task';
   f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
@@ -2180,7 +2181,7 @@ test('interrupted Workspace settlement waits for expiry and native ownership, th
       assert.deepEqual(readAssistantWorkspaceDraftRecovery(f.database,f.activePass()),workspaceDraft);
       if(busy)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       await options.beforeInvocation();
-      outcome=true;f.continuation.goalState='completed';
+      outcome=true;f.continuation.goalState=alreadyAccepted?'active':'completed';
     }
     return originalRun(input,options);
   };
