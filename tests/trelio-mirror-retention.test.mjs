@@ -6,6 +6,7 @@ import test from 'node:test';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID, webcrypto } from 'node:crypto';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   pruneCompanyMirrorCaches, pruneMirrorSchema, withMirrorRetentionLock,
@@ -115,6 +116,38 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   t.after(() => { globalThis.fetch = originalFetch; });
   const sync = options => syncCompanyContextMirror({ origin, token: 'synthetic-token',
     companyEncryption: encryption, ...options });
+  // Hold the real retention mutex until the reader reports cancellation.
+  // A reader that keeps waiting for the lock cannot pass this handshake.
+  let pendingRead;
+  const controller = new AbortController();
+  const cancellation = new Error('Synthetic mirror read cancelled while waiting for retention');
+  const contended = Promise.withResolvers();
+  const originalMkdir = fs.mkdir;
+  const retentionLock = path.join(paths.root, 'retention.lock');
+  const stages = [];
+  try {
+    await withMirrorRetentionLock(paths.root, async () => {
+      fs.mkdir = async (target, ...args) => {
+        try { return await originalMkdir(target, ...args); }
+        catch (error) {
+          if (target === retentionLock && error.code === 'EEXIST') contended.resolve();
+          throw error;
+        }
+      };
+      pendingRead = sync({ signal: controller.signal, onProgress: stage => stages.push(stage) })
+        .then(() => null, error => error);
+      await contended.promise;
+      controller.abort(cancellation);
+      const outcome = await Promise.race([pendingRead, delay(1_000, 'still waiting', { ref: false })]);
+      assert.equal(outcome, cancellation, 'The reader must settle before the held retention lock is released');
+      assert.deepEqual(stages, ['mirror_read']);
+      assert.equal(reads, 0, 'Cancellation must not start a manifest read');
+    });
+  } finally {
+    fs.mkdir = originalMkdir;
+    await pendingRead;
+  }
+
   // Ordinary detail reads retain their established immutable fallback. This
   // proves the old generation is actually readable before testing the search.
   const fallback = await sync({});

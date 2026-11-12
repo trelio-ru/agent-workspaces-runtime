@@ -614,8 +614,9 @@ const acquireMirrorWriter = async (
             const stalePath = `${paths.lock}.stale-${crypto.randomUUID()}`;
             await fs.rename(paths.lock, stalePath);
             await fs.rm(stalePath, { recursive: true, force: true });
-          });
+          }, { signal });
         } catch (takeoverError) {
+          signal?.throwIfAborted();
           if (takeoverError.code !== "ENOENT") throw takeoverError;
         }
         continue;
@@ -701,12 +702,21 @@ const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous
 // Cleanup never removes a generation while a new-runtime reader is opening it;
 // network synchronization remains outside this lock, so readers still use the
 // previous complete generation while another process downloads changes.
-const readMirrorGeneration = async (input) => {
-  if (!await fs.lstat(input.paths.root).catch(error => {
+const readMirrorGeneration = async (input, signal) => {
+  signal?.throwIfAborted();
+  const root = await fs.lstat(input.paths.root).catch(error => {
     if (error.code === "ENOENT") return null;
     throw error;
-  })) return null;
-  const result = await withMirrorRetentionLock(input.paths.root, () => readMirrorGenerationUnlocked(input));
+  });
+  signal?.throwIfAborted();
+  if (!root) return null;
+  // The metadata mutex has its own wait bound. A caller with an earlier
+  // deadline must leave that queue without waiting for the current owner or
+  // handing a late decrypted generation back to an already-cancelled read.
+  const result = await withMirrorRetentionLock(
+    input.paths.root, () => readMirrorGenerationUnlocked(input), { signal },
+  );
+  signal?.throwIfAborted();
   if (result?.skipped === "busy") {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_SYNC_BUSY", "Local mirror maintenance is still running.");
   }
@@ -4269,7 +4279,7 @@ export const syncCompanyContextMirror = async ({
     companyId: companyEncryption.runtime.company.id,
   });
   onProgress("mirror_read");
-  let previous = await readMirrorGeneration({ paths, companyEncryption });
+  let previous = await readMirrorGeneration({ paths, companyEncryption }, signal);
   onProgress("mirror_wait");
   const writer = await acquireMirrorWriter(paths, {
     signal,
@@ -4318,7 +4328,7 @@ export const syncCompanyContextMirror = async ({
   try {
     // Another writer may have published between the optimistic read and our
     // lock acquisition. Always reread the atomic pointer under ownership.
-    previous = await readMirrorGeneration({ paths, companyEncryption, previous });
+    previous = await readMirrorGeneration({ paths, companyEncryption, previous }, signal);
     let searchCache;
     const result = await buildStableCompanyMirror({
       onProgress,
@@ -8566,7 +8576,7 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal, 
   if (cachedEntry) localCompanyMirrorSessionCache.delete(sessionKey);
 
   if (!forceSync && localCompanyMirrorStartupSynced.has(sessionKey)) {
-    const current = await readMirrorGeneration({ paths, companyEncryption });
+    const current = await readMirrorGeneration({ paths, companyEncryption }, signal);
     if (current) {
       localCompanyMirrorObservedMutation.set(sessionKey, mutationToken);
       return {
@@ -8844,7 +8854,7 @@ export const exactCompanyFetchLocator = (rawId) => {
  */
 const readFreshManagedContextDocument = async ({origin,companySlug,selection,provider,profile,signal}) => {
   const paths=resolveMirrorPaths({origin,companyId:provider.companyEncryption.runtime.company.id});
-  const mirror=await readMirrorGeneration({paths,companyEncryption:provider.companyEncryption});
+  const mirror=await readMirrorGeneration({ paths, companyEncryption: provider.companyEncryption }, signal);
   const descriptor=mirror?.contextDocuments?.find(document=>document.id===selection.documentId&&document.type===selection.documentType);
   if(!descriptor)throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND","Select a current exact source through company search.");
   const read=()=>fetchContextDocumentProjection({origin:provider.requestOrigin,token:provider.token,companySlug,document:descriptor,signal});

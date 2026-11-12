@@ -751,6 +751,8 @@ publication tooling также остаются вне этого публичн
   Late private inspection retries only writer acquisition after positive fresh
   directory absence/replacement; unchanged or unknown claims retain refusal.
   Cold managed reads keep the original first-sync join bound, not stale-read 30s.
+  Mirror pointer reads and writer recovery pass the caller's abort signal into
+  retention-lock acquisition; a cancelled waiter leaves the live owner intact.
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts всех этапов чтения обязательны по
