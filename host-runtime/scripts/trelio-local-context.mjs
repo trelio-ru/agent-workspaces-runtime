@@ -11075,6 +11075,7 @@ export const createWorkspaceRunHeartbeatManager = ({
     try {
       const opened = await runBridge(entry.origin, entry.openArguments, {
         ...(entry.openWorkingDirectory ? { cwd: entry.openWorkingDirectory } : {}),
+        ...(entry.openInput !== undefined ? { input: entry.openInput } : {}),
       });
       const workspaceDirectory = await resolveOpenedDirectory(opened.stdout);
       replaceEntryDirectory(entry, workspaceDirectory);
@@ -11130,6 +11131,7 @@ export const createWorkspaceRunHeartbeatManager = ({
     runId,
     workspaceDirectory,
     openArguments = null,
+    openInput,
     openWorkingDirectory = null,
   }) => {
     const key = entryKey(workspaceDirectory);
@@ -11142,6 +11144,7 @@ export const createWorkspaceRunHeartbeatManager = ({
       runId,
       workspaceDirectory: key,
       openArguments: openArguments ? [...openArguments] : null,
+      openInput,
       openWorkingDirectory,
       activeActionCount: 0,
       renewalPromise: null,
@@ -11302,6 +11305,7 @@ const executeTrelioWorkspaceActionOperation = async (
     folderOnboardingApply = applyTrelioFolderOnboarding,
     resolveRunRootDirectory = resolveRegisteredWorkspaceRootDirectory,
     selectOpenRecovery,
+    codexThreadId = null,
   } = {},
 ) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
@@ -11340,11 +11344,21 @@ const executeTrelioWorkspaceActionOperation = async (
         invocation.operation === "open" ? invocation.parameters : undefined,
       );
     }
-    const result = await runBridge(origin, invocation.argumentsList, {
+    // Keep the ID out of model-visible arguments, child argv and persisted
+    // Run metadata. Only open consumes this pipe. Automatic reclaim reuses
+    // the exact original open and its private input in this process.
+    const openInput = invocation.operation === "open" && !invocation.parameters.runtimeSessionId
+      ? codexThreadId ?? undefined : undefined;
+    const bridgeArguments = openInput
+      ? [...invocation.argumentsList, "--codex-navigation-input"]
+      : invocation.argumentsList;
+    const input = invocation.parameters.nativeInput
+      ? JSON.stringify(invocation.parameters.nativeInput) : openInput;
+    const result = await runBridge(origin, bridgeArguments, {
       ...(workingDirectory ? { cwd: workingDirectory } : {}),
       signal,
       ...(onProgress ? { onProgress } : {}),
-      ...(invocation.parameters.nativeInput ? { input: JSON.stringify(invocation.parameters.nativeInput) } : {}),
+      ...(input !== undefined ? { input } : {}),
     });
     if (heartbeatManager && invocation.operation === "open") {
       const workspaceDirectory = await resolveOpenedWorkspaceDirectory(result.stdout);
@@ -11354,7 +11368,8 @@ const executeTrelioWorkspaceActionOperation = async (
         workspaceId: identity.workspaceId,
         runId: identity.runId,
         workspaceDirectory,
-        openArguments: invocation.argumentsList,
+        openArguments: bridgeArguments,
+        ...(openInput !== undefined ? { openInput } : {}),
         openWorkingDirectory: invocation.workingDirectory,
       });
     } else if (heartbeatManager) {
@@ -11574,7 +11589,7 @@ const executeTrelioWorkspaceActionOperation = async (
           ...rawInput,
           parameters: { ...rawInput.parameters, directory: details.suggestedDirectory },
         }, {
-          signal, runBridge, runHeartbeatManager, onProgress, folderOnboardingApply, resolveRunRootDirectory,
+          signal, runBridge, runHeartbeatManager, onProgress, folderOnboardingApply, resolveRunRootDirectory, codexThreadId,
           // A second refusal must remain visible. It never earns another open,
           // a fresh signal/deadline, a new Run or a replay of the pending save.
           selectOpenRecovery: null,

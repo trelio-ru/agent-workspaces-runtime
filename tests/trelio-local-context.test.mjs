@@ -720,7 +720,7 @@ test("expired background heartbeat claims the same Run with the original open ac
   const calls = [];
   const openArguments = [
     "open", "--workspace", actionWorkspaceId, "--run", actionRunId,
-    "--runtime-session", actionReleaseId,
+    "--codex-navigation-input",
   ];
   const manager = createWorkspaceRunHeartbeatManager({
     runBridge: async (origin, argumentsList, options) => {
@@ -747,6 +747,7 @@ test("expired background heartbeat claims the same Run with the original open ac
     runId: actionRunId,
     workspaceDirectory: actionWorkingDirectory,
     openArguments,
+    openInput: actionReleaseId,
     openWorkingDirectory: path.dirname(actionWorkingDirectory),
   });
   await scheduled[0].callback();
@@ -755,7 +756,7 @@ test("expired background heartbeat claims the same Run with the original open ac
     ["heartbeat"],
     openArguments,
   ]);
-  assert.deepEqual(calls[1].options, { cwd: path.dirname(actionWorkingDirectory) });
+  assert.deepEqual(calls[1].options, { cwd: path.dirname(actionWorkingDirectory), input: actionReleaseId });
   assert.equal(manager.inspect(actionWorkingDirectory)?.recovery, null);
   assert.equal(scheduled.at(-1).delayMilliseconds, WORKSPACE_RUN_AUTO_HEARTBEAT_INTERVAL_MS);
 });

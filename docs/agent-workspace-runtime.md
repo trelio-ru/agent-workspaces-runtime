@@ -3049,6 +3049,15 @@ Portable projection генерируется из backend и сохраняет 
 
 Связь Workspace/чат возникает только через verified Agent Run. Обсуждение и accepted
 read без Run не создают её и не требуют дополнительных инструкций модели.
+При открытии task Run без hook session local MCP берёт UUID текущего чата
+из per-call `params._meta.threadId` нативного `codex-mcp-client`. Поле из
+аргументов модели или общего окружения MCP не используется. Host передаёт UUID
+только дочернему open через stdin, а bridge добавляет его к start/claim как
+`x-trelio-codex-thread-id`. Автоматический reclaim использует тот же input
+из памяти host. При отсутствующем/некорректном UUID обычный open продолжается.
+Эта навигационная подсказка не передаёт подтверждение модели и не меняет
+допуск Run.
+
 Generic runtime после успешных open/claim, heartbeat и checkpoint читает
 private `GET /api/agent-workspaces/runs/:runId/codex-conversation`. Backend
 возвращает только initiating member locator текущего Run и CAS hash для любого

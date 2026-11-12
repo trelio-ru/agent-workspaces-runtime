@@ -31,7 +31,7 @@ import { browserControllerEnabled, parseBrowserControllerArguments, skillResourc
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
-import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment } from "./trelio-codex-conversation.mjs";
+import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment, readCodexNavigationThreadId } from "./trelio-codex-conversation.mjs";
 import { readCodexPluginEnablement, readCodexAssistantMarketplaceSource } from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
@@ -13762,6 +13762,13 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   // Exact open-команду строит уже допущенный MCP-вызов. Модельная политика
   // использует только server-side runtime session, созданную trusted hook.
   const runtimeSessionId = parseRuntimeSessionOption(options);
+  // Read the private pipe only after compatibility/routing: if the initial
+  // preflight hands off to an updated bridge, its child still owns this input.
+  // Older servers ignore the optional navigation header.
+  const codexThreadId = options["codex-navigation-input"] === true
+    ? await readCodexNavigationThreadId(process.stdin)
+    : null;
+  const navigationHeaders = codexThreadId ? { "x-trelio-codex-thread-id": codexThreadId } : {};
   const requestedRunId = options.run ? requireUuid(options.run, "run") : null;
   const rootResolution = await resolveWorkspaceRootDirectory({
     workspaceId,
@@ -13956,7 +13963,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       `/api/agent-workspaces/runs/${requestedRunId}/claim`,
       {
         method: "POST",
-        headers: { "content-type": "application/json", "x-trelio-work-start-presentation": "1" },
+        headers: { "content-type": "application/json", "x-trelio-work-start-presentation": "1", ...navigationHeaders },
         body: JSON.stringify({
           expectedFencingToken: existingRun.fencingToken,
           clientKind: "workspace-bridge",
@@ -13985,7 +13992,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
           `/api/agent-workspaces/workspaces/${workspaceId}/runs`,
           {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", ...navigationHeaders },
             body: JSON.stringify({
               clientKind: "workspace-bridge",
               clientVersion: PLUGIN_VERSION,

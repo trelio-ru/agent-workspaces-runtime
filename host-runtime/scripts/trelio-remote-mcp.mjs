@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -5725,6 +5725,7 @@ export const handleToolCall = async (
     localActionOperation = handleTrelioLocalActionOperation,
     localWorkspaceOperation = handleTrelioLocalWorkspaceOperation,
     workspaceActionOperation = handleTrelioWorkspaceActionOperation,
+    codexThreadId = null,
     proposalOperation = handleTrelioLocalProposalOperation,
     proposalProviderSelectionRecorder = null,
     proposalCapabilityConfigDirectory,
@@ -6021,7 +6022,7 @@ export const handleToolCall = async (
     return buildWorkspaceActionResult(await workspaceActionOperation(
       origin,
       rawArguments,
-      { signal },
+      { signal, ...(codexThreadId ? { codexThreadId } : {}) },
     ));
   }
   if (name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME) {
@@ -6635,6 +6636,7 @@ export const handleLocalMcpMessage = async (
     proposalProviderSelectionRecorder = persistLocalProposalProviderSelection,
     proposalCapabilityConfigDirectory,
     clientCapabilities = null,
+    clientInfo = null,
     textCompatibility = false,
     requestClient = null,
     codexLegacyMcpMigration = null,
@@ -6734,10 +6736,19 @@ export const handleLocalMcpMessage = async (
   if (message.method === "tools/call") {
     try {
       let delegated = false;
+      // Codex emits threadId in the JSON-RPC request metadata for each tool
+      // call. A shared MCP process cannot use its inherited environment or an
+      // ID supplied in tool arguments to identify the current chat.
+      const codexThreadId = clientInfo?.name === "codex-mcp-client"
+        && message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name
+        && message.params?.arguments?.operation === "open"
+        ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId)
+        : null;
       const execute = async (callSignal) => {
         try {
           return await callTool(origin, String(message.params?.name || ""), message.params?.arguments,
-            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, requestClient, codexLegacyMcpMigration });
+            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities,
+              requestClient, codexLegacyMcpMigration, ...(codexThreadId ? { codexThreadId } : {}) });
         } catch (error) {
           // A verified pre-dispatch upgrade is the only safe automatic replay.
           // Recovery spends this SAME call budget; a stalled update must not
@@ -7058,6 +7069,7 @@ export const runStdioHost = async ({
         callTool,
         signal: controller?.signal,
         clientCapabilities,
+        clientInfo: clientInitializeParams?.clientInfo,
         textCompatibility,
         requestClient,
         notifyClient: enqueueResponse,

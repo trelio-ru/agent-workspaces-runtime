@@ -226,6 +226,48 @@ test("local MCP delivers action-argument recovery without a diagnostic detour", 
   assert.equal(error.details.requiredAction, "execute_returned_action_arguments");
 });
 
+test("parallel Codex open calls pass only their own native thread IDs to the bridge pipe", async () => {
+  const tool = "continue_trelio_workspace_action";
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const runId = "22222222-2222-4222-8222-222222222222";
+  const firstThread = "33333333-3333-7333-8333-333333333333";
+  const secondThread = "44444444-4444-7444-8444-444444444444";
+  const calls = [];
+  const open = (id, threadId, { client = "codex-mcp-client", ...parameters } = {}) => handleLocalMcpMessage({
+    jsonrpc: "2.0", id, method: "tools/call", params: {
+      name: tool, _meta: { threadId },
+      arguments: { schemaVersion: 1, operation: "open", parameters: { workspaceId, runId, ...parameters } },
+    },
+  }, {
+    clientInfo: { name: client },
+    callTool: (origin, name, args, options) => handleToolCall(origin, name, args, {
+      ...options,
+      workspaceActionOperation: (actionOrigin, actionArgs, actionOptions) =>
+        handleTrelioWorkspaceActionOperation(actionOrigin, actionArgs, {
+          ...actionOptions,
+          runBridge: async (_origin, argv, bridgeOptions) => {
+            calls.push({ argv, input: bridgeOptions.input });
+            return { stdout: "fixture" };
+          },
+        }),
+    }),
+  });
+  const responses = await Promise.all([
+    open(1, firstThread), open(2, secondThread), open(3, "malformed"),
+    open(4, firstThread, { client: "other-mcp-client" }),
+    open(5, firstThread, { runtimeSessionId: workspaceId }),
+    open(6, undefined, { codexThreadId: firstThread }),
+  ]);
+  assert.ok(responses.slice(0, 5).every(({ result }) => !result.isError));
+  assert.equal(responses[5].result.isError, true, "Model-supplied IDs are not action parameters.");
+  assert.deepEqual(calls.map(call => call.input).filter(Boolean).sort(), [firstThread, secondThread]);
+  assert.equal(calls.filter(call => call.argv.includes("--codex-navigation-input")).length, 2);
+  assert.equal(calls.length, 5);
+  assert.ok(calls.every(call => !call.argv.includes(firstThread) && !call.argv.includes(secondThread)));
+  assert.ok(responses.slice(0, 5).every(response => !JSON.stringify(response).includes(firstThread)
+    && !JSON.stringify(response).includes(secondThread)));
+});
+
 test("local MCP offers account discovery only for the bridge's own setup refusal", async () => {
   const parameters = {
     companyId: "11111111-1111-4111-8111-111111111111",

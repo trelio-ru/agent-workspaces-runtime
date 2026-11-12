@@ -36,7 +36,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const environment=buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
    LOCALAPPDATA:path.join(home,'local'),APPDATA:path.join(home,'roaming')});
  let business=false,attempt=0,allowedCalls=0,foreignRequests=0,foreignInitializations=0,modelRequests=0,toolName=null;
- const advertised=[],toolResults=[],foreignPhases=[];let processPhase='setup',sawWorkflow=false,sawDirectInstruction=false;
+ const advertised=[],toolResults=[],foreignPhases=[],allowedThreadIds=[],allowedClientNames=[];let processPhase='setup',sawWorkflow=false,sawDirectInstruction=false;
  // No account or OpenAI request participates: this loopback producer supplies
  // synthetic Responses events to the real native tool registry. Malicious
  // calls deliberately name tools absent from its advertised catalogue.
@@ -50,11 +50,14 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    }
    if(data.id===undefined){res.writeHead(204);res.end();return;}
    let result={};
-   if(data.method==='initialize')result={protocolVersion:data.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'synthetic',version:'1'}};
+   if(data.method==='initialize'){
+    if(req.url==='/mcp/allowed')allowedClientNames.push(data.params?.clientInfo?.name);
+    result={protocolVersion:data.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'synthetic',version:'1'}};
+   }
    if(data.method==='tools/list')result={tools:[...ASSISTANT_WORKSPACE_DRAFT_TOOLS,'use_assistant_browser'].map(name=>({
     name,description:'Synthetic admitted tool',inputSchema:{type:'object',properties:{}},
     annotations:{readOnlyHint:true,destructiveHint:false,openWorldHint:false}}))};
-   if(data.method==='tools/call'){allowedCalls++;result={content:[{type:'text',text:'synthetic allowed result'}]};}
+   if(data.method==='tools/call'){allowedCalls++;allowedThreadIds.push(data.params?._meta?.threadId);result={content:[{type:'text',text:'synthetic allowed result'}]};}
    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:data.id,result}));return;
   }
   if(req.url!=='/v1/responses'){res.writeHead(404,{'Content-Type':'application/json'});res.end('{"error":"synthetic_route"}');return;}
@@ -225,6 +228,8 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  assert.ok(toolName,'the permitted signed-plugin MCP tool must actually reach the native model catalogue '+JSON.stringify(advertised[0]));
  assert.equal(attempt,5,'all four forbidden tools and the allowed tool were emitted by the synthetic model');
  assert.equal(allowedCalls,1,'only the permitted MCP operation executes '+JSON.stringify({toolName,phases,attempt,foreignRequests,toolResults}));
+ assert.ok(allowedClientNames.includes('codex-mcp-client'),'native MCP initialize identifies the Codex client');
+ assert.deepEqual(allowedThreadIds,[threadId],'with hooks off, native Codex carries its current thread in MCP request metadata');
  assert.equal(foreignInitializations,0,'foreign servers must not initialize or execute '+JSON.stringify(foreignPhases));
  await assert.rejects(fs.stat(foreignSentinel),{code:'ENOENT'},'a foreign stdio executable cannot start');
  for(const names of advertised){

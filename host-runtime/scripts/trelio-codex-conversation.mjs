@@ -5,6 +5,25 @@ import path from "node:path";
 import crypto from 'node:crypto';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const NAVIGATION_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+export const normalizeCodexNavigationThreadId = (value) => (
+  typeof value === "string" && value.length === 36 && NAVIGATION_THREAD_ID.test(value)
+    ? value.toLowerCase()
+    : null
+);
+
+/** The open child gets only the UUID over its invocation-local pipe. An
+ * absent or malformed optional locator must not prevent ordinary Run work. */
+export const readCodexNavigationThreadId = async (input) => {
+  let value = "";
+  for await (const chunk of input) {
+    value += chunk.toString("utf8");
+    if (value.length > 36) return null;
+  }
+  return normalizeCodexNavigationThreadId(value);
+};
+
 const ENV_KEYS = ["PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "CODEX_HOME"];
 const titleEnvironment = (environment, { platform = process.platform } = {}) => {
   const selected = Object.fromEntries(ENV_KEYS
