@@ -6054,7 +6054,15 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
     if (rawInput?.dueDateFrom && (!dueDate || dueDate < rawInput.dueDateFrom)) return false;
     if (rawInput?.dueDateTo && (!dueDate || dueDate > rawInput.dueDateTo)) return false;
     const dueState = String(rawInput?.dueState || "any");
-    if (!matchesContextTaskDueState({ dueDate, dueState, statusKind: task.status?.kind ?? "", todayDate: today })) return false;
+    if (!matchesContextTaskDueState({
+      // Hydrated task status carries the current project setting. Older
+      // snapshots without the flag retain their prior date-filter behavior.
+      deadlineTrackingStopped: task.status?.stopDeadlineTracking === true,
+      dueDate,
+      dueState,
+      statusKind: task.status?.kind ?? "",
+      todayDate: today,
+    })) return false;
 
     const controls = Array.isArray(task.controls) ? task.controls : [];
     if ((rawInput?.controlDateFrom || rawInput?.controlDateTo) && !controls.some((control) => {

@@ -37,6 +37,35 @@ test('list queries exclude relations/history and retain native task workflow and
   assert.equal(handleNativeLocalContextRead(mirror,'list_project_tasks',{projectSlug:'core',dueState:'upcoming'}).tasks.length,1);
 });
 
+test('local task lists count only tracked deadlines as overdue, including in review', () => {
+  const assignee = { memberId: base.viewer.memberId, displayName: 'Alice' };
+  const tasks = [true, false].map((stopDeadlineTracking, index) => ({
+    id: stopDeadlineTracking ? 'stopped' : 'tracked',
+    number: index + 1,
+    projectId: project.id,
+    projectSlug: project.slug,
+    payload: {
+      project,
+      task: {
+        title: 'Review item',
+        status: { name: 'Review', code: 'review', kind: 'review', stopDeadlineTracking },
+        assignee,
+        dueAt: '2020-01-01T00:00:00Z',
+      },
+    },
+  }));
+  const mirror = { ...base, tasks };
+  for (const tool of ['list_my_tasks', 'list_project_tasks']) {
+    const filters = { projectSlug: project.slug, ...(tool === 'list_my_tasks' ? { relation: 'assigned' } : {}) };
+    const overdue = handleNativeLocalContextRead(mirror, tool, { ...filters, dueState: 'overdue' });
+    assert.deepEqual(overdue.tasks.map(task => task.id), ['tracked']);
+    assert.equal(overdue.pagination.total, 1);
+
+    const dated = handleNativeLocalContextRead(mirror, tool, { ...filters, dueState: 'with_due_date' });
+    assert.equal(dated.pagination.total, 2, 'The historical date stays available to date filters.');
+  }
+});
+
 test('registry rows search document labels only; NULL sort matches PostgreSQL before pagination',()=>{
   const registry=document('registry','registry',{registry:{id:'registry',slug:'registry',title:'Registry',columns:[{key:'n',type:'number'},{key:'doc',type:'document'}]},rows:[
     {rowKey:'missing',values:{}},{rowKey:'negative',values:{n:-1}},{rowKey:'zero',values:{n:0}},

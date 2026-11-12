@@ -782,6 +782,8 @@ publication tooling также остаются вне этого публичн
   pure module. Все formulations документа делят bounded file-local matcher;
   rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
   ranking генерируется backend `build-context-search-ranking.mjs`; проверяй `--check`.
+  Task list due-state parity uses the [same generated predicates](docs/agent-workspace-runtime.md)
+  and the hydrated status flag for deadline tracking.
   Bounded human text uses the generated common Unicode policy; preserve UTF-16
   budgets and exact paging cursors. Test both emoji edges, lossless reconstruction
   and the fixed observer's self-contained script; see the runtime Unicode contract.

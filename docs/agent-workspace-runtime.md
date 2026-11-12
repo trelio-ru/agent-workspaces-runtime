@@ -1227,7 +1227,10 @@ Registry row query searches published document labels/filenames, never internal
 Workspace coordinates. Typed NULL ordering matches PostgreSQL before pagination.
 Meeting archives remain in the mirror; unified search hides them by default,
 `includeArchived` admits them explicitly, and date bounds compare parsed instants.
-`upcoming` includes today, as in the native task filter.
+`upcoming` includes today, as in the native task filter. For `overdue`, the
+dispatcher passes the hydrated status's `stopDeadlineTracking` flag to the
+shared predicate before counting and pagination. A review status can keep
+tracking. Stopped deadlines remain available to the other date filters.
 
 `tests/trelio-search-provider-parity.test.mjs` exercises the real dispatcher. The
 companion backend integration fixture pins an exact runtime commit and compares

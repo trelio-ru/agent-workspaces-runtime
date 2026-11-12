@@ -257,13 +257,16 @@ export const buildContextTaskListSearchText = (number, task, project) => {
         ...listArray(task.participants).map(name)]
         .map((value) => String(value || "").toLowerCase()).join(" ");
 };
-export const matchesContextTaskDueState = ({ dueDate, dueState, statusKind, todayDate }) => {
+export const matchesContextTaskDueState = ({ deadlineTrackingStopped, dueDate, dueState, statusKind, todayDate }) => {
     if (dueState === "without_due_date")
         return dueDate === null;
     if (dueState === "with_due_date")
         return dueDate !== null;
-    if (dueState === "overdue")
-        return statusKind !== "done" && dueDate !== null && dueDate < todayDate;
+    // The deadline remains available for date filters after tracking stops.
+    // Review statuses can keep tracking, so their kind alone cannot decide overdue.
+    if (dueState === "overdue") {
+        return statusKind !== "done" && !deadlineTrackingStopped && dueDate !== null && dueDate < todayDate;
+    }
     if (dueState === "today")
         return dueDate === todayDate;
     if (dueState === "upcoming")
