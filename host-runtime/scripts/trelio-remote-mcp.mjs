@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -7516,6 +7516,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
   const applyHarnessAdapter = async (ctx, {
     connection = createHarnessConnection(), prepare = prepareNativeRuntimeToolArguments,
     localMessage = handleLocalMcpMessage,
+    desktopNavigation = isDeepseekDesktopHost() ? createDeepseekDesktopNavigation() : null,
   } = {}) => {
     // Newer Harness releases are allowed; verify their native API explicitly.
     // Check the native registration surface before catalogue/OAuth/vault I/O;
@@ -7527,6 +7528,15 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     let disposed = false;
     let disposers = [];
     const continuations = createHarnessContinuations();
+    if (desktopNavigation) {
+      // Use Harness's exact owner-only fetch registry. The Desktop renderer
+      // crosses this path with its existing embedded Host connection.
+      ctx.inject(["connection"], inner => {
+        if (typeof inner.connection.fetch?.register === "function") {
+          inner.effect(() => inner.connection.fetch.register(desktopNavigation.route));
+        }
+      });
+    }
     const publicTool = tool => !(tool?._meta?.ui?.visibility?.length > 0
       && tool._meta.ui.visibility.every(value => value === "app"));
     const publicSchema = tool => {
@@ -7560,7 +7570,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
           // Only native Trelio and its existing correlated local dispatcher carry
           // hook proofs. Setup/recovery and other local tools retain their own ABI.
           if (server === "trelio" || tool.name === "continue_trelio_local_action") {
-            input = await prepare({ ...observeHarnessRuntime(execution),
+            const observed = observeHarnessRuntime(execution);
+            input = await prepare({ ...observed, desktop: desktopNavigation?.hasSession(observed.sessionId) === true,
               toolName: `mcp__${server}__${tool.name}`, input, signal: execution.signal });
           }
           const result = await withPrivateProcessSession(() => call(input, execution.signal), execution.signal);

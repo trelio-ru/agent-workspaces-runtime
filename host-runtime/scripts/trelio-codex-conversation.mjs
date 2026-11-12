@@ -351,7 +351,7 @@ export const codexLaunchFolderId = (token, origin, folder, provider = "codex") =
   // A device credential keys this opaque identity; a re-pair gets a new target.
   const bytes = crypto.createHmac("sha256", token).update(JSON.stringify([
     origin, folder.folderPath, folder.company.slug, folder.project?.slug ?? null,
-    ...(provider === "claude" ? [provider] : []),
+    ...(provider === "codex" ? [] : [provider]),
   ])).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 15) | 64;
   bytes[8] = (bytes[8] & 63) | 128;
@@ -439,7 +439,7 @@ export const registerAndVerifyCodexLaunchFolder = async ({ origin, token, folder
     try {
       const result = await (await bridge.request(routing.requestOrigin, token, `${endpoint}/${id}`, {
         method: "PUT", headers: { "content-type": "application/json" }, signal,
-        body: JSON.stringify({ runtimeSessionId: state.runtimeSessionId, folderPath,
+        body: JSON.stringify({ ...(state?.runtimeSessionId ? { runtimeSessionId: state.runtimeSessionId } : {}), folderPath,
           platform: process.platform, ...(folder.project ? { projectSlug: folder.project.slug } : {}) }),
       })).json();
       if (result?.registered !== true || result.id !== id) throw wizardError("CODEX_CONNECTION_INVALID_RESPONSE");
@@ -883,3 +883,161 @@ rpc('ui/initialize', {appInfo:{name:'trelio-codex-connection', version:'1.0.0'},
 })();
 </script></body></html>`,
 });
+
+const DEEPSEEK_DESKTOP_LOCAL_ROUTE = "/api/trelio.desktop-navigation";
+const DEEPSEEK_NATIVE_SESSION_ID = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+// The packaged Electron app runs this dedicated entry as an IPC child.
+// Terminal/Web runtimes do not get a Desktop route merely by loading the same bundle.
+export const isDeepseekDesktopHost = () => ["darwin", "win32"].includes(process.platform)
+  && typeof process.send === "function"
+  && process.argv[1]?.split(path.sep).slice(-4).join("/") === "@deepseek-ai/dsh-desktop-host/lib/index.js";
+
+/** Host side of the navigation adapter. The renderer uses Harness's
+ * authenticated owner-only connection. All Trelio device credentials remain
+ * here; only the exact local workspace ID or session ID reaches the renderer. */
+export const createDeepseekDesktopNavigation = ({
+  origin = "https://trelio.ru", bridge: injectedBridge, inspect = inspectCodexLaunchFolder,
+  register = registerAndVerifyCodexLaunchFolder,
+} = {}) => {
+  let knownSessions = new Set();
+  let catalog;
+  let active = false;
+
+  const fetchNavigation = async (request) => {
+    const reply = (action, status = 200) => Response.json({ action }, {
+      status, headers: { "cache-control": "no-store" },
+    });
+    if (request.headers.get("x-trelio-desktop-navigation") !== "1"
+      || request.headers.get("sec-fetch-site") === "cross-site") return reply(null, 403);
+    if (active) return reply(null);
+    active = true;
+    try {
+      const raw = await request.text();
+      if (Buffer.byteLength(raw) > 256 * 1024) return reply(null, 400);
+      const rows = JSON.parse(raw);
+      if (!Array.isArray(rows) || rows.length > 100 || rows.some(row =>
+        !row || typeof row.workspaceId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/u.test(row.workspaceId)
+        || typeof row.directory !== "string" || row.directory.length > 4096
+        || !Array.isArray(row.sessionIds) || row.sessionIds.length > 2000
+        || row.sessionIds.some(id => typeof id !== "string" || !DEEPSEEK_NATIVE_SESSION_ID.test(id)))) return reply(null, 400);
+      knownSessions = new Set(rows.flatMap(row => row.sessionIds));
+
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(12_000)]);
+      const bridge = injectedBridge ?? await import("./trelio-workspace.mjs");
+      const token = await bridge.readExistingBridgeSessionToken(origin, { signal });
+      if (!token?.startsWith("twb_")) return reply(null);
+      const credentialFingerprint = crypto.createHash("sha256").update(token).digest("hex");
+      const signature = JSON.stringify(rows.map(({ workspaceId, directory }) => [workspaceId, directory]));
+      if (catalog?.credentialFingerprint !== credentialFingerprint
+        || catalog.signature !== signature || catalog.refreshAt < Date.now()) {
+        const folders = new Map();
+        let retry = false;
+        for (const row of rows) {
+          if (signal.aborted) { retry = true; break; }
+          try {
+            const folder = await inspect(row.directory, { bridge });
+            // The directory chosen by the renderer must be the managed root.
+            // A nested workspace must not silently open a different folder.
+            if (folder?.state !== "bound" || folder.folderPath !== row.directory) continue;
+            const result = await register({ origin, token, folder, signal, provider: "deepseek", readBack: false }, { bridge });
+            if (result.registered === true) folders.set(result.id, { folder, workspaceId: row.workspaceId });
+          } catch { retry = true; }
+        }
+        catalog = { credentialFingerprint, signature, folders, refreshAt: Date.now() + (retry ? 30_000 : 300_000) };
+      }
+
+      const remote = await bridge.request(origin, token, "/api/agent-workspaces/deepseek-desktop/next", {
+        method: "POST", signal,
+      });
+      const { action } = await remote.json();
+      if (action?.kind === "resume" && knownSessions.has(action.sessionId)) {
+        return reply({ kind: "resume", sessionId: action.sessionId });
+      }
+      if (action?.kind !== "start") return reply(null);
+      const selected = catalog.folders.get(action.folderId);
+      if (!selected || typeof action.taskPath !== "string"
+        || !/^\/[^/?#]+\/[^/?#]+\/tasks\/[1-9][0-9]*\/$/u.test(action.taskPath)) return reply(null);
+      // Recheck the local binding at dispatch, even if its last published
+      // catalogue entry is still within the refresh window.
+      const local = await inspect(selected.folder.folderPath, { bridge });
+      if (local?.state !== "bound" || codexLaunchFolderId(token, origin, local, "deepseek") !== action.folderId) return reply(null);
+      const taskUrl = new URL(action.taskPath, origin);
+      if (taskUrl.origin !== origin) return reply(null);
+      return reply({ kind: "start", workspaceId: selected.workspaceId,
+        prompt: `Изучи задачу в Trelio через Trelio Agent Workspaces: ${taskUrl.href}` });
+    } catch {
+      return reply(null, 503);
+    } finally {
+      active = false;
+    }
+  };
+  return {
+    hasSession: id => knownSessions.has(id),
+    route: { path: DEEPSEEK_DESKTOP_LOCAL_ROUTE, methods: ["POST"], requestBody: "buffered", fetch: fetchNavigation },
+  };
+};
+
+// This small browser face is written with Harness's documented factory
+// wrapper by the signed installer. It contains no endpoints outside the
+// embedded app, bearer values, Node imports or model-visible tools.
+export function applyDeepseekDesktopClient(ctx) {
+  if (location.protocol !== "dsh-app:" || location.hostname !== "app") return;
+  const route = "/api/trelio.desktop-navigation";
+  if (typeof ctx.uiWorkspace?.startSession !== "function" || typeof ctx.uiWorkspace?.openSession !== "function"
+    || typeof ctx.workspaces?.list?.getSnapshot !== "function") return;
+  ctx.effect(() => {
+    const lifetime = new AbortController();
+    let checking = false;
+    const check = async () => {
+      if (checking || lifetime.signal.aborted) return;
+      const snapshot = ctx.workspaces.list.getSnapshot();
+      if (snapshot.phase !== "ready" || snapshot.items.length === 0) return;
+      const archived = new Set(snapshot.archivedSessionIds ?? []);
+      const rows = snapshot.items.slice(0, 100).map(workspace => ({
+        workspaceId: workspace.workspaceId,
+        directory: workspace.path,
+        sessionIds: workspace.sessionIds.filter(id => /^session-[0-9a-f-]{36}$/u.test(id)
+          && !archived.has(id)).slice(0, 2000),
+      }));
+      checking = true;
+      try {
+        const response = await fetch(route, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-trelio-desktop-navigation": "1" },
+          body: JSON.stringify(rows), signal: lifetime.signal,
+        });
+        if (!response.ok || lifetime.signal.aborted) return;
+        const { action } = await response.json();
+        if (lifetime.signal.aborted || !action) return;
+        const current = ctx.workspaces.list.getSnapshot();
+        if (action.kind === "start" && current.items.some(row => row.workspaceId === action.workspaceId)) {
+          // A blank can already contain a draft. Preserve it and append the
+          // new task context. startSession prepares text without submitting.
+          ctx.uiWorkspace.startSession(action.workspaceId, { prompt: action.prompt, whenDraftExists: "append" });
+        } else if (action.kind === "resume" && !(current.archivedSessionIds ?? []).includes(action.sessionId)
+          && current.items.some(row => row.sessionIds.includes(action.sessionId))) {
+          ctx.uiWorkspace.openSession(action.sessionId);
+        }
+      } catch { /* A disconnected app never retries an already consumed action. */ }
+      finally { checking = false; }
+    };
+    const unsubscribe = ctx.workspaces.list.subscribe(check);
+    window.addEventListener("focus", check);
+    const timer = window.setInterval(check, 15_000);
+    void check();
+    return () => {
+      lifetime.abort();
+      unsubscribe();
+      window.removeEventListener("focus", check);
+      window.clearInterval(timer);
+    };
+  }, "trelio: native desktop navigation");
+}
+
+export const buildDeepseekDesktopClientBundle = () =>
+  `window.__ModuleLoader__.load({ id: "@trelio/deepseek-harness", factory: () => ({
+    name: "trelio-desktop-navigation",
+    inject: ["workspaces", "uiWorkspace"],
+    apply: ${applyDeepseekDesktopClient.toString()}
+  }) });\n`;

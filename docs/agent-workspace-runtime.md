@@ -3465,7 +3465,8 @@ Refresh уже существующей exact managed-привязки допу�
 `trelio-remote-mcp.mjs.deepseekHarnessPlugin` — Cordis plugin для Harness `>=0.2.1-rc.2`,
 без Codex/Claude compatibility hooks. `Session.requestHeader().config` даёт
 actual provider/model/effort, `session.header.id` — native session, с префиксом
-`dsh:` в общем private signing state. `deepseek_native/local_observed` проходит
+`dsh:` в общем private signing state. Для подтверждённого Desktop-чата используется
+`dsh-desktop:`. `deepseek_native/local_observed` проходит
 тот же registration/refresh/nonce/proof engine. Off/unknown effort не наследует
 прежний high; отсутствующий model/header блокирует protected dispatch. Proof и
 instruction hints удаляются из authored args/schema и добавляются только внутри
@@ -3490,6 +3491,20 @@ stable shell `selectHostRuntime` и shell version по постоянному pl
 затем reload. Installer остаётся в bridge, native adapter — в local MCP module: package
 сохраняет frozen 100-file limit без изменения verifier. Public plugin ABI/manifests/hooks не меняются. Загруженный native
 module обновляется при reload; signed runtime selection остаётся общей.
+
+Desktop bundle также включает renderer adapter. Он активируется в
+`dsh-app://app`, использует `workspaces.list` и навигацию `uiWorkspace`.
+Маршрут `/api/trelio.desktop-navigation` регистрируется через owner-only fetch
+registry только в packaged Desktop Host. Renderer сообщает текущие локальные
+workspace/session ID, без доступа к Trelio credential. Host регистрирует
+доступные managed roots прежним codec, получает команду для своего paired
+устройства и возвращает в renderer workspace ID и черновик либо точный session
+ID. Перед открытием сверяется текущее состояние в Harness. Черновик не
+отправляется автоматически. Для обычной регистрации Run desktop namespace
+применяется только если native session видна в последнем снимке renderer.
+CLI сохраняет обычный namespace и не регистрирует Desktop history. Обновить
+предыдущую установку можно штатным installer и повторным native add нового
+bundle.
 
 Desktop Harness использует Electron в режиме Node: `process.execPath` остаётся
 executable приложения. Общий host строит `ELECTRON_RUN_AS_NODE=1` из observed

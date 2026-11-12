@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId, createDeepseekDesktopNavigation } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const managed = line => `<!-- trelio-agent-workspaces:start -->\n## Trelio\n${line}\n<!-- trelio-agent-workspaces:end -->\n`;
@@ -376,4 +376,49 @@ test("native picker child receives EOF without input and refuses partial early-e
     ["-e", "process.stdout.write('partial');process.exitCode=7"], options), error => error.code === 7);
   await assert.rejects(runCodexFolderPickerProcess(process.execPath,
     ["-e", "process.stdout.write('x'.repeat(20000))"], options), /OUTPUT_LIMIT/u);
+});
+
+test("Harness navigation resolves the requested folder and exact saved session through the local catalogue", async () => {
+  const origin = "https://trelio.ru";
+  const token = "twb_test-fixture";
+  const sessionId = "10000000-0000-4000-8000-000000000001";
+  const workspace = name => ({
+    workspaceId: `workspace-${name}`, directory: `/Users/test/${name}`, sessionIds: [],
+  });
+  const first = workspace("A"), second = workspace("B");
+  second.sessionIds.push(`session-${sessionId}`);
+  const folder = directory => ({ state: "bound", folderPath: directory, company: { slug: "fixture" } });
+  let action;
+  let canOpenFolder = true;
+  let polls = 0;
+  const bridge = {
+    readExistingBridgeSessionToken: async () => token,
+    request: async (_origin, _token, endpoint) => {
+      assert.equal(endpoint, "/api/agent-workspaces/deepseek-desktop/next");
+      polls += 1;
+      return Response.json({ action });
+    },
+  };
+  const navigation = createDeepseekDesktopNavigation({ origin, bridge,
+    inspect: async directory => canOpenFolder ? folder(directory) : null,
+    register: async ({ folder }) => ({ registered: true, id: codexLaunchFolderId(token, origin, folder, "deepseek") }),
+  });
+  const next = (site = "same-origin") => navigation.route.fetch(new Request(`https://host${navigation.route.path}`, {
+    method: "POST", headers: { "x-trelio-desktop-navigation": "1", "sec-fetch-site": site },
+    body: JSON.stringify([first, second]),
+  }));
+  assert.equal((await next("cross-site")).status, 403);
+  assert.equal(polls, 0);
+  action = { kind: "start", folderId: codexLaunchFolderId(token, origin, folder(second.directory), "deepseek"),
+    taskPath: "/fixture/general/tasks/23/" };
+  assert.deepEqual((await (await next()).json()).action, { kind: "start", workspaceId: second.workspaceId,
+    prompt: "Изучи задачу в Trelio через Trelio Agent Workspaces: https://trelio.ru/fixture/general/tasks/23/" });
+  canOpenFolder = false;
+  assert.deepEqual(await (await next()).json(), { action: null }, "A stale registered folder cannot be opened");
+  action = { kind: "resume", sessionId: `session-${sessionId}` };
+  assert.deepEqual((await (await next()).json()).action, action);
+  assert.equal(navigation.hasSession(action.sessionId), true);
+  action = { kind: "resume", sessionId: "session-10000000-0000-4000-8000-000000000002" };
+  assert.deepEqual(await (await next()).json(), { action: null }, "A foreign session cannot be opened or observed");
+  assert.equal(navigation.hasSession(action.sessionId), false);
 });

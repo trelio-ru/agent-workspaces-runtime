@@ -31,7 +31,7 @@ import { browserControllerEnabled, parseBrowserControllerArguments, skillResourc
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
-import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment, readCodexNavigationThreadId } from "./trelio-codex-conversation.mjs";
+import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment, readCodexNavigationThreadId, buildDeepseekDesktopClientBundle } from "./trelio-codex-conversation.mjs";
 import { readCodexPluginEnablement, readCodexAssistantMarketplaceSource } from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
@@ -20110,10 +20110,14 @@ export const buildDeepseekBundle = ({ pluginRoot }) => {
   const loader = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-loader.mjs")).href;
   const shell = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-shell.mjs")).href;
   return {
-    "package.json": `${JSON.stringify({ name: "@trelio/deepseek-harness", version: "0.1.0",
-      private: true, type: "module", main: "./index.mjs", engines: { node: ">=24.9.0", dsh: DEEPSEEK_HARNESS_VERSION_RANGE },
-      dsh: { bundle: { patch: "./cordis.patch.yml" } } }, null, 2)}\n`,
+    "package.json": `${JSON.stringify({ name: "@trelio/deepseek-harness", version: "0.2.0",
+      private: true, type: "module", main: "./index.mjs",
+      exports: { ".": "./index.mjs", "./client": "./client.js" },
+      engines: { node: ">=24.9.0", dsh: DEEPSEEK_HARNESS_VERSION_RANGE },
+      dsh: { bundle: { patch: "./cordis.patch.yml" }, client: { platform: "web",
+        inject: ["@deepseek-ai/dsh-api-workspace-controller", "@deepseek-ai/dsh-client-ui-workspace"] } } }, null, 2)}\n`,
     "cordis.patch.yml": "- insert:\n    - id: trelio-deepseek-harness\n      name: ./index.mjs\n",
+    "client.js": buildDeepseekDesktopClientBundle(),
     "index.mjs": `// Generated native bootstrap. Business code stays in the signed runtime.\nimport { pathToFileURL } from 'node:url';\nimport path from 'node:path';\nimport { selectHostRuntime } from ${JSON.stringify(loader)};\nimport { PLUGIN_VERSION } from ${JSON.stringify(shell)};\nconst selected = await selectHostRuntime();\nif (!selected) throw new Error('TRELIO_HOST_RUNTIME_REQUIRED');\nprocess.env.TRELIO_PLUGIN_ROOT = ${JSON.stringify(pluginRoot)};\nprocess.env.TRELIO_PLUGIN_VERSION = PLUGIN_VERSION;\nprocess.env.TRELIO_HOST_RUNTIME_VERSION = selected.runtimeVersion;\nconst native = await import(pathToFileURL(path.join(selected.runtimeDirectory, 'scripts', 'trelio-remote-mcp.mjs')).href).then(module => module.deepseekHarnessPlugin);\nexport const name = native.name;\nexport const inject = native.inject;\nexport const apply = native.apply;\n`,
   };
 };

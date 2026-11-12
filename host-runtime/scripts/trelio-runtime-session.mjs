@@ -915,7 +915,7 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
  * proposal route guard and proof-preparation binding. Proofs never enter the
  * Harness-authored tool arguments or recorded tool input.
  */
-export const prepareNativeRuntimeToolArguments = async ({ sessionId, observation, toolName, input, signal }) => {
+export const prepareNativeRuntimeToolArguments = async ({ sessionId, observation, toolName, input, signal, desktop = false }) => {
   if (observation?.clientFamily !== "deepseek-harness" || observation.source !== "deepseek_native"
       || observation.evidenceLevel !== "local_observed" || typeof observation.modelId !== "string"
       || !/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,254}$/u.test(observation.modelId)
@@ -923,7 +923,7 @@ export const prepareNativeRuntimeToolArguments = async ({ sessionId, observation
       || typeof sessionId !== "string" || !sessionId || sessionId.length > 256) {
     throw Object.assign(new Error("Harness не подтвердил текущую модель и сессию."), { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
   }
-  const hookInput = { hook_event_name: "PreToolUse", session_id: `dsh:${sessionId}`,
+  const hookInput = { hook_event_name: "PreToolUse", session_id: `${desktop === true ? "dsh-desktop" : "dsh"}:${sessionId}`,
     tool_name: toolName, tool_input: Object.fromEntries(Object.entries(structuredClone(input)).filter(([key]) =>
       !["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"].includes(key))) };
   let updated = hookInput.tool_input;
