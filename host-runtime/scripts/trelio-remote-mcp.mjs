@@ -4048,9 +4048,10 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
-  { name: "open_codex_connection_wizard", description: "Open only the exact bridge.action returned by prepare_codex_connection. Select the permanent folder in the App; no business Workspace or Run is created.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["companySlug", "runtimeSessionId"],
-      properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 }, runtimeSessionId: { type: "string", format: "uuid" } } },
+  { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action. The user selects the folder in the App.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["companySlug"],
+      properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
+        memberId: { type: "string", format: "uuid" }, runtimeSessionId: { type: "string", format: "uuid" } } },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } },
   { name: CODEX_CONNECTION_ACTION, description: "Local Codex connection wizard action.",
@@ -5726,6 +5727,7 @@ export const handleToolCall = async (
     localWorkspaceOperation = handleTrelioLocalWorkspaceOperation,
     workspaceActionOperation = handleTrelioWorkspaceActionOperation,
     codexThreadId = null,
+    codexFolderSetupClient = false,
     proposalOperation = handleTrelioLocalProposalOperation,
     proposalProviderSelectionRecorder = null,
     proposalCapabilityConfigDirectory,
@@ -6009,9 +6011,18 @@ export const handleToolCall = async (
   }
   if (name === CODEX_CONNECTION_ACTION) return handleCodexConnectionAction(origin, rawArguments, { signal });
   if (name === "open_codex_connection_wizard") {
+    // The shared OAuth profile cannot identify the desktop app. Require the
+    // local Codex MCP connection for the paired-device action; legacy actions
+    // carry their own server-verified Codex session.
+    if (rawArguments?.memberId && !codexFolderSetupClient) {
+      throw new RemoteMcpHostError("CODEX_CONNECTION_CLIENT_REQUIRED", "Open the folder setup in Codex.");
+    }
     try {
       return await openCodexConnectionWizard(origin, { schemaVersion: 1, operation: "codex_connection_open", parameters: rawArguments }, { signal });
     } catch (error) {
+      // The ordinary pairing error already carries the exact approval request.
+      // Preserve its public instructions without serializing the local verifier.
+      if (error?.code === "TRELIO_BRIDGE_PAIRING_REQUIRED" && error.pairing) throw error;
       const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "CODEX_CONNECTION_FAILED";
       const reason = error?.reason ?? error?.payload?.reason;
       throw new RemoteMcpHostError(code, "Мастер подключения не подготовлен. Сохраните код ошибки и повторите настройку в этом чате.",
@@ -6739,7 +6750,8 @@ export const handleLocalMcpMessage = async (
       // Codex emits threadId in the JSON-RPC request metadata for each tool
       // call. A shared MCP process cannot use its inherited environment or an
       // ID supplied in tool arguments to identify the current chat.
-      const codexThreadId = clientInfo?.name === "codex-mcp-client"
+      const nativeCodex = clientInfo?.name === "codex-mcp-client";
+      const codexThreadId = nativeCodex
         && message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name
         && message.params?.arguments?.operation === "open"
         ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId)
@@ -6748,7 +6760,8 @@ export const handleLocalMcpMessage = async (
         try {
           return await callTool(origin, String(message.params?.name || ""), message.params?.arguments,
             { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities,
-              requestClient, codexLegacyMcpMigration, ...(codexThreadId ? { codexThreadId } : {}) });
+              requestClient, codexLegacyMcpMigration, ...(codexThreadId ? { codexThreadId } : {}),
+              ...(nativeCodex && message.params?.name === "open_codex_connection_wizard" ? { codexFolderSetupClient: true } : {}) });
         } catch (error) {
           // A verified pre-dispatch upgrade is the only safe automatic replay.
           // Recovery spends this SAME call budget; a stalled update must not

@@ -549,18 +549,26 @@ const wizardDependencies = async dependencies => ({
   bridge: dependencies.bridge ?? await import("./trelio-workspace.mjs"),
   filesystem: dependencies.filesystem ?? fs,
 });
-const liveWizardContext = async (origin, parameters, dependencies, signal) => {
+const liveWizardContext = async (origin, parameters, dependencies, signal, { allowPairing = false } = {}) => {
   const { bridge } = await wizardDependencies(dependencies);
-  const token = await bridge.loadToken(origin, { signal });
+  // Only the initial opener can ask for the ordinary OAuth pairing approval.
+  // An existing App capability must never move to a newly paired device.
+  const token = allowPairing && parameters.memberId
+    ? await bridge.requireToken(origin, { signal, onStatus: () => {} })
+    : await bridge.loadToken(origin, { signal });
   if (!token?.startsWith("twb_")) throw wizardError("CODEX_CONNECTION_PAIRING_REQUIRED");
   const routing = await bridge.resolveBridgeDataPlaneRouting({ origin, token, companySlug: parameters.companySlug, signal });
   if (!["plain", "encrypted"].includes(routing.encryptionState)) throw wizardError("COMPANY_ENCRYPTION_TRANSITION");
-  const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(parameters.companySlug)}/codex-connection?runtimeSessionId=${parameters.runtimeSessionId}`;
+  const query = parameters.runtimeSessionId ? `?runtimeSessionId=${parameters.runtimeSessionId}` : "";
+  const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(parameters.companySlug)}/codex-connection${query}`;
   const context = await (await bridge.request(routing.requestOrigin, token, endpoint, { signal })).json();
   if (context?.company?.slug !== parameters.companySlug || !UUID.test(context?.company?.id ?? "")
     || !UUID.test(context?.memberId ?? "") || typeof context.company.name !== "string"
     || context.company.name.length > 255 || context.encryptionState !== routing.encryptionState) {
     throw wizardError("CODEX_CONNECTION_INVALID_RESPONSE");
+  }
+  if (parameters.memberId && context.memberId !== parameters.memberId) {
+    throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
   }
   return { context, token, bridge };
 };
@@ -578,10 +586,11 @@ const wizardResult = (capabilityToken, capability, state, mount = false) => ({
 export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) => {
   if (!object(raw) || raw.schemaVersion !== 1 || raw.operation !== "codex_connection_open"
     || Object.keys(raw).some(key => !["schemaVersion", "operation", "parameters"].includes(key))
-    || !object(raw.parameters) || Object.keys(raw.parameters).some(key => !["companySlug", "runtimeSessionId"].includes(key))
+    || !object(raw.parameters) || Object.keys(raw.parameters).some(key => !["companySlug", "runtimeSessionId", "memberId"].includes(key))
     || typeof raw.parameters.companySlug !== "string" || !/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(raw.parameters.companySlug)
-    || !UUID.test(raw.parameters.runtimeSessionId ?? "")) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
-  const { context, token, bridge } = await liveWizardContext(origin, raw.parameters, dependencies, dependencies.signal);
+    || Object.hasOwn(raw.parameters, "runtimeSessionId") === Object.hasOwn(raw.parameters, "memberId")
+    || !UUID.test(raw.parameters.runtimeSessionId ?? raw.parameters.memberId ?? "")) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+  const { context, token, bridge } = await liveWizardContext(origin, raw.parameters, dependencies, dependencies.signal, { allowPairing: true });
   const key = wizardBindingKey(origin, token, context);
   const stateFile = path.join(bridge.resolveWorkspaceBridgeConfigDirectory(), "codex-connections", `${key}.json`);
   const previous = await bridge.readPrivateJsonFile(stateFile, { maximumBytes: 16_384 });
@@ -632,8 +641,8 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
   if (wizardBusy.has(cap.busyKey)) throw wizardError("CODEX_CONNECTION_BUSY");
   wizardBusy.add(cap.busyKey);
   try {
-    // Expiry, revoked membership, bridge grant and model policy are independent
-    // of the hidden local capability and are checked again before every action.
+    // Expiry, membership, bridge grant and client availability are independent
+    // of the hidden App capability and are checked again before every action.
     const { context, bridge, token } = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
     const liveKey = wizardBindingKey(origin, token, context);
     if (context.company.id !== cap.company.id || context.memberId !== cap.memberId || liveKey !== cap.busyKey) {
@@ -695,7 +704,7 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
         || verifiedFolder.company.slug !== cap.company.slug || verifiedFolder.project) {
         throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
       }
-      // Registration read-back and local CAS are distinct from live admission.
+      // Registration read-back and local CAS are distinct from live access.
       // A policy/account change during HTTP must not leave an old green screen.
       const finalContext = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
       if (wizardBindingKey(origin, finalContext.token, finalContext.context) !== cap.busyKey) {

@@ -178,24 +178,29 @@ import { openCodexConnectionWizard, handleCodexConnectionAction, chooseCodexConn
   registerAndVerifyCodexLaunchFolder, codexConnectionAppResource, runCodexFolderPickerProcess } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import vm from "node:vm";
 
-const wizardFixture = async t => {
+const wizardFixture = async (t, pairedSetup = false) => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "trelio-wizard-")));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const origin = "https://trelio.ru", files = new Map();
-  let rows = [], puts = 0, allowed = true, loseResponse = false;
+  let rows = [], puts = 0, allowed = true, loseResponse = false, memberId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const originalMemberId = memberId;
   const company = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Company A", slug: "company-a" };
   const bridge = { ...localBridge, resolveWorkspaceBridgeConfigDirectory: () => path.join(root, "private"),
     readPrivateJsonFile: async file => files.get(file) ?? {},
     writePrivateJsonFile: async (file, value) => files.set(file, structuredClone(value)),
     loadToken: async () => "twb_wizard-fixture",
+    requireToken: async () => "twb_wizard-fixture",
     resolveBridgeDataPlaneRouting: async () => ({ requestOrigin: origin, encryptionState: "plain" }),
     request: async (_origin, _token, endpoint, options = {}) => {
       if (!allowed) throw Object.assign(new Error("native private message"), { code: "ACCESS_DENIED" });
-      if (endpoint.includes("codex-connection?")) return { json: async () => ({ company,
-        memberId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", encryptionState: "plain" }) };
+      if (endpoint.includes("/codex-connection")) {
+        assert.equal(endpoint.includes("runtimeSessionId="), !pairedSetup);
+        return { json: async () => ({ company, memberId, encryptionState: "plain" }) };
+      }
       if (options.method === "PUT") {
         puts++;
         const body = JSON.parse(options.body);
+        assert.equal(Object.hasOwn(body, "runtimeSessionId"), !pairedSetup);
         rows.push({ id: endpoint.split("/").at(-1), folderPath: body.folderPath, platform: body.platform, projectId: null });
         if (loseResponse) throw new Error("lost mutation response");
         return { json: async () => ({ id: rows.at(-1).id, registered: true }) };
@@ -203,15 +208,32 @@ const wizardFixture = async t => {
       return { json: async () => ({ folders: rows }) };
     },
   };
-  const raw = { schemaVersion: 1, operation: "codex_connection_open", parameters: { companySlug: "company-a", runtimeSessionId: state.runtimeSessionId } };
+  const raw = { schemaVersion: 1, operation: "codex_connection_open", parameters: { companySlug: "company-a",
+    ...(pairedSetup ? { memberId: originalMemberId } : { runtimeSessionId: state.runtimeSessionId }) } };
   const open = () => openCodexConnectionWizard(origin, raw, { bridge });
   const first = await open();
   const token = first._meta["trelio/codexConnection"].capabilityToken;
-  const action = (action, settings) => handleCodexConnectionAction(origin, { capabilityToken: token, action,
-    ...(settings ? { settings } : {}) }, { bridge });
+  const action = (action, settings, extra = {}) => handleCodexConnectionAction(origin, { capabilityToken: token, action,
+    ...(settings ? { settings } : {}) }, { bridge, ...extra });
   return { root, origin, bridge, open, action, token, company, files, get puts() { return puts; },
-    set allowed(value) { allowed = value; }, set loseResponse(value) { loseResponse = value; } };
+    set allowed(value) { allowed = value; }, set loseResponse(value) { loseResponse = value; },
+    set memberId(value) { memberId = value; } };
 };
+
+test("paired setup picks and registers a folder without a hook, and rejects an account switch", async t => {
+  const fixture = await wizardFixture(t, true);
+  const chosen = path.join(fixture.root, "Selected folder");
+  await fs.mkdir(chosen);
+  const pick = await fixture.action("pick", undefined, { chooseFolder: async () => chosen });
+  assert.equal(pick._meta["trelio/codexConnection"].folderPath, chosen);
+  const result = await fixture.action("connect");
+  assert.equal(result.structuredContent.verified, true, JSON.stringify(result.content));
+  assert.equal(fixture.puts, 1);
+  fixture.memberId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await assert.rejects(fixture.open(), /CODEX_CONNECTION_SCOPE_CHANGED/u);
+  assert.equal((await fixture.action("connect")).structuredContent.code, "CODEX_CONNECTION_SCOPE_CHANGED");
+  assert.equal(fixture.puts, 1);
+});
 
 test("wizard creates a chosen folder, preserves existing text, registers and reads back before ready", async t => {
   const fixture = await wizardFixture(t);

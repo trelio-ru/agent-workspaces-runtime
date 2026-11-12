@@ -3744,16 +3744,16 @@ lifecycle и ключ. Старый backend не обязан возвращат
 ## Мастер подключения Codex
 
 Владелец алгоритма – generic runtime в `trelio-codex-conversation.mjs`.
-Backend `prepare_codex_connection({companySlug})` проверяет read/workspaces:read,
-точную компанию и допущенную observed Codex hook session и возвращает только
-open metadata и exact `open_codex_connection_wizard` action. Нет business Run,
+Backend `prepare_codex_connection({companySlug})` проверяет read/workspaces:read
+и доступ к точной компании и возвращает только открытые метаданные
+и exact `open_codex_connection_wizard` action. Нет business Run,
 нового hook/matcher, изменения config Codex или автоматизации trust. Установка
 плагина и native OAuth предшествуют доступности мастера; чужой grant не копируется.
 Отсутствующий tool означает несовместимую опубликованную версию, а не разрешение
 копировать implementation в plugin или имитировать успешное подключение.
 
 Это единственный явный setup flow, где постоянная папка выбирается ПОСЛЕ plugin/
-OAuth/admission. Browser deep link открывает projectless чат с неотправленным
+OAuth. Browser deep link открывает projectless чат с неотправленным
 setup prompt; он не подставляет process cwd/home/temp как выбранную папку.
 Пользователь выбирает папку в App и нажимает «Подключить». Название подключения
 сохраняется только в owner-private локальном state и показывается в этом мастере;
@@ -3763,9 +3763,12 @@ setup prompt; он не подставляет process cwd/home/temp как вы
 Локальный UI `ui://trelio/codex-connection-v1.html` offline, без network/assets.
 Host передаёт пути, название и random capability только через App-only `_meta`.
 `codex_connection_app_action` скрыт от модели, capability живёт 30 минут,
-привязана к exact origin/company/member/bridge credential и runtime session.
-Каждый action повторяет bridge-only `GET codex-connection?runtimeSessionId=…`:
-live membership/modules/client/model policy, текущую session и encryption state.
+привязана к exact origin/company/member/bridge credential. Новый action
+из Codex может пройти обычное pairing при первом открытии, после чего bridge
+проверяет участника из плана. Каждый App action повторяет bridge-only
+`GET codex-connection` и проверку участника. Legacy action с
+`runtimeSessionId` дополнительно сверяет observed session.
+Проверки модели и effort выполняются при работе с Run.
 Повторный OAuth под другим аккаунтом/device не переносит старую карточку.
 Один company/device writer исключает двойное нажатие и параллельные карточки.
 
