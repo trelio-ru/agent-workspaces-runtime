@@ -45,6 +45,7 @@ import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 
 import {
@@ -94,6 +95,46 @@ const RECOVERY_TOOLS = new Set([
   "revoke_agent_workspace_bridge_session",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const CLAUDE_LOCAL_SESSION_ID = /^local_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+const claudeHostLocator = (environment, platform) => {
+  if (!["darwin", "win32"].includes(platform)
+    || environment.CLAUDE_CODE_ENTRYPOINT !== "claude-desktop"
+    || !/^\d+\.\d+\.\d+(?:[-.][\w.-]+)?$/u.test(environment.CLAUDE_CODE_DESKTOP_APP_VERSION || "")
+    || environment.SSH_CONNECTION || environment.SSH_CLIENT || environment.WSL_DISTRO_NAME
+    || environment.CLAUDE_CODE_REMOTE_SESSION_ID) return null;
+  const id = environment.CLAUDE_CODE_HOST_SESSION_ID;
+  return CLAUDE_LOCAL_SESSION_ID.test(id || "") ? id : null;
+};
+
+/** Desktop owns the native tab id. Independently check its exact private Code
+ * record, so a CLI/remote/Cowork session never becomes a Desktop launch target.
+ * Neither record content nor title, cwd or account identifiers leave this read. */
+export const observeClaudeDesktopLocalSession = async (clientSessionId, {
+  environment = process.env, platform = process.platform, home = os.homedir(), read,
+} = {}) => {
+  const locator = claudeHostLocator(environment, platform);
+  const account = environment.CLAUDE_CODE_ACCOUNT_UUID;
+  const organization = environment.CLAUDE_CODE_ORGANIZATION_UUID;
+  if (!locator || !UUID_PATTERN.test(clientSessionId || "")
+    || !UUID_PATTERN.test(account || "") || !UUID_PATTERN.test(organization || "")) return null;
+  const userData = platform === "darwin" ? path.join(home, "Library", "Application Support")
+    : environment.APPDATA;
+  if (!userData || !path.isAbsolute(userData)) return null;
+  const readRecord = read ?? (await loadWorkspaceBridgeModule()).readPrivateJsonFile;
+  const recordPath = path.join(userData, "Claude", "claude-code-sessions", account, organization, locator + ".json");
+  try {
+    const record = await readRecord(recordPath, { maximumBytes: 1024 * 1024 });
+    return record?.sessionId === locator && record.cliSessionId === clientSessionId
+      && !record.isArchived && !record.remoteTarget && !record.backend?.remoteTarget
+      && typeof record.cwd === "string" && path.isAbsolute(record.cwd) ? locator : null;
+  } catch {
+    // Native app variants can have a different storage location. Optional
+    // navigation evidence must never change the original hook admission.
+    return null;
+  }
+};
+
 const HOOK_REQUIRED_CODE = "TRELIO_RUNTIME_HOOK_REQUIRED";
 const HOOK_FAILED_CODE = "TRELIO_RUNTIME_HOOK_FAILED";
 const SUPPORTED_HOOK_EVENTS = new Set(["SessionStart", "PreToolUse", "SessionEnd"]);
@@ -473,6 +514,7 @@ const createRuntimeState = async ({
   instructionContext = null,
   previousState = null,
   currentObservation: suppliedObservation = null,
+  claudeDesktopSessionId = null,
 }) => {
   const currentObservation = suppliedObservation ?? await observeRuntimeForHook(hookInput);
   assertRuntimeHookBudget();
@@ -507,7 +549,7 @@ const createRuntimeState = async ({
   }));
   const registration = await registerRuntimeObservation({
     origin, clientSessionId, observation, publicKeySpki,
-    previousRuntimeSessionId: previousState?.runtimeSessionId,
+    claudeDesktopSessionId, previousRuntimeSessionId: previousState?.runtimeSessionId,
   });
   if (previousState && (!registration.runtimeRefreshSupported
     || Date.parse(registration.expiresAt) > Date.parse(previousState.expiresAt)
@@ -520,6 +562,8 @@ const createRuntimeState = async ({
     expiresAt: registration.expiresAt,
     privateKeyPkcs8,
     observation: registration.observation,
+    ...(claudeDesktopSessionId && { claudeDesktopLocatorObserved: claudeDesktopSessionId }),
+    ...(claudeDesktopSessionId && registration.claudeDesktopSessionId === claudeDesktopSessionId && { claudeDesktopSessionId }),
     runtimeRefreshSupported: registration.runtimeRefreshSupported,
     instructionContext,
   };
@@ -530,7 +574,7 @@ const createRuntimeState = async ({
 const sameRuntimeConfiguration = (left, right) => Boolean(left && right
   && ["clientFamily", "modelId", "effortLevel", "source", "evidenceLevel"].every(key => left[key] === right[key]));
 
-const registerRuntimeObservation = async ({ origin, clientSessionId, observation, publicKeySpki, previousRuntimeSessionId }) => {
+const registerRuntimeObservation = async ({ origin, clientSessionId, observation, publicKeySpki, previousRuntimeSessionId, claudeDesktopSessionId }) => {
   const {
     requireToken,
     registerAgentRuntimeHookSession,
@@ -568,6 +612,7 @@ const registerRuntimeObservation = async ({ origin, clientSessionId, observation
       observation,
       publicKeySpki,
       previousRuntimeSessionId,
+      claudeDesktopSessionId,
       signal: registrationSignal,
     })
   )));
@@ -590,7 +635,7 @@ const registerRuntimeObservation = async ({ origin, clientSessionId, observation
   return registration;
 };
 
-const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientSessionId }) => {
+const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientSessionId, claudeDesktopSessionId }) => {
   // Compatibility lifecycle: runtime-session-refresh-v1 in Trelio's legacy registry.
   // Old servers keep their original ABI. This is capability negotiation, never
   // a plaintext/proof fallback after an error from a supported refresh route.
@@ -600,7 +645,8 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
     throw Object.assign(new Error("текущий hook не смог определить модель; повторите запрос после появления данных текущего хода"),
       { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
   }
-  if (sameRuntimeConfiguration(state.observation, observation) && !state.pendingRefresh) return state;
+  const needsLocator = (stored) => Boolean(claudeDesktopSessionId && !stored.claudeDesktopLocatorObserved);
+  if (sameRuntimeConfiguration(state.observation, observation) && !state.pendingRefresh && !needsLocator(state)) return state;
   return withRuntimeStateLock(filePath, async () => {
     let current = await readRuntimeState(filePath);
     if (!current) throw Object.assign(new Error("runtime-сессия завершилась во время обновления"), { code: "TRELIO_RUNTIME_REFRESH_INVALID" });
@@ -637,7 +683,7 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
     // Never lend another model's effort, or invent one for a first unknown.
     if (observation.source !== "deepseek_native" && observation.modelId === current.observation?.modelId
       && observation.effortLevel === null && current.observation.effortLevel !== null) return current;
-    if (sameRuntimeConfiguration(current.observation, observation)) {
+    if (sameRuntimeConfiguration(current.observation, observation) && !needsLocator(current)) {
       if (current.pendingRefresh) {
         delete current.pendingRefresh;
         await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
@@ -645,7 +691,8 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
       return current;
     }
     return createRuntimeState({ hookInput, clientSessionId, origin, filePath,
-      previousState: current, currentObservation: observation, instructionContext: current.instructionContext });
+      previousState: current, currentObservation: observation, instructionContext: current.instructionContext,
+      claudeDesktopSessionId });
   });
 };
 
@@ -778,6 +825,11 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
   if (!clientSessionId) throw Object.assign(new Error("клиент не передал session_id"), { code: "TRELIO_RUNTIME_SESSION_ID_REQUIRED" });
   const filePath = await statePathFor(clientSessionId, origin);
   let state = await readRuntimeState(filePath);
+  const hostLocator = claudeHostLocator(process.env, process.platform);
+  // Reuse evidence only within the same native host tab. A different host
+  // must never inherit the original tab merely by reusing the engine ID.
+  const claudeDesktopSessionId = hostLocator && (state?.claudeDesktopLocatorObserved === hostLocator
+    ? hostLocator : await observeClaudeDesktopLocalSession(clientSessionId));
   if (!state) {
     state = await withRuntimeStateLock(filePath, async () => {
       // The winner may have completed while this process waited. Always
@@ -800,11 +852,12 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
         origin,
         filePath,
         initialObservation,
+        claudeDesktopSessionId,
         instructionContext: storedState.instructionContext ?? null,
       });
     });
   }
-  state = await refreshRuntimeState({ hookInput, state, filePath, origin, clientSessionId });
+  state = await refreshRuntimeState({ hookInput, state, filePath, origin, clientSessionId, claudeDesktopSessionId });
   assertRuntimeHookBudget();
   const bridge = await loadWorkspaceBridgeModule();
   await saveRuntimeChatBinding({ configDirectory: bridge.resolveWorkspaceBridgeConfigDirectory(),
@@ -842,11 +895,13 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
   const launchBudget = Math.min(2_000, runtimeHookRemainingMilliseconds("PreToolUse", {
     startedAt: resolveRuntimeHookStartedAt(),
   }) - 1_000);
-  if (launchBudget >= 250 && state.observation?.clientFamily === "codex" && typeof hookInput.cwd === "string") {
+  if (launchBudget >= 250 && typeof hookInput.cwd === "string"
+    && (state.observation?.clientFamily === "codex"
+      || (state.claudeDesktopSessionId && state.claudeDesktopSessionId === claudeHostLocator(process.env, process.platform)))) {
     // The lifecycle event owns the selected folder. Never substitute this
     // long-lived MCP process's cwd or an agent-authored workingDirectory.
-    const { synchronizeCodexLaunchFolder } = await import("./trelio-codex-conversation.mjs");
-    await synchronizeCodexLaunchFolder({ hookInput, state, origin,
+    const { synchronizeDesktopLaunchFolder } = await import("./trelio-codex-conversation.mjs");
+    await synchronizeDesktopLaunchFolder({ hookInput, state, origin,
       signal: AbortSignal.any([runtimeHookSignal(), AbortSignal.timeout(launchBudget)]) });
   }
   assertRuntimeHookBudget();

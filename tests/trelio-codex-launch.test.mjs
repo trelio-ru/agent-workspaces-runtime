@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { inspectCodexLaunchFolder, synchronizeCodexLaunchFolder, codexLaunchFolderId } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const managed = line => `<!-- trelio-agent-workspaces:start -->\n## Trelio\n${line}\n<!-- trelio-agent-workspaces:end -->\n`;
@@ -60,18 +60,49 @@ test("a chat about B in A registers only A; a lost PUT is reconciled through GET
     ensureCompanyEncryptionContext: () => assert.fail("Plain metadata must not start encryption setup"),
   };
   const input = { hookInput: { cwd: root }, state, origin: "https://trelio.ru", toolInput: { companySlug: "company-b" } };
-  assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
+  assert.equal(await synchronizeDesktopLaunchFolder(input, { bridge }), null);
   assert.equal(puts, 1);
-  assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
+  assert.equal(await synchronizeDesktopLaunchFolder(input, { bridge }), null);
   assert.equal(puts, 1);
-  await synchronizeCodexLaunchFolder(input, { bridge });
+  await synchronizeDesktopLaunchFolder(input, { bridge });
   assert.equal(puts, 1);
-  assert.equal(await synchronizeCodexLaunchFolder({ ...input, state: { ...state,
+  assert.equal(await synchronizeDesktopLaunchFolder({ ...input, state: { ...state,
     runtimeSessionId: "22222222-2222-4222-8222-222222222222" } }, { bridge }), null);
   assert.equal(puts, 1, "A new chat reuses the registered binding without another write or setup prompt");
   const folder = await inspectCodexLaunchFolder(root, { bridge });
   assert.equal(codexLaunchFolderId("twb_one", input.origin, folder), codexLaunchFolderId("twb_one", input.origin, folder));
   assert.notEqual(codexLaunchFolderId("twb_one", input.origin, folder), codexLaunchFolderId("twb_two", input.origin, folder));
+});
+
+test("Claude Desktop folders require the confirmed native locator and use a separate registry", async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "trelio-claude-launch-")));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, "AGENTS.md"), canonical);
+  const endpoints = [];
+  const bridge = { ...localBridge,
+    resolveWorkspaceBridgeConfigDirectory: () => root,
+    readPrivateJsonFile: async () => ({}),
+    writePrivateJsonFile: async () => {},
+    loadToken: async () => "twb_disposable-fixture",
+    resolveBridgeDataPlaneRouting: async ({ origin }) => ({ requestOrigin: origin, encryptionState: "plain" }),
+    request: async (_origin, _token, endpoint, options = {}) => {
+      endpoints.push([options.method ?? "GET", endpoint, options.body]);
+      return { json: async () => ({ folders: [] }) };
+    },
+  };
+  const origin = "https://trelio.ru";
+  const claudeState = { ...state, observation: { clientFamily: "claude-code" } };
+  await synchronizeDesktopLaunchFolder({ origin, state: claudeState, hookInput: { cwd: root } }, { bridge });
+  assert.deepEqual(endpoints, [], "A CLI session cannot register a Desktop path");
+  await synchronizeDesktopLaunchFolder({ origin, state: { ...claudeState,
+    claudeDesktopSessionId: "local_11111111-1111-4111-8111-111111111111",
+  }, hookInput: { cwd: root } }, { bridge });
+  assert.deepEqual(endpoints.map(([method]) => method), ["GET", "PUT"]);
+  const folder = await inspectCodexLaunchFolder(root, { bridge });
+  const id = codexLaunchFolderId("twb_disposable-fixture", origin, folder, "claude");
+  assert.notEqual(id, codexLaunchFolderId("twb_disposable-fixture", origin, folder));
+  assert.equal(endpoints[1][1], `/api/agent-workspaces/companies/company-a/claude-folders/${id}`);
+  assert.equal(JSON.parse(endpoints[1][2]).runtimeSessionId, state.runtimeSessionId);
 });
 
 test("unbound selected projects stay silent across chats, including folders with real Git history", async t => {
@@ -102,9 +133,9 @@ test("unbound selected projects stay silent across chats, including folders with
       for (const runtimeSessionId of [state.runtimeSessionId, "22222222-2222-4222-8222-222222222222"]) {
         const input = { hookInput: { cwd: folder }, state: { ...state, runtimeSessionId },
           origin: "https://trelio.ru", toolInput: { companySlug: "company-b" } };
-        assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
-        assert.equal(await synchronizeCodexLaunchFolder(input, { bridge }), null);
-        assert.equal(await synchronizeCodexLaunchFolder({ ...input, hookInput: {} }, { bridge }), null);
+        assert.equal(await synchronizeDesktopLaunchFolder(input, { bridge }), null);
+        assert.equal(await synchronizeDesktopLaunchFolder(input, { bridge }), null);
+        assert.equal(await synchronizeDesktopLaunchFolder({ ...input, hookInput: {} }, { bridge }), null);
       }
       assert.equal(privateCalls, 0, "No consent memo, credentials, registration or onboarding for an unbound folder");
       assert.equal(await fs.readFile(path.join(folder, "AGENTS.md"), "utf8"), instructions);
@@ -136,7 +167,7 @@ test("encryption failure never uploads plaintext or starts a different transport
       throw new Error("device not unlocked");
     },
   };
-  await synchronizeCodexLaunchFolder({ hookInput: { cwd: root }, state,
+  await synchronizeDesktopLaunchFolder({ hookInput: { cwd: root }, state,
     origin: "https://trelio.ru", toolInput: {} }, { bridge });
   assert.equal(puts, 0);
 });

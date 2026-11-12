@@ -30,6 +30,7 @@ import {
   cleanupStaleRuntimeSessions,
   formatRuntimeHookFailure,
   isProtectedTrelioToolName,
+  observeClaudeDesktopLocalSession,
   recoverHookHostRuntimeUpgrade,
   resolveTrelioMcpToolName,
 } from "../host-runtime/scripts/trelio-runtime-session.mjs";
@@ -168,6 +169,51 @@ const assertDeniedHook = (result) => {
   ]);
   return output.permissionDecisionReason;
 };
+
+test("only an exact private Claude Desktop Code Local record supplies a continuation ID", async () => {
+  const engine = "11111111-1111-4111-8111-111111111111";
+  const native = "local_22222222-2222-4222-8222-222222222222";
+  const environment = {
+    CLAUDE_CODE_ENTRYPOINT: "claude-desktop",
+    CLAUDE_CODE_DESKTOP_APP_VERSION: "2.9939.2",
+    CLAUDE_CODE_HOST_SESSION_ID: native,
+    CLAUDE_CODE_ACCOUNT_UUID: "33333333-3333-4333-8333-333333333333",
+    CLAUDE_CODE_ORGANIZATION_UUID: "44444444-4444-4444-8444-444444444444",
+  };
+  const home = path.resolve("fixture-home");
+  const record = { sessionId: native, cliSessionId: engine, cwd: path.resolve("project") };
+  const opts = { platform: "darwin", environment, home };
+  assert.equal(await observeClaudeDesktopLocalSession(engine, { ...opts, read: async (file, options) => {
+    assert.equal(file, path.join(home, "Library", "Application Support", "Claude", "claude-code-sessions",
+      environment.CLAUDE_CODE_ACCOUNT_UUID, environment.CLAUDE_CODE_ORGANIZATION_UUID, native + ".json"));
+    assert.equal(options.maximumBytes, 1024 * 1024);
+    return record;
+  } }), native);
+  for (const variation of [
+    { CLAUDE_CODE_ENTRYPOINT: "cli" },
+    { CLAUDE_CODE_ENTRYPOINT: "cowork" },
+    { CLAUDE_CODE_HOST_SESSION_ID: engine },
+    { CLAUDE_CODE_HOST_SESSION_ID: "local_../../private" },
+    { SSH_CONNECTION: "active" },
+    { CLAUDE_CODE_REMOTE_SESSION_ID: "remote" },
+  ]) {
+    assert.equal(await observeClaudeDesktopLocalSession(engine, {
+      ...opts, environment: { ...environment, ...variation },
+      read: async () => { assert.fail("An unrecognized host must not read Desktop files"); },
+    }), null);
+  }
+  for (const variation of [
+    { cliSessionId: native }, { sessionId: engine }, { isArchived: true },
+    { backend: { remoteTarget: "ssh" } }, { cwd: "relative" },
+  ]) {
+    assert.equal(await observeClaudeDesktopLocalSession(engine, {
+      ...opts, read: async () => ({ ...record, ...variation }),
+    }), null);
+  }
+  assert.equal(await observeClaudeDesktopLocalSession(engine, {
+    ...opts, read: async () => { throw new Error("owner check failed"); },
+  }), null);
+});
 
 test("chat binding is private exact session UI context with original expiry, never a guessed fallback", async () => {
   const configDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-chat-binding-"));

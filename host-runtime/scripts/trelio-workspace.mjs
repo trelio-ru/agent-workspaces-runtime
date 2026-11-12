@@ -5227,6 +5227,10 @@ const normalizeRuntimeHookSessionPayload = (value) => {
     runtimeSessionId: String(value.runtimeSessionId).toLowerCase(),
     expiresAt: String(value.expiresAt),
     observation: value.observation,
+    ...(value.conversation?.provider === "claude"
+      && value.conversation?.openProtocol === "claude-desktop-local-v1"
+      && /^local_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.conversation.conversationId)
+      ? { claudeDesktopSessionId: value.conversation.conversationId } : {}),
     runtimeRefreshSupported: value.runtimeRefreshSupported === true,
   };
 };
@@ -5243,6 +5247,7 @@ export const registerAgentRuntimeHookSession = async ({
   observation,
   publicKeySpki,
   previousRuntimeSessionId,
+  claudeDesktopSessionId,
   signal,
 }) => {
   const normalizedOrigin = normalizeOrigin(origin);
@@ -5257,7 +5262,8 @@ export const registerAgentRuntimeHookSession = async ({
       method: "POST",
       signal,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ clientSessionId, observation, publicKeySpki }),
+      body: JSON.stringify({ clientSessionId, observation, publicKeySpki,
+        ...(claudeDesktopSessionId && { claudeDesktopSessionId }) }),
     },
   );
   return normalizeRuntimeHookSessionPayload(await response.json());

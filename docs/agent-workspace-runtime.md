@@ -3700,6 +3700,26 @@ Browser кнопка и выбор другого компьютера/папк�
 не local runtime; новая ссылка не создаёт relation задачи с Codex thread.
 
 
+<a id="claude-desktop-local-navigation"></a>
+
+### Claude Desktop Code Local: native tab и папка
+
+Protected hook распознаёт локальный Claude Desktop по native host entrypoint,
+версии и `local_<uuid>`; SSH, WSL и remote markers не подходят. Runtime сверяет
+только exact owner-private запись в `claude-code-sessions` текущих account/org
+с отдельным engine UUID из hook. При отсутствии подтверждения admission не
+меняется; transcript UUID, title, cwd и содержимое записи не передаются как
+locator. Bridge передаёт только подтверждённый `claudeDesktopSessionId` в
+runtime registration/refresh. Существующий engine UUID по-прежнему задаёт
+lifecycle и ключ. Старый backend не обязан возвращать native locator:
+без exact server acknowledgment runtime не регистрирует папку Claude.
+
+При подтверждении тот же optional managed-root workflow использует
+`claude-folders`, отдельный HMAC namespace и прежний E2EE personal path adapter.
+Нет изменений plugin hook shell, native picker, запуска Run, автоматической
+настройки или маршрута для CLI. Ссылки запуска и продолжения строит Trelio.
+Сначала обновляется backend, затем активируется совместимый signed runtime.
+
 <a id="codex-connection-wizard"></a>
 
 ## Мастер подключения Codex

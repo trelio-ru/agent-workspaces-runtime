@@ -327,11 +327,12 @@ export const inspectCodexLaunchFolder = async (cwd, dependencies = {}) => {
   return binding ? { state: "bound", folderPath: root, ...binding } : null;
 };
 
-export const codexLaunchFolderId = (token, origin, folder) => {
+export const codexLaunchFolderId = (token, origin, folder, provider = "codex") => {
   // The backend never receives a dictionary-searchable plaintext path hash.
   // A device credential keys this opaque identity; a re-pair gets a new target.
   const bytes = crypto.createHmac("sha256", token).update(JSON.stringify([
     origin, folder.folderPath, folder.company.slug, folder.project?.slug ?? null,
+    ...(provider === "claude" ? [provider] : []),
   ])).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 15) | 64;
   bytes[8] = (bytes[8] & 63) | 128;
@@ -342,8 +343,10 @@ export const codexLaunchFolderId = (token, origin, folder) => {
 /** Best effort under the original hook deadline. Missing/unknown state never
  * triggers pairing, unlock, device registration, local file edits or logging.
  * GET precedes each uncertain PUT; a lost mutation response earns no replay. */
-export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, signal }, dependencies = {}) => {
-  if (state.observation?.clientFamily !== "codex" || !hookInput.cwd) return null;
+export const synchronizeDesktopLaunchFolder = async ({ hookInput, state, origin, signal }, dependencies = {}) => {
+  const provider = state.observation?.clientFamily === "codex" ? "codex"
+    : state.observation?.clientFamily === "claude-code" && state.claudeDesktopSessionId ? "claude" : null;
+  if (!provider || !hookInput.cwd) return null;
   try {
     const bridge = dependencies.bridge ?? await import("./trelio-workspace.mjs");
     const folder = await inspectCodexLaunchFolder(hookInput.cwd, { ...dependencies, bridge });
@@ -376,7 +379,7 @@ export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, s
     const token = await bridge.loadToken(origin, { signal });
     if (!token || !token.startsWith("twb_")) return null;
     signal?.throwIfAborted();
-    await registerAndVerifyCodexLaunchFolder({ origin, token, folder, state, signal, readBack: false }, dependencies);
+    await registerAndVerifyCodexLaunchFolder({ origin, token, folder, state, signal, provider, readBack: false }, dependencies);
     await remember();
     return null;
   } catch { return null; }
@@ -386,12 +389,12 @@ export const synchronizeCodexLaunchFolder = async ({ hookInput, state, origin, s
  * requires a positive GET read-back. A lost PUT response is reconciled once by
  * GET, never blindly replayed. An encrypted path is hydrated only locally. */
 export const registerAndVerifyCodexLaunchFolder = async ({ origin, token, folder, state, signal,
-  readBack = true, interactive = false }, dependencies = {}) => {
+  readBack = true, interactive = false, provider = "codex" }, dependencies = {}) => {
   const bridge = dependencies.bridge ?? await import("./trelio-workspace.mjs");
-  const id = codexLaunchFolderId(token, origin, folder);
+  const id = codexLaunchFolderId(token, origin, folder, provider);
   const routing = await bridge.resolveBridgeDataPlaneRouting({ origin, token, companySlug: folder.company.slug, signal });
   if (!["plain", "encrypted"].includes(routing.encryptionState)) throw wizardError("COMPANY_ENCRYPTION_TRANSITION");
-  const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(folder.company.slug)}/codex-folders`;
+  const endpoint = `/api/agent-workspaces/companies/${encodeURIComponent(folder.company.slug)}/${provider}-folders`;
   const read = async () => {
     const snapshot = await (await bridge.request(routing.requestOrigin, token, endpoint, { signal })).json();
     if (!Array.isArray(snapshot?.folders)) throw wizardError("CODEX_CONNECTION_INVALID_RESPONSE");
