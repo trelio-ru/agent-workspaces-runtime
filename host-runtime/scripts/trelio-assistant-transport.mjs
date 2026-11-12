@@ -3204,7 +3204,7 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_assistant_operation_contract", "download_attachment", "get_task_create_meta", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
+const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "review_outgoing_message", "get_assistant_operation_contract", "download_attachment", "get_task_create_meta", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS,
@@ -3556,10 +3556,10 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   };
   const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update','use_assistant_browser',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
-      ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
+    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update','use_assistant_browser','review_outgoing_message',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
+      ?['get_assistant_status','review_outgoing_message','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
       :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
-      :presentationProfile==='company_context'?['get_assistant_status','use_assistant_browser',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
+      :presentationProfile==='company_context'?['get_assistant_status','use_assistant_browser','review_outgoing_message',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
       :[...ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)),...ASSISTANT_COMPANY_DISCOVERY_TOOLS];
   };
   const perform = async (action, signal, operationTimeoutMs = timeoutMs, metadataProfile=null) => {
@@ -3633,10 +3633,13 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       },bounded,timeoutMs,profile);
       const normal=await catalogue(await selectedTools(true),presentationProfile);
       // The two original intake methods remain an indivisible legacy pair.
-      // Profile planning is an optional native definition in that SAME bounded
-      // view, usable with either genuine origin; never append its full schema
-      // to the already near-bound task catalogue or invent it on old backends.
-      const intake=await catalogue(intakeToolNames,'source_intake',true,['request_assistant_profile_update','use_assistant_browser','use_assistant_workspace_files']);
+      // Use the same small native view for optional shared definitions,
+      // including the content-free self-check. Older backends may omit them.
+      // Keep the near-bound task catalogue and exact schemas intact.
+      const intake=await catalogue(intakeToolNames,'source_intake',true,[
+        'request_assistant_profile_update','use_assistant_browser','use_assistant_workspace_files',
+        ...(presentationProfile==='skill_setup'?[]:['review_outgoing_message']),
+      ]);
       // Read native discovery definitions from their existing session-fixed
       // view BEFORE the client starts a model turn, not after a status call.
       // Older native catalogues may have none; partial sets fail closed.
@@ -3877,7 +3880,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
       }, signal, name==='connect_remote_agent_skill'?10*60*1000:name==='use_assistant_browser'?60_000:timeoutMs,
-        name==='request_assistant_profile_update'||name==='use_assistant_browser'||workspaceFileAction
+        name==='request_assistant_profile_update'||name==='use_assistant_browser'||workspaceFileAction||name==='review_outgoing_message'
           ||name==='get_trelio_tool_contract'&&argumentsSnapshot.name==='use_assistant_browser'?'source_intake':companyReadSession?'company_context':null);
     },
   };

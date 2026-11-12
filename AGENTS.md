@@ -162,6 +162,9 @@ publication tooling также остаются вне этого публичн
   turn. Only native acceptance/outcome and the normal receipt close the pass.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
+- Outgoing self-check: optional native intake metadata in task/owner intake.
+  Only empty arguments reach HTTP. Send authority stays with the selected
+  action. [Contract](docs/assistant-scheduler.md#managed-browser-routing-and-cleanup).
 - Assistant stdio получает read schemas только из dedicated backend catalog;
   fixed host allowlist и общий bounded MCP transport не создают domain authority.
   Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.

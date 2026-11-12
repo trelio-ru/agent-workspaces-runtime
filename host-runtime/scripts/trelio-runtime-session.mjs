@@ -85,7 +85,7 @@ const DISCOVERY_TOOLS = new Set([
   "search_tasks", "search_agent_workspace_files", "list_companies",
   "list_projects", "search_agent_guidance", "list_agent_skills", "list_my_tasks",
   "list_project_tasks", "list_task_connections", "get_project_meta",
-  "get_task_create_meta", "get_my_context", "resolve_user",
+  "get_task_create_meta", "get_my_context", "resolve_user", "review_outgoing_message",
   "resolve_company_member", "resolve_status", "get_task_move_options",
   "list_notifications",
 ]);

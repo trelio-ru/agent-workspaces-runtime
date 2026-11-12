@@ -363,6 +363,15 @@ native JS confirmations stay observable without raising a window over the
 person's desktop. Models cannot select presentation; signed provider defaults
 and independently authorized visible human setup retain their existing policy.
 
+The common outgoing message self-check uses the same native `source_intake`
+metadata view from ordinary task or owner-intake work, including when a skill
+or browser is selected. The host advertises `review_outgoing_message` only when
+the live backend supplies its definition. It sends an empty object and never
+forwards draft text, recipients, pass or proof for this static prompt. The
+agent applies the returned questions to its current draft. The platform rule
+carries the same fallback for earlier clients. Send authority remains with
+the normal browser or provider action.
+
 The browser definition is obtained from the small native source_intake view for
 either genuine origin, keeping near-bound task/company catalogues unchanged.
 Each command has a fresh native proof and structural five-second receipt bound

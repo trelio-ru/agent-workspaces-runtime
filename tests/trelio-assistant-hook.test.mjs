@@ -179,7 +179,7 @@ test('taskless intake hook has genuine observed one-use proof and cannot borrow 
  const proof=output.runtimeSessionProof,[key]=[...f.records.keys()];
  assert.equal(crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
    crypto.createPublicKey({key:Buffer.from(key,'base64url'),format:'der',type:'spki'}),Buffer.from(proof.signature,'base64url')),true);
- for(const read of ['search','search_tasks','get_task','get_task_sections']){
+ for(const read of ['search','search_tasks','get_task','get_task_sections','review_outgoing_message']){
   const current=(await f.hook(event,read)).hookSpecificOutput.updatedInput;
   assert.deepEqual(current.intakePass,{companyId,sourceId:pass.sourceId,intakeId:passId});
   assert.equal(current.taskPass,undefined,'a company read must never fabricate a task pass');
@@ -205,7 +205,7 @@ test('source triage hook seals the exact frozen role/batch with ordinary observe
  const [key]=[...f.records.keys()];assert.equal(crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,'resolve_assistant_intake',proof.issuedAt,proof.nonce].join('\n')),
    crypto.createPublicKey({key:Buffer.from(key,'base64url'),format:'der',type:'spki'}),Buffer.from(proof.signature,'base64url')),true);
  assert.deepEqual(first.hookSpecificOutput.updatedInput.intakePass,{companyId,sourceId:pass.sourceId,intakeId:passId});
- for(const name of ['create_task','request_assistant_action','get_task','confirm_assistant_intake_read'])await assert.rejects(f.hook(event,name),/CAPABILITY_UNAVAILABLE/);
+ for(const name of ['create_task','request_assistant_action','get_task','confirm_assistant_intake_read','review_outgoing_message'])await assert.rejects(f.hook(event,name),/CAPABILITY_UNAVAILABLE/);
  live={...live,eventIds:[crypto.randomUUID()]};await assert.rejects(f.hook(event,'resolve_assistant_intake'),/PASS_REVIEW_REQUIRED/);
  live={...live,eventIds,kind:'owner_command'};await assert.rejects(f.hook(event,'get_assistant_intake_context'),/PASS_REVIEW_REQUIRED/);
 });

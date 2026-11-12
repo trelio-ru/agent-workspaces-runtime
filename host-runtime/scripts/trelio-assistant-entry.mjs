@@ -3203,6 +3203,14 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
 export const withAssistantCompanyContentArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,companyContextRead=false}={})=>{
   if(!ASSISTANT_MCP_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(name==='review_outgoing_message'){
+    // A review prompt needs no company content or attestation on the wire.
+    // Validate the remaining input before HTTP, even if the server schema
+    // changes or this path is called directly without catalog validation.
+    const {taskPass:_pass,intakePass:_intake,runtimeSessionProof:_proof,...metadata}=args;
+    if(Object.keys(metadata).length)fail('ASSISTANT_MCP_INPUT_INVALID');
+    return send({});
+  }
   if(name==='get_assistant_status'||name==='get_trelio_tool_contract'){
     // These metadata reads use genuine device auth but no business proof.
     // An observed task hook may have added its managed fields; do not forward

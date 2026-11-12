@@ -4206,6 +4206,48 @@ test('stable native intake metadata survives cached task chats while execution k
 });
 
 
+test('outgoing review is optional native metadata and stays content-free for both origins', async () => {
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const origin='https://review.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'r'.repeat(43)}`,expiresAt:1});
+  const name='review_outgoing_message',proof={runtimeSessionProof:{},taskPass:{}},calls=[];
+  let active={kind:'task'},offered=false;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>active,
+    withWorkspaceArguments:(input,send)=>withAssistantCompanyContentArguments(input,send,{
+      withProfile:()=>assert.fail('static prompt never loads company content mode'),
+    }),
+    httpRequest:async input=>{
+      const view=input.config.headers['x-trelio-assistant-capability-profile']??'task';
+      const response=result=>({sessionId:'review-fixture',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+      if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list'){
+        const names=view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake',
+          ...(offered?[name]:[])]:['get_assistant_status'];
+        return response({tools:names.map(tool=>({name:tool,description:'Native metadata',inputSchema:{
+          type:'object',properties:{},additionalProperties:false}}))});
+      }
+      calls.push({view,...input.payload.params});
+      return response({content:[{type:'text',text:'Use your current draft'}]});
+    },
+  });
+  assert.ok(!(await client.listTools()).some(tool=>tool.name===name),'no fabricated tool on older backends');
+  offered=true;
+  const definition=(await client.listTools()).find(tool=>tool.name===name);
+  assert.equal(definition?.annotations.readOnlyHint,true);
+  assert.deepEqual(Object.keys(definition.inputSchema.properties??{}),[]);
+  await client.callTool(name,proof);
+  active={kind:'source_intake'};
+  await client.callTool(name,{runtimeSessionProof:{},intakePass:{}});
+  await assert.rejects(client.callTool(name,{draft:'PRIVATE_DRAFT'}),/ASSISTANT_MCP_INPUT_INVALID/u);
+  await assert.rejects(withAssistantCompanyContentArguments({name,args:{recipient:'PRIVATE_RECIPIENT'}},
+    ()=>assert.fail('text reached HTTP')),/ASSISTANT_MCP_INPUT_INVALID/u);
+  assert.deepEqual(calls,Array.from({length:2},()=>({view:'source_intake',name,arguments:{}})));
+  active={kind:'source_intake',intakeKind:'route_existing'};
+  await assert.rejects(client.callTool(name,{}),/ASSISTANT_CAPABILITY_UNAVAILABLE/u);
+  assert.equal(calls.length,2);
+});
+
 test('stable task plus native intake catalogue stays within the unchanged 64KiB budget without truncating business metadata',async()=>{
  const origin='https://catalogue.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'c'.repeat(43)}`,expiresAt:1});
