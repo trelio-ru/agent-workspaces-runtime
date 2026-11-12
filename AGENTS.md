@@ -1363,7 +1363,7 @@ publication tooling также остаются вне этого публичн
   New host test files must enter both generic and applicable Windows direct CI lanes; the suite-inventory guard must remain strict.
   Journal schema bumps must check both inbox and scheduler legacy-upgrade fixtures, then the complete assistant direct-test intersection before enqueue.
 
-- Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
+- Windows retention claim: bounded sharing retries before acquisition and for removal of the same empty atomic claim. Private validation and protected operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
 - Native scheduled-fixture start evidence is immutable JSON published under a
   fresh name before polling; never replace a file held by the reader. Keep the

@@ -40,13 +40,29 @@ const deadOwner = pid => {
     return error.code === "ESRCH";
   }
 };
-const removeEmptyClaim = async lock => {
-  try {
-    await fs.rmdir(lock);
-  } catch (error) {
-    // A replacement claim always contains its own nonce. An old release
-    // or recovery may race it, but rmdir cannot remove a nonempty successor.
-    if (!["ENOENT", "ENOTEMPTY"].includes(error.code)) throw error;
+const removeEmptyClaim = async (lock, identity, deadline = Infinity) => {
+  let firstError;
+  for (let retries = 0; ; retries++) {
+    try {
+      await fs.rmdir(lock);
+      return;
+    } catch (error) {
+      // A replacement claim always contains its own nonce. Even if it is
+      // published after inspection, rmdir cannot remove a nonempty successor.
+      if (["ENOENT", "ENOTEMPTY"].includes(error.code)) return;
+      if (process.platform !== "win32" || !["EPERM", "EACCES"].includes(error.code)) throw error;
+      firstError ??= error;
+      // A concurrent Windows reader can still be closing its directory handle
+      // after the nonce is removed. Retry only the same atomic claim's empty
+      // directory removal. A verified successor or absence settles cleanup;
+      // an uninspectable path or persistent refusal retains the original error.
+      const current = await fs.lstat(lock).catch(cause => isMissing(cause) ? null : undefined);
+      if (current === null) return;
+      if (!current?.isDirectory() || current.isSymbolicLink()) throw firstError;
+      if (current.ino !== identity.ino || current.birthtimeMs !== identity.birthtimeMs) return;
+      if (retries === 5 || Date.now() + 20 >= deadline) throw firstError;
+      await sleep(20);
+    }
   }
 };
 
@@ -101,13 +117,13 @@ const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, dea
   const ownerPath = path.join(lock, ownerName);
   let attempted = false;
   let claimSharingRetries = 0;
+  let claimedIdentity;
   for (;;) {
     // Cancellation affects only this contender. It cannot steal the current
     // owner's lock or replay its operation; the original wait clock remains.
     signal?.throwIfAborted();
     if (attempted && Date.now() >= deadline) return { skipped: "busy" };
     attempted = true;
-    let claimedIdentity;
     let created = false;
     try {
       if (staged) await fs.rename(staged, lock);
@@ -167,7 +183,7 @@ const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, dea
           // Atomic claim publication means only a release (including a dead
           // owner's recovery) can leave this layout's lock empty. rmdir
           // cannot remove a concurrently published complete claim.
-          await removeEmptyClaim(lock);
+          await removeEmptyClaim(lock, observedLock, deadline);
           continue;
         }
         const identity = entries.length === 1
@@ -186,7 +202,7 @@ const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, dea
             // race of a shared owner.json). Only the successful unlink may rmdir.
             try {
               await fs.unlink(observedPath);
-              await removeEmptyClaim(lock);
+              await removeEmptyClaim(lock, observedLock, deadline);
             } catch (error) { if (!isMissing(error)) throw error; }
             continue;
           }
@@ -219,7 +235,7 @@ const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, dea
   }
   try { signal?.throwIfAborted(); return await operation(); } finally {
     await fs.unlink(ownerPath);
-    if (staged) await removeEmptyClaim(lock);
+    if (staged) await removeEmptyClaim(lock, claimedIdentity);
     else await fs.rmdir(lock);
   }
 };

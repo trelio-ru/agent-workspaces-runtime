@@ -811,3 +811,53 @@ test('Windows rename denial counts as contention only with an observed destinati
     Object.defineProperty(process, 'platform', platform);
   }
 });
+
+test('Windows sharing refusal releases only the same empty atomic claim without replaying the operation', async t => {
+  const f = await fixture(t);
+  const root = await f.schema(MIRROR_SCHEMA_VERSION, 1);
+  const lock = path.join(root, 'retention.lock');
+  const rmdir = fs.rmdir, platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const denied = Object.assign(new Error('synthetic release sharing refusal'), { code: 'EPERM' });
+  let operations = 0;
+  const run = () => withCompanyMirrorRetentionLock(root, async () => { operations++; return 'done'; });
+  for (const scenario of ['transient', 'successor', 'persistent']) {
+    let removals = 0;
+    const successor = `${process.pid}-${randomUUID()}.json`;
+    fs.rmdir = async (target, ...args) => {
+      if (target !== lock) return rmdir(target, ...args);
+      removals++;
+      assert.deepEqual(await fs.readdir(lock), [], 'the completed owner removed only its own nonce');
+      if (scenario === 'transient' && removals === 2) return rmdir(target, ...args);
+      if (scenario === 'successor') {
+        // Keep the first inode allocated so the competing fixture has a
+        // distinct identity even on filesystems with immediate inode reuse.
+        await fs.rename(lock, path.join(root, 'released-claim'));
+        await fs.mkdir(lock);
+        await fs.writeFile(path.join(lock, successor), 'replacement');
+      }
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+      throw denied;
+    };
+    try {
+      if (scenario === 'persistent') await assert.rejects(run(), error => error === denied);
+      else assert.equal(await run(), 'done');
+    } finally {
+      fs.rmdir = rmdir;
+      Object.defineProperty(process, 'platform', platform);
+    }
+    if (scenario === 'transient') {
+      assert.equal(removals, 2);
+      await assert.rejects(fs.lstat(lock), { code: 'ENOENT' });
+    } else if (scenario === 'successor') {
+      assert.equal(removals, 1);
+      assert.deepEqual(await fs.readdir(lock), [successor]);
+      await fs.unlink(path.join(lock, successor));
+      await rmdir(lock);
+    } else {
+      assert.equal(removals, 6);
+      assert.deepEqual(await fs.readdir(lock), []);
+      await rmdir(lock);
+    }
+  }
+  assert.equal(operations, 3);
+});
