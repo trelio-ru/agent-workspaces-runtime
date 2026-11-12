@@ -65,7 +65,7 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   }
   const origin = 'https://search-writer.example', companyId = randomUUID();
   const keys = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const scope = { id: randomUUID(), epoch: 1,
+  const scope = { id: randomUUID(), epoch: 2,
     publicEncryptionJwk: await webcrypto.subtle.exportKey('jwk', keys.publicKey) };
   const encryption = { runtime: { company: { id: companyId, slug: 'synthetic' }, scope, device: { id: randomUUID() } },
     scopePrivateEncryptionKey: { privateKey: keys.privateKey,
@@ -78,19 +78,22 @@ test('human search builds a fresh private snapshot alongside a live mirror write
     documents: [{ path: 'synthetic.txt', text: 'Unchanged accepted source' }] };
   const unchanged = { cacheKey: 'task:unchanged', id: 'unchanged', type: 'task', title: 'Unchanged',
     revisionToken: 'same', fields: [{ source: 'task-title', values: ['Unchanged'] }] };
-  const publish = async n => {
+  const publish = async (n, { root = paths.root, version = MIRROR_SCHEMA_VERSION,
+    workspaces = [workspace], epoch = scope.epoch } = {}) => {
     const generation = name(n), serverGeneration = name(n + 100);
-    const payload = { schemaVersion: MIRROR_SCHEMA_VERSION, generation, serverGeneration,
-      company: encryption.runtime.company, tasks: [], workspaces: [workspace], searchDocuments: [unchanged,
+    const payload = { schemaVersion: version, generation, serverGeneration,
+      company: encryption.runtime.company, tasks: [], workspaces, searchDocuments: [unchanged,
         { ...unchanged, cacheKey: 'task:synthetic', revisionToken: 'old', title: 'Stale source' },
         { ...unchanged, cacheKey: 'task:revoked', id: 'revoked' }] };
     const encryptedPayload = await encryptCompanyPayload({ payload,
       scopePublicEncryptionJwk: scope.publicEncryptionJwk,
-      aad: { companyId, scopeId: scope.id, scopeEpoch: scope.epoch,
+      aad: { companyId, scopeId: scope.id, scopeEpoch: epoch,
         entityType: 'agent_context.mirror', entityId: randomUUID(), entityRevision: 1, purpose: 'content' } });
-    await writePrivateJsonFile(path.join(paths.generations, `${generation}.json`), {
-      schemaVersion: MIRROR_SCHEMA_VERSION, companyId, generation, serverGeneration, encryptedPayload });
-    await writePrivateJsonFile(paths.pointer, { schemaVersion: MIRROR_SCHEMA_VERSION, companyId, generation, serverGeneration });
+    const generationsRoot = path.join(root, 'generations');
+    await ensurePrivateDirectory(generationsRoot);
+    await writePrivateJsonFile(path.join(generationsRoot, `${generation}.json`), {
+      schemaVersion: version, companyId, generation, serverGeneration, encryptedPayload });
+    await writePrivateJsonFile(path.join(root, 'current.json'), { schemaVersion: version, companyId, generation, serverGeneration });
     return payload;
   };
   const old = await publish(1);
@@ -208,6 +211,70 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   assert.equal(rebuilt.mirror.serverGeneration, coldManifest.generation);
   assert.equal(JSON.parse(await fs.readFile(paths.pointer)).generation, rebuilt.mirror.generation);
   assert.deepEqual(await fs.readdir(legacyLock), []);
+
+  // A rolling upgrade has a complete schema-8 snapshot but no schema-9
+  // pointer. Exercise real encrypted bytes and a live competing schema-9
+  // writer, including the case where the old and fresh generation are equal.
+  const legacyRoot = path.dirname(legacyLock);
+  const revoked = { ...workspace, id: randomUUID() };
+  const legacyOptions = { root: legacyRoot, version: 8, workspaces: [
+    { ...workspace, title: 'Stale Workspace metadata' }, revoked,
+  ] };
+  await fs.rmdir(legacyLock);
+  await publish(2, legacyOptions);
+  const legacyPointer = path.join(legacyRoot, 'current.json');
+  const legacyPointerBytes = await fs.readFile(legacyPointer);
+  await fs.unlink(paths.pointer);
+  await ensurePrivateDirectory(paths.lock);
+  await writePrivateJsonFile(path.join(paths.lock, 'owner.json'), owner);
+  await writePrivateJsonFile(path.join(paths.lock, `${owner.lockId}.heartbeat.json`), { schemaVersion: 1, lockId: owner.lockId });
+  const currentWorkspace = { id: workspace.id, acceptedHead: workspace.acceptedHead, title: 'Fresh Workspace metadata' };
+  const current = { ...manifest, acceptedWorkspaces: [currentWorkspace] };
+  let upgradeReads = 0;
+  globalThis.fetch = async url => {
+    assert.equal(new URL(url).pathname, '/api/agent-workspaces/company-context/synthetic/manifest',
+      'An unchanged accepted head must not download its files again');
+    upgradeReads++;
+    return new Response(JSON.stringify(current));
+  };
+  const upgraded = await sync({ readOnlyOnContention: true, signal: AbortSignal.timeout(10_000) });
+  assert.equal(upgradeReads, 2, 'A legacy pointer must never satisfy the fresh manifest check');
+  assert.equal(upgraded.readOnlySnapshot, true);
+  assert.deepEqual(upgraded.mirror.workspaces, [{ ...currentWorkspace, documents: workspace.documents }]);
+  assert.deepEqual(upgraded.mirror.searchDocuments, current.searchDocuments);
+  assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
+  assert.deepEqual(await fs.readFile(legacyPointer), legacyPointerBytes);
+  await assert.rejects(fs.lstat(paths.pointer), { code: 'ENOENT' });
+
+  await fs.rm(paths.lock, { recursive: true });
+  const published = await sync({ readOnlyOnContention: true, signal: AbortSignal.timeout(10_000) });
+  assert.equal(upgradeReads, 4);
+  assert.equal(published.mirror.schemaVersion, MIRROR_SCHEMA_VERSION);
+  assert.deepEqual(published.mirror.workspaces, upgraded.mirror.workspaces);
+  assert.equal(JSON.parse(await fs.readFile(paths.pointer)).generation, published.mirror.generation);
+
+  // A rotated scope, changed head or unavailable legacy cache must read the
+  // exact fresh Workspace and propagate the refusal without serving old text.
+  await fs.unlink(paths.pointer);
+  for (const changed of ['scope_epoch', 'accepted_head', 'legacy_lock']) {
+    await publish(2, { ...legacyOptions, epoch: changed === 'scope_epoch' ? scope.epoch - 1 : scope.epoch });
+    if (changed === 'legacy_lock') await ensurePrivateDirectory(legacyLock);
+    let requestedWorkspace = false;
+    globalThis.fetch = async url => {
+      if (new URL(url).pathname === '/api/agent-workspaces/company-context/synthetic/manifest') {
+        return new Response(JSON.stringify({ ...current, acceptedWorkspaces: [{
+          ...currentWorkspace, acceptedHead: changed === 'accepted_head' ? 'c'.repeat(40) : workspace.acceptedHead,
+        }] }));
+      }
+      requestedWorkspace = true;
+      return new Response(JSON.stringify({ code: 'ACCESS_DENIED', message: 'Synthetic refusal' }), { status: 403 });
+    };
+    await assert.rejects(sync({ readOnlyOnContention: true, signal: AbortSignal.timeout(10_000) }),
+      error => error.statusCode === 403);
+    assert.equal(requestedWorkspace, true);
+    await assert.rejects(fs.lstat(paths.pointer), { code: 'ENOENT' });
+  }
+  assert.deepEqual(await fs.readdir(legacyLock), [], 'The optional reader leaves an ownerless legacy claim intact');
   console.log('HUMAN_SEARCH_WRITER_VERIFIED');
 });
 

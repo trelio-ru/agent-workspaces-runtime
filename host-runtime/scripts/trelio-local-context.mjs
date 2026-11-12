@@ -5,6 +5,7 @@ import { createWorkspaceFinishOperations, createCompanySearchOperations, runWork
 import { trelioCallSignal, parseTrelioCallTimeout, withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
 import {
   MIRROR_SCHEMA_VERSION, pruneMirrorSchema, withCompanyMirrorRetentionLock as withMirrorRetentionLock,
+  withMirrorRetentionLock as withLegacyMirrorRetentionLock,
 } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
@@ -635,7 +636,9 @@ const acquireMirrorWriter = async (
   );
 };
 
-const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous }) => {
+const readMirrorGenerationUnlocked = async ({
+  paths, companyEncryption, previous, schemaVersion = MIRROR_SCHEMA_VERSION,
+}) => {
   const pointer = await readPrivateJsonFile(paths.pointer);
   if (Object.keys(pointer).length === 0) return null;
   if (pointer.schemaVersion === 1) {
@@ -645,7 +648,7 @@ const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous
     return null;
   }
   if (
-    pointer.schemaVersion !== MIRROR_SCHEMA_VERSION
+    pointer.schemaVersion !== schemaVersion
     || pointer.companyId !== companyEncryption.runtime.company.id
     || !MIRROR_GENERATION_PATTERN.test(String(pointer.generation || ""))
   ) {
@@ -660,7 +663,7 @@ const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous
   // published meanwhile, read/decrypt its different generation normally. This
   // is not a cross-call permission/key/snapshot cache. A large warm mirror must
   // not be read/decrypted twice under one ordinary 45-second request budget.
-  if (previous?.schemaVersion === MIRROR_SCHEMA_VERSION
+  if (previous?.schemaVersion === schemaVersion
     && previous.company?.id === pointer.companyId
     && previous.generation === pointer.generation
     && previous.serverGeneration === pointer.serverGeneration) return previous;
@@ -668,7 +671,7 @@ const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous
     path.join(paths.generations, `${pointer.generation}.json`),
   );
   if (
-    record.schemaVersion !== MIRROR_SCHEMA_VERSION
+    record.schemaVersion !== schemaVersion
     || record.companyId !== pointer.companyId
     || record.generation !== pointer.generation
     || record.encryptedPayload?.aad?.entityType !== "agent_context.mirror"
@@ -678,13 +681,22 @@ const readMirrorGenerationUnlocked = async ({ paths, companyEncryption, previous
       "The local company context generation is invalid.",
     );
   }
+  if (schemaVersion !== MIRROR_SCHEMA_VERSION) {
+    const aad = record.encryptedPayload.aad;
+    const { company, scope } = companyEncryption.runtime;
+    // A schema upgrade can coincide with a key rotation. Old ciphertext is
+    // eligible only under the current authenticated company scope and epoch.
+    if (aad.companyId !== company.id || aad.scopeId !== scope.id || aad.scopeEpoch !== scope.epoch
+      || aad.entityRevision !== 1 || aad.purpose !== "content"
+      || record.serverGeneration !== pointer.serverGeneration) return null;
+  }
   const payload = await decryptCompanyPayload({
     encryptedPayload: record.encryptedPayload,
     scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
     scopePrivateJwk: companyEncryption.scopePrivateEncryptionKey.privateJwk,
   });
   if (
-    payload?.schemaVersion !== MIRROR_SCHEMA_VERSION
+    payload?.schemaVersion !== schemaVersion
     || payload.company?.id !== pointer.companyId
     || payload.generation !== pointer.generation
   ) {
@@ -719,6 +731,30 @@ const readMirrorGeneration = async (input, signal) => {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_SYNC_BUSY", "Local mirror maintenance is still running.");
   }
   return result;
+};
+
+// Schema 9 changed the retention lock protocol, not the accepted Workspace
+// file format. Seed only completed file records from that one compatible
+// predecessor. Its pointer cannot establish freshness or provide task, ACL,
+// skill or routing data. A busy/damaged legacy cache is an optional miss;
+// it must not introduce a second wait or prevent a normal current sync.
+const readLegacyWorkspaceSeed = async (paths, companyEncryption, signal) => {
+  const root = path.join(path.dirname(paths.root), "schema-8");
+  const legacyPaths = {
+    root, pointer: path.join(root, "current.json"), generations: path.join(root, "generations"),
+  };
+  try {
+    const legacy = await withLegacyMirrorRetentionLock(root, () => readMirrorGenerationUnlocked({
+      paths: legacyPaths, companyEncryption, schemaVersion: 8,
+    }), { waitMs: 0, signal });
+    signal?.throwIfAborted();
+    if (!Array.isArray(legacy?.workspaces)) return null;
+    const workspaces = legacy.workspaces.filter(workspace => Array.isArray(workspace?.documents));
+    if (workspaces.length) return { workspaces };
+  } catch {
+    signal?.throwIfAborted();
+  }
+  return null;
 };
 
 // Both durable publication and an isolated read use the SAME local snapshot
@@ -4156,7 +4192,9 @@ const buildMirror = async ({
   for (const workspace of manifest.acceptedWorkspaces ?? []) {
     const cached = previousWorkspaces.get(workspace.id);
     workspaces.push(cached?.acceptedHead === workspace.acceptedHead
-      ? cached
+      // Even at the same head, routing and Workspace metadata come from the
+      // current manifest. Only the accepted file records may be reused.
+      ? { ...workspace, documents: cached.documents }
       : await buildWorkspaceRecord({
           origin: requestOrigin,
           token,
@@ -4278,17 +4316,22 @@ export const syncCompanyContextMirror = async ({
   });
   onProgress("mirror_read");
   let previous = await readMirrorGeneration({ paths, companyEncryption }, signal);
+  const legacySeed = readOnlyOnContention && !previous
+    ? await readLegacyWorkspaceSeed(paths, companyEncryption, signal)
+    : null;
   onProgress("mirror_wait");
   const writer = await acquireMirrorWriter(paths, {
     signal,
     // Normal local reads may use a complete immutable generation while a
     // sibling publishes the next one. Once a task-section revision conflict
     // proves that generation stale, however, returning it again would make the
-    // same deterministic 409 loop forever in this MCP process.
-    allowReadableFallback: Boolean(previous) && !requireFresh,
+    // same deterministic 409 loop forever in this MCP process. The legacy
+    // seed only skips the queue for a fresh isolated build, never for a
+    // normal read's fallback.
+    allowReadableFallback: Boolean(previous && !requireFresh || legacySeed),
     // Freshness of an existing stale generation has a short refresh wait. A
-    // cold mirror has no readable fallback at all: retain the original bounded
-    // first-sync join budget, including for a managed assistant invocation.
+    // cold mirror without a compatible seed retains the original bounded
+    // first-sync join, including for a managed assistant invocation.
     maximumWaitMs: requireFresh && previous
       ? MIRROR_STALE_READ_REFRESH_WAIT_MS
       : MIRROR_FIRST_SYNC_WAIT_MS,
@@ -4306,7 +4349,7 @@ export const syncCompanyContextMirror = async ({
       // remain mandatory. This is neither a lock takeover nor a partial result.
       const result = await buildStableCompanyMirror({
         onProgress,
-        previous,
+        previous: previous ?? legacySeed,
         readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
         buildCandidate: (rawManifest, reusable) => buildMirror({
           origin, requestOrigin, token, companyEncryption, rawManifest, previous: reusable, signal,
@@ -4330,7 +4373,7 @@ export const syncCompanyContextMirror = async ({
     let searchCache;
     const result = await buildStableCompanyMirror({
       onProgress,
-      previous,
+      previous: previous ?? legacySeed,
       readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
       buildCandidate: async (rawManifest, reusable) => buildMirror({
         origin, requestOrigin, token, companyEncryption, rawManifest,

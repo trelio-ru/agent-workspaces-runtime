@@ -147,9 +147,15 @@ fence. Полный current snapshot остаётся в RAM reader с преж�
 pointer, writer-owned scratchpad и cleanup не изменяются. Новые файлы читает
 обычный private staging/crypto engine. Original deadline, bounds и отдельный
 fresh recipient/generation fence перед выдачей сохраняются. Отмена закрывает
-только собственные reads, не чужой writer/lock. Обычные detail reads сохраняют
-readable fallback, а proven-stale refresh – прежний короткий срок. Без complete
-previous generation действует прежняя bounded cold preparation.
+только собственные reads, не чужой writer/lock. При первом поиске в schema 9
+совместимый schema 8 может дать только полные файловые записи для этой же
+компании и текущего scope epoch. Поиск сверяет доступные Workspace и exact
+accepted heads со свежим манифестом. Метаданные и поиск по остальным сущностям
+строятся из текущего ответа. При занятом writer этот источник также позволяет
+начать отдельную сборку без ожидания его завершения. Если ни current, ни
+совместимые файловые записи недоступны, сохраняется исходная bounded cold
+preparation. Обычные detail reads сохраняют readable fallback, а proven-stale
+refresh – прежний короткий срок.
 
 Task-only `search_tasks` сохраняет отдельный native projection path без
 подготовки общего зеркала и без присоединения к pending full search.
@@ -2675,10 +2681,13 @@ import, CAS, service Git, Cursor и независимое продолжени�
 после grace лишние снимки удаляются независимо от прежних семи дней хранения.
 
 Pointer и encrypted bytes читаются под коротким `retention.lock`; удаление
-использует тот же lock, а сетевой sync остаётся вне него. Schema 9 использует
-прежний поисковый контекст в отдельном cache root. Первый read заново строит
-полный encrypted snapshot из авторизованных источников. Пустой lock старой
-схемы остаётся на месте, а старые процессы продолжают работать в своих roots.
+использует тот же lock, а сетевой sync остаётся вне него. Schema 9 держит
+отдельный cache root для нового lock-протокола. Первый человеческий поиск может
+прочитать schema 8 под её собственным retention lock без ожидания. Он
+переиспользует только полные файловые записи с подтверждённым текущим head,
+собирает полный актуальный снимок и повторно сверяет generation. Прежний pointer
+и поколения остаются в старом cache root. Пустой или занятый старый lock
+означает промах кэша, старые процессы продолжают работать в своих roots.
 Mutation marker по-прежнему общий для всех схем.
 
 Ожидание lock при чтении и восстановлении writer использует исходный сигнал

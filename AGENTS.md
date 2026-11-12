@@ -775,7 +775,9 @@ publication tooling также остаются вне этого публичн
   Legacy root locks and per-schema writer interlocks retain their existing scope.
   Schema 9 publishes the retention directory and private nonce atomically.
   Empty claims can be removed only in that layout; legacy readers and their
-  ownerless claims stay isolated. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
+  ownerless claims stay isolated. Cold human search can seed completed files
+  from schema 8 under its own no-wait retention lock. Keep current scope/epoch,
+  fresh ACL-filtered exact heads and final generation checks. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts всех этапов чтения обязательны по
