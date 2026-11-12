@@ -20,7 +20,8 @@ const MAINTENANCE_INTERVAL_MS = 15 * 60 * 1000;
 const HASH_FILE = /^[a-f0-9]{64}\.json$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u;
-const MAX_SCHEMA_VERSION = 8;
+export const MIRROR_SCHEMA_VERSION = 9;
+const SCHEMA_DIRECTORY = /^schema-([1-9])$/u;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const isMissing = error => error?.code === "ENOENT";
@@ -39,7 +40,25 @@ const deadOwner = pid => {
     return error.code === "ESRCH";
   }
 };
-export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000, signal } = {}) => {
+const removeEmptyClaim = async lock => {
+  try {
+    await fs.rmdir(lock);
+  } catch (error) {
+    // A replacement claim always contains its own nonce. An old release
+    // or recovery may race it, but rmdir cannot remove a nonempty successor.
+    if (!["ENOENT", "ENOTEMPTY"].includes(error.code)) throw error;
+  }
+};
+
+export const withMirrorRetentionLock = async (root, operation, options) =>
+  withRetentionClaim(root, operation, options);
+
+export const withCompanyMirrorRetentionLock = async (root, operation, options) => {
+  if (path.basename(root) !== `schema-${MIRROR_SCHEMA_VERSION}`) throw new Error("Unexpected atomic mirror layout.");
+  return withRetentionClaim(root, operation, { ...options, atomic: true });
+};
+
+const withRetentionClaim = async (root, operation, { waitMs = 30_000, signal, atomic = false } = {}) => {
   signal?.throwIfAborted();
   // Contenders inspect only structural lock metadata. Windows hardening is a
   // write: applying a parent DACL while its owner publishes a child can race
@@ -49,8 +68,27 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("Unsafe mirror lock root.");
   const lock = path.join(root, "retention.lock");
   const id = crypto.randomUUID();
-  const ownerPath = path.join(lock, `${process.pid}-${id}.json`);
+  const ownerName = `${process.pid}-${id}.json`;
   const deadline = Date.now() + waitMs;
+  const options = { root, lock, ownerName, id, deadline, signal };
+  if (!atomic) return runWithRetentionClaim(operation, options);
+
+  // Only the new mirror layout may use this protocol. An old runtime creates
+  // an empty lock while acquiring it, so an empty legacy claim is ambiguous.
+  // In this layout the completed, ACL-checked nonce and its directory appear
+  // together. A crash during preparation cannot block any other reader.
+  const staged = path.join(root, `.retention-${process.pid}-${id}`);
+  await fs.mkdir(staged, { mode: 0o700 });
+  try {
+    await writePrivateJsonFile(path.join(staged, ownerName), { id, pid: process.pid });
+    return await runWithRetentionClaim(operation, { ...options, staged });
+  } finally {
+    await fs.rm(staged, { recursive: true, force: true }).catch(() => undefined);
+  }
+};
+
+const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, deadline, signal, staged }) => {
+  const ownerPath = path.join(lock, ownerName);
   let attempted = false;
   let claimSharingRetries = 0;
   for (;;) {
@@ -62,31 +100,43 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
     let claimedIdentity;
     let created = false;
     try {
-      await fs.mkdir(lock, { mode: 0o700 });
+      if (staged) await fs.rename(staged, lock);
+      else await fs.mkdir(lock, { mode: 0o700 });
       created = true;
       claimedIdentity = await fs.lstat(lock);
       await assertPrivatePathKind(root, "directory").catch(error => {
         error.mirrorLockStage = "root_validation";
         throw error;
       });
-      await writePrivateJsonFile(ownerPath, { id, pid: process.pid }).catch(error => {
-        error.mirrorLockStage = "owner_publication";
-        throw error;
-      });
+      if (!staged) {
+        await writePrivateJsonFile(ownerPath, { id, pid: process.pid }).catch(error => {
+          error.mirrorLockStage = "owner_publication";
+          throw error;
+        });
+      }
       break;
     } catch (error) {
       // Windows may keep a just-removed directory delete-pending while another
-      // process still closes its handle. mkdir then returns EPERM/EACCES rather
-      // than EEXIST. Retry only this unacquired claim, briefly and boundedly;
+      // process still closes its handle. Acquisition may return EPERM/EACCES
+      // instead of EEXIST. Retry only this unacquired claim, briefly and boundedly;
       // never retry private validation, owner publication or the operation.
       // Persistent permission refusal retains its original error. A successful
       // claim must still pass the ordinary root/DACL validation below.
-      if (!created && process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)
+      const windowsSharingError = !created && process.platform === "win32"
+        && ["EPERM", "EACCES"].includes(error.code);
+      // A losing Windows directory rename can report EPERM for an existing
+      // destination. Require positive evidence of that destination before
+      // treating the refusal as contention. An absent path retains the
+      // existing bounded delete-pending retry.
+      const renameCollision = staged && windowsSharingError
+        && await exists(lock).catch(() => false);
+      if (windowsSharingError && !renameCollision
         && claimSharingRetries++ < 5 && Date.now() + 20 < deadline) {
         await sleep(20);
         continue;
       }
-      if (error.code !== "EEXIST") {
+      const contended = error.code === "EEXIST" || (staged && error.code === "ENOTEMPTY") || renameCollision;
+      if (created || !contended) {
         // Failed initialization owns only its nonce and empty claim directory.
         // Never leave a known failed acquisition as an immortal reader lock.
         const current = await fs.lstat(lock).catch(() => null);
@@ -103,6 +153,13 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
         observedLock = await fs.lstat(lock);
         if (!observedLock.isDirectory() || observedLock.isSymbolicLink()) throw new Error("Unsafe mirror lock.");
         const entries = await fs.readdir(lock);
+        if (staged && entries.length === 0) {
+          // Atomic claim publication means only a release (including a dead
+          // owner's recovery) can leave this layout's lock empty. rmdir
+          // cannot remove a concurrently published complete claim.
+          await removeEmptyClaim(lock);
+          continue;
+        }
         const identity = entries.length === 1
           ? /^(\d+)-([a-f0-9-]{36})\.json$/u.exec(entries[0]) : null;
         // A live PID in a filename grants only waiting, never access/recovery.
@@ -119,9 +176,7 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
             // race of a shared owner.json). Only the successful unlink may rmdir.
             try {
               await fs.unlink(observedPath);
-              await fs.rmdir(lock).catch(error => {
-                if (!["ENOENT", "ENOTEMPTY"].includes(error.code)) throw error;
-              });
+              await removeEmptyClaim(lock);
             } catch (error) { if (!isMissing(error)) throw error; }
             continue;
           }
@@ -154,7 +209,8 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
   }
   try { signal?.throwIfAborted(); return await operation(); } finally {
     await fs.unlink(ownerPath);
-    await fs.rmdir(lock);
+    if (staged) await removeEmptyClaim(lock);
+    else await fs.rmdir(lock);
   }
 };
 
@@ -169,12 +225,12 @@ const regularPrivateFile = async file => {
 // Caller owns sync.lock, the same lock used by older writers. Readers in this
 // release hold retention.lock while reading pointer + encrypted bytes. The
 // short grace additionally accommodates older readers without this protocol.
-export const pruneMirrorSchema = async (root, { now = Date.now(), stillOwnsWriter = async () => true } = {}) =>
-  withMirrorRetentionLock(root, async () => {
+export const pruneMirrorSchema = async (root, { now = Date.now(), stillOwnsWriter = async () => true, waitMs } = {}) => {
+  const version = Number(SCHEMA_DIRECTORY.exec(path.basename(root))?.[1] ?? 1);
+  const withLock = version === MIRROR_SCHEMA_VERSION ? withCompanyMirrorRetentionLock : withMirrorRetentionLock;
+  return withLock(root, async () => {
     const pointer = await readPrivateJsonFile(path.join(root, "current.json"), { maximumBytes: 4096 });
-    const version = root.match(/schema-([1-8])$/u)?.[1];
-    if (!HASH.test(pointer.generation ?? "")
-      || pointer.schemaVersion !== (version ? Number(version) : 1)) return { skipped: "invalid_pointer" };
+    if (!HASH.test(pointer.generation ?? "") || pointer.schemaVersion !== version) return { skipped: "invalid_pointer" };
     const generations = path.join(root, "generations");
     await assertPrivatePathKind(generations, "directory");
     // Never delete historical files if the only advertised current copy is
@@ -217,7 +273,8 @@ export const pruneMirrorSchema = async (root, { now = Date.now(), stillOwnsWrite
       }
     }
     return { removedFiles, removedBytes };
-  });
+  }, { waitMs });
+};
 
 const pruneIdleSchema = async root => {
   await assertPrivatePathKind(root, "directory");
@@ -255,7 +312,7 @@ const pruneIdleSchema = async root => {
       void fs.utimes(heartbeatPath, now, now).catch(() => undefined);
     }, 20_000);
     heartbeat.unref();
-    return await pruneMirrorSchema(root, { stillOwnsWriter });
+    return await pruneMirrorSchema(root, { stillOwnsWriter, waitMs: 0 });
   } finally {
     clearInterval(heartbeat);
     if (await stillOwnsWriter()) {
@@ -290,8 +347,7 @@ export const pruneCompanyMirrorCaches = async ({
         await assertPrivatePathKind(companyRoot, "directory");
         const roots = [companyRoot];
         for (const schema of await fs.readdir(companyRoot, { withFileTypes: true })) {
-          if (schema.isDirectory() && /^schema-[1-8]$/u.test(schema.name)
-            && Number(schema.name.slice(7)) <= MAX_SCHEMA_VERSION) roots.push(path.join(companyRoot, schema.name));
+          if (schema.isDirectory() && SCHEMA_DIRECTORY.test(schema.name)) roots.push(path.join(companyRoot, schema.name));
         }
         for (const root of roots) {
           if (!await exists(path.join(root, "current.json"))) continue;

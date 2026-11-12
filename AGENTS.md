@@ -762,6 +762,9 @@ publication tooling также остаются вне этого публичн
   Cold managed reads keep the original first-sync join bound, not stale-read 30s.
   Mirror pointer reads and writer recovery pass the caller's abort signal into
   retention-lock acquisition; a cancelled waiter leaves the live owner intact.
+  Schema 9 publishes the retention directory and private nonce atomically.
+  Empty claims can be removed only in that layout; legacy readers and their
+  ownerless claims stay isolated. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts всех этапов чтения обязательны по

@@ -2666,33 +2666,45 @@ import, CAS, service Git, Cursor и независимое продолжени�
 после grace лишние снимки удаляются независимо от прежних семи дней хранения.
 
 Pointer и encrypted bytes читаются под коротким `retention.lock`; удаление
-использует тот же lock, а сетевой sync остаётся вне него.
-Ожидание этого lock при чтении и восстановлении writer использует исходный
-сигнал вызова. Отменённый read завершается с исходной причиной, даже когда
-владелец продолжает держать lock. Полученный после отмены snapshot не отдаётся.
-Живой PID защищает reader без истечения по часам. Contender читает только
-structural имя PID/nonce;
-оно разрешает лишь ожидание. Protected root validation и publication выполняет
-только владелец mkdir claim: параллельная запись parent DACL в Windows не должна
-обгонять проверку прав дочернего файла. Подтверждённый dead owner восстанавливается
-только после protected чтения exact nonce-файла и совпадения PID/id. Unknown/empty/unsafe lock сохраняется. Ошибка protected inspection допускает
-повтор только захвата lock под прежним deadline, когда fresh metadata доказывает
+использует тот же lock, а сетевой sync остаётся вне него. Schema 9 использует
+прежний поисковый контекст в отдельном cache root. Первый read заново строит
+полный encrypted snapshot из авторизованных источников. Пустой lock старой
+схемы остаётся на месте, а старые процессы продолжают работать в своих roots.
+Mutation marker по-прежнему общий для всех схем.
+
+Ожидание lock при чтении и восстановлении writer использует исходный сигнал
+вызова. Отменённый read завершается с исходной причиной, даже когда владелец
+продолжает держать lock. Полученный после отмены snapshot не отдаётся.
+
+Schema 9 готовит private PID/nonce record в уникальном каталоге и атомарно
+публикует каталог целиком. Сбой до rename может оставить только staging с
+локальной структурной metadata. Такой staging не блокирует чтение.
+После публикации shared root проверяет владелец claim. Contender не меняет
+parent DACL. Живой PID защищает reader без истечения по часам. Подтверждённый
+dead owner восстанавливается после protected чтения exact nonce и совпадения
+PID/id. Пустой claim schema 9 возможен при обрыве release/recovery. `rmdir`
+может убрать его, сохраняя любого уже опубликованного непустого successor.
+Unknown/unsafe и пустые legacy claims сохраняются. Ошибка protected inspection
+допускает повтор только захвата lock под прежним deadline, когда fresh metadata доказывает
 исчезновение/замену exact каталога либо уникального nonce прежнего owner;
-новый owner проверяется заново. ENOENT самого первого lstat после contended
-mkdir тоже доказывает отсутствие: successor, успевший появиться до следующего
-lstat, не отменяет bounded retry лишь захвата. Protected permission/unknown ошибки сохраняют отказ; successor не удаляется,
-операция не повторяется. Единственное исключение – Windows EPERM/EACCES самого
-неполученного mkdir claim: delete-pending handle допускает не более пяти коротких
-повторов под прежним deadline. Persistent отказ сохраняет исходную ошибку;
-успех всё равно требует обычной private/DACL проверки root и publication. Cleanup после
-публикации best-effort: ошибка не превращает уже заменённый pointer в failed
-mutation и не разрешает повтор публикации.
+новый owner проверяется заново. ENOENT самого первого lstat после конкуренции
+тоже доказывает отсутствие. Successor, успевший появиться до следующего lstat,
+не отменяет bounded retry захвата. Protected permission/unknown ошибки
+сохраняют отказ, successor сохраняется, операция не повторяется.
+Windows EPERM/EACCES неуспешного rename считается
+конкуренцией только при наблюдаемом destination. Для delete-pending handle
+без наблюдаемого destination, как и для legacy mkdir, допускается не более
+пяти коротких повторов под прежним deadline. Persistent отказ сохраняет
+исходную ошибку, а успешный claim проходит обычную private/DACL проверку root.
+Cleanup после публикации best-effort: ошибка не превращает уже заменённый
+pointer в failed mutation и не разрешает повтор публикации.
 
 Каждый запуск signed entrypoint запускает отдельный тихий metadata-only sweep,
 не задерживая hook/MCP initialize. Общий lock и 15-минутный cooldown ограничивают
-повторы. Sweep охватывает известные schema 1–8 во всех origin/company roots,
+повторы. Sweep охватывает известные schema 1–9 во всех origin/company roots,
 включая заброшенные форматы и компании без новых изменений. Для каждого schema
-атомарно захватывается прежний `sync.lock`; занятый root пропускается. Current
+атомарно захватывается прежний `sync.lock`; занятые writer и retention locks
+пропускаются без ожидания. Current
 и previous сохраняются в каждом старом формате для уже работающих старых hosts.
 Поэтому compatibility-копии и незавершённые чтения временно могут превышать
 целевой бюджет; новые schema неизвестного формата не изменяются.
@@ -2862,7 +2874,7 @@ generic local action: body преобразуется в canonical rich text и 
 Top-level description лёгкого check-пункта проходит через тот же generic
 rich-text protection, а task-пункт сохраняет описание внутри `item.task`.
 
-Local mirror schema 8 читает accepted browser manifest и весь safe UTF-8 текст
+Local mirror schema 9 читает accepted browser manifest и весь safe UTF-8 текст
 частями до 64 KiB плюс overlap 2048 символа; прежних лимитов 1 MiB/16 MiB у индекса
 нет. Pure chunker/matcher генерируется из backend `shared/workspace-text-chunks.ts`;
 проверка – `scripts/build-workspace-text-chunks.mjs --runtime-root <checkout> --check`.

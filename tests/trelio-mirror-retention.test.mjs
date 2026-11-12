@@ -9,8 +9,8 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
-  pruneCompanyMirrorCaches, pruneMirrorSchema, withMirrorRetentionLock,
-  MIRROR_READER_GRACE_MS, MIRROR_HISTORY_MAX_BYTES,
+  pruneCompanyMirrorCaches, pruneMirrorSchema, withMirrorRetentionLock, withCompanyMirrorRetentionLock,
+  MIRROR_READER_GRACE_MS, MIRROR_HISTORY_MAX_BYTES, MIRROR_SCHEMA_VERSION,
 } from '../host-runtime/scripts/trelio-mirror-retention.mjs';
 import { ensurePrivateDirectory, writePrivateJsonFile, resolveWorkspaceBridgeConfigDirectory } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
@@ -71,6 +71,8 @@ test('human search builds a fresh private snapshot alongside a live mirror write
     scopePrivateEncryptionKey: { privateKey: keys.privateKey,
       privateJwk: await webcrypto.subtle.exportKey('jwk', keys.privateKey) } };
   const paths = resolveMirrorPaths({ origin, companyId });
+  const legacyLock = path.join(path.dirname(paths.root), 'schema-8', 'retention.lock');
+  await ensurePrivateDirectory(legacyLock);
   await ensurePrivateDirectory(paths.generations);
   const workspace = { id: randomUUID(), acceptedHead: 'b'.repeat(40),
     documents: [{ path: 'synthetic.txt', text: 'Unchanged accepted source' }] };
@@ -78,7 +80,7 @@ test('human search builds a fresh private snapshot alongside a live mirror write
     revisionToken: 'same', fields: [{ source: 'task-title', values: ['Unchanged'] }] };
   const publish = async n => {
     const generation = name(n), serverGeneration = name(n + 100);
-    const payload = { schemaVersion: 8, generation, serverGeneration,
+    const payload = { schemaVersion: MIRROR_SCHEMA_VERSION, generation, serverGeneration,
       company: encryption.runtime.company, tasks: [], workspaces: [workspace], searchDocuments: [unchanged,
         { ...unchanged, cacheKey: 'task:synthetic', revisionToken: 'old', title: 'Stale source' },
         { ...unchanged, cacheKey: 'task:revoked', id: 'revoked' }] };
@@ -87,8 +89,8 @@ test('human search builds a fresh private snapshot alongside a live mirror write
       aad: { companyId, scopeId: scope.id, scopeEpoch: scope.epoch,
         entityType: 'agent_context.mirror', entityId: randomUUID(), entityRevision: 1, purpose: 'content' } });
     await writePrivateJsonFile(path.join(paths.generations, `${generation}.json`), {
-      schemaVersion: 8, companyId, generation, serverGeneration, encryptedPayload });
-    await writePrivateJsonFile(paths.pointer, { schemaVersion: 8, companyId, generation, serverGeneration });
+      schemaVersion: MIRROR_SCHEMA_VERSION, companyId, generation, serverGeneration, encryptedPayload });
+    await writePrivateJsonFile(paths.pointer, { schemaVersion: MIRROR_SCHEMA_VERSION, companyId, generation, serverGeneration });
     return payload;
   };
   const old = await publish(1);
@@ -122,21 +124,23 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   const controller = new AbortController();
   const cancellation = new Error('Synthetic mirror read cancelled while waiting for retention');
   const contended = Promise.withResolvers();
-  const originalMkdir = fs.mkdir;
+  const originalRename = fs.rename;
   const retentionLock = path.join(paths.root, 'retention.lock');
   const stages = [];
   try {
-    await withMirrorRetentionLock(paths.root, async () => {
-      fs.mkdir = async (target, ...args) => {
-        try { return await originalMkdir(target, ...args); }
+    await withCompanyMirrorRetentionLock(paths.root, async () => {
+      fs.rename = async (source, target) => {
+        try { return await originalRename(source, target); }
         catch (error) {
-          if (target === retentionLock && error.code === 'EEXIST') contended.resolve();
+          if (target === retentionLock && ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error.code)) {
+            contended.resolve();
+          }
           throw error;
         }
       };
       pendingRead = sync({ signal: controller.signal, onProgress: stage => stages.push(stage) })
         .then(() => null, error => error);
-      await contended.promise;
+      assert.equal(await Promise.race([contended.promise, delay(10_000, 'no contention', { ref: false })]), undefined);
       controller.abort(cancellation);
       const outcome = await Promise.race([pendingRead, delay(1_000, 'still waiting', { ref: false })]);
       assert.equal(outcome, cancellation, 'The reader must settle before the held retention lock is released');
@@ -144,7 +148,7 @@ test('human search builds a fresh private snapshot alongside a live mirror write
       assert.equal(reads, 0, 'Cancellation must not start a manifest read');
     });
   } finally {
-    fs.mkdir = originalMkdir;
+    fs.rename = originalRename;
     await pendingRead;
   }
 
@@ -169,6 +173,7 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes, 'The parallel reader never publishes a pointer');
   assert.deepEqual(await generations(paths.root), generationNames, 'No extra durable generation is written');
   assert.deepEqual(await fs.readdir(paths.root), rootNames, 'The sibling writer retains sole ownership of its resumable scratchpad');
+  assert.deepEqual(await fs.readdir(legacyLock), [], 'Search works while the legacy orphan remains untouched');
 
   let conflictedReads = 0;
   globalThis.fetch = async () => new Response(JSON.stringify({ ...manifest,
@@ -191,6 +196,18 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   await refusal;
   assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
   assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes);
+
+  // A first sync after upgrading can publish a complete snapshot without
+  // taking ownership of the abandoned lock in the old runtime's cache.
+  await fs.rm(paths.lock, { recursive: true });
+  await fs.unlink(paths.pointer);
+  const coldManifest = { ...manifest, acceptedWorkspaces: [] };
+  globalThis.fetch = async () => new Response(JSON.stringify(coldManifest), { status: 200 });
+  const rebuilt = await sync({ requireFresh: true, signal: AbortSignal.timeout(10_000) });
+  assert.equal(rebuilt.changed, true);
+  assert.equal(rebuilt.mirror.serverGeneration, coldManifest.generation);
+  assert.equal(JSON.parse(await fs.readFile(paths.pointer)).generation, rebuilt.mirror.generation);
+  assert.deepEqual(await fs.readdir(legacyLock), []);
   console.log('HUMAN_SEARCH_WRITER_VERIFIED');
 });
 
@@ -387,10 +404,11 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
 
 test('startup sweep prunes historical schemas including v1 without changing current pointers', async t => {
   const f = await fixture(t);
-  for (const version of [1, 2, 4, 7, 8]) await f.schema(version);
+  const versions = [1, 2, 4, 7, 8, MIRROR_SCHEMA_VERSION];
+  for (const version of versions) await f.schema(version);
   const report = await pruneCompanyMirrorCaches({ directory: f.directory });
-  assert.equal(report.removedFiles, 30);
-  for (const version of [1, 2, 4, 7, 8]) {
+  assert.equal(report.removedFiles, versions.length * 6);
+  for (const version of versions) {
     const root = version === 1 ? f.companyRoot : path.join(f.companyRoot, `schema-${version}`);
     assert.deepEqual((await generations(root)).sort(), [name(7), name(8)].map(n => `${n}.json`));
     assert.equal(JSON.parse(await fs.readFile(path.join(root, 'current.json'))).generation, name(8));
@@ -399,10 +417,10 @@ test('startup sweep prunes historical schemas including v1 without changing curr
 });
 
 test('active reader serializes cleanup until its immutable generation has been read', async t => {
-  const f = await fixture(t); const root = await f.schema();
+  const f = await fixture(t); const root = await f.schema(MIRROR_SCHEMA_VERSION);
   let entered; const ready = new Promise(resolve => { entered = resolve; });
   let release; const blocked = new Promise(resolve => { release = resolve; });
-  const reading = withMirrorRetentionLock(root, async () => {
+  const reading = withCompanyMirrorRetentionLock(root, async () => {
     entered(); await blocked;
     assert.match(await fs.readFile(path.join(root, 'generations', `${name(1)}.json`), 'utf8'), /fixture/);
   });
@@ -415,12 +433,17 @@ test('active reader serializes cleanup until its immutable generation has been r
 });
 
 test('writer lock and future schemas are left intact; an unrelated schema still cleans', async t => {
-  const f = await fixture(t); const busy = await f.schema(7); const current = await f.schema(8);
+  const f = await fixture(t); const busy = await f.schema(7); const current = await f.schema(MIRROR_SCHEMA_VERSION);
   await fs.mkdir(path.join(busy, 'sync.lock'), { mode: 0o700 });
-  const future = await f.schema(9);
+  const legacy = await f.schema(8);
+  const legacyLock = path.join(legacy, 'retention.lock');
+  await fs.mkdir(legacyLock, { mode: 0o700 });
+  const future = await f.schema(MIRROR_SCHEMA_VERSION + 1);
   const report = await pruneCompanyMirrorCaches({ directory: f.directory });
-  assert.equal(report.skippedSchemas, 1);
+  assert.equal(report.skippedSchemas, 2);
   assert.equal((await generations(busy)).length, 8);
+  assert.equal((await generations(legacy)).length, 8);
+  assert.deepEqual(await fs.readdir(legacyLock), []);
   assert.equal((await generations(future)).length, 8);
   assert.equal((await generations(current)).length, 2);
 });
@@ -467,6 +490,44 @@ test('dead maintenance owner is recovered; live owner is never expired by age', 
   await writePrivateJsonFile(path.join(lock, `${process.pid}-${id}.json`), { id, pid: process.pid });
   await fs.utimes(lock, old, old);
   assert.equal((await withMirrorRetentionLock(root, async () => assert.fail(), { waitMs: 0 })).skipped, 'busy');
+});
+
+test('atomic mirror claims survive process exit before publication, after publication and during release', async t => {
+  const f = await fixture(t);
+  const root = await f.schema(MIRROR_SCHEMA_VERSION, 1);
+  const lock = path.join(root, 'retention.lock');
+  const moduleUrl = new URL('../host-runtime/scripts/trelio-mirror-retention.mjs', import.meta.url).href;
+  const source = `
+    import fs from 'node:fs/promises';
+    import path from 'node:path';
+    import { withCompanyMirrorRetentionLock } from ${JSON.stringify(moduleUrl)};
+    const [root, phase] = process.argv.slice(1);
+    const lock = path.join(root, 'retention.lock');
+    const rename = fs.rename, rmdir = fs.rmdir;
+    fs.rename = async (from, to) => {
+      if (to === lock && phase === 'before') process.exit(71);
+      await rename(from, to);
+      if (to === lock && phase === 'published') process.exit(72);
+    };
+    fs.rmdir = async target => {
+      if (target === lock && phase === 'released') process.exit(73);
+      return rmdir(target);
+    };
+    await withCompanyMirrorRetentionLock(root, async () => {});
+  `;
+  for (const [phase, code] of [['before', 71], ['published', 72], ['released', 73]]) {
+    await assert.rejects(exec(process.execPath, ['--input-type=module', '-e', source, root, phase]), { code });
+    if (phase === 'before') {
+      await assert.rejects(fs.lstat(lock), { code: 'ENOENT' });
+      assert.equal((await fs.readdir(root)).filter(name => name.startsWith('.retention-')).length, 1);
+    } else {
+      const entries = await fs.readdir(lock);
+      if (phase === 'published') assert.match(entries[0] ?? '', /^\d+-[a-f0-9-]{36}\.json$/u);
+      assert.equal(entries.length, phase === 'published' ? 1 : 0);
+    }
+    assert.equal(await withCompanyMirrorRetentionLock(root, async () => 'recovered', { waitMs: 5_000 }), 'recovered');
+    await assert.rejects(fs.lstat(lock), { code: 'ENOENT' });
+  }
 });
 
 
@@ -529,15 +590,15 @@ test('real entrypoint runs background maintenance using only its isolated local 
 });
 
 
-test('independent processes serialize updates while lock directories repeatedly disappear', async t => {
-  const f = await fixture(t); const root = await f.schema();
+test('independent processes serialize updates while atomic lock directories repeatedly disappear', async t => {
+  const f = await fixture(t); const root = await f.schema(MIRROR_SCHEMA_VERSION);
   const counter = path.join(root, 'counter.json');
   await fs.writeFile(counter, '0', { mode: 0o600 });
   const moduleUrl = new URL('../host-runtime/scripts/trelio-mirror-retention.mjs', import.meta.url).href;
   const source = `import fs from 'node:fs/promises';
-    import { withMirrorRetentionLock } from ${JSON.stringify(moduleUrl)};
+    import { withCompanyMirrorRetentionLock } from ${JSON.stringify(moduleUrl)};
     for (let n = 0; n < 12; n++) {
-      const result = await withMirrorRetentionLock(process.argv[1], async () => {
+      const result = await withCompanyMirrorRetentionLock(process.argv[1], async () => {
         const count = Number(await fs.readFile(process.argv[2], 'utf8'));
         await fs.writeFile(process.argv[2], String(count + 1));
         return true;
@@ -624,5 +685,33 @@ test('Windows delete-pending mkdir retries only the unacquired claim and retains
     assert.equal(claims, 6); assert.equal(operations, 1, 'failed acquisition never invokes the protected operation');
   } finally {
     fs.mkdir = mkdir; Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('Windows rename denial counts as contention only with an observed destination', async t => {
+  const f = await fixture(t);
+  const root = await f.schema(MIRROR_SCHEMA_VERSION, 1);
+  const lock = path.join(root, 'retention.lock');
+  await ensurePrivateDirectory(lock);
+  const id = randomUUID();
+  await writePrivateJsonFile(path.join(lock, `${process.pid}-${id}.json`), { id, pid: process.pid });
+  const rename = fs.rename;
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const denied = Object.assign(new Error('synthetic rename refusal'), { code: 'EPERM' });
+  fs.rename = async (from, to) => {
+    if (to !== lock) return rename(from, to);
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    throw denied;
+  };
+  try {
+    const compete = () => withCompanyMirrorRetentionLock(root, async () => assert.fail(), { waitMs: 0 });
+    assert.deepEqual(await compete(), { skipped: 'busy' });
+    assert.deepEqual(await fs.readdir(lock), [`${process.pid}-${id}.json`]);
+    Object.defineProperty(process, 'platform', platform);
+    await fs.rm(lock, { recursive: true });
+    await assert.rejects(compete(), error => error === denied);
+  } finally {
+    fs.rename = rename;
+    Object.defineProperty(process, 'platform', platform);
   }
 });

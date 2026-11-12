@@ -3,7 +3,9 @@ import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-po
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, createCompanySearchOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
 import { trelioCallSignal, parseTrelioCallTimeout, withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
-import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
+import {
+  MIRROR_SCHEMA_VERSION, pruneMirrorSchema, withCompanyMirrorRetentionLock as withMirrorRetentionLock,
+} from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
@@ -121,10 +123,6 @@ import {
   isTrelioFolderOnboardingClient,
 } from "./trelio-folder-onboarding.mjs";
 
-// Version 8 adds complete Workspace text chunks to backend-defined search
-// projections and keeps full task/domain payloads out of the mirror. Exact reads are hydrated
-// into the bounded process cache only when the caller opens a selected object.
-const MIRROR_SCHEMA_VERSION = 8;
 const IS_HUMAN_SEARCH_READER = isDirectModuleInvocation(import.meta.url)
   && process.argv[2] === "--company-search-reader" && typeof process.send === "function";
 const MIRROR_LOCK_STALE_MS = 10 * 60 * 1000;
