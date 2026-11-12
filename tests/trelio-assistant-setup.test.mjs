@@ -3565,12 +3565,14 @@ test(`answered source recovery crosses production factory, HTTP and SQLite reope
 
 test('expired unbound triage recovers the original through the production factory and device codec after restart',async t=>{
   const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
-  for(const scenario of ['lost_attach','lost_provision','unsupported','bound','read_available','legacy_catalog','modern_lost','legacy_indexed']){
+  for(const scenario of ['lost_attach','lost_provision','unsupported','bound','read_available','legacy_catalog','modern_lost','legacy_indexed','native_starting','native_prior_indexed']){
     await t.test(scenario,async()=>{
       const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-unattached-triage-')),file=path.join(directory,'inbox.sqlite');
       const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
       const companyId=randomUUID(),sourceId=randomUUID(),ownerId=randomUUID(),oldThread=randomUUID(),newThread=randomUUID();
-      const legacy= ['legacy_catalog','modern_lost','legacy_indexed'].includes(scenario),legacyThread=randomUUID(),legacyMarker=randomUUID();
+      const nativeStarting=scenario==='native_starting'||scenario==='native_prior_indexed';
+      const legacy=nativeStarting||['legacy_catalog','modern_lost','legacy_indexed'].includes(scenario);
+      const legacyThread=randomUUID(),legacyMarker=randomUUID(),priorThread=randomUUID(),priorMarker=randomUUID();
       const source={id:sourceId,companyId,deviceId:identity.deviceId,localAccountId:randomUUID(),projectId:null,
         skillId:'telegram-mtproto',state:'active',revision:0};
       const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -3594,7 +3596,8 @@ test('expired unbound triage recovers the original through the production factor
           // Real v3.32.10 journal shape before scoped catalogue polling.
           const prior={originalThreadId:oldThread,markerId:legacyMarker,leaseExpiresAt:expiry,
             started:true,threadId:legacyThread,attachStarted:false,
-            ...(scenario==='modern_lost'?{catalogReadinessVersion:1}:{})};
+            ...(scenario==='modern_lost'?{catalogReadinessVersion:2}:{}),
+            ...(nativeStarting?{catalogReadinessVersion:1,priorProvision:{threadId:priorThread,markerId:priorMarker}}:{})};
           seed.prepare('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?').run(JSON.stringify(prior),id);
         }
       }finally{seed.close();}
@@ -3636,8 +3639,9 @@ test('expired unbound triage recovers the original through the production factor
               'workspace_execution','owner_decisions','background_service']}}),
           readHookReadiness:async()=>({fingerprint:'c'.repeat(64)}),native:{
             readUnmaterializedTriage:async thread=>{
-              assert.ok(thread===oldThread||legacy&&thread===legacyThread);
-              return scenario!=='read_available'&&(scenario!=='legacy_indexed'||thread!==legacyThread);
+              assert.ok(thread===oldThread||legacy&&thread===legacyThread||nativeStarting&&thread===priorThread);
+              return scenario!=='read_available'&&(scenario!=='legacy_indexed'||thread!==legacyThread)
+                &&(scenario!=='native_prior_indexed'||thread!==priorThread);
             },
             readDelivery:async(thread,marker,options)=>{
               if(thread===oldThread){assert.equal(marker,original.provision_id);
@@ -3666,7 +3670,7 @@ test('expired unbound triage recovers the original through the production factor
       try{
         host=await create();await host.coordinator.workOnce().catch(()=>{});await host.close();host=null;
         host=await create();await host.coordinator.workOnce().catch(()=>{});
-        const positive=['lost_attach','lost_provision','legacy_catalog'].includes(scenario);
+        const positive=['lost_attach','lost_provision','legacy_catalog','native_starting'].includes(scenario);
         assert.deepEqual([provisions,posts,runs,clears],positive?[1,1,1,1]:[0,0,0,0]);
         const db=new DatabaseSync(file,{readOnly:true});
         try{
@@ -3677,8 +3681,11 @@ test('expired unbound triage recovers the original through the production factor
           if(positive){
             const recovery=JSON.parse(row.triage_provision_json);
             assert.equal(recovery.originalThreadId,oldThread);
-            assert.equal(recovery.catalogReadinessVersion,1);
-            if(legacy)assert.deepEqual(recovery.priorProvision,{threadId:legacyThread,markerId:legacyMarker});
+            assert.equal(recovery.catalogReadinessVersion,2);
+            if(nativeStarting){
+              assert.deepEqual(recovery.priorProvision,{threadId:priorThread,markerId:priorMarker});
+              assert.deepEqual(recovery.priorNativeStartupProvision,{threadId:legacyThread,markerId:legacyMarker});
+            }else if(legacy)assert.deepEqual(recovery.priorProvision,{threadId:legacyThread,markerId:legacyMarker});
           }else if(legacy)assert.equal(JSON.parse(row.triage_provision_json).markerId,legacyMarker);
           assert.equal(db.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,1);
           assert.equal(db.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);

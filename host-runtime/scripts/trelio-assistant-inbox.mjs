@@ -97,23 +97,26 @@ const provisionReview=value=>{
 // until the new READY is observed. An interrupted new attempt is read-only.
 const triageProvision=value=>{
   const fields=['originalThreadId','markerId','leaseExpiresAt','started','threadId','attachStarted'];
-  object(value,[...fields,'catalogReadinessVersion','priorProvision']);
+  object(value,[...fields,'catalogReadinessVersion','priorProvision','priorNativeStartupProvision']);
   if(fields.some(key=>!Object.hasOwn(value,key))||typeof value.started!=='boolean'||typeof value.attachStarted!=='boolean'
     ||typeof value.leaseExpiresAt!=='string'||!Number.isFinite(Date.parse(value.leaseExpiresAt))
     ||new Date(value.leaseExpiresAt).toISOString()!==value.leaseExpiresAt
     ||value.threadId!==null&&!value.started||value.attachStarted&&value.threadId===null
-    ||value.originalThreadId===value.threadId||value.catalogReadinessVersion!==undefined&&value.catalogReadinessVersion!==1)
+    ||value.originalThreadId===value.threadId||value.catalogReadinessVersion!==undefined&&![1,2].includes(value.catalogReadinessVersion))
     inputError();
-  let priorProvision;
-  if(value.priorProvision!==undefined){
-    object(value.priorProvision,['markerId','threadId']);
-    priorProvision={markerId:uuid(value.priorProvision.markerId),threadId:uuid(value.priorProvision.threadId)};
-    if(value.catalogReadinessVersion!==1||priorProvision.markerId===value.markerId
-      ||[value.threadId,value.originalThreadId].includes(priorProvision.threadId))inputError();
+  const prior={};
+  const seenThreads=new Set([value.originalThreadId,value.threadId]),seenMarkers=new Set([value.markerId]);
+  for(const key of ['priorProvision','priorNativeStartupProvision']){
+    if(value[key]===undefined)continue;
+    object(value[key],['markerId','threadId']);
+    const markerId=uuid(value[key].markerId),threadId=uuid(value[key].threadId);
+    if(value.catalogReadinessVersion===undefined||key==='priorNativeStartupProvision'&&value.catalogReadinessVersion!==2
+      ||seenThreads.has(threadId)||seenMarkers.has(markerId))inputError();
+    seenThreads.add(threadId);seenMarkers.add(markerId);prior[key]={markerId,threadId};
   }
   return {originalThreadId:uuid(value.originalThreadId),markerId:uuid(value.markerId),leaseExpiresAt:value.leaseExpiresAt,
     started:value.started,threadId:value.threadId===null?null:uuid(value.threadId),attachStarted:value.attachStarted,
-    ...(value.catalogReadinessVersion===1?{catalogReadinessVersion:1}:{}),...(priorProvision?{priorProvision}:{})};
+    ...(value.catalogReadinessVersion!==undefined?{catalogReadinessVersion:value.catalogReadinessVersion}:{}),...prior};
 };
 
 /** One irreversible prepare intent plus the SAME provider's send/result fence.
@@ -1395,21 +1398,33 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id),prior=this.triageProvision(id);
       if(!triageProvisionCandidate(row)||prior?.leaseExpiresAt!==undefined&&prior.leaseExpiresAt!==leaseExpiresAt)
         fail('ASSISTANT_INBOX_CONFLICT');
-      let priorProvision;
+      let priorProvision,priorNativeStartupProvision;
       if(preCatalogMarkerId!==null){
-        // Only the pre-fix format can enter this distinct technical phase.
-        // A lost modern start or prior historical marker is never reset.
-        if(!prior?.started||!prior.threadId||prior.attachStarted||prior.catalogReadinessVersion!==undefined
+        // Compatibility only for the two earlier staging formats. The old
+        // worker may have stopped at a pending native status. A start under
+        // the corrected enum, a possible first attach, or any lost business
+        // result never earns another new chat.
+        if(!prior?.started||!prior.threadId||prior.attachStarted||prior.catalogReadinessVersion===2
           ||prior.originalThreadId!==row.thread_id||prior.markerId!==uuid(preCatalogMarkerId))
           fail('ASSISTANT_INBOX_CONFLICT');
-        priorProvision={markerId:prior.markerId,threadId:prior.threadId};
+        const abandoned={markerId:prior.markerId,threadId:prior.threadId};
+        if(prior.catalogReadinessVersion===1){
+          priorProvision=prior.priorProvision;
+          priorNativeStartupProvision=abandoned;
+        }else priorProvision=abandoned;
       }else if(prior){
         if(prior.started)fail('ASSISTANT_INBOX_CONFLICT');
-        return prior;
+        if(prior.catalogReadinessVersion===2)return prior;
+        // A reserved but never-started marker needs no replacement. Stamp
+        // the corrected protocol before starting it so a future lost result
+        // cannot masquerade as an earlier startup failure.
+        const upgraded=triageProvision({...prior,catalogReadinessVersion:2});
+        run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify(upgraded),row.id);
+        return Object.freeze(upgraded);
       }
       const recovery=triageProvision({originalThreadId:row.thread_id,markerId:randomUUID(),
-        leaseExpiresAt,started:false,threadId:null,attachStarted:false,catalogReadinessVersion:1,
-        ...(priorProvision?{priorProvision}:{})});
+        leaseExpiresAt,started:false,threadId:null,attachStarted:false,catalogReadinessVersion:2,
+        ...(priorProvision?{priorProvision}:{}),...(priorNativeStartupProvision?{priorNativeStartupProvision}:{})});
       run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify(recovery),row.id);
       return Object.freeze(recovery);
     });},

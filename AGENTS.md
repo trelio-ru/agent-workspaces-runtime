@@ -1088,9 +1088,10 @@ publication tooling также остаются вне этого публичн
   is separately fenced before HTTP and reconciled by read-back only. The
   original frozen batch runs through normal source admission after READY.
   Scoped triage polls a complete correctly identified native catalogue while
-  connection status is null/connecting, before any model input. Exact expired
-  never-attached pre-polling failures get one separately recorded recovery only;
-  preserve both earlier staging IDs and every modern start/attachment fence.
+  connection status is null, notStarted or starting, before any model input.
+  Earlier staging formats get one separately recorded recovery only after all
+  historical chats are unmaterialized and native attachment is still absent.
+  Preserve all staging IDs and every corrected start/attachment fence.
   Stored history may project an active GUI turn as interrupted; keep its reader
   until actual completion/failure or the original deadline. This snapshot never
   certifies cancellation, pass release, a new invocation or recovery authority.

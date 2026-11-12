@@ -301,12 +301,13 @@ only after the resulting native turn, committed classification and pass release.
 
 Fresh source-triage threads can expose the correct cached catalogue before the
 native server reports a live connection. Re-read that same complete catalogue
-under the existing deadline while the exact assistant plugin is null/connecting.
-A foreign tool, invalid inventory or explicit failure still refuses, and only
-connected status permits a model turn. A retained pre-polling recovery can earn
-one distinct technical marker only after both abandoned thread IDs return the
-exact not-loaded response and native first-attachment eligibility still holds.
-Both older starts and markers remain recorded. Lost modern starts remain
+under the existing deadline while its native status is null, notStarted or
+starting. An empty pending catalogue grants no authority. A foreign tool,
+invalid inventory or explicit failure still refuses, and only connected status
+with the exact required tools permits a model turn. An older staging format
+can earn one distinct technical marker only after every abandoned thread
+returns the exact not-loaded response and native first-attachment eligibility
+still holds. Keep all older starts and markers. Lost corrected starts remain
 read-back-only.
 
 On subsequent turns, the exact UUID, cwd, model and effort must still match.

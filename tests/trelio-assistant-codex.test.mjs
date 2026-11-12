@@ -37,9 +37,14 @@ test('independent readiness completion requires its exact tool-free GUI turn',as
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const prompt=`TRELIO_ASSISTANT_DELIVERY ${deliveryId}\nThis is an isolated native dispatcher readiness check. Reply exactly READY. Do not use tools or access files, sites, accounts or integrations.\n`;
   const turn={id:turnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:prompt}]},{type:'agentMessage',text:'READY'}]};
-  const read=t=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},readinessOnly:true,
+  const read=(t,options={})=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},readinessOnly:true,...options,
     spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[t],nextCursor:null}}))});
   assert.equal((await read(turn)).state,'completed');
+  const reasoning={...turn,items:[turn.items[0],{type:'reasoning'},turn.items[1]]};
+  assert.equal((await read(reasoning)).state,'uncertain');
+  assert.equal((await read(reasoning,{chatKind:'source_triage'})).state,'completed');
+  assert.equal((await read({...reasoning,items:[turn.items[0],{type:'mcpToolCall'},turn.items[1]]},
+    {chatKind:'source_triage'})).state,'uncertain');
   for(const items of [[...turn.items,{type:'mcpToolCall'}],[turn.items[0],{type:'agentMessage',text:'other response'}],
     [{type:'userMessage',content:[{type:'text',text:prompt.trimEnd()}]},turn.items[1]],
     [{type:'userMessage',content:[{type:'text',text:prompt+'\nprivate body'}]},turn.items[1]]])
@@ -1628,7 +1633,9 @@ test('source triage waits for the same scoped native server to connect before ei
         if(request.method==='mcpServerStatus/list'){
           assert.equal(request.params.threadId,threadId);
           assert.equal(turns,0);assert.ok(saved);
-          reply.result.data[0].runtimeStatus=[null,'connecting','connected'][catalogueReads++];
+          const server=reply.result.data[0];
+          server.runtimeStatus=['notStarted','starting','connected'][catalogueReads++];
+          if(server.runtimeStatus==='notStarted')server.tools={};
         }
         return reply;
       }}),

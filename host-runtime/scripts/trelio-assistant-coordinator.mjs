@@ -1214,14 +1214,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(retained?.started){
       if(!retained.threadId)return false;
       try{
-        const result=await native.readDelivery(retained.threadId,retained.markerId,{signal,provision:true,readinessOnly:true});lease();
+        const result=await native.readDelivery(retained.threadId,retained.markerId,
+          {signal,provision:true,readinessOnly:true,chatKind:'source_triage'});lease();
         if(result.state!=='completed')return false;
         inbox.readyTriageProvision(row.id,retained.markerId);return true;
       }catch(error){
-        // The older format could burn its only technical marker while the
-        // native MCP status was still cached. An unknown modern attempt, any
-        // available/ambiguous history or any business attachment stays fenced.
-        if(retained.catalogReadinessVersion!==undefined||error?.code!=='ASSISTANT_CODEX_READ_UNAVAILABLE')throw error;
+        // Earlier staging formats refused pending native MCP states before
+        // the first turn. The corrected enum never retries a lost modern
+        // start. Only the exact never-attached backend reservation and every
+        // historical chat's native not-loaded observation can cross below.
+        if(retained.catalogReadinessVersion===2||error?.code!=='ASSISTANT_CODEX_READ_UNAVAILABLE')throw error;
         preCatalogAttempt=retained;
       }
     }
@@ -1238,7 +1240,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Only an independently certified never-attached reservation has had
       // no business authority. Native absence alone is not that certificate
       // and does not authorize replay of the old chat or model input.
-      const abandoned=[row.thread_id,preCatalogAttempt?.threadId??retained?.priorProvision?.threadId].filter(Boolean);
+      const abandoned=[row.thread_id,preCatalogAttempt?.threadId,retained?.priorProvision?.threadId,
+        retained?.priorNativeStartupProvision?.threadId].filter(Boolean);
       for(const threadId of abandoned){
         if(await native.readUnmaterializedTriage(threadId,{signal})!==true)return null;
         lease();

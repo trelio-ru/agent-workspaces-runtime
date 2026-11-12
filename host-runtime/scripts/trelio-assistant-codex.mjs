@@ -118,17 +118,20 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
     if(!row.tools||Object.getPrototypeOf(row.tools)!==Object.prototype||Object.keys(row.tools).length||row.toolsError!==null)
       fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
   const server=admitted[0];
-  if(admitted.length!==1
-    ||server?.name!=='trelio-assistant'||server.pluginId!==ASSISTANT_PLUGIN_IDS[0]
-    ||![null,'connecting','connected'].includes(server.runtimeStatus)||server.toolsError!==null||!server.tools
-    ||Object.getPrototypeOf(server.tools)!==Object.prototype
-    ||Object.keys(server.tools).length>256
+  if(admitted.length!==1||server?.name!=='trelio-assistant'||server.pluginId!==ASSISTANT_PLUGIN_IDS[0]
+    ||server.toolsError!==null||!server.tools||Object.getPrototypeOf(server.tools)!==Object.prototype
+    ||Object.keys(server.tools).length>256)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  // Native McpServerConnectionStatus uses camel-case notStarted and starting.
+  // A pending connection may expose a cached or empty catalogue. Neither is
+  // positive readiness; verify required tools after the live connection.
+  if([null,'notStarted','starting'].includes(server.runtimeStatus))return false;
+  if(server.runtimeStatus!=='connected'
     ||(workspaceDraftRecovery?['get_assistant_status','prepare_assistant_workspace_run','continue_assistant_workspace_action',
       'use_assistant_workspace_files','complete_assistant_pass']:['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'])
       .some(name=>server.tools[name]?.name!==name)
     ||workspaceDraftRecovery&&Object.entries(server.tools).some(([name,tool])=>!ASSISTANT_WORKSPACE_DRAFT_TOOLS.includes(name)||tool?.name!==name))
     fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
-  return server.runtimeStatus==='connected';
+  return true;
 };
 
 /** Fresh native threads can advertise the correct cached tool descriptions
@@ -137,7 +140,7 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
  * the original signal/deadline. No other plugin, wrong tools, malformed page
  * or explicit connection error becomes acceptable or retryable. */
 const verifyAssistantExecutionServer = async(request,threadId,{workspaceDraftRecovery,triage,signal})=>{
-  const delays=triage?[250,500,1000,2000,4000,8000]:[];
+  const delays=triage?[250,500,1000,2000,4000,8000,8000,8000]:[];
   for(let attempt=0;;attempt++){
     if(await readAssistantExecutionServer(request,threadId,workspaceDraftRecovery))return;
     if(attempt===delays.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
@@ -651,10 +654,17 @@ export const readAssistantCodexExecutionAvailabilitySet = async (configurations,
 /** Exact marker search stays in memory. Missing history is uncertainty, never
  * proof of rejection/retry. Summary pages contain user messages without reading
  * arbitrary local rollout files or loading full tool output/transcript bodies. */
-const toolFreeReady=(turn,prompt)=>turn?.status==='completed'&&turn.error==null&&Array.isArray(turn.items)&&turn.items.length===2
-  &&turn.items[0]?.type==='userMessage'&&Array.isArray(turn.items[0].content)&&turn.items[0].content.length===1
-  &&turn.items[0].content[0]?.type==='text'&&turn.items[0].content[0].text===prompt
-  &&turn.items[1]?.type==='agentMessage'&&turn.items[1].text==='READY';
+const toolFreeReady=(turn,prompt,{allowReasoning=false}={})=>{
+  if(turn?.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>32)return false;
+  const [request,...remainder]=turn.items,response=remainder.pop();
+  // Codex can retain reasoning between the exact empty request and READY.
+  // For source triage that is model output only. Any tool, intermediate
+  // message or other item still invalidates the technical proof.
+  return request?.type==='userMessage'&&Array.isArray(request.content)&&request.content.length===1
+    &&request.content[0]?.type==='text'&&request.content[0].text===prompt
+    &&response?.type==='agentMessage'&&response.text==='READY'
+    &&(allowReasoning?remainder.every(item=>item?.type==='reasoning'):remainder.length===0);
+};
 /** A portable/WinGet PowerShell need not live in ProgramFiles. Check the
  * actual file with Windows' Authenticode reader instead of widening admission
  * to arbitrary pwsh basenames or guessed package paths. This launches ONLY the
@@ -1385,7 +1395,7 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
     // history binding. This is read-only reconciliation of the saved marker,
     // never permission to submit another verification or owner question.
     if(options.readinessOnly===true&&turn.status==='completed'&&!toolFreeReady(turn,
-      assistantNativePrompt(deliveryId,undefined,{readinessProbe:true})))
+      assistantNativePrompt(deliveryId,undefined,{readinessProbe:true}),{allowReasoning:options.chatKind==='source_triage'}))
       return {state:'uncertain'};
     if (turn.status === 'completed') return { state: 'completed', turnId: turn.id, receipt: `codex:${id(threadId)}:${id(turn.id)}` };
     if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}`,
