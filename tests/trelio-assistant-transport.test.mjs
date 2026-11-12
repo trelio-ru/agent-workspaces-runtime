@@ -145,6 +145,41 @@ test('exact browser schema read is content-free metadata without a Workspace or 
  assert.deepEqual(sent,{name:'use_assistant_browser'});
 });
 
+test('the exact Workspace command contract crosses company discovery without granting file execution',async()=>{
+ const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+ const origin='https://workspace-contract.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'e'.repeat(43)}`,expiresAt:1});
+ const name='use_assistant_workspace_files',method='get_trelio_tool_contract';
+ const contract={schemaVersion:1,name,inputSchema:{type:'object',properties:{command:{type:'object'}}}};
+ const calls=[];
+ const client=createAssistantMcpClient({origin,assistantId,deviceId,store,presentationProfile:'company_context',
+  materializeWorkspaceFiles:()=>assert.fail('metadata must not materialize a Run'),
+  withWorkspaceArguments:(request,send)=>withAssistantEncryptedWorkspaceArguments(request,send,{
+   companyContextRead:true,withProfile:()=>assert.fail('metadata must not open a writable profile'),
+   withManagedContent:()=>assert.fail('metadata must not stage managed content'),
+  }),
+  httpRequest:async input=>{
+   const view=input.config.headers['x-trelio-assistant-capability-profile'];
+   assert.equal(view,'company_context');
+   const response=result=>({sessionId:'workspace-contract',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+   if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+   if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+   if(input.payload.method==='tools/list')return response({tools:[{name:method,description:'Native contract metadata',
+    inputSchema:{type:'object',properties:{name:{anyOf:[{enum:['get_task']},{const:name}]}},required:['name'],additionalProperties:false}}]});
+   calls.push(input.payload.params);
+   return response({content:[],structuredContent:contract});
+  }});
+ const result=await client.callTool(method,{name,taskPass:{passId:randomUUID()},runtimeSessionProof:{runtimeSessionId:randomUUID()}});
+ assert.deepEqual(result.structuredContent,contract);
+ await assert.rejects(client.callTool(method,{name:'private company prose'}),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+ await assert.rejects(client.callTool(method,{name,text:'private company prose'}),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+ await assert.rejects(client.callTool(name,{command:{action:'read',path:'WORK.md'}}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+ assert.deepEqual(calls,[{name:method,arguments:{name}}],'only the fixed schema locator may reach native HTTP');
+
+ await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:method,args:{name}},
+  ()=>assert.fail('a non-company route cannot send this locator')),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+});
+
 test('only a confirmed native outcome requests browser cleanup; cleanup failure never replays or masks completion',async()=>{
  const origin='https://cleanup.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'c'.repeat(43)}`,expiresAt:1});

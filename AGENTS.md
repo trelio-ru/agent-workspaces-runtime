@@ -1000,6 +1000,9 @@ publication tooling также остаются вне этого публичн
   executor. See [contract](docs/assistant-scheduler.md#encrypted-source-and-exact-public-task-skill).
 - Delegated native operations: [contract](docs/assistant-scheduler.md#delegated-native-operations). Exact live schemas/coverage, same protector and independent owner decisions; no human identity or domain-schema copy.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
+  Allow the exact `use_assistant_workspace_files` schema locator only as
+  company discovery metadata; the file executor remains own-Run-only and
+  outside the company-read allowlist.
   Encrypted comment files reuse native-selected signed same-task accepted manifests and the SAME local human link composer before whole-body sealing; native atomic references/receipts remain authoritative, never server append to opaque JSON.
   Structural encrypted own-error retraction uses the SAME native authority; correct files through an ordinary encrypted Run and verify before correction attachment.
   Content-bearing calls also require the SAME fresh managed company-mode

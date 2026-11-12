@@ -3224,10 +3224,17 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
     // Contract lookup is metadata only when its locator is one of the native
     // names in this presentation. Reject arbitrary prose BEFORE HTTP even
     // though the backend's exact contract registry would also refuse it.
-    if(name==='get_trelio_tool_contract'&&(metadata.name!=='use_assistant_browser'&&(!companyContextRead&&!args.intakePass
-      ||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(metadata.name))
-      ||Object.keys(metadata).some(key=>key!=='name')))
-      throw new AssistantTransportError('ASSISTANT_MCP_INPUT_INVALID');
+    if(name==='get_trelio_tool_contract'){
+      // The company session exposes the fixed Workspace command schema, not
+      // the file executor. Keep the exception here so it cannot enter the
+      // general company-read tool set or bypass own-Run admission.
+      const workspaceContract=companyContextRead&&metadata.name==='use_assistant_workspace_files';
+      const companyReadContract=(companyContextRead||args.intakePass)
+        &&ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(metadata.name);
+      if((metadata.name!=='use_assistant_browser'&&!workspaceContract&&!companyReadContract)
+        ||Object.keys(metadata).some(key=>key!=='name'))
+        throw new AssistantTransportError('ASSISTANT_MCP_INPUT_INVALID');
+    }
     return send(metadata);
   }
   if(name==='download_knowledge_base_attachment'){

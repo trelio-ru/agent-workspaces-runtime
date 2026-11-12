@@ -337,6 +337,10 @@ assistant role and work-state reference are loaded from the exact running plugin
 and passed as private turn instructions. They do not change the installed skill
 or other chats.
 
+Read its fixed command schema with
+`get_trelio_tool_contract(name=use_assistant_workspace_files)` through the
+native company discovery session. This lookup forwards only the exact tool
+name and does not open a local profile or admit a file operation.
 Opened Run files use `use_assistant_workspace_files({runIdentity,command})`.
 The server receives only Run locators, the active pass and its one-use observed
 proof. The host repeats native own-Run/lease and managed-recipient checks before
