@@ -3659,6 +3659,9 @@ into text. App-only methods and secret browser-fill are unavailable, including
 nested local continuations. Exact textual human decisions keep their normal
 backend guards. Diagnosis/folder setup use `clientKind=kimi-work`, AGENTS.md and
 the SAME planner/apply/CAS without foreign configuration migration.
+The shared managed block reminds Kimi to use real MCP calls, its stable remote
+discovery/invocation tools, and the exact returned local MCP action. Existing
+blocks receive this guidance through the same diagnostics and CAS refresh.
 
 Tests compose the actual OAuth callback/PKCE, native credential separation,
 serial stdio, catalogue notification and structured authority. A stdio client

@@ -365,6 +365,9 @@ const buildManagedBindingBlock = ({ company, project }) => {
     "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio относятся только к выданному bridge воркспейсу.",
     "",
     CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
+    // Keep one shared template across clients: a Kimi refresh must not remove
+    // Codex guidance or make another client rewrite the same managed block.
+    "Kimi Work: вызывай инструменты из MCP-каталога, без `system.invoke`. Если удалённого инструмента в чате нет, используй `trelio_find_tools` для его точной схемы и `trelio_call_tool` для вызова. Существующий OAuth переиспользуй. Возвращённые локальные действия выполняй через указанные MCP server/tool; если указан `nativeArgumentsTarget`, заполни только этот слот исходными аргументами.",
     "",
     "По запросу диагностики Trelio сначала вызови diagnose_trelio_installation с intent=diagnostics, реальным clientKind и текущей выбранной клиентом папкой в folderOnboarding.folderPath. Следуй возвращённому плану; не создавай учебные задачи или Run. Обновляй только существующий managed Trelio-блок через returned refresh action, если пользователь не запретил изменения.",
     "",

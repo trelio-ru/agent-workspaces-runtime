@@ -220,6 +220,16 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
   const request = (method, params) => new Promise(resolve => {
     const id = ++sequence; pending.set(id, resolve); input.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
+  const encryptedRead = { companySlug: "synthetic-encrypted" };
+  const localReadArguments = { schemaVersion: 1, route: "action", parameters: {
+    companySlug: encryptedRead.companySlug, nativeTool: "get_agent_instructions", arguments: {},
+  } };
+  const encryptedRoute = { code: "MCP_LOCAL_CONTEXT_REQUIRED", providerSelection: {
+    automatic: true, provider: "local_company_context", server: "trelio-remote-skills",
+    tool: "continue_trelio_local_action", companySlug: encryptedRead.companySlug,
+    nativeTool: "get_agent_instructions", route: "action", arguments: localReadArguments,
+    nativeArgumentsTarget: "parameters.arguments",
+  } };
   const connection = { instructions: () => "COMPLETE SERVER INSTRUCTIONS", connect: async () => {
     connects++;
     connected = true; return { connected: true, protectedRead: "not_checked", saving: "not_checked" };
@@ -241,6 +251,10 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
       return output({ tasks: [{ title: "Overdue task" }] });
     }
     assert.equal(method, "get_agent_instructions");
+    if (args.companySlug === encryptedRead.companySlug) {
+      assert.deepEqual(args, encryptedRead);
+      return output(encryptedRoute);
+    }
     assert.deepEqual(args, { companySlug: "synthetic-company" });
     return output({ effectiveInstructions: { markdown: "FULL AUTHORITY" } });
   } };
@@ -286,6 +300,19 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
     const later = await initialCall("trelio_call_tool", { name: exact.name, arguments: {
       companySlug: "synthetic-company", dueState: "overdue" } });
     assert.deepEqual(later.result.structuredContent.tasks, [{ title: "Overdue task" }]);
+    // A later chat with the same stale inventory can also receive and dispatch
+    // the server's encrypted route through the distinct local MCP adapter.
+    const encrypted = await initialCall("trelio_call_tool", { name: "get_agent_instructions", arguments: encryptedRead });
+    assert.deepEqual(encrypted.result.structuredContent, encryptedRoute);
+    const selection = encrypted.result.structuredContent.providerSelection;
+    const localInput = structuredClone(selection.arguments);
+    localInput.parameters.arguments = encryptedRead;
+    const local = createKimiLocalMcpHandler({ localMessage: async (message) => {
+      assert.deepEqual(message.params, { name: "continue_trelio_local_action", arguments: localInput });
+      return { jsonrpc: "2.0", id: message.id, result: output({ effectiveInstructions: { markdown: "LOCAL AUTHORITY" } }) };
+    } });
+    const localResult = await local(call(selection.tool, localInput));
+    assert.equal(localResult.result.structuredContent.effectiveInstructions.markdown, "LOCAL AUTHORITY");
     assert.equal(connects, 1);
     // Clients that refresh can still call the same exact native definition.
     const catalogue = (await request("tools/list")).result.tools;
@@ -293,7 +320,7 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
     const direct = await request("tools/call", { name: "get_agent_instructions", arguments: {
       companySlug: "synthetic-company", runtimeSessionProof: { forged: true }, knownInstructionRevisionKey: "forged" } });
     assert.equal(direct.result.structuredContent.effectiveInstructions.markdown, "FULL AUTHORITY");
-    assert.equal(calls, 4);
+    assert.equal(calls, 5);
   } finally { input.end(); await running; }
 });
 

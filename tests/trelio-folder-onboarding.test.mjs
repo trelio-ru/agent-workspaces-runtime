@@ -84,12 +84,28 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
     const healthy = await prepareTrelioFolderDiagnostic({ folderPath: root }, clientKind);
     assert.equal(healthy.status, "ready");
     assert.equal(healthy.scope.companySlug, binding.company.slug);
-    await makeTemplateOutdated(root);
+    if (clientKind === "kimi-work") {
+      const guidance = current.split("\n").find((line) => line.startsWith("Kimi Work:"));
+      assert.match(guidance ?? "", /MCP-каталога.*system\.invoke.*trelio_find_tools.*trelio_call_tool.*локальные действия/u);
+      // An earlier managed block refreshes in place. A second client must see
+      // the same current template when the directory is shared.
+      const codex = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+      assert.equal(codex.status, "ready");
+      assert.equal(codex.instructions.templateSha256, healthy.instructions.templateSha256);
+      await fs.writeFile(path.join(root, "AGENTS.md"), current.replace(`${guidance}\n`, ""));
+    } else {
+      await makeTemplateOutdated(root);
+    }
     const outdated = await prepareTrelioFolderDiagnostic({ folderPath: root }, clientKind);
+    assert.equal(outdated.status, "refresh_available");
     await handleTrelioWorkspaceActionOperation(
       "https://trelio.example", outdated.refresh.action.arguments, actionOptions,
     );
     assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), current);
+    if (clientKind === "kimi-work") {
+      const next = await prepareTrelioFolderDiagnostic({ folderPath: root }, "kimi-work");
+      assert.equal(next.status, "ready");
+    }
   });
 }
 
