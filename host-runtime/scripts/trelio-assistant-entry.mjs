@@ -1921,7 +1921,7 @@ const productionContext = async (action, options = {}) => {
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
   'beginSourceIntake','reconcileAnsweredSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
-  'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery'];
+  'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery','readRejectedTriageIgnore','reconcileRejectedTriageIgnore'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
 /** Reuse the host setup mutex at the final NEW-work HTTP boundary. This is a
  * denial/CAS check, never domain admission: native owner/device/task guards
@@ -2001,7 +2001,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
       readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
       readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply,
-      readUnmaterializedTriage:nativeRuntime.readAssistantUnmaterializedTriage};
+      readUnmaterializedTriage:nativeRuntime.readAssistantUnmaterializedTriage,
+      readRejectedTriageIgnore:nativeRuntime.readAssistantRejectedTriageIgnore};
     if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     // Observe the native boundary before the coordinator deliberately replaces
     // a post-admission error with its durable delivery-uncertain fence. That

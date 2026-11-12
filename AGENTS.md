@@ -1092,6 +1092,10 @@ publication tooling также остаются вне этого публичн
   Earlier staging formats get one separately recorded recovery only after all
   historical chats are unmaterialized and native attachment is still absent.
   Preserve all staging IDs and every corrected start/attachment fence.
+  A recovered triage IGNORE explicitly rejected before resolve proof can get
+  a separate receipt after ordinary expiry/cancellation. Schema30 preserves
+  original history and one device attempt. Exact whole-terminal proof, batch
+  and live backend receipt are required. No model/provider replay or new lease.
   Stored history may project an active GUI turn as interrupted; keep its reader
   until actual completion/failure or the original deadline. This snapshot never
   certifies cancellation, pass release, a new invocation or recovery authority.

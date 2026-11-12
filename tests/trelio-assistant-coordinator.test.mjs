@@ -2833,3 +2833,47 @@ for(const profile of ['generation','dispatch'])for(const mode of ['success','los
   assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
  }finally{await coordinator.close();}
 });
+
+for(const mode of ['confirmed','lost_committed','lost_unconfirmed','unproven'])test(`recovered triage ignore preserves the original receipt and never reruns the pass (${mode})`,async t=>{
+  const f=fixture(t);await f.coordinator.close();
+  const sourceId=randomUUID(),accountId=randomUUID(),threadId=randomUUID(),terminalTurnId=randomUUID(),originalReceiptId=randomUUID();
+  const scope={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
+  f.options.client.tasks=async()=>({bindings:[],nextCursor:null});f.options.workspaceForIntake=async()=>process.cwd();
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+  const poll=inbox.claimPoll(scope);
+  inbox.commitPage(scope,{...poll,nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,
+    wake:false,providerWake:true,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+  inbox.queueExistingTaskIntakes(scope,{sourceRevision:0,eventKeys:inbox.pendingExternalRoutes(scope).map(row=>row.event_key)});
+  const {id}=inbox.ownerIntakes()[0];inbox.freezeExistingTaskIntake(id);inbox.prepareOwnerIntake(id);inbox.startOwnerIntakeProvision(id);
+  inbox.bindOwnerIntakeThread(id,randomUUID());
+  const provision=inbox.prepareTriageProvision(id,new Date(f.options.now()-1000).toISOString());
+  inbox.startTriageProvision(id,provision.markerId);inbox.bindTriageProvision(id,provision.markerId,threadId);
+  inbox.readyTriageProvision(id,provision.markerId);inbox.startTriageAttachment(id,provision.markerId);inbox.startOwnerIntake(id);
+  inbox.finishOwnerIntake(id,{state:'cancelled',receiptId:originalReceiptId});f.advance(300001);
+  const original=inbox.ownerIntake(id);const locator={companyId:f.companyId,sourceId,intakeId:id};
+  const expected={...locator,threadId,eventIds:original.eventIds,sourceRevision:0,originalReceiptId,terminalTurnId};
+  const positive={...expected,receiptId:randomUUID(),state:'ignored'};
+  let proofReads=0,posts=0,confirmed=0,receipt=null;
+  f.options.native.readRejectedTriageIgnore=async(thread,delivery,pass,events)=>{
+    proofReads++;assert.equal(thread,threadId);assert.equal(delivery,original.delivery_id);assert.deepEqual(pass,locator);assert.deepEqual(events,original.eventIds);
+    return mode==='unproven'?null:{terminalTurnId};};
+  f.options.client.readRejectedTriageIgnore=async request=>{assert.deepEqual(request,expected);return receipt;};
+  f.options.client.reconcileRejectedTriageIgnore=async request=>{
+    posts++;assert.deepEqual(request,expected);assert.equal(inbox.rejectedTriageIgnore(id).receiptId,null);
+    if(mode!=='lost_unconfirmed')receipt=positive;
+    if(mode.startsWith('lost_'))throw Object.assign(new Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    return receipt;};
+  f.options.onBusinessConfirmed=async()=>{confirmed++;};
+  f.options.native.run=async()=>assert.fail('the original model turn is never started again');
+  let c=createAssistantCoordinator(f.options);
+  try{await c.workOnce();}finally{await c.close();}
+  f.advance(300001);c=createAssistantCoordinator(f.options);
+  try{await c.workOnce();}finally{await c.close();}
+  assert.equal(posts,mode==='unproven'?0:1);
+  assert.equal(proofReads,mode==='unproven'?2:1);
+  assert.equal(confirmed,receipt?1:0);
+  assert.equal(inbox.rejectedTriageIgnore(id)?.receiptId??null,receipt?.receiptId??null);
+  assert.deepEqual({...inbox.ownerIntake(id),next_check_at:original.next_check_at},original,'preserve every original journal field apart from pacing');
+  assert.equal(f.activePass(),null);assert.deepEqual(f.counts(),{starts:0,provisions:0,runs:0,acks:0});
+});

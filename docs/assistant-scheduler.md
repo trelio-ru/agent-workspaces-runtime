@@ -310,6 +310,18 @@ returns the exact not-loaded response and native first-attachment eligibility
 still holds. Keep all older starts and markers. Lost corrected starts remain
 read-back-only.
 
+An IGNORE decision covers the whole frozen batch. If a recovered triage's
+original complete turn already read the batch but the exact schema explicitly
+rejected IGNORE with the full event list, ordinary expiry/cancellation stays
+immutable. The same signed coordinator verifies the whole native terminal turn,
+then records one separate closed confirmation with the current backend. The
+backend checks the exact cancelled receipt, device, source/model, spent read
+proofs and absence of a spent resolve, route, question or competing original.
+Schema30 stores only the terminal and confirmation UUIDs. An uncertain write
+can read back that same receipt. There is no new lease, turn, source read,
+unsubscribe or provider action. Normal health recovery still requires no other
+retained device uncertainty.
+
 On subsequent turns, the exact UUID, cwd, model and effort must still match.
 Native `thread/resume` acquires the writer. A `notLoaded` report from the current
 process cannot rule out a writer in another process. The native writer conflict

@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -1644,4 +1644,33 @@ test('source triage waits for the same scoped native server to connect before ei
   assert.equal(inputs,2);
   assert.equal(catalogueReads,3,'the cached result earns no readiness');
   assert.equal(children.length,2,'one owned writer plus the separate cosmetic naming client');
+});
+
+test('rejected triage ignore is proven by the exact full terminal turn and typed refusal only', async () => {
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),runtimeSessionId=randomUUID();
+  const intakePass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()},eventIds=[randomUUID(),randomUUID()];
+  const code='ASSISTANT_INTAKE_INPUT_INVALID';
+  const native={server:'trelio-assistant',type:'mcpToolCall'};
+  const context={...native,tool:'get_assistant_intake_context',status:'completed',
+    arguments:{intakePass,runtimeSessionProof:{runtimeSessionId}},result:{content:[{type:'text',text:'SYNTHETIC_READ'}]}};
+  const resolve={...native,tool:'resolve_assistant_intake',status:'failed',arguments:{clientRequestId:intakePass.intakeId,
+    decision:'ignore',ignoredEventIds:[...eventIds].reverse(),intakePass,runtimeSessionProof:{runtimeSessionId}},
+    result:{structuredContent:{code,retryable:false},content:[{type:'text',text:code}]}};
+  const original={type:'userMessage',content:[{type:'text',text:`${assistantDeliveryMarker(deliveryId)}\nSYNTHETIC`} ]};
+  const turn={id:turnId,status:'completed',items:[original,context,{type:'reasoning'},resolve,{type:'agentMessage'}]};
+  const read=(data,nextCursor=null)=>readAssistantRejectedTriageIgnore(threadId,deliveryId,intakePass,eventIds,{
+    executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+      ?{thread:{id:threadId,cwd:process.cwd()}}:{data,nextCursor}}))});
+  assert.deepEqual(await read([turn]),{terminalTurnId:turnId});
+  assert.equal(await read([turn],'unread'),null);
+  assert.equal(await read([{id:randomUUID(),status:'completed',items:[]},turn]),null);
+  for(const changed of [
+    {...turn,status:'interrupted'},
+    {...turn,items:[...turn.items,context]},
+    {...turn,items:[original,{...context,status:'failed'},resolve]},
+    ...[{ignoredEventIds:[eventIds[0]]},{ignoredEventIds:[eventIds[0],eventIds[0]]},{ignoredEventIds:[eventIds[0],randomUUID()]},
+      {unsubscribeEventIds:[eventIds[0]]},{decision:'ask_owner'},{runtimeSessionProof:{runtimeSessionId:randomUUID()}}]
+      .map(args=>({...turn,items:[original,context,{...resolve,arguments:{...resolve.arguments,...args}}]})),
+    {...turn,items:[original,context,{...resolve,result:{...resolve.result,structuredContent:{code,retryable:true}}}]},
+  ])assert.equal(await read([changed]),null);
 });

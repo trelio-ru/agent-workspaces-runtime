@@ -1309,11 +1309,48 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     inbox.startAnsweredSourceAdmission(row.id,{claimReceiptId:closed.answeredSourceRecoveryClaimId,prerequisiteKey:prerequisite.fingerprint});
     return true;
   };
+  const reconcileRejectedTriageIgnore=async signal=>{
+    if(typeof native.readRejectedTriageIgnore!=='function'||typeof client.readRejectedTriageIgnore!=='function'
+      ||typeof client.reconcileRejectedTriageIgnore!=='function')return;
+    for(const row of inbox.rejectedTriageIgnoreCandidates()){
+      const provision=inbox.triageProvision(row.id);
+      if(!provision?.attachStarted||provision.threadId!==row.thread_id)continue;
+      try{
+        const locator=intakeLocator(row),intent=inbox.rejectedTriageIgnore(row.id);
+        let terminalTurnId=intent?.terminalTurnId;
+        if(!intent){
+          // Only this existing, expired pass is inspected. The read-only
+          // App Server proves the original complete turn and typed rejection;
+          // no model turn, native MCP, provider or source read runs again.
+          const terminal=await native.readRejectedTriageIgnore(row.thread_id,row.delivery_id,locator,row.eventIds,{signal});lease();
+          if(!terminal||!uuid.test(terminal.terminalTurnId??''))continue;
+          terminalTurnId=terminal.terminalTurnId;
+        }
+        const request={...locator,threadId:row.thread_id,eventIds:row.eventIds,sourceRevision:row.source_revision,
+          originalReceiptId:row.outcome_receipt,terminalTurnId};
+        let receipt=await client.readRejectedTriageIgnore(request,signal);lease();
+        if(!intent){
+          inbox.startRejectedTriageIgnore(row.id,row.outcome_receipt,terminalTurnId);
+          if(!receipt){receipt=await client.reconcileRejectedTriageIgnore(request,signal);lease();}
+        }
+        // A missing read-back after an attempted write grants no replay. The
+        // original cancelled receipt and frozen event history remain intact.
+        if(!receipt)continue;
+        if(receipt.state!=='ignored'||receipt.intakeId!==row.id||receipt.companyId!==locator.companyId||receipt.sourceId!==locator.sourceId
+          ||receipt.threadId!==row.thread_id||receipt.originalReceiptId!==row.outcome_receipt||receipt.terminalTurnId!==terminalTurnId
+          ||receipt.sourceRevision!==row.source_revision||JSON.stringify(receipt.eventIds)!==JSON.stringify(row.eventIds))
+          fail('ASSISTANT_INTAKE_CHANGED');
+        inbox.confirmRejectedTriageIgnore(row.id,receipt);
+        await businessConfirmed();
+      }catch(error){emit(errorCode(error));}
+      finally{inbox.deferOwnerIntake(row.id);}
+    }
+  };
   const workIntake=async(signal,visited)=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
     if(saved&&saved.kind!=='source_intake')return null;
-    if(!saved){await recoverUnreadCancelledIntake(signal);await recoverReadonlyOwnerIntake(signal);}
+    if(!saved){await reconcileRejectedTriageIgnore(signal);await recoverUnreadCancelledIntake(signal);await recoverReadonlyOwnerIntake(signal);}
     const candidates=inbox.ownerIntakes(),rowSaved=saved?inbox.ownerIntake(saved.passId):null;
     // Preserve a closed receipt's read-only ACL/transport backoff across ticks.
     // Otherwise its previously accepted task could immediately re-enter normal

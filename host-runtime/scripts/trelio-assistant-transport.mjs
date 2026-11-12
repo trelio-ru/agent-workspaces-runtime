@@ -374,6 +374,8 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
     ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']], ['registerRuntime',['POST','/runtime/session/register']],
     ['endRuntime',['POST','/runtime/session/end']],
+    ['intakeRejectedTriageIgnoreRead',['POST','/runtime/source-skills/intake/triage-ignore/read']],
+    ['intakeRejectedTriageIgnoreReconcile',['POST','/runtime/source-skills/intake/triage-ignore/reconcile']],
     ...['begin','read','session/register','session/end','read-confirm','cancel','reply-confirm','reply-not-attempted','reply-delivery/prepare','reply-delivery/read','reply-delivery/confirm'].map((suffix,index)=>[['intakeBegin','intakeRead','intakeRegister','intakeEnd','intakeReadConfirm','intakeCancel','intakeReplyConfirm','intakeReplyAbandon','intakePreparedReplyPrepare','intakePreparedReplyRead','intakePreparedReplyConfirm'][index],['POST',`/runtime/source-skills/intake/${suffix}`]]),
   ]);
   return async (operation, body, credential = null, signal = null) => {
@@ -2698,6 +2700,25 @@ const intakeProjection=(value,expected)=>{
 /** Fixed host wire receipt, never a model tool or a content cache. Echo every
  * native binding; silently dropping a field would admit a different original.
  * Null is meaningful only for exact read after an unknown prepare outcome. */
+const triageIgnoreEventIds=value=>{
+  if(!Array.isArray(value)||!value.length||value.length>100)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+  const ids=value.map(id);
+  if(new Set(ids).size!==ids.length)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+  return ids;
+};
+const rejectedTriageIgnoreRequest=input=>({...intakeLocator(input),sourceRevision:revision(input.sourceRevision),threadId:id(input.threadId),
+  originalReceiptId:id(input.originalReceiptId),terminalTurnId:id(input.terminalTurnId),eventIds:triageIgnoreEventIds(input.eventIds)});
+const rejectedTriageIgnoreResult=(value,expected)=>{
+  if(!object(value)||Object.keys(value).sort().join(',')!=='resolution,schemaVersion'||value.schemaVersion!==1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  const r=value.resolution;
+  if(r===null)return null;
+  if(!object(r)||Object.keys(r).sort().join(',')!=='companyId,deviceId,eventIds,intakeId,originalReceiptId,ownerUserId,receiptId,schemaVersion,sourceId,sourceRevision,state,terminalTurnId,threadId'
+    ||r.schemaVersion!==1||r.state!=='ignored'||Object.entries(expected).some(([key,field])=>key==='eventIds'
+      ?JSON.stringify(r.eventIds)!==JSON.stringify(field):r[key]!==field))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {...intakeLocator(r),sourceRevision:revision(r.sourceRevision),threadId:id(r.threadId),originalReceiptId:id(r.originalReceiptId),
+    terminalTurnId:id(r.terminalTurnId),receiptId:id(r.receiptId),eventIds:triageIgnoreEventIds(r.eventIds),state:'ignored'};
+};
+
 export const assistantPreparedOwnerReplyReceipt=(value,expected)=>{
   if(!object(value)||Object.keys(value).sort().join(',')!==['schemaVersion','intakeId','sourceId','sourceRevision','deviceId','localAccountId',
     'ownerIdentityId','ownerUserId','eventId','threadId','originalReceiptId','terminalTurnId','previousPrerequisiteKey','prerequisiteKey',
@@ -3018,6 +3039,16 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if(input.verifyReplyFile!==undefined&&input.verifyReplyFile!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const body={...intakeLocator(input),...(input.verifyReplyFile===true?{verifyReplyFile:true}:{})};
       return intakeProjection(await call('intakeRead',body,signal),body);
+    },
+    async readRejectedTriageIgnore(input,signal){
+      const body=rejectedTriageIgnoreRequest(input);
+      return rejectedTriageIgnoreResult(await call('intakeRejectedTriageIgnoreRead',body,signal),{...body,deviceId});
+    },
+    async reconcileRejectedTriageIgnore(input,signal){
+      const body=rejectedTriageIgnoreRequest(input);
+      const result=rejectedTriageIgnoreResult(await call('intakeRejectedTriageIgnoreReconcile',body,signal),{...body,deviceId});
+      if(!result)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return result;
     },
     async prepareOwnerReplyDelivery(input,signal){
       if(!object(input)||Object.keys(input).sort().join(',')!=='clientRequestId,companyId,intakeId,originalReceiptId,prerequisiteKey,previousPrerequisiteKey,sourceId,terminalTurnId'

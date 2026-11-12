@@ -294,7 +294,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -399,7 +399,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -649,8 +649,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // Nullable addition only. Legacy started markers still require live
     // native/backend evidence. No old row is made eligible by migration.
     if(!triageColumns.includes('triage_provision_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN triage_provision_json TEXT');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=29');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (29)');
+    if(versions[0]?.version>=30&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_triage_ignore_reconciliations'"))
+      fail('ASSISTANT_INBOX_CONFLICT');
+    // Separate receipt history. Migration neither reopens a cancelled pass
+    // nor invents an attempted reconciliation for earlier rows.
+    db.exec(`CREATE TABLE IF NOT EXISTS assistant_triage_ignore_reconciliations (
+      intake_id TEXT PRIMARY KEY REFERENCES assistant_owner_intakes(id) ON DELETE CASCADE,
+      original_receipt_id TEXT NOT NULL, terminal_turn_id TEXT NOT NULL, receipt_id TEXT
+    )`);
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=30');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (30)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1452,6 +1460,37 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ||row.source_revision!==row.configuration_revision||recovery?.markerId!==uuid(markerId)||!recovery.started
         ||recovery.threadId!==row.thread_id||recovery.attachStarted)fail('ASSISTANT_INBOX_CONFLICT');
       run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify({...recovery,attachStarted:true}),row.id);
+    });},
+    rejectedTriageIgnoreCandidates(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      LEFT JOIN assistant_triage_ignore_reconciliations r ON r.intake_id=i.id
+      WHERE i.kind='route_existing' AND i.state='complete' AND i.outcome_state='cancelled' AND i.settled=1
+        AND i.frozen=1 AND i.native_started=1 AND i.triage_provision_json IS NOT NULL
+        AND i.source_revision=s.configuration_revision AND s.state='active' AND i.next_check_at<=?
+        AND r.receipt_id IS NULL ORDER BY i.next_check_at,i.created_at,i.id LIMIT 5`,time()).map(({id})=>this.ownerIntake(id));},
+    rejectedTriageIgnore(id){
+      const row=get('SELECT original_receipt_id,terminal_turn_id,receipt_id FROM assistant_triage_ignore_reconciliations WHERE intake_id=?',uuid(id));
+      return row&&Object.freeze({originalReceiptId:uuid(row.original_receipt_id),terminalTurnId:uuid(row.terminal_turn_id),
+        receiptId:row.receipt_id===null?null:uuid(row.receipt_id)});
+    },
+    startRejectedTriageIgnore(id,originalReceiptId,terminalTurnId){return transaction(()=>{
+      const row=this.ownerIntake(id),provision=this.triageProvision(id);
+      originalReceiptId=uuid(originalReceiptId);terminalTurnId=uuid(terminalTurnId);
+      if(row.kind!=='route_existing'||row.state!=='complete'||row.outcome_state!=='cancelled'||row.settled!==1
+        ||row.frozen!==1||row.native_started!==1||row.outcome_receipt!==originalReceiptId||row.source_state!=='active'
+        ||row.source_revision!==row.configuration_revision||!provision?.attachStarted||provision.threadId!==row.thread_id
+        ||this.rejectedTriageIgnore(id))fail('ASSISTANT_INBOX_CONFLICT');
+      // Persist before the one device POST. An interrupted request can only
+      // read the immutable server result for this exact original on restart.
+      run('INSERT INTO assistant_triage_ignore_reconciliations(intake_id,original_receipt_id,terminal_turn_id) VALUES (?,?,?)',
+        row.id,originalReceiptId,terminalTurnId);
+    });},
+    confirmRejectedTriageIgnore(id,{originalReceiptId,terminalTurnId,receiptId}){return transaction(()=>{
+      const row=this.ownerIntake(id),intent=this.rejectedTriageIgnore(id);receiptId=uuid(receiptId);
+      if(!intent||intent.originalReceiptId!==uuid(originalReceiptId)||intent.terminalTurnId!==uuid(terminalTurnId)
+        ||row.outcome_state!=='cancelled'||row.outcome_receipt!==intent.originalReceiptId||receiptId===intent.originalReceiptId
+        ||intent.receiptId!==null&&intent.receiptId!==receiptId)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_triage_ignore_reconciliations SET receipt_id=? WHERE intake_id=?',receiptId,row.id);
     });},
     startOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='ready'||row.source_state!=='active'||row.source_revision!==row.configuration_revision)
