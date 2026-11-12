@@ -153,8 +153,8 @@ fence. Полный current snapshot остаётся в RAM reader с преж�
 pointer, writer-owned scratchpad и cleanup не изменяются. Новые файлы читает
 обычный private staging/crypto engine. Original deadline, bounds и отдельный
 fresh recipient/generation fence перед выдачей сохраняются. Отмена закрывает
-только собственные reads, не чужой writer/lock. При первом поиске в schema 9
-совместимый schema 8 может дать только полные файловые записи для этой же
+только собственные reads, не чужой writer/lock. При первой сборке в schema 10
+совместимые schema 9 и 8 могут дать только полные файловые записи для этой же
 компании и текущего scope epoch. Поиск сверяет доступные Workspace и exact
 accepted heads со свежим манифестом. Метаданные и поиск по остальным сущностям
 строятся из текущего ответа. При занятом writer этот источник также позволяет
@@ -163,8 +163,12 @@ accepted heads со свежим манифестом. Метаданные и �
 preparation. Обычные detail reads сохраняют readable fallback, а proven-stale
 refresh – прежний короткий срок.
 
-Task-only `search_tasks` сохраняет отдельный native projection path без
-подготовки общего зеркала и без присоединения к pending full search.
+`list_projects`, списки задач и отдельный поиск навыков, процедур и метаданных
+секретов запрашивают только соответствующую проекцию. Они не ждут writer и
+не загружают файлы. `search_tasks` строит результат по проекции задач,
+затем сверяет generation через лёгкий `tasks_fence` (актуальный видимый
+инвентарь и ревизии). Сервер без поддержки узких проекций возвращает прежний
+manifest. Host фильтрует его перед расшифровкой и также не загружает файлы.
 
 Общий short-wait registry ждёт до 10 секунд после свежего admission.
 `state=preparing`, readOnly, operationId, elapsedMs, закрытый этап и timings не
@@ -2687,26 +2691,24 @@ import, CAS, service Git, Cursor и независимое продолжени�
 после grace лишние снимки удаляются независимо от прежних семи дней хранения.
 
 Pointer и encrypted bytes читаются под коротким `retention.lock`; удаление
-использует тот же lock, а сетевой sync остаётся вне него. Schema 9 держит
-отдельный cache root для нового lock-протокола. Первый человеческий поиск может
-прочитать schema 8 под её собственным retention lock без ожидания. Он
-переиспользует только полные файловые записи с подтверждённым текущим head,
-собирает полный актуальный снимок и повторно сверяет generation. Прежний pointer
-и поколения остаются в старом cache root. Пустой или занятый старый lock
-означает промах кэша, старые процессы продолжают работать в своих roots.
-Mutation marker по-прежнему общий для всех схем.
+использует тот же lock, а сетевой sync остаётся вне него. Schema 10 хранит
+отдельный cache root для атомарного writer lock. Совместимые schema 9 и 8
+открываются только под их собственным retention lock без ожидания. Из них
+переиспользуются полные файловые записи с подтверждённым текущим head, после
+чего runtime повторно сверяет generation. Прежние pointers и locks остаются
+в своих roots. Mutation marker по-прежнему общий для всех схем.
 
 Ожидание lock при чтении и восстановлении writer использует исходный сигнал
 вызова. Отменённый read завершается с исходной причиной, даже когда владелец
 продолжает держать lock. Полученный после отмены snapshot не отдаётся.
 
-Schema 9 готовит private PID/nonce record в уникальном каталоге и атомарно
+Retention с schema 9 и writer с schema 10 готовят private PID/nonce record в уникальном каталоге и атомарно
 публикует каталог целиком. Сбой до rename может оставить только staging с
 локальной структурной metadata. Такой staging не блокирует чтение.
 После публикации shared root проверяет владелец claim. Contender не меняет
 parent DACL. Живой PID защищает reader без истечения по часам. Подтверждённый
 dead owner восстанавливается после protected чтения exact nonce и совпадения
-PID/id. Пустой claim schema 9 возможен при обрыве release/recovery. `rmdir`
+PID/id. Пустой claim атомарного протокола возможен при обрыве release/recovery. `rmdir`
 может убрать его, сохраняя любого уже опубликованного непустого successor.
 Unknown/unsafe и пустые legacy claims сохраняются. Ошибка protected inspection
 допускает повтор только захвата lock под прежним deadline, когда fresh metadata доказывает
@@ -2726,10 +2728,10 @@ pointer в failed mutation и не разрешает повтор публик�
 Каждый запуск signed entrypoint запускает отдельный тихий metadata-only sweep,
 не задерживая hook/MCP initialize. Новый sweep использует атомарный
 `retention-v2.lock` и отдельный 15-минутный cooldown. Пустой lock и отметка
-прежнего sweep остаются в legacy namespace. Sweep охватывает известные schema 1–9 во всех origin/company roots,
+прежнего sweep остаются в legacy namespace. Sweep охватывает известные schema 1–10 во всех origin/company roots,
 включая заброшенные форматы и компании без новых изменений. Для каждого schema
-атомарно захватывается прежний `sync.lock`; занятые writer и retention locks
-пропускаются без ожидания. Current
+захватывается её `sync.lock` по соответствующему протоколу. Занятые живым
+процессом writer и retention locks пропускаются без ожидания. Current
 и previous сохраняются в каждом старом формате для уже работающих старых hosts.
 Поэтому compatibility-копии и незавершённые чтения временно могут превышать
 целевой бюджет; новые schema неизвестного формата не изменяются.
@@ -2740,18 +2742,11 @@ writes, повреждённые pointers и missing current сохраняют�
 keys, credentials и Workspace files не читаются; server state и ACL не меняются.
 Summary хранит только счётчики и время локально в `retention-v2-state.json`.
 Scratchpad файлов сохраняет свой отдельный лимит 512 MiB/семь дней.
-Свежий `sync.lock` после остановки writer восстанавливается без ожидания возраста
-только при valid protected owner schema/UUID/PID и native `ESRCH`. Живой или
-повторно использованный PID, `EPERM`, неизвестные entries, unsafe heartbeat и
-неполная identity не дают такого разрешения. Под тем же `retention.lock`
-повторно проверяются nonce/PID, directory identity и heartbeat inode/mtime,
-затем прежний exact claim переносится в unique stale directory. Конкурирующий
-recoverer не удаляет successor. Прежний heartbeat/age protocol совместим;
-startup sweep не восстанавливает занятые writer claims. Если native inspection
-writer owner вернула отказ после освобождения/замены наблюдённого каталога,
-fresh отсутствие либо изменённые inode/birthtime разрешают только новый захват
-под исходным deadline с полной проверкой прав. Неизменный или недоступный каталог
-сохраняет исходный отказ; network work/publication не повторяются.
+В schema 10 `sync.lock` использует тот же atomic nonce-протокол, что и
+retention. Возраст каталога и прошедшее время не снимают блокировку живого
+writer. Новый reader и sweep не исправляют locks старых layout. Сбой до атомарной публикации оставляет только
+уникальный staging, который не блокирует следующий поиск. Освобождение
+и восстановление удаляют только уникальный nonce и подтверждённо пустой claim.
 Cold managed read без
 complete pointer ждёт под исходным first-sync bound; 30-секундный refresh wait
 относится только к уже существующей stale generation. Сигнал managed pass и
@@ -2899,7 +2894,7 @@ generic local action: body преобразуется в canonical rich text и 
 Top-level description лёгкого check-пункта проходит через тот же generic
 rich-text protection, а task-пункт сохраняет описание внутри `item.task`.
 
-Local mirror schema 9 читает accepted browser manifest и весь safe UTF-8 текст
+Local mirror читает accepted browser manifest и весь safe UTF-8 текст
 частями до 64 KiB плюс overlap 2048 символа; прежних лимитов 1 MiB/16 MiB у индекса
 нет. Pure chunker/matcher генерируется из backend `shared/workspace-text-chunks.ts`;
 проверка – `scripts/build-workspace-text-chunks.mjs --runtime-root <checkout> --check`.

@@ -20,8 +20,8 @@ const MAINTENANCE_INTERVAL_MS = 15 * 60 * 1000;
 const HASH_FILE = /^[a-f0-9]{64}\.json$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u;
-export const MIRROR_SCHEMA_VERSION = 9;
-const SCHEMA_DIRECTORY = /^schema-([1-9])$/u;
+export const MIRROR_SCHEMA_VERSION = 10;
+const SCHEMA_DIRECTORY = /^schema-([1-9]|10)$/u;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const isMissing = error => error?.code === "ENOENT";
@@ -54,8 +54,15 @@ export const withMirrorRetentionLock = async (root, operation, options) =>
   withRetentionClaim(root, operation, options);
 
 export const withCompanyMirrorRetentionLock = async (root, operation, options) => {
-  if (path.basename(root) !== `schema-${MIRROR_SCHEMA_VERSION}`) throw new Error("Unexpected atomic mirror layout.");
+  if (!["schema-9", "schema-10"].includes(path.basename(root))) throw new Error("Unexpected atomic mirror layout.");
   return withRetentionClaim(root, operation, options, { atomic: true });
+};
+
+export const withCompanyMirrorWriterLock = async (root, operation, options) => {
+  if (path.basename(root) !== `schema-${MIRROR_SCHEMA_VERSION}`) throw new Error("Unexpected atomic writer layout.");
+  // Schema 10 is isolated from old writers and their heartbeat takeover.
+  // The same nonce-directory protocol serves writer and reader mutexes.
+  return withRetentionClaim(root, operation, options, { atomic: true, lockName: "sync.lock" });
 };
 
 const withRetentionClaim = async (
@@ -230,7 +237,7 @@ const regularPrivateFile = async file => {
 // short grace additionally accommodates older readers without this protocol.
 export const pruneMirrorSchema = async (root, { now = Date.now(), stillOwnsWriter = async () => true, waitMs } = {}) => {
   const version = Number(SCHEMA_DIRECTORY.exec(path.basename(root))?.[1] ?? 1);
-  const withLock = version === MIRROR_SCHEMA_VERSION ? withCompanyMirrorRetentionLock : withMirrorRetentionLock;
+  const withLock = version >= 9 ? withCompanyMirrorRetentionLock : withMirrorRetentionLock;
   return withLock(root, async () => {
     const pointer = await readPrivateJsonFile(path.join(root, "current.json"), { maximumBytes: 4096 });
     if (!HASH.test(pointer.generation ?? "") || pointer.schemaVersion !== version) return { skipped: "invalid_pointer" };
@@ -280,6 +287,9 @@ export const pruneMirrorSchema = async (root, { now = Date.now(), stillOwnsWrite
 };
 
 const pruneIdleSchema = async root => {
+  if (path.basename(root) === `schema-${MIRROR_SCHEMA_VERSION}`) {
+    return withCompanyMirrorWriterLock(root, () => pruneMirrorSchema(root, { waitMs: 0 }), { waitMs: 0 });
+  }
   await assertPrivatePathKind(root, "directory");
   const lock = path.join(root, "sync.lock");
   // Atomic mkdir interlocks with every old/new writer. Maintenance never steals

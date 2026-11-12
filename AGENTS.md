@@ -190,9 +190,11 @@ publication tooling также остаются вне этого публичн
   After two OWN full-search deadlines, return ordinary company-context/task-only
   read nextCalls, never a third full sync. Fresh native catalogue metadata keeps
   that refinement discoverable to old facades within the SAME schema/byte bounds.
-  Task refinement hydrates only native task projections under the common fresh
-  manifest/generation fence; no Workspace file prerequisite, mirror writer,
-  incomplete pointer or cross-call cache. Current comments and revocations stay covered.
+  Task refinement hydrates only native task projections. Its fresh
+  tasks_fence rereads ACL and exact revisions without assembling task text again.
+  Lists and dedicated guidance/secret discovery use independent narrow
+  projections. No Workspace files, mirror writer, incomplete pointer or
+  cross-call cache. Current comments and revocations stay covered.
   The signed request pipe distinguishes its own timeout, caller cancellation,
   process/input failure, nonzero exit, empty/invalid response and output bound;
   none authorizes replay or exposes child output. Reject damaged UTF-8 before
@@ -767,20 +769,13 @@ publication tooling также остаются вне этого публичн
   unsafe paths и смена lock до первого lstat защищены по [контракту](docs/agent-workspace-runtime.md#mirror-retention).
   Dead-writer regression diagnostics retain closed acquisition subphases and
   filesystem/native categories, never raw child output or paths.
-  Fresh sync claims recover only from a protected valid nonce/PID with native
-  ESRCH, rechecked under the SAME metadata mutex; live/unknown owners stay intact.
-  Late private inspection retries only writer acquisition after positive fresh
-  directory absence/replacement; unchanged or unknown claims retain refusal.
-  Cold managed reads keep the original first-sync join bound, not stale-read 30s.
-  Mirror pointer reads and writer recovery pass the caller's abort signal into
-  retention-lock acquisition; a cancelled waiter leaves the live owner intact.
-  The current mirror sweeper has its own atomic root lock and cooldown record.
-  Legacy root locks and per-schema writer interlocks retain their existing scope.
-  Schema 9 publishes the retention directory and private nonce atomically.
-  Empty claims can be removed only in that layout; legacy readers and their
-  ownerless claims stay isolated. Cold human search can seed completed files
-  from schema 8 under its own no-wait retention lock. Keep current scope/epoch,
-  fresh ACL-filtered exact heads and final generation checks. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
+  Schema 10 atomically publishes both reader and writer nonce directories.
+  Recover only a verified dead PID or an empty atomic release directory, never
+  an old heartbeat, live owner, malformed record or unknown identity. Sweeping
+  uses the same writer lock. Earlier layouts keep their own protocols; a cold
+  current sync may seed completed files from schema 9 or 8 under their own
+  no-wait reader lock, with current scope/epoch, fresh ACL-filtered exact heads
+  and final generation checks. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts всех этапов чтения обязательны по

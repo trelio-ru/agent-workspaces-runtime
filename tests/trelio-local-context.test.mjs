@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import {
   hydrateNativeReadWithRevisionRefresh, hydrateLocalActionMirror, prepareLocalActionContext, canonicalizeLocalProposalTarget, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
-  buildStableCompanyMirror,
+  buildStableCompanyMirror, readNarrowCompanyContext,
   createHumanCompanySearchReader,
   isHumanCompanySearch,
   createEncryptedSearchFileCache,
@@ -1818,6 +1818,62 @@ test("local task cores never present the manual-search subset as the full commen
       .find(({ name }) => name === "comments")?.itemCount,
     3,
   );
+});
+
+test("narrow encrypted reads preserve matching and never start a Workspace download", async t => {
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const task = mirror.tasks[0];
+  const origin = "https://synthetic.invalid";
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  const current = "a".repeat(64);
+  const manifest = {
+    ...mirror, schemaVersion: 2, provider: "local_company_context", generation: current,
+    tasks: [{ ...task, payload: undefined }],
+    acceptedWorkspaces: [{ id: crypto.randomUUID(), acceptedHead: "c".repeat(40) }],
+    searchDocuments: [{
+      cacheKey: `task:${task.id}`, id: "task:acme/mobile/17", type: "task", title: task.payload.task.title,
+      stableKey: "acme/mobile/17", revisionToken: task.revisionToken,
+      fields: [{ source: "task-title", values: [task.payload.task.title] }],
+      metadata: { taskId: task.id, projectId: task.projectId, projectSlug: "mobile", taskNumber: 17 },
+    }],
+  };
+  let legacy = false, changed = false, wrongProjection = false;
+  globalThis.fetch = async url => {
+    const parsed = new URL(url);
+    assert.equal(parsed.origin, origin);
+    if (parsed.pathname.endsWith("/tasks/mobile/17")) {
+      assert.equal(parsed.searchParams.get("expectedRevision"), task.revisionToken);
+      requests.push("detail");
+      return new Response(JSON.stringify({ task: task.payload }));
+    }
+    assert.equal(parsed.pathname, "/api/agent-workspaces/company-context/acme/manifest");
+    const selected = parsed.searchParams.get("projection");
+    assert.deepEqual([...parsed.searchParams.keys()], ["projection"], "search terms stay on the device");
+    requests.push(selected);
+    return new Response(JSON.stringify({
+      ...manifest, projection: legacy ? undefined : wrongProjection ? "guidance" : selected === "tasks_fence" ? "tasks" : selected,
+      generation: changed && selected === "tasks_fence" ? "d".repeat(64) : current,
+      searchDocuments: selected === "tasks_fence" ? [] : manifest.searchDocuments,
+    }));
+  };
+  const run = (nativeTool, input = {}) => readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool, input, provider });
+  assert.equal((await run("list_projects")).items[0].slug, "mobile");
+  assert.equal((await run("list_my_tasks", { query: "офлайн" })).tasks[0].title, task.payload.task.title);
+  assert.equal((await run("search_agent_guidance", { query: "nothing synthetic" })).guidance.length, 0);
+  assert.equal((await run("search_agent_secrets", { query: "nothing synthetic" })).results.length, 0);
+  const input = { companySlugs: ["acme"], queries: ["офлайн синхронизацию"] };
+  assert.equal((await run("search_tasks", input)).tasks[0].id, "task:acme/mobile/17");
+  assert.deepEqual(requests.splice(0), ["projects", "task_inventory", "detail", "guidance", "secrets", "tasks", "tasks_fence"]);
+  legacy = true;
+  assert.equal((await run("search_tasks", input)).tasks.length, 1, "an old server does not re-enable file hydration");
+  assert.deepEqual(requests.splice(0), ["tasks", "tasks_fence"]);
+  legacy = false; changed = true;
+  await assert.rejects(run("search_tasks", input), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+  assert.deepEqual(requests.splice(0), ["tasks", "tasks_fence", "tasks", "tasks_fence", "tasks", "tasks_fence"]);
+  wrongProjection = true;
+  await assert.rejects(run("list_projects"), { code: "LOCAL_CONTEXT_INVALID_MANIFEST" });
 });
 
 test("native task search keeps ordinary lexical result ids and never needs a remote query", () => {
@@ -4427,7 +4483,7 @@ test("encrypted mirror generations are schema-isolated while mutation coherence 
     companyId: "11111111-1111-4111-8111-111111111111",
   });
 
-  assert.equal(paths.root.endsWith("schema-9"), true);
+  assert.equal(paths.root.endsWith("schema-10"), true);
   assert.equal(paths.pointer.startsWith(paths.root), true);
   assert.equal(paths.lock.startsWith(paths.root), true);
   assert.equal(paths.generations.startsWith(paths.root), true);

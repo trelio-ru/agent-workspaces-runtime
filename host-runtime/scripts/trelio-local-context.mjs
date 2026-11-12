@@ -5,7 +5,7 @@ import { createWorkspaceFinishOperations, createCompanySearchOperations, runWork
 import { trelioCallSignal, parseTrelioCallTimeout, withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
 import {
   MIRROR_SCHEMA_VERSION, pruneMirrorSchema, withCompanyMirrorRetentionLock as withMirrorRetentionLock,
-  withMirrorRetentionLock as withLegacyMirrorRetentionLock,
+  withMirrorRetentionLock as withLegacyMirrorRetentionLock, withCompanyMirrorWriterLock,
 } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
@@ -127,19 +127,15 @@ import {
 
 const IS_HUMAN_SEARCH_READER = isDirectModuleInvocation(import.meta.url)
   && process.argv[2] === "--company-search-reader" && typeof process.send === "function";
-const MIRROR_LOCK_STALE_MS = 10 * 60 * 1000;
-// A first company snapshot can legitimately hydrate thousands of tasks. When
-// no readable generation exists yet, simultaneous MCP hosts join that single
-// writer instead of failing after a short arbitrary timeout. The extra margin
-// also lets one waiter take over a genuinely stale lock and finish normally.
-const MIRROR_FIRST_SYNC_WAIT_MS = MIRROR_LOCK_STALE_MS + 30 * 1000;
+// A genuinely cold reader may join another process assembling the same corpus.
+// The caller's original signal can end its wait earlier.
+const MIRROR_FIRST_SYNC_WAIT_MS = 10 * 60 * 1000 + 30 * 1000;
 // A supplemental task-section read has already proved that its in-memory
 // revision fence is stale. In that narrow recovery path it is safer to wait
 // briefly for the current mirror writer than to reuse the known-stale readable
 // generation. Keep the wait bounded well below an ordinary tool timeout; a
 // genuinely long or wedged writer still fails closed with LOCAL_CONTEXT_SYNC_BUSY.
 const MIRROR_STALE_READ_REFRESH_WAIT_MS = 30 * 1000;
-const MIRROR_LOCK_HEARTBEAT_MS = 20 * 1000;
 const MIRROR_GENERATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const TRELIO_LOCAL_MIRROR_MEMORY_TTL_SECONDS = 600;
 export const TRELIO_LOCAL_PROPOSAL_RESOURCE_URI = "ui://trelio/task-proposals/v14.html";
@@ -478,165 +474,6 @@ const invalidateLocalCompanyMirrorSession = async ({
   }
 };
 
-const inspectLockOwner = async (lockDirectory, observeDirectory = () => {}) => {
-  const directory = await fs.lstat(lockDirectory);
-  if (!directory.isDirectory() || directory.isSymbolicLink()) {
-    throw new TrelioLocalContextError("LOCAL_CONTEXT_MIRROR_INVALID", "The local mirror writer claim is invalid.");
-  }
-  // Retain only structural identity before the asynchronous native private
-  // inspection. Its owner may release this exact directory while the Windows
-  // worker is still reading ACLs; a late refusal alone is not an absent lock.
-  observeDirectory(directory);
-  const owner = await readPrivateJsonFile(path.join(lockDirectory, "owner.json"));
-  let metadata;
-  try {
-    metadata = await fs.stat(path.join(lockDirectory, `${owner.lockId}.heartbeat.json`));
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    // A process can die between mkdir and heartbeat publication. The directory
-    // timestamp then provides a bounded stale takeover instead of an immortal
-    // malformed lock.
-    metadata = await fs.stat(lockDirectory);
-  }
-  return { owner, metadata, directory };
-};
-
-const hasExitedMirrorWriter = async (lockDirectory, { owner }) => {
-  if (owner.schemaVersion !== 1 || !UUID_PATTERN.test(String(owner.lockId || ""))
-    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return false;
-  // A stopped first-sync child can leave a perfectly fresh heartbeat because
-  // its private I/O deadline also bounds finally cleanup. Age cannot distinguish
-  // that abandoned claim from a live writer. Only ESRCH is positive evidence;
-  // EPERM, a reused/live PID and every unknown process error keep the claim.
-  try { process.kill(owner.pid, 0); return false; }
-  catch (error) { if (error.code !== "ESRCH") return false; }
-  const names = await fs.readdir(lockDirectory);
-  const heartbeat = `${owner.lockId}.heartbeat.json`;
-  if (!names.includes("owner.json") || names.some(name => !["owner.json", heartbeat].includes(name))) return false;
-  if (names.includes(heartbeat)) {
-    const stat = await fs.lstat(path.join(lockDirectory, heartbeat));
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) return false;
-  }
-  return true;
-};
-
-const acquireMirrorWriter = async (
-  paths,
-  {
-    allowReadableFallback = false,
-    maximumWaitMs = MIRROR_FIRST_SYNC_WAIT_MS,
-    signal,
-  } = {},
-) => {
-  await ensurePrivateDirectory(paths.root);
-  const lockId = crypto.randomUUID();
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < maximumWaitMs) {
-    // A background preparation owns its writer only within the same managed
-    // pass/deadline. Waiting for another mirror must not outlive cancellation.
-    signal?.throwIfAborted();
-    try {
-      await fs.mkdir(paths.lock, { mode: 0o700 });
-      await writePrivateJsonFile(path.join(paths.lock, "owner.json"), {
-        schemaVersion: 1,
-        lockId,
-        pid: process.pid,
-        createdAt: new Date().toISOString(),
-      });
-      const heartbeatPath = path.join(paths.lock, `${lockId}.heartbeat.json`);
-      await writePrivateJsonFile(heartbeatPath, { schemaVersion: 1, lockId });
-      // A full first sync may legitimately take longer than the stale-lock
-      // threshold. Refresh only the lock that still carries our random owner
-      // id, otherwise an old process could accidentally keep a replacement
-      // writer alive after its directory was atomically taken over.
-      const heartbeat = setInterval(() => {
-        void (async () => {
-          const owner = await readPrivateJsonFile(path.join(paths.lock, "owner.json"));
-          if (owner.lockId === lockId) {
-            const now = new Date();
-            // The heartbeat filename contains this writer's random id. If the
-            // directory was renamed and replaced between the owner read and
-            // this call, a new lock cannot contain that path, so the old
-            // writer cannot refresh the replacement by accident.
-            await fs.utimes(heartbeatPath, now, now);
-          }
-        })().catch(() => undefined);
-      }, MIRROR_LOCK_HEARTBEAT_MS);
-      heartbeat.unref();
-      return {
-        lockId,
-        release: async () => {
-          clearInterval(heartbeat);
-          const owner = await readPrivateJsonFile(path.join(paths.lock, "owner.json"));
-          if (owner.lockId === lockId) {
-            await fs.rm(paths.lock, { recursive: true, force: true });
-          }
-        },
-      };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      let current, recoverable, observedDirectory;
-      try {
-        current = await inspectLockOwner(paths.lock, directory => { observedDirectory = directory; });
-        recoverable = Date.now() - current.metadata.mtimeMs > MIRROR_LOCK_STALE_MS
-          || await hasExitedMirrorWriter(paths.lock, current);
-      } catch (inspectionError) {
-        if (inspectionError.code === "ENOENT") continue;
-        // The SAME private-file/native checks are mandatory on the next claim.
-        // Retry only acquisition after fresh metadata positively proves release
-        // or replacement of the directory observed before the failed read. An
-        // unchanged/unreadable lock retains the original ACL/permission error;
-        // no network operation, hardening or publication is replayed here.
-        const fresh = observedDirectory
-          ? await fs.lstat(paths.lock).catch(error => error.code === "ENOENT" ? null : undefined)
-          : undefined;
-        if (observedDirectory && (fresh === null || fresh
-          && (fresh.ino !== observedDirectory.ino || fresh.birthtimeMs !== observedDirectory.birthtimeMs))) continue;
-        throw inspectionError;
-      }
-      if (recoverable) {
-        try {
-          // Use the SAME short metadata mutex as mirror readers/retention so
-          // simultaneous recoverers cannot rename a successor's live claim.
-          // Re-read its protected owner and heartbeat inside that mutex; a
-          // changed nonce/PID/heartbeat or a live PID never earns fast recovery.
-          // Network hydration remains outside the critical section.
-          await withMirrorRetentionLock(paths.root, async () => {
-            const fresh = await inspectLockOwner(paths.lock);
-            if (fresh.owner.lockId !== current.owner.lockId || fresh.owner.pid !== current.owner.pid
-              || fresh.directory.ino !== current.directory.ino
-              || fresh.directory.birthtimeMs !== current.directory.birthtimeMs
-              || fresh.metadata.ino !== current.metadata.ino
-              || fresh.metadata.mtimeMs !== current.metadata.mtimeMs) return;
-            if (Date.now() - fresh.metadata.mtimeMs <= MIRROR_LOCK_STALE_MS
-              && !await hasExitedMirrorWriter(paths.lock, fresh)) return;
-            const stalePath = `${paths.lock}.stale-${crypto.randomUUID()}`;
-            await fs.rename(paths.lock, stalePath);
-            await fs.rm(stalePath, { recursive: true, force: true });
-          }, { signal });
-        } catch (takeoverError) {
-          signal?.throwIfAborted();
-          if (takeoverError.code !== "ENOENT") throw takeoverError;
-        }
-        continue;
-      }
-      if (allowReadableFallback) {
-        // A complete previous generation is preferable to queueing every
-        // simultaneous chat behind a healthy refresh. Its immutable pointer
-        // remains valid until the writer atomically publishes the replacement.
-        return null;
-      }
-      await delay(200);
-    }
-  }
-
-  throw new TrelioLocalContextError(
-    "LOCAL_CONTEXT_SYNC_BUSY",
-    "Another local process is still publishing this company context mirror.",
-  );
-};
-
 const readMirrorGenerationUnlocked = async ({
   paths, companyEncryption, previous, schemaVersion = MIRROR_SCHEMA_VERSION,
 }) => {
@@ -734,26 +571,30 @@ const readMirrorGeneration = async (input, signal) => {
   return result;
 };
 
-// Schema 9 changed the retention lock protocol, not the accepted Workspace
-// file format. Seed only completed file records from that one compatible
-// predecessor. Its pointer cannot establish freshness or provide task, ACL,
-// skill or routing data. A busy/damaged legacy cache is an optional miss;
-// it must not introduce a second wait or prevent a normal current sync.
+// Schemas 8–10 share the accepted-file record format. Only exact completed
+// file records may cross a layout boundary. Old locks and pointers remain
+// independent, and never establish freshness in the current layout.
 const readLegacyWorkspaceSeed = async (paths, companyEncryption, signal) => {
-  const root = path.join(path.dirname(paths.root), "schema-8");
-  const legacyPaths = {
-    root, pointer: path.join(root, "current.json"), generations: path.join(root, "generations"),
-  };
-  try {
-    const legacy = await withLegacyMirrorRetentionLock(root, () => readMirrorGenerationUnlocked({
-      paths: legacyPaths, companyEncryption, schemaVersion: 8,
-    }), { waitMs: 0, signal });
-    signal?.throwIfAborted();
-    if (!Array.isArray(legacy?.workspaces)) return null;
-    const workspaces = legacy.workspaces.filter(workspace => Array.isArray(workspace?.documents));
-    if (workspaces.length) return { workspaces };
-  } catch {
-    signal?.throwIfAborted();
+  for (const schemaVersion of [9, 8]) {
+    const root = path.join(path.dirname(paths.root), `schema-${schemaVersion}`);
+    const legacyPaths = {
+      root, pointer: path.join(root, "current.json"), generations: path.join(root, "generations"),
+    };
+    try {
+      const lock = schemaVersion === 9 ? withMirrorRetentionLock : withLegacyMirrorRetentionLock;
+      const legacy = await lock(root, () => readMirrorGenerationUnlocked({
+        paths: legacyPaths, companyEncryption, schemaVersion,
+      }), { waitMs: 0, signal });
+      signal?.throwIfAborted();
+      const workspaces = Array.isArray(legacy?.workspaces)
+        ? legacy.workspaces.filter(workspace => Array.isArray(workspace?.documents))
+        : [];
+      if (workspaces.length) return { workspaces };
+    } catch {
+      // A busy, inaccessible or damaged predecessor is an optional miss.
+      // It must neither delay nor grant access to a fresh current build.
+      signal?.throwIfAborted();
+    }
   }
   return null;
 };
@@ -977,7 +818,9 @@ export const createEncryptedSearchFileCache = async ({
 
 // Only optimistic read conflicts restart assembly. Permission, crypto, transport
 // and caller cancellation errors keep their exact original identity.
-export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish, onProgress = () => {} }) => {
+export const buildStableCompanyMirror = async ({
+  previous, readManifest, readFence = readManifest, buildCandidate, publish, onProgress = () => {},
+}) => {
   let failureStage = "starting_manifest";
   let failureReason = "revision_conflict";
   let diagnosticReason = failureReason;
@@ -999,7 +842,7 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
       candidate = await buildCandidate(startingManifest, previous);
       failureStage = "finishing_manifest";
       onProgress("verifying");
-      const finishingManifest = await readManifest();
+      const finishingManifest = await readFence();
       if (finishingManifest.generation !== startingManifest.generation) {
         failureReason = "generation_mismatch";
         diagnosticReason = failureReason;
@@ -3834,14 +3677,23 @@ const readHumanSearchSource = async (read, signal) => {
   return read();
 };
 
-const fetchManifest = async ({ origin, token, companySlug, signal }) => (
-  readJson(await request(
-    origin,
-    token,
-    `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest`,
-    { signal },
-  ))
-);
+const NARROW_CONTEXT_PROJECTION = new Map([
+  ["list_projects", "projects"], ["list_my_tasks", "task_inventory"], ["list_project_tasks", "task_inventory"],
+  ["search_tasks", "tasks"], ["search_agent_guidance", "guidance"], ["search_agent_secrets", "secrets"],
+]);
+
+const fetchManifest = async ({ origin, token, companySlug, signal, projection }) => {
+  const suffix = projection ? `?projection=${encodeURIComponent(projection)}` : "";
+  const manifest = await readJson(await request(origin, token,
+    `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest${suffix}`, { signal }));
+  const expected = projection === "tasks_fence" ? "tasks" : projection;
+  // Pre-upgrade servers ignore the query and return the original full manifest.
+  // Only an absent discriminator can use that compatibility path. A selected
+  // narrow projection must never be confused with another domain or full cache.
+  if (manifest?.projection !== undefined && manifest.projection !== expected)
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Trelio returned another context projection.");
+  return manifest;
+};
 
 const mapWithConcurrency = async (items, concurrency, mapper) => {
   const results = new Array(items.length);
@@ -4361,60 +4213,21 @@ export const syncCompanyContextMirror = async ({
   });
   onProgress("mirror_read");
   let previous = await readMirrorGeneration({ paths, companyEncryption }, signal);
-  const legacySeed = readOnlyOnContention && !previous
-    ? await readLegacyWorkspaceSeed(paths, companyEncryption, signal)
-    : null;
+  const legacySeed = previous ? null : await readLegacyWorkspaceSeed(paths, companyEncryption, signal);
   onProgress("mirror_wait");
-  const writer = await acquireMirrorWriter(paths, {
-    signal,
-    // Normal local reads may use a complete immutable generation while a
-    // sibling publishes the next one. Once a task-section revision conflict
-    // proves that generation stale, however, returning it again would make the
-    // same deterministic 409 loop forever in this MCP process. The legacy
-    // seed only skips the queue for a fresh isolated build, never for a
-    // normal read's fallback.
-    allowReadableFallback: Boolean(previous && !requireFresh || legacySeed),
-    // Freshness of an existing stale generation has a short refresh wait. A
-    // cold mirror without a compatible seed retains the original bounded
-    // first-sync join, including for a managed assistant invocation.
-    maximumWaitMs: requireFresh && previous
-      ? MIRROR_STALE_READ_REFRESH_WAIT_MS
-      : MIRROR_FIRST_SYNC_WAIT_MS,
+  // Ordinary detail reads can use their own complete immutable generation.
+  // A compatible seed only permits an isolated fresh search to skip the wait.
+  const canSkipWait = Boolean(previous && !requireFresh || readOnlyOnContention && legacySeed);
+  // Existing roots are validated only after the atomic claim. On Windows
+  // hardening an already contended root can race the other owner's ACL check.
+  const rootExists = await fs.lstat(paths.root).then(() => true, error => {
+    if (error.code === "ENOENT") return false;
+    throw error;
   });
-  if (!writer) {
-    if (readOnlyOnContention) {
-      // A busy sibling must not make a human question wait for its full sync,
-      // nor make it search a known-stale readable fallback. Reuse the SAME
-      // complete-snapshot builder in this isolated reader, with fresh native
-      // manifests and exact revision/head reuse. It hydrates only changed
-      // records and NEVER publishes a pointer, prunes, or opens the shared
-      // writer-owned scratchpad. New files use the ordinary private read
-      // staging/crypto engine; all started readers still settle on cancellation.
-      // The caller's original deadline and final recipient/generation fence
-      // remain mandatory. This is neither a lock takeover nor a partial result.
-      const result = await buildStableCompanyMirror({
-        onProgress,
-        previous: previous ?? legacySeed,
-        readManifest,
-        buildCandidate: (rawManifest, reusable) => buildMirror({
-          origin, requestOrigin, token, companyEncryption, rawManifest, previous: reusable, signal,
-          readSource, onHydrationProgress,
-        }),
-        publish: async mirror => withMirrorGeneration(mirror),
-      });
-      return { ...result, syncInProgress: true, readOnlySnapshot: true, paths };
-    }
-    return {
-      mirror: previous,
-      changed: false,
-      syncInProgress: true,
-      paths,
-    };
-  }
-
-  try {
-    // Another writer may have published between the optimistic read and our
-    // lock acquisition. Always reread the atomic pointer under ownership.
+  if (!rootExists) await ensurePrivateDirectory(paths.root);
+  const written = await withCompanyMirrorWriterLock(paths.root, async () => {
+    // A sibling might have published since the optimistic read. Under writer
+    // ownership always validate the current pointer again before reusing it.
     previous = await readMirrorGeneration({ paths, companyEncryption, previous }, signal);
     let searchCache;
     const result = await buildStableCompanyMirror({
@@ -4423,21 +4236,33 @@ export const syncCompanyContextMirror = async ({
       readManifest,
       buildCandidate: async (rawManifest, reusable) => buildMirror({
         origin, requestOrigin, token, companyEncryption, rawManifest, readSource, onHydrationProgress,
-        // A native unchanged-generation read needs neither scratch inventory
-        // nor quota eviction across thousands of completed encrypted files.
-        // Laziness changes no cache binding/ACL/quota or pruning: a genuinely
-        // changed manifest opens the SAME writer-owned scratchpad once.
+        // Scan the scratchpad only when the fresh generation actually changed.
         previous: reusable, signal, searchCache:searchCache??=await createEncryptedSearchFileCache({paths,origin,companyEncryption}),
       }),
-      publish: (mirror) => publishMirrorGeneration({ paths, companyEncryption, mirror }),
+      publish: mirror => publishMirrorGeneration({ paths, companyEncryption, mirror }),
     });
-    // Also prune unchanged mirrors: idle companies otherwise never reach the
-    // publication path and would retain historical files indefinitely.
     if (!result.changed) await pruneMirrorSchema(paths.root).catch(() => undefined);
     return { ...result, paths };
-  } finally {
-    await writer.release();
-  }
+  }, { signal, waitMs: canSkipWait ? 0 : requireFresh && previous
+    ? MIRROR_STALE_READ_REFRESH_WAIT_MS : MIRROR_FIRST_SYNC_WAIT_MS });
+  if (written?.skipped !== "busy") return written;
+  if (!canSkipWait) throw new TrelioLocalContextError(
+    "LOCAL_CONTEXT_SYNC_BUSY", "Another local process is still publishing this company context mirror.",
+  );
+  if (!readOnlyOnContention) return { mirror: previous, changed: false, syncInProgress: true, paths };
+
+  // A busy writer keeps sole ownership of the pointer and encrypted scratchpad.
+  // The isolated reader builds a complete fresh in-memory candidate, retaining
+  // the same manifest and accepted-head fences without touching writer state.
+  const result = await buildStableCompanyMirror({
+    onProgress, previous: previous ?? legacySeed, readManifest,
+    buildCandidate: (rawManifest, reusable) => buildMirror({
+      origin, requestOrigin, token, companyEncryption, rawManifest, previous: reusable, signal,
+      readSource, onHydrationProgress,
+    }),
+    publish: async mirror => withMirrorGeneration(mirror),
+  });
+  return { ...result, syncInProgress: true, readOnlySnapshot: true, paths };
 };
 
 const collectText = (value, output = []) => {
@@ -8739,7 +8564,9 @@ export const prepareTrelioLocalCompanyContext = async (origin, companySlug, {sig
  * generation, including its ACL-filtered inventory. This reads no mirror or
  * answer and never falls back after a refusal. The caller separately fences the
  * original pass and managed scope/epoch/device/envelope before and after it. */
-export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug, generation, {signal, expectedBinding}={}) => {
+export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug, generation, {
+  signal, expectedBinding, nativeTool,
+}={}) => {
   if (!MIRROR_GENERATION_PATTERN.test(String(generation ?? "")))
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid search generation.");
   const provider = await resolveLocalCompanyProvider({origin, companySlug:normalizeCompanySlug(companySlug), signal,
@@ -8747,7 +8574,7 @@ export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug,
   if (provider.nativeProvider) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed.");
   if (expectedBinding && humanSearchBinding(origin, provider) !== expectedBinding) return false;
   const manifest = await fetchManifest({origin:provider.requestOrigin, token:provider.token,
-    companySlug:normalizeCompanySlug(companySlug), signal});
+    companySlug:normalizeCompanySlug(companySlug), signal, projection: NARROW_CONTEXT_PROJECTION.get(nativeTool)});
   if (!MIRROR_GENERATION_PATTERN.test(String(manifest?.generation ?? "")))
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid native generation.");
   signal?.throwIfAborted();
@@ -8897,7 +8724,7 @@ const createHumanCompanySearches = () => {
     execute: humanSearchReader.execute,
     validate: (origin, input, value, admission, { signal }) => readHumanSearchSource(
       () => isTrelioLocalCompanyGenerationCurrent(
-        origin, input.companySlug, value.generation, { signal, expectedBinding: admission.binding }), signal),
+        origin, input.companySlug, value.generation, { signal, expectedBinding: admission.binding, nativeTool: input.nativeTool }), signal),
     closeReader: humanSearchReader.close,
     errorFactory: (code, message, details) => new TrelioLocalContextError(code, message, details),
   });
@@ -9067,6 +8894,57 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
   return handleNativeLocalContextRead(unfiledQueue ? { ...mirror, unfiledQueue } : mirror, nativeTool, localInput);
 };
 
+// Use the canonical server corpus and the same local matching, while keeping
+// narrow reads out of the writer, file pipeline and decrypted mirror cache.
+export const readNarrowCompanyContext = async ({
+  origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot,
+}) => {
+  const projection = NARROW_CONTEXT_PROJECTION.get(nativeTool);
+  const read = async (selected = projection) => {
+    const value = await fetchManifest({ origin: provider.requestOrigin, token: provider.token, companySlug, signal,
+      projection: selected });
+    if (value?.provider !== "local_company_context" || value.company?.slug !== companySlug
+      || value.company?.id !== provider.companyEncryption.runtime.company.id
+      || !MIRROR_GENERATION_PATTERN.test(String(value.generation ?? ""))) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Trelio returned an invalid narrow context projection.");
+    }
+    return value;
+  };
+  const readManifest = () => projection === "guidance" || projection === "secrets"
+    ? readHumanSearchSource(() => read(), signal) : read();
+  const buildCandidate = (raw, previous) => {
+    const taskSearchOnly = projection === "tasks";
+    const documentType = taskSearchOnly ? "task" : projection === "secrets" ? "agent-secret" : null;
+    // Restrict even a legacy full response before hydration. For schema 1 the
+    // task-only path retains its existing per-task reader and never uses files.
+    const selected = inheritAgentCompanyEncryptedSnapshot(raw, {
+      ...raw, acceptedWorkspaces: [], workspaces: [], contextDocuments: [], instructions: null,
+      tasks: taskSearchOnly || projection === "task_inventory" ? raw.tasks : [],
+      agentSkills: projection === "guidance" ? raw.agentSkills : null,
+      agentProcedures: projection === "guidance" ? raw.agentProcedures : [],
+      ...(raw.schemaVersion === 2 ? {
+        searchDocuments: documentType === null ? [] : raw.searchDocuments?.filter(doc => doc.type === documentType),
+      } : {}),
+    });
+    return buildMirror({ origin, requestOrigin: provider.requestOrigin, token: provider.token,
+      companyEncryption: provider.companyEncryption, rawManifest: selected, previous, signal, taskSearchOnly });
+  };
+  const prepare = async () => ({
+    ...provider,
+    mirror: await buildCandidate(await readManifest(), null),
+  });
+  const ready = projection === "tasks" ? await buildStableCompanyMirror({
+    previous: null, readManifest, readFence: () => read("tasks_fence"), buildCandidate,
+    publish: async mirror => mirror,
+  }) : await prepare();
+  const mirror = projection === "task_inventory" ? await hydrateNativeReadWithRevisionRefresh({
+    origin, ready, nativeTool, input, signal, refreshReady: prepare,
+  }) : ready.mirror;
+  signal?.throwIfAborted();
+  onSearchSnapshot?.(mirror.serverGeneration);
+  return handleNativeLocalContextRead(mirror, nativeTool, input);
+};
+
 export const handleTrelioLocalContextOperation = async (
   origin,
   rawInput,
@@ -9081,26 +8959,9 @@ export const handleTrelioLocalContextOperation = async (
     const nativeTool = String(rawInput?.nativeTool || "").trim();
     const input = rawInput?.arguments;
     const profile = currentWorkspaceExecutionProfile();
-    if (nativeTool === "search_tasks") {
-      // Task refinement has its OWN existing native corpus: task titles,
-      // descriptions, checklists, controls, attachment names and discussion.
-      // Requiring every accepted Workspace file here makes this fallback wait
-      // for the very same full index that just exhausted search preparation.
-      // Assemble only the current native task projections in invocation RAM.
-      // The shared generation reader repeats fresh ACL-filtered manifests and
-      // retries only its ordinary bounded revision conflicts. It never opens
-      // the mirror writer, reuses a failed search's proof/clock or publishes
-      // this task-only snapshot as a complete company generation.
-      const selected = await buildStableCompanyMirror({
-        previous: null,
-        readManifest: () => fetchManifest({ origin: provider.requestOrigin, token: provider.token, companySlug, signal }),
-        buildCandidate: (rawManifest, previous) => buildMirror({ origin, requestOrigin: provider.requestOrigin,
-          token: provider.token, companyEncryption: provider.companyEncryption, rawManifest, previous, signal,
-          taskSearchOnly: true }),
-        publish: async candidate => candidate,
-      });
-      signal?.throwIfAborted();
-      return handleNativeLocalContextRead(selected.mirror, nativeTool, input);
+    if (NARROW_CONTEXT_PROJECTION.has(nativeTool)
+      && (nativeTool === "search_tasks" || !profile?.canReadCompanyContextExact?.(nativeTool))) {
+      return readNarrowCompanyContext({ origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot });
     }
     if (profile?.canReadCompanyContextExact?.(nativeTool)) {
       if (!input || typeof input !== "object" || Array.isArray(input))

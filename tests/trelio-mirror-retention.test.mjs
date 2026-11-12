@@ -98,10 +98,10 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   };
   const old = await publish(1);
   await ensurePrivateDirectory(paths.lock);
-  const owner = { schemaVersion: 1, lockId: randomUUID(), pid: process.pid, createdAt: new Date().toISOString() };
-  await writePrivateJsonFile(path.join(paths.lock, 'owner.json'), owner);
-  await writePrivateJsonFile(path.join(paths.lock, `${owner.lockId}.heartbeat.json`), { schemaVersion: 1, lockId: owner.lockId });
-  const ownerBytes = await fs.readFile(path.join(paths.lock, 'owner.json'));
+  const owner = { id: randomUUID(), pid: process.pid };
+  const ownerPath = path.join(paths.lock, `${owner.pid}-${owner.id}.json`);
+  await writePrivateJsonFile(ownerPath, owner);
+  const ownerBytes = await fs.readFile(ownerPath);
   const pointerBytes = await fs.readFile(paths.pointer);
   const generationNames = await generations(paths.root);
   const rootNames = await fs.readdir(paths.root);
@@ -172,7 +172,7 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   assert.deepEqual(result.mirror.searchDocuments, [unchanged, freshDocument], 'Changed and revoked sources follow the fresh inventory');
   assert.deepEqual(result.mirror.workspaces, [workspace], 'Unchanged accepted heads reuse complete existing bytes without a second download');
   assert.equal(reads, 2, 'Starting and finishing native manifests still fence the complete snapshot');
-  assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
+  assert.deepEqual(await fs.readFile(ownerPath), ownerBytes);
   assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes, 'The parallel reader never publishes a pointer');
   assert.deepEqual(await generations(paths.root), generationNames, 'No extra durable generation is written');
   assert.deepEqual(await fs.readdir(paths.root), rootNames, 'The sibling writer retains sole ownership of its resumable scratchpad');
@@ -197,7 +197,7 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   await atRead;
   cancelled.abort(new Error('Synthetic original search cancelled'));
   await refusal;
-  assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
+  assert.deepEqual(await fs.readFile(ownerPath), ownerBytes);
   assert.deepEqual(await fs.readFile(paths.pointer), pointerBytes);
 
   // A first sync after upgrading can publish a complete snapshot without
@@ -212,8 +212,8 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   assert.equal(JSON.parse(await fs.readFile(paths.pointer)).generation, rebuilt.mirror.generation);
   assert.deepEqual(await fs.readdir(legacyLock), []);
 
-  // A rolling upgrade has a complete schema-8 snapshot but no schema-9
-  // pointer. Exercise real encrypted bytes and a live competing schema-9
+  // A rolling upgrade has a complete schema-8 snapshot but no current
+  // pointer. Exercise real encrypted bytes and a live competing current
   // writer, including the case where the old and fresh generation are equal.
   const legacyRoot = path.dirname(legacyLock);
   const revoked = { ...workspace, id: randomUUID() };
@@ -222,12 +222,15 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   ] };
   await fs.rmdir(legacyLock);
   await publish(2, legacyOptions);
+  const schemaNine = path.join(path.dirname(paths.root), "schema-9");
+  await publish(2, { ...legacyOptions, root: schemaNine, version: 9 });
+  const oldWriter = path.join(schemaNine, "sync.lock");
+  await ensurePrivateDirectory(oldWriter);
   const legacyPointer = path.join(legacyRoot, 'current.json');
   const legacyPointerBytes = await fs.readFile(legacyPointer);
   await fs.unlink(paths.pointer);
   await ensurePrivateDirectory(paths.lock);
-  await writePrivateJsonFile(path.join(paths.lock, 'owner.json'), owner);
-  await writePrivateJsonFile(path.join(paths.lock, `${owner.lockId}.heartbeat.json`), { schemaVersion: 1, lockId: owner.lockId });
+  await writePrivateJsonFile(ownerPath, owner);
   const currentWorkspace = { id: workspace.id, acceptedHead: workspace.acceptedHead, title: 'Fresh Workspace metadata' };
   const current = { ...manifest, acceptedWorkspaces: [currentWorkspace] };
   let upgradeReads = 0;
@@ -242,8 +245,9 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   assert.equal(upgraded.readOnlySnapshot, true);
   assert.deepEqual(upgraded.mirror.workspaces, [{ ...currentWorkspace, documents: workspace.documents }]);
   assert.deepEqual(upgraded.mirror.searchDocuments, current.searchDocuments);
-  assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), ownerBytes);
+  assert.deepEqual(await fs.readFile(ownerPath), ownerBytes);
   assert.deepEqual(await fs.readFile(legacyPointer), legacyPointerBytes);
+  assert.deepEqual(await fs.readdir(oldWriter), [], 'The old schema writer namespace is left alone');
   await assert.rejects(fs.lstat(paths.pointer), { code: 'ENOENT' });
 
   await fs.rm(paths.lock, { recursive: true });
@@ -253,6 +257,8 @@ test('human search builds a fresh private snapshot alongside a live mirror write
   assert.deepEqual(published.mirror.workspaces, upgraded.mirror.workspaces);
   assert.equal(JSON.parse(await fs.readFile(paths.pointer)).generation, published.mirror.generation);
 
+  // Subsequent cases exercise schema 8 as the only compatible predecessor.
+  await fs.unlink(path.join(schemaNine, "current.json"));
   // A rotated scope, changed head or unavailable legacy cache must read the
   // exact fresh Workspace and propagate the refusal without serving old text.
   await fs.unlink(paths.pointer);
@@ -325,13 +331,12 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   console.log('MIRROR_DEAD_WRITER_STAGE:pid');
   const seed = async (pid, extra = {}) => {
     await ensurePrivateDirectory(paths.lock);
-    const owner = { schemaVersion: 1, lockId: randomUUID(), pid,
-      createdAt: new Date().toISOString(), ...extra };
-    await writePrivateJsonFile(path.join(paths.lock, 'owner.json'), owner);
-    await writePrivateJsonFile(path.join(paths.lock, `${owner.lockId}.heartbeat.json`),
-      { schemaVersion: 1, lockId: owner.lockId });
-    return owner;
+    const owner = { id: randomUUID(), pid };
+    const file = path.join(paths.lock, `${pid}-${owner.id}.json`);
+    await writePrivateJsonFile(file, { ...owner, ...extra });
+    return file;
   };
+  const readOwner = async () => JSON.parse(await fs.readFile(path.join(paths.lock, (await fs.readdir(paths.lock))[0])));
   const encryption = { runtime: { company: { id: companyId, slug: 'synthetic' },
     scope: { id: randomUUID(), epoch: 1 }, device: { id: randomUUID() } } };
   const previousFetch = globalThis.fetch;
@@ -339,7 +344,7 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   const refusal = new Error('SYNTHETIC_MIRROR_STOP');
   globalThis.fetch = async url => {
     assert.equal(new URL(url).pathname, '/api/agent-workspaces/company-context/synthetic/manifest');
-    reads++; if (reads === 2) entered?.(); if (held) await held;
+    reads++; if (reads === 3) entered?.(); if (held) await held;
     // Reaching the original native reader is enough to prove acquisition.
     // Its explicit refusal must survive; no partial mirror is published.
     throw refusal;
@@ -368,22 +373,36 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   console.log('MIRROR_DEAD_WRITER_STAGE:first');
   stage='dead_owner_recover';
   await assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
-  assert.equal(reads, 1, 'a fresh dead-owner heartbeat does not consume another sync budget');
+  assert.equal(reads, 1, 'a fresh dead-owner claim does not consume another sync budget');
   assert.equal(await fs.stat(paths.lock).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
+
+  // An empty directory can only be left by release in this atomic layout.
+  // A stopped reader must not leave the next cold search blocked by it.
+  await ensurePrivateDirectory(paths.lock);
+  await assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  assert.equal(reads, 2);
+  await assert.rejects(fs.lstat(paths.lock), { code: 'ENOENT' });
 
   // A live or malformed owner is never declared dead by elapsed clocks, a
   // partial read or a failed PID probe. Cancelling the waiter changes nothing.
-  for (const [variant, seedClaim] of [['live', () => seed(process.pid)], ['malformed', () => seed(exited.pid, { schemaVersion: 99 })], ['unexpected', async () => {
-    await seed(exited.pid); await fs.writeFile(path.join(paths.lock, 'unexpected'), 'synthetic');
+  for (const [variant, seedClaim] of [['live', async () => {
+    const file = await seed(process.pid);
+    const old = new Date(Date.now() - 20 * 60_000);
+    await fs.utimes(file, old, old);
+    await fs.utimes(paths.lock, old, old);
+    return file;
+  }], ['malformed', () => seed(exited.pid, { id: randomUUID() })], ['unexpected', async () => {
+    const file = await seed(exited.pid); await fs.writeFile(path.join(paths.lock, 'unexpected'), 'synthetic');
+    return file;
   }]]) {
     stage=variant;
     console.log(`MIRROR_DEAD_WRITER_STAGE:${stage}`);
-    await seedClaim();
-    const before = await fs.readFile(path.join(paths.lock, 'owner.json'));
+    const file = await seedClaim();
+    const before = await fs.readFile(file);
     const signal = AbortSignal.timeout(250);
     await assert.rejects(sync(signal), error => error === signal.reason);
-    assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), before);
-    assert.equal(reads, 1, 'a blocked waiter never reaches the manifest');
+    assert.deepEqual(await fs.readFile(file), before);
+    assert.equal(reads, 2, 'a blocked waiter never reaches the manifest');
     await fs.rm(paths.lock, { recursive: true });
   }
 
@@ -397,18 +416,18 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   stage='concurrent_first';const first = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
   await Promise.race([entering, first.then(() => { throw new Error('WRITER_DID_NOT_REACH_READER'); })]);
   console.log('MIRROR_DEAD_WRITER_STAGE:entered');
-  const successor = JSON.parse(await observed(fs.readFile(path.join(paths.lock, 'owner.json'))));
+  const successor = await observed(readOwner());
   console.log('MIRROR_DEAD_WRITER_STAGE:owner');
   assert.equal(successor.pid, process.pid);
   stage='concurrent_second';const second = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
   console.log('MIRROR_DEAD_WRITER_STAGE:waiting');
   await new Promise(resolve => setTimeout(resolve, 100));
-  assert.equal(reads, 2);
-  assert.equal(JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json'))).lockId, successor.lockId);
+  assert.equal(reads, 3);
+  assert.equal((await readOwner()).id, successor.id);
   stage='concurrent_release';release(); console.log('MIRROR_DEAD_WRITER_STAGE:released');
   await Promise.all([first, second]);
   console.log('MIRROR_DEAD_WRITER_STAGE:settled');
-  assert.equal(reads, 3);
+  assert.equal(reads, 4);
   assert.equal(await fs.stat(paths.pointer).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
   // Deterministically reproduce the native inspection/release interleaving,
   // independently of Windows scheduler luck. Only this fixture's synthetic
@@ -418,7 +437,7 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   for (const mode of ['absent', 'replaced', 'unchanged']) {
     stage='race_'+mode;
     console.log(`MIRROR_DEAD_WRITER_STAGE:race_${mode}`);
-    await seed(process.pid);
+    const observedOwner = await seed(exited.pid);
     const cancellation = new AbortController();
     const signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(5_000)]);
     let abortTimer;
@@ -426,7 +445,7 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
       'Synthetic late private inspection refusal.', { operation: 'windows_acl.owner_read' });
     let injected = false;
     fs.lstat = async (...args) => {
-      if (!injected && args[0] === path.join(paths.lock, 'owner.json')) {
+      if (!injected && args[0] === observedOwner) {
         injected = true;
         if (mode !== 'unchanged') {
           await fs.rm(paths.lock, { recursive: true });
@@ -445,10 +464,10 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
       await assert.rejects(sync(signal), error => mode === 'absent' ? error.cause === refusal
         : mode === 'replaced' ? error === signal.reason : error === privateRefusal);
       assert.equal(injected, true);
-      assert.equal(reads, 4, 'only a positively released claim permits the next manifest read');
+      assert.equal(reads, 5, 'only a positively released claim permits the next manifest read');
       if (mode !== 'absent') {
-        const owner = JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json')));
-        assert.equal(owner.pid, process.pid, 'live/unchanged owner is never removed');
+        const owner = await readOwner();
+        assert.equal(owner.pid, mode === 'replaced' ? process.pid : exited.pid, 'successor/unchanged owner is never removed');
       }
     } finally {
       clearTimeout(abortTimer);
@@ -471,7 +490,7 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
 
 test('startup sweep prunes historical schemas including v1 without changing current pointers', async t => {
   const f = await fixture(t);
-  const versions = [1, 2, 4, 7, 8, MIRROR_SCHEMA_VERSION];
+  const versions = [1, 2, 4, 7, 8, 9, MIRROR_SCHEMA_VERSION];
   for (const version of versions) await f.schema(version);
   const report = await pruneCompanyMirrorCaches({ directory: f.directory });
   assert.equal(report.removedFiles, versions.length * 6);
