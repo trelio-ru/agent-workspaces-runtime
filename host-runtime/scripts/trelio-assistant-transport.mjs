@@ -2108,9 +2108,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           const keys=[...url.searchParams.keys()];
           const documentRoute=route.routePattern.includes('/documents/'),taskRoute=route.routePattern.endsWith('/tasks/:projectSlug/:taskNumber');
           const revisionsRoute=route.routePattern.endsWith('/workspaces/:workspaceId/revisions');
+          // The already admitted tool may select only its own structural
+          // projection or generation fence. Search terms remain device-only.
+          const modes=route.routePattern.endsWith('/company-context/:companySlug/manifest')
+            ? assistantNarrowManifestModes.get(companyRead.nativeTool) : undefined;
           const allowedKeys=documentRoute?['expectedRevision','occurrenceId']:taskRoute?['expectedRevision']
-            :revisionsRoute?['head','cursor','limit']:route.routePattern.endsWith('/bridge-routing')?['workspaceId','companySlug']:['head'];
+            :revisionsRoute?['head','cursor','limit']:route.routePattern.endsWith('/bridge-routing')?['workspaceId','companySlug']
+              :modes?['projection']:['head'];
           if(new Set(keys).size!==keys.length || keys.some(key=>!allowedKeys.includes(key))
+            || url.searchParams.has('projection')&&!modes?.includes(url.searchParams.get('projection'))
             || url.searchParams.has('head')&&!HEAD.test(url.searchParams.get('head'))
             || url.searchParams.has('workspaceId')&&!uuid.test(url.searchParams.get('workspaceId'))
             ||url.searchParams.has('companySlug')&&url.searchParams.get('companySlug')!==companyRead.companySlug
@@ -4350,6 +4356,12 @@ export const ASSISTANT_WORKSPACE_PREFIX = "/api/digital-assistants/runtime/works
 export const ASSISTANT_WORKSPACE_PROOF_TOOL = "assistant_workspace_data_plane";
 export const ASSISTANT_WORKSPACE_RECIPIENT_HEADER = "x-trelio-assistant-encryption-device";
 const assistantWorkspacePolicyDenied = () => new AssistantWorkspacePolicyError();
+const assistantNarrowManifestModes = new Map([
+  ['search_tasks', ['tasks', 'tasks_fence']],
+  ['list_projects', ['projects']],
+  ['list_my_tasks', ['task_inventory']],
+  ['list_project_tasks', ['task_inventory']],
+]);
 /** Names only: both profiles still validate canonical native schemas and ACL.
  * v2 owner consent enables this read capability; these names never authorize
  * a mutation, another company or a source task as the writable pass target. */

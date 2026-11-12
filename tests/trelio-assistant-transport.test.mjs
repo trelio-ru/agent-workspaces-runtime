@@ -2698,17 +2698,42 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     return materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,descriptor,name:'search',arguments:{queries:[canary]},
       assertCurrent:profile.prepareCompanyContextRead});
   });
-  const read=async(nativeTool,input)=>{
+  const read=async(nativeTool,input,inspectTransport)=>{
     const selected={...descriptor,nativeTool};
     const sourceProfile=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
       encryptedCompanyContext:selected,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,action)=>action()});
     return common.withWorkspaceExecutionProfile(sourceProfile,async()=>{
       await sourceProfile.prepareCompanyContextRead();
+      if(inspectTransport)return inspectTransport(sourceProfile);
       return materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,descriptor:selected,name:nativeTool,arguments:input,
         assertCurrent:sourceProfile.prepareCompanyContextRead});
     });
   };
   try{
+    // Exercise the actual native profile before the backend fixture: only
+    // task-only search can place these structural selectors on its GET.
+    const plan = async (profile, suffix) => profile.prepareRequest({
+      origin: descriptor.requestOrigin, token: await profile.requireToken(f.identity.origin),
+      pathname: '/api/agent-workspaces/company-context/encrypted/manifest'+suffix,
+      options: {method:'GET'}, buildHeaders: () => new Headers(),
+    });
+    await read('search_tasks',{},async profile=>{
+      for(const projection of ['tasks','tasks_fence']){
+        const sent=await plan(profile,'?projection='+projection);
+        assert.equal(sent.url.searchParams.get('projection'),projection);
+        assert.match(sent.url.pathname,/^\/api\/digital-assistants\/runtime\/workspace\//u);
+      }
+      for(const query of ['?projection=secrets','?projection=tasks&projection=tasks_fence','?projection=tasks&q=private'])
+        await assert.rejects(plan(profile,query),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+    });
+    await read('search',{},profile=>assert.rejects(plan(profile,'?projection=tasks'),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'}));
+    for(const [tool,projection] of [['list_projects','projects'],['list_my_tasks','task_inventory'],
+      ['list_project_tasks','task_inventory']]){
+      await read(tool,{},async profile=>{
+        assert.equal((await plan(profile,'?projection='+projection)).url.searchParams.get('projection'),projection);
+        await assert.rejects(plan(profile,'?projection=tasks'),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+      });
+    }
     // A previously advertised immutable file is already an exact source, not
     // another company search. Exercise a genuinely cold managed task/owner
     // profile with the real HPKE manifest/file reader: no company mirror has
@@ -2751,8 +2776,7 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
       const {resolveMirrorPaths}=await import('../host-runtime/scripts/trelio-local-context.mjs');
       const paths=resolveMirrorPaths({origin:f.identity.origin,companyId:f.pass.companyId}),lockId=randomUUID();
       await common.ensurePrivateDirectory(paths.lock);
-      await common.writePrivateJsonFile(path.join(paths.lock,'owner.json'),{schemaVersion:1,lockId,pid:exited.pid,createdAt:new Date().toISOString()});
-      await common.writePrivateJsonFile(path.join(paths.lock,`${lockId}.heartbeat.json`),{schemaVersion:1,lockId});
+      await common.writePrivateJsonFile(path.join(paths.lock,`${exited.pid}-${lockId}.json`),{id:lockId,pid:exited.pid});
     },{encryptedCompanyContext:descriptor});
     const prepared=await executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},operationOptions);
     assert.deepEqual(prepared,{schemaVersion:1,prepared:true});
