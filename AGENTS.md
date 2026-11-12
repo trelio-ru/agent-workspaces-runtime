@@ -426,7 +426,8 @@ publication tooling также остаются вне этого публичн
   Claude, неизвестный формат, Code Mode и ошибки возвращаются к полному чтению.
   Оптимизация не ослабляет admission/proof и не кеширует тексты правил.
 - Browser fill повторяет только value-free preflight: временно отсутствующее
-  AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,
+  AX/UIA-дерево или ещё не найденный exact документ проверяется не более трёх
+  раз на той же поверхности. Смена закреплённого URL остаётся отказом. Activation,
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
   Signed Chrome discovery не зависит от locator; field-only сохраняет вкладку.
@@ -437,8 +438,10 @@ publication tooling также остаются вне этого публичн
   Вложенная форма требует explicit same-origin URL/hash path; native имена
   полей допустимы только с unique/object binding, без AX/UIA value reads.
   Старый host отказывается до checkout; такой план не меняет native surface.
-  Discovery останавливается на HTTP(S) WebArea; общие native roots разделяют
-  прежний bounded budget. Закрытые stage/limit не разрешают fill retry.
+  Discovery останавливается на HTTP(S) WebArea. `AXWindows`, main/focused и
+  application roots разделяют прежний бюджет и дедупликацию native объектов.
+  Chrome запрашивает дерево через AXRole своего подписанного приложения.
+  Закрытые stage/limit не разрешают fill retry.
   Native UIA fixture reports fixed startup stages only; its window timeout is
   not permission to relax production admission, deadlines or Windows assertions.
 - Hook/bridge/MCP используют общий recovery exact stable loader по

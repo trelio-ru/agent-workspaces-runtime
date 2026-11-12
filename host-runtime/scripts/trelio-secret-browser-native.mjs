@@ -448,22 +448,22 @@ const prepareSecretBrowserSessionInternal = async ({
     for (let attempt = 0; attempt < NATIVE_PREFLIGHT_ATTEMPTS; attempt++) {
       channel = openChannel({ executable, platform });
       ready = await channel.request({ command: "prepare", clientFamily: binding.clientFamily, steps });
-      const treeUnavailable = ready.status === "unavailable" && ready.reasonCode === "accessibility_unavailable";
+      const discoveryPending = (ready.status === "unavailable" && ready.reasonCode === "accessibility_unavailable")
+        || (ready.status === "failed" && ready.reasonCode === "target_document_unavailable");
       const transientField = ready.status === "failed"
         && ["field_write_failed", "field_value_unsettable"].includes(ready.reasonCode);
-      if ((!treeUnavailable && !transientField)
+      if ((!discoveryPending && !transientField)
         || attempt === NATIVE_PREFLIGHT_ATTEMPTS - 1
         || steps.some((step) => step.activationId)) break;
-      // Chromium may temporarily omit the entire AX/UIA document while a tab
-      // is attached to its visible pane, not just mark AXValue unwritable.
-      // Both are value-free preparation failures: close the old helper before
-      // retrying the exact URL and controls, without bringing any app to front.
-      // Permission/signature failures, ambiguous documents, lost replies and
-      // activation plans are not transient: a click could already have run.
+      // The exact document can be absent while Chromium attaches the tab,
+      // even when other windows already expose documents. An unobserved
+      // document has no pinned identity to invalidate. A changed pinned URL,
+      // ambiguous result, lost reply or activation plan stays terminal here.
+      // Close the previous helper before repeating the value-free preparation.
       // The one-use grant is consumed only after this function returns ready.
       await channel.close();
       channel = null;
-      await new Promise((resolve) => setTimeout(resolve, (treeUnavailable ? 500 : 200) * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, (discoveryPending ? 500 : 200) * (attempt + 1)));
     }
     const traversalDiagnostic = nativeTraversalDiagnostic(ready);
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {
@@ -510,15 +510,19 @@ const prepareSecretBrowserSessionInternal = async ({
       // new, final field-only grant and click the already identified button
       // in the same tab. Never reinterpret it as a writable-field failure or
       // silently move the credential to a different Chrome profile.
-      const message = ready.reasonCode === "submit_press_unavailable"
-        ? "Кнопка submit не поддерживает AXPress. Для финального шага подготовьте новый field-only grant без submitSelector и после успешной подстановки нажмите ранее определённую кнопку в той же embedded-вкладке без чтения заполненных полей."
-        : missingDocument
-          ? "Не найден native документ с точным адресом исходной вкладки. Секрет не запрошен. "
-            + "Покажите уже открытую исходную вкладку штатным browser tool и проверьте адрес. "
-            + "Если адрес прежний, повторите ту же проверку один раз; не открывайте другую вкладку и не меняйте профиль."
-        : traversalDiagnostic
-          ? `Native обход остановлен: stage=${traversalDiagnostic.stage}; limit=${traversalDiagnostic.limit}. Секрет не запрошен этой попыткой для подстановки. Увеличение лимитов и повтор выдачи значения не разрешены этим отказом.`
-          : "Проверка встроенной вкладки отклонена.";
+      let message = "Проверка встроенной вкладки отклонена.";
+      if (ready.reasonCode === "submit_press_unavailable") {
+        message = "Кнопка submit не поддерживает AXPress. Для финального шага подготовьте новый field-only grant без submitSelector и после успешной подстановки нажмите ранее определённую кнопку в той же embedded-вкладке без чтения заполненных полей.";
+      } else if (missingDocument) {
+        message = "Не найден native документ с точным адресом исходной вкладки. Секрет не запрошен. "
+          + "Покажите уже открытую исходную вкладку штатным browser tool и проверьте адрес. "
+          + "Если адрес прежний, повторите ту же проверку один раз; не открывайте другую вкладку и не меняйте профиль.";
+      } else if (traversalDiagnostic) {
+        message = `Native обход остановлен: stage=${traversalDiagnostic.stage}; limit=${traversalDiagnostic.limit}. Секрет не запрошен этой попыткой для подстановки. Увеличение лимитов и повтор выдачи значения не разрешены этим отказом.`;
+      } else if (ready.status === "failed" && ready.reasonCode === "field_not_found") {
+        message = "В исходном документе не найдено доступное поле или кнопка по заданному селектору. "
+          + "Если поле доступно по имени в дереве Accessibility, проверьте пустую форму и подготовьте новый план с точным accessibleName этого поля. Секрет не запрошен.";
+      }
       throw new SecretBrowserFillError(message, reasonCode);
     }
     // An additive helper field identifies only a closed application class,

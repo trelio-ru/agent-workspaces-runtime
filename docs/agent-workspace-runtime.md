@@ -988,6 +988,8 @@ edit без title и description подходит точный AXPlaceholderValu
 для secure edit без имени используется прежний unique password locator.
 AXValue/ValuePattern, соседний текст и порядок полей не читаются. Так
 поддерживаются поля без id, в том числе внутри shadow roots.
+Если native роль пароля не представлена, но пустое поле имеет точное имя,
+`field_not_found` подсказывает подготовить новый план по `accessibleName`.
 Неоднозначные имена и пересечение name/id locators отклоняются до setter.
 Последний step может оставаться field-only для заранее определённого browser
 click в той же вкладке; MFA/SMS/push не обходятся, успешный fill не доказывает login.
@@ -1004,7 +1006,10 @@ id-only top-document grants сохраняют прежний ABI. Без `frame
 
 macOS discovery обходит native shell до границ HTTP(S) WebArea и не читает их
 потомков до выбора exact target. Non-HTTP Electron shell остаётся проходимым
-для вложенной browser view. Application/main/focused roots обходятся вместе:
+для вложенной browser view. Application, `AXWindows`, main и focused roots
+обходятся вместе. Явный `AXWindows` учитывает окно, отсутствующее в AXChildren
+и main/focused. У подписанного Chrome сначала запрашивается AXRole приложения
+для штатной ленивой инициализации Accessibility. Фокус окна не меняется.
 CF object identity устраняет повторные aliases/циклы, но разные документы с
 одним URL сохраняют ambiguity. Один прежний бюджет 12 000 уникальных узлов /
 12 секунд по monotonic clock включает обход и проверку metadata, без reset на
@@ -1023,9 +1028,13 @@ Apple team `EQHXZ8M8AV`, Windows – Authenticode `Google LLC` и product
 подписанных приложений, затем сохраняются окно/контейнер/объекты.
 Профиль, cookies и вкладка остаются прежними; приложения не активируются.
 Если Chrome не открыл native документ точного адреса, helper отличает это
-от смены уже закреплённого документа. Field-only план остаётся на исходной
-вкладке: показать её штатным browser tool, сверить адрес и повторить проверку
-один раз. Условия изолированного Chrome fallback и закрытый код аудита не меняются.
+от смены уже закреплённого документа. План без activation может повторить
+value-free discovery в пределах общего лимита трёх попыток. Каждая попытка
+закрывает предыдущий helper и заново подтверждает exact URL и поля. Смена
+закреплённого URL не получает этот повтор. Если документ всё ещё отсутствует,
+field-only план остаётся на исходной вкладке: показать её штатным browser
+tool, сверить адрес и повторить проверку один раз. Условия изолированного
+Chrome fallback и закрытый код аудита сохраняются.
 Exact id и accessibleName не требуют добавлять password-role locator ради
 выбора Chrome. Совпавшие документы в разных разрешённых приложениях остаются
 неоднозначными. Field-only `embedded` – исходная native-вкладка, включая Chrome;

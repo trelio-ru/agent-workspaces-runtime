@@ -255,16 +255,16 @@ final class Session {
         return found
     }
     static func applicationDocuments(_ application: AXUIElement) throws -> [AXUIElement] {
-        // An inactive Electron client may leave its application-level
-        // AXChildren/AXWindows empty even while its last main window remains
-        // addressable through AXMainWindow or AXFocusedWindow. Read those
-        // documented window attributes without activating, raising or focusing
-        // the client. Exact URL, top-level document and control checks below
-        // still gate every candidate before any secret is consumed.
+        // Application children and window attributes are independent AX views.
+        // Chrome can expose the form's window in AXWindows without exposing it
+        // through AXChildren or marking it main/focused. An inactive Electron
+        // client can instead expose only AXMainWindow or AXFocusedWindow.
+        // Read each view without changing focus, then use the same document
+        // identity, exact URL and control checks for every window.
         var roots = [application]
+        roots.append(contentsOf: attribute(application, kAXWindowsAttribute) as? [AXUIElement] ?? [])
         for key in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
-            if let window = elementAttribute(application, key as String),
-               !roots.contains(where: { CFEqual($0, window) }) {
+            if let window = elementAttribute(application, key as String) {
                 roots.append(window)
             }
         }
@@ -433,9 +433,16 @@ final class Session {
             guard Session.trust(app, requirement) else { throw Stop.failed("adapter_error") }
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(ax, 1)
-            // Documented Electron switch; it exposes the accessibility tree but
-            // does not grant TCC permission or change any browser/site policy.
-            AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            if identity.0 == "com.google.Chrome" {
+                // Chrome lazily initializes native accessibility on AXRole
+                // reads of its application. Request that before enumerating
+                // windows. AXManualAccessibility is specific to Electron.
+                _ = text(ax, kAXRoleAttribute)
+            } else {
+                // This Electron switch exposes the tree after the OS has
+                // already confirmed Accessibility permission for this helper.
+                AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            }
             let docs = try Session.applicationDocuments(ax)
             exposedDocuments += docs.count
             for doc in docs where matches(documentURL(doc), steps[0]) { candidates.append((app, ax, doc, requirement)) }

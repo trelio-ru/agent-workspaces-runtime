@@ -449,10 +449,56 @@ test("an unobserved native document directs the agent to the same tab before che
     error.reasonCode === "target_url_changed" && /уже открытую исходную вкладку/u.test(error.message)
     && /Секрет не запрошен/u.test(error.message) && !error.message.includes(targetUrl)
   ));
-  assert.deepEqual(f.requests.map(({ command }) => command), ["prepare"]);
+  assert.deepEqual(f.requests.map(({ command }) => command), ["prepare", "prepare", "prepare"]);
   assert.equal(f.chromePreflights, 0);
   assert.equal(f.chromeCalls, 0);
   assert.ok(f.closed);
+});
+test("late native document is rediscovered in the original Chrome tab before checkout", async () => {
+  const f = fixture();
+  delete f.args.context.browserSteps[0].submitSelector;
+  const requests = [], closed = [];
+  f.args.openChannel = () => {
+    const attempt = requests.length;
+    return {
+      request: async (request) => {
+        requests.push(request);
+        return attempt === 0 ? { status: "failed", reasonCode: "target_document_unavailable" }
+          : { status: "ready", application: "chrome" };
+      },
+      close: async () => { closed.push(attempt); },
+    };
+  };
+  const session = await prepareSecretBrowserSession({ ...f.args, mode: "embedded" });
+  assert.equal(session.surface, "embedded");
+  assert.equal(session.application, "chrome");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.equal(requests[0].command, "prepare");
+  assert.equal(Object.hasOwn(requests[0], "values"), false);
+  assert.deepEqual(closed, [0]);
+  assert.equal(f.chromePreflights, 0);
+  await session.close();
+  assert.deepEqual(closed, [0, 1]);
+});
+test("a pinned URL change remains terminal in the original tab", async () => {
+  const f = fixture({ status: "failed", reasonCode: "target_url_changed" });
+  delete f.args.context.browserSteps[0].submitSelector;
+  await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }),
+    (error) => error.reasonCode === "target_url_changed" && error.preflight === true);
+  assert.deepEqual(f.requests.map(({ command }) => command), ["prepare"]);
+  assert.equal(f.chromePreflights, 0);
+  assert.ok(f.closed);
+});
+test("a native field miss explains exact accessible names before requesting values", async () => {
+  const f = fixture({ status: "failed", reasonCode: "field_not_found" });
+  delete f.args.context.browserSteps[0].submitSelector;
+  await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
+    error.reasonCode === "field_not_found" && error.preflight === true
+    && /пустую форму.*точным accessibleName/u.test(error.message) && /Секрет не запрошен/u.test(error.message)
+  ));
+  assert.deepEqual(f.requests.map(({ command }) => command), ["prepare"]);
+  assert.equal(f.chromePreflights, 0);
 });
 test("Chrome preflight failure after a native miss never receives a secret", async () => {
   const f = fixture({ status: "failed", reasonCode: "target_url_changed" });
@@ -604,8 +650,7 @@ test("macOS production resolver binds explicit nested documents and rejects stal
       section("func matchesTarget(", "func belongs("),
       section("func matchesField(", "final class Session {"),
       "final class Session {",
-      section("    static func documents(", "    static func applicationDocuments("),
-      section("    static func boundDocument(", "    init(_ request: Request) throws {"),
+      section("    static func documents(", "    init(_ request: Request) throws {"),
       "}",
     ].join("\n"));
     assert.notEqual(code, fixtureSource);

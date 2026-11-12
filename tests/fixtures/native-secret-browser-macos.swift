@@ -17,6 +17,9 @@ final class FixtureElement: NSObject {
     var url: String?
     var parent: FixtureElement?
     var nodes: [FixtureElement] = []
+    var windows: [FixtureElement] = []
+    var mainWindow: FixtureElement?
+    var focusedWindow: FixtureElement?
     var shown = true
     var enabled = true
     var writable = true
@@ -27,6 +30,9 @@ final class FixtureElement: NSObject {
 }
 typealias AXUIElement = FixtureElement
 let kAXParentAttribute = "AXParent"
+let kAXWindowsAttribute = "AXWindows"
+let kAXMainWindowAttribute = "AXMainWindow"
+let kAXFocusedWindowAttribute = "AXFocusedWindow"
 let kAXTitleAttribute = "AXTitle"
 let kAXDescriptionAttribute = "AXDescription"
 let kAXRoleAttribute = "AXRole"
@@ -48,12 +54,17 @@ func text(_ element: AXUIElement, _ name: String) -> String? {
 }
 func attribute(_ element: AXUIElement, _ name: String) -> Any? {
     if name == "AXHidden" { return !element.shown }
+    if name == kAXWindowsAttribute { return element.windows }
     precondition(name == kAXEnabledAttribute)
     return element.enabled
 }
 func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
-    precondition(name == kAXParentAttribute)
-    return element.parent
+    switch name {
+    case kAXParentAttribute: return element.parent
+    case kAXMainWindowAttribute: return element.mainWindow
+    case kAXFocusedWindowAttribute: return element.focusedWindow
+    default: preconditionFailure("Unexpected AX element attribute read")
+    }
 }
 func rectangle(_ element: AXUIElement) -> CGRect? { return CGRect(x: 0, y: 0, width: 200, height: 100) }
 
@@ -115,6 +126,23 @@ let anotherTab = FixtureElement("AXWebArea"); anotherTab.url = selectedPage.url;
 discoveryApp.append(anotherTab)
 let distinct = try Session.documents(discoveryApp)
 precondition(distinct.filter { $0.url == selectedPage.url }.count == 2)
+
+// An exact login document can be in a signed Chrome window reported only via
+// AXWindows. The focused/main window reports a different document. Sharing an
+// object across root views must not manufacture ambiguity or hide a real tab.
+let chrome = FixtureElement("AXApplication")
+let mainWindow = FixtureElement("AXWindow"); mainWindow.append(unrelatedPage)
+let loginWindow = FixtureElement("AXWindow"); loginWindow.append(selectedPage)
+chrome.append(mainWindow)
+chrome.windows = [mainWindow, loginWindow, loginWindow]
+chrome.mainWindow = mainWindow
+chrome.focusedWindow = mainWindow
+let chromeDocs = try Session.applicationDocuments(chrome)
+precondition(chromeDocs.count == 2 && chromeDocs.contains { $0 === selectedPage })
+let duplicateWindow = FixtureElement("AXWindow"); duplicateWindow.append(anotherTab)
+chrome.windows.append(duplicateWindow)
+let duplicateChromeDocs = try Session.applicationDocuments(chrome)
+precondition(duplicateChromeDocs.filter { $0.url == selectedPage.url }.count == 2)
 // A non-HTTP Electron shell is not an authorization boundary for its embedded
 // browser. Its actual HTTP child still needs ordinary exact URL selection.
 let shell = FixtureElement("AXWebArea"); shell.url = "codex://shell"
