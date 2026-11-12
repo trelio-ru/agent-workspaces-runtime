@@ -26,7 +26,7 @@ export const resolveLocalMcpTextCompatibility = async (environment = process.env
 
 export const deliverLocalMcpResult = (result, textCompatibility = false, nativeTool = "") =>
   enforceAgentSkillMcpBudget(nativeTool,
-    deliverMcpStructuredText(compactLocalMcpResult(result), textCompatibility));
+    deliverMcpStructuredText(compactLocalMcpResult(result), textCompatibility), textCompatibility);
 
 /**
  * Keep one model-visible copy of a structured result. The App still receives
@@ -63,7 +63,7 @@ export const compactLocalMcpResult = (result) => {
  * Provider JSON и MCP App state не относятся к этому контракту. Исходная
  * копия удаляется до проекции, чтобы полный JSON не остался в content.
  */
-export const compactLocalNativeMcpResult = (toolName, result, args = {}) => {
+export const compactLocalNativeMcpResult = (toolName, result, args = {}, textCompatibility = false) => {
   const compact = compactLocalMcpResult(result);
   if (!compact || compact.isError) return compact;
   if (compact.structuredContent && typeof compact.structuredContent === "object") {
@@ -75,7 +75,13 @@ export const compactLocalNativeMcpResult = (toolName, result, args = {}) => {
       && Object.keys(content[0]).every((key) => ["type", "text"].includes(key))) {
       content = [{ type: "text", text: "Текст файла и coverage находятся в structuredContent." }];
     }
-    return enforceAgentSkillMcpBudget(toolName, { ...compact, content, structuredContent: projectMcpAgentPayload(toolName, payload, args) });
+    const projected = { ...compact, content, structuredContent: projectMcpAgentPayload(toolName, payload, args) };
+    // The local preparation must use the final format for skills. An ordinary
+    // structured summary can itself push a near-boundary response over the
+    // limit before the verified text client gets its single-copy delivery.
+    return toolName === "get_agent_skill"
+      ? deliverLocalMcpResult(projected, textCompatibility, toolName)
+      : projected;
   }
   // Read/search helpers исторически возвращают единственный JSON text block.
   // Сохраняем этот ABI, не создавая второй structuredContent и не разбирая

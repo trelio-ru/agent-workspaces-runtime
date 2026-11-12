@@ -3190,8 +3190,9 @@ Exact native Antigravity shell (root plugin.json, выбранный loader-ом
 JSON TextContent после hydration/projection. Другие shells сохраняют compact
 выдачу. Root App _meta/capabilities никогда не копируются в text; independent
 text/media/errors сохраняются, нормализация идемпотентна. Это presentation,
-не OAuth/runtime admission. Backend учитывает эту копию в exact read/page
-budget; local text-only reads уже измеряют собственный envelope.
+не OAuth/runtime admission. Backend учитывает итоговый TextContent Antigravity,
+Мультитула и Harness в бюджете native exact task reads и страниц. Local
+text-only reads измеряют собственный envelope.
 
 ## Личные аккаунты навыков
 
@@ -3452,7 +3453,10 @@ projection. Финальный `deliverLocalMcpResult` повторяет про
 JSON TextContent compatibility delivery; native tool берётся только из exact
 local continuation, а не из содержимого provider. Полный visible envelope,
 личный слой, future fields и JSON escaping входят в предел 40 000 байт.
-Hidden `_meta` не сериализуется. При overflow возвращается
+Hidden `_meta` не сериализуется. Если точный дубликат переполняет лимит,
+Antigravity, Harness и Мультитул получают единственную полную JSON-копию в
+TextContent. Та же проверка применяется после hydration, чтобы промежуточный
+формат не отклонил ответ до выбора формата клиента. При итоговом overflow возвращается
 `AGENT_SKILL_RESPONSE_TOO_LARGE`, без текста инструкции и runtime action;
 исходный объект не меняется, auth/config не сбрасываются и действие не повторяется.
 Исторические releases не переписываются; новый publication limit не является

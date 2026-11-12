@@ -130,12 +130,25 @@ export const measureAgentSkillMcpResultBytes = (result) => {
  * The original result remains untouched; oversized text is not truncated.
  * @param {string} toolName
  * @param {unknown} result
+ * @param {boolean} textCompatibility A trusted delivery mode, not a tool argument.
  */
-export const enforceAgentSkillMcpBudget = (toolName, result) => {
+export const enforceAgentSkillMcpBudget = (toolName, result, textCompatibility = false) => {
   if (toolName !== "get_agent_skill" || !result || typeof result !== "object"
     || /** @type {Record<string, unknown>} */ (result).isError === true) return result;
-  const actualBytes = measureAgentSkillMcpResultBytes(result);
+  let actualBytes = measureAgentSkillMcpResultBytes(result);
   if (actualBytes <= AGENT_SKILL_MCP_MAX_RESULT_BYTES) return result;
+  if (textCompatibility) {
+    const { structuredContent, ...textResult } = /** @type {Record<string, unknown>} */ (result);
+    const json = JSON.stringify(structuredContent);
+    // The compatibility client reads TextContent. Drop only a proven second
+    // copy, after projection/hydration. Independent text, media and App
+    // metadata stay on the envelope, and the single-copy wire size is rechecked.
+    if (typeof json === "string" && Array.isArray(textResult.content)
+      && textResult.content.some((block) => block?.type === "text" && block.text === json)) {
+      actualBytes = measureAgentSkillMcpResultBytes(textResult);
+      if (actualBytes <= AGENT_SKILL_MCP_MAX_RESULT_BYTES) return textResult;
+    }
+  }
   const payload = {
     code: "AGENT_SKILL_RESPONSE_TOO_LARGE",
     actualBytes,

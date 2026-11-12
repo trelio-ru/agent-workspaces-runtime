@@ -1298,8 +1298,9 @@ publication tooling также остаются вне этого публичн
 - Metadata create/release: [единый draft и source reader](docs/agent-workspace-runtime.md#private-skill-metadata).
 - Основная инструкция новой публикации ограничена 16 КиБ UTF-8 до encryption.
   Полный `get_agent_skill` после hydration/projection и final text delivery
-  ограничен 40 000 байтами; превышение возвращает typed error без action и
-  без обрезки. Shared guard генерируется из backend, а не поддерживается копией.
+  ограничен 40 000 байтами. Text adapters используют
+  [общий контракт доставки](docs/agent-workspace-runtime.md#бюджет-инструкций-agent-skill).
+  Shared guard генерируется из backend, а не поддерживается копией.
 - Личный слой навыка в model projection сохраняется отдельно от signed base;
   lazy/reuse semantics проверяются в `tests/trelio-mcp-results.test.mjs`.
 

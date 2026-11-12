@@ -387,6 +387,34 @@ test("Kimi bridge state never adopts a common Codex/Claude device or legacy OAut
   assert.equal(result.code, 0, result.stderr); assert.equal(result.stdout, "isolated");
 });
 
+test("MultiTool enforces the final skill budget for remote and local reads", async () => {
+  const { createMultiToolConnection } = await import("../host-runtime/scripts/trelio-remote-mcp.mjs");
+  const skill = { instructionsMarkdown: "я".repeat(11000), runtimeExecution: { localAction: { route: "fixture" } } };
+  const continuation = "continue_trelio_local_action";
+  let data = skill;
+  const result = () => ({ structuredContent: data, content: [{ type: "text", text: JSON.stringify(data) }] });
+  const connection = createMultiToolConnection({
+    native: { call: async () => result() },
+    local: async (_message, options) => {
+      assert.equal(options.textCompatibility, true);
+      return { result: result() };
+    },
+  });
+  const call = (name) => connection.call(name, name === continuation ? { parameters: { nativeTool: "get_agent_skill" } } : {});
+  for (const tool of ["get_agent_skill", continuation]) {
+    const reply = await call(tool);
+    assert.equal(reply.structuredContent, undefined);
+    assert.deepEqual(JSON.parse(reply.content[0].text), skill);
+    assert.ok(Buffer.byteLength(JSON.stringify(reply)) <= 40000);
+  }
+  data = { ...skill, instructionsMarkdown: skill.instructionsMarkdown.repeat(2) };
+  for (const tool of ["get_agent_skill", continuation]) {
+    const reply = await call(tool);
+    assert.equal(reply.structuredContent.code, "AGENT_SKILL_RESPONSE_TOO_LARGE");
+    assert.doesNotMatch(JSON.stringify(reply), /localAction/u);
+  }
+});
+
 test("MultiTool sends exact open and inspect envelopes and plans complete local authority reads", async t => {
   const { createMultiToolConnection } = await import("../host-runtime/scripts/trelio-remote-mcp.mjs");
   const { buildLocalTaskReadToolResult } = await import("../host-runtime/scripts/trelio-task-read-budget.mjs");

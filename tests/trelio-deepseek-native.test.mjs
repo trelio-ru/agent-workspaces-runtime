@@ -423,4 +423,9 @@ test("native text compatibility preserves the shared complete skill-response bud
   assert.ok(JSON.stringify(projected).includes("AGENT_SKILL_RESPONSE_TOO_LARGE"));
   assert.ok(!JSON.stringify(projected).includes("private-overflow-marker"));
   assert.ok(source.structuredContent.instructionsMarkdown.includes("private-overflow-marker"));
+  const withinBudget = { ...source, structuredContent: { instructionsMarkdown: "я".repeat(11000) } };
+  const recovered = projectHarnessMcpResult(withinBudget, "get_agent_skill");
+  assert.equal(recovered.structuredContent, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(recovered)) <= 40000);
+  assert.ok(recovered.content.some(block => block.text === JSON.stringify(withinBudget.structuredContent)));
 });

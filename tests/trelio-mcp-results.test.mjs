@@ -573,7 +573,10 @@ test("local skill guard measures complete hydrated and final text-compatible env
   const original = { structuredContent: skill, content: [{ type: "text", text: JSON.stringify(skill) }] };
   const projected = compactLocalNativeMcpResult("get_agent_skill", original, { sections: ["instructions"] });
   assert.equal(projected.isError, undefined);
-  assert.equal(deliverLocalMcpResult(projected, true, "get_agent_skill").structuredContent.code, "AGENT_SKILL_RESPONSE_TOO_LARGE");
+  const resultWithText = deliverLocalMcpResult(projected, true, "get_agent_skill");
+  assert.equal(resultWithText.structuredContent, undefined);
+  assert.deepEqual(JSON.parse(resultWithText.content[0].text), projected.structuredContent);
+  assert.ok(Buffer.byteLength(JSON.stringify(resultWithText)) <= 40000);
   const oversized = structuredClone(original);
   oversized.structuredContent.skill.instructionsMarkdown = "я".repeat(28000);
   oversized.content[0].text = JSON.stringify(oversized.structuredContent);
@@ -581,4 +584,21 @@ test("local skill guard measures complete hydrated and final text-compatible env
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.code, "AGENT_SKILL_RESPONSE_TOO_LARGE");
   assert.doesNotMatch(JSON.stringify(result), /instructionsMarkdown|localAction/);
+});
+
+test("Antigravity local continuation sizes the final text before rejecting a near-limit skill", async () => {
+  const nativeTool = "get_agent_skill";
+  const args = { sections: ["instructions"] };
+  const structuredContent = { companySlug: "sample", skill: { id: "synthetic", instructionsMarkdown: "я".repeat(19700) } };
+  const original = { structuredContent, content: [{ type: "text", text: JSON.stringify(structuredContent) }] };
+  assert.equal(compactLocalNativeMcpResult(nativeTool, original, args).isError, true);
+  const reply = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "continue_trelio_local_action", arguments: { parameters: { nativeTool } } } }, {
+    textCompatibility: true,
+    callTool: async (_origin, _name, _input, options) => compactLocalNativeMcpResult(nativeTool, original, args, options.textCompatibility),
+  });
+  assert.equal(reply.result.isError, undefined);
+  assert.equal(reply.result.structuredContent, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(reply.result)) <= 40000);
+  assert.equal(JSON.parse(reply.result.content[0].text).skill.instructionsMarkdown, structuredContent.skill.instructionsMarkdown);
 });

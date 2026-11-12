@@ -5736,6 +5736,7 @@ export const handleToolCall = async (
     proposalCapabilityConfigDirectory,
     clientCapabilities = null,
     requestClient = null,
+    textCompatibility = false,
     localPrerequisiteDiagnosis = diagnoseLocalPrerequisites,
     publicServiceDiagnosis = diagnosePublicTrelioService,
     folderOnboardingPrepare = prepareTrelioFolderOnboarding,
@@ -5777,6 +5778,7 @@ export const handleToolCall = async (
       nativeTool,
       result,
       routeArguments?.arguments ?? routeArguments,
+      textCompatibility,
     );
   };
   const runLocalNativeActionRoute = async (routeArguments) => {
@@ -5799,6 +5801,7 @@ export const handleToolCall = async (
         }),
       }),
       routeArguments?.arguments,
+      textCompatibility,
     );
   };
   const runLocalProposalContextRoute = async (routeArguments) => {
@@ -6762,7 +6765,7 @@ export const handleLocalMcpMessage = async (
       const execute = async (callSignal) => {
         try {
           return await callTool(origin, String(message.params?.name || ""), message.params?.arguments,
-            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities,
+            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, textCompatibility,
               requestClient, codexLegacyMcpMigration, ...(codexThreadId ? { codexThreadId } : {}),
               ...(nativeCodex && message.params?.name === "open_codex_connection_wizard" ? { codexFolderSetupClient: true } : {}) });
         } catch (error) {
@@ -7607,7 +7610,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         ...remote.filter(publicTool).map(tool => definition(tool, "trelio", (input, callSignal) => connection.call(tool.name, input, callSignal))),
         ...local.result.tools.filter(publicTool).map(tool => definition(tool, "trelio_remote_skills", async (input, callSignal) => {
           const reply = await localMessage({ jsonrpc: "2.0", id: 1, method: "tools/call",
-            params: { name: tool.name, arguments: input } }, { origin: ORIGIN, signal: callSignal });
+            params: { name: tool.name, arguments: input } }, { origin: ORIGIN, signal: callSignal,
+            textCompatibility: tool.name === "continue_trelio_local_action" && input.parameters?.nativeTool === "get_agent_skill" });
           if (!reply?.result) throw fail("TRELIO_HARNESS_LOCAL_FAILED", "Локальный компонент Trelio отклонил вызов.");
           return reply.result;
         })),
@@ -7856,7 +7860,10 @@ const multiToolUnavailable = () => Object.assign(new Error("Tool unavailable in 
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
-const projectText = result => {
+const projectText = (result, nativeTool) => {
+  // The facade sees the server-selected native tool (or exact local
+  // continuation), so it can enforce the same final skill delivery budget.
+  if (nativeTool === "get_agent_skill") return deliverLocalMcpResult(result, true, nativeTool);
   // MultiTool renders TextContent even when structuredContent also exists.
   // Copy only the public structured result, never App metadata or credentials.
   if (!result.isError && result.structuredContent) {
@@ -7949,7 +7956,8 @@ export const createMultiToolConnection = ({
 
   const execute = async (name, args, signal) => {
     const response = await local({ jsonrpc: "2.0", id: 1, method: "tools/call",
-      params: { name, arguments: args } }, { origin, signal });
+      params: { name, arguments: args } }, { origin, signal,
+      textCompatibility: name === TRELIO_LOCAL_ACTION_TOOL.name && args?.parameters?.nativeTool === "get_agent_skill" });
     if (!response?.result) throw multiToolUnavailable();
     return response.result;
   };
@@ -8011,12 +8019,12 @@ export const createMultiToolConnection = ({
         if (name === workspaceTool.name && Object.hasOwn(multiToolRoutes, args?.operation)) {
           return projectText(await withAuthorityPlan(result, args.operation, args.parameters));
         }
-        return projectText(result);
+        return projectText(result, name === TRELIO_LOCAL_ACTION_TOOL.name ? args?.parameters?.nativeTool : undefined);
       }
       // The backend records the distinct OAuth attestation independently. Set
       // the presentation client label here so a default cannot imply Codex.
       const input = name === "prepare_agent_workspace_run" ? { ...args, clientKind: "multitool" } : args;
-      return projectText(projectPreparation(name, await native.call(name, input, signal), workspaceTool.name));
+      return projectText(projectPreparation(name, await native.call(name, input, signal), workspaceTool.name), name);
     },
   };
 };
