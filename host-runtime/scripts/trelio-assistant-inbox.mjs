@@ -97,14 +97,23 @@ const provisionReview=value=>{
 // until the new READY is observed. An interrupted new attempt is read-only.
 const triageProvision=value=>{
   const fields=['originalThreadId','markerId','leaseExpiresAt','started','threadId','attachStarted'];
-  object(value,fields);
-  if(Object.keys(value).length!==fields.length||typeof value.started!=='boolean'||typeof value.attachStarted!=='boolean'
+  object(value,[...fields,'catalogReadinessVersion','priorProvision']);
+  if(fields.some(key=>!Object.hasOwn(value,key))||typeof value.started!=='boolean'||typeof value.attachStarted!=='boolean'
     ||typeof value.leaseExpiresAt!=='string'||!Number.isFinite(Date.parse(value.leaseExpiresAt))
     ||new Date(value.leaseExpiresAt).toISOString()!==value.leaseExpiresAt
     ||value.threadId!==null&&!value.started||value.attachStarted&&value.threadId===null
-    ||value.originalThreadId===value.threadId)inputError();
+    ||value.originalThreadId===value.threadId||value.catalogReadinessVersion!==undefined&&value.catalogReadinessVersion!==1)
+    inputError();
+  let priorProvision;
+  if(value.priorProvision!==undefined){
+    object(value.priorProvision,['markerId','threadId']);
+    priorProvision={markerId:uuid(value.priorProvision.markerId),threadId:uuid(value.priorProvision.threadId)};
+    if(value.catalogReadinessVersion!==1||priorProvision.markerId===value.markerId
+      ||[value.threadId,value.originalThreadId].includes(priorProvision.threadId))inputError();
+  }
   return {originalThreadId:uuid(value.originalThreadId),markerId:uuid(value.markerId),leaseExpiresAt:value.leaseExpiresAt,
-    started:value.started,threadId:value.threadId===null?null:uuid(value.threadId),attachStarted:value.attachStarted};
+    started:value.started,threadId:value.threadId===null?null:uuid(value.threadId),attachStarted:value.attachStarted,
+    ...(value.catalogReadinessVersion===1?{catalogReadinessVersion:1}:{}),...(priorProvision?{priorProvision}:{})};
 };
 
 /** One irreversible prepare intent plus the SAME provider's send/result fence.
@@ -1382,13 +1391,25 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id);
       return row.triage_provision_json===null?null:Object.freeze(triageProvision(JSON.parse(row.triage_provision_json)));
     },
-    prepareTriageProvision(id,leaseExpiresAt){return transaction(()=>{
+    prepareTriageProvision(id,leaseExpiresAt,preCatalogMarkerId=null){return transaction(()=>{
       const row=this.ownerIntake(id),prior=this.triageProvision(id);
       if(!triageProvisionCandidate(row)||prior?.leaseExpiresAt!==undefined&&prior.leaseExpiresAt!==leaseExpiresAt)
         fail('ASSISTANT_INBOX_CONFLICT');
-      if(prior)return prior;
+      let priorProvision;
+      if(preCatalogMarkerId!==null){
+        // Only the pre-fix format can enter this distinct technical phase.
+        // A lost modern start or prior historical marker is never reset.
+        if(!prior?.started||!prior.threadId||prior.attachStarted||prior.catalogReadinessVersion!==undefined
+          ||prior.originalThreadId!==row.thread_id||prior.markerId!==uuid(preCatalogMarkerId))
+          fail('ASSISTANT_INBOX_CONFLICT');
+        priorProvision={markerId:prior.markerId,threadId:prior.threadId};
+      }else if(prior){
+        if(prior.started)fail('ASSISTANT_INBOX_CONFLICT');
+        return prior;
+      }
       const recovery=triageProvision({originalThreadId:row.thread_id,markerId:randomUUID(),
-        leaseExpiresAt,started:false,threadId:null,attachStarted:false});
+        leaseExpiresAt,started:false,threadId:null,attachStarted:false,catalogReadinessVersion:1,
+        ...(priorProvision?{priorProvision}:{})});
       run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify(recovery),row.id);
       return Object.freeze(recovery);
     });},

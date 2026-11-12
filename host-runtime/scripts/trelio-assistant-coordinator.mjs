@@ -1210,13 +1210,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     &&Date.parse(live.unattachedLeaseExpiresAt)<=now();
   const recoverTriageProvision=async(row,signal)=>{
     const retained=inbox.triageProvision(row.id);
+    let preCatalogAttempt=null;
     if(retained?.started){
-      // This new empty marker is itself one-use. A lost result is read back
-      // only, even if the original staging reservation is still untouched.
       if(!retained.threadId)return false;
-      const result=await native.readDelivery(retained.threadId,retained.markerId,{signal,provision:true,readinessOnly:true});lease();
-      if(result.state!=='completed')return false;
-      inbox.readyTriageProvision(row.id,retained.markerId);return true;
+      try{
+        const result=await native.readDelivery(retained.threadId,retained.markerId,{signal,provision:true,readinessOnly:true});lease();
+        if(result.state!=='completed')return false;
+        inbox.readyTriageProvision(row.id,retained.markerId);return true;
+      }catch(error){
+        // The older format could burn its only technical marker while the
+        // native MCP status was still cached. An unknown modern attempt, any
+        // available/ambiguous history or any business attachment stays fenced.
+        if(retained.catalogReadinessVersion!==undefined||error?.code!=='ASSISTANT_CODEX_READ_UNAVAILABLE')throw error;
+        preCatalogAttempt=retained;
+      }
     }
     if(typeof native.readUnmaterializedTriage!=='function')return false;
     const verify=async()=>{
@@ -1231,12 +1238,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Only an independently certified never-attached reservation has had
       // no business authority. Native absence alone is not that certificate
       // and does not authorize replay of the old chat or model input.
-      if(await native.readUnmaterializedTriage(row.thread_id,{signal})!==true)return null;
-      lease();return {leaseExpiresAt:live.unattachedLeaseExpiresAt,execution};
+      const abandoned=[row.thread_id,preCatalogAttempt?.threadId??retained?.priorProvision?.threadId].filter(Boolean);
+      for(const threadId of abandoned){
+        if(await native.readUnmaterializedTriage(threadId,{signal})!==true)return null;
+        lease();
+      }
+      return {leaseExpiresAt:live.unattachedLeaseExpiresAt,execution};
     };
     const evidence=await verify();
     if(!evidence)return false;
-    const recovery=inbox.prepareTriageProvision(row.id,evidence.leaseExpiresAt);
+    const recovery=inbox.prepareTriageProvision(row.id,evidence.leaseExpiresAt,preCatalogAttempt?.markerId??null);
     const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
     const result=await native.provision({deliveryId:recovery.markerId,cwd,execution:evidence.execution},{
       signal,chatKind:'source_triage',readinessOnly:true,

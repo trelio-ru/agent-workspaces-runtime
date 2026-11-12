@@ -1,5 +1,6 @@
 /** Native Codex adapter: exact IDs, stdio-only prompts, no transcript cache. */
 import { spawn } from 'node:child_process';
+import { setTimeout as wait } from 'node:timers/promises';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -105,7 +106,7 @@ const verifyAssistantExecutionFeatures = async request => {
  * native plugin identity, live connection and complete catalogue must all
  * agree. This is an executor boundary, not a tool-name blacklist: no foreign
  * MCP/browser bridge is allowed to join the assistant's tool registry. */
-const verifyAssistantExecutionServer = async (request,threadId,workspaceDraftRecovery=false) => {
+const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecovery) => {
   const result=await request('mcpServerStatus/list',{threadId,detail:'toolsAndAuthOnly',limit:100});
   if(!Array.isArray(result?.data)||result.data.length>100||result.nextCursor!==null)
     fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
@@ -119,7 +120,7 @@ const verifyAssistantExecutionServer = async (request,threadId,workspaceDraftRec
   const server=admitted[0];
   if(admitted.length!==1
     ||server?.name!=='trelio-assistant'||server.pluginId!==ASSISTANT_PLUGIN_IDS[0]
-    ||server.runtimeStatus!=='connected'||server.toolsError!==null||!server.tools
+    ||![null,'connecting','connected'].includes(server.runtimeStatus)||server.toolsError!==null||!server.tools
     ||Object.getPrototypeOf(server.tools)!==Object.prototype
     ||Object.keys(server.tools).length>256
     ||(workspaceDraftRecovery?['get_assistant_status','prepare_assistant_workspace_run','continue_assistant_workspace_action',
@@ -127,6 +128,21 @@ const verifyAssistantExecutionServer = async (request,threadId,workspaceDraftRec
       .some(name=>server.tools[name]?.name!==name)
     ||workspaceDraftRecovery&&Object.entries(server.tools).some(([name,tool])=>!ASSISTANT_WORKSPACE_DRAFT_TOOLS.includes(name)||tool?.name!==name))
     fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+  return server.runtimeStatus==='connected';
+};
+
+/** Fresh native threads can advertise the correct cached tool descriptions
+ * while runtimeStatus is still null. That snapshot is not a live connection.
+ * Re-read only this same complete catalogue in the same owned writer, within
+ * the original signal/deadline. No other plugin, wrong tools, malformed page
+ * or explicit connection error becomes acceptable or retryable. */
+const verifyAssistantExecutionServer = async(request,threadId,{workspaceDraftRecovery,triage,signal})=>{
+  const delays=triage?[250,500,1000,2000,4000,8000]:[];
+  for(let attempt=0;;attempt++){
+    if(await readAssistantExecutionServer(request,threadId,workspaceDraftRecovery))return;
+    if(attempt===delays.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
+    await wait(delays[attempt],undefined,{signal});
+  }
 };
 
 /** Load only the fixed platform skill of the running verified plugin. The
@@ -1735,7 +1751,10 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       const saved=options.onThreadStarted(threadId);
       if(saved&&typeof saved.then==='function')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
-    await verifyAssistantExecutionServer(request,threadId,Boolean(options.workspaceDraftRecovery));
+    await verifyAssistantExecutionServer(request,threadId,{
+      workspaceDraftRecovery:Boolean(options.workspaceDraftRecovery),
+      triage:options.chatKind==='source_triage'||workStateContext?.intakeKind==='route_existing',signal,
+    });
     if(options.workspaceDraftRecovery){
       const {terminalMarkerId,terminalTurnId,taskPass,workspaceDraft}=options.workspaceDraftRecovery;
       // Reading persisted history alone cannot distinguish a dead turn from

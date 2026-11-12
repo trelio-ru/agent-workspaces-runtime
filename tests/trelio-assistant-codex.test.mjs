@@ -1612,3 +1612,29 @@ test('unmaterialized triage probe observes only two exact native refusals',async
     }
   }
 });
+
+test('source triage waits for the same scoped native server to connect before either readiness turn',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),children=[];
+  let catalogueReads=0,starts=0,turns=0,inputs=0,saved=false;
+  const result=await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},{
+    executable:process.execPath,environment:{},chatKind:'source_triage',
+    readExecutionAvailability:async()=>true,
+    startInvocation:()=>{starts++;},
+    onThreadStarted:value=>{assert.equal(value,threadId);saved=true;},
+    readDelivery:async()=>({state:'completed',turnId:randomUUID(),receipt:'fixture:complete'}),
+    spawnProcess:ownedRpc({threadId,children,onInput:()=>{assert.equal(catalogueReads,3);assert.ok(saved);inputs++;},
+      onTurn:()=>{turns++;},
+      executionPolicy:(request,reply)=>{
+        if(request.method==='mcpServerStatus/list'){
+          assert.equal(request.params.threadId,threadId);
+          assert.equal(turns,0);assert.ok(saved);
+          reply.result.data[0].runtimeStatus=[null,'connecting','connected'][catalogueReads++];
+        }
+        return reply;
+      }}),
+  });
+  assert.equal(result.state,'completed');assert.equal(starts,1);assert.equal(turns,1);
+  assert.equal(inputs,2);
+  assert.equal(catalogueReads,3,'the cached result earns no readiness');
+  assert.equal(children.length,2,'one owned writer plus the separate cosmetic naming client');
+});
