@@ -64,6 +64,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
+import { setTimeout as sleep } from "node:timers/promises";
 import { isLocalPathInside, sameLocalPath, isDirectModuleInvocation, nodeChildEnvironment } from "./trelio-local-path.mjs";
 
 import {
@@ -3811,6 +3812,28 @@ const resolveLocalCompanyProvider = async ({
   };
 };
 
+// Search only reads immutable revisions and current manifests. Retry transient
+// gateway/service refusals within the caller's original budget. Do not replay
+// ACL, validation, revision, crypto, cancellation or any write failure.
+const readHumanSearchSource = async (read, signal) => {
+  const pauses = [1000, 3000, 8000];
+  for (const pause of pauses) {
+    signal?.throwIfAborted();
+    try { return await read(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      if (!(error instanceof TrelioApiError) || error.code
+        || ![502, 503, 504].includes(error.statusCode) || error.retryAfterMilliseconds > 8000) throw error;
+      await sleep(Math.max(pause, error.retryAfterMilliseconds ?? 0), undefined, { signal }).catch(error => {
+        signal?.throwIfAborted();
+        throw error;
+      });
+    }
+  }
+  signal?.throwIfAborted();
+  return read();
+};
+
 const fetchManifest = async ({ origin, token, companySlug, signal }) => (
   readJson(await request(
     origin,
@@ -4037,6 +4060,8 @@ const buildWorkspaceRecord = async ({
   workspace,
   signal,
   searchCache,
+  readSource,
+  onHydrationProgress,
 }) => {
   const binding = { workspaceId: workspace.id, acceptedHead: workspace.acceptedHead };
   const cached = await searchCache?.readWorkspace?.(binding);
@@ -4049,6 +4074,8 @@ const buildWorkspaceRecord = async ({
     acceptedHead: workspace.acceptedHead,
     signal,
     searchCache,
+    readSource,
+    onHydrationProgress,
   });
   signal?.throwIfAborted();
   // Persist only after ALL started readers settled and the entire accepted
@@ -4069,6 +4096,8 @@ const buildMirror = async ({
   previous,
   signal,
   searchCache,
+  readSource,
+  onHydrationProgress,
   taskSearchOnly = false,
 }) => {
   if (
@@ -4202,7 +4231,12 @@ const buildMirror = async ({
           workspace,
           signal,
           searchCache,
+          readSource,
+          onHydrationProgress,
         }));
+    // A complete Workspace is progress even if it contains only names or was
+    // restored from a verified encrypted checkpoint. Failed reads never count.
+    onHydrationProgress?.();
   }
   const previousContextDocuments = new Map(
     (previous?.contextDocuments ?? []).map((document) => [document.id, document]),
@@ -4310,6 +4344,17 @@ export const syncCompanyContextMirror = async ({
 }) => {
   const companySlug = companyEncryption.runtime.company.slug;
   const requestOrigin = resolveCompanyEncryptionRequestOrigin(origin, companyEncryption);
+  const readSource = readOnlyOnContention ? read => readHumanSearchSource(read, signal) : read => read();
+  const readManifest = () => readSource(() => fetchManifest({ origin: requestOrigin, token, companySlug, signal }));
+  let lastProgress = -Infinity;
+  const onHydrationProgress = readOnlyOnContention ? () => {
+    // IPC progress is structural and rate-bounded. It contains no source names,
+    // identifiers, file counts, bytes or query, including on a cache-only build.
+    const now = performance.now();
+    if (now - lastProgress < 1000) return;
+    lastProgress = now;
+    onProgress("hydration_progress");
+  } : undefined;
   const paths = resolveMirrorPaths({
     origin,
     companyId: companyEncryption.runtime.company.id,
@@ -4350,9 +4395,10 @@ export const syncCompanyContextMirror = async ({
       const result = await buildStableCompanyMirror({
         onProgress,
         previous: previous ?? legacySeed,
-        readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
+        readManifest,
         buildCandidate: (rawManifest, reusable) => buildMirror({
           origin, requestOrigin, token, companyEncryption, rawManifest, previous: reusable, signal,
+          readSource, onHydrationProgress,
         }),
         publish: async mirror => withMirrorGeneration(mirror),
       });
@@ -4374,9 +4420,9 @@ export const syncCompanyContextMirror = async ({
     const result = await buildStableCompanyMirror({
       onProgress,
       previous: previous ?? legacySeed,
-      readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
+      readManifest,
       buildCandidate: async (rawManifest, reusable) => buildMirror({
-        origin, requestOrigin, token, companyEncryption, rawManifest,
+        origin, requestOrigin, token, companyEncryption, rawManifest, readSource, onHydrationProgress,
         // A native unchanged-generation read needs neither scratch inventory
         // nor quota eviction across thousands of completed encrypted files.
         // Laziness changes no cache binding/ACL/quota or pruning: a genuinely
@@ -8783,6 +8829,9 @@ export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, 
       if (!pending || message?.id !== pending.id) return;
       if (pending.signal?.aborted) return; // Wait for owned process cleanup/close.
       if (message.type === "progress" && HUMAN_SEARCH_STAGES.has(message.stage)) pending.onProgress(message.stage);
+      else if (message.type === "progress" && message.stage === "hydration_progress" && pending.stage === "hydrating") {
+        pending.onProgress(message.stage);
+      }
       else if (message.type === "result" && Buffer.byteLength(JSON.stringify(message)) <= 512 * 1024) pending.resolve(message.value);
       else if (message.type === "failure") {
         const code = diagnosticContract.errorCodes.includes(message.code) ? message.code : "LOCAL_CONTEXT_SEARCH_FAILED";
@@ -8807,7 +8856,10 @@ export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, 
     let abort;
     try {
       return await new Promise((resolve, reject) => {
-        const pending = { id, resolve, reject, signal, stage: "starting", onProgress(stage) { this.stage = stage; onProgress(stage); } };
+        const pending = { id, resolve, reject, signal, stage: "starting", onProgress(stage) {
+          if (stage !== "hydration_progress") this.stage = stage;
+          onProgress(stage);
+        } };
         active = pending;
         abort = () => {
           // Stop the owned child, then settle after close so another query can
@@ -8840,10 +8892,12 @@ let humanCompanySearches;
 const createHumanCompanySearches = () => {
   const humanSearchReader = createHumanCompanySearchReader();
   return createCompanySearchOperations({
-    authorize: readHumanCompanySearchAdmission,
+    authorize: (origin, input, options) => readHumanSearchSource(
+      () => readHumanCompanySearchAdmission(origin, input, options), options.signal),
     execute: humanSearchReader.execute,
-    validate: (origin, input, value, admission, { signal }) => isTrelioLocalCompanyGenerationCurrent(
-      origin, input.companySlug, value.generation, { signal, expectedBinding: admission.binding }),
+    validate: (origin, input, value, admission, { signal }) => readHumanSearchSource(
+      () => isTrelioLocalCompanyGenerationCurrent(
+        origin, input.companySlug, value.generation, { signal, expectedBinding: admission.binding }), signal),
     closeReader: humanSearchReader.close,
     errorFactory: (code, message, details) => new TrelioLocalContextError(code, message, details),
   });
@@ -13141,7 +13195,9 @@ if (IS_HUMAN_SEARCH_READER) {
     try {
       process.send?.({ id: message.id, type: "progress", stage: "access" });
       const value = await withPrivateProcessSession(async () => {
-        const admission = await readHumanCompanySearchAdmission(message.origin, message.input, { signal: controller.signal });
+        const admission = await readHumanSearchSource(
+          () => readHumanCompanySearchAdmission(message.origin, message.input, { signal: controller.signal }),
+          controller.signal);
         if (admission.binding !== message.binding) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Search admission changed.");
         return handleTrelioLocalContextOperation(message.origin, message.input, {
           signal: controller.signal,

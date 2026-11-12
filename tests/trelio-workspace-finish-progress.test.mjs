@@ -75,6 +75,42 @@ test("company search deadlines never slide across polls and stale recipients can
   await acl.close();
 });
 
+test("verified hydration extends observed search past idle, with a fixed overall deadline", async () => {
+  for (const outcome of ["complete", "idle", "unobserved", "deadline"]) {
+    const completion = pending();
+    let report;
+    const reader = createCompanySearchOperations({ ...searchOptions,
+      idleMs: 200, timeoutMs: outcome === "deadline" ? 260 : 2000,
+      execute: async (_origin, _input, _admission, { signal, onProgress }) => {
+        report = onProgress;
+        onProgress("hydrating");
+        const aborted = new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        return Promise.race([completion.promise, aborted]);
+      },
+    });
+    try {
+      const origin = "https://synthetic.invalid";
+      const first = await reader.read(origin, searchInput);
+      const poll = () => reader.read(origin, first.nextCall.arguments.parameters, { operationId: first.operationId });
+      const wait = () => new Promise(resolve => setTimeout(resolve, 65));
+      for (let i = 0; i < (["idle", "deadline"].includes(outcome) ? 2 : 3); i++) {
+        await wait();
+        report(outcome === "idle" ? "hydrating" : "hydration_progress");
+        if (outcome !== "unobserved") assert.equal((await poll()).progress.stage, "hydrating");
+      }
+      await new Promise(resolve => setTimeout(resolve, 145));
+      if (outcome === "complete") {
+        completion.resolve(searchValue);
+        assert.deepEqual(await poll(), searchValue.result);
+      } else {
+        const pattern = { idle: /без подтверждённого прогресса/u, unobserved: /отсутствия запросов/u,
+          deadline: /общего лимита/u }[outcome];
+        await assert.rejects(poll(), error => error.code === "LOCAL_CONTEXT_SEARCH_TIMEOUT" && pattern.test(error.message));
+      }
+    } finally { await reader.close(); }
+  }
+});
+
 test("company search refuses changed generations, oversized answers and duplicate concurrent delivery", async () => {
   let nativeCurrent = false, invalidatedReaders = 0, executions = 0;
   const stale = createCompanySearchOperations({ ...searchOptions,

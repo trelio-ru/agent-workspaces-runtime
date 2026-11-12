@@ -168,7 +168,8 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
  * failed-entry replacement. A poll is an exact retained operation, not replay.
  * Only a bounded answer lives here; the isolated reader owns the corpus. */
 export const createCompanySearchOperations = ({ authorize, execute, validate, closeReader = async () => {},
-  waitMs = 10_000, timeoutMs = 10 * 60_000, retentionMs = 600_000, errorFactory = operationError } = {}) => {
+  waitMs = 10_000, timeoutMs = 2 * 60 * 60_000, idleMs = 10 * 60_000,
+  retentionMs = 600_000, errorFactory = operationError } = {}) => {
   const operations = createWorkspaceFinishOperations({ waitMs, errorFactory });
   let current = null, closed = false;
   const fail = (code, message) => { throw errorFactory(code, message); };
@@ -233,6 +234,9 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
           stage: "starting", stageAt: performance.now(), timings: {}, settled: false };
         current = entry;
       }
+      // Only a valid admitted continuation keeps this worker observed. This
+      // lease never substitutes for verified progress or the hard deadline.
+      if (!entry.controller.signal.aborted) entry.observerTimer?.refresh();
       const render = async value => {
         entry.id = value.operationId;
         if (value.state === "running") return pending(value, entry);
@@ -260,10 +264,19 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
               // if the first waiter is cancelled before receiving nextCall, so
               // TTL/EOF can erase this exact undelivered terminal value later.
               entry.id ??= operations.active("search").operationId;
-              const timer = setTimeout(() => controllerAbort(entry), timeoutMs);
+              const timer = setTimeout(() => controllerAbort(entry, "deadline"), timeoutMs);
+              const idleTimer = setTimeout(() => controllerAbort(entry, "idle"), idleMs);
+              entry.observerTimer = setTimeout(() => controllerAbort(entry, "unobserved"), idleMs);
               try {
                 const value = await execute(origin, entry.input, admission, { signal: entry.controller.signal,
                   onProgress: stage => {
+                    // Only the isolated reader can report verified file or
+                    // Workspace progress. Polls, stage changes and transport
+                    // retries cannot renew the idle budget or hard deadline.
+                    if (stage === "hydration_progress") {
+                      if (entry.stage === "hydrating" && !entry.controller.signal.aborted) idleTimer.refresh();
+                      return;
+                    }
                     // The reader adapter supplies a closed stage vocabulary.
                     // Timings contain no corpus size, content or identifiers.
                     const now = performance.now();
@@ -278,7 +291,11 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
                   fail("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный результат изолированного поиска.");
                 return value;
               } finally {
-                clearTimeout(timer); entry.settled = true;
+                clearTimeout(timer);
+                clearTimeout(idleTimer);
+                clearTimeout(entry.observerTimer);
+                entry.observerTimer = null;
+                entry.settled = true;
                 entry.retentionTimer = setTimeout(() => {
                   operations.discardTerminal("search", entry.id, entry.binding);
                   if (current === entry) current = null;
@@ -311,9 +328,16 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
       current = null;
     },
   };
-  function controllerAbort(entry) {
-    entry.controller.abort(errorFactory("LOCAL_CONTEXT_SEARCH_TIMEOUT", "Подготовка поиска не завершилась за 10 минут. Готовые зашифрованные части сохранены; автоматического повтора нет.",
-      { stage: entry.stage, timings: { ...entry.timings } }));
+  function controllerAbort(entry, reason) {
+    const messages = {
+      idle: "Поиск остановлен по тайм-ауту без подтверждённого прогресса.",
+      unobserved: "Поиск остановлен после длительного отсутствия запросов состояния.",
+      deadline: "Поиск достиг общего лимита времени.",
+    };
+    const message = messages[reason];
+    entry.controller.abort(errorFactory("LOCAL_CONTEXT_SEARCH_TIMEOUT", message
+      + " Сборка может использовать сохранённые зашифрованные части при следующем поиске.",
+    { stage: entry.stage, timings: { ...entry.timings } }));
   }
 };
 

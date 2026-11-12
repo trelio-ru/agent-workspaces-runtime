@@ -390,8 +390,11 @@ publication tooling также остаются вне этого публичн
   подготовку, HTTP/body и 429 waits. HTTP standalone/background bridge также
   ограничен 60 секундами; transport failure не запускает sleep/replay.
   Human company search готовит полный снимок и ищет в одном изолированном
-  процессе под отдельным 10-минутным сроком; short waits продолжают exact
-  операцию без нового sync. При занятом mirror writer поиск строит current RAM
+  процессе. Подтверждённая обработка файлов или Workspace обновляет 10-минутный
+  idle deadline, exact admitted poll — отдельный 10-минутный observer deadline,
+  общий предел 2 часа не продлевается. Short waits продолжают exact операцию.
+  Только временный gateway 502/503/504 на read допускает bounded повтор
+  конкретного шага под исходным бюджетом и теми же ACL/ревизиями. При занятом mirror writer поиск строит current RAM
   snapshot тем же builder/fences без ожидания, stale fallback или shared writes.
   Fresh recipient/generation fence предшествует
   одноразовой выдаче; тяжёлый corpus не переносится в MCP-процесс.

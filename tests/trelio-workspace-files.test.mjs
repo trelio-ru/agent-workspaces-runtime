@@ -376,7 +376,7 @@ test("advertised exact file ids share one bounded decode and reject unsafe coord
 // fully verified Workspace prefix, not spend that second deadline fetching
 // every old overview/manifest again. Exercise the real HTTP/file/HPKE/mirror
 // path with a disposable profile, then reopen it like a fresh request process.
-for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revoked_final"]) test(`cold mirror resumes completed Workspaces after cancellation [${recovery}]`, async (t) => {
+for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revoked_final", "gateway_restart"]) test(`cold mirror resumes completed Workspaces after cancellation [${recovery}]`, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trelio-workspace-resume-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const companyId = randomUUID(), scopeId = randomUUID(), deviceId = randomUUID();
@@ -410,7 +410,7 @@ for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revok
     acceptedWorkspaces: workspaces.map(({ id, acceptedHead }) => ({ id, acceptedHead })), workspaces: [],
     contextDocuments: [], searchDocuments: [], instructions: {}, agentSkills: null, agentProcedures: [] };
   const controller = new AbortController();
-  let cancelAtBoundary = true, manifestReads = 0, denyManifest = false;
+  let cancelAtBoundary = true, manifestReads = 0, denyManifest = false, restartedFileReads = 0;
   const server = createServer((request, response) => {
     const json = value => { response.setHeader("content-type", "application/json"); response.end(JSON.stringify(value)); };
     if (request.url === "/api/agent-workspaces/company-context/synthetic/manifest") {
@@ -432,6 +432,11 @@ for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revok
     const id = /\/files\/([^/]+)\/encrypted-content$/u.exec(request.url)?.[1], bytes = ciphertexts.get(id);
     if (!bytes) { response.statusCode = 404; response.end(); return; }
     const owner = ownerByFile.get(id);
+    if (recovery === "gateway_restart" && id === workspaces.at(-2).fileId && ++restartedFileReads === 1) {
+      response.statusCode = 502;
+      response.end("Bad Gateway");
+      return;
+    }
     response.setHeader("x-trelio-workspace-id", owner.id); response.setHeader("x-trelio-workspace-head", owner.acceptedHead);
     response.setHeader("x-trelio-ciphertext-sha256", createHash("sha256").update(bytes).digest("hex")); response.end(bytes);
   });
@@ -469,7 +474,13 @@ for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revok
       await assert.rejects(readFile(paths.pointer), { code: "ENOENT" });
       return;
     }
-    const resumed = await syncCompanyContextMirror({ ...input, signal: AbortSignal.timeout(15000) });
+    const progress = [];
+    const resumed = await syncCompanyContextMirror({ ...input, signal: AbortSignal.timeout(15000),
+      readOnlyOnContention: recovery === "gateway_restart", onProgress: stage => progress.push(stage) });
+    if (recovery === "gateway_restart") {
+      assert.equal(restartedFileReads, 2, "only the failed encrypted file read repeats");
+      assert.ok(progress.includes("hydration_progress"), "verified progress reaches the human search adapter");
+    }
     const removed = ["removed", "revoked_final"].includes(recovery);
     assert.equal(resumed.mirror.workspaces.length, workspaces.length - Number(removed));
     assert.equal(resumed.mirror.workspaces.some(item => item.id === workspaces[0].id), !removed,

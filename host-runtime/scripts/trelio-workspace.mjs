@@ -14764,7 +14764,8 @@ export const withEncryptedAcceptedWorkspaceFiles = async (input, consume) => {
   try {
     await ensurePrivateDirectory(directory);
     input.signal?.throwIfAborted();
-    await requestAndDecryptCompanyWorkspaceBundle({
+    const readSource = input.readSource ?? (read => read());
+    await readSource(() => requestAndDecryptCompanyWorkspaceBundle({
       origin: input.origin, token: input.token, companyEncryption: input.companyEncryption,
       expectedWorkspaceId: input.workspaceId, expectedWorkspaceHead: input.workspaceHead,
       pathname: `/api/agent-workspaces/workspaces/${input.workspaceId}/encrypted-bundle?${new URLSearchParams({ head: input.workspaceHead })}`,
@@ -14774,7 +14775,7 @@ export const withEncryptedAcceptedWorkspaceFiles = async (input, consume) => {
           const error = new Error("WORKSPACE_OUTDATED"); error.code = "WORKSPACE_OUTDATED"; throw error;
         }
       },
-    });
+    }));
     input.signal?.throwIfAborted();
     await materializeBundle({ bundlePath, directory: workspaceDirectory, head: input.workspaceHead, branch: "trelio-search" });
     await assertMaterializedWorkspaceFileTypes(workspaceDirectory);
@@ -14838,8 +14839,9 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks } =
     await import("./trelio-workspace-files.mjs");
   const requestInput = { ...input, workspaceHead: input.acceptedHead };
+  const readSource = input.readSource ?? (read => read());
   let files;
-  try { files = await readEncryptedWorkspaceFileManifest(requestInput); }
+  try { files = await readSource(() => readEncryptedWorkspaceFileManifest(requestInput)); }
   catch (error) {
     // Do not turn ACL, transport, crypto, stale-head or malformed manifests
     // into an alternate read. Only a proven missing derived projection has a
@@ -14869,6 +14871,7 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
           });
         }
         documents.push(document);
+        input.onHydrationProgress?.();
       }
       return documents;
     });
@@ -14903,12 +14906,16 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
           const document = pending[next++];
           const file = byId.get(document.sourceFileId);
           const cached = await input.searchCache?.read(input, file);
-          const indexed = cached == null ? await readEncryptedWorkspaceSearchChunks(requestInput, file) : JSON.parse(cached);
+          const indexed = cached == null
+            ? await readSource(() => readEncryptedWorkspaceSearchChunks(requestInput, file))
+            : JSON.parse(cached);
           document.chunks = indexed.chunks;
           document.searchCoverage = indexed.searchCoverage;
           // Scratchpad entries stay encrypted and exact-head bound. The existing
           // per-entry size guard limits caching only, never search completeness.
           if (cached == null) await input.searchCache?.write(input, file, JSON.stringify(indexed));
+          input.signal?.throwIfAborted();
+          input.onHydrationProgress?.();
         }
       } catch (error) {
         failed = true;
