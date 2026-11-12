@@ -31,14 +31,42 @@ const integer = (value, min, max) => {
   return value;
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const workspaceDraftIdentity = value => {
+  object(value,['workspaceId','runId']);
+  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId)};
+};
+export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
+  'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',
+  'prepare_assistant_workspace_run','continue_assistant_workspace_action','use_assistant_workspace_files','complete_assistant_pass',
+]);
 const continuationIntent = value => {
   const fields=['passId','expectedLeaseRevision','clientRequestId','terminalTurnId','terminalMarkerId','reviewId','resumeAttempted','resumed','started'];
-  object(value,[...fields,'capacity']);
-  if(Object.keys(value).length!==fields.length+(value.capacity===true?1:0)||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
+  object(value,[...fields,'capacity','workspaceDraft']);
+  if(value.capacity===true&&value.workspaceDraft!==undefined
+    ||Object.keys(value).length!==fields.length+(value.capacity===true||value.workspaceDraft!==undefined?1:0)
+    ||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
     ||value.resumed&&!value.resumeAttempted||value.started&&!value.resumed||value.resumeAttempted&&value.reviewId===null)inputError();
   return {...Object.fromEntries(['passId','clientRequestId','terminalTurnId','terminalMarkerId'].map(key=>[key,key==='passId'&&value.capacity===true&&value[key]===null?null:uuid(value[key])])),
     expectedLeaseRevision:integer(value.expectedLeaseRevision,0,2_147_483_646),reviewId:value.reviewId===null?null:uuid(value.reviewId),
-    resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started,...(value.capacity===true?{capacity:true}:{})};
+    resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started,...(value.capacity===true?{capacity:true}:{}),
+    ...(value.workspaceDraft===undefined?{}:{workspaceDraft:workspaceDraftIdentity(value.workspaceDraft)})};
+};
+/** A read-only dispatch guard for the current signed MCP worker. Once a draft
+ * intent is reserved, even a stale advertised catalogue cannot permit another
+ * provider/domain action in that pass. Legacy continuations remain unchanged. */
+export const readAssistantWorkspaceDraftRecovery = (database,pass) => {
+  // A loader may update between calls of an older active worker, before the
+  // next coordinator migrates its v13 or earlier journal. Such a journal
+  // cannot contain an indexed draft intent. Any later missing table is an error.
+  const versions=database.prepare('SELECT version FROM assistant_inbox_meta LIMIT 2').all();
+  if(versions.length!==1||!Number.isSafeInteger(versions[0].version)||versions[0].version<1)fail('ASSISTANT_INBOX_CONFLICT');
+  if(versions[0].version<=13)return null;
+  const row=database.prepare('SELECT intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1').get(uuid(pass.deliveryId));
+  if(!row)return null;
+  const intent=continuationIntent(JSON.parse(row.intent_json));
+  if(!intent.workspaceDraft)return null;
+  if(intent.passId!==uuid(pass.passId))fail('ASSISTANT_INBOX_CONFLICT');
+  return Object.freeze(intent.workspaceDraft);
 };
 const capacityState = value => {
   object(value,['firstAt','nextAt','step','turnId','markerId','waiting']);
@@ -1859,8 +1887,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     /** Only structural history is appended. A native continuation permits a NEW
      * marker, never resetting the original native-start or replaying a turn.
      * The coordinator supplies positive terminal read-back before this call. */
-    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false}) {
+    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false,workspaceDraft}) {
       if(typeof capacity!=='boolean'||capacity&&prerequisiteKey===null)inputError();
+      if(workspaceDraft!==undefined){
+        if(capacity||prerequisiteKey===null||passId===null)inputError();
+        workspaceDraft=workspaceDraftIdentity(workspaceDraft);
+      }
       if(prerequisiteKey!==null&&(typeof prerequisiteKey!=='string'||!/^[0-9a-f]{64}$/u.test(prerequisiteKey)))inputError();
       return transaction(()=>{
         const row=delivery(uuid(id));
@@ -1871,7 +1903,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const latest=get('SELECT ordinal,intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
         const last=latest?continuationIntent(JSON.parse(latest.intent_json)):history.at(-1);
         if(last&&last.terminalTurnId===terminalTurnId){
-          if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId)fail('ASSISTANT_INBOX_CONFLICT');
+          if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId
+            ||JSON.stringify(last.workspaceDraft)!==JSON.stringify(workspaceDraft))fail('ASSISTANT_INBOX_CONFLICT');
           return Object.freeze(continuationIntent(last));
         }
         // Twenty remains the unchanged retry bound for one actual trusted hook
@@ -1879,12 +1912,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // count. Legacy callers keep their original bound and cannot bypass a
         // newer journal. A ready inventory is never permission to replay the
         // original turn, release a pass, process an event or clear health.
-        if(last&&!last.started||prerequisiteKey===null&&(latest||history.length>=20)
+        if(last&&(!last.started||last.workspaceDraft)||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
         const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
-          resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{})});
+          resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{})});
         if(prerequisiteKey!==null){
           const ordinal=integer((latest?.ordinal??0)+1,1,2_147_483_647);
           // Capacity retries have no attempt cap and cannot spend/reset the

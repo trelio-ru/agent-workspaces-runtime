@@ -6,7 +6,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -147,7 +148,7 @@ const nativeRpc = (handler, executionPolicy=()=>null) => (_executable, args, opt
 // the execution policy and must fail rather than silently simulate success.
 const ownedRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onTurn=()=>{},
   onRequest=()=>{},nameFailure=false,pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[],bootstrapError=null,
-  status={type:'notLoaded'},canAcceptDirectInput=null,executionPolicy,resumeError}={}) => {
+  status={type:'notLoaded'},canAcceptDirectInput=null,executionPolicy,resumeError,priorTurn}={}) => {
   let input='',turnId=randomUUID(),phase='read',snapshot=0;
   const rpc=nativeRpc(request=>{
     onRequest(request);
@@ -173,6 +174,7 @@ const ownedRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onT
     }
     if(request.method==='thread/queue/list')return {result:{data:queued,nextCursor:null}};
     assert.equal(request.method,'thread/turns/list');
+    if(phase==='read'&&priorTurn)return {result:{data:[priorTurn],nextCursor:'older'}};
     const current=phase==='controlled'&&snapshotStatuses.length?snapshotStatuses[Math.min(snapshot++,snapshotStatuses.length-1)]:'completed';
     return {result:{data:terminal?[{id:turnId,status:current,items:[{type:'userMessage',content:[{type:'text',text:input}]},{type:'agentMessage',text:'READY'}]}]:[],nextCursor:null}};
   },executionPolicy);
@@ -445,6 +447,83 @@ test('stored interrupted history is uncertain, not a failed or completed receipt
         {result:{data:[{id:turnId,status,items:[{type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nSynthetic input'}]}]}],nextCursor:null}})});
     assert.equal(result.state,status==='interrupted'?'uncertain':'failed');
     assert.equal(Object.hasOwn(result,'receipt'),status==='failed');
+  }
+});
+
+const draftHistory=()=>{
+  const terminalMarkerId=randomUUID(),terminalTurnId=randomUUID(),workspaceDraft={workspaceId:randomUUID(),runId:randomUUID()};
+  const taskPass={companyId:taskContext.companyId,taskId:taskContext.taskId,passId:randomUUID()};
+  const call=(tool,args,result,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+    arguments:{...args,taskPass},result:{structuredContent:result}});
+  const text='Synthetic verified draft';
+  const turn={id:terminalTurnId,status:'interrupted',items:[
+    {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(terminalMarkerId)+'\nExisting request'}]},
+    call('prepare_assistant_workspace_run',{...workspaceDraft,clientRequestId:randomUUID()},
+      {prepared:true,workspace:{id:workspaceDraft.workspaceId,scopeType:'task',companyId:taskPass.companyId,taskId:taskPass.taskId},
+        run:{id:workspaceDraft.runId}}),
+    call('continue_assistant_workspace_action',{operation:'open',parameters:workspaceDraft},{operation:'open',
+      authorityReads:['agent-instructions.md','user-profile.md'].map(path=>({tool:'use_assistant_workspace_files',
+        arguments:{runIdentity:workspaceDraft,command:{action:'read',source:'authority',path}}}))}),
+    call('use_assistant_workspace_files',{runIdentity:workspaceDraft,command:{action:'write'}},
+      {code:'ASSISTANT_WORKSPACE_FILE_INPUT_INVALID'},'failed'),
+    call('use_assistant_workspace_files',{runIdentity:workspaceDraft,command:{action:'replace',path:'WORKSPACE_CONTEXT.md',
+      expectedSha256:null,text}},{state:'draft_updated',sha256:createHash('sha256').update(text).digest('hex')}),
+  ]};
+  return {turn,terminalMarkerId,terminalTurnId,taskPass,workspaceDraft};
+};
+
+test('the entire interrupted history must confirm an exact own draft and exclude unknown effects',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=draftHistory();
+  assert.deepEqual(assistantInterruptedWorkspaceDraft(turn,terminalMarkerId,taskPass),workspaceDraft);
+  for(const mutate of [
+    value=>{value.status='inProgress';},value=>{value.items[0].content[0].text='Only a quotation';},
+    value=>{delete value.items[1].arguments.runId;},
+    value=>{value.items[2].arguments.operation='finish';},
+    value=>{value.items.at(-1).arguments.runIdentity={...workspaceDraft,runId:randomUUID()};},
+    value=>{value.items.at(-1).result.structuredContent.sha256='0'.repeat(64);},
+    value=>{value.items.at(-1).status='inProgress';},
+    value=>{value.items.push({type:'mcpToolCall',tool:'use_assistant_browser',status:'failed'});},
+  ]){
+    const changed=structuredClone(turn);mutate(changed);
+    assert.equal(assistantInterruptedWorkspaceDraft(changed,terminalMarkerId,taskPass),null);
+  }
+});
+
+for(const state of ['confirmed','busy','changed','unfiltered'])test(`native Workspace draft recovery requires its own writer and restricted catalogue (${state})`,async()=>{
+  const {turn,...workspaceDraftRecovery}=draftHistory();
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
+  const pluginId='trelio-digital-assistant@trelio-digital-assistants';
+  let reads=0,starts=0;
+  const operation=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{
+    executable:process.execPath,environment:{},workspaceDraftRecovery,requireAbsentMarker:true,
+    continuationReview:{priorTurnId:workspaceDraftRecovery.terminalTurnId,reviewId:deliveryId},
+    readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    readExecutionAvailability:async()=>true,beforeInvocation:async()=>{steps.push('renew');},startInvocation:()=>{starts++;},
+    readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
+    spawnProcess:ownedRpc({threadId,cwd,priorTurn:state==='changed'?{...turn,id:randomUUID()}:turn,
+      resumeError:state==='busy'?{code:-32600,message:`thread ${threadId} already has an active writer`}:undefined,
+      onRequest:request=>{
+        if(request.method==='thread/resume'){
+          steps.push('writer');
+          assert.deepEqual(request.params.config.plugins[pluginId].mcp_servers['trelio-assistant'].enabled_tools,ASSISTANT_WORKSPACE_DRAFT_TOOLS);
+        }
+        if(request.method==='thread/turns/list'&&request.params.limit===1)steps.push('draft');
+      },
+      executionPolicy:(request,policy)=>{
+        if(request.method!=='mcpServerStatus/list'||state==='unfiltered')return policy;
+        policy.result.data[0].tools=Object.fromEntries(ASSISTANT_WORKSPACE_DRAFT_TOOLS.map(name=>[name,{name}]));
+        return policy;
+      },
+      onInput:text=>{assert.match(text,/only to preserve its interrupted Workspace draft/u);assert.match(text,/Do not repeat the browser check/u);},
+    }),
+  });
+  if(state==='confirmed'){
+    assert.equal((await operation()).state,'completed');
+    assert.deepEqual(steps,['writer','draft','renew']);assert.equal(starts,1);
+  }else{
+    await assert.rejects(operation(),{code:state==='busy'?'ASSISTANT_CODEX_THREAD_BUSY':
+      state==='unfiltered'?'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    assert.equal(starts,0);assert.ok(!steps.includes('renew'));
   }
 });
 

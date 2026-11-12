@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createAssistantInbox } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantWorkspaceDraftRecovery } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 
@@ -2138,6 +2138,73 @@ test('done settlement still blocks a NEW recovery invocation under a changed mod
     await assert.rejects(f.coordinator.workOnce(),/TASK_STOPPED/);
     assert.equal(reviews,0);assert.equal(f.counts().runs,1);assert.ok(f.activePass());
     assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED'));
+  }finally{await f.coordinator.close();}
+});
+
+test('interrupted Workspace settlement waits for expiry and native ownership, then uses one new marker on the same pass',async t=>{
+  const f=fixture(t),originalRun=f.options.native.run,originalOutcome=f.options.client.readBusinessOutcome;
+  const terminalTurnId=randomUUID(),priorMarker=randomUUID(),reviewId=randomUUID();
+  const workspaceDraft={workspaceId:randomUUID(),runId:randomUUID()};
+  let outcome=false,busy=true,resumes=0,reviews=0,ownAttempts=0;
+  f.authority.workMode='task';
+  f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  f.options.client.readBusinessOutcome=async args=>{
+    if(!outcome)throw new Error('no verified outcome');
+    return originalOutcome(args);
+  };
+  f.options.native.readDelivery=async(_thread,marker,options)=>{
+    if(marker===priorMarker)return options.interruptedWorkspaceDraft
+      ?{state:'interrupted_workspace_draft',turnId:terminalTurnId,workspaceDraft}:{state:'uncertain',turnId:terminalTurnId};
+    return f.deliveries.get(marker)??{state:'uncertain'};
+  };
+  f.options.passHost.continuePass=async (args,expected)=>{
+    assert.deepEqual(expected,f.activePass());
+    const pass=f.passes.get(expected.deliveryId);
+    assert.equal(args.terminalTurnId,terminalTurnId);
+    if(args.continuation==='review')reviews++;
+    if(args.continuation==='resume'){
+      assert.equal(busy,false,'a merely interrupted history must not renew a live writer');
+      assert.equal(pass.state,'review_required');assert.equal(args.expectedLeaseRevision,pass.leaseRevision);resumes++;
+      Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
+        leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+    }
+    return {schemaVersion:2,state:resumes?'resumed':'approved',reviewId,invocationId:reviewId,
+      resumed:resumes?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+  };
+  f.options.native.run=async(input,options)=>{
+    if(options.workspaceDraftRecovery){
+      ownAttempts++;
+      assert.equal(input.deliveryId,reviewId);
+      assert.equal(input.threadId,f.activePass().threadId);
+      assert.equal(options.workspaceDraftRecovery.terminalMarkerId,priorMarker);
+      assert.deepEqual(readAssistantWorkspaceDraftRecovery(f.database,f.activePass()),workspaceDraft);
+      if(busy)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      await options.beforeInvocation();
+      outcome=true;f.continuation.goalState='completed';
+    }
+    return originalRun(input,options);
+  };
+  try{
+    f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    const original=f.activePass(),pass=f.passes.get(original.deliveryId);
+    const prior=createAssistantInbox({database:f.database,now:f.options.now});
+    const intent=prior.preparePassContinuation(original.deliveryId,{passId:original.passId,expectedLeaseRevision:0,
+      terminalTurnId:randomUUID(),terminalMarkerId:original.deliveryId,prerequisiteKey:'a'.repeat(64)});
+    prior.updatePassContinuation(original.deliveryId,intent.clientRequestId,{reviewId:priorMarker,resumeAttempted:true,resumed:true,started:true});
+    prior.markDeliveryUncertain(original.deliveryId);
+    assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(reviews,0);
+    f.advance(21*60_000);Object.assign(pass,{state:'review_required',leaseRevision:1});
+    await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+    assert.equal(ownAttempts,1);assert.equal(resumes,0);assert.equal(reviews,1);
+    assert.equal(prior.readPassContinuation(original.deliveryId).started,false);
+    busy=false;
+    await f.coordinator.workOnce();
+    assert.equal(ownAttempts,2);assert.equal(resumes,1);assert.equal(reviews,1);
+    assert.equal(f.activePass(),null);
+    assert.equal(f.database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(original.deliveryId).state,'complete');
+    await f.coordinator.workOnce();assert.equal(f.counts().runs,2,'only one real recovery turn crossed the start fence');
   }finally{await f.coordinator.close();}
 });
 

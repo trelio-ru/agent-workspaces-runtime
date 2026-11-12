@@ -21,7 +21,8 @@ import {readCodexAssistantMarketplaceSource} from '../host-runtime/scripts/treli
 import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import http from 'node:http';
 import {randomUUID} from 'node:crypto';
-import {provisionAssistantCodexChat,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
@@ -50,7 +51,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    if(data.id===undefined){res.writeHead(204);res.end();return;}
    let result={};
    if(data.method==='initialize')result={protocolVersion:data.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'synthetic',version:'1'}};
-   if(data.method==='tools/list')result={tools:['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'].map(name=>({
+   if(data.method==='tools/list')result={tools:[...ASSISTANT_WORKSPACE_DRAFT_TOOLS,'use_assistant_browser'].map(name=>({
     name,description:'Synthetic admitted tool',inputSchema:{type:'object',properties:{}},
     annotations:{readOnlyHint:true,destructiveHint:false,openWorldHint:false}}))};
    if(data.method==='tools/call'){allowedCalls++;result={content:[{type:'text',text:'synthetic allowed result'}]};}
@@ -231,6 +232,21 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   assert.ok(names.some(name=>name.includes('get_assistant_status')));
   assert.ok(!names.some(name=>/shell|exec_command|cua_repl|foreign|spawn_agent|web_search/.test(name)),JSON.stringify(names));
  }
+ // Use the exact continuation overlay in a real native thread resume. A
+ // fixture-only policy assertion would miss a Codex build ignoring the
+ // plugin-scoped allowlist and exposing the browser to the recovery turn.
+ const recovered=await attach();
+ try {
+  const current=await recovered.request(2,'config/read',{includeLayers:false,cwd:root});
+  assert.ok(current.result?.config);
+  const config=assistantCodexExecutionOverrides(current.result.config,true);
+  const own=await recovered.request(3,'thread/resume',{threadId,cwd:root,excludeTurns:true,approvalPolicy:'never',sandbox:'read-only',config});
+  assert.equal(own.result?.thread?.id,threadId);
+  const inventory=await recovered.request(4,'mcpServerStatus/list',{threadId,detail:'toolsAndAuthOnly',limit:100});
+  const rows=inventory.result?.data?.filter(row=>row.runtimeStatus!=='disabled');
+  assert.equal(rows?.length,1);assert.equal(rows[0].name,'trelio-assistant');
+  assert.deepEqual(Object.keys(rows[0].tools).sort(),[...ASSISTANT_WORKSPACE_DRAFT_TOOLS].sort());
+ }finally{await recovered.close();}
  assert.deepEqual(await fs.readFile(path.join(home,'config.toml')),before,'execution policy cannot rewrite user configuration or trust');
 });
 

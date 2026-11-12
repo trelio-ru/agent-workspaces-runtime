@@ -528,6 +528,35 @@ from the local delivery heartbeat. Closed receipts do not renew or acquire new
 signing authority. These tests use real SQLite plus synthetic trusted adapters;
 they do not substitute for a supported Windows end-to-end activation test.
 
+### Interrupted Workspace draft settlement
+
+A stored `interrupted` is still uncertainty. The one narrow exception is a
+candidate for settling a known task continuation after its exact pass lease
+expires. It requires the latest complete native turn and its unique existing
+delivery marker, an exact existing canonical Workspace Run, and at least one
+successful local draft replacement whose returned digest matches its bytes.
+Only settled reads, the existing prepare/open, local file operations and the
+literal pre-dispatch input refusals qualify. Unknown or unfinished actions,
+external source inputs, browser use, published comments and submitted material
+retain the original review fence.
+
+Reserve one new marker in the existing indexed continuation journal. Persist
+only the exact Run and Workspace UUIDs alongside the existing intent. The
+isolated App Server acquires the native exclusive writer and reads the same
+latest full turn again before the existing pass renewal and start CAS. A busy
+writer, changed history or lost renewal result cannot spend that start. The
+configured native plugin allowlist is verified on the owning thread, and the
+signed request worker checks the exact Run and operations even for a stale
+catalogue. This invocation can read context, preserve the existing draft and
+verify its acceptance. It cannot start a fresh Run, publish a comment, run a
+skill, use a browser or process a source. No subsequent model retry is granted
+by an interrupted or incomplete settlement.
+
+Only the actual accepted Run, committed business outcome and exact native
+terminal read-back permit the existing atomic completion/release boundary.
+Tests cover the journal and owning App Server ordering, a real native plugin
+allowlist, and the signed request argument fence.
+
 ## Company model selection
 
 There is one owner-selected model/effort pair per assistant/company and no

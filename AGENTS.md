@@ -150,6 +150,15 @@ publication tooling также остаются вне этого публичн
   read calls with the verified Run locators. Each call keeps independent native
   admission and local lease validation. The suggested reads carry no absolute
   filesystem path, proof or write authority.
+- Interrupted task draft settlement is a one-use continuation of the SAME
+  pass, only after its exact lease expires and the full latest native history
+  proves an existing canonical Run and settled local-only draft edits. The
+  owned App Server must acquire the writer and reread that history before
+  renewal. Keep only Workspace/Run UUIDs in the existing continuation intent.
+  Native tool filtering plus signed argument checks limit recovery to that
+  Run; no external work, comment, source processing or retry of an attempted
+  turn. Only native acceptance/outcome and the normal receipt close the pass.
+  [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Assistant stdio получает read schemas только из dedicated backend catalog;
   fixed host allowlist и общий bounded MCP transport не создают domain authority.

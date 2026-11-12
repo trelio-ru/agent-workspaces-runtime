@@ -2794,7 +2794,44 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
   }
 };
 
+/** Recovering a draft changes only the exact Run's existing state. Native
+ * list filtering hides unrelated tools; this check also rejects stale
+ * catalogues and disallowed operations of the generic continuation tool. */
+const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
+  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS}=await import('./trelio-assistant-inbox.mjs');
+  const same=value=>value?.workspaceId===draft.workspaceId&&value?.runId===draft.runId;
+  let permitted=ASSISTANT_WORKSPACE_DRAFT_TOOLS.includes(name);
+  if(name==='prepare_assistant_workspace_run')permitted=same(args)&&args.relatedWorkspaceIds===undefined;
+  if(name==='continue_assistant_workspace_action')permitted=
+    ['open','status','heartbeat','checkpoint','finish'].includes(args.operation)
+    &&same(args.operation==='open'?args.parameters:args.runIdentity)
+    &&(args.operation!=='checkpoint'||args.parameters?.type==='draft')
+    &&(args.operation!=='finish'||args.parameters?.taskOutcome==='no_status_change');
+  if(name==='use_assistant_workspace_files'){
+    const {parseAssistantRunFileCommand}=await import('./trelio-workspace-files.mjs');
+    permitted=same(args.runIdentity)&&['list','read','replace'].includes(parseAssistantRunFileCommand(args.command).action);
+  }
+  if(name==='complete_assistant_pass')permitted=args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
+    &&args.goalState==='completed'&&args.noChange===false&&args.replyCommentId===undefined&&args.ownerDecisionId===undefined
+    &&(args.processedSourceReferences===undefined||Array.isArray(args.processedSourceReferences)&&args.processedSourceReferences.length===0);
+  if(!permitted)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+};
+const readProductionWorkspaceDraftRecovery=async(identity,host)=>{
+  const active=await host.readActivePass();
+  if(!active||active.kind==='source_intake')return null;
+  const [{validateAssistantActivePass},{openAssistantDatabase},{readAssistantWorkspaceDraftRecovery},common]=await Promise.all([
+    import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-private.mjs'),
+    import('./trelio-assistant-inbox.mjs'),import('./trelio-workspace.mjs')]);
+  const pass=validateAssistantActivePass(active,identity);
+  const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime',pass.assistantId.toLowerCase(),pass.deviceId.toLowerCase());
+  // Never create/migrate the inbox from a business tool. Authority and the
+  // model surface remain tied to the SAME protected pass and journal.
+  const opened=await openAssistantDatabase(directory,{readOnly:true});
+  try{return readAssistantWorkspaceDraftRecovery(opened.database,pass);}
+  finally{await opened.close();}
+};
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
+  readDraftRecovery=context===productionContext?readProductionWorkspaceDraftRecovery:async()=>null,
   backgroundTick=runAssistantBackgroundTick,requestRuntime=requestCurrentAssistantRuntime,upgradeRuntime=prepareHostRuntimeUpgrade,
   backgroundRecovery=runProductionAssistantBackgroundRecovery,
   companyContextOperation=executeAssistantCompanyContextRequest,
@@ -2895,6 +2932,10 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   if(sourceSetup&&(interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
   if(request.operation==='call' && !sourceSetup && !localConnection && !localSkill && !encryptionSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
+    if(request.operation==='call'){
+      const draft=await readDraftRecovery(client.identity,host);
+      if(draft)await assertWorkspaceDraftRecoveryCall(request,draft);
+    }
     const current=await client.readHealth();
     const blocked=assistantHealthCompatibility(current,versions());
     if(blocked) {

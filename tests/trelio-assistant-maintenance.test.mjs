@@ -17,6 +17,35 @@ import {retainLoadedCodexPluginInstallation,readCodexPluginUpdateInventory,prepa
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
 
+test('a stale catalogue cannot escape the exact Workspace draft recovery boundary',async()=>{
+  const draft={workspaceId:randomUUID(),runId:randomUUID()},calls=[];
+  const health={revision:1,code:'ready',compatibility:{minimumPluginVersion:'3.0.0',minimumRuntimeVersion:null}};
+  const run=(name,args)=>executeAssistantRuntimeRequest({operation:'call',name,arguments:args},{
+    context:async action=>action({identity:{},readHealth:async()=>health,reportHealth:async()=>health},{}),
+    versions:()=>versions,readDraftRecovery:async()=>draft,
+    proxyFor:async()=>({callTool:async(name,args)=>{calls.push({name,args});return {content:[]};}}),
+  });
+  const complete={workspaceId:draft.workspaceId,acceptedRunId:draft.runId,goalState:'completed',noChange:false};
+  for(const [name,args] of [
+    ['use_assistant_browser',{}],
+    ['create_comment',{}],
+    ['prepare_assistant_workspace_run',{workspaceId:draft.workspaceId}],
+    ['prepare_assistant_workspace_run',{...draft,relatedWorkspaceIds:[randomUUID()]}],
+    ['continue_assistant_workspace_action',{operation:'skill_run',runIdentity:draft}],
+    ['continue_assistant_workspace_action',{operation:'finish',runIdentity:draft,parameters:{taskOutcome:'work_completed'}}],
+    ['continue_assistant_workspace_action',{operation:'open',parameters:{...draft,runId:randomUUID()}}],
+    ['complete_assistant_pass',{...complete,processedSourceReferences:[{}]}],
+    ['complete_assistant_pass',{...complete,acceptedRunId:randomUUID()}],
+  ])await assert.rejects(run(name,args),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  assert.equal(calls.length,0,'rejected actions never reach the native client');
+  await run('prepare_assistant_workspace_run',draft);
+  await run('continue_assistant_workspace_action',{operation:'open',parameters:draft});
+  await run('continue_assistant_workspace_action',{operation:'finish',runIdentity:draft,parameters:{taskOutcome:'no_status_change'}});
+  await run('complete_assistant_pass',complete);
+  assert.deepEqual(calls.map(call=>call.name),['prepare_assistant_workspace_run','continue_assistant_workspace_action',
+    'continue_assistant_workspace_action','complete_assistant_pass']);
+});
+
 test('the registered supervisor survives failed startup reads without an MCP or a premature business tick',async()=>{
   for(const stage of ['identity','registration']){
     const controller=new AbortController(),identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
