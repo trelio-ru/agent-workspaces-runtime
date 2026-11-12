@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildKimiWorkBundle, installKimiWorkBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { connectRemoteMcpOAuth } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
@@ -385,4 +385,149 @@ test("Kimi bridge state never adopts a common Codex/Claude device or legacy OAut
     child.once("error", reject); child.once("close", code => resolve({ code, stdout, stderr }));
   });
   assert.equal(result.code, 0, result.stderr); assert.equal(result.stdout, "isolated");
+});
+
+test("MultiTool sends exact open and inspect envelopes and plans complete local authority reads", async t => {
+  const { createMultiToolConnection } = await import("../host-runtime/scripts/trelio-remote-mcp.mjs");
+  const { buildLocalTaskReadToolResult } = await import("../host-runtime/scripts/trelio-task-read-budget.mjs");
+  const { TRELIO_WORKSPACE_ACTION_TOOL, buildTrelioWorkspaceActionInvocation,
+    readOpenedWorkspaceRunIdentity, resolveOpenedWorkspaceDirectory } =
+    await import("../host-runtime/scripts/trelio-local-context.mjs");
+  const trelioOrigin = "https://trelio.ru";
+  const workspaceId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "multitool-authority-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspaceDirectory = path.join(root, "workspace");
+  const contextDirectory = path.join(root, "context");
+  await fs.mkdir(workspaceDirectory);
+  await fs.mkdir(contextDirectory);
+  await fs.writeFile(path.join(root, ".trelio-run.json"), JSON.stringify({
+    schemaVersion: 3, origin: trelioOrigin, workspaceId, runId, workspaceDirectory,
+  }), { mode: 0o600 });
+  const instructions = path.join(contextDirectory, "agent-instructions.md");
+  const profile = path.join(contextDirectory, "user-profile.md");
+  await fs.writeFile(instructions, "private-rule\n".repeat(121));
+  await fs.writeFile(profile, "private-profile\nlast line without newline");
+
+  const tool = TRELIO_WORKSPACE_ACTION_TOOL.name;
+  const open = { schemaVersion: 1, operation: "open", parameters: { workspaceId, runId } };
+  const inspect = { schemaVersion: 1, operation: "inspect", parameters: { workspaceId } };
+  const finish = { tool, server: "trelio-remote-skills", arguments: { schemaVersion: 1, operation: "finish", parameters: {}, runIdentity: { workspaceId, runId } } };
+  const requests = [];
+  const connection = createMultiToolConnection({
+    native: {
+      listTools: async () => ["prepare_agent_workspace_run", "prepare_agent_workspace_read"].map(name => ({
+        name, inputSchema: { type: "object" },
+      })),
+      instructions: () => "",
+      call: async (name, args) => {
+        if (name === "prepare_agent_workspace_run") {
+          assert.equal(args.clientKind, "multitool");
+          return output({ bridge: { actions: { open: { tool, server: "trelio-remote-skills", arguments: open, workingDirectory: "current_project" }, finish } } });
+        }
+        return output({ bridge: { action: { tool, server: "trelio-remote-skills", arguments: inspect } } });
+      },
+    },
+    origin: trelioOrigin,
+    workspaceTool: TRELIO_WORKSPACE_ACTION_TOOL,
+    resolveOpenedDirectory: resolveOpenedWorkspaceDirectory,
+    readOpenedRunIdentity: readOpenedWorkspaceRunIdentity,
+    local: async ({ params }, options) => {
+      assert.equal(options.origin, trelioOrigin);
+      assert.equal(params.name, tool);
+      buildTrelioWorkspaceActionInvocation(params.arguments);
+      requests.push(params.arguments);
+      return { result: buildLocalTaskReadToolResult({
+        schemaVersion: 1, operation: params.arguments.operation, stdout: workspaceDirectory + "\n",
+      }) };
+    },
+  });
+  const handler = createKimiMcpHandler({ connection, multiTool: true });
+  const tools = (await handler({ jsonrpc: "2.0", id: 1, method: "tools/list" })).result.tools;
+  for (const [name, fields] of [["trelio_workspace_open", ["workspaceId", "runId"]],
+    ["trelio_workspace_inspect", ["workspaceId"]]]) {
+    const { inputSchema } = tools.find(tool => tool.name === name);
+    assert.equal(inputSchema.additionalProperties, false);
+    assert.deepEqual(Object.keys(inputSchema.properties), fields);
+  }
+  const run = (await handler(call("prepare_agent_workspace_run", { workspaceId }))).result;
+  const prepared = run.structuredContent.bridge.actions;
+  assert.deepEqual(prepared.open, { tool: "trelio_workspace_open", server: "trelio", arguments: open.parameters });
+  assert.deepEqual(prepared.finish, { ...finish, server: "trelio" });
+  assert.doesNotMatch(run.content[0].text, /current_project/u);
+  const read = (await handler(call("prepare_agent_workspace_read", { workspaceId }))).result;
+  assert.deepEqual(read.structuredContent.bridge.action, { tool: "trelio_workspace_inspect", server: "trelio", arguments: inspect.parameters });
+
+  const unexpectedDirectory = (await handler(call(prepared.open.tool, { ...prepared.open.arguments, workingDirectory: "current_project" }))).result;
+  assert.equal(unexpectedDirectory.isError, true);
+  assert.deepEqual(requests, []);
+  for (const descriptor of [prepared.open, read.structuredContent.bridge.action]) {
+    const result = (await handler(call(descriptor.tool, descriptor.arguments))).result;
+    assert.equal(result.structuredContent.authorityReadPlan.state, "ready");
+    assert.equal(result.structuredContent.workspaceDirectory, workspaceDirectory);
+    assert.deepEqual(result.structuredContent.authorityReadPlan.files, [
+      { filePath: instructions, offset: 1, limit: 121, expectedLastLine: 121 },
+      { filePath: profile, offset: 1, limit: 2, expectedLastLine: 2 },
+    ]);
+    assert.doesNotMatch(result.content[0].text, /private-rule|private-profile|privateAppGrant/u);
+  }
+  assert.deepEqual(requests, [open, inspect]);
+
+  await fs.rm(profile);
+  const unavailable = (await handler(call(prepared.open.tool, prepared.open.arguments))).result;
+  assert.equal(unavailable.structuredContent.operation, "open");
+  assert.equal(unavailable.structuredContent.authorityReadPlan.state, "unavailable");
+  assert.equal(requests.length, 3, "a failed plan must not repeat open");
+});
+
+test("MultiTool installer prepares an exact signed-loader launch without modifying client configuration", async t => {
+  const { prepareMultiToolInstallation } = await import("../host-runtime/scripts/trelio-workspace.mjs");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-multitool-install-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const homeDirectory = path.join(directory, "home");
+  const configurationPath = path.join(homeDirectory, ".config", "gigatool", "opencode.json");
+  await fs.mkdir(path.dirname(configurationPath), { recursive: true });
+  const existing = '{"mcp":{"other":{"type":"remote","url":"https://example.test/mcp"}}}';
+  await fs.writeFile(configurationPath, existing);
+
+  const options = { pluginRoot: pluginDirectory, configDirectory: directory, homeDirectory };
+  await assert.rejects(prepareMultiToolInstallation({ ...options, platform: "linux" }), /TRELIO_MULTITOOL_MACOS_REQUIRED/u);
+  const first = await prepareMultiToolInstallation({ ...options, platform: "darwin" });
+  const second = await prepareMultiToolInstallation({ ...options, platform: "darwin" });
+  assert.equal(first.installedInMultiTool, false);
+  assert.equal(first.serverName, "trelio");
+  assert.equal(first.configurationPath, configurationPath);
+  assert.equal(await fs.readFile(configurationPath, "utf8"), existing);
+  assert.notEqual(first.bundleDirectory, second.bundleDirectory);
+  assert.deepEqual(first.mcpServer, {
+    type: "local", command: [process.execPath, path.join(first.bundleDirectory, "bootstrap.mjs")], enabled: true,
+  });
+  const bootstrap = await fs.readFile(first.mcpServer.command[1], "utf8");
+  assert.match(bootstrap, /runHostRuntimeLoader.*\['mcp','--multitool'\]/u);
+  assert.match(bootstrap, /TRELIO_WORKSPACE_CLIENT_PROFILE = 'multitool'/u);
+  assert.doesNotMatch(bootstrap, /127\.0\.0\.1:4187|preview|runtimeSessionProof/u);
+});
+
+test("signed MultiTool stdio startup checks its own namespace before exposing OAuth", async t => {
+  const { spawnSync } = await import("node:child_process");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-multitool-entry-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const entry = new URL("../host-runtime/scripts/trelio-host-runtime-entry.mjs", import.meta.url);
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory,
+    LOCALAPPDATA: path.join(directory, "local"), XDG_CONFIG_HOME: path.join(directory, ".config"),
+    TRELIO_PLUGIN_VERSION: "3.2.5", TRELIO_HOST_RUNTIME_VERSION: "4.0.0",
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1", TRELIO_WORKSPACE_CLIENT_PROFILE: "multitool" };
+  const input = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n";
+  const launch = (args, launchEnv = env) => spawnSync(process.execPath,
+    [fileURLToPath(entry), "mcp", ...args], { env: launchEnv, input, encoding: "utf8", timeout: 8000 });
+  const started = launch(["--multitool"]);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(JSON.parse(started.stdout).result.serverInfo.name, "trelio-multitool");
+  const foreign = launch(["--multitool"], { ...env, TRELIO_WORKSPACE_CLIENT_PROFILE: "kimi-work" });
+  assert.notEqual(foreign.status, 0);
+  assert.match(foreign.stderr, /TRELIO_MULTITOOL_PROFILE_REQUIRED/u);
+  const extra = launch(["--multitool", "extra"]);
+  assert.notEqual(extra.status, 0);
+  assert.match(extra.stderr, /TRELIO_MCP_ARGUMENTS_UNSUPPORTED/u);
 });

@@ -3840,3 +3840,25 @@ read-back, scope/conflict/revocation, native picker vectors и App RPC lifecycle
 560 bytes / 128 tokens. Общий catalog allowance добавляет ровно этот opener и
 один прежний bounded initialize prefix (650 tokens), не повышая budgets прежних
 методов или обычного task Run. Полный HTML и private draft туда не входят.
+
+## Мультитул
+
+`bridge multitool install` готовит неизменяемый bootstrap для локального MCP
+в «Мультитуле» на macOS. Команда возвращает путь к конфигурации и одну запись
+`mcp.trelio`, не перезаписывая настройки приложения. Bootstrap каждый раз
+запускает штатный signed loader с закрытым селектором `mcp --multitool`.
+Оба runtime entry проверяют профиль до запуска чужого хоста.
+
+Канал использует обычный Trelio HTTPS и общий native OAuth S256. Начальный grant
+запрашивает `mcp:read`, `mcp:workspaces:read` и `mcp:workspaces:write`.
+Keychain, pairing, реестр Run и encrypted device имеют собственную namespace.
+Компания применяет независимый opt-in в строгом режиме. Hooks, MCP Apps и
+browser-fill в этом клиенте не используются.
+
+Адаптер передаёт подготовленные open/inspect как отдельные инструменты с
+точными UUID, чтобы cwd чата не попадал в аргументы. Действие с дополнительными
+аргументами для восстановления сохраняет исходный typed envelope. Open и
+inspect возвращают `authorityReadPlan` с локальными путями и последними
+строками двух файлов. Чат читает правила и профиль до EOF своим читателем.
+Bridge не дублирует их текст в MCP. Ошибка плана сохраняет уже выполненное
+действие и требует остановиться до получения полной authority.

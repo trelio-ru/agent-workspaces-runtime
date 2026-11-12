@@ -39,7 +39,9 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
   const kimiProfile = mode === "mcp" && argumentsAfterMode.length === 2
     && argumentsAfterMode[0] === "--kimi-work"
     && ["remote", "local"].includes(argumentsAfterMode[1]);
-  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile) {
+  const multiToolProfile = mode === "mcp" && argumentsAfterMode.length === 1
+    && argumentsAfterMode[0] === "--multitool";
+  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !multiToolProfile) {
     throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED");
   }
 
@@ -64,7 +66,7 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
 
   return {
     mode,
-    ...(kimiProfile ? { profile: "kimi-work" } : {}),
+    ...(kimiProfile ? { profile: "kimi-work" } : multiToolProfile ? { profile: "multitool" } : {}),
     entrypointPath: path.join(SCRIPT_DIRECTORY, entrypointName),
     arguments: argumentsAfterMode,
   };
@@ -76,6 +78,9 @@ const assertHostRuntimeNamespace = (invocation, environment) => {
   // private state. A selector alone cannot borrow the common client's paths.
   if (invocation.profile === "kimi-work" && environment.TRELIO_WORKSPACE_CLIENT_PROFILE !== "kimi-work") {
     throw new Error("TRELIO_KIMI_PROFILE_REQUIRED");
+  }
+  if (invocation.profile === "multitool" && environment.TRELIO_WORKSPACE_CLIENT_PROFILE !== "multitool") {
+    throw new Error("TRELIO_MULTITOOL_PROFILE_REQUIRED");
   }
 };
 

@@ -35,6 +35,7 @@ import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -121,6 +122,8 @@ import {
   TRELIO_LOCAL_PROPOSAL_RESOURCE_MIME_TYPE,
   TRELIO_LOCAL_PROPOSAL_RESOURCE_URI,
   TRELIO_WORKSPACE_ACTION_TOOL,
+  readOpenedWorkspaceRunIdentity,
+  resolveOpenedWorkspaceDirectory,
   TrelioLocalContextError,
   handleTrelioLocalContextOperation,
   completeHumanCompanySearch,
@@ -4075,7 +4078,7 @@ const LOCAL_TOOLS = [
       properties: {
         clientKind: {
           type: "string",
-          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"],
+          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"],
           description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
         },
         intent: {
@@ -6043,7 +6046,7 @@ export const handleToolCall = async (
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding", "readTarget"].includes(key))
-      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(rawArguments.clientKind)
+      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
@@ -6061,7 +6064,7 @@ export const handleToolCall = async (
       const prepared = await folderOnboardingPrepare({
         ...rawArguments.folderOnboarding,
         // Select native clients' file format without changing legacy plans.
-        ...(["cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
+        ...(["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
       });
       return buildTextResult(prepared);
     }
@@ -6069,7 +6072,7 @@ export const handleToolCall = async (
       origin,
       clientKind: rawArguments.clientKind,
       includeHookStartup: rawArguments.intent === "diagnostics"
-        && !["cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(rawArguments.clientKind),
+        && !["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind),
       signal,
     });
     let codexRouting = null;
@@ -7384,10 +7387,19 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     httpRequest = remoteMcpHttpRequest, httpJson = oauthHttpJson,
     connectOAuth = connectRemoteMcpOAuth, vault, nativeClient = "deepseek-harness",
   } = {}) => {
-    if (!["deepseek-harness", "kimi-work"].includes(nativeClient)) {
+    if (!["deepseek-harness", "kimi-work", "multitool"].includes(nativeClient)) {
       throw fail("TRELIO_NATIVE_CLIENT_INVALID", "Неизвестный native OAuth client.");
     }
     const isKimi = nativeClient === "kimi-work";
+    const isMultiTool = nativeClient === "multitool";
+    const publicProfile = isMultiTool
+      ? { id: "trelio_multitool_agent_workspaces_v1", name: "Trelio – Мультитул", authRequired: "TRELIO_MULTITOOL_AUTH_REQUIRED" }
+      : isKimi
+        ? { id: "trelio_kimi_work_agent_workspaces_v1", name: "Trelio – Kimi Work", authRequired: "TRELIO_KIMI_AUTH_REQUIRED" }
+        : null;
+    // MultiTool's onboarding verifies task reads and Workspace lifecycle.
+    // Consent for these capabilities never requests unrelated domain writes.
+    const multiToolScopes = ["mcp:read", "mcp:workspaces:read", "mcp:workspaces:write"];
     let configuration, identity, session, initializing, sequence = 0;
     const config = () => configuration ??= { schemaVersion: 3, endpoint: RESOURCE, protocolVersion: PROTOCOL,
       headers: Object.fromEntries(buildBridgeRequestHeaders(null)), authentication: { type: "oauth2_pkce", scopes: [] } };
@@ -7399,10 +7411,13 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
           || scopes.some(scope => typeof scope !== "string" || !/^mcp:[a-z0-9:-]+$/u.test(scope))) {
         throw fail("TRELIO_HARNESS_OAUTH_METADATA_INVALID", "Trelio не предоставил актуальный каталог OAuth scopes.");
       }
-      config().authentication.scopes = [...new Set(scopes)].sort();
+      if (isMultiTool && !multiToolScopes.every(scope => scopes.includes(scope))) {
+        throw fail("TRELIO_MULTITOOL_SCOPES_UNAVAILABLE", "Trelio не предоставил scopes для Workspace.");
+      }
+      config().authentication.scopes = isMultiTool ? multiToolScopes : [...new Set(scopes)].sort();
       identity = { remoteMcp: { configFingerprint: crypto.createHash("sha256")
         .update(JSON.stringify({ endpoint: RESOURCE, protocolVersion: PROTOCOL, scopes: config().authentication.scopes,
-          ...(isKimi ? { nativeClient } : {}) })).digest("hex") } };
+          ...(publicProfile ? { nativeClient } : {}) })).digest("hex") } };
       return identity;
     };
     const store = vault ?? createRemoteMcpOAuthVault({ nativeClient,
@@ -7411,7 +7426,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     const credential = async signal => {
       if (!identity) await readMetadata(signal);
       const current = await store.read(ORIGIN, identity);
-      if (!current || current.expiresAt <= Date.now()) throw fail(isKimi ? "TRELIO_KIMI_AUTH_REQUIRED" : "TRELIO_HARNESS_AUTH_REQUIRED",
+      if (!current || current.expiresAt <= Date.now()) throw fail(publicProfile?.authRequired ?? "TRELIO_HARNESS_AUTH_REQUIRED",
         "Подключите Trelio инструментом trelio_connect. Вход выполняется только в браузере.");
       return current.accessToken;
     };
@@ -7467,8 +7482,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         const current = await store.read(ORIGIN, target);
         if (reauthorize || !current || current.expiresAt <= Date.now()) {
           const created = await connectOAuth(config(), { signal, resolveEndpoint: resolveSafeRemoteMcpEndpoint,
-            clientName: isKimi ? "Trelio – Kimi Work" : "Trelio – DeepSeek Harness", resource: RESOURCE,
-            ...(isKimi ? { publicClientId: "trelio_kimi_work_agent_workspaces_v1" } : {}),
+            clientName: publicProfile?.name ?? "Trelio – DeepSeek Harness", resource: RESOURCE,
+            ...(publicProfile ? { publicClientId: publicProfile.id } : {}),
             maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
           await store.write(ORIGIN, target, created);
           const saved = await store.read(ORIGIN, target);
@@ -7644,9 +7659,13 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
  * runtime proofs. Object ACL, current company policy and the paired data plane
  * still run on the server for every operation, including downloads and saves.
  */
-export const createKimiMcpHandler = ({ connection = createHarnessConnection({ nativeClient: "kimi-work" }) } = {}) => {
+export const createKimiMcpHandler = ({
+  connection = createHarnessConnection({ nativeClient: "kimi-work" }), multiTool = false,
+} = {}) => {
+  const clientLabel = multiTool ? "Мультитул" : "Kimi Work";
+  const authRequired = multiTool ? "TRELIO_MULTITOOL_AUTH_REQUIRED" : "TRELIO_KIMI_AUTH_REQUIRED";
   const connectTool = { name: "trelio_connect", description:
-    "Connect Trelio in Kimi Work using browser OAuth, or refresh the catalogue using the existing grant. Set reauthorize only for an explicitly requested replacement of a revoked or insufficient grant. Never supply tokens or codes; previous business operations are not replayed.",
+    `Connect Trelio in ${clientLabel} using browser OAuth, or refresh the catalogue using the existing grant. Set reauthorize only for an explicitly requested replacement of a revoked or insufficient grant. Never supply tokens or codes; previous business operations are not replayed.`,
     inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false } };
   // Work can reuse its first tools/list result in later chats, including ones
   // started after OAuth succeeds. Keep discovery and invocation available from
@@ -7663,10 +7682,10 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
   const stableTools = [connectTool, findTool, callTool];
   const stableNames = new Set(stableTools.map(tool => tool.name));
   const privateArgumentKeys = ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"];
-  const authCodes = new Set(["TRELIO_KIMI_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"]);
+  const authCodes = new Set([authRequired, "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"]);
   const isArgumentObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
-  const invalidInput = () => Object.assign(new Error(), { code: "TRELIO_KIMI_INPUT_INVALID" });
-  const unavailable = () => Object.assign(new Error(), { code: "TRELIO_KIMI_TOOL_UNAVAILABLE" });
+  const invalidInput = () => Object.assign(new Error(), { code: multiTool ? "TRELIO_MULTITOOL_INPUT_INVALID" : "TRELIO_KIMI_INPUT_INVALID" });
+  const unavailable = () => Object.assign(new Error(), { code: multiTool ? "TRELIO_MULTITOOL_TOOL_UNAVAILABLE" : "TRELIO_KIMI_TOOL_UNAVAILABLE" });
   const denied = tool => tool?.name === "prepare_agent_secret_browser_fill"
     || stableNames.has(tool?.name)
     || (tool?._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app"));
@@ -7698,7 +7717,10 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
   };
   const findNative = async (tools, query, signal) => {
     const exact = tools.find(tool => tool.name === query);
-    if (exact) return textResult(`Native schema for ${exact.name} is in structuredContent.`, { tool: publicTool(exact) });
+    if (exact) {
+      const value = { tool: publicTool(exact) };
+      return textResult(multiTool ? JSON.stringify(value) : `Native schema for ${exact.name} is in structuredContent.`, value);
+    }
     // Use the backend's ranked compact search and intersect with this Kimi
     // session's live catalogue before returning any matches.
     const result = await invokeNative(tools, "search_trelio_tools", { query, limit: 5 }, signal);
@@ -7708,16 +7730,18 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
       throw Object.assign(new Error(), { code: "TRELIO_HARNESS_CATALOG_INVALID" });
     }
     const available = new Set(tools.map(tool => tool.name));
-    return textResult("Use an exact result name with trelio_find_tools to read its schema.",
-      { tools: matches.filter(tool => available.has(tool?.name)) });
+    const value = { tools: matches.filter(tool => available.has(tool?.name)) };
+    return textResult(multiTool ? JSON.stringify(value) : "Use an exact result name with trelio_find_tools to read its schema.", value);
   };
-  const instructions = "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat: for missing direct tools, use trelio_find_tools to get the exact native schema and trelio_call_tool to invoke it. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
+  const instructions = multiTool
+    ? "This is the MultiTool OAuth channel for Trelio. Use clientKind=multitool for local diagnostics and folder onboarding. Call trelio_connect before protected reads. The company policy applies without hooks or model verification; never author runtimeSessionProof. Execute exact returned tools and arguments. After open or inspect, read every file in authorityReadPlan in order through EOF before continuing. Stop if the plan is unavailable. Local routes use this same MCP catalogue. For missing tools use trelio_find_tools and trelio_call_tool. MCP Apps and browser-fill are unavailable. "
+    : "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat: for missing direct tools, use trelio_find_tools to get the exact native schema and trelio_call_tool to invoke it. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
   return async (message, { signal, notifyClient } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
     const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
     try {
       if (message.method === "initialize") return reply({ protocolVersion: message.params?.protocolVersion || REMOTE_MCP_PROTOCOL_VERSION,
-        serverInfo: { name: "trelio-kimi-work", version: getHostRuntimeVersion() },
+        serverInfo: { name: multiTool ? "trelio-multitool" : "trelio-kimi-work", version: getHostRuntimeVersion() },
         capabilities: { tools: { listChanged: true } }, instructions: instructions + connection.instructions() });
       if (message.method === "ping") return reply({});
       if (message.method === "tools/list") {
@@ -7759,10 +7783,10 @@ export const createKimiMcpHandler = ({ connection = createHarnessConnection({ na
       }, callSignal), { signal });
       return reply(result);
     } catch (error) {
-      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : "TRELIO_KIMI_CONNECTION_FAILED";
+      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : multiTool ? "TRELIO_MULTITOOL_CONNECTION_FAILED" : "TRELIO_KIMI_CONNECTION_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id,
         error: { code: -32000, message: code, data: { code } } };
-      const reason = code === "TRELIO_KIMI_AUTH_REQUIRED"
+      const reason = code === authRequired
         ? "Вызовите trelio_connect и продолжите исходный запрос после входа в этом чате."
         : "Проверьте доступ и повторите только безопасное чтение. Неизвестный результат изменения требует read-back.";
       return reply({ ...textResult(`${code}: ${reason}`, { code }), isError: true });
@@ -7819,6 +7843,195 @@ export const runKimiLocalStdioHost = (options = {}) => {
   });
 };
 
+const multiToolRoutes = {
+  open: { name: "trelio_workspace_open", fields: ["workspaceId", "runId"],
+    description: "Open the prepared Workspace Run with the returned arguments. Read every pinned authority file listed in the result to EOF before working." },
+  inspect: { name: "trelio_workspace_inspect", fields: ["workspaceId"],
+    description: "Materialize the accepted Workspace in a separate read-only directory. Read the returned authority plan before reading files there." },
+};
+const multiToolAuthorityFiles = ["agent-instructions.md", "user-profile.md"];
+const multiToolAuthorityFileLimit = 128 * 1024;
+const multiToolUnavailable = () => Object.assign(new Error("Tool unavailable in MultiTool."),
+  { code: "TRELIO_MULTITOOL_TOOL_UNAVAILABLE" });
+const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+  && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+
+const projectText = result => {
+  // MultiTool renders TextContent even when structuredContent also exists.
+  // Copy only the public structured result, never App metadata or credentials.
+  if (!result.isError && result.structuredContent) {
+    return { ...result, content: [{ type: "text", text: JSON.stringify(result.structuredContent) },
+      ...(result.content ?? []).filter(block => block.type !== "text")] };
+  }
+  return result;
+};
+
+const projectMultiToolBridgeServer = (action, workspaceToolName) =>
+  action?.tool === workspaceToolName && action.server === "trelio-remote-skills"
+    ? { ...action, server: "trelio" }
+    : action;
+
+const projectRoute = (action, operation, workspaceToolName) => {
+  // This client uses one stdio catalogue. Both the original and the specialized
+  // local continuation are carried by its managed mcp.trelio entry.
+  action = projectMultiToolBridgeServer(action, workspaceToolName);
+  const route = multiToolRoutes[operation];
+  const args = action?.arguments;
+  if (action?.tool !== workspaceToolName || !exactKeys(args, ["schemaVersion", "operation", "parameters"])
+    || args.schemaVersion !== 1 || args.operation !== operation || !exactKeys(args.parameters, route.fields)) {
+    return action;
+  }
+  // The backend's top-level workingDirectory label describes placement. It is
+  // not an argument. A route-specific schema keeps both it and a guessed chat
+  // cwd out of open/inspect while forwarding the exact backend locators.
+  const { workingDirectory, ...descriptor } = action;
+  return { ...descriptor, tool: route.name, arguments: args.parameters };
+};
+
+const projectPreparation = (name, result, workspaceToolName) => {
+  const value = result.structuredContent;
+  if (result.isError || !value?.bridge) return result;
+  const bridge = value.bridge;
+  if (name === "prepare_agent_workspace_run" && bridge.actions?.open) {
+    const actions = Object.fromEntries(Object.entries(bridge.actions).map(([key, action]) => [
+      key, key === "open" ? projectRoute(action, "open", workspaceToolName) : projectMultiToolBridgeServer(action, workspaceToolName),
+    ]));
+    return { ...result, structuredContent: { ...value, bridge: { ...bridge, actions } } };
+  }
+  if (name === "prepare_agent_workspace_read" && bridge.action) {
+    return { ...result, structuredContent: { ...value, bridge: { ...bridge,
+      action: projectRoute(bridge.action, "inspect", workspaceToolName) } } };
+  }
+  return result;
+};
+
+const describeAuthorityFile = async (contextDirectory, name) => {
+  const filePath = path.join(contextDirectory, name);
+  const file = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    // Bound the read itself, including if a file changes after stat. These
+    // bytes stay local. Only the native reader's input and the EOF count cross
+    // MCP, so an encrypted snapshot does not create another content channel.
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size === 0 || stat.size > multiToolAuthorityFileLimit) throw multiToolUnavailable();
+    const buffer = Buffer.alloc(stat.size + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await file.read(buffer, size, buffer.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size !== stat.size) throw multiToolUnavailable();
+    const markdown = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size));
+    const lineCount = markdown.split("\n").length - Number(markdown.endsWith("\n"));
+    return { filePath, offset: 1, limit: lineCount, expectedLastLine: lineCount };
+  } finally {
+    await file.close();
+  }
+};
+
+export const createMultiToolConnection = ({
+  native = createHarnessConnection({ nativeClient: "multitool" }),
+  local = createKimiLocalMcpHandler(),
+  origin = DEFAULT_ORIGIN,
+  workspaceTool = TRELIO_WORKSPACE_ACTION_TOOL,
+  resolveOpenedDirectory = resolveOpenedWorkspaceDirectory,
+  readOpenedRunIdentity = readOpenedWorkspaceRunIdentity,
+} = {}) => {
+  const localTools = [workspaceTool, TRELIO_LOCAL_ACTION_TOOL,
+    LOCAL_TOOLS.find(tool => tool.name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME)];
+  const localNames = new Set(localTools.map(tool => tool.name));
+  const operationTools = Object.values(multiToolRoutes).map(({ name, fields, description }) => ({
+    name, description,
+    inputSchema: { type: "object", additionalProperties: false, required: fields,
+      properties: Object.fromEntries(fields.map(field => [field, { type: "string", format: "uuid" }])) },
+  }));
+
+  const execute = async (name, args, signal) => {
+    const response = await local({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name, arguments: args } }, { origin, signal });
+    if (!response?.result) throw multiToolUnavailable();
+    return response.result;
+  };
+
+  const withAuthorityPlan = async (result, operation, parameters) => {
+    if (result.isError) return result;
+    let bridgeResult;
+    let authorityReadPlan;
+    let workspaceDirectory;
+    try {
+      // The shared workspace dispatcher uses a single JSON TextContent block.
+      // Decode only that operation's closed response, never arbitrary tool
+      // output or stdout supplied by the model.
+      const [content] = result.content ?? [];
+      if (result.content?.length !== 1 || content.type !== "text") throw multiToolUnavailable();
+      const parsed = JSON.parse(content.text);
+      if (parsed?.schemaVersion !== 1 || parsed.operation !== operation
+        || typeof parsed.stdout !== "string" || !parsed.stdout) throw multiToolUnavailable();
+      bridgeResult = parsed;
+      workspaceDirectory = await resolveOpenedDirectory(bridgeResult.stdout);
+      if (operation === "open") {
+        const identity = await readOpenedRunIdentity(workspaceDirectory, origin);
+        if (identity.workspaceId !== parameters.workspaceId || (parameters.runId !== undefined && identity.runId !== parameters.runId)
+          || identity.terminalStatus) throw multiToolUnavailable();
+      }
+      const contextDirectory = path.join(path.dirname(workspaceDirectory), "context");
+      const context = await fs.lstat(contextDirectory);
+      if (!context.isDirectory() || context.isSymbolicLink()) throw multiToolUnavailable();
+      const files = [];
+      for (const name of multiToolAuthorityFiles) files.push(await describeAuthorityFile(contextDirectory, name));
+      authorityReadPlan = { state: "ready", files,
+        instruction: "Call the native file reader for each file in order with its exact filePath, offset and limit. Verify EOF at expectedLastLine. If a read is shortened, continue from the next line until EOF. Finish both complete reads before writing or reading accepted materials." };
+    } catch {
+      // Open/inspect already completed. Preserve that outcome and fail closed
+      // on the read plan. A missing local snapshot must not cause another open.
+      authorityReadPlan = { state: "unavailable",
+        instruction: "The bridge action completed, but full authority could not be verified. Stop Workspace work and report the missing authority." };
+    }
+    return { ...result, structuredContent: { ...bridgeResult, operation,
+      ...(workspaceDirectory ? { workspaceDirectory } : {}), authorityReadPlan } };
+  };
+
+  return {
+    ...native,
+    listTools: async signal => [
+      ...operationTools, ...localTools, ...(await native.listTools(signal)).filter(tool => !localNames.has(tool.name)),
+    ],
+    async call(name, args, signal) {
+      const operation = Object.keys(multiToolRoutes).find(key => multiToolRoutes[key].name === name);
+      if (operation) {
+        if (!exactKeys(args, multiToolRoutes[operation].fields)) throw multiToolUnavailable();
+        const result = await execute(workspaceTool.name, { schemaVersion: 1, operation, parameters: args }, signal);
+        return projectText(await withAuthorityPlan(result, operation, args));
+      }
+      if (localNames.has(name)) {
+        const result = await execute(name, args, signal);
+        // Some recoveries carry an explicit directory in a server-issued
+        // envelope. Preserve that exact action and return the same EOF plan.
+        if (name === workspaceTool.name && Object.hasOwn(multiToolRoutes, args?.operation)) {
+          return projectText(await withAuthorityPlan(result, args.operation, args.parameters));
+        }
+        return projectText(result);
+      }
+      // The backend records the distinct OAuth attestation independently. Set
+      // the presentation client label here so a default cannot imply Codex.
+      const input = name === "prepare_agent_workspace_run" ? { ...args, clientKind: "multitool" } : args;
+      return projectText(projectPreparation(name, await native.call(name, input, signal), workspaceTool.name));
+    },
+  };
+};
+
+
+export const runMultiToolStdioHost = (options = {}) => {
+  if (workspaceBridgeClientEnvironment().TRELIO_WORKSPACE_CLIENT_PROFILE !== "multitool") {
+    throw new Error("TRELIO_MULTITOOL_PROFILE_REQUIRED");
+  }
+  return runStdioHost({ ...options, origin: DEFAULT_ORIGIN,
+    handleMessage: createKimiMcpHandler({ connection: options.connection ?? createMultiToolConnection(), multiTool: true }),
+    migrateClientConfiguration: async () => null, preservePlugin: () => null,
+  });
+};
+
 if (isDirectModuleInvocation(import.meta.url)) {
   // Repeat the signed entry's closed selector before any host bootstrap.
   // An unknown/retired selector must never fall through to ordinary local MCP.
@@ -7828,7 +8041,8 @@ if (isDirectModuleInvocation(import.meta.url)) {
   const start = args.length === 0 ? runStdioHost
     : args.length === 2 && args[0] === "--kimi-work" && args[1] === "remote" ? runKimiStdioHost
       : args.length === 2 && args[0] === "--kimi-work" && args[1] === "local" ? runKimiLocalStdioHost
-        : async () => { throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED"); };
+        : args.length === 1 && args[0] === "--multitool" ? runMultiToolStdioHost
+          : async () => { throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED"); };
   Promise.resolve().then(() => start()).catch((error) => {
     process.stderr.write(`Remote MCP host failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

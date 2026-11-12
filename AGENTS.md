@@ -1519,6 +1519,10 @@ The shared folder template keeps Kimi's MCP discovery/invocation and separate
 local continuation guidance across chats. Refresh existing blocks through the
 same folder plan, without dropping other clients' instructions.
 See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
+[MultiTool](docs/agent-workspace-runtime.md#мультитул) uses the same signed loader
+and an independent OAuth/bridge namespace. The macOS installer returns one
+config entry. Exact open/inspect routes omit chat cwd; read the returned local
+authority through EOF before using the materialized Workspace.
 Its bootstrap uses the SAME loader's bounded MCP update/startup path; both entry
 boundaries reject unknown selectors before a foreign host or private namespace.
 Node children reconstruct `ELECTRON_RUN_AS_NODE=1` only for the currently observed

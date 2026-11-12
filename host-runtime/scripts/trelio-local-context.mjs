@@ -12366,7 +12366,7 @@ export const materializeHistoricalWorkspaceTreeForRestore = async ({
   await materializeRuntimeControlFiles(workspaceDirectory);
 };
 
-const resolveOpenedWorkspaceDirectory = async (stdout) => {
+export const resolveOpenedWorkspaceDirectory = async (stdout) => {
   const candidates = String(stdout || "")
     .split(/\r?\n/u)
     .map((line) => line.trim())

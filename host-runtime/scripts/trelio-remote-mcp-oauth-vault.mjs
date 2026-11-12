@@ -30,7 +30,7 @@ export const remoteMcpOAuthSessionAccount = (origin, resolved, namespace = null,
     // Native Trelio OAuth precedes company selection. Give it a dedicated
     // global client cell; never invent company/member/skill IDs or borrow an
     // external provider credential. The host chooses this closed discriminator.
-    ...(["deepseek-harness", "kimi-work"].includes(nativeClient) ? { nativeClient } : {
+    ...(["deepseek-harness", "kimi-work", "multitool"].includes(nativeClient) ? { nativeClient } : {
       companyId: resolved.localIdentity.companyId,
       memberId: resolved.localIdentity.memberId,
       skillId: resolved.localIdentity.skillId,
