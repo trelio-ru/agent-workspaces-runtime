@@ -340,8 +340,15 @@ const readNative = async (threadId, project, options = {}) => {
               const busy=options.controlledExecution===true&&current.method==='thread/resume'
                 &&UUID.test(current.threadId??'')&&message.error.code===-32600
                 &&message.error.message===`thread ${current.threadId} already has an active writer`;
-              current.no(new AssistantCodexError(busy?'ASSISTANT_CODEX_THREAD_BUSY'
+              // Only the dedicated read-only staging probe consumes this
+              // exact native refusal. Generic RPC, transport and unavailable
+              // history cannot become a missing-thread observation.
+              const notLoaded=options.observeUnmaterializedTriage===true
+                &&['thread/read','thread/turns/list'].includes(current.method)&&UUID.test(current.threadId??'')
+                &&message.error.code===-32600&&message.error.message===`thread not loaded: ${current.threadId}`;
+              current.no(new AssistantCodexError(notLoaded?'ASSISTANT_CODEX_THREAD_NOT_LOADED':busy?'ASSISTANT_CODEX_THREAD_BUSY'
                 :policy?'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE':'ASSISTANT_CODEX_READ_UNAVAILABLE'));
+              if(notLoaded)continue;
               // Let the owning projection retain its closed failure before
               // cleanup. In particular a refused policy read precedes any turn.
               if(options.controlledExecution===true)continue;
@@ -376,6 +383,24 @@ const readNative = async (threadId, project, options = {}) => {
       });
     } catch { abort(); }
   });
+};
+
+/** Observe that neither native read can materialize the original staging
+ * chat. This alone proves no business outcome and never admits a task or
+ * owner command. Only a separately certified never-attached triage ledger
+ * can make a replacement technical READY relevant. */
+export const readAssistantUnmaterializedTriage = (threadId,options={}) => {
+  threadId=id(threadId);
+  return readNative(null,async(_thread,request)=>{
+    for(const [method,params] of [
+      ['thread/read',{threadId,includeTurns:false}],
+      ['thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'summary'}],
+    ]){
+      try{await request(method,params);return false;}
+      catch(error){if(error?.code!=='ASSISTANT_CODEX_THREAD_NOT_LOADED')throw error;}
+    }
+    return true;
+  },{...options,observeUnmaterializedTriage:true});
 };
 
 /** Pure projection of the documented App Server account/rateLimits/read DTO.

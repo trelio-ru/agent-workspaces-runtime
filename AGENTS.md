@@ -1081,6 +1081,12 @@ publication tooling также остаются вне этого публичн
   only its exact tool-free GUI READY admits the original business intake. Missing,
   impure or running history refuses. Lost verification is read-back-only forever;
   no business/provider/old-queue replay, new chat, false health/ACK or manual state edit.
+  An expired, never-attached third-party triage reservation is a distinct
+  pre-business case. Require fresh backend negative-attachment evidence, both
+  exact native not-loaded reads and the original coordinator lease. Schema29
+  retains the old chat/start and one new technical READY marker. First attach
+  is separately fenced before HTTP and reconciled by read-back only. The
+  original frozen batch runs through normal source admission after READY.
   Stored history may project an active GUI turn as interrupted; keep its reader
   until actual completion/failure or the original deadline. This snapshot never
   certifies cancellation, pass release, a new invocation or recovery authority.

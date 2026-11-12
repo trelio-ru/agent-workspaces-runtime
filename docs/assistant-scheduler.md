@@ -287,6 +287,18 @@ empty READY under the ordinary provision marker. Exact terminal read-back earns
 provisioning. The original one-use provision bit covers both turns. An uncertain
 create/start never creates a replacement chat or repeats a marker.
 
+An expired third-party triage reservation can recover before any business
+chat has attached. The backend must positively certify the exact frozen batch
+still has no chat, runtime session, body read, question or outcome. Two exact
+native not-loaded responses distinguish an unavailable staging chat from
+ordinary uncertain history. Under the same coordinator lease, retain the old
+chat and marker and allow one distinct empty READY provision. Only its exact
+native completion can lead to the first attachment. That attachment and its
+fresh clock commit atomically under the original source and model snapshot.
+Lost provision or attachment responses permit only exact read-back. The
+original business marker and events never change. Dispatch health can recover
+only after the resulting native turn, committed classification and pass release.
+
 On subsequent turns, the exact UUID, cwd, model and effort must still match.
 Native `thread/resume` acquires the writer. A `notLoaded` report from the current
 process cannot rule out a writer in another process. The native writer conflict

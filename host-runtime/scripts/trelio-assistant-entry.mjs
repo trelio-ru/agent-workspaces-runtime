@@ -2000,7 +2000,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   try {
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
       readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
-      readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply};
+      readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply,
+      readUnmaterializedTriage:nativeRuntime.readAssistantUnmaterializedTriage};
     if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     // Observe the native boundary before the coordinator deliberately replaces
     // a post-admission error with its durable delivery-uncertain fence. That

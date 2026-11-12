@@ -92,6 +92,21 @@ const provisionReview=value=>{
   if(Object.keys(value).length!==4||typeof value.started!=='boolean')inputError();
   return {turnId:uuid(value.turnId),markerId:uuid(value.markerId),reviewId:uuid(value.reviewId),started:value.started};
 };
+// A distinct technical attempt for a triage reservation that Trelio has
+// certified never attached. Retain the original chat, marker and start bit
+// until the new READY is observed. An interrupted new attempt is read-only.
+const triageProvision=value=>{
+  const fields=['originalThreadId','markerId','leaseExpiresAt','started','threadId','attachStarted'];
+  object(value,fields);
+  if(Object.keys(value).length!==fields.length||typeof value.started!=='boolean'||typeof value.attachStarted!=='boolean'
+    ||typeof value.leaseExpiresAt!=='string'||!Number.isFinite(Date.parse(value.leaseExpiresAt))
+    ||new Date(value.leaseExpiresAt).toISOString()!==value.leaseExpiresAt
+    ||value.threadId!==null&&!value.started||value.attachStarted&&value.threadId===null
+    ||value.originalThreadId===value.threadId)inputError();
+  return {originalThreadId:uuid(value.originalThreadId),markerId:uuid(value.markerId),leaseExpiresAt:value.leaseExpiresAt,
+    started:value.started,threadId:value.threadId===null?null:uuid(value.threadId),attachStarted:value.attachStarted};
+};
+
 /** One irreversible prepare intent plus the SAME provider's send/result fence.
  * No answer text/history/body digest is durable. Losing prepare/send responses
  * permits only exact native/provider read-back, never a new key or send. */
@@ -172,10 +187,13 @@ export const assistantOwnerReplyAttemptReady=row=>row?.kind==='owner_command'
   &&assistantOwnerReplyCapacityOpen(row)&&row.outcome_task_id===null&&row.outcome_receipt===null&&row.outcome_state===null
   &&row.reply_receipt_id===null&&row.reply_message_id===null&&row.reply_abandon_receipt_id===null;
 
-const ownerProvisionCandidate=row=>row.kind==='owner_command'&&row.state==='provisioning'&&row.native_started===1
+const provisionCandidate=row=>row.state==='provisioning'&&row.native_started===1
   &&UUID.test(row.thread_id??'')&&row.settled===0&&row.source_state==='active'&&row.source_revision===row.configuration_revision
   &&row.reply_receipt_id===null&&row.reply_message_id===null&&row.reply_abandon_receipt_id===null
   &&row.outcome_receipt===null&&row.outcome_state===null&&row.outcome_task_id===null;
+const ownerProvisionCandidate=row=>row.kind==='owner_command'&&provisionCandidate(row);
+const triageProvisionCandidate=row=>row.kind==='route_existing'&&row.frozen===1&&provisionCandidate(row)
+  &&row.provision_review_json===null&&row.prepared_reply_json===null&&row.model_capacity_json===null;
 /** Provider-owned opaque routing hints, never sender or task authority. Email
  * uses a scoped hash of untrusted threading headers; Telegram uses its native
  * account HMAC; MAX uses its verified native/account-scope key. These remain
@@ -264,7 +282,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -369,7 +387,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -614,8 +632,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // Independent pre-HTTP intent. Never replace the old readonly JSON, start
     // bit, parent receipt or original event during this nullable-only upgrade.
     if(!answeredColumns.includes('answered_recovery_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN answered_recovery_json TEXT');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=28');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (28)');
+    const triageColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version>=29&&!triageColumns.includes('triage_provision_json'))fail('ASSISTANT_INBOX_CONFLICT');
+    // Nullable addition only. Legacy started markers still require live
+    // native/backend evidence. No old row is made eligible by migration.
+    if(!triageColumns.includes('triage_provision_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN triage_provision_json TEXT');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=29');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (29)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1354,6 +1377,45 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // Commit directly before the ONE new technical queue submission. Preserve
       // native_started and the old provision ID: neither is reset to allow replay.
       run('UPDATE assistant_owner_intakes SET provision_review_json=? WHERE id=?',JSON.stringify({...review,started:true}),row.id);
+    });},
+    triageProvision(id){
+      const row=this.ownerIntake(id);
+      return row.triage_provision_json===null?null:Object.freeze(triageProvision(JSON.parse(row.triage_provision_json)));
+    },
+    prepareTriageProvision(id,leaseExpiresAt){return transaction(()=>{
+      const row=this.ownerIntake(id),prior=this.triageProvision(id);
+      if(!triageProvisionCandidate(row)||prior?.leaseExpiresAt!==undefined&&prior.leaseExpiresAt!==leaseExpiresAt)
+        fail('ASSISTANT_INBOX_CONFLICT');
+      if(prior)return prior;
+      const recovery=triageProvision({originalThreadId:row.thread_id,markerId:randomUUID(),
+        leaseExpiresAt,started:false,threadId:null,attachStarted:false});
+      run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify(recovery),row.id);
+      return Object.freeze(recovery);
+    });},
+    startTriageProvision(id,markerId){return transaction(()=>{
+      const row=this.ownerIntake(id),recovery=this.triageProvision(id);
+      if(!triageProvisionCandidate(row)||recovery?.markerId!==uuid(markerId)||recovery.started||recovery.originalThreadId!==row.thread_id)
+        fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify({...recovery,started:true}),row.id);
+    });},
+    bindTriageProvision(id,markerId,threadId){return transaction(()=>{
+      const row=this.ownerIntake(id),recovery=this.triageProvision(id);threadId=uuid(threadId);
+      if(!triageProvisionCandidate(row)||recovery?.markerId!==uuid(markerId)||!recovery.started||recovery.threadId!==null
+        ||recovery.originalThreadId!==row.thread_id||recovery.originalThreadId===threadId)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify({...recovery,threadId}),row.id);
+    });},
+    readyTriageProvision(id,markerId){return transaction(()=>{
+      const row=this.ownerIntake(id),recovery=this.triageProvision(id);
+      if(!triageProvisionCandidate(row)||recovery?.markerId!==uuid(markerId)||!recovery.started||!recovery.threadId
+        ||recovery.originalThreadId!==row.thread_id)fail('ASSISTANT_INBOX_CONFLICT');
+      run("UPDATE assistant_owner_intakes SET state='ready',thread_id=?,native_started=0 WHERE id=?",recovery.threadId,row.id);
+    });},
+    startTriageAttachment(id,markerId){return transaction(()=>{
+      const row=this.ownerIntake(id),recovery=this.triageProvision(id);
+      if(row.state!=='ready'||row.kind!=='route_existing'||row.native_started||row.source_state!=='active'
+        ||row.source_revision!==row.configuration_revision||recovery?.markerId!==uuid(markerId)||!recovery.started
+        ||recovery.threadId!==row.thread_id||recovery.attachStarted)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET triage_provision_json=? WHERE id=?',JSON.stringify({...recovery,attachStarted:true}),row.id);
     });},
     startOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='ready'||row.source_state!=='active'||row.source_revision!==row.configuration_revision)

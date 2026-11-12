@@ -3562,3 +3562,110 @@ test(`answered source recovery crosses production factory, HTTP and SQLite reope
   }finally{db.close();}
  }finally{await host?.close();}
 });
+
+test('expired unbound triage recovers the original through the production factory and device codec after restart',async t=>{
+  const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+  for(const scenario of ['lost_attach','lost_provision','unsupported','bound','read_available']){
+    await t.test(scenario,async()=>{
+      const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-unattached-triage-')),file=path.join(directory,'inbox.sqlite');
+      const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+      const companyId=randomUUID(),sourceId=randomUUID(),ownerId=randomUUID(),oldThread=randomUUID(),newThread=randomUUID();
+      const source={id:sourceId,companyId,deviceId:identity.deviceId,localAccountId:randomUUID(),projectId:null,
+        skillId:'telegram-mtproto',state:'active',revision:0};
+      const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+      const scope={origin:identity.origin,assistantId:identity.assistantId,companyId,provider:'telegram',
+        accountId:source.localAccountId,bindingId:sourceId};
+      const clock=Date.now(),expiry=new Date(clock-60_000).toISOString();
+      let original,host,active=null,provisions=0,posts=0,runs=0,clears=0,readyMarker;
+      const seed=new DatabaseSync(file);
+      try{
+        const inbox=createAssistantInbox({database:seed,now:()=>clock});
+        inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+        inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'1',hasMore:false,
+          events:[{id:'message:123:9',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
+            conversationKey:'telegram-conversation/v1.'+'a'.repeat(64)}]});
+        const row=inbox.pendingExternalRoutes(scope)[0];
+        inbox.queueExistingTaskIntakes(scope,{sourceRevision:0,eventKeys:[row.event_key]});
+        const {id}=inbox.ownerIntakes()[0];
+        inbox.freezeExistingTaskIntake(id);inbox.prepareOwnerIntake(id);inbox.startOwnerIntakeProvision(id);
+        inbox.bindOwnerIntakeThread(id,oldThread);original=inbox.ownerIntake(id);
+      }finally{seed.close();}
+      let current={schemaVersion:1,id:original.id,companyId,sourceId,sourceRevision:0,kind:'route_existing',
+        eventId:original.original_event_id,eventIds:original.eventIds,threadId:scenario==='bound'?oldThread:null,
+        state:'leased',taskId:null,receiptId:null,readConfirmed:false,ownerPrivateRead:false,execution,leaseExpiresAt:expiry,
+        ...(!['unsupported','bound'].includes(scenario)?{unattachedLeaseExpiresAt:expiry}:{})};
+      const credential='tda_'+'x'.repeat(43);
+      const device=createAssistantDeviceClient({...identity,store:{get:async()=>({...identity,credential,expiresAt:1})},
+        http:createAssistantHttp({origin:identity.origin,fetchImpl:async(url,options)=>{
+          assert.equal(options.headers.authorization,'Bearer '+credential);
+          const body=JSON.parse(options.body);assert.equal(body.intakeId,original.id);
+          const reply=()=>new Response(JSON.stringify(current),{headers:{'content-type':'application/json'}});
+          if(url.endsWith('/intake/read'))return reply();
+          assert.ok(url.endsWith('/intake/begin'));assert.equal(++posts,1);
+          assert.equal(body.threadId,newThread);assert.equal(body.unattachedLeaseExpiresAt,expiry);
+          assert.deepEqual(body.eventIds,original.eventIds);
+          const db=new DatabaseSync(file,{readOnly:true});
+          try{const row=db.prepare('SELECT triage_provision_json FROM assistant_owner_intakes WHERE id=?').get(original.id);
+            assert.equal(JSON.parse(row.triage_provision_json).attachStarted,true,'attempt commits before HTTP');}
+          finally{db.close();}
+          current={...current,threadId:newThread,leaseExpiresAt:new Date(clock+30*60_000).toISOString()};
+          delete current.unattachedLeaseExpiresAt;
+          if(scenario==='lost_attach')throw Error('synthetic lost response after commit');
+          return reply();
+        }})});
+      const create=()=>createAssistantRuntimeHost({context:async action=>action({...device,identity,
+        heartbeat:async()=>({}),companies:async()=>[{companyId,memberId:ownerId,execution:{state:'ready',configuration:execution}}],
+        tasks:async()=>({bindings:[],nextCursor:null}),sourceAccounts:async()=>[source],sourceRoutes:async()=>[],
+        readHealth:async()=>({code:clears?'ready':'dispatch_review_required',revision:1}),
+        reportHealth:async input=>{assert.equal(input.clearedReason,'dispatch_review_required');assert.equal(active,null);clears++;}},
+        {readIdentity:async()=>identity,readActivation:async()=>null,withSetupLock:action=>action(),readActivePass:async()=>active,
+          activatePass:async pass=>{assert.equal(active,null);assert.equal(pass.threadId,newThread);active=pass;},
+          releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}}),
+        dependencies:{directory,ensureDirectory:async()=>{},now:()=>clock,timeZone:'UTC',
+          openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
+          readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+            authorizedByUserId:ownerId,businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome',
+              'workspace_execution','owner_decisions','background_service']}}),
+          readHookReadiness:async()=>({fingerprint:'c'.repeat(64)}),native:{
+            readUnmaterializedTriage:async thread=>{assert.equal(thread,oldThread);return scenario!=='read_available';},
+            readDelivery:async(thread,marker,options)=>{
+              if(thread===oldThread){assert.equal(marker,original.provision_id);
+                throw Object.assign(Error(),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});}
+              assert.equal(thread,newThread);assert.equal(marker,readyMarker);assert.equal(options.readinessOnly,true);
+              return {state:'completed',turnId:randomUUID()};
+            },
+            provision:async(input,options)=>{
+              assert.equal(++provisions,1);assert.equal(options.readinessOnly,true);
+              assert.notEqual(input.deliveryId,original.provision_id);assert.equal(active,null);
+              await options.beforeInvocation();options.startInvocation();
+              readyMarker=input.deliveryId;options.onThreadStarted(newThread);
+              if(scenario==='lost_provision')throw Object.assign(Error(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+              return {state:'completed',threadId:newThread};
+            },
+            run:async(input,options)=>{
+              assert.equal(++runs,1);assert.equal(input.deliveryId,original.delivery_id);
+              assert.equal(input.intakeContext.intakeId,original.id);assert.deepEqual(input.intakeContext.eventIds,original.eventIds);
+              options.startInvocation();
+              current={...current,state:'ignored',receiptId:randomUUID(),readConfirmed:true};
+              return {state:'completed',turnId:randomUUID()};
+            },
+          }}});
+      try{
+        host=await create();await host.coordinator.workOnce().catch(()=>{});await host.close();host=null;
+        host=await create();await host.coordinator.workOnce().catch(()=>{});
+        const positive=['lost_attach','lost_provision'].includes(scenario);
+        assert.deepEqual([provisions,posts,runs,clears],positive?[1,1,1,1]:[0,0,0,0]);
+        const db=new DatabaseSync(file,{readOnly:true});
+        try{
+          const row=db.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id);
+          assert.equal(row.provision_id,original.provision_id);assert.equal(row.delivery_id,original.delivery_id);
+          assert.equal(row.original_event_id,original.original_event_id);
+          assert.equal(row.thread_id,positive?newThread:oldThread);assert.equal(row.settled,positive?1:0);
+          if(positive)assert.equal(JSON.parse(row.triage_provision_json).originalThreadId,oldThread);
+          assert.equal(db.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,1);
+          assert.equal(db.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+        }finally{db.close();}
+      }finally{await host?.close();await fs.rm(directory,{recursive:true,force:true});}
+    });
+  }
+});

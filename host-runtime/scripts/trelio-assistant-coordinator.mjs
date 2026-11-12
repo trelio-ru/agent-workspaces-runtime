@@ -723,7 +723,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const confirmed=await client.confirmOwnerReply({intakePass:intakeLocator(row),receiptId:row.reply_receipt_id},signal);
     lease();return confirmed;
   };
-  const settleIntake=async(row,outcome,signal)=>{
+  const settleIntake=async(row,outcome,signal,terminal=null)=>{
     if(outcome.id!==row.id||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||!uuid.test(outcome.receiptId??'')
       ||row.kind==='route_existing'&&(outcome.kind!=='route_existing'||JSON.stringify(outcome.eventIds)!==JSON.stringify(row.eventIds)))
       fail('ASSISTANT_INTAKE_CHANGED');
@@ -740,7 +740,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // health; another retained task/intake still prevents false recovery.
       await businessConfirmed();return;
     }
-    if(['waiting_owner','ignored','cancelled','reply_abandoned'].includes(outcome.state))return;
+    const confirmRecoveredTriage=async()=>{
+      if(row.kind!=='route_existing'||outcome.readConfirmed!==true||!inbox.triageProvision(row.id)?.attachStarted)return;
+      const evidence=terminal??await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+      if(evidence.state==='completed'&&uuid.test(evidence.turnId??'')&&inbox.ownerIntake(row.id).settled===1)
+        await businessConfirmed();
+    };
+    if(outcome.state==='ignored'){await confirmRecoveredTriage();return;}
+    if(['waiting_owner','cancelled','reply_abandoned'].includes(outcome.state))return;
     if(outcome.state==='redirected'){
       const target=outcome.redirect;
       if(!target||target.sourceId===row.scope.bindingId)fail('ASSISTANT_INTAKE_CHANGED');
@@ -774,6 +781,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,
       eventKeys:row.kind==='route_existing'?row.originals.map(event=>event.event_key):[row.event_key],routes,intakeId:row.id});
     inbox.settleOwnerIntake(row.id);
+    await confirmRecoveredTriage();
   };
   const deferredIntake=row=>Object.freeze({state:'deferred',kind:'source_intake',intakeId:row.id});
   const blockedIntake=()=>{emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};};
@@ -1193,6 +1201,56 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       onThreadStarted:()=>fail('ASSISTANT_COORDINATOR_THREAD_CONFLICT')});lease();
     return result.state==='completed'&&result.threadId===row.thread_id;
   };
+  const exactTriageLedger=(row,live)=>live.kind==='route_existing'&&live.id===row.id&&live.companyId===row.scope.companyId
+    &&live.sourceId===row.scope.bindingId&&live.sourceRevision===row.source_revision&&live.eventId===row.original_event_id
+    &&JSON.stringify(live.eventIds)===JSON.stringify(row.eventIds)&&live.state==='leased'
+    &&live.readConfirmed===false&&live.ownerPrivateRead===false&&live.receiptId===null&&live.taskId===null;
+  const expiredTriageReservation=(row,live)=>exactTriageLedger(row,live)&&live.threadId===null
+    &&live.unattachedLeaseExpiresAt===live.leaseExpiresAt&&Number.isFinite(Date.parse(live.unattachedLeaseExpiresAt))
+    &&Date.parse(live.unattachedLeaseExpiresAt)<=now();
+  const recoverTriageProvision=async(row,signal)=>{
+    const retained=inbox.triageProvision(row.id);
+    if(retained?.started){
+      // This new empty marker is itself one-use. A lost result is read back
+      // only, even if the original staging reservation is still untouched.
+      if(!retained.threadId)return false;
+      const result=await native.readDelivery(retained.threadId,retained.markerId,{signal,provision:true,readinessOnly:true});lease();
+      if(result.state!=='completed')return false;
+      inbox.readyTriageProvision(row.id,retained.markerId);return true;
+    }
+    if(typeof native.readUnmaterializedTriage!=='function')return false;
+    const verify=async()=>{
+      if(await passHost.readActivePass())fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
+      await intakeSource(row,signal);
+      const live=await client.readSourceIntake(intakeLocator(row),signal);lease();
+      if(!expiredTriageReservation(row,live))return null;
+      const company=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
+      if(company?.execution?.state!=='ready')return null;
+      const execution=assistantExecutionConfiguration(company.execution.configuration);
+      if(JSON.stringify(assistantExecutionConfiguration(live.execution))!==JSON.stringify(execution))return null;
+      // Only an independently certified never-attached reservation has had
+      // no business authority. Native absence alone is not that certificate
+      // and does not authorize replay of the old chat or model input.
+      if(await native.readUnmaterializedTriage(row.thread_id,{signal})!==true)return null;
+      lease();return {leaseExpiresAt:live.unattachedLeaseExpiresAt,execution};
+    };
+    const evidence=await verify();
+    if(!evidence)return false;
+    const recovery=inbox.prepareTriageProvision(row.id,evidence.leaseExpiresAt);
+    const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+    const result=await native.provision({deliveryId:recovery.markerId,cwd,execution:evidence.execution},{
+      signal,chatKind:'source_triage',readinessOnly:true,
+      beforeInvocation:async()=>{
+        const current=await verify();
+        if(!current||JSON.stringify(current)!==JSON.stringify(evidence))
+          fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
+      },
+      startInvocation:()=>{lease();inbox.startTriageProvision(row.id,recovery.markerId);},
+      onThreadStarted:threadId=>{lease();inbox.bindTriageProvision(row.id,recovery.markerId,threadId);},
+    });lease();
+    if(result.state!=='completed'||result.threadId!==inbox.triageProvision(row.id).threadId)return false;
+    inbox.readyTriageProvision(row.id,recovery.markerId);return true;
+  };
   /** The old begin protocol always refused dialogue. A genuinely consumed
    * source answer permits ONE independently advertised admission of the SAME
    * never-started child, not replay of that old request. Native SQL separately
@@ -1261,11 +1319,26 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // policy cannot turn uncertainty into permission to start another chat.
       if(!row.thread_id){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
       const review=inbox.ownerProvisionReview(row.id),marker=review?.started?review.reviewId:row.provision_id;
-      const result=await native.readDelivery(row.thread_id,marker,{signal,provision:true,...(!review?.started?{allowPrepared:true}:{readinessOnly:true})});lease();
-      if(result.state!=='completed'&&!await verifyOwnerProvision(row,result,signal)){
-        emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};
+      const recovery=row.kind==='route_existing'?inbox.triageProvision(row.id):null;
+      if(recovery?.started){
+        if(!await recoverTriageProvision(row,signal))return blockedIntake();
+      }else{
+        let result;
+        try{
+          result=await native.readDelivery(row.thread_id,marker,{signal,provision:true,
+            ...(!review?.started?{allowPrepared:true}:{readinessOnly:true})});lease();
+        }catch(error){
+          if(row.kind!=='route_existing'||error?.code!=='ASSISTANT_CODEX_READ_UNAVAILABLE')throw error;
+          if(!await recoverTriageProvision(row,signal))return blockedIntake();
+        }
+        if(result){
+          if(result.state!=='completed'&&!await verifyOwnerProvision(row,result,signal)){
+            emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};
+          }
+          inbox.readyOwnerIntake(row.id);
+        }
       }
-      inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
+      row=inbox.ownerIntake(row.id);
     }
     if(saved&&row.native_started===1&&['complete','waiting_owner'].includes(row.state)
       &&!await nativeIntakeStopped(row,signal))return blockedIntake();
@@ -1332,7 +1405,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(outcome.state==='reply_pending'&&!['completed','failed'].includes(nativeResult.state))return blockedIntake();
       outcome=await reconcileIntakeReply(row,outcome,signal,nativeResult);
       if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
-        await settleIntake(row,outcome,signal);return deferredIntake(row);
+        await settleIntake(row,outcome,signal,nativeResult);return deferredIntake(row);
       }
       // Native history may later be incomplete/running instead of repeating
       // the capacity marker. That cannot revive an already consumed POST or
@@ -1400,7 +1473,22 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // After a lost response, only exact child read-back is allowed across restart;
     // even an idempotent endpoint is not blindly replayed or allocated another ID.
     let admitted;
-    if(answeredAdmission)admitted=await client.reconcileAnsweredSourceIntake(input,signal);
+    const triage=row.kind==='route_existing'?inbox.triageProvision(row.id):null;
+    if(triage){
+      const live=await client.readSourceIntake(intakeLocator(row),signal);lease();
+      if(triage.attachStarted){
+        // A lost attach response is resolved by this exact GET only. A
+        // second request cannot extend the clock or assign a different chat.
+        if(!exactTriageLedger(row,live)||live.threadId!==row.thread_id)fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+        admitted=live;
+      }else{
+        if(!expiredTriageReservation(row,live)||live.unattachedLeaseExpiresAt!==triage.leaseExpiresAt)
+          fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+        inbox.startTriageAttachment(row.id,triage.markerId);
+        admitted=await client.beginSourceIntake({...input,unattachedLeaseExpiresAt:triage.leaseExpiresAt},signal);
+      }
+    }
+    else if(answeredAdmission)admitted=await client.reconcileAnsweredSourceIntake(input,signal);
     else if(recovery?.beginAttempted)admitted=await client.readSourceIntake(intakeLocator(row),signal);
     else{
       if(recovery)inbox.startReadonlyIntakeBegin(row.id);
@@ -1458,7 +1546,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(await recoverOwnerCapacity(inbox.ownerIntake(row.id),outcome,result,combined))return await passHost.readActivePass()?{state:'blocked',kind:'source_intake'}:deferredIntake(row);
       outcome=await reconcileIntakeReply(inbox.ownerIntake(row.id),outcome,combined);
       if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
-      await settleIntake(inbox.ownerIntake(row.id),outcome,combined);return {state:'completed',kind:'source_intake'};
+      await settleIntake(inbox.ownerIntake(row.id),outcome,combined,result);return {state:'completed',kind:'source_intake'};
     }catch(error){
       if(cancelledOutcome)return settleOwnedCancellation();
       if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);

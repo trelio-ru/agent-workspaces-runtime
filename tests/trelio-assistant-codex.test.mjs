@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -1589,5 +1589,26 @@ test('exact-read technical correction certifies READY, selected failures and the
     t=>{t.items.push(structuredClone(t.items.at(-1)));}]){
     const changed=structuredClone(f.turn);change(changed);
     assert.equal(await assistantReadOnlyPreparationFailure(changed,options),false,String(change));
+  }
+});
+
+test('unmaterialized triage probe observes only two exact native refusals',async()=>{
+  const threadId=randomUUID();
+  for(const mode of ['unmaterialized','indexed','wrong_uuid','generic_failure']){
+    const methods=[];
+    const options={executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+      methods.push(request.method);
+      assert.equal(request.params.threadId,threadId);
+      if(request.method==='thread/turns/list'&&mode==='indexed')return {result:{data:[],nextCursor:null}};
+      return {error:{code:mode==='generic_failure'?-32000:-32600,
+        message:'thread not loaded: '+(mode==='wrong_uuid'?randomUUID():threadId)}};
+    })};
+    if(mode==='wrong_uuid'||mode==='generic_failure'){
+      await assert.rejects(readAssistantUnmaterializedTriage(threadId,options),/READ_UNAVAILABLE/);
+      assert.deepEqual(methods,['thread/read']);
+    }else{
+      assert.equal(await readAssistantUnmaterializedTriage(threadId,options),mode==='unmaterialized');
+      assert.deepEqual(methods,['thread/read','thread/turns/list']);
+    }
   }
 });

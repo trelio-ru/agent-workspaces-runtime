@@ -133,7 +133,7 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   // no-send fence and the independent generation-only recovery discriminator.
   // Recreating the intake table must reach v27 with an empty prepared-output cell, without resetting v1 state;
   // merely restoring the legacy v19/v24 tables would leave newer rows unusable.
-  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 28);
+  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 29);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('assistant_owner_intakes','assistant_source_intake_events')").get().count, 2);
   assert.ok(db.prepare('PRAGMA table_info(assistant_owner_intakes)').all().some(row => row.name === 'kind'));
   assert.ok(db.prepare('PRAGMA table_info(assistant_owner_intakes)').all().some(row => row.name === 'reply_abandon_receipt_id'));

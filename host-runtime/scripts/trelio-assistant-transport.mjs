@@ -2624,6 +2624,11 @@ const intakeProjection=(value,expected)=>{
     ||expected.threadId!==undefined&&expected.threadId!==null&&value.threadId!==expected.threadId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(value.kind!==undefined&&!['owner_command','route_existing'].includes(value.kind))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   const routing=value.kind==='route_existing';
+  if(value.unattachedLeaseExpiresAt!==undefined&&(!routing||value.state!=='leased'||value.threadId!==null
+    ||value.readConfirmed||value.ownerPrivateRead!==false||value.taskId!==null||value.receiptId!==null
+    ||value.unattachedLeaseExpiresAt!==value.leaseExpiresAt
+    ||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value.unattachedLeaseExpiresAt)))
+    fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(value.state==='reply_abandoned'&&(routing||value.readConfirmed!==true||value.ownerPrivateRead!==true
     ||value.taskId!==null||!UUID.test(value.receiptId??'')))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.kind==='route_existing'&&(!routing||JSON.stringify(value.eventIds)!==JSON.stringify(expected.eventIds)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -2660,6 +2665,7 @@ const intakeProjection=(value,expected)=>{
     ...(routing?{kind:'route_existing',eventIds:value.eventIds.map(id),...(value.companySelectionRequired===true?{companySelectionRequired:true}:{})}:{}),
     eventId:id(value.eventId),threadId:value.threadId===null?null:id(value.threadId),state:value.state,leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
     taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
+    ...(value.unattachedLeaseExpiresAt!==undefined?{unattachedLeaseExpiresAt:isoTimestamp(value.unattachedLeaseExpiresAt)}:{}),
     ...(value.readOnlyRecoveryProtocolVersion===1?{readOnlyRecoveryProtocolVersion:1}:{}),
     ...(value.readOnlyReplyCorrectionProtocolVersion===1?{readOnlyReplyCorrectionProtocolVersion:1}:{}),
     ...(value.readOnlyContinuationProtocolVersion===1?{readOnlyContinuationProtocolVersion:1}:{}),
@@ -2964,13 +2970,18 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     registerIntakeRuntime:(input,signal)=>registerObservedRuntime(input,signal,true),
     async beginSourceIntake(input,signal){
       if(input?.kind==='route_existing'){
-        const keys=['companyId','sourceId','intakeId','sourceRevision','eventId','eventIds','threadId','conversationKey','kind','redirectFromIntakeId'];
+        const keys=['companyId','sourceId','intakeId','sourceRevision','eventId','eventIds','threadId','conversationKey','kind','redirectFromIntakeId','unattachedLeaseExpiresAt'];
         if(!object(input)||Object.keys(input).some(key=>!keys.includes(key))||!Array.isArray(input.eventIds)||!input.eventIds.length||input.eventIds.length>100
           ||input.eventIds[0]!==input.eventId||new Set(input.eventIds).size!==input.eventIds.length
           ||!['telegram','email','max'].some(provider=>assistantConversationKeyMatches(provider,input.conversationKey)))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
         const body={...intakeLocator(input),kind:'route_existing',sourceRevision:revision(input.sourceRevision),eventId:id(input.eventId),
           eventIds:input.eventIds.map(id),threadId:input.threadId===null?null:id(input.threadId),conversationKey:input.conversationKey,
           ...(input.redirectFromIntakeId?{redirectFromIntakeId:id(input.redirectFromIntakeId)}:{})};
+        if(input.unattachedLeaseExpiresAt!==undefined){
+          if(body.threadId===null||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(input.unattachedLeaseExpiresAt)
+            ||!Number.isFinite(Date.parse(input.unattachedLeaseExpiresAt)))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+          body.unattachedLeaseExpiresAt=input.unattachedLeaseExpiresAt;
+        }
         return intakeProjection(await call('intakeBegin',body,signal),body);
       }
       const body={...intakeLocator(input),sourceRevision:revision(input.sourceRevision),eventId:id(input.eventId),threadId:id(input.threadId),
