@@ -20151,9 +20151,13 @@ export const buildKimiWorkBundle = ({ pluginRoot, nodePath = process.execPath })
   // GUI and terminal PATHs may select different compatible Node installations;
   // neither that difference nor an ordinary Node upgrade requires a reinstall.
   const server = profile => ({ command: path.basename(nodePath), args: ["./bootstrap.mjs", profile], cwd: "./", toolTimeoutMs: 360_000 });
+  // Work reads the icon from the imported manifest. Advance the native plugin
+  // version so Kimi can offer the branded import as an update of the same ID.
   return {
-    "kimi.plugin.json": `${JSON.stringify({ name: "trelio-agent-workspaces", version: "0.1.0",
-      description: "Trelio Agent Workspaces for Kimi Work", interface: { displayName: "Trelio Agent Workspaces" },
+    "kimi.plugin.json": `${JSON.stringify({ name: "trelio-agent-workspaces", version: "0.1.1",
+      description: "Trelio Agent Workspaces for Kimi Work", interface: {
+        displayName: "Trelio Agent Workspaces", iconUrl: "https://trelio.ru/favicon-v2.png",
+      },
       mcpServers: { trelio: server("remote"), "trelio-remote-skills": server("local") },
       systemPrompt: `Use Trelio in Kimi Work with clientKind=kimi-work. Connect via trelio_connect; never use Codex/Claude hooks or author runtimeSessionProof. Read the applicable Trelio workflow from ${path.join(pluginRoot, "skills", "trelio-workspace-worker", "SKILL.md")} before Workspace work. MCP Apps and secret browser-fill are unavailable. OAuth, protected read, bridge and saved Workspace are separate checks; report only verified results.` }, null, 2)}\n`,
     "bootstrap.mjs": `// Generated bootstrap; the official loader owns update, verification and startup.\nimport { runHostRuntimeLoader } from ${JSON.stringify(loader)};\nconst profile = process.argv[2];\nif (process.argv.length !== 3 || !['remote','local'].includes(profile)) throw new Error('TRELIO_KIMI_PROFILE_INVALID');\nif (Number(process.versions.node.split('.')[0]) < 22) throw new Error('TRELIO_NODE_22_REQUIRED');\nprocess.env.TRELIO_WORKSPACE_CLIENT_PROFILE = 'kimi-work';\nprocess.exitCode = await runHostRuntimeLoader({ rawArguments: ['mcp','--kimi-work',profile] });\n`,

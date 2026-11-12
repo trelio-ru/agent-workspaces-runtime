@@ -31,6 +31,9 @@ test("Kimi installer prepares a fresh signed launch after Plugin Builder updates
   const manifestPath = path.join(result.bundleDirectory, "kimi.plugin.json");
   const originalManifest = await fs.readFile(manifestPath, "utf8");
   const manifest = JSON.parse(originalManifest);
+  assert.equal(manifest.name, "trelio-agent-workspaces");
+  assert.equal(manifest.version, "0.1.1");
+  assert.equal(manifest.interface.iconUrl, "https://trelio.ru/favicon-v2.png");
   assert.deepEqual(Object.keys(manifest.mcpServers), ["trelio", "trelio-remote-skills"]);
   assert.equal(manifest.hooks, undefined);
   assert.equal(manifest.mcpServers.trelio.command, path.basename(process.execPath));
@@ -58,10 +61,13 @@ test("parallel Kimi installs succeed with a modified legacy digest bundle and le
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const pluginRoot = await fs.realpath(pluginDirectory);
   const files = buildKimiWorkBundle({ pluginRoot });
-  const digest = crypto.createHash("sha256").update(JSON.stringify(files)).digest("hex");
+  const manifest = JSON.parse(files["kimi.plugin.json"]);
+  manifest.version = "0.1.0";
+  delete manifest.interface.iconUrl;
+  const legacyFiles = { ...files, "kimi.plugin.json": `${JSON.stringify(manifest, null, 2)}\n` };
+  const digest = crypto.createHash("sha256").update(JSON.stringify(legacyFiles)).digest("hex");
   const legacy = path.join(directory, "native-clients", "kimi-work", "bundles", digest);
   await fs.mkdir(legacy, { recursive: true, mode: 0o700 });
-  const manifest = JSON.parse(files["kimi.plugin.json"]);
   manifest.interface.category = "productivity";
   const changedManifest = JSON.stringify(manifest);
   await fs.writeFile(path.join(legacy, "kimi.plugin.json"), changedManifest, { mode: 0o600 });

@@ -1470,6 +1470,8 @@ Kimi Work uses its own default-allow OAuth profile and the SAME bridge/data
 plane, without foreign hooks. The installer generates a fresh private import
 from signed code so Plugin Builder can update metadata without blocking later
 installs. Preserve all previously handed-off paths and legacy digest bundles.
+Kimi branding belongs to the generated manifest. Use the canonical public icon
+and the native plugin's own version for updates through Kimi Work.
 The initial tool list includes exact discovery and invocation alongside OAuth.
 Keep the live native catalogue and the same invocation guards for both routes,
 so a chat retaining its first list can complete its request after login.

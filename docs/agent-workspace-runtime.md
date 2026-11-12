@@ -3548,6 +3548,10 @@ budget, rather than merely reading a cached selection. Closed forwarded
 `mcp --kimi-work remote|local` selectors are checked at both executable boundaries;
 old/unknown runtime selectors refuse without starting ordinary local MCP.
 Native registration and installation remain Work's ordinary user-facing flow.
+The generated manifest declares the canonical public Trelio icon via
+`interface.iconUrl`. New installs receive it with the import. For an existing
+install, register the new import under the same plugin ID and apply the update
+in Work. The native manifest version is independent of the signed runtime version.
 The installer only writes the new import directory and preserves other clients'
 configuration and trust.
 No stable plugin change, copied provider implementation or new package file is
