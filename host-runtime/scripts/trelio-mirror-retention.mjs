@@ -55,10 +55,13 @@ export const withMirrorRetentionLock = async (root, operation, options) =>
 
 export const withCompanyMirrorRetentionLock = async (root, operation, options) => {
   if (path.basename(root) !== `schema-${MIRROR_SCHEMA_VERSION}`) throw new Error("Unexpected atomic mirror layout.");
-  return withRetentionClaim(root, operation, { ...options, atomic: true });
+  return withRetentionClaim(root, operation, options, { atomic: true });
 };
 
-const withRetentionClaim = async (root, operation, { waitMs = 30_000, signal, atomic = false } = {}) => {
+const withRetentionClaim = async (
+  root, operation, { waitMs = 30_000, signal } = {},
+  { atomic = false, lockName = "retention.lock" } = {},
+) => {
   signal?.throwIfAborted();
   // Contenders inspect only structural lock metadata. Windows hardening is a
   // write: applying a parent DACL while its owner publishes a child can race
@@ -66,7 +69,7 @@ const withRetentionClaim = async (root, operation, { waitMs = 30_000, signal, at
   // behind the mkdir claim; no business data is touched before validation.
   const rootStat = await fs.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("Unsafe mirror lock root.");
-  const lock = path.join(root, "retention.lock");
+  const lock = path.join(root, lockName);
   const id = crypto.randomUUID();
   const ownerName = `${process.pid}-${id}.json`;
   const deadline = Date.now() + waitMs;
@@ -329,8 +332,11 @@ export const pruneCompanyMirrorCaches = async ({
 } = {}) => {
   if (!await exists(directory)) return { removedFiles: 0, removedBytes: 0 };
   await assertPrivatePathKind(directory, "directory");
-  return withMirrorRetentionLock(directory, async () => {
-    const statePath = path.join(directory, "retention-state.json");
+  // A stopped old sweeper can leave its global mkdir claim empty. The new
+  // sweeper owns a separate namespace and scheduling record, so it can still
+  // reach current mirrors. Both versions keep the same per-schema sync lock.
+  return withRetentionClaim(directory, async () => {
+    const statePath = path.join(directory, "retention-v2-state.json");
     const state = await readPrivateJsonFile(statePath, { maximumBytes: 4096 });
     if (!force && Date.now() - state.completedAt < MAINTENANCE_INTERVAL_MS) return { skipped: "interval" };
     const result = { removedFiles: 0, removedBytes: 0, skippedSchemas: 0 };
@@ -366,7 +372,7 @@ export const pruneCompanyMirrorCaches = async ({
     }
     await writePrivateJsonFile(statePath, { completedAt: Date.now(), ...result });
     return result;
-  }, { waitMs: 0 });
+  }, { waitMs: 0 }, { atomic: true, lockName: "retention-v2.lock" });
 };
 
 export const startMirrorCacheMaintenance = () => {

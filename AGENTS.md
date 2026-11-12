@@ -764,6 +764,8 @@ publication tooling также остаются вне этого публичн
   Cold managed reads keep the original first-sync join bound, not stale-read 30s.
   Mirror pointer reads and writer recovery pass the caller's abort signal into
   retention-lock acquisition; a cancelled waiter leaves the live owner intact.
+  The current mirror sweeper has its own atomic root lock and cooldown record.
+  Legacy root locks and per-schema writer interlocks retain their existing scope.
   Schema 9 publishes the retention directory and private nonce atomically.
   Empty claims can be removed only in that layout; legacy readers and their
   ownerless claims stay isolated. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).

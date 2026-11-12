@@ -2700,8 +2700,9 @@ Cleanup после публикации best-effort: ошибка не прев�
 pointer в failed mutation и не разрешает повтор публикации.
 
 Каждый запуск signed entrypoint запускает отдельный тихий metadata-only sweep,
-не задерживая hook/MCP initialize. Общий lock и 15-минутный cooldown ограничивают
-повторы. Sweep охватывает известные schema 1–9 во всех origin/company roots,
+не задерживая hook/MCP initialize. Новый sweep использует атомарный
+`retention-v2.lock` и отдельный 15-минутный cooldown. Пустой lock и отметка
+прежнего sweep остаются в legacy namespace. Sweep охватывает известные schema 1–9 во всех origin/company roots,
 включая заброшенные форматы и компании без новых изменений. Для каждого schema
 атомарно захватывается прежний `sync.lock`; занятые writer и retention locks
 пропускаются без ожидания. Current
@@ -2713,7 +2714,7 @@ pointer в failed mutation и не разрешает повтор публик�
 повторной проверкой inode/size/mtime. Symlinks, hardlinks, unknown файлы, partial
 writes, повреждённые pointers и missing current сохраняются. Generation payload,
 keys, credentials и Workspace files не читаются; server state и ACL не меняются.
-Summary хранит только счётчики и время локально в `retention-state.json`.
+Summary хранит только счётчики и время локально в `retention-v2-state.json`.
 Scratchpad файлов сохраняет свой отдельный лимит 512 MiB/семь дней.
 Свежий `sync.lock` после остановки writer восстанавливается без ожидания возраста
 только при valid protected owner schema/UUID/PID и native `ESRCH`. Живой или

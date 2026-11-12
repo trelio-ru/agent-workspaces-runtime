@@ -568,6 +568,11 @@ test('real entrypoint runs background maintenance using only its isolated local 
   await ensurePrivateDirectory(bridgeRoot);
   const cacheRoot = path.join(bridgeRoot, 'company-context-mirrors');
   await fs.rename(f.directory, cacheRoot);
+  const legacyLock = path.join(cacheRoot, 'retention.lock');
+  const legacyState = path.join(cacheRoot, 'retention-state.json');
+  await ensurePrivateDirectory(legacyLock);
+  await writePrivateJsonFile(legacyState, { completedAt: Date.now() });
+  const priorState = await fs.readFile(legacyState, 'utf8');
   const entrypoint = fileURLToPath(new URL('../host-runtime/scripts/trelio-host-runtime-entry.mjs', import.meta.url));
   // --help exits without admission/network. Cleanup is the genuine detached
   // startup subprocess, not a test replacement for the production launcher.
@@ -575,15 +580,20 @@ test('real entrypoint runs background maintenance using only its isolated local 
   const deadline = Date.now() + 30_000;
   let state;
   while (Date.now() < deadline) {
-    try { state = JSON.parse(await fs.readFile(path.join(cacheRoot, 'retention-state.json'))); break; }
+    try { state = JSON.parse(await fs.readFile(path.join(cacheRoot, 'retention-v2-state.json'))); break; }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.equal(state?.removedFiles, 6);
   // Wait for the detached process to release its root lock before teardown.
   while (Date.now() < deadline) {
-    try { await fs.lstat(path.join(cacheRoot, 'retention.lock')); }
-    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    try { await fs.lstat(path.join(cacheRoot, 'retention-v2.lock')); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      assert.deepEqual(await fs.readdir(legacyLock), []);
+      assert.equal(await fs.readFile(legacyState, 'utf8'), priorState);
+      return;
+    }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.fail('background maintenance did not release its lock');
