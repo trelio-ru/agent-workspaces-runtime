@@ -73,6 +73,29 @@ runtime/plugin or change any minimum version. Trelio's existing product queue
 keeps its hosted-pause and local-evidence policy for releases and uses the same release-before-CI
 invariant without replacing its mature runner/evidence implementation.
 
+## Published task branch cleanup
+
+Runtime enables `remoteBranchCleanup` in its repository policy. Before the main
+transport, the worker retains the exact expected origin SHA of its task branch.
+An ordinary ticket uses the observed pre-rebase remote SHA, after confirming it
+belongs to the original source. A release ticket records the SHA it published
+for hosted CI. Local-only tasks have no remote branch to clean.
+
+After guarded main read-back, the worker checks the integrated commit on origin,
+deletes only that task ref under an explicit SHA lease, and reads it back even
+after an ambiguous transport response. A changed ref is preserved and recorded
+as `remoteCleanupState=changed`. A transient refusal leaves successful
+integration with `remoteCleanupState=pending`. Run
+`npm run git:integrate -- --retry-cleanup TICKET` from the same clone to retry
+only cleanup. The retry checks live ancestry and the recorded lease, without CI,
+rebase, or push to main. Completed cleanup stays a no-op on repeat. The separate
+`git:finish-worktree` removes the local worktree and branch.
+
+Resolve pending remote cleanup before closing an authorized release. The
+tagged artifact build, signing and activation keep their own existing gates.
+Other repositories must opt in through their own policy. Older receipts and
+unrecorded remote refs are not automatically pruned.
+
 ## Background integration and chat follow-up
 
 `npm run git:integrate` always launches in the background; `--background` remains

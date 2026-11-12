@@ -16,6 +16,7 @@ import {acknowledgeAdmission, integrationLaunchResult, launchBackground, waitFor
 
 const SHA = /^[a-f0-9]{40}$/u;
 const ID = /^\d{12}$/u;
+const TASK_BRANCH = /^codex\/[a-z0-9][a-z0-9._-]*$/u;
 const startHost = os.hostname();
 const localName = process.platform === 'darwin'
   ? spawnSync('/usr/sbin/scutil', ['--get', 'LocalHostName'], {encoding: 'utf8', timeout: 1000}) : null;
@@ -69,6 +70,7 @@ export function policy(cwd) {
     || !Array.isArray(value.verify) || !value.verify.length || value.verify.some(item => typeof item !== 'string')
     || (value.verifyLocal !== undefined && (!Array.isArray(value.verifyLocal) || !value.verifyLocal.length
       || value.verifyLocal.some(item => typeof item !== 'string')))
+    || (value.remoteBranchCleanup !== undefined && typeof value.remoteBranchCleanup !== 'boolean')
     || !Array.isArray(value.transport) || !value.transport.length || value.transport.some(item => typeof item !== 'string')) {
     throw Error('Invalid repository coordination policy');
   }
@@ -82,7 +84,8 @@ export function queue(cwd, attempt = 0) {
     const row = JSON.parse(fs.readFileSync(filename, 'utf8'));
     if (row.schemaVersion !== 1 || row.id + '.json' !== name || !Number.isSafeInteger(row.pid) || row.pid < 1
       || row.pgid !== row.pid || typeof row.host !== 'string' || typeof row.cwd !== 'string'
-      || !/^codex\/[a-z0-9][a-z0-9._-]*$/u.test(row.branch ?? '') || !SHA.test(row.sha ?? '')
+      || !TASK_BRANCH.test(row.branch ?? '') || !SHA.test(row.sha ?? '')
+      || (row.remoteCleanupSha !== undefined && !SHA.test(row.remoteCleanupSha))
       || !['waiting', 'running', 'verified'].includes(row.state) || typeof row.tag !== 'string') throw Error('Invalid coordination ticket');
     return row;
   }); } catch (error) {
@@ -109,6 +112,9 @@ function result(cwd, id) {
   const value = JSON.parse(fs.readFileSync(filename, 'utf8'));
   if (value.schemaVersion !== 1 || value.id !== id || !SHA.test(value.sha ?? '') || !SHA.test(value.sourceSha ?? '')
     || !['succeeded', 'failed', 'interrupted', 'recovered'].includes(value.state)
+    || (value.remoteCleanupSha !== undefined && (!SHA.test(value.remoteCleanupSha) || !TASK_BRANCH.test(value.branch ?? '')))
+    || (value.remoteCleanupState !== undefined && (!value.remoteCleanupSha
+      || !['complete', 'changed', 'pending'].includes(value.remoteCleanupState)))
     || typeof value.cwd !== 'string' || typeof value.branch !== 'string' || typeof value.tag !== 'string'
     || !Number.isFinite(Date.parse(value.finishedAt))) throw Error('Invalid coordination result');
   return value;
@@ -194,7 +200,7 @@ async function mutex(cwd, config, action, cancelled = () => false) {
 }
 function candidate(cwd, entry) {
   const branch = git(cwd, 'symbolic-ref', '--short', 'HEAD'), sha = git(cwd, 'rev-parse', 'HEAD');
-  if (!/^codex\/[a-z0-9][a-z0-9._-]*$/u.test(branch)
+  if (!TASK_BRANCH.test(branch)
     || git(cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none')) throw Error('Use a clean committed codex/* worktree');
   for (const marker of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG']) {
     if (fs.existsSync(path.resolve(cwd, git(cwd, 'rev-parse', '--git-path', marker)))) throw Error('Unfinished Git operation');
@@ -237,6 +243,81 @@ function run(command, args, cwd) {
       env: {...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ''}`}});
     child.once('error', reject);
     child.once('close', (code, signal) => code === 0 ? resolve() : reject(Error(`${command} failed (${signal ?? code})`)));
+  });
+}
+
+function remoteRefSha(cwd, ref) {
+  const observation = git(cwd, 'ls-remote', '--refs', 'origin', ref);
+  if (!observation) return '';
+  const sha = observation.split('\t')[0];
+  if (!SHA.test(sha) || observation !== `${sha}\t${ref}`) throw Error('Incomplete remote Git ref');
+  return sha;
+}
+
+function cleanPublishedBranch(cwd, {branch, sha, remoteCleanupSha}) {
+  if (!TASK_BRANCH.test(branch) || !SHA.test(sha) || !SHA.test(remoteCleanupSha)) {
+    throw Error('Invalid recorded branch cleanup');
+  }
+  const ref = `refs/heads/${branch}`;
+  git(cwd, 'check-ref-format', ref);
+  const origin = git(cwd, 'remote', 'get-url', '--all', 'origin');
+  if (!origin || origin.includes('\n') || origin !== git(cwd, 'remote', 'get-url', '--push', '--all', 'origin')) {
+    throw Error('Remote cleanup requires one matching origin read and push URL');
+  }
+  const main = remoteRefSha(cwd, 'refs/heads/main');
+  // This also covers recovery after a lost push response. A recorded cleanup
+  // plan on its own never proves the rebased commit reached main.
+  if (!main) throw Error('Cannot confirm origin/main');
+  try { git(cwd, 'merge-base', '--is-ancestor', sha, main); }
+  catch { throw Error('Cannot confirm the integrated commit on origin/main'); }
+
+  const before = remoteRefSha(cwd, ref);
+  if (!before) return 'complete';
+  if (before !== remoteCleanupSha) return 'changed';
+  // Git checks the expected remote SHA at mutation time. A separate fresh
+  // observation settles both success and an ambiguous transport response.
+  spawnSync('git', ['push', `--force-with-lease=${ref}:${remoteCleanupSha}`, 'origin', `:${ref}`], {
+    cwd, stdio: 'ignore', timeout: 30_000,
+  });
+  const after = remoteRefSha(cwd, ref);
+  if (!after) return 'complete';
+  if (after !== remoteCleanupSha) return 'changed';
+  throw Error('Remote task branch is still present at the expected SHA');
+}
+
+function finishRemoteCleanup(cwd, entry) {
+  if (!entry.remoteCleanupSha) return {};
+  try {
+    const remoteCleanupState = cleanPublishedBranch(cwd, entry);
+    if (remoteCleanupState === 'changed') console.log(`Remote branch ${entry.branch} changed and was kept.`);
+    return {remoteCleanupState};
+  } catch (error) {
+    // Guarded transport has succeeded. Keep that outcome and let the
+    // operator retry housekeeping independently of CI and the main push.
+    console.error(`Integrated; remote cleanup pending (${error.message}). Retry: npm run git:integrate -- --retry-cleanup ${entry.id}`);
+    return {remoteCleanupState: 'pending'};
+  }
+}
+
+async function retryRemoteCleanup(cwd, id) {
+  if (!ID.test(id)) throw Error('Cleanup requires one exact ticket');
+  const config = policy(cwd);
+  const receipt = result(cwd, id);
+  if (!receipt?.remoteCleanupSha) throw Error('The ticket has no recorded remote cleanup');
+  if (receipt.remoteCleanupState && receipt.remoteCleanupState !== 'pending') return receipt.remoteCleanupState;
+  if (queue(cwd).some(row => row.branch === receipt.branch)) {
+    throw Error('Wait for the branch integration to settle before retrying cleanup');
+  }
+  // Network I/O does not hold the main mutex. The exact remote lease fences
+  // concurrent writers, and the short lock below preserves terminal receipts.
+  const observed = cleanPublishedBranch(cwd, receipt);
+  return mutex(cwd, config, () => {
+    const current = result(cwd, id);
+    if (!current || current.branch !== receipt.branch || current.sha !== receipt.sha
+      || current.remoteCleanupSha !== receipt.remoteCleanupSha) throw Error('The cleanup receipt changed');
+    if (current.remoteCleanupState && current.remoteCleanupState !== 'pending') return current.remoteCleanupState;
+    save(resultPath(cwd, id), {...current, remoteCleanupState: observed});
+    return observed;
   });
 }
 
@@ -299,16 +380,16 @@ export async function coordinate(cwd, tag = '', actions = {}) {
     if (tag && git(cwd, 'ls-remote', '--refs', 'origin', `refs/tags/${tag}`)) throw Error('Release version already exists; choose a fresh version before CI');
     if (git(cwd, 'rev-list', '--merges', 'refs/remotes/origin/main..HEAD')) throw Error('Resolve merge history explicitly before integration');
     const remoteRef = `refs/heads/${entry.branch}`;
-    const published = git(cwd, 'ls-remote', '--refs', 'origin', remoteRef);
-    const remoteSha = published ? published.split('\t')[0] : '';
-    if (published && (!SHA.test(remoteSha) || published !== `${remoteSha}\t${remoteRef}`)) throw Error('Incomplete task ref');
+    const remoteSha = remoteRefSha(cwd, remoteRef);
     if (remoteSha) git(cwd, 'merge-base', '--is-ancestor', remoteSha, initial.sha);
     await command('git', ['rebase', '--no-autostash', 'refs/remotes/origin/main'], cwd);
-    entry.sha = git(cwd, 'rev-parse', 'HEAD'); save(path.join(root(cwd), entry.id + '.json'), entry);
+    entry.sha = git(cwd, 'rev-parse', 'HEAD');
+    if (config.remoteBranchCleanup && remoteSha) entry.remoteCleanupSha = remoteSha;
+    save(path.join(root(cwd), entry.id + '.json'), entry);
     candidate(cwd, entry);
     if (!tag && entry.sha === git(cwd, 'rev-parse', 'refs/remotes/origin/main')) {
       await command('git', ['merge', '--ff-only', entry.sha], canonical);
-      observation = {state: 'succeeded', outcome: 'already_integrated'}; return;
+      observation = {state: 'succeeded', outcome: 'already_integrated', ...finishRemoteCleanup(cwd, entry)}; return;
     }
     const base = git(cwd, 'rev-parse', 'refs/remotes/origin/main');
     if (!tag && config.verifyLocal) {
@@ -319,6 +400,10 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       entry.localCheckBase = base;
     } else {
       await command('git', ['push', `--force-with-lease=${remoteRef}:${remoteSha}`, 'origin', `HEAD:${remoteRef}`], cwd);
+      if (config.remoteBranchCleanup) {
+        entry.remoteCleanupSha = entry.sha;
+        save(path.join(root(cwd), entry.id + '.json'), entry);
+      }
       await command(config.verify[0], [...config.verify.slice(1), '--prepare', entry.sha], cwd);
     }
     if (cancelled) throw Error('Coordination interrupted');
@@ -332,7 +417,7 @@ export async function coordinate(cwd, tag = '', actions = {}) {
     assertPush(cwd, entry.sha, tag);
     await command(config.transport[0], [...config.transport.slice(1), ...(tag ? ['--tag', tag] : [])], cwd);
     console.log(`FIFO ${entry.id} complete; finish this worktree from canonical main`);
-    observation = {state: 'succeeded', outcome: 'integrated'};
+    observation = {state: 'succeeded', outcome: 'integrated', ...finishRemoteCleanup(cwd, entry)};
   } catch (error) {
     observation = {state: cancelled ? 'interrupted' : 'failed', error: error.message.slice(0, 2000)};
     throw error;
@@ -388,14 +473,17 @@ export async function main(args = process.argv.slice(2)) {
   if (args[0] === '--status' && args.length === 2) return console.log(JSON.stringify(status(cwd, args[1])));
   if (args[0] === '--wait' && args.length === 2) return waitForIntegration(args[1], id => status(cwd, id));
   if (args[0] === '--recover' && args.length === 2) return recover(cwd, args[1]);
+  if (args[0] === '--retry-cleanup' && args.length === 2) {
+    return console.log(JSON.stringify({id: args[1], remoteCleanupState: await retryRemoteCleanup(cwd, args[1])}));
+  }
   const worker = args[0] === '--worker', backgroundWorker = args[0] === '--background-worker';
   const detached = args[0] === '--background', foreground = args[0] === '--foreground', wait = args[0] === '--wait';
   const expected = backgroundWorker ? {logFile: args[1], sha: args[2], branch: args[3]} : null;
   if (backgroundWorker && (!/^[a-f0-9]{32}\.log$/u.test(expected.logFile ?? '') || !SHA.test(expected.sha ?? '')
-    || !/^codex\/[a-z0-9][a-z0-9._-]*$/u.test(expected.branch ?? ''))) throw Error('Invalid background worker identity');
+    || !TASK_BRANCH.test(expected.branch ?? ''))) throw Error('Invalid background worker identity');
   if (backgroundWorker) args = args.slice(4);
   else if (worker || detached || foreground || wait) args = args.slice(1);
-  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--background | --foreground | --wait] [--tag TAG] | --wait TICKET | --status [TICKET] | --recover TICKET');
+  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--background | --foreground | --wait] [--tag TAG] | --wait TICKET | --status [TICKET] | --recover TICKET | --retry-cleanup TICKET');
   if (!['darwin', 'linux'].includes(process.platform) || Number(process.versions.node.split('.')[0]) < 22) throw Error('Coordinator requires native Linux/macOS and Node >=22');
   if (worker) return coordinate(cwd, args[1] ?? '');
   if (backgroundWorker) {

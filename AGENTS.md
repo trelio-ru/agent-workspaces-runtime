@@ -1340,7 +1340,9 @@ publication tooling также остаются вне этого публичн
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требуют полной матрицы Windows, ARM64, macOS и browser jobs при релизе.
   При обычном вливании их проверяет локальный план. [Контракт CI](docs/runtime-ci.md).
-- После интеграции выполни из canonical checkout
+- После read-back очередь удаляет свою опубликованную origin-ветку по SHA.
+  Pending cleanup повторяется через `git:integrate -- --retry-cleanup <ticket>`.
+  После интеграции выполни из canonical checkout
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
 - Stable runtime tag создаётся только по явной команде на runtime release и

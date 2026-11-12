@@ -20,7 +20,7 @@ const until = async predicate => {
   const deadline = Date.now() + 25_000;
   while (!predicate()) { assert.ok(Date.now() < deadline, 'fixture progress deadline'); await delay(50); }
 };
-function fixture(t) {
+function fixture(t, {remoteBranchCleanup = true} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-coordination-'));
   const main = path.join(root, 'main'), remote = path.join(root, 'remote.git');
   fs.mkdirSync(main);
@@ -31,7 +31,7 @@ function fixture(t) {
   fs.mkdirSync(path.join(main, 'scripts'));
   for (const name of ['git-coordinator.mjs', 'git-background.mjs', 'assert-coordination.mjs']) fs.copyFileSync(path.join(source, name), path.join(main, 'scripts', name));
   fs.writeFileSync(path.join(main, 'git-coordination.json'), JSON.stringify({schemaVersion: 1, repository: 'fixture/runtime',
-    canonicalKey: 'trelio.canonicalMainWorktree', mainMutex: 'main.lock', verify: ['node', 'scripts/ci.mjs'], verifyLocal: ['node', 'scripts/ci.mjs'], transport: ['node', 'scripts/push.mjs']}));
+    canonicalKey: 'trelio.canonicalMainWorktree', mainMutex: 'main.lock', remoteBranchCleanup, verify: ['node', 'scripts/ci.mjs'], verifyLocal: ['node', 'scripts/ci.mjs'], transport: ['node', 'scripts/push.mjs']}));
   fs.writeFileSync(path.join(main, 'scripts/ci.mjs'), `import fs from 'node:fs'; import {execFileSync} from 'node:child_process';
 const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim();
 fs.appendFileSync(${JSON.stringify(path.join(root, 'events'))},branch+'\\n');
@@ -97,12 +97,90 @@ test('default admission detaches and the background alias reuses one owner throu
   assert.deepEqual(f.events(), ['codex/one', 'codex/two']);
   assert.equal(status(f.main, second.id).sourceSha, original);
   assert.equal(status(f.main, second.id).sha, command(two, 'rev-parse', 'HEAD'));
+  assert.equal(status(f.main, second.id).remoteCleanupState, 'complete');
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', 'refs/heads/codex/two'), '');
+  assert.equal(status(f.main, first.id).remoteCleanupSha, undefined, 'ordinary local-only work has no cleanup lease');
   assert.equal(status(f.main, first.id).outcome, 'integrated');
   assert.equal(command(f.main, 'rev-parse', 'v9.9.8^{}'), command(two, 'rev-parse', 'HEAD'));
   const observed = await f.launch(f.main, '--status', second.id).done;
   assert.equal(JSON.parse(observed.output).state, 'succeeded');
   assert.equal(JSON.parse(observed.output).followUp, undefined, 'status is an observation, not another scheduling request');
   assert.equal(status(f.main, '999999999999').state, 'unknown');
+});
+
+test('a rebased published task cleans up only the observed remote SHA', async t => {
+  const f = fixture(t), published = f.branch('published'), baseUpdate = f.branch('base-update');
+  const source = command(published, 'rev-parse', 'HEAD');
+  command(published, 'push', 'origin', 'HEAD:refs/heads/codex/published');
+  const first = await f.launch(baseUpdate, '--wait').done;
+  assert.equal(first.code, 0, first.output);
+  const second = await f.launch(published, '--wait').done;
+  assert.equal(second.code, 0, second.output);
+  const outcome = JSON.parse(second.output.trim().split('\n').at(-1));
+  assert.notEqual(outcome.sha, source);
+  assert.equal(outcome.remoteCleanupSha, source);
+  assert.equal(outcome.remoteCleanupState, 'complete');
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', 'refs/heads/codex/published'), '');
+});
+
+test('the deletion lease preserves a remote update after the initial read', async t => {
+  const f = fixture(t), cwd = f.branch('task'), other = f.branch('other');
+  const ref = 'refs/heads/codex/task', before = command(cwd, 'rev-parse', 'HEAD');
+  const newer = command(other, 'rev-parse', 'HEAD');
+  command(cwd, 'push', 'origin', `HEAD:${ref}`);
+  command(other, 'push', 'origin', 'HEAD:refs/heads/codex/other');
+  // Real Git invokes pre-push after discovering the advertised remote ref.
+  // Advance that ref inside the hook, immediately before the server update.
+  const hooks = path.join(f.root, 'hooks');
+  fs.mkdirSync(hooks);
+  fs.writeFileSync(path.join(hooks, 'pre-push'), `#!/bin/sh
+while read -r local_ref local_oid remote_ref remote_oid; do
+  if [ "$local_ref" = "(delete)" ] && [ "$remote_ref" = "${ref}" ]; then
+    git --git-dir="${f.remote}" update-ref "${ref}" "${newer}" "${before}" || exit 1
+  fi
+done
+`, {mode: 0o700});
+  command(cwd, 'config', 'core.hooksPath', hooks);
+  const finished = await f.launch(cwd, '--wait').done;
+  assert.equal(finished.code, 0, finished.output);
+  const outcome = JSON.parse(finished.output.trim().split('\n').at(-1));
+  assert.equal(outcome.remoteCleanupState, 'changed');
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', ref), `${newer}\t${ref}`);
+});
+
+test('a rejected release branch delete can be retried from main without CI or push', async t => {
+  const f = fixture(t), release = f.branch('release'), ref = 'refs/heads/codex/release';
+  command(f.main, `--git-dir=${f.remote}`, 'config', 'receive.denyDeletes', 'true');
+  const finished = await f.launch(release, '--wait', '--tag', 'v9.9.8').done;
+  assert.equal(finished.code, 0, finished.output);
+  const outcome = JSON.parse(finished.output.trim().split('\n').at(-1));
+  assert.equal(outcome.state, 'succeeded');
+  assert.equal(outcome.remoteCleanupState, 'pending');
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', ref), `${outcome.sha}\t${ref}`);
+  command(f.main, `--git-dir=${f.remote}`, 'config', 'receive.denyDeletes', 'false');
+  const retried = await f.launch(f.main, '--retry-cleanup', outcome.id).done;
+  assert.equal(retried.code, 0, retried.output);
+  assert.equal(JSON.parse(retried.output).remoteCleanupState, 'complete');
+  assert.equal(status(f.main, outcome.id).remoteCleanupState, 'complete');
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', ref), '');
+  assert.equal(command(f.main, 'rev-parse', 'v9.9.8^{}'), outcome.sha);
+  assert.deepEqual(f.events(), ['codex/release'], 'retry never runs CI');
+  command(f.main, 'push', 'origin', `HEAD:${ref}`);
+  const duplicate = await f.launch(f.main, '--retry-cleanup', outcome.id).done;
+  assert.equal(duplicate.code, 0, duplicate.output);
+  assert.equal(JSON.parse(duplicate.output).remoteCleanupState, 'complete');
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', ref), `${outcome.sha}\t${ref}`,
+    'a ref created again after confirmed cleanup is left alone');
+});
+
+test('other coordinator consumers retain task refs unless cleanup is enabled', async t => {
+  const f = fixture(t, {remoteBranchCleanup: false}), release = f.branch('release');
+  const finished = await f.launch(release, '--wait', '--tag', 'v9.9.8').done;
+  assert.equal(finished.code, 0, finished.output);
+  const outcome = JSON.parse(finished.output.trim().split('\n').at(-1));
+  assert.equal(outcome.remoteCleanupSha, undefined);
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', 'refs/heads/codex/release'),
+    `${outcome.sha}\trefs/heads/codex/release`);
 });
 
 test('wait follows the exact ticket through FIFO and can reattach after cancellation', async t => {
@@ -146,6 +224,12 @@ test('wait propagates terminal failures and unknown tickets without a new worker
   const outcome = JSON.parse(failed.output.trim().split('\n').at(-1));
   assert.equal(outcome.state, 'failed');
   assert.equal(outcome.tag, 'v9.9.8');
+  assert.equal(outcome.remoteCleanupSha, outcome.sha);
+  const refused = await f.launch(f.main, '--retry-cleanup', outcome.id).done;
+  assert.equal(refused.code, 1);
+  assert.match(refused.output, /Cannot confirm the integrated commit/);
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', 'refs/heads/codex/failure'),
+    `${outcome.sha}\trefs/heads/codex/failure`);
   const observed = await f.launch(f.main, '--wait', outcome.id).done;
   assert.equal(observed.code, 1, observed.output);
   assert.deepEqual(JSON.parse(observed.output), outcome);
