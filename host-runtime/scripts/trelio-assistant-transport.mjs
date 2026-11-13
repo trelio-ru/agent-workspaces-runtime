@@ -800,7 +800,8 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
     ||name==='continue_assistant_workspace_action'&&business.operation==='external_account_admit'&&!assistantExternalAccountAdmission(business.parameters))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   const secretMetadata=name==='continue_assistant_workspace_action'&&business.operation==='secret_list'&&business.parameters?.holder==='company';
   if(secretMetadata&&(business.schemaVersion!==1||business.runIdentity!==undefined||Object.keys(business).some(key=>!['schemaVersion','operation','parameters'].includes(key))
-    ||Object.keys(business.parameters).some(key=>!['holder','offset','limit'].includes(key))
+    ||Object.keys(business.parameters).some(key=>!['holder','sourceTaskId','offset','limit'].includes(key))
+    ||business.parameters.sourceTaskId!==undefined&&(typeof business.parameters.sourceTaskId!=='string'||!UUID.test(business.parameters.sourceTaskId))
     ||business.parameters.offset!==undefined&&(!Number.isSafeInteger(business.parameters.offset)||business.parameters.offset<0)
     ||business.parameters.limit!==undefined&&(!Number.isSafeInteger(business.parameters.limit)||business.parameters.limit<1||business.parameters.limit>50)))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   const secretSkill=name==='continue_assistant_workspace_action'&&business.operation==='secret_skill_prepare';

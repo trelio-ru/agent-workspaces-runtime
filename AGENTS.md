@@ -901,7 +901,7 @@ publication tooling также остаются вне этого публичн
   root на hosted Windows в обеих Node lanes через общий CI helper, а не зависят от toolcache/PATH; bounded cleanup retry
   применяется только к их disposable cwd после native abort, не к provider work.
 
-- Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+- Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile). Linked-task Secret reads use an exact source UUID and native ACL.
   Handoff outcomes follow the exact native target scope, never the enclosing task pass: named Workspaces omit taskOutcome; task targets use no_status_change.
   Positive common LOCAL/DRAFT recovery may reopen its exact owned sibling once;
   retain original files and return reconciliation evidence in the same chat.

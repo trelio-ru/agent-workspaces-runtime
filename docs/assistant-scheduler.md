@@ -3908,8 +3908,11 @@ receipt and actual login verification remain independent.
 ### Company Secret use
 
 Existing `secret_list` with `parameters.holder="company"` reads the SAME exact
-active task + parent scopes and native permissions. Plain metadata is unchanged;
-encrypted metadata is a native-selected managed snapshot, hydrated in process
+active task + parent scopes and native permissions. If instructions refer to
+another task, an exact native task read may supply `parameters.sourceTaskId`;
+only that task's own cards are listed, subject to its own same-company ACL.
+The original pass remains the only task execution authority. Plain metadata
+is unchanged; encrypted metadata is a native-selected managed snapshot, hydrated in process
 with the SAME recipient/field codec. The ordinary private list is unchanged.
 No values, general payload resolver, new cache or extra grant are exposed.
 

@@ -615,10 +615,10 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
         context:{questionText:`Complete document: ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_json')}`},encryptedPayloads:[richPayload]}}}));
     assert.match(previewed.structuredContent.questionText,/RICH_BODY_CANARY/);assert.doesNotMatch(previewed.structuredContent.questionText,/\[object Object\]/);
-    const metadataStages=preparations,secretId=randomUUID();
+    const metadataStages=preparations,secretId=randomUUID(),sourceTaskId=randomUUID();
     const listedSecrets=await withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',
-      args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',limit:20}}},async wire=>{
-        assert.deepEqual(wire.parameters,{holder:'company',limit:20});
+      args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',sourceTaskId,limit:20}}},async wire=>{
+        assert.deepEqual(wire.parameters,{holder:'company',sourceTaskId,limit:20});
         assert.equal(wire.encryptedContent.fingerprint,registered.fingerprint);
         assert.equal(wire.encryptedContent.signature,undefined,'metadata read is not staged or signed as a mutation');
         return {content:[],structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,
@@ -4118,10 +4118,11 @@ test('company Secret metadata remains structural and rejects ignored holder pros
   const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   let sends=0;
   const send=async args=>{sends++;return args;},withProfile=()=>assert.fail('structural list never opens keys or a browser');
-  const input={name:'continue_assistant_workspace_action',args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',offset:0,limit:20}}};
+  const sourceTaskId=randomUUID();
+  const input={name:'continue_assistant_workspace_action',args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',sourceTaskId,offset:0,limit:20}}};
   assert.deepEqual(await withAssistantCompanyContentArguments(input,send,{withProfile}),input.args);
   for(const parameters of [{holder:'other'}, {holder:'company',scopeId:randomUUID()}, {holder:'company',name:'COMPANY_SECRET_CANARY'},
-    {holder:'company',limit:'20'}])await assert.rejects(withAssistantCompanyContentArguments({...input,args:{...input.args,parameters}},send,{withProfile}),
+    {holder:'company',sourceTaskId:'COMPANY_SECRET_CANARY'}, {sourceTaskId}, {holder:'company',limit:'20'}])await assert.rejects(withAssistantCompanyContentArguments({...input,args:{...input.args,parameters}},send,{withProfile}),
       {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
   assert.equal(sends,1);
 });

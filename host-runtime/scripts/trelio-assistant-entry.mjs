@@ -3297,8 +3297,11 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
   };
   if(name==='continue_assistant_workspace_action'&&args.operation==='secret_list'){
     privateEnvelope();const p=args.parameters;
-    if(args.runIdentity!==undefined||!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).some(key=>!['holder','offset','limit'].includes(key))
+    if(args.runIdentity!==undefined||!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).some(key=>!['holder','sourceTaskId','offset','limit'].includes(key))
       ||p.holder!==undefined&&p.holder!=='company'
+      // The exact independently read task ID is structural metadata only.
+      // Native scope and card ACLs independently gate the returned snapshot.
+      ||p.sourceTaskId!==undefined&&(p.holder!=='company'||typeof p.sourceTaskId!=='string'||!new RegExp(UUID,'u').test(p.sourceTaskId))
       ||p.offset!==undefined&&(!Number.isSafeInteger(p.offset)||p.offset<0)
       ||p.limit!==undefined&&(!Number.isSafeInteger(p.limit)||p.limit<1||p.limit>50))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
     return send(args);
