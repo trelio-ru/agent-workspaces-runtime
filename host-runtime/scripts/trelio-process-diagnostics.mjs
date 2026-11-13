@@ -1,8 +1,8 @@
 /**
  * Content-free errors at subprocess boundaries. The bridge's own final error
  * frame preserves the inner failure instead of replacing a skill exit with
- * the exit of the enclosing Node CLI. Protected setup may additionally retain
- * a reviewed fixed provider code; provider prose/arguments never cross here.
+ * the exit of the enclosing Node CLI. Reviewed operations may additionally
+ * retain fixed provider evidence; provider prose/arguments never cross here.
  */
 const WINDOWS_CODES = [
   "TRELIO_WINDOWS_PRIVATE_PROCESS_START_FAILED",
@@ -58,6 +58,30 @@ const telegramSetupMessages = Object.freeze({
   TELEGRAM_REQUEST_FAILED: 'Telegram не завершил операцию; причина не установлена.',
   TELEGRAM_WINDOWS_NATIVE_FAILURE: 'Процесс Telegram завершился с native-ошибкой Windows.',
 });
+const TELEGRAM_EXACT_READ_CODE = "TELEGRAM_EXACT_READ_UNAVAILABLE";
+export const TELEGRAM_EXACT_READ_MESSAGE = "Точное сообщение Telegram не получено. Сверьте исходную ссылку, доступ к чату и соответствие внешнего ID нативному ID сообщения.";
+export const isTelegramExactRead = (skillId, args) => skillId === "telegram-mtproto"
+  && args?.[0] === "read"
+  && args.slice(1).some(arg => /^--(?:link|message-id)(?:=|$)/u.test(arg));
+
+// Reconstruct the entire diagnostic from two checked observations. An empty
+// lookup leaves the cause unknown. A mismatch proves only a returned candidate
+// failed identity checks. Never accept provider-supplied next steps or prose.
+const telegramExactReadDetails = (value) => {
+  if (!value || !["message_lookup", "reference_validation"].includes(value.stage)) return {};
+  if (value.category !== "unknown"
+      && !(value.category === "reference_mismatch" && value.stage === "reference_validation")) return {};
+  return {
+    providerCode: TELEGRAM_EXACT_READ_CODE,
+    diagnostic: {
+      category: value.category,
+      stage: value.stage,
+      nextStep: value.category === "reference_mismatch"
+        ? "verify_native_message_mapping" : "verify_original_link_and_chat_access",
+      automaticRetry: false,
+    },
+  };
+};
 const windowsCodes = new Set(WINDOWS_CODES);
 const stages = new Set([
   "local_state", "hook_setup", "runtime_state_read", "state_lock",
@@ -92,6 +116,9 @@ const safeDetails = (code, value = {}) => ({
   ...(code.startsWith('TRELIO_SKILL_RUNTIME_EXIT_') && value.providerCode === 'TELEGRAM_RATE_LIMITED'
     && Number.isSafeInteger(value.retryAfterSeconds) && value.retryAfterSeconds >= 0 && value.retryAfterSeconds <= 86400 * 365
     ? { retryAfterSeconds: value.retryAfterSeconds } : {}),
+  ...(code === "TRELIO_SKILL_RUNTIME_EXIT_2" && value.operation === "skill_run"
+    && value.exitCode === 2 && value.providerCode === TELEGRAM_EXACT_READ_CODE
+    ? telegramExactReadDetails(value.diagnostic) : {}),
 });
 
 export class ProcessDiagnosticError extends Error {
@@ -117,6 +144,27 @@ export const skillRuntimeExitError = exitCode => new ProcessDiagnosticError(
   { operation: "skill_run", exitCode },
 );
 
+export const SKILL_REFUSAL_MAX_BYTES = 64 * 1024;
+const parseSkillRefusal = (stderr) => {
+  try {
+    const bytes = typeof stderr === "string" ? Buffer.byteLength(stderr) : Buffer.isBuffer(stderr) ? stderr.length : Infinity;
+    if (bytes > SKILL_REFUSAL_MAX_BYTES) return null;
+    const raw = JSON.parse(typeof stderr === "string" ? stderr : new TextDecoder("utf-8", { fatal: true }).decode(stderr));
+    return raw?.ok === false && typeof raw.code === "string" ? raw : null;
+  } catch { return null; }
+};
+
+export const skillExactReadExitError = (exitCode, stderr) => {
+  const fallback = skillRuntimeExitError(exitCode);
+  if (exitCode !== 2) return fallback;
+  const raw = parseSkillRefusal(stderr);
+  if (raw?.code !== TELEGRAM_EXACT_READ_CODE) return fallback;
+  const details = telegramExactReadDetails(raw.details?.diagnostic);
+  if (!details.diagnostic) return fallback;
+  return new ProcessDiagnosticError(fallback.diagnosticCode, TELEGRAM_EXACT_READ_MESSAGE,
+    { operation: "skill_run", exitCode, ...details });
+};
+
 /** Inspect only a complete failed protected setup pipe. Keep the real exit
  * bucket for telemetry and add bounded evidence for the human/model. No value,
  * path, message, nextAction or arbitrary provider details are ever reflected.
@@ -124,16 +172,12 @@ export const skillRuntimeExitError = exitCode => new ProcessDiagnosticError(
 export const skillSetupExitError = (exitCode, { skillId, stderr } = {}) => {
   const fallback = skillRuntimeExitError(exitCode);
   if (skillId !== 'telegram-mtproto' || !Number.isSafeInteger(exitCode) || exitCode < 1) return fallback;
-  try {
-    const bytes = typeof stderr === 'string' ? Buffer.byteLength(stderr) : Buffer.isBuffer(stderr) ? stderr.length : Infinity;
-    if (bytes > 65536) return fallback;
-    const raw = JSON.parse(typeof stderr === 'string' ? stderr : new TextDecoder('utf-8', { fatal: true }).decode(stderr));
-    if (!raw || Array.isArray(raw) || raw.ok !== false || typeof raw.code !== 'string' || !Object.hasOwn(telegramSetupMessages, raw.code)) return fallback;
-    return new ProcessDiagnosticError(fallback.diagnosticCode, telegramSetupMessages[raw.code], {
-      operation: 'skill_run', exitCode, providerCode: raw.code,
-      retryAfterSeconds: raw.details?.diagnostic?.retryAfterSeconds,
-    });
-  } catch { return fallback; }
+  const raw = parseSkillRefusal(stderr);
+  if (!raw || !Object.hasOwn(telegramSetupMessages, raw.code)) return fallback;
+  return new ProcessDiagnosticError(fallback.diagnosticCode, telegramSetupMessages[raw.code], {
+    operation: 'skill_run', exitCode, providerCode: raw.code,
+    retryAfterSeconds: raw.details?.diagnostic?.retryAfterSeconds,
+  });
 };
 
 const PROCESS_FRAME_MAX_BYTES = 8 * 1024;

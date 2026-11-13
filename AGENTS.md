@@ -875,9 +875,13 @@ publication tooling также остаются вне этого публичн
   не повторяет provider action. См. тот же transport-контракт.
   Legacy prose не разбирается как HTTP; wrapper и правила повторов сохраняются.
   Сохраняй внутренний skill exit отдельно от CLI exit; Windows private worker
-  различает startup/request/protocol/ACL/DPAPI. Hook deny сохраняет закрытый
-  failureCode/phase. Hooks имеют отдельную boundary и content-free user-temp
-  очередь без private helper; legacy error-only данные не входят в v2 rates.
+  различает startup/request/protocol/ACL/DPAPI.
+  Для обычного exact Telegram read через signed skill допускается закрытый
+  provider diagnostic из полной failed pipe, с повторной проверкой на MCP
+  boundary; сырой вывод и автоматический повтор запрещены.
+  Hook deny сохраняет закрытый failureCode/phase. Hooks имеют отдельную
+  boundary и content-free user-temp очередь без private helper; legacy
+  error-only данные не входят в v2 rates.
 - In-process и child bridge сохраняют один закрытый transport error contract:
   [контракт](docs/agent-workspace-runtime.md#bridge-transport-diagnostics).
   Не раскрывай native cause/stack и не добавляй автоматический повтор исходного действия.

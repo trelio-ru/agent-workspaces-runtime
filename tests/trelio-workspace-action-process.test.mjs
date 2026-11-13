@@ -103,6 +103,17 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     code: process.env.TRELIO_TEST_PROVIDER_FAILURE,
     message: "PRIVATE_CANARY", details: { secret: "PRIVATE_CANARY" } }));
   process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_INNER_EXIT_STYLE === "telegram-exact-read") {
+  process.stdout.write("PRIVATE_CANARY stdout");
+  process.stderr.write("PRIVATE_CANARY stderr\\n");
+  process.stderr.write("Ошибка: " + JSON.stringify({
+    code: "TRELIO_SKILL_RUNTIME_EXIT_2", message: "PRIVATE_CANARY",
+    details: { failureCode: "TRELIO_SKILL_RUNTIME_EXIT_2", operation: "skill_run", exitCode: 2,
+      providerCode: "TELEGRAM_EXACT_READ_UNAVAILABLE",
+      diagnostic: { category: "unknown", stage: "message_lookup", nextStep: "PRIVATE_CANARY",
+        automaticRetry: true, original: "PRIVATE_CANARY" } },
+  }) + "\\n");
+  process.exitCode = 1;
 } else if (process.env.TRELIO_TEST_INNER_EXIT) {
   const style = process.env.TRELIO_TEST_INNER_EXIT_STYLE;
   process.stderr.write("PRIVATE_CANARY provider stderr\\n");
@@ -503,6 +514,25 @@ test("real failed skill preserves the action ABI, reports only a fixed category 
     assert.equal(event.code, outcome.error.diagnosticCode);
     assert.equal(JSON.stringify(event).includes("PRIVATE_CANARY"), false);
   }
+});
+
+test("workspace action exposes only closed diagnostics for a completed exact Telegram read", async (t) => {
+  const fixture = await createFixture(t);
+  const parameters = { ...skillAction.parameters, skillId: "telegram-mtproto",
+    arguments: ["read", "--chat", "fixture", "--message-id", "42", "--context", "0"] };
+  const outcome = await fixture.run({ action: { ...skillAction, parameters }, innerExitStyle: "telegram-exact-read" });
+  assert.equal(outcome.error.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+  assert.equal(outcome.error.diagnosticCode, "TRELIO_SKILL_RUNTIME_EXIT_2");
+  assert.equal(outcome.error.details.process.providerCode, "TELEGRAM_EXACT_READ_UNAVAILABLE");
+  assert.deepEqual(outcome.error.details.process.diagnostic, {
+    category: "unknown", stage: "message_lookup", nextStep: "verify_original_link_and_chat_access", automaticRetry: false,
+  });
+  assert.doesNotMatch(JSON.stringify(outcome.error), /PRIVATE_CANARY/u);
+  assert.equal(outcome.executions, "started\n");
+  const foreignFixture = await createFixture(t);
+  const foreign = await foreignFixture.run({ innerExitStyle: "telegram-exact-read" });
+  assert.equal(foreign.error.details.process.providerCode, undefined);
+  assert.equal(foreign.error.details.process.diagnostic, undefined);
 });
 
 test("Workspace bridge preserves runtime recovery through the subprocess boundary without replay or private stderr", async (t) => {

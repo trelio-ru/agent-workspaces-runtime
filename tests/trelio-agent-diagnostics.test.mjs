@@ -68,6 +68,45 @@ test("every process category and local recovery code is admitted by the closed t
   }
 });
 
+test("ordinary exact Telegram read forwards a complete closed refusal and drops raw stderr", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-exact-read-diagnostic-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const child = path.join(directory, "main.mjs");
+  const artifact = { skillId: "telegram-mtproto", runtimeVersion: "0.0.0",
+    parsedPackage: { entrypoint: { path: "main.mjs", interpreter: "node" }, capabilities: [] } };
+  const run = (runtimeArguments) => runMaterializedAgentSkill({ artifact, runtimeDirectory: directory,
+    runtimeArguments, executionContext: { skillId: artifact.skillId, companyId: randomUUID(), releaseId: randomUUID() } });
+  const payload = { ok: false, code: "TELEGRAM_EXACT_READ_UNAVAILABLE", error: "PRIVATE_ERROR",
+    details: { diagnostic: { category: "unknown", stage: "message_lookup", nextStep: "PRIVATE_STEP",
+      automaticRetry: true, chatId: "PRIVATE_CHAT" } } };
+  const write = (stderr, exit = 2) => fs.writeFile(child,
+    `process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${exit}; });`);
+  for (const [category, stage, nextStep] of [
+    ["unknown", "message_lookup", "verify_original_link_and_chat_access"],
+    ["reference_mismatch", "reference_validation", "verify_native_message_mapping"],
+  ]) {
+    Object.assign(payload.details.diagnostic, { category, stage });
+    await write(JSON.stringify(payload));
+    await assert.rejects(run(["read", "--chat", "fixture", "--message-id", "1"]), error => {
+      const frame = formatBridgeCommandError(error);
+      assert.doesNotMatch(frame, /PRIVATE/u);
+      assert.deepEqual(parseProcessDiagnostic("Ошибка: " + frame), {
+        failureCode: "TRELIO_SKILL_RUNTIME_EXIT_2", operation: "skill_run", exitCode: 2,
+        providerCode: "TELEGRAM_EXACT_READ_UNAVAILABLE",
+        diagnostic: { category, stage, nextStep, automaticRetry: false },
+      });
+      return true;
+    });
+  }
+  for (const stderr of [JSON.stringify({ ...payload, ok: true }),
+    JSON.stringify(payload).slice(0, -1), "x".repeat(65537),
+    JSON.stringify({ ...payload, details: { diagnostic: { category: "reference_mismatch", stage: "message_lookup" } } })]) {
+    await write(stderr);
+    await assert.rejects(run(["read", "--link=https://example.test"]), error =>
+      error.code === "TRELIO_SKILL_RUNTIME_EXIT_2" && !error.details.providerCode);
+  }
+});
+
 test("bridge diagnostic frame preserves inner exits and filters arbitrary fields and earlier provider frames", () => {
   for (const exitCode of [1, 2, 3, 4, 5, 6, 7, 3221225781]) {
     const error = skillRuntimeExitError(exitCode);

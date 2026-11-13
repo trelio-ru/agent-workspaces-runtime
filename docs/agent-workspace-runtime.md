@@ -2369,6 +2369,17 @@ accepted revision и история Run остаются на сервере Tre
 
 ## Диагностика transport bridge
 
+Обычный signed Telegram `read --link` или `read --message-id` сохраняет
+`TELEGRAM_EXACT_READ_UNAVAILABLE` как `details.process.providerCode` поверх
+прежнего `TRELIO_WORKSPACE_ACTION_FAILED` и exit bucket 2. Только полный
+ограниченный JSON-отказ из stderr дочернего процесса принимается до final
+bridge frame. Хост повторно проверяет provider/command и закрытую пару
+category/stage, сам формирует nextStep и `automaticRetry=false`. При
+неизвестной причине, включая пустой lookup, предлагается сверить исходную
+ссылку и доступ к чату. При несовпадении возвращённого peer/ID предлагается
+сверить внешнее сопоставление с нативным ID. Сырые stderr, stdout и поля
+provider-а не входят в эту диагностику; telemetry сохраняет прежний exit bucket.
+
 <a id="closed-runtime-diagnostic-details"></a>
 
 ### Закрытые runtime diagnostic details v1

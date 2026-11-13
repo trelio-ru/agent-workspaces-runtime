@@ -51,7 +51,8 @@ import {
   isWorkspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
-import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError, skillSetupExitError } from "./trelio-process-diagnostics.mjs";
+import { isTelegramExactRead, ProcessDiagnosticError, processDiagnosticCauseCode, SKILL_REFUSAL_MAX_BYTES,
+  skillExactReadExitError, skillRuntimeExitError, skillSetupExitError } from "./trelio-process-diagnostics.mjs";
 import { buildBridgeHttpErrorFrame } from "./trelio-bridge-http-diagnostics.mjs";
 import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
@@ -9745,13 +9746,31 @@ const runMaterializedAgentSkillUnqueued = async ({
       replyInput?.fill(0);
     }
   }
-  const exitCode = await new Promise((resolve, reject) => {
+  const exactRead = !prepareSetupEnvironment && grantedStdin === null
+    && isTelegramExactRead(artifact.skillId, runtimeArguments);
+  await new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: runtimeDirectory,
       env: runtimeEnvironment,
       shell: false,
-      stdio: [grantedStdin === null ? "inherit" : "pipe", "inherit", "inherit"],
+      stdio: [grantedStdin === null ? "inherit" : "pipe", "inherit", exactRead ? "pipe" : "inherit"],
     });
+    // The exact read emits one JSON refusal on stderr. Drain the whole pipe
+    // without forwarding it, retain at most the refusal limit, and wait for
+    // close so a partial/signal-terminated response cannot become evidence.
+    const refusal = exactRead ? Buffer.alloc(SKILL_REFUSAL_MAX_BYTES) : null;
+    let refusalBytes = 0;
+    let completeRefusal = exactRead;
+    child.stderr?.on("data", (chunk) => {
+      if (!completeRefusal) return;
+      if (refusalBytes + chunk.length > refusal.length) {
+        completeRefusal = false;
+        return;
+      }
+      chunk.copy(refusal, refusalBytes);
+      refusalBytes += chunk.length;
+    });
+    child.stderr?.on("error", () => { completeRefusal = false; });
     let deadlineTimer = null;
     let forceTimer = null;
     let deadlineExceeded = false;
@@ -9773,12 +9792,17 @@ const runMaterializedAgentSkillUnqueued = async ({
     }
     child.once("error", (error) => {
       clearSupervision();
+      refusal?.fill(0);
       reject(new ProcessDiagnosticError("TRELIO_SKILL_RUNTIME_START_FAILED",
         "Не удалось запустить runtime навыка.",
         { operation: "skill_run", causeCode: processDiagnosticCauseCode(error) }));
     });
-    child.once("exit", (code, signal) => {
+    child.once(exactRead ? "close" : "exit", (code, signal) => {
       clearSupervision();
+      const failure = code === 0 ? null : completeRefusal && !deadlineExceeded && !signal
+        ? skillExactReadExitError(code, refusal.subarray(0, refusalBytes))
+        : skillRuntimeExitError(code ?? 1);
+      refusal?.fill(0);
       if (deadlineExceeded) {
         reject(new ProcessDiagnosticError("TRELIO_SKILL_RUNTIME_LEASE_EXPIRED",
           "Browser-session runtime превысил подписанный lease.", { operation: "skill_run" }));
@@ -9789,16 +9813,13 @@ const runMaterializedAgentSkillUnqueued = async ({
           "Runtime процесса завершён сигналом.", { operation: "skill_run", signal }));
         return;
       }
-      resolve(code ?? 1);
+      if (failure) reject(failure);
+      else resolve();
     });
     if (grantedStdin !== null) {
       child.stdin.end(grantedStdin);
     }
   });
-
-  if (exitCode !== 0) {
-    throw skillRuntimeExitError(exitCode);
-  }
 };
 
 const assertOrdinaryRuntimePolicyForCompany = async ({

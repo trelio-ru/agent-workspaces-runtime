@@ -13,7 +13,8 @@ import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-ta
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { rememberDiagnosticDetail, readDiagnosticDetail, diagnosticValueType } from "./trelio-diagnostic-observation.mjs";
-import { parseProcessDiagnostic, ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
+import { isTelegramExactRead, parseProcessDiagnostic, ProcessDiagnosticError,
+  TELEGRAM_EXACT_READ_MESSAGE } from "./trelio-process-diagnostics.mjs";
 import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "./trelio-skill-accounts.mjs";
@@ -11570,7 +11571,25 @@ const executeTrelioWorkspaceActionOperation = async (
         openRecovery.details,
       );
     }
-    const processDiagnostic = workspaceActionProcessDiagnostic(error, invocation.operation);
+    let processDiagnostic = workspaceActionProcessDiagnostic(error, invocation.operation);
+    const exactReadDiagnostic = processDiagnostic?.diagnostic
+      && invocation.operation === "skill_run" && error?.code === 1 && !error.killed && !error.signal
+      && isTelegramExactRead(invocation.parameters.skillId, invocation.parameters.arguments);
+    if (exactReadDiagnostic) {
+      // Keep the established action wrapper and exit bucket. Only the
+      // validated provider fields reach MCP, never the child's other output.
+      const actionError = new TrelioLocalContextError(
+        "TRELIO_WORKSPACE_ACTION_FAILED", TELEGRAM_EXACT_READ_MESSAGE,
+        { operation: invocation.operation, failureCode: processDiagnostic.failureCode, process: processDiagnostic },
+      );
+      actionError.diagnosticCode = processDiagnostic.failureCode;
+      throw actionError;
+    }
+    if (processDiagnostic?.diagnostic) {
+      // A lookalike frame from a different command carries no exact-read evidence.
+      const { diagnostic, providerCode, ...processOnly } = processDiagnostic;
+      processDiagnostic = processOnly;
+    }
     const failureCode = workspaceActionFailureCode(error, invocation.operation, processDiagnostic);
     const httpDiagnostic = parseBridgeHttpDiagnostic(error?.stderr);
     const runtime = httpDiagnostic?.runtime;
