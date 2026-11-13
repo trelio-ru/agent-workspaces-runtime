@@ -3262,6 +3262,31 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
     assert.equal(opened.operation,'open');
 
+    const localMetadataPath=path.join(path.dirname(writable),'.trelio-run.json');
+    const localMetadata=JSON.parse(await fs.readFile(localMetadataPath,'utf8'));
+    // The real large archive contains hydrated local snapshots beyond the
+    // former command-envelope limit. Exercise both protected metadata readers.
+    await fs.writeFile(localMetadataPath,JSON.stringify({...localMetadata,
+      localFixtureSnapshot:'a'.repeat(600*1024)}));
+    const {materializeAssistantWorkspaceFiles}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    const fileScope={...plan.scope,passId:f.pass.passId};
+    const fileProof={runtimeSessionId:f.runtime.state.runtimeSessionId};
+    const fileResult={structuredContent:{schemaVersion:1,kind:'assistant_workspace_files',
+      scope:fileScope,runIdentity,runtimeSessionId:fileProof.runtimeSessionId,encryptedLifecycle:descriptor}};
+    const readPinned=()=>common.withWorkspaceExecutionProfile(writerProfile,()=>materializeAssistantWorkspaceFiles({
+      result:fileResult,arguments:{runIdentity,taskPass:f.pass,runtimeSessionProof:fileProof,
+        command:{action:'read',source:'authority',path:'agent-instructions.md'}},
+    },{withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
+    const pinned=await readPinned();
+    assert.equal(pinned.structuredContent.text,'SELECTED_ASSISTANT_RULES');
+    if(named){
+      const metadataHandle=await fs.open(localMetadataPath,'r+');
+      try{await metadataHandle.truncate(32*1024*1024+1);}
+      finally{await metadataHandle.close();}
+      await assert.rejects(readPinned(),/превышает допустимый размер/u);
+      await fs.writeFile(localMetadataPath,JSON.stringify(localMetadata));
+    }
+
     if(!named){
       // The retained encrypted Run has a committed local candidate but the
       // interrupted finish uploaded neither candidate nor handoff. Exercise

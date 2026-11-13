@@ -268,6 +268,99 @@ test("a tree above 100 MiB uploads once and one-file changes reuse the accepted 
     baseHead: previousHead, storageLimits: { ...storage.limits, maxFileBytes: 1024 } }), /лимит компании/u);
 });
 
+test("a 917-file candidate verifies its exact tree in batches and reuses all unchanged ciphertext", async (t) => {
+  const { directory, metadata, companyEncryption, git, storage } = await fixture(t);
+  const server = transport({ companyId: companyEncryption.runtime.company.id, workspaceId: metadata.workspaceId });
+  const scope = companyEncryption.runtime.scope;
+  const projectionId = randomUUID();
+  const manifestFileId = randomUUID();
+  const files = [];
+  await git(["config", "core.autocrlf", "true"]);
+  for (let index = 0; index < 917; index++) {
+    const filePath = `школьный архив ${index}.md`;
+    const bytes = Buffer.from(`synthetic source ${index}\r\n`);
+    await fs.writeFile(path.join(metadata.workspaceDirectory, filePath), bytes);
+    files.push({ id: randomUUID(), path: filePath, sizeBytes: bytes.length,
+      plaintextSha256: digest(bytes), contentType: "text/plain; charset=utf-8" });
+  }
+  await git(["add", "--all"]);
+  await git(["commit", "-m", "Принятый архив"]);
+  const baseHead = (await git(["rev-parse", "HEAD"])).stdout.trim();
+  const manifest = path.join(directory, "base.json");
+  const encryptedManifest = path.join(directory, "base.trelioe1");
+  await fs.writeFile(manifest, canonicalJson({ schemaVersion: 1, kind: "agent-workspace-browser-manifest",
+    projectionId, workspaceId: metadata.workspaceId, workspaceHead: baseHead, files }));
+  const sealed = await encryptFileToCompanyContainer({
+    sourcePath: manifest, destinationPath: encryptedManifest, scopePublicEncryptionJwk: scope.publicEncryptionJwk,
+    aad: { companyId: companyEncryption.runtime.company.id, scopeId: scope.id, scopeEpoch: scope.epoch,
+      entityType: "agent_workspace_browser_manifest", entityId: manifestFileId, entityRevision: 1 },
+    writerDeviceId: companyEncryption.runtime.device.id, signingPrivateKey: companyEncryption.device.privateKeys.signingPrivateKey,
+  });
+  server.uploads.set(manifestFileId, { bytes: await fs.readFile(encryptedManifest) });
+  const acceptedProjection = { id: projectionId, formatVersion: 2, workspaceHead: baseHead, scopeId: scope.id,
+    scopeEpoch: scope.epoch, manifestFileId, fileCount: files.length,
+    files: [{ id: manifestFileId, kind: "manifest", sizeBytes: sealed.ciphertextSizeBytes,
+      ciphertextSha256: sealed.ciphertextSha256 }, ...files.map(({ id }) => ({
+      id, kind: "content", sizeBytes: 1024, ciphertextSha256: "a".repeat(64),
+    }))] };
+  await fs.writeFile(path.join(metadata.workspaceDirectory, "новый файл.md"), "new candidate bytes\r\n");
+  await git(["add", "--all"]);
+  await git(["commit", "-m", "Один новый файл"]);
+  const workspaceHead = (await git(["rev-parse", "HEAD"])).stdout.trim();
+  const progress = [];
+  const options = {
+    metadata: { ...metadata, baseHead }, metadataPath: path.join(directory, "private", "run.json"),
+    origin: "https://trelio.test", token: "fixture", companyEncryption, workspaceHead,
+    storage: { ...storage, baseHead, baseRevision: { ...storage.baseRevision, head: baseHead },
+      projection: acceptedProjection }, retry,
+    transportRequest: (_origin, _token, pathname, options) => server.api(pathname, options),
+    onProgress: async (value) => progress.push(value.completedFiles),
+  };
+  const tracePath = path.join(directory, "git-trace.jsonl");
+  const previousTrace = process.env.GIT_TRACE2_EVENT;
+  process.env.GIT_TRACE2_EVENT = tracePath;
+  let result;
+  try {
+    result = await uploadIncrementalEncryptedWorkspaceProjection(options);
+  } finally {
+    if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
+    else process.env.GIT_TRACE2_EVENT = previousTrace;
+  }
+  const commands = (await fs.readFile(tracePath, "utf8")).trim().split("\n").map(line => JSON.parse(line))
+    .filter(event => event.event === "cmd_name").map(event => event.name);
+  assert.ok(commands.filter(name => name === "hash-object").length <= 31,
+    "two passes per 64-file batch plus one changed file, regardless of platform spawn speed");
+  assert.equal(commands.filter(name => name === "ls-tree").length, 1);
+  // First use may run the common Git readiness probe once.
+  assert.ok(commands.filter(name => name === "rev-parse").length <= 1);
+  const saved = server.projections.get(result.projectionId);
+  const retained = new Set(saved.files.filter(file => file.kind === "content").map(file => file.id));
+  assert.equal(retained.size, files.length + 1);
+  assert.ok(files.every(file => retained.has(file.id)));
+  assert.equal(server.requests.filter(entry => entry.method === "PUT").length, 2, "only new content and manifest");
+  assert.ok(progress.includes(64) && progress.includes(files.length + 1), "unchanged batches advance the lease check");
+  const writes = server.requests.filter(entry => ["POST", "PUT"].includes(entry.method)).length;
+  await fs.writeFile(path.join(metadata.workspaceDirectory, files[0].path), "stale materialized bytes\r\n");
+  await assert.rejects(uploadIncrementalEncryptedWorkspaceProjection({ ...options,
+    metadata: { ...options.metadata, runId: randomUUID() } }), /changed after preparing/u);
+  assert.equal(server.requests.filter(entry => ["POST", "PUT"].includes(entry.method)).length, writes);
+});
+
+test("ciphertext cache refuses bytes that differ from the candidate digest before any upload", async (t) => {
+  const { directory, metadata, companyEncryption } = await fixture(t);
+  const sourcePath = path.join(directory, "candidate.txt");
+  const cacheDirectory = path.join(directory, "cache");
+  const original = Buffer.from("expected bytes");
+  await fs.writeFile(sourcePath, "modified bytes");
+  await assert.rejects(prepareCachedEncryptedWorkspaceFile({
+    cacheDirectory, cacheKey: digest(original), sourcePath, kind: "content", metadata, companyEncryption,
+    originalName: "candidate.txt", mimeType: "text/plain", expectedSource: {
+      sizeBytes: original.length, sha256: digest(original),
+    }, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile,
+  }), /bytes changed/u);
+  assert.deepEqual(await fs.readdir(cacheDirectory), [], "no stale ciphertext or reusable descriptor");
+});
+
 test("capabilities reject a foreign base and never confuse part size with file size", async (t) => {
   const { metadata, storage } = await fixture(t);
   assert.equal(validateEncryptedWorkspaceCapabilities(storage, metadata), storage);

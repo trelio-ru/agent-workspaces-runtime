@@ -865,7 +865,7 @@ export const materializeAssistantWorkspaceFiles = async ({ result, arguments: ar
       const assertCurrent=async()=>{
         await checkPass();
         const current=await readRun();
-        const metadata=await common.readPrivateJsonFile(path.join(root,'.trelio-run.json'),{maximumBytes:512*1024});
+        const metadata=await common.readAssistantWorkspaceRunMetadata(root);
         if(metadata.schemaVersion!==3||metadata.origin!==identity.origin||metadata.company?.id!==receipt.scope.companyId
           ||!sameLocalPath(metadata.workspaceDirectory??'',path.join(root,'workspace'))||metadata.terminalStatus
           ||!idsMatch(metadata,selected,['runId','workspaceId'])||!idsMatch(metadata,current,['leaseId','fencingToken'])
@@ -4150,7 +4150,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
             // neither a stale status nor a model prompt can override it.
             await common.withWorkspaceFinishLock(plan.runIdentity.runId,async()=>{
               const {hasFinishRecoveryMarker}=await import('./trelio-workspace-finish-recovery.mjs');
-              const metadata=await common.readPrivateJsonFile(path.join(root,'.trelio-run.json'),{maximumBytes:512*1024});
+              const metadata=await common.readAssistantWorkspaceRunMetadata(root);
               const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
               const head=(await common.runGit(['rev-parse','HEAD'],{cwd:directory})).stdout.trim();
               if(local.workspaceId!==plan.runIdentity.workspaceId||local.runId!==plan.runIdentity.runId||local.terminalStatus

@@ -3109,6 +3109,14 @@ A wait cancellation does not stop or launch a second checkout. An unknown
 handle uses the existing read-back-only recovery. If local metadata is
 missing, the separate native Run status cannot certify a clean checkout.
 
+The assistant file commands and retained-finish preflight share one private
+32 MiB local Run metadata reader. Decoded pinned authority and inventories
+belong to that file, outside the smaller wire envelope. The reader uses the
+same verified fd and bounds its read even if the file grows. Native admission,
+the original Run/lease and path binding, and the model-facing file limits
+remain independent.
+
+
 The child uses one fixed eight-minute materialization deadline. Each native
 request and encrypted body retains its independent ordinary limit. Once an
 encrypted bundle is local, the verified Git history walk uses the child

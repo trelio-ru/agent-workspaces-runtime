@@ -677,6 +677,10 @@ const MAX_INLINE_TEXT_BYTES = 4 * 1024 * 1024;
 const TARGET_INLINE_GIT_TREE_BYTES = 48 * 1024 * 1024;
 const MAX_ENCRYPTED_WORKSPACE_TREE_BYTES = 100 * 1024 * 1024;
 const MAX_ENCRYPTED_WORKSPACE_FILE_COUNT = 20_000;
+// Run metadata contains decoded authority snapshots and local inventories. It
+// is larger than a file-command envelope but still bounded at the local fd.
+const MAX_ASSISTANT_RUN_METADATA_BYTES = 32 * 1024 * 1024;
+const ENCRYPTED_WORKSPACE_PROJECTION_HASH_BATCH_SIZE = 64;
 const ENCRYPTED_WORKSPACE_BROWSER_PROJECTION_MAGIC = Buffer.from("TRELIOP1", "ascii");
 const ENCRYPTED_WORKSPACE_BROWSER_PROJECTION_CONTENT_TYPE =
   "application/vnd.trelio.encrypted-workspace-projection";
@@ -2719,15 +2723,37 @@ export const readPrivateJsonFile = async (
     // Caller command files may contain user-approved text. Decode their SAME
     // verified fd strictly instead of silently replacing damaged UTF-8 bytes.
     // Existing metadata readers retain their compatible default behaviour.
+    let bytes;
+    if (Number.isFinite(maximumBytes)) {
+      // fstat limits the initial allocation. Read exactly that snapshot size
+      // on the same fd and probe one byte so growth cannot bypass the bound.
+      bytes = Buffer.alloc(metadata.size);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+        if (!bytesRead) throw new Error(`Локальный JSON изменился при чтении: ${filePath}`);
+        offset += bytesRead;
+      }
+      if ((await handle.read(Buffer.alloc(1), 0, 1, offset)).bytesRead) {
+        throw new Error(`Локальный JSON изменился при чтении: ${filePath}`);
+      }
+    } else {
+      bytes = await handle.readFile();
+    }
     const source = fatalUtf8
-      ? new TextDecoder('utf-8', { fatal: true }).decode(await handle.readFile())
-      : await handle.readFile("utf8");
+      ? new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      : bytes.toString("utf8");
     assertRuntimeHookBudget();
     return JSON.parse(source);
   } finally {
     await handle.close();
   }
 };
+
+export const readAssistantWorkspaceRunMetadata = (rootDirectory) => readPrivateJsonFile(
+  path.join(rootDirectory, ".trelio-run.json"),
+  { maximumBytes: MAX_ASSISTANT_RUN_METADATA_BYTES },
+);
 
 const readFallbackCredentials = async () => {
   await ensurePrivateDirectory(CONFIG_DIRECTORY);
@@ -17231,6 +17257,49 @@ const verifyEncryptedProjectionSource = async ({
   return { sizeBytes: fileStat.size };
 };
 
+// Parse the immutable candidate once. Batch Git's worktree hash operation
+// through stdin so Windows does not spawn Git per file or hit its argv limit.
+// Git must still apply the repository's clean/EOL rules to each literal path.
+const readEncryptedProjectionTree = async (workspaceDirectory, workspaceHead) => {
+  const { stdout } = await runGit(["ls-tree", "-r", "-z", workspaceHead], { cwd: workspaceDirectory });
+  if (stdout && !stdout.endsWith("\0")) throw new Error("Incomplete encrypted projection tree.");
+  const entries = [];
+  const paths = new Set();
+  for (const record of stdout ? stdout.slice(0, -1).split("\0") : []) {
+    const match = /^(?:100644|100755) blob ([a-f0-9]{40}(?:[a-f0-9]{24})?)\t([^\u0000-\u001f\u007f]+)$/u.exec(record);
+    if (!match) throw new Error("Invalid encrypted projection tree entry.");
+    const [, blobId, filePath] = match;
+    // A leading quote has syntax in --stdin-paths. The candidate path policy
+    // already excludes quotes and control characters on all platforms.
+    if (paths.has(filePath) || filePath.includes('"')) throw new Error("Invalid encrypted projection path.");
+    assertSafeDerivedManifestPath(filePath, "projection tree");
+    paths.add(filePath);
+    if (isHumanFacingEncryptedWorkspacePath(filePath)) entries.push({ filePath, blobId });
+  }
+  return entries;
+};
+
+const assertEncryptedProjectionFileType = async (workspaceDirectory, filePath) => {
+  const fileStat = await fs.lstat(path.join(workspaceDirectory, filePath));
+  if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+    throw new Error(`Workspace содержит неподдерживаемый тип файла: ${filePath}`);
+  }
+};
+
+const verifyEncryptedProjectionBatch = async (workspaceDirectory, entries) => {
+  for (const { filePath } of entries) await assertEncryptedProjectionFileType(workspaceDirectory, filePath);
+  if (!entries.length) return;
+  const { stdout } = await runGit(["hash-object", "--stdin-paths"], {
+    cwd: workspaceDirectory,
+    input: entries.map(({ filePath }) => `${filePath}\n`).join(""),
+  });
+  const hashes = stdout.split(/\r?\n/u);
+  if (hashes.pop() !== "" || hashes.length !== entries.length
+    || entries.some(({ blobId }, index) => blobId !== hashes[index])) {
+    throw new Error("Workspace files changed after preparing the encrypted candidate.");
+  }
+};
+
 const appendFileToHandle = async ({ sourcePath, destinationHandle, position }) => {
   let outputOffset = position;
 
@@ -17519,49 +17588,74 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
       const baseFiles = encryptedWorkspaceBundlePlan(storage, companyEncryption).bundleFormat === "delta"
         ? await readEncryptedWorkspaceBaseManifest({ capabilities: storage, metadata, companyEncryption,
           api, retry, readBoundedResponseBuffer, ensurePrivateDirectory }) : new Map();
-      const tree = await runGit(["ls-tree", "-r", "--name-only", "-z", workspaceHead], { cwd: metadata.workspaceDirectory });
-      const filePaths = tree.stdout.split("\0").filter(isHumanFacingEncryptedWorkspacePath);
-      if (filePaths.length > storage.limits.maxFiles) throw new Error("Зашифрованный Workspace содержит слишком много файлов.");
+      const { workspaceDirectory } = metadata;
+      const entries = await readEncryptedProjectionTree(workspaceDirectory, workspaceHead);
+      const totalFiles = entries.length;
+      if (totalFiles > storage.limits.maxFiles) throw new Error("Зашифрованный Workspace содержит слишком много файлов.");
       const externalObjects = new Map((metadata.objects || []).map((object) => [object.filePath, object]));
       const manifestFiles = [];
       const files = [];
-      reportFinishProgress("projection", { completedFiles: 0, totalFiles: filePaths.length });
-      for (const filePath of filePaths) {
-        const expectedExternalObject = externalObjects.get(filePath) || null;
-        const verifySource = () => verifyEncryptedProjectionSource({ metadata, workspaceHead, filePath, expectedExternalObject });
-        await verifySource();
-        const sourcePath = path.join(metadata.workspaceDirectory, filePath);
-        const source = await hashFile(sourcePath);
-        await verifySource();
-        if (source.sizeBytes > storage.limits.maxFileBytes) {
-          throw new Error(`Файл ${filePath} превышает лимит компании ${storage.limits.maxFileBytes} байт.`);
+      reportFinishProgress("projection", { completedFiles: 0, totalFiles });
+      for (let offset = 0; offset < totalFiles; offset += ENCRYPTED_WORKSPACE_PROJECTION_HASH_BATCH_SIZE) {
+        const batch = entries.slice(offset, offset + ENCRYPTED_WORKSPACE_PROJECTION_HASH_BATCH_SIZE);
+        const inline = batch.filter(({ filePath }) => !externalObjects.has(filePath));
+        await verifyEncryptedProjectionBatch(workspaceDirectory, inline);
+        const sources = new Map();
+        for (const { filePath } of batch) {
+          const external = externalObjects.get(filePath);
+          if (external) await assertEncryptedProjectionFileType(workspaceDirectory, filePath);
+          const source = external
+            ? await verifyEncryptedProjectionSource({ metadata, filePath, expectedExternalObject: external })
+            : await hashFile(path.join(workspaceDirectory, filePath));
+          sources.set(filePath, source);
         }
-        const manifestFile = { ...serializeEncryptedWorkspaceBrowserFile({ fileId: null, filePath,
-          sizeBytes: source.sizeBytes, externalContentType: expectedExternalObject?.contentType || null }),
-          plaintextSha256: source.sha256 };
-        const prior = baseFiles.get(filePath);
-        if (prior && prior.file.plaintextSha256 === source.sha256 && prior.file.sizeBytes === source.sizeBytes
-          && prior.file.contentType === manifestFile.contentType) {
-          files.push(prior.reference);
-          manifestFiles.push({ ...manifestFile, id: prior.file.id });
-          reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles: filePaths.length });
-          continue;
+        // No reference or upload is staged from a batch whose current bytes
+        // no longer match the exact Git candidate after the plaintext reads.
+        await verifyEncryptedProjectionBatch(workspaceDirectory, inline);
+        for (const { filePath, blobId } of batch) {
+          const expectedExternalObject = externalObjects.get(filePath) || null;
+          const sourcePath = path.join(workspaceDirectory, filePath);
+          const source = sources.get(filePath);
+          if (source.sizeBytes > storage.limits.maxFileBytes) {
+            throw new Error(`Файл ${filePath} превышает лимит компании ${storage.limits.maxFileBytes} байт.`);
+          }
+          const manifestFile = { ...serializeEncryptedWorkspaceBrowserFile({ fileId: null, filePath,
+            sizeBytes: source.sizeBytes, externalContentType: expectedExternalObject?.contentType || null }),
+            plaintextSha256: source.sha256 };
+          const prior = baseFiles.get(filePath);
+          if (prior && prior.file.plaintextSha256 === source.sha256 && prior.file.sizeBytes === source.sizeBytes
+            && prior.file.contentType === manifestFile.contentType) {
+            files.push(prior.reference);
+            manifestFiles.push({ ...manifestFile, id: prior.file.id });
+            reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles });
+            continue;
+          }
+          const file = await prepareCachedEncryptedWorkspaceFile({ cacheDirectory,
+            cacheKey: encryptedWorkspaceCacheKey({ ...binding, kind: "content", filePath,
+              sha256: source.sha256, sizeBytes: source.sizeBytes, contentType: manifestFile.contentType }),
+            sourcePath, kind: "content", metadata, companyEncryption, expectedSource: source,
+            originalName: filePath.split("/").at(-1), mimeType: manifestFile.contentType,
+            ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile });
+          // Retain the post-stream candidate fence. The cipher independently
+          // hashes the bytes it actually read, even if an edit was reverted.
+          if (expectedExternalObject) {
+            await assertEncryptedProjectionFileType(workspaceDirectory, filePath);
+            await verifyEncryptedProjectionSource({ metadata, filePath, expectedExternalObject });
+          } else {
+            await verifyEncryptedProjectionBatch(workspaceDirectory, [{ filePath, blobId }]);
+          }
+          await uploadEncryptedWorkspaceFile({ file, metadata, api, retry, onProgress: async (progress) => {
+            reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles, ...progress });
+            await onProgress(progress);
+          } });
+          files.push({ id: file.uploadId, kind: "content", sizeBytes: file.ciphertextSizeBytes,
+            ciphertextSha256: file.ciphertextSha256 });
+          manifestFiles.push({ ...manifestFile, id: file.uploadId });
+          reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles });
         }
-        const file = await prepareCachedEncryptedWorkspaceFile({ cacheDirectory,
-          cacheKey: encryptedWorkspaceCacheKey({ ...binding, kind: "content", filePath,
-            sha256: source.sha256, sizeBytes: source.sizeBytes, contentType: manifestFile.contentType }),
-          sourcePath, kind: "content", metadata, companyEncryption,
-          originalName: filePath.split("/").at(-1), mimeType: manifestFile.contentType,
-          ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile });
-        await verifySource();
-        await uploadEncryptedWorkspaceFile({ file, metadata, api, retry, onProgress: async (progress) => {
-          reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles: filePaths.length, ...progress });
-          await onProgress(progress);
-        } });
-        files.push({ id: file.uploadId, kind: "content", sizeBytes: file.ciphertextSizeBytes,
-          ciphertextSha256: file.ciphertextSha256 });
-        manifestFiles.push({ ...manifestFile, id: file.uploadId });
-        reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles: filePaths.length });
+        // Reusing opaque base references produces no upload callbacks. Still
+        // service the original Run heartbeat during a large unchanged tree.
+        await onProgress({ completedFiles: manifestFiles.length, totalFiles });
       }
       const { projectionId } = await cacheEncryptedWorkspaceRecord({ cacheDirectory,
         key: { ...binding, kind: "projection-id", workspaceHead }, readPrivateJsonFile, writePrivateJsonFile,

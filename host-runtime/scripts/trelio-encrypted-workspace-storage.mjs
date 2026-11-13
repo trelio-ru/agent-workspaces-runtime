@@ -174,7 +174,7 @@ const readPart = async (handle, offset, sizeBytes) => {
  */
 export const prepareCachedEncryptedWorkspaceFile = async ({
   cacheDirectory, cacheKey, sourcePath, kind, metadata, companyEncryption,
-  originalName, mimeType, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile,
+  originalName, mimeType, expectedSource, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile,
 }) => {
   ensure(SHA.test(cacheKey), "Некорректный ключ encrypted upload cache.");
   await ensurePrivateDirectory(cacheDirectory);
@@ -203,7 +203,7 @@ export const prepareCachedEncryptedWorkspaceFile = async ({
         : kind === "manifest" ? "agent_workspace_browser_manifest" : "agent_workspace_browser_file",
       entityId: kind === "revision" ? metadata.runId : uploadId,
       entityRevision: kind === "revision" ? Number(metadata.fencingToken) : 1 },
-    originalName, mimeType, writerDeviceId: companyEncryption.runtime.device.id,
+    originalName, mimeType, expectedSource, writerDeviceId: companyEncryption.runtime.device.id,
     signingPrivateKey: companyEncryption.device.privateKeys.signingPrivateKey,
   });
   const descriptor = { schemaVersion: 1, cacheKey, uploadId, kind,

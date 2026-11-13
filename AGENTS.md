@@ -1413,6 +1413,11 @@ publication tooling также остаются вне этого публичн
   and each joiner's cancellation remain intact. See the [OAuth contract](docs/agent-workspace-runtime.md#remote-mcp-oauth-sessions).
 - Assistant owner actions: live sealed intent and persisted decision; never text-as-approval. Signup is one attempt, never site success. See [contract](docs/assistant-scheduler.md#exact-owner-action-client).
 - Encrypted incremental saves select only the own Run/current native v2 base manifest; same reader/crypto and native late ACL. See the scheduler encrypted Run contract.
+  Projection verifies literal Git blob paths in bounded batches with native
+  clean/EOL behavior; raw bytes streamed into new ciphertext must match the
+  source digest. Reused files also service the same lease heartbeat.
+  Assistant file commands and retained finish share the bounded private Run
+  metadata reader. Its inventory/authority limit is independent of the wire.
 - An interrupted ordinary task continuation can recover once after its lease
   expires only from exact full native read-only history and its completed parent.
   The same native writer rereads both before renewing the original pass; no

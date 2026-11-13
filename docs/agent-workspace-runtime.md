@@ -3018,6 +3018,15 @@ path/type/size/plaintext digest с расшифрованным manifest при�
 создаёт новые containers. Server повторяет ACL и разрешает reuse только из
 exact base того же Workspace либо текущего Run/device.
 
+Перед формированием browser projection bridge читает один exact Git tree.
+Материализованные blob hashes проверяются пачками до и после чтения SHA-256;
+Git применяет обычные clean/EOL правила и возвращает один hash на literal path.
+Для новых файлов сохраняется post-stream проверка candidate, а шифратор
+проверяет SHA-256 фактически прочитанных bytes до публикации cache descriptor.
+Переиспользование старых ciphertext IDs тоже обслуживает heartbeat между
+пачками, даже если ни одного файла не пришлось загрузить.
+
+
 Git передаётся encrypted delta относительно exact parent revision. Full
 checkpoint создаётся при смене scope/epoch и после цепочки из 128 containers.
 При чтении bridge проверяет `TRELIOH1` descriptor, каждый ciphertext digest/AAD,

@@ -961,9 +961,13 @@ export const encryptFileToCompanyContainer = async ({
   mimeType,
   writerDeviceId = null,
   signingPrivateKey = null,
+  expectedSource = null,
 }) => {
   const sourceStat = await stat(sourcePath);
   if (!sourceStat.isFile()) throw new Error("Encrypted source must be a regular file.");
+  if (expectedSource && sourceStat.size !== expectedSource.sizeBytes) {
+    throw new Error("Workspace file bytes changed while preparing the encrypted projection.");
+  }
   const aad = buildCompanyEncryptionAad({ ...rawAad, purpose: "file" });
   const dataKeyBytes = randomBytes(32);
   const noncePrefix = randomBytes(8);
@@ -1020,6 +1024,10 @@ export const encryptFileToCompanyContainer = async ({
   const source = await openFile(sourcePath, "r");
   let destination = null;
   const digest = createHash("sha256");
+  // A pre/post path check cannot identify an edit that was reverted during
+  // streaming. Bind the bytes actually encrypted to the projection digest
+  // before the cache publishes a reusable ciphertext descriptor.
+  const sourceDigest = expectedSource ? createHash("sha256") : null;
   let outputOffset = 0;
   let completed = false;
 
@@ -1042,6 +1050,7 @@ export const encryptFileToCompanyContainer = async ({
           )
         : Buffer.alloc(0);
       try {
+        sourceDigest?.update(plaintext);
         const ciphertext = await webcrypto.subtle.encrypt(
           {
             name: "AES-GCM",
@@ -1056,6 +1065,10 @@ export const encryptFileToCompanyContainer = async ({
       } finally {
         plaintext.fill(0);
       }
+    }
+    if (sourceDigest && (sourceDigest.digest("hex") !== expectedSource.sha256
+      || (await source.read(Buffer.alloc(1), 0, 1, sourceStat.size)).bytesRead)) {
+      throw new Error("Workspace file bytes changed while preparing the encrypted projection.");
     }
     await destination.sync();
     completed = true;
