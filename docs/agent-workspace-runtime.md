@@ -3862,7 +3862,11 @@ read-back, scope/conflict/revocation, native picker vectors и App RPC lifecycle
 запускает штатный signed loader с закрытым селектором `mcp --multitool`.
 Оба runtime entry проверяют профиль до запуска чужого хоста.
 
-Канал использует обычный Trelio HTTPS и общий native OAuth S256. Начальный grant
+Канал использует собственный public OAuth client
+`trelio_multitool_agent_workspaces_v1` и общий с Kimi Work native OAuth S256.
+Список фиксированных client ID общий для адаптера и проверки OAuth.
+Каждый фиксированный профиль привязан к точному resource `https://trelio.ru/mcp`.
+Начальный grant
 запрашивает `mcp:read`, `mcp:workspaces:read` и `mcp:workspaces:write`.
 Keychain, pairing, реестр Run и encrypted device имеют собственную namespace.
 Компания применяет независимый opt-in в строгом режиме. Hooks, MCP Apps и

@@ -102,6 +102,7 @@ import {
 } from "./trelio-folder-onboarding.mjs";
 import {
   RemoteMcpOAuthError,
+  TRELIO_NATIVE_OAUTH_CLIENT_IDS,
   connectRemoteMcpOAuth,
   oauthHttpJson,
   refreshRemoteMcpOAuth,
@@ -7396,9 +7397,9 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     const isKimi = nativeClient === "kimi-work";
     const isMultiTool = nativeClient === "multitool";
     const publicProfile = isMultiTool
-      ? { id: "trelio_multitool_agent_workspaces_v1", name: "Trelio – Мультитул", authRequired: "TRELIO_MULTITOOL_AUTH_REQUIRED" }
+      ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS.multitool, name: "Trelio – Мультитул", authRequired: "TRELIO_MULTITOOL_AUTH_REQUIRED" }
       : isKimi
-        ? { id: "trelio_kimi_work_agent_workspaces_v1", name: "Trelio – Kimi Work", authRequired: "TRELIO_KIMI_AUTH_REQUIRED" }
+        ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS["kimi-work"], name: "Trelio – Kimi Work", authRequired: "TRELIO_KIMI_AUTH_REQUIRED" }
         : null;
     // MultiTool's onboarding verifies task reads and Workspace lifecycle.
     // Consent for these capabilities never requests unrelated domain writes.

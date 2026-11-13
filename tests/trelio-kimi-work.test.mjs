@@ -163,47 +163,57 @@ test("actual signed-runtime entry selects both Kimi carriers and rejects malform
   await assert.rejects(fs.stat(path.join(directory, "foreign-codex")), { code: "ENOENT" });
 });
 
-test("Kimi uses the real S256/state/loopback OAuth engine and a distinct native vault cell", async () => {
-  let credential, authorize, exchange, writes = 0, dcrCalls = 0;
-  const httpJson = async (url, options = {}) => {
-    if (url.includes(".well-known")) return { body: metadata };
-    if (url === metadata.registration_endpoint) { dcrCalls++; throw new Error("fixed profile must not use DCR"); }
-    assert.equal(url, metadata.token_endpoint);
-    exchange = new URLSearchParams(options.body);
-    return { body: { access_token: "synthetic-kimi-oauth", token_type: "Bearer", expires_in: 3600,
-      scope: metadata.scopes_supported.join(" ") } };
-  };
-  const connection = createHarnessConnection({ nativeClient: "kimi-work", httpJson,
-    vault: { read: async () => credential, write: async (_origin, _identity, value) => { writes++; credential = value; } },
-    connectOAuth: (config, options) => connectRemoteMcpOAuth(config, { ...options, httpJson,
-      openBrowserFn: async url => {
-        authorize = new URL(url);
-        assert.equal(authorize.searchParams.get("client_id"), "trelio_kimi_work_agent_workspaces_v1");
-        assert.equal(authorize.searchParams.get("resource"), `${origin}/mcp`);
-        const callback = new URL(authorize.searchParams.get("redirect_uri"));
-        assert.equal(callback.hostname, "127.0.0.1"); assert.equal(callback.pathname, "/callback");
-        callback.searchParams.set("state", authorize.searchParams.get("state"));
-        callback.searchParams.set("code", "synthetic-code");
-        const response = await fetch(callback); assert.equal(response.status, 200);
-      } }),
-    httpRequest: async ({ payload, credential: token }) => {
-      assert.equal(token, "synthetic-kimi-oauth");
-      if (!payload.id) return { body: null };
-      return { sessionId: "synthetic-mcp", message: { jsonrpc: "2.0", id: payload.id,
-        result: payload.method === "initialize" ? { protocolVersion: "2025-03-26", instructions: "server authority" }
-          : { tools: [] } } };
-    } });
-  assert.equal((await connection.connect(signal())).connected, true);
-  assert.equal(dcrCalls, 0); assert.equal(writes, 1);
-  assert.equal(exchange.get("client_id"), "trelio_kimi_work_agent_workspaces_v1");
-  assert.equal(exchange.get("redirect_uri"), authorize.searchParams.get("redirect_uri"));
-  assert.equal(crypto.createHash("sha256").update(exchange.get("code_verifier")).digest("base64url"), authorize.searchParams.get("code_challenge"));
-  assert.equal((await connection.connect(signal())).saving, "not_checked");
-  assert.equal(writes, 1, "valid existing authorization is reused");
-  const resolved = { remoteMcp: { configFingerprint: "synthetic" } };
-  assert.notEqual(remoteMcpOAuthSessionAccount(origin, resolved, "native", "kimi-work"),
-    remoteMcpOAuthSessionAccount(origin, resolved, "native", "deepseek-harness"));
-});
+for (const { nativeClient, clientId } of [
+  { nativeClient: "kimi-work", clientId: "trelio_kimi_work_agent_workspaces_v1" },
+  { nativeClient: "multitool", clientId: "trelio_multitool_agent_workspaces_v1" },
+]) {
+  test(`${nativeClient} connects through the real S256/state/loopback OAuth engine and its own vault cell`, async () => {
+    let credential, authorize, exchange, writes = 0, dcrCalls = 0;
+    const httpJson = async (url, options = {}) => {
+      if (url.includes(".well-known")) return { body: metadata };
+      if (url === metadata.registration_endpoint) { dcrCalls++; throw new Error("fixed profile must not use DCR"); }
+      assert.equal(url, metadata.token_endpoint);
+      exchange = new URLSearchParams(options.body);
+      return { body: { access_token: `synthetic-${nativeClient}-oauth`, token_type: "Bearer", expires_in: 3600,
+        scope: metadata.scopes_supported.join(" ") } };
+    };
+    const connection = createHarnessConnection({ nativeClient, httpJson,
+      vault: { read: async () => credential, write: async (_origin, _identity, value) => { writes++; credential = value; } },
+      connectOAuth: (config, options) => connectRemoteMcpOAuth(config, { ...options, httpJson,
+        openBrowserFn: async url => {
+          authorize = new URL(url);
+          assert.equal(authorize.searchParams.get("client_id"), clientId);
+          assert.equal(authorize.searchParams.get("resource"), `${origin}/mcp`);
+          const callback = new URL(authorize.searchParams.get("redirect_uri"));
+          assert.equal(callback.hostname, "127.0.0.1"); assert.equal(callback.pathname, "/callback");
+          callback.searchParams.set("state", authorize.searchParams.get("state"));
+          callback.searchParams.set("code", "synthetic-code");
+          const response = await fetch(callback); assert.equal(response.status, 200);
+        } }),
+      httpRequest: async ({ payload, credential: token }) => {
+        assert.equal(token, `synthetic-${nativeClient}-oauth`);
+        if (!payload.id) return { body: null };
+        return { sessionId: "synthetic-mcp", message: { jsonrpc: "2.0", id: payload.id,
+          result: payload.method === "initialize" ? { protocolVersion: "2025-03-26", instructions: "server authority" }
+            : { tools: [] } } };
+      } });
+    const handler = createKimiMcpHandler({ connection, multiTool: nativeClient === "multitool" });
+    const connected = await handler(call("trelio_connect"), { signal: signal() });
+    assert.equal(connected.result.structuredContent.connected, true, JSON.stringify(connected.result));
+    assert.equal(dcrCalls, 0); assert.equal(writes, 1);
+    assert.equal(exchange.get("client_id"), clientId);
+    assert.equal(exchange.get("resource"), `${origin}/mcp`);
+    assert.equal(exchange.get("redirect_uri"), authorize.searchParams.get("redirect_uri"));
+    assert.equal(crypto.createHash("sha256").update(exchange.get("code_verifier")).digest("base64url"), authorize.searchParams.get("code_challenge"));
+    assert.equal((await connection.connect(signal())).saving, "not_checked");
+    assert.equal(writes, 1, "valid existing authorization is reused");
+    const resolved = { remoteMcp: { configFingerprint: "synthetic" } };
+    const account = remoteMcpOAuthSessionAccount(origin, resolved, "native", nativeClient);
+    for (const otherClient of ["kimi-work", "multitool", "deepseek-harness"].filter(client => client !== nativeClient)) {
+      assert.notEqual(account, remoteMcpOAuthSessionAccount(origin, resolved, "native", otherClient));
+    }
+  });
+}
 
 test("Kimi reads tasks in the first and later chats using a cached startup catalogue", async () => {
   const input = new PassThrough(), stream = new PassThrough();

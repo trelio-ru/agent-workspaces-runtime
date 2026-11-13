@@ -1569,6 +1569,8 @@ See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
 and an independent OAuth/bridge namespace. The macOS installer returns one
 config entry. Exact open/inspect routes omit chat cwd; read the returned local
 authority through EOF before using the materialized Workspace.
+Keep both fixed client IDs in the shared OAuth inventory and test each native
+adapter through the real callback and token exchange.
 Its bootstrap uses the SAME loader's bounded MCP update/startup path; both entry
 boundaries reject unknown selectors before a foreign host or private namespace.
 Node children reconstruct `ELECTRON_RUN_AS_NODE=1` only for the currently observed

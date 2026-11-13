@@ -58,6 +58,22 @@ const assertListenerClosed = async (callback) => {
   });
 };
 
+test("fixed native OAuth profiles reject unknown IDs and resources before I/O", async () => {
+  const nativeEndpoint = "https://trelio.ru/mcp";
+  const multiToolClient = "trelio_multitool_agent_workspaces_v1";
+  const unexpectedIO = () => assert.fail("invalid fixed profiles must fail before discovery or browser launch");
+  for (const [endpoint, resource, publicClientId] of [
+    [nativeEndpoint, nativeEndpoint, "unregistered-native-client"],
+    [config.endpoint, config.endpoint, multiToolClient],
+    [nativeEndpoint, null, multiToolClient],
+    [nativeEndpoint, "https://trelio.ru/mcp/other", multiToolClient],
+  ]) {
+    await assert.rejects(connectRemoteMcpOAuth({ ...callbackConfig, endpoint }, {
+      publicClientId, resource, httpJson: unexpectedIO, openBrowserFn: unexpectedIO,
+    }), { code: "REMOTE_MCP_OAUTH_PROFILE_INVALID" });
+  }
+});
+
 test("OAuth opener failure and cancellation close the exact loopback listener", async (t) => {
   for (const cancel of [false, true]) {
     await t.test(cancel ? "cancel during browser handoff" : "opener failure", async () => {

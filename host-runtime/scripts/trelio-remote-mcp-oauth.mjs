@@ -14,6 +14,14 @@ const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;
 const OAUTH_TIMEOUT_MS = 20_000;
 const CALLBACK_TIMEOUT_MS = 10 * 60 * 1_000;
 
+// The native connection and the OAuth engine share this inventory so a client
+// cannot reach the browser with a profile the engine does not recognize.
+export const TRELIO_NATIVE_OAUTH_CLIENT_IDS = Object.freeze({
+  "kimi-work": "trelio_kimi_work_agent_workspaces_v1",
+  multitool: "trelio_multitool_agent_workspaces_v1",
+});
+const TRELIO_NATIVE_OAUTH_RESOURCE = "https://trelio.ru/mcp";
+
 export class RemoteMcpOAuthError extends Error {
   constructor(code, message) {
     super(message);
@@ -323,8 +331,8 @@ export const connectRemoteMcpOAuth = async (
   // A fixed public profile is a host-owned choice, never part of an external
   // skill declaration. Keep the exact resource/id pair closed so this option
   // cannot turn another provider into Trelio's model-independent channel.
-  if (publicClientId !== null && (publicClientId !== "trelio_kimi_work_agent_workspaces_v1"
-    || config.endpoint !== "https://trelio.ru/mcp" || resource !== config.endpoint)) {
+  if (publicClientId !== null && (!Object.values(TRELIO_NATIVE_OAUTH_CLIENT_IDS).includes(publicClientId)
+    || config.endpoint !== TRELIO_NATIVE_OAUTH_RESOURCE || resource !== TRELIO_NATIVE_OAUTH_RESOURCE)) {
     throw fail("REMOTE_MCP_OAUTH_PROFILE_INVALID", "Недопустимый public OAuth profile.");
   }
   const metadata = await discoverRemoteMcpOAuth(config, { resolveEndpoint, httpJson, signal });
