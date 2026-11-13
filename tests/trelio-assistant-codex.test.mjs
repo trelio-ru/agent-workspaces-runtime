@@ -1723,11 +1723,11 @@ test('unmaterialized triage probe observes only two exact native refusals',async
   }
 });
 
-test('source triage waits for the same scoped native server to connect before either readiness turn',async()=>{
+for(const chatKind of ['source_triage','task'])test(`${chatKind} waits for the same scoped native server before either readiness turn`,async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),children=[];
   let catalogueReads=0,starts=0,turns=0,inputs=0,saved=false;
   const result=await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},{
-    executable:process.execPath,environment:{},chatKind:'source_triage',
+    executable:process.execPath,environment:{},chatKind,
     readExecutionAvailability:async()=>true,
     startInvocation:()=>{starts++;},
     onThreadStarted:value=>{assert.equal(value,threadId);saved=true;},
@@ -1749,6 +1749,38 @@ test('source triage waits for the same scoped native server to connect before ei
   assert.equal(inputs,2);
   assert.equal(catalogueReads,3,'the cached result earns no readiness');
   assert.equal(children.length,2,'one owned writer plus the separate cosmetic naming client');
+});
+
+test('task provision recovery sends one new technical marker and requires the complete tool-free READY history',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),children=[],inputs=[];
+  let prepared=false,started=false,saved=false;
+  const state=await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},{
+    executable:process.execPath,environment:{},chatKind:'task',taskProvisionRecovery:true,
+    beforeInvocation:async()=>{assert.equal(started,false);prepared=true;},
+    readExecutionAvailability:async()=>true,
+    startInvocation:()=>{assert.ok(prepared);started=true;},
+    onThreadStarted:value=>{assert.equal(value,threadId);assert.ok(started);saved=true;},
+    readDelivery:async(_thread,_delivery,options)=>{
+      assert.equal(options.taskProvisionRecovery,true);
+      return {state:'completed',threadId,turnId:randomUUID()};
+    },
+    spawnProcess:ownedRpc({threadId,children,onInput:text=>{assert.ok(saved);inputs.push(text);}}),
+  });
+  assert.equal(state.state,'completed');
+  assert.equal(inputs.length,1);assert.match(inputs[0],new RegExp('^'+assistantDeliveryMarker(deliveryId)));
+  assert.equal(children.filter(child=>child.killed).length,2);
+  const turn={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',text:inputs[0]}]},
+    {type:'reasoning'},{type:'agentMessage',text:'READY'}]};
+  for(const [turns,nextCursor,expected] of [
+    [[turn],null,'completed'],[[turn],'unread','uncertain'],
+    [[turn,{id:randomUUID(),status:'completed',items:[]}],null,'uncertain'],
+    [[{...turn,items:[turn.items[0],{type:'mcpToolCall'},turn.items[2]]}],null,'uncertain'],
+  ]){
+    const result=await readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
+      taskProvisionRecovery:true,spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+        ?{thread:{id:threadId,cwd:process.cwd()}}:{data:turns,nextCursor}}))});
+    assert.equal(result.state,expected);
+  }
 });
 
 test('rejected triage ignore is proven by the exact full terminal turn and typed refusal only', async () => {

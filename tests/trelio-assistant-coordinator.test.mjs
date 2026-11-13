@@ -676,6 +676,74 @@ test('an ambiguous server host claim resumes the same durable provision before t
   assert.equal(restarted.status().length,1);
 });
 
+for(const mode of ['recovered','committed_reply_lost','register_then_crash','start_lost','history_present','claim_registered','hard_failure'])
+  test(`unmaterialized task provision preserves its original start and admits only one technical recovery (${mode})`,async t=>{
+    const f=fixture(t),oldThread=randomUUID(),newThread=randomUUID(),turnId=randomUUID();
+    const claims=[],witnesses=[],attempts=[];
+    let registered=null,receipt=null;
+    f.options.client.task=async()=>({...f.authority,execution:f.execution,hostState:claims.length?'this_device':'unclaimed'});
+    f.options.client.claimTaskHost=async input=>{
+      claims.push(input.provisionId);return {bindingId:input.bindingId,provisionId:input.provisionId,threadId:registered};
+    };
+    f.options.native.readDelivery=async(thread,marker,options)=>{
+      if(thread===oldThread){
+        assert.equal(marker,claims[0]);assert.equal(options.provision,true);
+        throw Object.assign(Error(),{code:mode==='hard_failure'?'ASSISTANT_CODEX_READ_TIMEOUT':'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+      }
+      assert.equal(thread,newThread);assert.equal(marker,attempts[1]);assert.equal(options.taskProvisionRecovery,true);
+      return receipt??{state:'uncertain'};
+    };
+    f.options.native.readUnmaterializedTaskProvision=async thread=>{
+      witnesses.push(thread);assert.equal(thread,oldThread);return mode!=='history_present';
+    };
+    f.options.native.provision=async(input,options)=>{
+      attempts.push(input.deliveryId);
+      if(attempts.length===1){
+        options.startInvocation();options.onThreadStarted(oldThread);
+        throw Object.assign(Error(),{code:'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE'});
+      }
+      assert.equal(options.taskProvisionRecovery,true);assert.equal(input.threadId,undefined);
+      assert.notEqual(input.deliveryId,attempts[0]);await options.beforeInvocation();options.startInvocation();
+      if(mode==='start_lost')throw Error('native start outcome unknown');
+      options.onThreadStarted(newThread);
+      receipt={state:'completed',threadId:newThread,turnId,receipt:`codex:${newThread}:${turnId}`};
+      if(mode==='committed_reply_lost')throw Error('terminal response lost');
+      return receipt;
+    };
+    await f.coordinator.pollOnce();await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    const before=f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get();
+    if(mode==='claim_registered')registered=randomUUID();
+    if(mode==='register_then_crash'){
+      // Stop after local registration but before the delivery's SQLite commit.
+      // The next worker adopts the SAME accepted READY, never starts again.
+      f.database.exec(`CREATE TRIGGER deny_completion BEFORE UPDATE ON assistant_inbox_deliveries
+        WHEN NEW.state='complete' BEGIN SELECT RAISE(ABORT,'fixture crash'); END;`);
+    }
+    if(mode==='hard_failure')await assert.rejects(f.coordinator.workOnce(),/READ_TIMEOUT/);
+    else if(['start_lost','committed_reply_lost','register_then_crash'].includes(mode))await assert.rejects(f.coordinator.workOnce());
+    else await f.coordinator.workOnce();
+    if(mode==='register_then_crash'){
+      assert.equal(f.coordinator.status()[0].threadId,newThread);
+      f.database.exec('DROP TRIGGER deny_completion');
+      registered=newThread;
+    }
+    await f.coordinator.close();
+    const restarted=createAssistantCoordinator(f.options);
+    if(mode==='hard_failure')await assert.rejects(restarted.workOnce(),/READ_TIMEOUT/);
+    else await restarted.workOnce();
+    const after=f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(before.delivery_id);
+    assert.equal(after.native_thread_id,oldThread);assert.equal(after.native_started,1);
+    assert.equal(after.failure_code,before.failure_code);
+    const finished=['recovered','committed_reply_lost','register_then_crash'].includes(mode);
+    assert.equal(after.state,finished?'complete':'uncertain');
+    assert.equal(attempts.length,['recovered','committed_reply_lost','register_then_crash','start_lost'].includes(mode)?2:1);
+    assert.ok(claims.every(id=>id===before.delivery_id));
+    assert.ok(witnesses.every(id=>id===oldThread));
+    assert.equal(restarted.status()[0]?.threadId,finished?newThread:undefined);
+    assert.equal(f.passes.size,0);
+    await restarted.close();
+  });
+
 test('another valid device host blocks native business work even with an accepted task binding', async t=>{
   const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
   f.options.client.task=async()=>({...f.authority,hostState:'other_device'});

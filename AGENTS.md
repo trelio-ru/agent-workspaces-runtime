@@ -1513,6 +1513,14 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
 
 Pre-native reservation recovery: SAME delivery v12/bit0/lease and native history, not a new invocation; see docs/assistant-scheduler.md.
 
+Technical provision waits for the same exact connected MCP catalogue. Schema31
+can recover a legacy unmaterialized task provision only with both exact native
+not-loaded responses and the original unregistered device/task claim. Keep its
+old thread/start/failure and permit one independent tool-free READY marker;
+unknown starts stay read-back-only. No provider/body/pass/ACK or health shortcut.
+See [native provision recovery](docs/assistant-scheduler.md#native-invocation).
+
+
 
 Native DeepSeek Harness connection принадлежит host runtime; его bootstrap,
 compatibility range, exact qualification fixture и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-connection). Desktop navigation включается в новом native bundle и использует owner-only Host route.

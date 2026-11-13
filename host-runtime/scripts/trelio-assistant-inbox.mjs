@@ -303,7 +303,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -408,7 +408,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -666,8 +666,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       intake_id TEXT PRIMARY KEY REFERENCES assistant_owner_intakes(id) ON DELETE CASCADE,
       original_receipt_id TEXT NOT NULL, terminal_turn_id TEXT NOT NULL, receipt_id TEXT
     )`);
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=30');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (30)');
+    if(versions[0]?.version>=31&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_task_provision_recoveries'"))
+      fail('ASSISTANT_INBOX_CONFLICT');
+    // A separate marker prevents a corrected technical start from replacing
+    // any old thread, start bit or uncertain business record in schema30.
+    db.exec(`CREATE TABLE IF NOT EXISTS assistant_task_provision_recoveries (
+      delivery_id TEXT PRIMARY KEY REFERENCES assistant_inbox_deliveries(delivery_id) ON DELETE CASCADE,
+      original_thread_id TEXT NOT NULL, marker_id TEXT NOT NULL UNIQUE,
+      started INTEGER NOT NULL CHECK(started IN (0,1)), thread_id TEXT
+    )`);
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=31');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (31)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -776,6 +785,28 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     const row = get('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?', uuid(id));
     if (!row) fail('ASSISTANT_INBOX_DELIVERY_REQUIRED');
     return row;
+  };
+  const taskProvisionRecovery = row => {
+    const record=get('SELECT * FROM assistant_task_provision_recoveries WHERE delivery_id=?',row.delivery_id);
+    if(!record)return null;
+    if(row.kind!=='provision'||!row.native_started||uuid(record.original_thread_id)!==row.native_thread_id
+      ||uuid(record.marker_id)===row.delivery_id||![0,1].includes(record.started)
+      ||record.thread_id!==null&&(!record.started||uuid(record.thread_id)===row.native_thread_id))
+      fail('ASSISTANT_INBOX_CONFLICT');
+    return Object.freeze({markerId:record.marker_id,started:Boolean(record.started),threadId:record.thread_id});
+  };
+  const canRecoverTaskProvision = row => {
+    // Only the exact catalogue-policy failure after native thread registration
+    // qualifies. A lost start or any possibly executed task stays uncertain.
+    if(row.kind!=='provision'||row.state!=='uncertain'||!row.native_started||!UUID.test(row.native_thread_id??'')
+      ||row.failure_code!=='ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE'||row.failure_stage!=='native_started'
+      ||row.pass_continuation_json!==null
+      ||get('SELECT 1 FROM assistant_pass_continuations WHERE delivery_id=? LIMIT 1',row.delivery_id)
+      ||get('SELECT 1 FROM assistant_inbox_delivery_events WHERE delivery_id=? LIMIT 1',row.delivery_id))return false;
+    const source=get('SELECT state,scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key);
+    const task=get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',row.source_key,row.task_id);
+    return source?.state==='active'&&JSON.parse(source.scope_json).provider==='trelio'
+      &&task?.state==='accepted'&&task.revision===row.task_revision;
   };
   const recoverExpired = () => {
     // Only a lease that never crossed the external-call boundary may retry.
@@ -2165,6 +2196,38 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const row = delivery(id);
         if (row.kind !== 'provision' || row.state !== 'started' || !row.native_started || (row.native_thread_id && row.native_thread_id !== threadId)) fail('ASSISTANT_INBOX_STALE_DELIVERY');
         run('UPDATE assistant_inbox_deliveries SET native_thread_id=? WHERE delivery_id=?', threadId, id);
+      });
+    },
+    readTaskProvisionRecovery(id) {
+      const row=delivery(uuid(id));
+      return {eligible:canRecoverTaskProvision(row),intent:taskProvisionRecovery(row)};
+    },
+    prepareTaskProvisionRecovery(id) {
+      return transaction(()=>{
+        const row=delivery(uuid(id));
+        if(!canRecoverTaskProvision(row))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        const current=taskProvisionRecovery(row);
+        if(current)return current;
+        run('INSERT INTO assistant_task_provision_recoveries(delivery_id,original_thread_id,marker_id,started) VALUES(?,?,?,0)',
+          id,row.native_thread_id,randomUUID());
+        return taskProvisionRecovery(row);
+      });
+    },
+    startTaskProvisionRecovery(id,marker) {
+      return transaction(()=>{
+        const row=delivery(uuid(id)),intent=taskProvisionRecovery(row);
+        if(!canRecoverTaskProvision(row)||intent?.markerId!==uuid(marker)||intent.started)
+          fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run('UPDATE assistant_task_provision_recoveries SET started=1 WHERE delivery_id=?',id);
+      });
+    },
+    bindTaskProvisionRecovery(id,marker,threadId) {
+      return transaction(()=>{
+        const row=delivery(uuid(id)),intent=taskProvisionRecovery(row);
+        threadId=uuid(threadId);
+        if(!canRecoverTaskProvision(row)||intent?.markerId!==uuid(marker)||!intent.started||intent.threadId!==null
+          ||threadId===row.native_thread_id)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run('UPDATE assistant_task_provision_recoveries SET thread_id=? WHERE delivery_id=?',threadId,id);
       });
     },
     incompleteDeliveries() {

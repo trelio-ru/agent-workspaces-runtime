@@ -1708,6 +1708,73 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(!intent.reviewId)intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId:randomUUID(),resumeAttempted:true,resumed:true});
     await perform(job,signal,intent);return false;
   };
+  /** Recover only a technical first-chat failure. The native host cannot
+   * begin a business pass before the original claim has a registered thread.
+   * Keep that exact claim and old start; a separate marker can obtain one
+   * tool-free READY after two exact native not-loaded refusals. */
+  const recoverTaskProvision = async (job,retained,signal) => {
+    const claim = async (settledThread=null) => {
+      lease();
+      const plan=findSchedule(job.scope,job.taskId);
+      if(!passHost||await passHost.readActivePass()||plan&&plan.threadId!==settledThread
+        ||!inbox.readTaskProvisionRecovery(job.deliveryId).eligible)return null;
+      let execution,binding;
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{job,captureBinding:value=>{binding=value;},
+        captureExecution:value=>{execution=value;}})||binding.hostState!=='this_device')return null;
+      // This is the existing exact same-id host claim. 'this_device' is
+      // independently read first; the native CAS rejects competing provision
+      // IDs/devices. Only the already completed SAME marker may reconcile a
+      // partially registered result after a crash; no registered thread may
+      // authorize another native start.
+      const host=await client.claimTaskHost({companyId:job.scope.companyId,taskId:job.taskId,
+        bindingId:binding.id,bindingRevision:binding.revision,provisionId:job.deliveryId},signal);
+      lease();
+      if(host.bindingId!==binding.id||host.provisionId!==job.deliveryId||host.threadId!==null&&host.threadId!==settledThread
+        ||!inbox.readTaskProvisionRecovery(job.deliveryId).eligible||await passHost.readActivePass())return null;
+      lease();
+      return {bindingId:binding.id,revision:binding.revision,execution};
+    };
+    const settle=async (result,threadId)=>{
+      if(result.state!=='completed'||!uuid.test(result.turnId??'')
+        ||result.receipt!==`codex:${threadId}:${result.turnId}`||!await claim(threadId))return true;
+      registerChat(job,threadId);
+      await commitCompletion(job,threadId,result.receipt,signal);
+      // A technical READY does not clear a dispatch warning as business
+      // recovery. Only an actual task pass and its accepted result can do so.
+      return false;
+    };
+    if(retained?.started){
+      // A lost start response is never retried, even if no thread was saved.
+      if(!retained.threadId)return true;
+      const result=await native.readDelivery(retained.threadId,retained.markerId,{signal,taskProvisionRecovery:true});lease();
+      return settle(result,retained.threadId);
+    }
+    if(typeof native.readUnmaterializedTaskProvision!=='function')return true;
+    const verify=async()=>{
+      const evidence=await claim();
+      if(!evidence||await native.readUnmaterializedTaskProvision(job.threadId,{signal})!==true)return null;
+      lease();return evidence;
+    };
+    const evidence=await verify();
+    if(!evidence||await native.ready(identity,signal)!==true)return true;
+    lease();
+    const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+    const intent=inbox.prepareTaskProvisionRecovery(job.deliveryId);
+    const result=await native.provision({deliveryId:intent.markerId,cwd,execution:evidence.execution},{
+      signal,chatKind:'task',taskProvisionRecovery:true,
+      beforeInvocation:async()=>{
+        const current=await verify();
+        if(!current||JSON.stringify(current)!==JSON.stringify(evidence))
+          fail('ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED');
+      },
+      startInvocation:()=>{lease();inbox.startTaskProvisionRecovery(job.deliveryId,intent.markerId);},
+      onThreadStarted:threadId=>{lease();inbox.bindTaskProvisionRecovery(job.deliveryId,intent.markerId,threadId);},
+    });
+    lease();
+    const final=inbox.readTaskProvisionRecovery(job.deliveryId).intent;
+    if(!final?.started||final.markerId!==intent.markerId||!final.threadId||result.threadId!==final.threadId)return true;
+    return settle(result,final.threadId);
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -1737,9 +1804,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     const threadId=job.kind==='provision'?job.threadId:findSchedule(job.scope,job.taskId)?.threadId;
     if(!threadId) { emit('ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED'); return true; }
+    const recovery=job.kind==='provision'?inbox.readTaskProvisionRecovery(job.deliveryId):null;
+    if(recovery?.intent?.started)return recoverTaskProvision(job,recovery.intent,signal);
     const continued=inbox.readPassContinuation(job.deliveryId);
     const marker=continued?(continued.started?continued.reviewId:continued.terminalMarkerId):job.deliveryId;
-    const result=await native.readDelivery(threadId,marker,{signal,...(job.kind==='provision'?{provision:true}:{})}); lease();
+    let result;
+    try{result=await native.readDelivery(threadId,marker,{signal,...(job.kind==='provision'?{provision:true}:{})});}
+    catch(error){
+      // A generic history failure is not absence. The separate native probe
+      // below accepts only the two exact not-loaded refusals for this UUID.
+      if(!recovery?.eligible||error?.code!=='ASSISTANT_CODEX_READ_UNAVAILABLE')throw error;
+      return recoverTaskProvision(job,recovery.intent,signal);
+    }
+    lease();
     if(result.state==='completed') {
       if(job.kind==='provision') registerChat(job,threadId);
       try{await commitCompletion(job,threadId,result.receipt,signal);}

@@ -144,8 +144,8 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
  * Re-read only this same complete catalogue in the same owned writer, within
  * the original signal/deadline. No other plugin, wrong tools, malformed page
  * or explicit connection error becomes acceptable or retryable. */
-const verifyAssistantExecutionServer = async(request,threadId,{workspaceDraftRecovery,triage,signal})=>{
-  const delays=triage?[250,500,1000,2000,4000,8000,8000,8000]:[];
+const verifyAssistantExecutionServer = async(request,threadId,{workspaceDraftRecovery,waitForConnection,signal})=>{
+  const delays=waitForConnection?[250,500,1000,2000,4000,8000,8000,8000]:[];
   for(let attempt=0;;attempt++){
     if(await readAssistantExecutionServer(request,threadId,workspaceDraftRecovery))return;
     if(attempt===delays.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
@@ -367,7 +367,7 @@ const readNative = async (threadId, project, options = {}) => {
               // Only the dedicated read-only staging probe consumes this
               // exact native refusal. Generic RPC, transport and unavailable
               // history cannot become a missing-thread observation.
-              const notLoaded=options.observeUnmaterializedTriage===true
+              const notLoaded=options.observeUnmaterializedProvision===true
                 &&['thread/read','thread/turns/list'].includes(current.method)&&UUID.test(current.threadId??'')
                 &&message.error.code===-32600&&message.error.message===`thread not loaded: ${current.threadId}`;
               current.no(new AssistantCodexError(notLoaded?'ASSISTANT_CODEX_THREAD_NOT_LOADED':busy?'ASSISTANT_CODEX_THREAD_BUSY'
@@ -412,8 +412,8 @@ const readNative = async (threadId, project, options = {}) => {
 /** Observe that neither native read can materialize the original staging
  * chat. This alone proves no business outcome and never admits a task or
  * owner command. Only a separately certified never-attached triage ledger
- * can make a replacement technical READY relevant. */
-export const readAssistantUnmaterializedTriage = (threadId,options={}) => {
+ * or the exact never-registered task claim can make a technical READY relevant. */
+export const readAssistantUnmaterializedProvision = (threadId,options={}) => {
   threadId=id(threadId);
   return readNative(null,async(_thread,request)=>{
     for(const [method,params] of [
@@ -424,8 +424,9 @@ export const readAssistantUnmaterializedTriage = (threadId,options={}) => {
       catch(error){if(error?.code!=='ASSISTANT_CODEX_THREAD_NOT_LOADED')throw error;}
     }
     return true;
-  },{...options,observeUnmaterializedTriage:true});
+  },{...options,observeUnmaterializedProvision:true});
 };
+export const readAssistantUnmaterializedTriage=readAssistantUnmaterializedProvision;
 
 /** Pure projection of the documented App Server account/rateLimits/read DTO.
  * Never forward account IDs, balance/reset credits, provider prose or labels.
@@ -663,7 +664,7 @@ const toolFreeReady=(turn,prompt,{allowReasoning=false}={})=>{
   if(turn?.status!=='completed'||turn.error!=null||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>32)return false;
   const [request,...remainder]=turn.items,response=remainder.pop();
   // Codex can retain reasoning between the exact empty request and READY.
-  // For source triage that is model output only. Any tool, intermediate
+  // For the selected technical provision that is model output only. Any tool, intermediate
   // message or other item still invalidates the technical proof.
   return request?.type==='userMessage'&&Array.isArray(request.content)&&request.content.length===1
     &&request.content[0]?.type==='text'&&request.content[0].text===prompt
@@ -1496,7 +1497,7 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       return {state:'uncertain',markerEvidence:'ambiguous'};
     }
     const response = await request('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc',
-      itemsView:(options.provision===true&&options.allowPrepared===true||options.readinessOnly===true)?'full':'summary' });
+      itemsView:(options.provision===true&&options.allowPrepared===true||options.readinessOnly===true||options.taskProvisionRecovery===true)?'full':'summary' });
     if (!Array.isArray(response?.data) || response.data.length > 20) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
     let matches = response.data.filter(turn => Array.isArray(turn.items) && turn.items.some(item =>
       item.type === 'userMessage' && Array.isArray(item.content) && item.content.some(input =>
@@ -1530,8 +1531,11 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
     // completed READY after submission; trimming would instead weaken exact
     // history binding. This is read-only reconciliation of the saved marker,
     // never permission to submit another verification or owner question.
-    if(options.readinessOnly===true&&turn.status==='completed'&&!toolFreeReady(turn,
-      assistantNativePrompt(deliveryId,undefined,{readinessProbe:true}),{allowReasoning:options.chatKind==='source_triage'}))
+    if(options.taskProvisionRecovery===true&&(response.nextCursor!==null||response.data.length!==1))
+      return {state:'uncertain'};
+    if((options.readinessOnly===true||options.taskProvisionRecovery===true)&&turn.status==='completed'&&!toolFreeReady(turn,
+      assistantNativePrompt(deliveryId,undefined,{readinessProbe:true}),
+      {allowReasoning:options.chatKind==='source_triage'||options.taskProvisionRecovery===true}))
       return {state:'uncertain'};
     if (turn.status === 'completed') return { state: 'completed', turnId: turn.id, receipt: `codex:${id(threadId)}:${id(turn.id)}` };
     if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}`,
@@ -1801,6 +1805,10 @@ export const provisionAssistantCodexChat = async ({ deliveryId, cwd, execution, 
   deliveryId = id(deliveryId);
   execution = assistantExecutionConfiguration(execution);
   if(options.chatKind!==undefined&&!['task','owner_dialogue','source_triage'].includes(options.chatKind))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  // This host-only recovery creates one technical READY marker. It cannot be
+  // combined with a resumed, business or taskless chat or skip the start CAS.
+  if(options.taskProvisionRecovery===true&&(threadId!==null||options.chatKind!=='task'
+    ||typeof options.beforeInvocation!=='function'))fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (typeof options.onThreadStarted !== 'function' || typeof cwd !== 'string' || !path.isAbsolute(cwd)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   let actual; try { actual = await fs.realpath(cwd); } catch { fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE'); }
   if(threadId!==null){
@@ -1951,8 +1959,8 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       if(saved&&typeof saved.then==='function')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
     await verifyAssistantExecutionServer(request,threadId,{
-      workspaceDraftRecovery:workspaceRecoveryMode,
-      triage:options.chatKind==='source_triage'||workStateContext?.intakeKind==='route_existing',signal,
+      workspaceDraftRecovery:workspaceRecoveryMode,signal,
+      waitForConnection:options.readinessProbe===true||workStateContext?.intakeKind==='route_existing',
     });
     if(options.workspaceDraftRecovery){
       const {terminalMarkerId,terminalTurnId,taskPass,workspaceDraft}=options.workspaceDraftRecovery;
@@ -1980,15 +1988,15 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       return completed;
     };
-    if(newProvision){
+    if(newProvision&&options.taskProvisionRecovery!==true){
       const marker=`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}`;
       const prepared=await run(`${marker}\nReply exactly READY. Do not use tools or access files, sites, accounts or integrations.`);
       if(prepared.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       const verified=await waitForNativeTurn(request,threadId,marker,signal);
       if(verified.turnId!==prepared.turnId||verified.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
-    }else await beforeStart();
-    // The second empty READY retains the established provision/read-back ABI.
-    // Existing chats keep their identity/history and unknown-delivery fences.
+    }else if(!newProvision)await beforeStart();
+    // Ordinary provision retains its second empty READY and receipt ABI. The
+    // isolated recovery uses only its new marker; neither sends task input.
     await run(assistantNativePrompt(deliveryId,workStateContext,options));
     await waitForNativeTurn(request,threadId,assistantDeliveryMarker(deliveryId),signal);
   });

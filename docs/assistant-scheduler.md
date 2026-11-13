@@ -299,7 +299,7 @@ Lost provision or attachment responses permit only exact read-back. The
 original business marker and events never change. Dispatch health can recover
 only after the resulting native turn, committed classification and pass release.
 
-Fresh source-triage threads can expose the correct cached catalogue before the
+Fresh technical provisions and source-triage turns can expose the correct cached catalogue before the
 native server reports a live connection. Re-read that same complete catalogue
 under the existing deadline while its native status is null, notStarted or
 starting. An empty pending catalogue grants no authority. A foreign tool,
@@ -309,6 +309,21 @@ can earn one distinct technical marker only after every abandoned thread
 returns the exact not-loaded response and native first-attachment eligibility
 still holds. Keep all older starts and markers. Lost corrected starts remain
 read-back-only.
+
+A legacy task provision is eligible only when its durable first failure is
+the scoped execution-policy refusal after the native UUID was stored. The
+exact current task binding and same-device same-ID host claim must still
+have no registered thread, no active protected pass, no associated event and
+no prior continuation. A task pass cannot start before that registration.
+The old native chat must independently return both exact not-loaded responses;
+an unreadable history, matching marker or generic RPC failure cannot qualify.
+Schema31 adds a separate one-use technical marker and new UUID without changing
+the original claim, thread ID, start bit, failure, or inbox events. The same
+exclusive coordinator rechecks eligibility and the native claim before starting.
+Only the complete history of one exact tool-free READY can register the chat.
+After a lost start it only reads back that marker; no replacement or repeated
+input is allowed. READY alone never clears the incident or proves task work.
+
 
 An IGNORE decision covers the whole frozen batch. If a recovered triage's
 original complete turn already read the batch but the exact schema explicitly

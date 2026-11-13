@@ -2002,6 +2002,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
       readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply,
       readUnmaterializedTriage:nativeRuntime.readAssistantUnmaterializedTriage,
+      readUnmaterializedTaskProvision:nativeRuntime.readAssistantUnmaterializedProvision,
       readRejectedTriageIgnore:nativeRuntime.readAssistantRejectedTriageIgnore};
     if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     // Observe the native boundary before the coordinator deliberately replaces
