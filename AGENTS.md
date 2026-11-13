@@ -744,8 +744,10 @@ publication tooling также остаются вне этого публичн
   deadline renewal. See [parallel sessions](docs/visual-browser.md#parallel-skill-sessions).
   Fixture navigation traces retain only the last closed phase of the exact
   failed request, without changing native execution, deadlines or replay rules.
-  Owned headed Windows Chromium disables native compositor occlusion per
-  process; keep focus, sandbox, signed presentation and no-replay rules.
+  Owned headed Windows Chromium disables native compositor occlusion and
+  selects the pinned Playwright fresh-surface capture path per process.
+  Keep selected-tab, credential, focus, sandbox, presentation and no-replay
+  guards; the same three real native two-owner lifecycles gate this change.
   Protected-store init/DACL hardening shares that account transaction; Windows private-path validation is a write and must not race another owner's publication.
 - HTTP-ошибки browser document сохраняют только numeric status и approved
   origin через общий observer; transport failure не получает выдуманного кода.

@@ -199,9 +199,15 @@ A Windows ARM reproduction reached `compositor_capture` after the sibling
 closed. Owned headed Windows Chromium disables `CalculateNativeWinOcclusion`
 for that process, independently of the existing renderer backgrounding flags.
 Chromium's native tracker can otherwise withdraw compositor visibility during a
-foreground/window transition. The change never activates an app, changes a
-system policy, switches presentation, or replays the original navigation. Native
-two-owner tests retain their exact image, frame and closure assertions.
+foreground/window transition. The capture still stalled with occlusion off:
+Chromium can wait for the legacy ForceRedraw acknowledgement before copying
+the surface. The pinned Playwright launcher enables `CDPScreenshotNewSurface`
+to request a fresh compositor surface instead. The host spawns Chromium
+directly, so it selects that same capture path only for owned headed Windows
+processes. This does not activate an app, change system policy or presentation,
+or replay navigation. The same selected tab, viewport, credential checks and
+deadline apply. Native two-owner tests retain their image, frame and closure
+assertions, including all three independent fresh lifecycles.
 No Error text/path, owner descriptor, extra native observation, input/save retry
 or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
 Parallel fixture shutdown preserves the first body/close assertion if later

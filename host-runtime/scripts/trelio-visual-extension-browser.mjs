@@ -69,16 +69,20 @@ export function visualBrowserHeadless(presentation, manual) {
   return presentation === 'hidden' && !manual;
 }
 
-/** Windows has two independent occlusion paths: renderer backgrounding and
- * native visibility delivered to the compositor. The generic renderer flags
- * below do not disable the native tracker. After a sibling window closes,
- * the ARM fixture reaches Page.captureScreenshot but never receives a frame.
- * Disable the native tracker for this owned headed process so the viewport
- * stays paintable. Do not focus it, change the global OS/browser policy,
- * alter headless rendering, or retry the navigation after a missing reply.
+/** Renderer backgrounding and native Windows occlusion are independent.
+ * Disabling both keeps this owned window paintable, but did not prevent the
+ * ARM capture from stalling after a sibling closed. The pinned Playwright
+ * launch defaults select Chromium's CDPScreenshotNewSurface for that separate
+ * failure mode: request a new surface instead of waiting for the legacy
+ * ForceRedraw acknowledgement before copying it. We spawn Chromium directly,
+ * so we must select that path ourselves. The same selected tab, fromSurface
+ * capture, credential guards and deadline apply. Neither switch focuses the
+ * window, changes system policy or gives a failed navigation a second attempt.
  */
 export const visualNativeCompositorSwitches = (platform, headless) =>
-  platform === 'win32' && headless === false ? ['--disable-features=CalculateNativeWinOcclusion'] : [];
+  platform === 'win32' && headless === false
+    ? ['--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface']
+    : [];
 
 /** Fixture logging already has its private --log-file. Keep the SAME ignored
  * stdio as an ordinary browser: a diagnostic-only stderr pipe can be inherited

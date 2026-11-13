@@ -9,8 +9,10 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-test('only an owned headed Windows launch opts out of native compositor occlusion', () => {
-  assert.deepEqual(visualNativeCompositorSwitches('win32', false), ['--disable-features=CalculateNativeWinOcclusion']);
+test('only owned headed Windows Chromium uses the new screenshot surface and disables native occlusion', () => {
+  assert.deepEqual(visualNativeCompositorSwitches('win32', false), [
+    '--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface',
+  ]);
   for (const [platform, headless] of [['win32', true], ['darwin', false], ['linux', false]]) {
     assert.deepEqual(visualNativeCompositorSwitches(platform, headless), []);
   }
