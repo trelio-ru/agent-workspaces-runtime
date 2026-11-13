@@ -601,6 +601,26 @@ from the local delivery heartbeat. Closed receipts do not renew or acquire new
 signing authority. These tests use real SQLite plus synthetic trusted adapters;
 they do not substitute for a supported Windows end-to-end activation test.
 
+### Interrupted read-only task continuation
+
+An existing ordinary task continuation that interrupted during settled task
+reads is not a completed pass. The candidate must be the newest native turn
+and match its original completed parent, exact journal markers and protected
+task pass. Only exact task, instruction-page, device status and static operation
+contract reads qualify; no source/owner-answer event, browser, command, file,
+mutation, pending tool or unknown history is permitted.
+
+Wait for the original lease to expire and verify that the same task remains
+accepted under the live execution policy and that its outcome is pending.
+Persist one new continuation intent in the existing SQLite journal; the same
+isolated App Server rechecks both full turns under its exclusive native
+writer before the existing renewal CAS. Read back a lost renewal, never
+repeat it. The new turn keeps the original task authority, work-state and
+existing action reconciliation; it does not replay the interrupted or parent
+turn. No new marker is permitted after this bounded recovery. Only the ordinary
+native completion and backend business receipt can advance the schedule or
+clear dispatch review.
+
 ### Interrupted Workspace draft settlement
 
 A stored `interrupted` is still uncertainty. The one narrow exception is a

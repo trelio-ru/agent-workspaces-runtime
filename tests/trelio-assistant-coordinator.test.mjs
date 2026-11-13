@@ -2946,3 +2946,71 @@ for(const mode of ['confirmed','lost_committed','lost_unconfirmed','unproven'])t
   assert.deepEqual({...inbox.ownerIntake(id),next_check_at:original.next_check_at},original,'preserve every original journal field apart from pacing');
   assert.equal(f.activePass(),null);assert.deepEqual(f.counts(),{starts:0,provisions:0,runs:0,acks:0});
 });
+
+for(const ending of ['completed','interrupted','receipt-appeared'])test(`one read-only task continuation after exact native expiry (${ending})`,async t=>{
+  const f=fixture(t),ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
+  const oldTurn=randomUUID(),oldMarker=randomUUID(),parentTurn=randomUUID(),newMarker=randomUUID();
+  let durableOutcome=false,owned=false,views=0,renewals=0,attempts=0;
+  f.authority.workMode='task';
+  f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  f.options.client.readBusinessOutcome=async args=>durableOutcome?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
+  f.options.native.readDelivery=async(_thread,marker,options)=>{
+    if(marker===oldMarker)return {state:options.interruptedTaskRead?'interrupted_task_read':'uncertain',turnId:oldTurn};
+    if(marker===newMarker&&ending==='interrupted')return {state:'uncertain',turnId:randomUUID()};
+    return f.deliveries.get(marker)??{state:'uncertain'};
+  };
+  f.options.passHost.continuePass=async (args,expected)=>{
+    assert.deepEqual(expected,f.activePass());const pass=f.passes.get(expected.deliveryId);
+    assert.equal(args.terminalTurnId,oldTurn);
+    if(args.continuation==='review')views++;
+    if(args.continuation==='resume'){
+      assert.ok(owned,'only the native owner authorizes renewal');
+      assert.equal(pass.state,'review_required');assert.equal(pass.leaseRevision,args.expectedLeaseRevision);renewals++;
+      Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+    }
+    return {schemaVersion:2,state:renewals?'resumed':'approved',reviewId:newMarker,invocationId:newMarker,
+      resumed:renewals?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+  };
+  f.options.native.run=async(input,options)=>{
+    if(!options.taskReadRecovery)return ordinaryRun(input,options);
+    attempts++;
+    assert.equal(input.deliveryId,newMarker);assert.equal(input.threadId,f.activePass().threadId);
+    assert.equal(options.taskReadRecovery.parentTurnId,parentTurn);
+    assert.equal(options.taskReadRecovery.terminalMarkerId,oldMarker);
+    if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+    if(ending==='receipt-appeared')durableOutcome=true;
+    await options.beforeInvocation();
+    if(ending==='interrupted'){options.startInvocation();return {state:'uncertain'};}
+    durableOutcome=true;return ordinaryRun(input,options);
+  };
+  try{
+    f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    const original=f.activePass(),pass=f.passes.get(original.deliveryId);
+    const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+    const first=inbox.preparePassContinuation(original.deliveryId,{passId:original.passId,expectedLeaseRevision:0,
+      terminalTurnId:parentTurn,terminalMarkerId:original.deliveryId,prerequisiteKey:'a'.repeat(64)});
+    inbox.updatePassContinuation(original.deliveryId,first.clientRequestId,{reviewId:oldMarker,resumeAttempted:true,resumed:true,started:true});
+    inbox.markDeliveryUncertain(original.deliveryId);
+    assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(views,0);
+    f.advance(21*60_000);Object.assign(pass,{state:'review_required',leaseRevision:1});
+    await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+    assert.equal(views,1);assert.equal(renewals,0);assert.equal(inbox.readPassContinuation(original.deliveryId).started,false);
+    owned=true;
+    if(ending==='interrupted'){
+      await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN|REVIEW_REQUIRED/);
+      f.advance(21*60_000);Object.assign(pass,{state:'review_required'});
+      assert.equal((await f.coordinator.workOnce()).state,'blocked');
+      assert.ok(f.activePass());assert.equal(inbox.readPassContinuation(original.deliveryId).started,true);
+      assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,0);
+    }else if(ending==='receipt-appeared'){
+      await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+      assert.ok(f.activePass());assert.equal(inbox.readPassContinuation(original.deliveryId).started,false);
+    }else{
+      await f.coordinator.workOnce();assert.equal(f.activePass(),null);
+      assert.equal(f.database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(original.deliveryId).state,'complete');
+    }
+    assert.equal(views,1);assert.equal(renewals,ending==='receipt-appeared'?0:1);assert.equal(attempts,2);
+  }finally{await f.coordinator.close();}
+});

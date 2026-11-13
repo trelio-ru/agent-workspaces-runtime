@@ -1198,6 +1198,76 @@ const sameWorkspaceRecovery=(value,expected)=>value&&expected
 const exactDraftPass=(value,expected)=>value&&Object.getPrototypeOf(value)===Object.prototype
   &&Object.keys(value).sort().join(',')==='companyId,passId,taskId'
   &&['companyId','passId','taskId'].every(key=>UUID.test(expected?.[key]??'')&&value[key]===expected[key]);
+/** Identifies an interrupted *continuation* whose complete native history
+ * contains only completed reads of this same task. This is not a terminal
+ * business receipt. The owning App Server must see the same evidence again
+ * after acquiring the native writer and before any pass renewal. */
+export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId,parentTurnId}={})=>{
+  if(![deliveryId,turn?.id,assistantId,parentTurnId].every(value=>UUID.test(value??''))
+    ||!exactDraftPass(taskPass,taskPass)||turn.status!=='interrupted'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>64)return false;
+  const [original,...items]=turn.items;
+  const input=original?.content;
+  if(original?.type!=='userMessage'||!Array.isArray(input)||input.length!==1||input[0]?.type!=='text'
+    ||typeof input[0].text!=='string'||Buffer.byteLength(input[0].text)>32_768)return false;
+  const [marker,scopeLine,continuationLine]=input[0].text.split('\n',3);
+  if(marker!==assistantDeliveryMarker(deliveryId)||!scopeLine?.startsWith('TRELIO_ASSISTANT_SCOPE ')
+    ||!continuationLine?.startsWith(`This is ONE automatic recovery continuation after terminal turn ${parentTurnId}, with invocation marker ${deliveryId}. `))
+    return false;
+  let scope;
+  try{scope=JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length));}catch{return false;}
+  if(!scope||Object.getPrototypeOf(scope)!==Object.prototype
+    ||Object.keys(scope).some(key=>!['schemaVersion','assistantUserId','companyId','taskId','workStatePath','scheduled'].includes(key))
+    ||scope.schemaVersion!==1||scope.assistantUserId!==assistantId||scope.companyId!==taskPass.companyId||scope.taskId!==taskPass.taskId
+    ||scope.workStatePath!==`assistants/${assistantId}/WORK.md`||scope.scheduled!==undefined&&scope.scheduled!==true)return false;
+  let taskReads=0,pages=0,catalogue=null,nextPage=0;
+  for(const item of items){
+    if(['agentMessage','reasoning'].includes(item?.type))continue;
+    const args=item?.arguments,content=item?.result?.content;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||item.status!=='completed'||item.error!=null
+      ||!item.result||item.result.isError===true||!args||Object.getPrototypeOf(args)!==Object.prototype)return false;
+    let result=item.result.structuredContent;
+    // Native history may retain a complete exact read as one bounded JSON
+    // text block. There is no text fallback for status or operation metadata.
+    if(result==null&&['get_task','get_task_instruction_page'].includes(item.tool)
+      &&Array.isArray(content)&&content.length===1&&content[0]?.type==='text'
+      &&typeof content[0].text==='string'&&Buffer.byteLength(content[0].text)<=64*1024){
+      try{result=JSON.parse(content[0].text);}catch{return false;}
+    }
+    if(!result||Object.getPrototypeOf(result)!==Object.prototype||Object.hasOwn(result,'code'))return false;
+    const keys=Object.keys(args).sort().join(',');
+    if(item.tool==='get_assistant_status'){
+      if(!['','view'].includes(keys)||args.view!==undefined&&!['task','company_context'].includes(args.view)
+        ||result.schemaVersion!==1||result.assistantUserId!==assistantId)return false;
+      continue;
+    }
+    if(!exactDraftPass(args.taskPass,taskPass)||!args.runtimeSessionProof
+      ||Object.getPrototypeOf(args.runtimeSessionProof)!==Object.prototype)return false;
+    if(item.tool==='get_task'){
+      if(++taskReads!==1||keys!=='runtimeSessionProof,taskPass'||result.effectiveInstructions?.schemaVersion!==3
+        ||!Array.isArray(result.tasks)||result.tasks.length!==1||result.tasks[0]?.task?.id!==taskPass.taskId)return false;
+      const authority=result.effectiveInstructions;
+      if(authority.status==='incomplete'){
+        catalogue=authority.delivery?.catalogRevisionKey;
+        if(!/^[a-f0-9]{64}$/u.test(catalogue??''))return false;
+      }else if(authority.status!=='complete')return false;
+    }else if(item.tool==='get_task_instruction_page'){
+      if(taskReads!==1||++pages>20||keys!=='expectedCatalogRevisionKey,pageIndex,pageSize,runtimeSessionProof,taskPass'
+        ||result.schemaVersion!==3||!['instruction_page','instruction_page_batch'].includes(result.responseKind)
+        ||catalogue===null||args.expectedCatalogRevisionKey!==catalogue||result.catalogRevisionKey!==catalogue
+        ||!Number.isInteger(args.pageIndex)||args.pageIndex!==nextPage||result.pageIndex!==nextPage
+        ||!Number.isInteger(args.pageSize)||args.pageSize<1||args.pageSize>4
+        ||result.nextPageIndex!==null&&(!Number.isInteger(result.nextPageIndex)
+          ||result.nextPageIndex<=nextPage||result.nextPageIndex>nextPage+args.pageSize))return false;
+      nextPage=result.nextPageIndex;
+    }else if(item.tool==='get_assistant_operation_contract'){
+      if(keys!=='runtimeSessionProof,taskPass'||result.schemaVersion!==1||!result.operations
+        ||Object.getPrototypeOf(result.operations)!==Object.prototype)return false;
+    }else return false;
+  }
+  return taskReads===1;
+};
+
 const draftReads=new Set(['get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract']);
 const localDraftRefusal=(item,code)=>item.status==='failed'&&item.result?.isError!==false
   &&item.result?.structuredContent?.code===code&&(item.error==null||item.error.message===code);
@@ -1389,12 +1459,27 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
     ??assistantInterruptedWorkspaceDraft(turn,deliveryId,taskPass);
   return workspaceDraft?{state:'interrupted_workspace_draft',turnId:turn.id,workspaceDraft}:{state:'uncertain'};
 };
+const readInterruptedTaskReadTurn=async(request,threadId,deliveryId,witness)=>{
+  // Fetch the two latest full turns together. An intervening turn or a
+  // replaced parent makes the pending pass unsafe to recover automatically.
+  const response=await request('thread/turns/list',{threadId,limit:2,sortDirection:'desc',itemsView:'full'});
+  if(!Array.isArray(response?.data)||response.data.length!==2)return {state:'uncertain'};
+  const [turn,parent]=response.data;
+  if(parent?.id!==witness?.parentTurnId||parent.status!=='completed'
+    ||!UUID.test(witness?.parentMarkerId??'')||!Array.isArray(parent.items)
+    ||parent.items.filter(item=>item.type==='userMessage'&&Array.isArray(item.content)&&item.content.some(input=>
+      input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(assistantDeliveryMarker(witness.parentMarkerId)+'\n'))).length!==1
+    ||!assistantInterruptedTaskRead(turn,deliveryId,witness))return {state:'uncertain'};
+  return {state:'interrupted_task_read',turnId:turn.id};
+};
 export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     if(options.interruptedWorkspaceDraft!==undefined)
       return readInterruptedDraftTurn(request,threadId,deliveryId,options.interruptedWorkspaceDraft);
+    if(options.interruptedTaskRead!==undefined)
+      return readInterruptedTaskReadTurn(request,threadId,deliveryId,options.interruptedTaskRead);
     if(options.readOnlyPreparation!==undefined){
       if(options.cancelledSourceRead!==undefined&&(options.cancelledSourceRead!==true
         ||[options.technicalReplyCorrection,options.readOnlyContinuation,options.generationReplyCorrection,
@@ -1773,6 +1858,19 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
       ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
   }
+  if(options.taskReadRecovery!==undefined){
+    const recovery=options.taskReadRecovery;
+    if(!recovery||Object.getPrototypeOf(recovery)!==Object.prototype
+      ||Object.keys(recovery).sort().join(',')!=='parentMarkerId,parentTurnId,taskPass,terminalMarkerId,terminalTurnId'
+      ||![recovery.parentMarkerId,recovery.parentTurnId,recovery.terminalMarkerId,recovery.terminalTurnId].every(value=>UUID.test(value??''))
+      ||new Set([deliveryId,recovery.parentMarkerId,recovery.terminalMarkerId]).size!==3
+      ||recovery.parentTurnId===recovery.terminalTurnId||options.continuationReview?.priorTurnId!==recovery.terminalTurnId
+      ||options.workspaceDraftRecovery!==undefined||intakeContext!==undefined||workStateContext.workMode==='discussion'
+      ||workStateContext.sourceReferences!==undefined||workStateContext.ownerQuestionIds!==undefined
+      ||!exactDraftPass(recovery.taskPass,recovery.taskPass)||recovery.taskPass.companyId!==workStateContext.companyId
+      ||recovery.taskPass.taskId!==workStateContext.taskId||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
+      fail('ASSISTANT_CODEX_INVALID_INPUT');
+  }
   if (typeof options.startInvocation !== 'function') fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   const readMetadata = options.readMetadata ?? readAssistantCodexMetadata;
@@ -1972,6 +2070,16 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       if(current.turnId!==terminalTurnId||!sameWorkspaceRecovery(current.workspaceDraft,workspaceDraft))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
+    if(options.taskReadRecovery){
+      // A reader's notLoaded snapshot alone cannot authorize renewal. The
+      // successful resume above owns the same native thread; verify the exact
+      // previously completed marker and the read-only interrupted tail here.
+      const {terminalMarkerId,terminalTurnId,taskPass,parentMarkerId,parentTurnId}=options.taskReadRecovery;
+      const current=await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{
+        taskPass,parentMarkerId,parentTurnId,assistantId:workStateContext.assistantUserId});
+      if(current.state!=='interrupted_task_read'||current.turnId!==terminalTurnId)
+        fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    }
     const workflow=options.readinessProbe===true?null
       :await (options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
     const run=async text=>{
@@ -2025,6 +2133,8 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       // UUID/path locators enter the native stdin prompt. READY stays tool-free
       // and receives no task state or request to create a file.
       const scope = options.readinessProbe === true ? '' : `TRELIO_ASSISTANT_${workStateContext?.kind==='source_intake'?'INTAKE':'SCOPE'} ${JSON.stringify(workStateContext)}\n`;
+      const readRecovery=options.taskReadRecovery
+        ? 'The interrupted continuation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';
       const recovery=options.continuationReview
         ? `This is ONE automatic recovery continuation after terminal turn ${options.continuationReview.priorTurnId}, with invocation marker ${options.continuationReview.reviewId}. The original task authorization remains in force. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Re-read current status even if an earlier message or pending technical question says host recovery is required; the earlier error is not a current result. A lost finish operation handle requires ordinary status without that handle and an exact native Run read. When acceptance is absent, recover the same own Run through its native prepare/open and returned local recovery actions; technical reopening needs no new owner approval. Preserve the source files and reconcile their selected delta before saving. Decide what remains to be done and continue the task. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. Technical recovery does not approve sensitive actions or prove completion.\n`:'';
   // The durable delivery, not incoming prose or a timer guessed by the model,
@@ -2059,7 +2169,7 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       'Unsupported authentication or OS prompts are concrete blockers. Save progress, ask the owner the specific missing decision or setup and wait. Read back an uncertain result before further input. Never replay it or switch transport.',
       'Source intake stays read-only. Close windows when this work finishes or enters owner waiting. Saved login is retained, and the runtime also closes idle windows after ten minutes. Verify the actual site outcome before reporting success.\n',
     ].join(' '):'';
-  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${replyOnly}${instruction}\n${browserRecovery}${conversationTracking}${scheduled}`;
+  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${readRecovery}${replyOnly}${instruction}\n${browserRecovery}${conversationTracking}${scheduled}`;
 };
 
 // Windows telemetry is deliberately a fixed native read, never model-authored

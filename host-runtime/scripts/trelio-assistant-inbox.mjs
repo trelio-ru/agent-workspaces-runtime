@@ -48,17 +48,24 @@ export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
 export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract','complete_assistant_pass',
 ]);
+const taskReadParent=value=>{
+  const fields=['parentMarkerId','parentTurnId'];
+  object(value,fields);
+  if(Object.keys(value).length!==fields.length)inputError();
+  return Object.fromEntries(fields.map(key=>[key,uuid(value[key])]));
+};
 const continuationIntent = value => {
   const fields=['passId','expectedLeaseRevision','clientRequestId','terminalTurnId','terminalMarkerId','reviewId','resumeAttempted','resumed','started'];
-  object(value,[...fields,'capacity','workspaceDraft']);
-  if(value.capacity===true&&value.workspaceDraft!==undefined
-    ||Object.keys(value).length!==fields.length+(value.capacity===true||value.workspaceDraft!==undefined?1:0)
+  object(value,[...fields,'capacity','workspaceDraft','taskReadParent']);
+  const modes=[value.capacity===true,value.workspaceDraft!==undefined,value.taskReadParent!==undefined].filter(Boolean).length;
+  if(modes>1||Object.keys(value).length!==fields.length+modes
     ||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
     ||value.resumed&&!value.resumeAttempted||value.started&&!value.resumed||value.resumeAttempted&&value.reviewId===null)inputError();
   return {...Object.fromEntries(['passId','clientRequestId','terminalTurnId','terminalMarkerId'].map(key=>[key,key==='passId'&&value.capacity===true&&value[key]===null?null:uuid(value[key])])),
     expectedLeaseRevision:integer(value.expectedLeaseRevision,0,2_147_483_646),reviewId:value.reviewId===null?null:uuid(value.reviewId),
     resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started,...(value.capacity===true?{capacity:true}:{}),
-    ...(value.workspaceDraft===undefined?{}:{workspaceDraft:workspaceDraftIdentity(value.workspaceDraft)})};
+    ...(value.workspaceDraft===undefined?{}:{workspaceDraft:workspaceDraftIdentity(value.workspaceDraft)}),
+    ...(value.taskReadParent===undefined?{}:{taskReadParent:taskReadParent(value.taskReadParent)})};
 };
 /** A read-only dispatch guard for the current signed MCP worker. Once a draft
  * intent is reserved, even a stale advertised catalogue cannot permit another
@@ -2064,11 +2071,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     /** Only structural history is appended. A native continuation permits a NEW
      * marker, never resetting the original native-start or replaying a turn.
      * The coordinator supplies positive terminal read-back before this call. */
-    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false,workspaceDraft}) {
+    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false,workspaceDraft,taskReadParent:parentRead}) {
       if(typeof capacity!=='boolean'||capacity&&prerequisiteKey===null)inputError();
       if(workspaceDraft!==undefined){
         if(capacity||prerequisiteKey===null||passId===null)inputError();
         workspaceDraft=workspaceDraftIdentity(workspaceDraft);
+      }
+      if(parentRead!==undefined){
+        if(capacity||workspaceDraft!==undefined||prerequisiteKey===null||passId===null)inputError();
+        parentRead=taskReadParent(parentRead);
       }
       if(prerequisiteKey!==null&&(typeof prerequisiteKey!=='string'||!/^[0-9a-f]{64}$/u.test(prerequisiteKey)))inputError();
       return transaction(()=>{
@@ -2081,7 +2092,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const last=latest?continuationIntent(JSON.parse(latest.intent_json)):history.at(-1);
         if(last&&last.terminalTurnId===terminalTurnId){
           if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId
-            ||JSON.stringify(last.workspaceDraft)!==JSON.stringify(workspaceDraft))fail('ASSISTANT_INBOX_CONFLICT');
+            ||JSON.stringify(last.workspaceDraft)!==JSON.stringify(workspaceDraft)
+            ||JSON.stringify(last.taskReadParent)!==JSON.stringify(parentRead))fail('ASSISTANT_INBOX_CONFLICT');
           return Object.freeze(continuationIntent(last));
         }
         // Twenty remains the unchanged retry bound for one actual trusted hook
@@ -2089,12 +2101,19 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // count. Legacy callers keep their original bound and cannot bypass a
         // newer journal. A ready inventory is never permission to replay the
         // original turn, release a pass, process an event or clear health.
-        if(last&&(!last.started||last.workspaceDraft)||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
+        // The read-only recovery is one shot across all versions and hook
+        // definitions. The previous attempt stays in the indexed journal.
+        if(parentRead!==undefined&&(!latest||!last.started||last.capacity||last.workspaceDraft||last.taskReadParent
+          ||last.terminalMarkerId!==parentRead.parentMarkerId||last.terminalTurnId!==parentRead.parentTurnId
+          ||last.passId!==passId||last.reviewId!==terminalMarkerId||terminalTurnId===parentRead.parentTurnId
+          ||terminalMarkerId===parentRead.parentMarkerId))fail('ASSISTANT_INBOX_CONFLICT');
+        if(last&&(!last.started||last.workspaceDraft||last.taskReadParent)||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
         const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
-          resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{})});
+          resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{}),
+          ...(parentRead?{taskReadParent:parentRead}:{})});
         if(prerequisiteKey!==null){
           const ordinal=integer((latest?.ordinal??0)+1,1,2_147_483_647);
           // Capacity retries have no attempt cap and cannot spend/reset the

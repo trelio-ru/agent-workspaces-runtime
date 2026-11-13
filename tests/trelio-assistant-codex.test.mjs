@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -179,7 +179,7 @@ const ownedRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onT
     }
     if(request.method==='thread/queue/list')return {result:{data:queued,nextCursor:null}};
     assert.equal(request.method,'thread/turns/list');
-    if(phase==='read'&&priorTurn)return {result:{data:[priorTurn],nextCursor:'older'}};
+    if(phase==='read'&&priorTurn)return {result:{data:Array.isArray(priorTurn)?priorTurn:[priorTurn],nextCursor:'older'}};
     const current=phase==='controlled'&&snapshotStatuses.length?snapshotStatuses[Math.min(snapshot++,snapshotStatuses.length-1)]:'completed';
     return {result:{data:terminal?[{id:turnId,status:current,items:[{type:'userMessage',content:[{type:'text',text:input}]},{type:'agentMessage',text:'READY'}]}]:[],nextCursor:null}};
   },executionPolicy);
@@ -1810,4 +1810,79 @@ test('rejected triage ignore is proven by the exact full terminal turn and typed
       .map(args=>({...turn,items:[original,context,{...resolve,arguments:{...resolve.arguments,...args}}]})),
     {...turn,items:[original,context,{...resolve,result:{...resolve.result,structuredContent:{code,retryable:true}}}]},
   ])assert.equal(await read([changed]),null);
+});
+
+const interruptedTaskReadHistory=()=>{
+  const taskPass={companyId:taskContext.companyId,taskId:taskContext.taskId,passId:randomUUID()};
+  const terminalMarkerId=randomUUID(),terminalTurnId=randomUUID(),parentTurnId=randomUUID(),parentMarkerId=randomUUID();
+  const proof={taskPass,runtimeSessionProof:{synthetic:true}};
+  const catalogue='b'.repeat(64);
+  const read=(tool,args,value,{text=false}={})=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',arguments:args,
+    result:text?{content:[{type:'text',text:JSON.stringify(value)}]}:{structuredContent:value}});
+  const scope=assistantWorkStateContext(taskContext);
+  const turn={id:terminalTurnId,status:'interrupted',items:[
+    {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(terminalMarkerId)+'\nTRELIO_ASSISTANT_SCOPE '+JSON.stringify(scope)
+      +'\nThis is ONE automatic recovery continuation after terminal turn '+parentTurnId+', with invocation marker '+terminalMarkerId+'. '} ]},
+    read('get_assistant_status',{view:'task'},{schemaVersion:1,assistantUserId:taskContext.assistantId}),
+    read('get_task',proof,{effectiveInstructions:{schemaVersion:3,status:'incomplete',delivery:{catalogRevisionKey:catalogue}},
+      tasks:[{task:{id:taskContext.taskId}}]},{text:true}),
+    read('get_task_instruction_page',{...proof,pageIndex:0,pageSize:4,expectedCatalogRevisionKey:catalogue},
+      {schemaVersion:3,responseKind:'instruction_page_batch',pageIndex:0,nextPageIndex:null,catalogRevisionKey:catalogue},{text:true}),
+    {type:'reasoning'},
+    read('get_assistant_operation_contract',proof,{schemaVersion:1,operations:{}}),
+  ]};
+  const parent={id:parentTurnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(parentMarkerId)+'\noriginal'}]}]};
+  return {turn,parent,taskPass,terminalMarkerId,terminalTurnId,parentTurnId,parentMarkerId};
+};
+
+test('only exact full native read-only continuation qualifies as an interrupted task read',()=>{
+  const {turn,taskPass,terminalMarkerId,parentTurnId}=interruptedTaskReadHistory();
+  const witness={taskPass,parentTurnId,assistantId:taskContext.assistantId};
+  assert.equal(assistantInterruptedTaskRead(turn,terminalMarkerId,witness),true);
+  for(const change of [
+    value=>{value.status='inProgress';},value=>{value.error={code:'unknown'};},
+    value=>{value.items[0].content[0].text+='\nother';value.items[0].content.push({type:'text',text:'extra user input'});},
+    value=>{value.items[2].status='inProgress';},value=>{value.items[2].arguments.taskPass={...taskPass,passId:randomUUID()};},
+    value=>{value.items[3].arguments.pageIndex=8;},value=>{value.items[3].result.content[0].text='{invalid';},
+    value=>{value.items[5].tool='execute_assistant_operation';},value=>{value.items.push({type:'commandExecution'});},
+    value=>{value.items.push({type:'userMessage'});},
+  ]){
+    const invalid=structuredClone(turn);change(invalid);
+    assert.equal(assistantInterruptedTaskRead(invalid,terminalMarkerId,witness),false);
+  }
+  assert.equal(assistantInterruptedTaskRead(turn,randomUUID(),witness),false);
+  assert.equal(assistantInterruptedTaskRead(turn,terminalMarkerId,{...witness,parentTurnId:randomUUID()}),false);
+});
+
+for(const variant of ['exact','busy','changed-parent','newer-turn','pending'])test(`read-only continuation rechecks both turns under its own native writer (${variant})`,async()=>{
+  const {turn,parent,...taskReadRecovery}=interruptedTaskReadHistory();
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
+  const priorTurn=[turn,parent];
+  if(variant==='changed-parent')parent.id=randomUUID();
+  if(variant==='newer-turn')priorTurn.unshift({id:randomUUID(),status:'completed',items:[]});
+  if(variant==='pending')turn.items[3].status='inProgress';
+  let reads=0,starts=0;
+  const attempt=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{
+    executable:process.execPath,environment:{},taskReadRecovery,requireAbsentMarker:true,
+    continuationReview:{priorTurnId:taskReadRecovery.terminalTurnId,reviewId:deliveryId},
+    readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    readExecutionAvailability:async()=>true,
+    beforeInvocation:async()=>{steps.push('renew');},
+    startInvocation:()=>{starts++;},
+    readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
+    spawnProcess:ownedRpc({threadId,cwd,priorTurn,
+      resumeError:variant==='busy'?{code:-32600,message:`thread ${threadId} already has an active writer`}:undefined,
+      onRequest:req=>{
+        if(req.method==='thread/resume')steps.push('writer');
+        if(req.method==='thread/turns/list'&&req.params.limit===2)steps.push('readboth');
+      },
+    }),
+  });
+  if(variant==='exact'){
+    assert.equal((await attempt()).state,'completed');
+    assert.deepEqual(steps,['writer','readboth','renew']);assert.equal(starts,1);
+  }else{
+    await assert.rejects(attempt(),{code:variant==='busy'?'ASSISTANT_CODEX_THREAD_BUSY':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    assert.equal(starts,0);assert.ok(!steps.includes('renew'));
+  }
 });

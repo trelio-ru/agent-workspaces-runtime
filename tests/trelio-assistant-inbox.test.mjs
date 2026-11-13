@@ -1977,3 +1977,27 @@ test('schema28 retains the original attempted recovery while a separate one-use 
  database.exec('ALTER TABLE assistant_owner_intakes DROP COLUMN answered_recovery_json');
  assert.throws(()=>createAssistantInbox({database}),/CONFLICT/,'missing current-schema intent is corruption, never a fresh attempt');
 });
+
+test('one exact interrupted-read continuation survives SQLite reload and cannot be chained',async t=>{
+  const f=memory(t),source=scope(),taskId=randomUUID();let inbox=f.inbox;
+  inbox.register(source);accept(inbox,source,taskId);
+  page(inbox,source,[{id:'original',revision:'1',taskId,wake:true}]);
+  const job=await inbox.claimDelivery({authorize:async()=>true}),passId=randomUUID();
+  inbox.prepareTaskPass(job.deliveryId);inbox.startDelivery(job.deliveryId);inbox.markDeliveryUncertain(job.deliveryId);
+  const first=inbox.preparePassContinuation(job.deliveryId,{passId,expectedLeaseRevision:0,
+    terminalTurnId:randomUUID(),terminalMarkerId:job.deliveryId,prerequisiteKey:'a'.repeat(64)});
+  const reviewId=randomUUID();
+  inbox.updatePassContinuation(job.deliveryId,first.clientRequestId,{reviewId,resumeAttempted:true,resumed:true,started:true});
+  const nextInput={passId,expectedLeaseRevision:1,terminalTurnId:randomUUID(),terminalMarkerId:reviewId,
+    prerequisiteKey:'a'.repeat(64),taskReadParent:{parentMarkerId:job.deliveryId,parentTurnId:first.terminalTurnId}};
+  assert.throws(()=>inbox.preparePassContinuation(job.deliveryId,{...nextInput,taskReadParent:{...nextInput.taskReadParent,parentTurnId:randomUUID()}}),/CONFLICT/);
+  const next=inbox.preparePassContinuation(job.deliveryId,nextInput);
+  inbox=createAssistantInbox({database:f.database,now:()=>1000000});
+  assert.deepEqual(inbox.preparePassContinuation(job.deliveryId,nextInput),next);
+  const secondReviewId=randomUUID();
+  inbox.updatePassContinuation(job.deliveryId,next.clientRequestId,{reviewId:secondReviewId,resumeAttempted:true,resumed:true,started:true});
+  assert.throws(()=>inbox.preparePassContinuation(job.deliveryId,{passId,expectedLeaseRevision:2,terminalTurnId:randomUUID(),
+    terminalMarkerId:secondReviewId,prerequisiteKey:'b'.repeat(64)}),/CONFLICT/);
+  assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=?').get(job.deliveryId).n,2);
+  assert.equal(f.database.prepare('SELECT native_started FROM assistant_inbox_deliveries WHERE delivery_id=?').get(job.deliveryId).native_started,1);
+});
