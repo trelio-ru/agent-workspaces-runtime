@@ -40,8 +40,11 @@ refusal and unknown HTTP bucket privacy. Fault injection shortens only the first
 N deliberately stalled preparation clocks; a healthy resumed attempt retains its
 ordinary production budget. The two-timeout case still refuses a third attempt,
 and the outer fixture bound and all native/no-replay assertions remain unchanged.
-A disposable macOS Keychain never reads the operator's login Keychain; Linux
-explicitly skips this native private-store
+A disposable macOS Keychain never reads the operator's login Keychain. Its
+fixture prepares the native Swift helper with one missing-slot lookup in the
+isolated HOME before the composed child starts. Cold helper compilation is
+still covered separately; no private-session deadline or native seed assertion
+is relaxed. Linux explicitly skips this native private-store
 suite and retains the common crypto/mirror tests. It is not evidence of a model
 answer or a live Telegram send: that remains a separate original-peer acceptance.
 Its disposable Windows HOME uses the short runner-owned temp root, avoiding an

@@ -36,7 +36,7 @@ for(const scenario of [
     const keychain=path.join(root,'fixture.keychain-db');
     const env={...process.env,HOME:root,USERPROFILE:root,APPDATA:root,LOCALAPPDATA:root,CODEX_HOME:path.join(root,'.codex'),
       TRELIO_COMPANY_E2E_CHILD:'1',TRELIO_HOST_RUNTIME_VERSION:'0.0.0',TRELIO_PLUGIN_VERSION:'0.0.0',
-      TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH:keychain};
+      TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH:keychain,TRELIO_WORKSPACE_DISABLE_KEYCHAIN:''};
     // A disposable Keychain is opened by the SAME no-UI Swift helper. The login
     // Keychain and operator entries never participate. The password is a public
     // fixture constant, contains no user secret and is deleted with this root.
@@ -46,6 +46,18 @@ for(const scenario of [
       if(process.platform==='darwin'){
         await execute('/usr/bin/security',['create-keychain','-p','synthetic-fixture-only',keychain]);
         stage='unlock_keychain';await execute('/usr/bin/security',['unlock-keychain','-p','synthetic-fixture-only',keychain]);
+        // An isolated HOME starts without a compiled Swift helper. Prepare it
+        // once in a separate fixture stage, as the locked Keychain test does.
+        // This only looks up an empty test slot: the child must still make
+        // every native write/read-back under the original production deadlines.
+        stage='prepare_keychain_helper';
+        const bridge=new URL('../host-runtime/scripts/trelio-workspace.mjs',import.meta.url).href;
+        const prepared=await execute(process.execPath,['--input-type=module','--eval',
+          `import {getMacosPrivateKeychainValue} from ${JSON.stringify(bridge)};
+          const value=await getMacosPrivateKeychainValue('ru.trelio.test.owner-company-fixture','helper-preflight');
+          if(value!==null)process.exitCode=1;`],
+        {env:{...env,NODE_TEST_CONTEXT:'child-v8'},timeout:90_000,maxBuffer:64*1024});
+        assert.equal(prepared.stdout,'');
       }
       // Fixture generation, actual first-sync and cleanup have separate work;
       // this outer harness is not the original production preparation clock.
