@@ -596,6 +596,9 @@ publication tooling также остаются вне этого публичн
   Synthetic auth diagnostics distinguish finished POST responses from consumed attempt steps without raw values; the original success assertion and no-replay fence remain strict.
   Fixture-only authentication transport evidence retains the last eight closed
   operation/result buckets from original calls, never an extra probe or input retry.
+  After a positively acknowledged authentication action, only a closed native
+  receiver transition may repeat the value-free probe under the same deadline.
+  Input, policy errors and unclassified transport failures remain non-retryable.
   Parallel detached fixture failure tails are execution-owner-specific; ready
   retains closed stop/snapshot/persist/cleanup cause without retry or raw errors.
   Post-sibling navigation keeps the original validated reason, elapsed time and

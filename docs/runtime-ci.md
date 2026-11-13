@@ -139,6 +139,14 @@ numeric child exit plus closed filesystem/native failure categories on failure.
 Concurrent acquisition reports fixed subphases; raw errors, paths and child output
 remain private. The original assertion and deadlines are preserved.
 
+Authentication transition regressions cover the signed top-frame receiver
+during document replacement. After a positively acknowledged form/follow,
+only the closed native messaging error can retry the value-free observation
+under the original attempt deadline. Initial probes, exact challenge
+revalidation, credential input and generic transport/policy errors remain
+fail-closed. Native fixtures still require positive success and exact submit
+counts; neither user-facing pixels nor native error prose cross this boundary.
+
 Planning uploads `runtime-ci-plan/ci-plan.json`, binding the complete diff,
 base/head, full profile, required jobs and exact GitHub run/attempt. The tag job
 selects the latest dispatched workflow for the same repository and tagged SHA,

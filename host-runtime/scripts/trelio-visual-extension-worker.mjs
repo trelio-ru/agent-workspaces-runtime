@@ -770,7 +770,20 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       }
       // Fixed top-frame messages, never arbitrary DOM/evaluate/CDP. Values
       // stay in this private channel; the public call API has no such aliases.
-      return chrome.tabs.sendMessage(tab.id, { kind: op, ...(['authentication-fill', 'authentication-follow', 'authentication-probe'].includes(op) ? args : {}) }, { frameId: 0 });
+      const message = { ...args, kind: op };
+      if (op !== 'authentication-probe') return chrome.tabs.sendMessage(tab.id, message, { frameId: 0 });
+      try { return await chrome.tabs.sendMessage(tab.id, message, { frameId: 0 }); }
+      catch (error) {
+        // A document can disappear as Chrome switches the top-frame receiver.
+        // Only fixed browser transport diagnostics are reduced to a private
+        // read-only transition. Do not expose renderer errors, retry input
+        // or weaken the document/navigation checks above.
+        if (error?.message === 'Could not establish connection. Receiving end does not exist.'
+          || error?.message === 'The message port closed before a response was received.'
+          || error?.message === 'A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
+          return { state: 'error', reason: 'authentication_document_transition' };
+        throw error;
+      }
     }
     if (op === 'manual') {
       manual = true; frame = undefined;

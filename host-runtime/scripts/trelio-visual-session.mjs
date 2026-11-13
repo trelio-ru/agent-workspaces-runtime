@@ -648,9 +648,16 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
       || !definition.steps.some(step => step.fields?.emailOtp))
     || afterAuthentication !== undefined && typeof afterAuthentication !== 'function') fail('invalid_input');
   const methodArguments = method === 'email' ? { method } : {};
-  const observe = async () => {
+  const observe = async (allowTransition = false) => {
     active();
     const value = await send('authentication-probe', method === 'email' ? methodArguments : undefined);
+    // Chrome may replace the top frame between a confirmed submission and
+    // its read-only observation. Only this closed local receiver transition
+    // can wait for another probe, inside the original attempt deadline.
+    // Never turn a failed fill/follow, generic transport or policy refusal
+    // into a success or permission to dispatch another field.
+    if (allowTransition && exact(value, ['state', 'reason']) && value.state === 'error'
+      && value.reason === 'authentication_document_transition') return { state: 'unknown' };
     if (!exact(value, ['state', 'stepId', 'documentId']) || !['success', 'challenge', 'unknown'].includes(value.state) || (value.state === 'challenge' && (!definition.steps.some(step => step.id === value.stepId) || typeof value.documentId !== 'string' || !/^[0-9a-f-]{36}$/u.test(value.documentId)))) fail('authentication_unknown');
     return value;
   };
@@ -699,7 +706,7 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
           attempt.steps.push(step.id); await store.writeCredentials(credentials); active();
           const value = await send('authentication-follow', { stepId: step.id, documentId: probe.documentId, ...methodArguments });
           if (!exact(value, ['state']) || value.state !== 'submitted') fail('authentication_unknown');
-          await wait(200); active(); probe = await observe(); continue;
+          await wait(200); active(); probe = await observe(true); continue;
         }
         if (step.fields.totp && credentials.totp) {
           const parsed = parseAgentSecretTotpValue(credentials.totp);
@@ -737,7 +744,7 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
         finally { for (const key of Object.keys(values)) values[key] = ''; }
         if (!exact(value, ['state']) || value.state !== 'submitted') fail('authentication_unknown');
       }
-      await wait(200); active(); probe = await observe();
+      await wait(200); active(); probe = await observe(attempt.steps.length > 0);
       // Unknown after submission can be a normal redirect/SPA loading state.
       // Wait only within this attempt; never choose another field or method.
     }

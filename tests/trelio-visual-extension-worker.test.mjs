@@ -15,7 +15,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, authenticationMessage } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[];
@@ -71,13 +71,17 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
         async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
         async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
-        async sendMessage(_id, message) { return message.kind === 'authentication-guard' ? { blocked: false } : { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false }; },
+        async sendMessage(_id, message, target) {
+          if (message.kind === 'authentication-guard') return { blocked: false };
+          if (authenticationMessage && message.kind.startsWith('authentication-')) return authenticationMessage(message, target);
+          return { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false };
+        },
       },
     }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } },
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, fixtureOnly,
-    observationMode: image ? 'image' : 'text', ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
+    observationMode: image ? 'image' : 'text', ...(authenticationMessage?{authentication:true}:{}), ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -98,6 +102,25 @@ test('the exact owned bootstrap page is reused only after policy/auth and commit
   assert.deepEqual(worker.navigation,['about:blank','https://example.test/']);
   assert.ok(worker.sent.some(value=>value.kind==='hello'));
   assert.equal((await worker.dispatch('read-text')).state,'ready');
+});
+
+test('authentication maps only known native receiver transitions from a top-frame probe', async () => {
+  const expected = 'Could not establish connection. Receiving end does not exist.';
+  let nativeError = expected, reads = 0, writes = 0;
+  const worker = await dialogWorker({ authenticationMessage(message, target) {
+    assert.equal(target.frameId, 0);
+    if (message.kind === 'authentication-probe') reads++;
+    else if (message.kind === 'authentication-fill') writes++;
+    else assert.fail(message.kind);
+    throw Error(nativeError);
+  } });
+  assert.equal((await worker.dispatch('authentication-start')).state, 'connected');
+  assert.deepEqual(await worker.dispatch('authentication-probe'), { state: 'error', reason: 'authentication_document_transition' });
+  assert.deepEqual(await worker.dispatch('authentication-fill'), { state: 'error', reason: 'operation_failed' });
+  nativeError = 'PRIVATE_PROVIDER_ERROR';
+  assert.deepEqual(await worker.dispatch('authentication-probe'), { state: 'error', reason: 'operation_failed' });
+  assert.equal(reads, 2); assert.equal(writes, 1);
+  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_PROVIDER_ERROR|Receiving end/);
 });
 
 test('a stalled native capture marks the original navigation before it can reply, only in synthetic fixtures', async () => {

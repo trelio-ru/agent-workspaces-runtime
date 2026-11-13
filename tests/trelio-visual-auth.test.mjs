@@ -288,6 +288,41 @@ test('TOTP window wait rechecks the complete document and never dispatches an em
   assert.equal(result.state, 'saved_unverified'); assert.ok(probes >= 3); assert.equal(fills, 1);
 });
 
+test('read-only authentication probe survives one signed renderer transition without repeating input', async()=>{
+ const def=definition('https://auth.example.test'),store=memoryStore(def);
+ let clock=60000,probes=0,fills=0;
+ const result=await authenticateVisualBrowser({definition:def,store,active(){},now:()=>clock,wait:async ms=>{clock+=ms;},
+  send:async(op,args)=>{
+   if(op==='authentication-fill'){fills++;assert.equal(args.stepId,'password');return {state:'submitted'};}
+   assert.equal(op,'authentication-probe');
+   if(++probes===1)return {state:'challenge',stepId:'password',documentId:randomUUID()};
+   if(probes===2)return {state:'error',reason:'authentication_document_transition'};
+   return {state:'success'};
+  }});
+ assert.deepEqual(result,{state:'saved_unverified',reason:'none'});
+ assert.equal(fills,1);assert.equal(probes,3);assert.equal(store.saved.attempt.state,'complete');
+});
+
+test('authentication transition cannot consume another secret before the original deadline or normalize a generic refusal', async()=>{
+ const def=definition('https://auth.example.test');
+ for(const reason of ['authentication_document_transition','operation_failed']){
+   const store=memoryStore(def);
+   let clock=60000,probes=0,fills=0;
+   const run=()=>authenticateVisualBrowser({definition:def,store,active(){},now:()=>clock,wait:async ms=>{clock+=ms;},
+    send:async(op,args)=>{
+     if(op==='authentication-fill'){fills++;assert.equal(args.stepId,'password');return {state:'submitted'};}
+     assert.equal(op,'authentication-probe');
+     if(++probes===1)return {state:'challenge',stepId:'password',documentId:randomUUID()};
+     return {state:'error',reason};
+    }});
+   if(reason==='authentication_document_transition'){
+     assert.equal((await run()).reason,'authentication_unknown');
+     assert.equal(clock,90000);
+   }else await assert.rejects(run(),{code:'authentication_unknown'});
+   assert.equal(fills,1);assert.equal(store.saved.attempt.state,'pending');
+ }
+});
+
 test('credential management rejects value-bearing arguments before identity, state writes or worker creation', async () => {
   for (const operation of ['credentials-setup', 'credentials-status', 'credentials-forget', 'authenticate']) {
     assert.equal((await runVisualSession({ origins: ['https://auth.example.test'], operation, args: { password: 'SYNTHETIC_NOT_AN_ARGUMENT' }, env: {} })).reason, 'invalid_input');
