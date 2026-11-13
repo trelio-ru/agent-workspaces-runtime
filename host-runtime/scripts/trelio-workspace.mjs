@@ -13753,7 +13753,7 @@ const synchronizePersistentWorkspaceToAcceptedHead = async ({
   }
 };
 
-const openWorkspaceLocked = async (origin, options, workspaceId) => {
+const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssistantFinish) => {
   const token = await requireToken(origin);
   let compatibility = await ensureBridgeCompatibility(origin, token);
   let activeAgentRules = compatibility?.agentRules ?? null;
@@ -13948,6 +13948,20 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     if (!existingRun) {
       throw new Error("Run не найден в указанном workspace или недоступен пользователю.");
     }
+    // This object is an in-process option of the signed assistant worker,
+    // never a flag or a model-selected path. The worker holds the existing
+    // finish lock while the original Run's live lease is claimed.
+    if (retainedAssistantFinish && (
+      retainedAssistantFinish.workspaceId !== workspaceId
+      || retainedAssistantFinish.runId !== requestedRunId
+      || existingRun.status !== "expired"
+      || existingRun.baseHead !== retainedAssistantFinish.baseHead
+      || runOverview?.workspace?.acceptedHead !== retainedAssistantFinish.baseHead
+      || existingRun.draftHead && existingRun.draftHead !== retainedAssistantFinish.candidateHead
+      || existingRun.candidateHead
+    )) {
+      throw new Error("Исходный Run изменился перед восстановлением незавершённого сохранения.");
+    }
     const pinnedAgentRules = existingRun.agentInstructionsSnapshotJson?.platform;
 
     if (pinnedAgentRules) {
@@ -14121,6 +14135,9 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
 
   const existingMetadata = await readOptionalRunMetadata(rootDirectory);
 
+  if (retainedAssistantFinish && !existingMetadata) {
+    throw new Error("Локальный кандидат недоступен; новый корень для сохранения не создаётся.");
+  }
   if (existingMetadata) {
     await assertValidMaterializedRoot(rootDirectory, existingMetadata, workspaceId, origin);
     const continuingSameRun = existingMetadata.runId === runId;
@@ -14129,7 +14146,19 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     })).stdout.trim();
     let downloadedEncryptedDraft = null;
 
-    if (localHead !== materializedHead) {
+    // The last finish can commit the candidate locally before its upload.
+    // For this one owned recovery, keep that exact tree instead of trying
+    // to sync it backwards to the unchanged server base. No ordinary open
+    // gets this exception, and the ordinary finish still validates/uploads
+    // the complete delta and performs its server acceptance CAS.
+    if (retainedAssistantFinish && (!continuingSameRun
+      || existingMetadata.candidateHead !== retainedAssistantFinish.candidateHead
+      || localHead !== retainedAssistantFinish.candidateHead
+      || existingMetadata.baseHead !== agentRun.baseHead
+      || await getGitStatus(workspaceDirectory, existingMetadata.objects || []))) {
+      throw new Error("Локальный кандидат изменился; незавершённое сохранение не восстановлено.");
+    }
+    if (localHead !== materializedHead && !retainedAssistantFinish) {
       const syncDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-draft-sync-"));
       const syncBundlePath = path.join(syncDirectory, "run.bundle");
 
@@ -14210,7 +14239,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       fencingToken: agentRun.fencingToken,
       baseHead: agentRun.baseHead,
       draftHead: agentRun.draftHead || null,
-      materializedHead,
+      materializedHead: retainedAssistantFinish?.candidateHead ?? materializedHead,
       encryptedDraft: downloadedEncryptedDraft
         || (continuingSameRun && agentRun.draftHead
           ? resolveReusableEncryptedDraftRevision({
@@ -14426,12 +14455,12 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   }
 };
 
-const openWorkspace = async (origin, options) => {
+const openWorkspace = async (origin, options, retainedAssistantFinish) => {
   const workspaceId = requireUuid(options.workspace, "workspace");
 
   await withWorkspaceOpenLock(
     workspaceId,
-    () => openWorkspaceLocked(origin, options, workspaceId),
+    () => openWorkspaceLocked(origin, options, workspaceId, retainedAssistantFinish),
   );
 
   // Автоочистка запускается только после публикации metadata нового/claimed
@@ -20606,7 +20635,7 @@ export const recoverBridgePluginUpgrade = async (
   }
 };
 
-export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart } = {}) => {
+export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -20646,7 +20675,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
     }
     await inspectWorkspace(origin, options);
   } else if (command === "open") {
-    await openWorkspace(origin, options);
+    await openWorkspace(origin, options, retainedAssistantFinish);
   } else if (command === "status") {
     await status();
   } else if (command === "heartbeat") {

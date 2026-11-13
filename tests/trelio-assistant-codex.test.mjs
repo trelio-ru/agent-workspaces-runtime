@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedWorkspaceDraft, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -538,8 +538,48 @@ test('interruption after exact finish and accepted readback offers only outcome 
     assert.ok(!tools.includes(tool),tool);
 });
 
-for(const state of ['confirmed','busy','changed','unfiltered','accepted'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
-  const {turn,...workspaceDraftRecovery}=state==='accepted'?acceptedHistory():draftHistory();
+const pendingFinishHistory=()=>{
+  const {turn,workspaceDraft,...locators}=acceptedHistory();
+  const {acceptedHead,...identity}=workspaceDraft;
+  const finish=turn.items.at(-3),result=finish.result.structuredContent;
+  result.nextCall={tool:finish.tool,arguments:{schemaVersion:1,operation:'status',runIdentity:identity,
+    parameters:{finishOperationId:result.operationId}}};
+  const effect=(tool,args,value)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:{taskPass:locators.taskPass,...args},result:{structuredContent:value}});
+  const questionId=randomUUID(),controlId=randomUUID(),receiptId=randomUUID();
+  turn.items.splice(-4,4,
+    effect('ask_assistant_owner',{clientRequestId:randomUUID()},
+      {id:questionId,path:'/profile/',state:'pending',replayed:false}),
+    effect('update_task_control',{clientRequestId:randomUUID(),controlId,visibility:'shared'},
+      {schemaVersion:1,operation:'update_task_control',taskId:locators.taskPass.taskId,resultId:controlId,receiptId}),
+    finish,
+  );
+  return {turn,...locators,workspaceDraft:{...identity,finishPending:true}};
+};
+
+test('a started finish is recoverable without treating its pending handle or earlier effects as completion',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
+  assert.equal(assistantInterruptedAcceptedWorkspace(turn,terminalMarkerId,taskPass),null);
+  assert.deepEqual(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),workspaceDraft);
+  for(const change of [
+    value=>{value.items.at(-3).result.structuredContent.replayed=true;},
+    value=>{value.items.at(-2).result.structuredContent.receiptId=null;},
+    value=>{value.items.at(-2).arguments.visibility='other';},
+    value=>{value.items.at(-2).result.structuredContent.taskId=randomUUID();},
+    value=>{value.items.at(-2).arguments.taskPass={...taskPass,passId:randomUUID()};},
+    value=>{value.items.at(-1).result.structuredContent.nextCall.arguments.runIdentity={...workspaceDraft,runId:randomUUID()};},
+    value=>{value.items.at(-1).result.structuredContent.nextCall.arguments.parameters.finishOperationId=randomUUID();},
+    value=>{value.items.at(-1).result.structuredContent.state='completed';},
+    value=>{value.items.splice(-1,0,{...value.items.at(-2),tool:'use_assistant_skill'});},
+    value=>{value.items.push(structuredClone(value.items.at(-2)));},
+  ]){
+    const edited=structuredClone(turn);change(edited);
+    assert.equal(assistantInterruptedPendingWorkspaceFinish(edited,terminalMarkerId,taskPass),null);
+  }
+});
+
+for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
+  const {turn,...workspaceDraftRecovery}=state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
   const pluginId='trelio-digital-assistant@trelio-digital-assistants';
   const tools=state==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
@@ -568,6 +608,9 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted'])test(`
         if(state==='accepted'){
           assert.match(text,/Only confirm the result already accepted/u);
           assert.ok(text.includes(workspaceDraftRecovery.workspaceDraft.acceptedHead));
+        }else if(state==='finish_pending'){
+          assert.match(text,/First call continue_assistant_workspace_action/u);
+          assert.match(text,/do not repeat any question, control change/u);
         }else{
           assert.match(text,/only to preserve its interrupted Workspace draft/u);
           assert.match(text,/Do not repeat the browser check/u);
@@ -575,7 +618,7 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted'])test(`
       },
     }),
   });
-  if(state==='confirmed'||state==='accepted'){
+  if(['confirmed','accepted','finish_pending'].includes(state)){
     assert.equal((await operation()).state,'completed');
     assert.deepEqual(steps,['writer','draft','renew']);assert.equal(starts,1);
   }else{

@@ -3158,6 +3158,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       workspaceRun:runIdentity,lockDirectory:path.join(os.tmpdir(),'synthetic-writer-locks'),lock:(_file,action)=>action()});
     const readFetch=globalThis.fetch,uploads=new Map(),storedPayloads=[payload];
     let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null,handoffTargetMode='valid';
+    let claims=0,workspaceBundleReads=0;
     globalThis.fetch=async(url,options)=>{
       const parsed=new URL(url),base='/api/digital-assistants/runtime/workspace';
       if(parsed.pathname===`${base}/files/${baseManifestId}/encrypted-content`){
@@ -3175,6 +3176,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
           runs:[nativeRun],permissions:{canRead:true,canEdit:true,canApprove:true}});
       if(parsed.pathname===`${base}/workspaces/${descriptor.workspaceId}/runs/${runId}`)return scoped({run:nativeRun,latestCheckpoint});
       if(parsed.pathname===`${base}/runs/${runId}/claim`){
+        claims++;
         const input=JSON.parse(options.body);assert.equal(input.expectedFencingToken,nativeRun.fencingToken);
         nativeRun={...nativeRun,status:'running',fencingToken:nativeRun.fencingToken+1,leaseId:randomUUID()};return scoped(nativeRun);
       }
@@ -3238,11 +3240,13 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         nativeRun={...nativeRun,candidateHead:input.workspaceHead,status:'accepted',acceptedAt:new Date().toISOString()};
         return json({run:nativeRun});
       }
-      if(parsed.pathname===`${base}/runs/${runId}/encrypted-bundle`)
+      if(parsed.pathname===`${base}/runs/${runId}/encrypted-bundle`){
+        workspaceBundleReads++;
         return draftTransport?new Response(draftTransport.bytes,{headers:draftTransport.headers}):new Response(bytes,{headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':descriptor.workspaceId,
           'x-trelio-accepted-head':head,'x-trelio-materialized-head':head,'x-trelio-materialized-source':'base',
           'x-trelio-encrypted-revision-id':revisionId,'x-trelio-scope-id':scopeId,'x-trelio-scope-epoch':'1',
           'x-trelio-ciphertext-sha256':digest(bytes)}});
+      }
       return readFetch(url,options);
     };
     const writerPlan={prepared:true,scope:plan.scope,encryptedLifecycle:descriptor,localAction:{schemaVersion:1,operation:'open',
@@ -3257,6 +3261,47 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     assert.equal(await fs.readFile(path.join(path.dirname(writable),'context','agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
     assert.equal(opened.operation,'open');
+
+    if(!named){
+      // The retained encrypted Run has a committed local candidate but the
+      // interrupted finish uploaded neither candidate nor handoff. Exercise
+      // the real common opener, native lease claim and Git root, not a stub.
+      const metadataPath=path.join(path.dirname(writable),'.trelio-run.json');
+      const original=JSON.parse(await fs.readFile(metadataPath,'utf8'));
+      await fs.writeFile(path.join(writable,'interrupted-save.md'),'RETAINED_INTERRUPTED_SAVE');
+      await common.runGit(['add','interrupted-save.md'],{cwd:writable});
+      await common.runGit(['commit','-m','Retained finish candidate'],{cwd:writable});
+      const candidate=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
+      const {createFinishRecoveryMarker}=await import('../host-runtime/scripts/trelio-workspace-finish-recovery.mjs');
+      await fs.writeFile(metadataPath,JSON.stringify({...original,candidateHead:candidate,materializedHead:candidate,
+        finishRecovery:createFinishRecoveryMarker(original)}));
+      nativeRun={...nativeRun,status:'expired'};
+      const execute=localAction=>common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(
+        {...writerPlan,localAction},{withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),
+          readDraftRecovery:async()=>({...runIdentity,finishPending:true})}));
+      const status={schemaVersion:1,operation:'status',parameters:{},runIdentity};
+      const observed=await execute(status);
+      assert.deepEqual(observed.nativeRunStatus,{status:'expired',baseHead:head,candidateHead:null});
+      assert.equal(JSON.parse(observed.stdout).candidateHead,candidate);
+      const before={claims,workspaceBundleReads};
+      await fs.writeFile(path.join(writable,'interrupted-save.md'),'CHANGED_AFTER_CHECK');
+      await assert.rejects(execute(writerPlan.localAction),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+      assert.equal(claims,before.claims,'a changed local candidate must not spend a native claim');
+      await common.runGit(['restore','interrupted-save.md'],{cwd:writable});
+      const recovered=await execute(writerPlan.localAction);
+      assert.equal(recovered.operation,'open');
+      assert.equal(claims,before.claims+1);
+      assert.equal(workspaceBundleReads,before.workspaceBundleReads,'do not sync the retained candidate backwards');
+      assert.equal((await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim(),candidate);
+      assert.equal(await fs.readFile(path.join(writable,'interrupted-save.md'),'utf8'),'RETAINED_INTERRUPTED_SAVE');
+      assert.equal(acceptedPublications,0,'reopen is not acceptance');
+      const refreshed=JSON.parse(await fs.readFile(metadataPath,'utf8'));
+      assert.equal(refreshed.fencingToken,nativeRun.fencingToken);
+      assert.equal(refreshed.materializedHead,candidate);
+      // Restore this synthetic tree to start the independent older fixture.
+      await common.runGit(['reset','--hard',head],{cwd:writable});
+      await fs.writeFile(metadataPath,JSON.stringify({...refreshed,candidateHead:null,materializedHead:head,finishRecovery:undefined}));
+    }
 
     // A saved encrypted draft and a later local committed delta are both real
     // material. Reopening an expired own Run must preserve that checkout and

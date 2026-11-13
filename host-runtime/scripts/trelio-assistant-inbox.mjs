@@ -32,10 +32,12 @@ const integer = (value, min, max) => {
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId','acceptedHead']);
+  object(value,['workspaceId','runId','acceptedHead','finishPending']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
+  if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined))inputError();
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
-    ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead})};
+    ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
+    ...(value.finishPending===true?{finishPending:true}:{})};
 };
 export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',

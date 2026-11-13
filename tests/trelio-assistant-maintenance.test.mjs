@@ -68,6 +68,32 @@ test('an accepted Workspace recovery can confirm only the exact accepted head wi
   assert.deepEqual(calls,['complete_assistant_pass']);
 });
 
+test('interrupted finish settlement keeps existing files and settled task actions read-only',async()=>{
+  const runIdentity={workspaceId:randomUUID(),runId:randomUUID()},calls=[];
+  const draft={...runIdentity,finishPending:true};
+  const health={revision:1,code:'ready',compatibility:{minimumPluginVersion:'3.0.0',minimumRuntimeVersion:null}};
+  const run=(name,args)=>executeAssistantRuntimeRequest({operation:'call',name,arguments:args},{
+    context:async action=>action({identity:{},readHealth:async()=>health,reportHealth:async()=>health},{}),
+    versions:()=>versions,readDraftRecovery:async()=>draft,
+    proxyFor:async()=>({callTool:async name=>{calls.push(name);return {content:[]};}}),
+  });
+  const complete={workspaceId:draft.workspaceId,acceptedRunId:draft.runId,workspaceHead:'a'.repeat(40),
+    goalState:'waiting_owner',noChange:false};
+  for(const [name,args] of [
+    ['ask_assistant_owner',{}],['update_task_control',{}],['use_assistant_browser',{}],
+    ['use_assistant_workspace_files',{runIdentity,command:{action:'replace',path:'WORK.md',text:'edit',expectedSha256:null}}],
+    ['continue_assistant_workspace_action',{operation:'checkpoint',runIdentity,parameters:{type:'draft'}}],
+    ['complete_assistant_pass',{...complete,workspaceHead:'unknown'}],
+    ['complete_assistant_pass',{...complete,processedSourceReferences:[{}]}],
+    ['complete_assistant_pass',{...complete,goalState:'cancelled'}],
+  ])await assert.rejects(run(name,args),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  assert.deepEqual(calls,[]);
+  await run('continue_assistant_workspace_action',{operation:'status',runIdentity,parameters:{}});
+  await run('use_assistant_workspace_files',{runIdentity,command:{action:'read',path:'WORK.md'}});
+  await run('complete_assistant_pass',complete);
+  assert.deepEqual(calls,['continue_assistant_workspace_action','use_assistant_workspace_files','complete_assistant_pass']);
+});
+
 test('the registered supervisor survives failed startup reads without an MCP or a premature business tick',async()=>{
   for(const stage of ['identity','registration']){
     const controller=new AbortController(),identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};

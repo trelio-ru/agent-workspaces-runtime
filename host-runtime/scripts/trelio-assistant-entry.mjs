@@ -2802,20 +2802,24 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
   const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS}=await import('./trelio-assistant-inbox.mjs');
   const accepted=draft.acceptedHead!==undefined;
+  const interruptedFinish=draft.finishPending===true;
   const same=value=>value?.workspaceId===draft.workspaceId&&value?.runId===draft.runId;
   let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS).includes(name);
   if(!accepted&&name==='prepare_assistant_workspace_run')permitted=same(args)&&args.relatedWorkspaceIds===undefined;
   if(!accepted&&name==='continue_assistant_workspace_action')permitted=
     ['open','status','heartbeat','checkpoint','finish'].includes(args.operation)
     &&same(args.operation==='open'?args.parameters:args.runIdentity)
-    &&(args.operation!=='checkpoint'||args.parameters?.type==='draft')
+    &&(args.operation!=='checkpoint'||!interruptedFinish&&args.parameters?.type==='draft')
     &&(args.operation!=='finish'||args.parameters?.taskOutcome==='no_status_change');
   if(!accepted&&name==='use_assistant_workspace_files'){
     const {parseAssistantRunFileCommand}=await import('./trelio-workspace-files.mjs');
-    permitted=same(args.runIdentity)&&['list','read','replace'].includes(parseAssistantRunFileCommand(args.command).action);
+    permitted=same(args.runIdentity)&&(interruptedFinish?['list','read']:['list','read','replace'])
+      .includes(parseAssistantRunFileCommand(args.command).action);
   }
   if(name==='complete_assistant_pass')permitted=args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
-    &&(accepted?args.workspaceHead===draft.acceptedHead&&['active','waiting_external','waiting_owner','blocked','completed'].includes(args.goalState)
+    &&(accepted||interruptedFinish
+      ?(accepted?args.workspaceHead===draft.acceptedHead:/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(args.workspaceHead??''))
+        &&['active','waiting_external','waiting_owner','blocked','completed'].includes(args.goalState)
       :args.goalState==='completed')
     &&args.noChange===false&&args.replyCommentId===undefined&&args.ownerDecisionId===undefined
     &&(args.processedSourceReferences===undefined||Array.isArray(args.processedSourceReferences)&&args.processedSourceReferences.length===0);
@@ -3934,7 +3938,9 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   }
   let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
   if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation
-    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual'].includes(key)))fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus'].includes(key))
+    || value.nativeRunStatus!==undefined&&(value.operation!=='status'
+      ||JSON.stringify(value.nativeRunStatus)!==JSON.stringify(assistantNativeRunStatus(value.nativeRunStatus))))fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
   if(value.visual!==undefined){
     if(value.operation!=='skill_run' || value.stdout!==undefined || value.stderr!==undefined
       || Buffer.byteLength(JSON.stringify(value))>3*1024*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
@@ -3944,12 +3950,24 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   return value;
 };
 
+// The isolated worker already reads the exact native Run for status. Expose
+// only its closed lifecycle projection alongside local Git status; never
+// expose the snapshot, lease ID, task materials, or a new access token.
+const assistantNativeRunStatus=run=>{
+  const head=value=>typeof value==='string'&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+  if(!run||!['running','waiting_for_human','review','accepted','expired','cancelled','rejected','outdated'].includes(run.status)
+    ||!head(run.baseHead)||run.candidateHead!=null&&!head(run.candidateHead))return undefined;
+  return {status:run.status,baseHead:run.baseHead,candidateHead:run.candidateHead??null};
+};
+
 /** Exactly one command runs in this isolated process. chdir/stdout capture are
  * confined here, never a long-lived MCP/background host. All native Workspace
  * algorithms (safe materialization, dirty state, recovery, checkpoint and
  * acceptance) remain the common engine. No module is copied into this adapter. */
 export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProductionAssistantWorkspace,
-  loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs'),expectedOrigin='https://trelio.ru'}={}) => {
+  loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs'),
+  readDraftRecovery=withProfile===withProductionAssistantWorkspace?readProductionWorkspaceDraftRecovery:async()=>null,
+  expectedOrigin='https://trelio.ru'}={}) => {
   const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
   return withProfile(async({identity,client,store,host,withSecretGenerationKey,selectCompanySecretContext,prepareWorkspaceRun})=>{
     const common=await loadCommon(),context=await loadContext();
@@ -3966,6 +3984,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const encryption=runLifecycle||['secret_skill_run','secret_browser_fill','secret_generate','secret_company_create','secret_input'].includes(plan.localAction.operation)?await prepareWorkspaceRun():null;
     if(plan.encryptedLifecycle && (!encryption || encryption.requestOrigin!==plan.encryptedLifecycle.requestOrigin
       || encryption.runtime.company.id!==plan.encryptedLifecycle.companyId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    let nativeRunStatus;
     if(!skill && !(inspecting && plan.encryptedInspection)){
       const response=await common.request(encryption?.requestOrigin??identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
       const snapshot=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
@@ -3973,6 +3992,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       if(inspecting ? snapshot.workspace?.id!==plan.runIdentity.workspaceId || snapshot.workspace.scopeType!=='task'
         || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
         : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(plan.localAction.operation==='status')nativeRunStatus=assistantNativeRunStatus(snapshot.run);
     }
     if(plan.localAction.operation==='open' || skill || plan.localAction.operation==='secret_skill_run') {
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
@@ -3986,6 +4006,10 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     let root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin))
       :inspecting?assistantWorkspaceRoot(config,plan,expectedOrigin):await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin);
     let directory=path.join(root,'workspace');
+    const pending=runLifecycle?await readDraftRecovery(identity,host):null;
+    const interruptedFinish=pending?.finishPending===true;
+    if(interruptedFinish&&(pending.workspaceId!==plan.runIdentity.workspaceId||pending.runId!==plan.runIdentity.runId))
+      fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     // The common opener claims a new root itself. Precreating that final
     // --dir makes it look like an unrelated existing directory and correctly
     // trips its ownership guard. Prepare ONLY its private parent for open;
@@ -4042,7 +4066,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
       resolveRunRootDirectory:async()=>root,
-      selectOpenRecovery:opening?async error=>{
+      selectOpenRecovery:opening&&!interruptedFinish?async error=>{
         const d=error.details,base=assistantWorkspaceRoot(config,plan,expectedOrigin);
         if(!['TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED','TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED'].includes(error.code))return false;
         // Only a positive common LOCAL/DRAFT preflight can choose a new sibling.
@@ -4074,7 +4098,27 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           const boundary=args.indexOf('--'),nativeArgs=[...args];
           nativeArgs.splice(boundary<0?args.length:boundary,0,'--origin',identity.origin);
           const guidePart=skill?assistantSkillGuidePart(action.parameters):undefined;
-          await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart});return {stdout,stderr:''};
+          if(interruptedFinish&&opening){
+            // Take the same cross-process finish lock before inspecting the
+            // candidate or claiming an expired lease. An old writer wins;
+            // neither a stale status nor a model prompt can override it.
+            await common.withWorkspaceFinishLock(plan.runIdentity.runId,async()=>{
+              const {hasFinishRecoveryMarker}=await import('./trelio-workspace-finish-recovery.mjs');
+              const metadata=await common.readPrivateJsonFile(path.join(root,'.trelio-run.json'),{maximumBytes:512*1024});
+              const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
+              const head=(await common.runGit(['rev-parse','HEAD'],{cwd:directory})).stdout.trim();
+              if(local.workspaceId!==plan.runIdentity.workspaceId||local.runId!==plan.runIdentity.runId||local.terminalStatus
+                ||metadata.company?.id!==plan.scope.companyId||metadata.origin!==identity.origin
+                ||!hasFinishRecoveryMarker(metadata)
+                ||metadata.candidateHead!==head||metadata.materializedHead!==head||metadata.baseHead===head
+                ||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)
+                ||await common.getGitStatus(directory,metadata.objects??[]))
+                fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+              await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
+                baseHead:metadata.baseHead,candidateHead:head}});
+            });
+          }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart});
+          return {stdout,stderr:''};
         }
         catch(error) {
           // Reuse the ordinary in-process -> CLI error projection so common
@@ -4086,6 +4130,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           if(['ASSISTANT_SKILL_COMMAND_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_POLICY_INVALID',
             'ASSISTANT_SKILL_COMMAND_DENIED','ASSISTANT_SKILL_GUIDE_INPUT_INVALID',
             'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'].includes(error?.code))nativeCommandPolicyCause=error.code;
+          if(interruptedFinish&&['ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED',
+            'TRELIO_WORKSPACE_FINISH_IN_PROGRESS'].includes(error?.code))nativeCommandPolicyCause=error.code;
           if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(error.payload?.reason))nativeReason=error.payload.reason;
           throw Object.assign(error,{stderr:'Ошибка: '+common.formatBridgeCommandError(error,args[0])});
         }
@@ -4095,7 +4141,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // Preserve the common bounded evidence for semantic reconciliation in
       // this SAME chat. It stays local, not in HTTP/SQLite or a second journal.
       // A fresh open is not saved material and never completes the task.
-      return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}:result;
+      return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}
+        :nativeRunStatus?{...result,nativeRunStatus}:result;
     } catch(error) {
       const diagnostic=error?.details?.http?.failureCode;
       if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;

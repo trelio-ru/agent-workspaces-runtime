@@ -606,9 +606,27 @@ opening, editing or submitting a Workspace in this mode. The outcome gate
 still verifies live acceptance and the assistant's own material. A confirmed
 pass may preserve an active or blocked task goal.
 
+If the final tool returned an in-progress finish and its exact native poll
+handle, treat that handle as evidence of the attempted save only. The same
+bounded history can include a settled owner question and a control
+update with a positive native receipt for this task and pass. These calls are
+not exposed to the recovery turn. Browser and provider operations, an
+unconfirmed effect, a different Run, or a tool call after the pending finish
+still refuse this path.
+
+The recovery first reads the exact server Run lifecycle alongside local Git
+status. An accepted candidate is read back without reopening it. For an
+expired Run, the existing cross-process finish lock, private finish marker,
+local candidate/base and a clean tree must all match before the original
+Run's native lease can be claimed. The shared opener keeps that candidate
+instead of syncing backwards to an unchanged base. It neither adopts a
+foreign path nor publishes the candidate. Ordinary handoff/finish and its
+server CAS still validate and accept the original material; the recovery may
+read but cannot change the files. A waiting goal remains waiting.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
-only the exact Run and Workspace UUIDs and, for accepted material, its head
-alongside the existing intent. The
+only the exact Run and Workspace UUIDs and either the pending-finish bit or the
+accepted head alongside the existing intent. The
 isolated App Server acquires the native exclusive writer and reads the same
 latest full turn again before the existing pass renewal and start CAS. A busy
 writer, changed history or lost renewal result cannot spend that start. The

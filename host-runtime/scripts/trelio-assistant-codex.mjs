@@ -48,7 +48,8 @@ export const assistantCodexExecutionArguments = () => ['app-server','--listen','
  * No config file, enabled setting or native hook trust is changed on disk. */
 const workspaceRecoveryTools=mode=>mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
 const workspaceRecoveryModeFor=options=>options.workspaceDraftRecovery?.workspaceDraft?.acceptedHead!==undefined
-  ?'accepted':Boolean(options.workspaceDraftRecovery);
+  ?'accepted':options.workspaceDraftRecovery?.workspaceDraft?.finishPending===true
+    ?'finish_pending':Boolean(options.workspaceDraftRecovery);
 export const assistantCodexExecutionOverrides = (configuration,workspaceDraftRecovery=false) => {
   const object=value=>value!==null&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype;
   if(!object(configuration))fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
@@ -1191,7 +1192,8 @@ const sameDraftRun=(value,expected)=>value&&expected&&Object.getPrototypeOf(valu
   &&value.runId===expected.runId&&value.workspaceId===expected.workspaceId;
 const acceptedWorkspaceHead=value=>typeof value==='string'&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
 const sameWorkspaceRecovery=(value,expected)=>value&&expected
-  &&value.runId===expected.runId&&value.workspaceId===expected.workspaceId&&value.acceptedHead===expected.acceptedHead;
+  &&value.runId===expected.runId&&value.workspaceId===expected.workspaceId
+  &&value.acceptedHead===expected.acceptedHead&&value.finishPending===expected.finishPending;
 const exactDraftPass=(value,expected)=>value&&Object.getPrototypeOf(value)===Object.prototype
   &&Object.keys(value).sort().join(',')==='companyId,passId,taskId'
   &&['companyId','passId','taskId'].every(key=>UUID.test(expected?.[key]??'')&&value[key]===expected[key]);
@@ -1252,22 +1254,27 @@ export const assistantInterruptedWorkspaceDraft=(turn,deliveryId,taskPass)=>{
   return opened&&changed?run:null;
 };
 
-/** The same native turn may finish a Run and get interrupted before it can
- * close its task pass. Require positive finish and clean accepted status for
- * one own Run. Unknown/foreign operations never qualify. The recovery can
- * only confirm this accepted result through the ordinary live outcome gate. */
-export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>{
+/** Recognize the canonical Run behind a native finish attempt, not its outcome.
+ * The pending variant can reconcile that one Run only. A settled owner question
+ * or control update is a prior effect, not a permission to repeat it.
+ * Those narrow native receipts are allowed only before the final finish call;
+ * a provider operation or any unconfirmed effect still fences the whole turn. */
+const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending)=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
     ||!Array.isArray(turn.items)||turn.items.length<6||turn.items.length>128)return null;
   const [original,...items]=turn.items;
   if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
     ||typeof original.content[0].text!=='string'||!original.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return null;
-  let run=null,opened=false,changed=false,operationId=null,finished=false,acceptedHead;
+  let run=null,inspectedWorkspaceId=null,opened=false,changed=false,operationId=null,finished=false,acceptedHead;
+  let questionId=null,controlReceiptId=null;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!item.arguments||Object.getPrototypeOf(item.arguments)!==Object.prototype)return null;
     const args=item.arguments,result=item.result?.structuredContent;
     const success=item.status==='completed'&&item.error==null&&item.result?.isError!==true&&result&&typeof result==='object';
+    // For the unknown-outcome branch the started finish must be the final
+    // tool. A subsequent status/error or unrelated call needs its own proof.
+    if(allowPending&&operationId)return null;
     if(item.tool==='get_assistant_status'){
       if(!success||Object.keys(args).some(key=>key!=='view'))return null;
       continue;
@@ -1284,13 +1291,29 @@ export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>{
     }else if(item.tool==='get_agent_skill'){
       if(!localDraftRefusal(item,'ASSISTANT_SOURCE_INVALID_RESPONSE'))return null;
     }else if(item.tool==='prepare_assistant_workspace_read'){
-      if(!acceptedHead||!success||args.workspaceId!==run.workspaceId||result.workspace?.id!==run.workspaceId)return null;
+      if(allowPending){
+        if(inspectedWorkspaceId||run||!success||result.prepared!==true||result.mode!=='read_only_accepted_workspace'
+          ||!UUID.test(args.workspaceId??'')||result.workspace?.id!==args.workspaceId)return null;
+        inspectedWorkspaceId=args.workspaceId;
+      }else if(!acceptedHead||!success||args.workspaceId!==run.workspaceId||result.workspace?.id!==run.workspaceId)return null;
     }else if(item.tool==='prepare_assistant_workspace_run'){
       if(run||!success||result.prepared!==true||!UUID.test(args.workspaceId??'')||!UUID.test(result.run?.id??'')
         ||args.runId!==undefined&&args.runId!==result.run.id||args.relatedWorkspaceIds!==undefined
+        ||inspectedWorkspaceId!==null&&inspectedWorkspaceId!==args.workspaceId
         ||result.workspace?.id!==args.workspaceId||result.workspace.scopeType!=='task'
         ||result.workspace.taskId!==taskPass.taskId||result.workspace.companyId!==taskPass.companyId)return null;
       run={workspaceId:args.workspaceId,runId:result.run.id};
+    }else if(allowPending&&item.tool==='ask_assistant_owner'){
+      if(!opened||questionId||!success||!UUID.test(args.clientRequestId??'')||!UUID.test(result.id??'')
+        ||result.state!=='pending'||result.replayed!==false||Object.keys(result).sort().join(',')!=='id,path,replayed,state')return null;
+      questionId=result.id;
+    }else if(allowPending&&item.tool==='update_task_control'){
+      if(!opened||controlReceiptId||!success||!['personal','shared'].includes(args.visibility)||args.ownerDecisionId!==undefined
+        ||!UUID.test(args.clientRequestId??'')||!UUID.test(args.controlId??'')
+        ||result.schemaVersion!==1||result.operation!==item.tool||result.taskId!==taskPass.taskId
+        ||result.resultId!==args.controlId||!UUID.test(result.receiptId??'')
+        ||Object.keys(result).sort().join(',')!=='operation,receiptId,resultId,schemaVersion,taskId')return null;
+      controlReceiptId=result.receiptId;
     }else if(item.tool==='use_assistant_workspace_files'){
       if(!opened||operationId||!sameDraftRun(args.runIdentity,run))return null;
       if(localDraftRefusal(item,'ASSISTANT_WORKSPACE_FILE_INPUT_INVALID'))continue;
@@ -1312,6 +1335,13 @@ export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>{
       }else if(args.operation==='finish'){
         if(!changed||operationId||args.parameters?.taskOutcome!=='no_status_change'||result.operation!=='finish'
           ||!UUID.test(result.operationId??'')||!['running','completed'].includes(result.state))return null;
+        if(allowPending){
+          const next=result.nextCall;
+          if(result.state!=='running'||next?.tool!==item.tool||next.arguments?.schemaVersion!==1
+            ||next.arguments.operation!=='status'||!sameDraftRun(next.arguments.runIdentity,run)
+            ||Object.keys(next.arguments.parameters??{}).join(',')!=='finishOperationId'
+            ||next.arguments.parameters.finishOperationId!==result.operationId)return null;
+        }
         operationId=result.operationId;
         finished=result.state==='completed';
       }else if(args.operation==='status'&&args.parameters?.finishOperationId!==undefined){
@@ -1329,14 +1359,20 @@ export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>{
       }else return null;
     }else return null;
   }
+  if(allowPending)return operationId?{...run,finishPending:true}:null;
   return acceptedHead?{...run,acceptedHead}:null;
 };
+export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>
+  assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,false);
+export const assistantInterruptedPendingWorkspaceFinish=(turn,deliveryId,taskPass)=>
+  assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,true);
 const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   // Only the latest full turn can qualify. A second message or any unknown
   // action leaves the original uncertainty intact. No transcript leaves RAM.
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
   const workspaceDraft=assistantInterruptedAcceptedWorkspace(turn,deliveryId,taskPass)
+    ??assistantInterruptedPendingWorkspaceFinish(turn,deliveryId,taskPass)
     ??assistantInterruptedWorkspaceDraft(turn,deliveryId,taskPass);
   return workspaceDraft?{state:'interrupted_workspace_draft',turnId:turn.id,workspaceDraft}:{state:'uncertain'};
 };
@@ -1716,6 +1752,7 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
       ||!exactDraftPass(taskPass,taskPass)||taskPass.companyId!==workStateContext.companyId||taskPass.taskId!==workStateContext.taskId
       ||![terminalMarkerId,terminalTurnId,workspaceDraft?.workspaceId,workspaceDraft?.runId].every(value=>UUID.test(value??''))
       ||workspaceRecoveryMode==='accepted'&&!acceptedWorkspaceHead(workspaceDraft.acceptedHead)
+      ||workspaceDraft.finishPending!==undefined&&(workspaceDraft.finishPending!==true||workspaceDraft.acceptedHead!==undefined)
       ||terminalMarkerId===deliveryId||options.continuationReview?.priorTurnId!==terminalTurnId
       ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
@@ -1951,6 +1988,8 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
         const {workspaceDraft}=options.workspaceDraftRecovery;
         if(workspaceDraft.acceptedHead!==undefined)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly confirm the result already accepted in the immediately preceding interrupted turn. Use its saved WORK.md content and the live task to determine the actual goal state, cadence and timezone. Use complete_assistant_pass with workspaceId=${workspaceDraft.workspaceId}, acceptedRunId=${workspaceDraft.runId}, workspaceHead=${workspaceDraft.acceptedHead}, noChange=false and no processed source references. This closes the pass, so keep an unfinished goal active, waiting or blocked as recorded in the accepted material. If the result or its accepted state cannot be verified, leave the pass unresolved.\n`;
+        if(workspaceDraft.finishPending===true)
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nSettle only the interrupted save in this SAME pass. First call continue_assistant_workspace_action (schemaVersion=1, operation=status, parameters={}, runIdentity={workspaceId:${workspaceDraft.workspaceId},runId:${workspaceDraft.runId}}). Do not poll the old handle. Inspect nativeRunStatus. If the server already accepted this Run, verify its accepted head and clean local tree; do not reopen or submit. Only if the server shows expired, the exact local candidate is intact, and the original save has ended, prepare/open this same Run; read both pinned authority files and existing WORK.md, then preserve the original material with the ordinary finish (taskOutcome=no_status_change). Follow only the new finish nextCall until terminal and verify exact native acceptance. Read the existing owner question and controls as needed; do not repeat any question, control change, provider read or write, or edit draft files. Only after verified acceptance, complete_assistant_pass with the actual goal state and cadence, same accepted Run/head, noChange=false and no processed source references. Waiting for an existing answer does not complete the goal. If save state, material, or business result is ambiguous, stop with the original fence intact.\n`;
         return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nContinue this SAME pass only to preserve its interrupted Workspace draft. Read the live task and original results. Prepare the exact existing Workspace Run with workspaceId=${workspaceDraft.workspaceId} and runId=${workspaceDraft.runId}. Use its returned open, read both pinned authority files, and inspect the recovered files. Keep the result already obtained. Save and verify acceptance through the ordinary finish with taskOutcome=no_status_change, then use complete_assistant_pass with this accepted Run/head and no processedSourceReferences only when the original result is confirmed. Do not repeat the browser check, publish another comment, send a message, create a Run or make any other task or provider change. If exact draft or outcome evidence is missing, preserve the draft and report the blocker.\n`;
       }
   const instruction = options.readinessProbe === true
