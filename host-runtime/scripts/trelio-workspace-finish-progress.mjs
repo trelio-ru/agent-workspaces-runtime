@@ -65,7 +65,8 @@ const operationError = (code, message, details) => Object.assign(new Error(messa
  * CLI Run lock; losing/restarting this host does not authorize a second writer.
  * This is a host-lifetime registry, not a promise of a restartable job service.
  */
-export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs = 30 * 60_000, errorFactory = operationError, toolName = "continue_trelio_workspace_action" } = {}) => {
+export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs = 30 * 60_000, errorFactory = operationError, toolName = "continue_trelio_workspace_action",
+  operation = "finish", instruction = "Сохранение продолжается. Через 10 секунд вызовите nextCall для этой операции; не запускайте новый finish и не меняйте файлы до завершения." } = {}) => {
   const entries = new Map();
   const prune = () => {
     for (const [key, entry] of entries) {
@@ -74,13 +75,13 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
   };
   const snapshot = (entry) => ({
     schemaVersion: 1,
-    operation: "finish",
+    operation,
     state: entry.state,
     operationId: entry.id,
     elapsedMs: Date.now() - entry.startedAt,
     progress: entry.progress,
     nextCall: { tool: toolName, arguments: entry.pollAction },
-    instruction: "Сохранение продолжается. Через 10 секунд вызовите nextCall для этой операции; не запускайте новый finish и не меняйте файлы до завершения.",
+    instruction,
   });
   const wait = async (entry, signal) => {
     signal?.throwIfAborted();
@@ -112,6 +113,7 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       if (!entry || entry.id!==id || entry.scope!==scope || entry.state==='running') return false;
       entries.delete(key);return true;
     },
+    has(key, id) { return entries.get(key)?.id === id; },
     active(key) { const entry = entries.get(key); return entry?.state === "running" ? snapshot(entry) : null; },
     async start({ key, scope, fingerprint, pollAction, execute, signal }) {
       signal?.throwIfAborted();

@@ -7597,6 +7597,7 @@ export const writeAndDecryptCompanyWorkspaceBundle = async ({
   companyEncryption,
   expectedWorkspaceId,
   expectedWorkspaceHead,
+  localMaterializationSignal,
 }) => {
   if (!companyEncryption) {
     throw new Error("Encrypted Agent Workspace response requires an unlocked local company key.");
@@ -7627,7 +7628,7 @@ export const writeAndDecryptCompanyWorkspaceBundle = async ({
     if (response.headers.get("x-trelio-encrypted-bundle-format") === "chain-v1") {
       return await materializeEncryptedWorkspaceChain({ sourcePath: encryptedPath, destination,
         companyEncryption, expectedWorkspaceId, expectedWorkspaceHead, expectedCiphertextSha256: expectedDigest,
-        runGit, ensurePrivateDirectory });
+        runGit, ensurePrivateDirectory, signal: localMaterializationSignal });
     }
     const decrypted = await decryptFileFromCompanyContainer({
       sourcePath: encryptedPath,
@@ -7666,29 +7667,36 @@ const requestAndDecryptCompanyWorkspaceBundle = async ({
   expectedWorkspaceId,
   expectedWorkspaceHead,
   signal,
+  localMaterializationSignal,
   inspectResponse = () => null,
-}) => withEncryptedWorkspaceTransport(async () => {
-  // An interrupted earlier inspection may leave a partial encrypted stream.
-  // Both paths are private temporary files owned by this operation; clear
-  // them before this explicit GET. A failed attempt is never replayed here.
-  await fs.rm(destination, { force: true }).catch(() => undefined);
-  await fs.rm(`${destination}.trelioe1`, { force: true }).catch(() => undefined);
-  const response = await request(
-    resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
-    token,
-    pathname,
-    signal ? { signal } : {},
-  );
-  const inspected = inspectResponse(response);
-  const decrypted = await writeAndDecryptCompanyWorkspaceBundle({
-    response,
-    destination,
-    companyEncryption,
-    expectedWorkspaceId,
-    expectedWorkspaceHead,
-  });
-  return { decrypted, inspected };
-});
+}) => {
+  const download = async () => {
+    // An interrupted earlier inspection may leave a partial encrypted stream.
+    // Both paths are private temporary files owned by this operation; clear
+    // them before this explicit GET. A failed attempt is never replayed here.
+    await fs.rm(destination, { force: true }).catch(() => undefined);
+    await fs.rm(`${destination}.trelioe1`, { force: true }).catch(() => undefined);
+    const response = await request(
+      resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
+      token,
+      pathname,
+      signal ? { signal } : {},
+    );
+    const inspected = inspectResponse(response);
+    const decrypted = await writeAndDecryptCompanyWorkspaceBundle({
+      response,
+      destination,
+      companyEncryption,
+      expectedWorkspaceId,
+      expectedWorkspaceHead,
+      localMaterializationSignal,
+    });
+    return { decrypted, inspected };
+  };
+  // Assistant materialization has a separate fixed whole-worker clock. Each
+  // request still carries the independent ordinary 60s HTTP/body deadline.
+  return localMaterializationSignal ? download() : withEncryptedWorkspaceTransport(download);
+};
 
 export const parseWorkspaceObjectPointer = (value) => {
   const rawText = Buffer.isBuffer(value) ? value.toString("utf8") : String(value);
@@ -11389,36 +11397,37 @@ const materializeWorkspaceObjects = async ({
   return objects;
 };
 
-const materializeBundle = async ({ bundlePath, directory, head, branch, temporary = false }) => {
+const materializeBundle = async ({ bundlePath, directory, head, branch, temporary = false, signal }) => {
+  signal?.throwIfAborted();
   if (!GIT_OBJECT_PATTERN.test(head)) {
     throw new Error("Сервер вернул некорректный Git head.");
   }
 
   await fs.mkdir(directory, { recursive: true });
-  await runGit(["init", "--initial-branch=main"], { cwd: directory });
+  await runGit(["init", "--initial-branch=main"], { cwd: directory, signal });
   if (temporary) {
     // A throwaway merge repository has no maintenance lifetime. A detached
     // auto-GC child can outlive fetch and race destruction of its pack files.
-    await runGit(["config", "maintenance.auto", "false"], { cwd: directory });
-    await runGit(["config", "gc.auto", "0"], { cwd: directory });
+    await runGit(["config", "maintenance.auto", "false"], { cwd: directory, signal });
+    await runGit(["config", "gc.auto", "0"], { cwd: directory, signal });
   }
   // Ни checkout, ни последующие commit не должны исполнять hooks, которые
   // могли попасть из пользовательского Git template/config на этой машине.
   await runGit(
     ["config", "core.hooksPath", GIT_DISABLED_HOOKS_PATH],
-    { cwd: directory },
+    { cwd: directory, signal },
   );
-  await runGit(["config", "fetch.fsckObjects", "true"], { cwd: directory });
+  await runGit(["config", "fetch.fsckObjects", "true"], { cwd: directory, signal });
   await runGit([
     "fetch",
     bundlePath,
     "+refs/trelio/exports/*:refs/remotes/trelio-export/*",
     "+refs/heads/*:refs/remotes/trelio-encrypted/*",
-  ], { cwd: directory });
-  await runGit(["cat-file", "-e", `${head}^{commit}`], { cwd: directory });
-  await runGit(["checkout", "-B", branch, head], { cwd: directory });
-  await runGit(["config", "user.name", "Trelio Agent Workspace"], { cwd: directory });
-  await runGit(["config", "user.email", "agent-workspaces@trelio.local"], { cwd: directory });
+  ], { cwd: directory, signal });
+  await runGit(["cat-file", "-e", `${head}^{commit}`], { cwd: directory, signal });
+  await runGit(["checkout", "-B", branch, head], { cwd: directory, signal });
+  await runGit(["config", "user.name", "Trelio Agent Workspace"], { cwd: directory, signal });
+  await runGit(["config", "user.email", "agent-workspaces@trelio.local"], { cwd: directory, signal });
 };
 
 const fastForwardMaterializedBundle = async ({
@@ -13753,7 +13762,7 @@ const synchronizePersistentWorkspaceToAcceptedHead = async ({
   }
 };
 
-const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssistantFinish) => {
+const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssistantFinish, localMaterializationSignal, assertAssistantMaterializationCurrent) => {
   const token = await requireToken(origin);
   let compatibility = await ensureBridgeCompatibility(origin, token);
   let activeAgentRules = compatibility?.agentRules ?? null;
@@ -13891,7 +13900,31 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   });
   let directoryPreflight;
   try {
-    directoryPreflight = await preflight(rootDirectory);
+    // An old cancelled assistant opener may have created only an empty root.
+    // Do not delete or adopt it. Before claim, admit a single fresh sibling
+    // only for the exact server-returned own Run. Nonempty/unknown directories,
+    // existing sibling data and ordinary CLI users keep the usual preflight.
+    if (localMaterializationSignal && requestedRunId && rootDirectoryExists && options.dir
+      && currentWorkspaceExecutionProfile()?.kind === "digital_assistant"
+      && runOverview?.workspace?.id === workspaceId && !await readOptionalRunMetadata(rootDirectory)
+      && (await fs.readdir(rootDirectory)).length === 0) {
+      const originalRun = await loadRunSnapshot(requestedRunId);
+      if (originalRun?.run?.id === requestedRunId && originalRun.run.workspaceId === workspaceId
+        && ["running", "expired"].includes(originalRun.run.status)
+        && !originalRun.run.candidateHead && !originalRun.run.draftHead) {
+        const sibling = workspaceRecoveryDirectory(rootDirectory, workspaceId, requestedRunId);
+        // Exact nonrecursive mkdir below still protects against a late creator.
+        const siblingPreflight = await preflight(sibling, true);
+        if (siblingPreflight.existingMetadata && siblingPreflight.existingMetadata.runId !== requestedRunId) {
+          throw new Error("Отдельный корень уже принадлежит другому Run.");
+        }
+        directoryPreflight = siblingPreflight;
+        rootDirectory = sibling;
+        rootDirectoryExists = directoryPreflight.rootDirectoryExists;
+        parallelOpen = true;
+      }
+    }
+    directoryPreflight ??= await preflight(rootDirectory);
   } catch (error) {
     // The server has already prepared an independent Run. A known live Run
     // occupying the default checkout is not a content conflict and must not
@@ -13971,12 +14004,14 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     } else {
       activeAgentRules = null;
     }
+    localMaterializationSignal?.throwIfAborted();
     const claimedRun = await readJsonResponse(await request(
       workspaceOrigin,
       token,
       `/api/agent-workspaces/runs/${requestedRunId}/claim`,
       {
         method: "POST",
+        signal: localMaterializationSignal,
         headers: { "content-type": "application/json", "x-trelio-work-start-presentation": "1", ...navigationHeaders },
         body: JSON.stringify({
           expectedFencingToken: existingRun.fencingToken,
@@ -14173,6 +14208,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
             companyEncryption,
             expectedWorkspaceId: workspaceId,
             expectedWorkspaceHead: materializedHead,
+          signal: localMaterializationSignal,
+          localMaterializationSignal,
             inspectResponse: (response) => parseEncryptedDraftRevisionResponseDescriptor(
               response,
               {
@@ -14275,6 +14312,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       claimedAt: now,
       lastUsedAt: now,
     };
+    localMaterializationSignal?.throwIfAborted();
+    await assertAssistantMaterializationCurrent?.(agentRun);
     await writeRunMetadata(metadataPath, refreshedMetadata);
     const contexts = await materializeRunContexts({
       origin: workspaceOrigin,
@@ -14344,6 +14383,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
         companyEncryption,
         expectedWorkspaceId: workspaceId,
         expectedWorkspaceHead: materializedHead,
+        signal: localMaterializationSignal,
+        localMaterializationSignal,
         inspectResponse: (response) => parseEncryptedDraftRevisionResponseDescriptor(
           response,
           {
@@ -14357,7 +14398,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       });
       downloadedEncryptedDraft = download.inspected;
     } else {
-      const baseResponse = await request(workspaceOrigin, token, pathname);
+      const baseResponse = await request(workspaceOrigin, token, pathname, { signal: localMaterializationSignal });
       await writeResponseToFile(baseResponse, baseBundlePath);
     }
     await materializeBundle({
@@ -14365,6 +14406,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       directory: workspaceDirectory,
       head: materializedHead,
       branch: "trelio-candidate",
+      signal: localMaterializationSignal,
     });
     await materializeRuntimeControlFiles(workspaceDirectory);
     const objects = await materializeWorkspaceObjects({
@@ -14426,6 +14468,10 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       claimedAt: now,
       lastUsedAt: now,
     };
+    localMaterializationSignal?.throwIfAborted();
+    // A long local history restore is not authority. Native independently
+    // checks the exact own Run/pass and current lease before local publication.
+    await assertAssistantMaterializationCurrent?.(agentRun);
     await writeRunMetadata(metadataPath, metadata);
     await registerOpenedRoot();
     await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
@@ -14455,12 +14501,12 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   }
 };
 
-const openWorkspace = async (origin, options, retainedAssistantFinish) => {
+const openWorkspace = async (origin, options, retainedAssistantFinish, localMaterializationSignal, assertAssistantMaterializationCurrent) => {
   const workspaceId = requireUuid(options.workspace, "workspace");
 
   await withWorkspaceOpenLock(
     workspaceId,
-    () => openWorkspaceLocked(origin, options, workspaceId, retainedAssistantFinish),
+    () => openWorkspaceLocked(origin, options, workspaceId, retainedAssistantFinish, localMaterializationSignal, assertAssistantMaterializationCurrent),
   );
 
   // Автоочистка запускается только после публикации metadata нового/claimed
@@ -20635,7 +20681,7 @@ export const recoverBridgePluginUpgrade = async (
   }
 };
 
-export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish } = {}) => {
+export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -20675,7 +20721,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
     }
     await inspectWorkspace(origin, options);
   } else if (command === "open") {
-    await openWorkspace(origin, options, retainedAssistantFinish);
+    await openWorkspace(origin, options, retainedAssistantFinish, assistantMaterializationSignal, assertAssistantMaterializationCurrent);
   } else if (command === "status") {
     await status();
   } else if (command === "heartbeat") {

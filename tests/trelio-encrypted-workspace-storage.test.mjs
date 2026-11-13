@@ -315,6 +315,24 @@ test("encrypted full-base plus delta history restores real Git bytes and rejects
   const restored = path.join(directory, "restored");
   await exec("git", ["clone", "-b", "trelio-candidate", destination, restored]);
   assert.equal(await fs.readFile(path.join(restored, "result.txt"), "utf8"), "revision 1");
+  // Cancel after a genuine import. The next Git step must not run and the
+  // operation cannot publish an incomplete bundle or retain its scratch repo.
+  const controller = new AbortController();
+  const stop = new Error('test-owned materialization deadline');
+  const cancelledBundle = path.join(directory, "cancelled.bundle");
+  let scratch, imports = 0;
+  await assert.rejects(materializeEncryptedWorkspaceChain({ ...options, destination: cancelledBundle, signal: controller.signal,
+    runGit: async (args, { signal }) => {
+      assert.equal(signal, controller.signal);
+      const result = await exec("git", args);
+      if (args[0] === "init") scratch = path.dirname(args.at(-1));
+      if (args[3] === "unbundle") { imports++; controller.abort(stop); }
+      return result;
+    },
+  }), error => error === stop);
+  assert.equal(imports, 1);
+  await assert.rejects(fs.lstat(scratch), { code: "ENOENT" });
+  await assert.rejects(fs.lstat(cancelledBundle), { code: "ENOENT" });
   revisions[1].parentRevisionId = randomUUID(); await saveTransport();
   await assert.rejects(materializeEncryptedWorkspaceChain({ ...options, destination: path.join(directory, "invalid.bundle") }), /базовую ревизию/u);
 });

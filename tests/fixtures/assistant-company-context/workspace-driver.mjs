@@ -96,8 +96,21 @@ export const createWorkspaceSystemDriver=async configuration=>{
     async call(name,args={}){
       await fs.writeFile(path.join(root,'question-system-stage.json'),JSON.stringify({phase:'model_tool',tool:name,
         operation:args.operation??null}),{mode:0o600});
-      const result=await send('tools/call',{name,arguments:{...args,taskPass:locator,
+      const dispatch=input=>send('tools/call',{name,arguments:{...input,taskPass:locator,
         runtimeSessionProof:buildRuntimeSessionProof({state,toolName:name})}});
+      let result=await dispatch(args);
+      if(name==='continue_assistant_workspace_action'&&args.operation==='open'){
+        // Real native authorization/proof on each wait. A two-millisecond
+        // fixture wait makes the opening cross this boundary on all OSes.
+        const deadline=Date.now()+180_000;
+        while(result.result?.structuredContent?.state==='running'){
+          const {operation,nextCall}=result.result.structuredContent;
+          assert.equal(operation,'open');assert.equal(nextCall.tool,name);assert.equal(nextCall.arguments.operation,'status');
+          assert.ok(Date.now()<deadline,'original open did not settle');
+          await new Promise(resolve=>setTimeout(resolve,20));
+          result=await dispatch(nextCall.arguments);
+        }
+      }
       assert.equal(result.error,undefined,JSON.stringify(result.error));
       await fs.writeFile(path.join(root,'question-system-stage.json'),JSON.stringify({phase:'tool_settled',tool:name,
         operation:args.operation??null,state:result.result?.structuredContent?.state??null,code:result.result?.structuredContent?.code??null}),{mode:0o600});

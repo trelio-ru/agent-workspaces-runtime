@@ -3075,6 +3075,30 @@ The composition fixture runs real Git/container/HPKE/cache inside an isolated
 child HOME and requires an explicit end-of-flow sentinel. It removes inherited
 `NODE_TEST_CONTEXT`; a nested runner exit 0 alone cannot prove execution.
 
+### Slow Workspace open
+
+An own-Run checkout of a large encrypted archive can outlast the 45-second
+assistant MCP request. After native open admission, the existing stdio
+coordinator owns one signed child. It responds within a short wait; each
+returned status call repeats native admission and matches the original
+assistant/device/task/pass/Workspace/Run and opaque operation handle. The
+native status wire field `finishOperationId` is shared for compatibility.
+A running receipt contains no local authority reads. Only a verified opened
+checkout returns the two pinned-authority read calls and starts its heartbeat.
+A wait cancellation does not stop or launch a second checkout. An unknown
+handle uses the existing read-back-only recovery. If local metadata is
+missing, the separate native Run status cannot certify a clean checkout.
+
+The child uses one fixed eight-minute materialization deadline. Each native
+request and encrypted body retains its independent ordinary limit. Once an
+encrypted bundle is local, the verified Git history walk uses the child
+deadline; cancellation stops further Git commands and settles owned scratch
+cleanup. No retry, accepted write, provider action or new pass is implied.
+After an older cancelled open left a positively empty root, common open may
+select its deterministic sibling for the exact admitted Run under the
+existing Workspace lock. The previous root, other Runs and unverified or
+nonempty directories are not adopted, overwritten or removed.
+
 ### Encrypted Run and accepted material completion
 
 The common incremental writer must also read an existing v2 accepted base

@@ -326,8 +326,15 @@ export const uploadEncryptedWorkspaceFile = async ({ file, metadata, api, retry,
  */
 export const materializeEncryptedWorkspaceChain = async ({
   sourcePath, destination, companyEncryption, expectedWorkspaceId, expectedWorkspaceHead,
-  expectedCiphertextSha256, runGit, ensurePrivateDirectory,
+  expectedCiphertextSha256, runGit, ensurePrivateDirectory, signal,
 }) => {
+  // A cancelled assistant checkout must settle through this finally block;
+  // never kill the loader while Git is still mutating its temporary repository.
+  const git = args => {
+    signal?.throwIfAborted();
+    return runGit(args, signal ? { signal } : undefined);
+  };
+  signal?.throwIfAborted();
   const source = await fs.open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-encrypted-history-"));
   const repository = path.join(directory, "repository.git");
@@ -346,12 +353,13 @@ export const materializeEncryptedWorkspaceChain = async ({
       && Array.isArray(header.revisions) && header.revisions.length >= 2
       && header.revisions.length <= ENCRYPTED_WORKSPACE_MAX_CHAIN_LENGTH,
     "Encrypted история относится к другому Workspace или формату.");
-    await runGit(["init", "--bare", repository]);
+    await git(["init", "--bare", repository]);
     let offset = 12 + headerLength;
     let previous = null;
     let opened;
     const seen = new Set();
     for (const [index, revision] of header.revisions.entries()) {
+      signal?.throwIfAborted();
       ensure(UUID.test(revision.id || "") && !seen.has(revision.id) && HEAD.test(revision.workspaceHead || "")
         && SHA.test(revision.ciphertextSha256 || "") && Number.isSafeInteger(revision.ciphertextSizeBytes)
         && revision.ciphertextSizeBytes > 0 && revision.ciphertextSizeBytes <= ENCRYPTED_WORKSPACE_MAX_CONTAINER_BYTES
@@ -364,7 +372,7 @@ export const materializeEncryptedWorkspaceChain = async ({
       const encryptedPath = path.join(directory, `${index}.trelioe1`);
       const bundlePath = path.join(directory, `${index}.bundle`);
       await pipeline(source.createReadStream({ start: offset, end: offset + revision.ciphertextSizeBytes - 1, autoClose: false }),
-        createWriteStream(encryptedPath, { flags: "wx", mode: 0o600 }));
+        createWriteStream(encryptedPath, { flags: "wx", mode: 0o600 }), { signal });
       opened = await decryptFileFromCompanyContainer({ sourcePath: encryptedPath, destinationPath: bundlePath,
         scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
         scopePrivateJwk: companyEncryption.scopePrivateEncryptionKey.privateJwk,
@@ -375,18 +383,18 @@ export const materializeEncryptedWorkspaceChain = async ({
         && UUID.test(aad.entityId || "") && Number.isSafeInteger(aad.entityRevision) && aad.entityRevision >= 1
         && opened.originalName === "workspace.bundle" && opened.mimeType === "application/vnd.git.bundle",
       "Encrypted Git bundle имеет другую AAD-привязку.");
-      await runGit(["--git-dir", repository, "bundle", "verify", bundlePath]);
-      await runGit(["--git-dir", repository, "bundle", "unbundle", bundlePath]);
-      await runGit(["--git-dir", repository, "cat-file", "-e", `${revision.workspaceHead}^{commit}`]);
-      if (previous) await runGit(["--git-dir", repository, "merge-base", "--is-ancestor", previous.workspaceHead, revision.workspaceHead]);
-      await runGit(["--git-dir", repository, "update-ref", "refs/heads/trelio-candidate", revision.workspaceHead]);
+      await git(["--git-dir", repository, "bundle", "verify", bundlePath]);
+      await git(["--git-dir", repository, "bundle", "unbundle", bundlePath]);
+      await git(["--git-dir", repository, "cat-file", "-e", `${revision.workspaceHead}^{commit}`]);
+      if (previous) await git(["--git-dir", repository, "merge-base", "--is-ancestor", previous.workspaceHead, revision.workspaceHead]);
+      await git(["--git-dir", repository, "update-ref", "refs/heads/trelio-candidate", revision.workspaceHead]);
       offset += revision.ciphertextSizeBytes; previous = revision;
       await fs.rm(encryptedPath); await fs.rm(bundlePath);
     }
     ensure(offset === stat.size && previous?.workspaceHead === expectedWorkspaceHead
       && previous.ciphertextSha256 === expectedCiphertextSha256,
       "Encrypted история обрезана либо не заканчивается ожидаемым head.");
-    await runGit(["--git-dir", repository, "bundle", "create", destination, "refs/heads/trelio-candidate"]);
+    await git(["--git-dir", repository, "bundle", "create", destination, "refs/heads/trelio-candidate"]);
     return opened;
   } finally {
     await source.close();

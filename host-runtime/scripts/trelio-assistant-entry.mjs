@@ -1397,7 +1397,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
           if(plan.localAction.operation==='status' && plan.localAction.parameters.finishOperationId){
             const nextCall={tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,
               operation:'status',parameters:{},runIdentity:plan.runIdentity}};
-            return {isError:true,content:[{type:'text',text:'The local finish handle is no longer retained. Do not poll it again or infer acceptance/a running writer. Execute the returned ordinary read-only status, then read the exact server Run. For an expired own Run, prepare that runId and execute its returned open before further writes. Preserve files; never resubmit an accepted Run or blindly repeat finish. Technical inspection/recovery does not need a new owner decision or approve sensitive actions.'}],
+            return {isError:true,content:[{type:'text',text:'The local Workspace operation handle is no longer retained. Do not poll it again or infer acceptance/a running writer. Execute the returned ordinary read-only status, then read the exact server Run. For an expired own Run, prepare that runId and execute its returned open before further writes. Preserve files; never resubmit an accepted Run or blindly repeat a write. Technical inspection/recovery does not need a new owner decision or approve sensitive actions.'}],
               structuredContent:{code:'TRELIO_WORKSPACE_FINISH_UNKNOWN',recovery:{readOnly:true,nextCall}}};
           }
         }
@@ -1407,7 +1407,8 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
         const {visualMcpResult}=await import('./trelio-visual-result.mjs');
         return visualMcpResult(executed.visual);
       }
-      return {content:[{type:'text',text:executed?.operation==='open'&&executed.authorityReads
+      return {content:[{type:'text',text:executed?.state==='running'&&executed.operation==='open'?executed.instruction
+        :executed?.operation==='open'&&executed.authorityReads
         ?'Read both pinned authority files in order using the exact structuredContent.authorityReads calls. If a response has nextOffset, repeat that read with command.offset set to nextOffset until null before proceeding to the next file.'
         :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
     }};
@@ -3516,6 +3517,10 @@ const rejectLegacyAssistantTaskStorage=async(config,scope)=>{
 // Both parent handoffs use ONE closed projection of an already validated
 // native plan. Derived invocation fields stay local; encrypted routing must
 // survive facade -> coordinator -> process -> child, not only the last pipe.
+// A slow first checkout can exceed the facade's 45-second request lifetime.
+// The child retains a fixed operation budget; each request still has its
+// original, shorter private-session/native-admission clock.
+const ASSISTANT_WORKSPACE_MATERIALIZATION_MS=8*60_000;
 const assistantWorkspaceExecutionPlan = plan => ({prepared:true,scope:plan.scope,localAction:plan.localAction,
   ...(plan.encryptedInspection?{encryptedInspection:plan.encryptedInspection}:{}),
   ...(plan.encryptedLifecycle?{encryptedLifecycle:plan.encryptedLifecycle}:{})});
@@ -3529,6 +3534,8 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
   if(!path.isAbsolute(config))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const plans=new Map();
   const finishes=createWorkspaceFinishOperations({...finishOptions,toolName:'continue_assistant_workspace_action'});
+  const opens=createWorkspaceFinishOperations({...finishOptions,toolName:'continue_assistant_workspace_action',operation:'open',
+    instruction:'Workspace opening is still running. Use nextCall to observe the same opening; do not prepare or claim another Run. Read both authority files only after open completes.'});
   // Reuse the SAME bounded registry/short waits as finish. Legacy v1 retains
   // readiness only. V2 owns sync+query together and holds one undelivered value
   // until fresh native generation/pass/recipient validation; successful delivery
@@ -3750,21 +3757,38 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     return false;
   },async execute(raw,{signal}={}) {
     const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
-    // Accepted inspection has no Run, renewal, progress registry or writable
-    // task directory. The common reader selects its isolated cache in the child.
-    if(['inspect','skill_run'].includes(plan.localAction.operation))return runPlan(assistantWorkspaceExecutionPlan(plan),{signal});
-    const root=await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
+    // Accepted inspection has no Run or renewal. Its separate read-only
+    // result contract is unchanged; only own-Run open uses the new handle.
+    const operation=plan.localAction.operation;
+    if(['inspect','skill_run'].includes(operation))return runPlan(assistantWorkspaceExecutionPlan(plan),{signal});
     const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
     const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
+    if(operation==='status' && plan.localAction.parameters.finishOperationId){
+      const handle=plan.localAction.parameters.finishOperationId;
+      // No local filesystem or new worker is needed to observe an already
+      // owned operation. The fresh native status plan precedes this lookup;
+      // the registry separately checks the exact pass and Run.
+      const opening=opens.active(key),finishing=finishes.active(key);
+      if(opening?.operationId===handle||finishing?.operationId===handle){
+        // Preserve the existing cross-pass active-writer refusal; the caller
+        // never sees its handle or progress without matching native scope.
+        for(const previous of plans.values())
+          if(previous.key===key&&(previous.scope.passId!==plan.scope.passId||previous.runIdentity.runId!==plan.runIdentity.runId))
+            fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+      }
+      if(opens.has(key,handle))return opens.poll(key,handle,signal,scope);
+      return finishes.poll(key,handle,signal,scope);
+    }
+    const root=await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
     for(const [oldDirectory,previous] of plans){
       if(previous.key===key&&(previous.scope.passId!==plan.scope.passId||previous.runIdentity.runId!==plan.runIdentity.runId)){
-        if(finishes.active(key))fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+        if(finishes.active(key)||opens.active(key))fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
         heartbeat.stop(oldDirectory);plans.delete(oldDirectory);
       }
     }
     if(!plans.has(directory) && plans.size>=64) {
       for(const [oldDirectory,oldPlan] of plans) {
-        if(!heartbeat.inspect(oldDirectory) && !finishes.active(oldPlan.key))plans.delete(oldDirectory);
+        if(!heartbeat.inspect(oldDirectory) && !finishes.active(oldPlan.key) && !opens.active(oldPlan.key))plans.delete(oldDirectory);
       }
       if(plans.size>=64)fail('ASSISTANT_WORKSPACE_CAPACITY');
     }
@@ -3773,7 +3797,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     plans.set(directory,{scope:plan.scope,runIdentity:plan.runIdentity,key,
       ...(plan.encryptedLifecycle?{encryptedLifecycle:plan.encryptedLifecycle}:{})});
     const execute=async(onProgress,actionSignal)=>{
-      const entry=await heartbeat.beginAction(directory,plan.localAction.operation);
+      const entry=await heartbeat.beginAction(directory,plan.localAction.operation,plan.runIdentity);
       try {
         const result=await runPlan(assistantWorkspaceExecutionPlan(plan),{signal:actionSignal,onProgress});
         if(plan.localAction.operation==='open'){
@@ -3796,9 +3820,18 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
         return result;
       } finally {heartbeat.endAction(entry);}
     };
-    if(plan.localAction.operation==='status' && plan.localAction.parameters.finishOperationId)
-      return finishes.poll(key,plan.localAction.parameters.finishOperationId,signal,scope);
-    if(plan.localAction.operation==='finish')return finishes.start({key,scope,signal,
+    if(operation==='open'){
+      if(finishes.active(key))fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+      return opens.start({key,scope,signal,fingerprint:JSON.stringify(assistantWorkspaceExecutionPlan(plan)),
+        pollAction:{schemaVersion:1,operation:'status',parameters:{},runIdentity:plan.runIdentity},
+        execute:onProgress=>execute(onProgress,undefined)});
+    }
+    const opening=opens.active(key);
+    if(opening){
+      if(operation==='status')return opening;
+      fail('ASSISTANT_WORKSPACE_OPEN_IN_PROGRESS');
+    }
+    if(operation==='finish')return finishes.start({key,scope,signal,
       fingerprint:JSON.stringify(plan.localAction.parameters),
       pollAction:{schemaVersion:1,operation:'status',parameters:{},runIdentity:plan.runIdentity},
       execute:onProgress=>execute(onProgress,undefined)});
@@ -3939,7 +3972,9 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   }
   let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
   if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation
-    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus'].includes(key))
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState'].includes(key))
+    || value.localWorkspaceState!==undefined&&(value.operation!=='status'||value.localWorkspaceState!=='unverified'
+      ||!value.nativeRunStatus||value.stdout!==''||value.stderr!=='')
     || value.nativeRunStatus!==undefined&&(value.operation!=='status'
       ||JSON.stringify(value.nativeRunStatus)!==JSON.stringify(assistantNativeRunStatus(value.nativeRunStatus))))fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
   if(value.visual!==undefined){
@@ -3970,6 +4005,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
   readDraftRecovery=withProfile===withProductionAssistantWorkspace?readProductionWorkspaceDraftRecovery:async()=>null,
   expectedOrigin='https://trelio.ru'}={}) => {
   const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
+  const materialization=plan.localAction.operation==='open'
+    ?AbortSignal.timeout(ASSISTANT_WORKSPACE_MATERIALIZATION_MS):undefined;
   return withProfile(async({identity,client,store,host,withSecretGenerationKey,selectCompanySecretContext,prepareWorkspaceRun})=>{
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
@@ -4017,8 +4054,16 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     // never weaken that guard or adopt an unrecognized existing folder.
     const opening=plan.localAction.operation==='open';
     if(!inspecting)await common.ensurePrivateDirectory(opening?path.dirname(root):root);
-    if(!inspecting && !skill && plan.localAction.operation!=='open') {
-      const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
+    if(!inspecting && !skill && !opening) {
+      // An ordinary native-authorized read-back can outlive a lost open
+      // handle. Without an exact local checkout, report the server status
+      // separately; empty stdout must never stand for a clean tree.
+      let local;
+      try{local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);}
+      catch(error){
+        if(plan.localAction.operation!=='status'||!nativeRunStatus||error?.code!=='LOCAL_WORKSPACE_RUN_MISMATCH')throw error;
+        return {schemaVersion:1,operation:'status',stdout:'',stderr:'',nativeRunStatus,localWorkspaceState:'unverified'};
+      }
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     }
     if(plan.localAction.operation==='secret_company_create'||plan.localAction.operation==='secret_input'){
@@ -4118,10 +4163,24 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
               await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
                 baseHead:metadata.baseHead,candidateHead:head}});
             });
-          }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart});
+          }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart,assistantMaterializationSignal:materialization,
+            ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
+              ?{assertAssistantMaterializationCurrent:async claimed=>{
+                materialization.throwIfAborted();
+                const response=await common.request(encryption?.requestOrigin??identity.origin,token,
+                  `/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/runs/${plan.runIdentity.runId}`,{signal:materialization});
+                const latest=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
+                  :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant opened Run')).toString('utf8'));
+                const run=latest.run;
+                if(run?.id!==claimed.id||run.workspaceId!==claimed.workspaceId||run.status!=='running'
+                  ||run.fencingToken!==claimed.fencingToken||run.leaseId!==claimed.leaseId
+                  ||!(Date.parse(run.leaseExpiresAt)>Date.now()))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+              }}:{})});
           return {stdout,stderr:''};
         }
         catch(error) {
+          if(materialization?.aborted&&(error===materialization.reason||error?.cause===materialization.reason))
+            nativeCommandPolicyCause='ASSISTANT_WORKSPACE_OPEN_TIMED_OUT';
           // Reuse the ordinary in-process -> CLI error projection so common
           // lease/recovery and bounded HTTP classification remain identical.
           if(assistantHealthFailure(error))nativeHealthCause=error.code;
@@ -4145,6 +4204,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}
         :nativeRunStatus?{...result,nativeRunStatus}:result;
     } catch(error) {
+      if(materialization?.aborted && (error===materialization.reason || error?.cause===materialization.reason))
+        fail('ASSISTANT_WORKSPACE_OPEN_TIMED_OUT');
       const diagnostic=error?.details?.http?.failureCode;
       if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;
       if(nativeHealthCause)error.code=nativeHealthCause;
@@ -4152,7 +4213,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && nativeReason)error.reason=nativeReason;
       throw error;
     }
-  },{encryptedInspection:plan.encryptedInspection??null,
+  },{signal:materialization,encryptedInspection:plan.encryptedInspection??null,
     workspaceRun:['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation)?plan.runIdentity:null,
     secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
     ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null,

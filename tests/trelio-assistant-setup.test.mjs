@@ -1080,6 +1080,49 @@ test('stdio retains the same finish registry across fresh per-call native proxie
   input.end();await done;assert.equal(stops,1,'EOF stops only this host heartbeat manager');
 });
 
+test('a slow own-Run opening survives a short caller wait, with one child and fresh native poll admission',async t=>{
+  const {createForwardingAssistantMcp,createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-retained-open-'));
+  await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+  const plan=workspacePlan(),{workspaceId,runId}=plan.localAction.parameters;
+  let release,launches=0,admissions=0,deny=false;
+  const child=new Promise(resolve=>{release=resolve;});
+  const executor=await createAssistantWorkspaceExecutor({configDirectory:root,finishOptions:{waitMs:5},
+    runPlan:async (raw,{signal})=>{
+      launches++;assert.equal(raw.localAction.operation,'open');
+      assert.equal(signal,undefined,'45-second request clock is not the child clock');
+      await child;return {schemaVersion:1,operation:'open',stdout:'exact opened result'};
+    }});
+  t.after(async()=>{release();await executor.stop();await fs.rm(root,{recursive:true,force:true});});
+  const proxy=await createForwardingAssistantMcp({configurationDirectory:root,createWorkspace:()=>executor,
+    request:async raw=>{
+      admissions++;
+      if(deny)throw new AssistantTransportError('ASSISTANT_ACCESS_DENIED',403);
+      return {content:[],structuredContent:{...plan,localAction:raw.arguments.operation==='open'?plan.localAction:raw.arguments}};
+    }});
+  const first=await proxy.callTool('continue_assistant_workspace_action',{operation:'open'});
+  const running=first.structuredContent;
+  assert.equal(running.operation,'open');assert.equal(running.state,'running');
+  assert.equal(running.authorityReads,undefined);
+  assert.equal(running.nextCall.arguments.operation,'status');
+  assert.deepEqual(running.nextCall.arguments.runIdentity,{workspaceId,runId});
+  assert.match(first.content[0].text,/same opening/);
+  const cancelled=new AbortController();
+  const waiter=executor.execute({...plan,localAction:running.nextCall.arguments},{signal:cancelled.signal});
+  cancelled.abort();await assert.rejects(waiter);
+  deny=true;
+  await assert.rejects(proxy.callTool(running.nextCall.tool,running.nextCall.arguments),/ASSISTANT_ACCESS_DENIED/);
+  deny=false;
+  await assert.rejects(executor.execute({...plan,scope:{...plan.scope,passId:randomUUID()},localAction:running.nextCall.arguments}),{code:'ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS'});
+  await assert.rejects(executor.execute({...plan,localAction:{schemaVersion:1,operation:'heartbeat',parameters:{},runIdentity:{workspaceId,runId}}}),/ASSISTANT_WORKSPACE_OPEN_IN_PROGRESS/);
+  release();
+  const opened=(await proxy.callTool(running.nextCall.tool,running.nextCall.arguments)).structuredContent;
+  assert.equal(opened.state,'completed');assert.equal(opened.operation,'open');assert.equal(opened.operationId,running.operationId);
+  assert.equal(opened.authorityReads.length,2);
+  assert.equal(launches,1);assert.equal(admissions,3);
+});
+
 test('assistant Workspace plan rejects unreviewed paths/operations before private or child access',async()=>{
   const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const raw=workspacePlan(),valid=await validateAssistantWorkspacePlan(raw);
