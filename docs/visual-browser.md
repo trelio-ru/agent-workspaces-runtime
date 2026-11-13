@@ -195,6 +195,13 @@ await on the original navigation. Its host correlates the private request in
 memory and persists only the latest validated phase on a refusal. This separates
 missing extension delivery or queue stalls from tab update, document load,
 credential checks and native screenshot capture without changing the deadline.
+A Windows ARM reproduction reached `compositor_capture` after the sibling
+closed. Owned headed Windows Chromium disables `CalculateNativeWinOcclusion`
+for that process, independently of the existing renderer backgrounding flags.
+Chromium's native tracker can otherwise withdraw compositor visibility during a
+foreground/window transition. The change never activates an app, changes a
+system policy, switches presentation, or replays the original navigation. Native
+two-owner tests retain their exact image, frame and closure assertions.
 No Error text/path, owner descriptor, extra native observation, input/save retry
 or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
 Parallel fixture shutdown preserves the first body/close assertion if later

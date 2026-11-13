@@ -1,13 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser, visualBrowserHeadless, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualBrowserHeadless, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess, visualNativeCompositorSwitches } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+test('only an owned headed Windows launch opts out of native compositor occlusion', () => {
+  assert.deepEqual(visualNativeCompositorSwitches('win32', false), ['--disable-features=CalculateNativeWinOcclusion']);
+  for (const [platform, headless] of [['win32', true], ['darwin', false], ['linux', false]]) {
+    assert.deepEqual(visualNativeCompositorSwitches(platform, headless), []);
+  }
+});
 
 test('signed hidden presentation never hides human setup or changes the legacy windowed default', () => {
   assert.equal(visualBrowserHeadless('hidden', false), true);
