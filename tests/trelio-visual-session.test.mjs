@@ -269,12 +269,13 @@ test('native Windows characterizes atomic descriptor publication while the origi
 });
 
 test('synthetic worker evidence retains closed failure categories and drops arbitrary error/owner data',async()=>{
+  const {visualNavigationFixturePhase}=await import('../host-runtime/scripts/trelio-visual-extension-browser.mjs');
   const source=await fs.readFile(new URL('../host-runtime/scripts/trelio-visual-worker.mjs',import.meta.url),'utf8');
   const start=source.indexOf('function fixtureDiagnostic(value) {'),end=source.indexOf('\nasync function stop()',start);
   assert.ok(start>=0&&end>start);
   const snapshots=[];
   const scope={fixtureOnly:true,fixtureEvidence:[],fixtureWrites:Promise.resolve(),
-    PROCESS_DIAGNOSTIC_CODES,ProcessDiagnosticError,parseProcessDiagnostic,processDiagnosticCauseCode,path,owner:{directory:os.tmpdir()},
+    PROCESS_DIAGNOSTIC_CODES,ProcessDiagnosticError,parseProcessDiagnostic,processDiagnosticCauseCode,visualNavigationFixturePhase,path,owner:{directory:os.tmpdir()},
     writePrivateJsonFile:async(_file,value)=>snapshots.push(JSON.parse(JSON.stringify(value)))};
   vm.createContext(scope);vm.runInContext(source.slice(start,end),scope);
   scope.input={stage:'startup_failed',startupPhase:'owner_publish',failureCode:'TRELIO_WINDOWS_PRIVATE_ACL_FAILED',
@@ -300,7 +301,10 @@ test('synthetic worker evidence retains closed failure categories and drops arbi
     vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
     assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'startup_failed',startupPhase});
   }
-  scope.input={stage:'navigation_transport',outcome:'response_timeout',url:'PRIVATE URL',requestId:'PRIVATE ID'};
+  scope.input={stage:'navigation_transport',outcome:'response_timeout',phase:'compositor_capture',url:'PRIVATE URL',requestId:'PRIVATE ID'};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout',phase:'compositor_capture'});
+  scope.input={stage:'navigation_transport',outcome:'response_timeout',phase:'PRIVATE PHASE'};
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
   assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout'});
   const beforeInvalidOutcome=snapshots.length;

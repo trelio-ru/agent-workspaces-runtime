@@ -568,7 +568,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (execution.error) throw execution.error;
     return execution.value;
   }
-  async function executeWithDialogs(op, args) {
+  async function executeWithDialogs(op, args, navigationStage) {
     if (['heartbeat', 'close-windows', 'restore-session-auth', 'snapshot-session-auth', 'manual'].includes(op)) return execute(op, args);
     if (currentDialog()) {
       if (['screenshot', 'read-text'].includes(op)) return captureDialog();
@@ -595,7 +595,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (['screenshot', 'read-text'].includes(op)) return awaitExecution(pendingExecution);
       throw Error('stale_frame');
     }
-    return beginExecution(op, args);
+    return beginExecution(op, args, () => execute(op, args, navigationStage));
   }
   function beginExecution(op, args, action = () => execute(op, args)) {
     const execution = { settled: false, operation: op };
@@ -604,36 +604,44 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       .finally(() => { execution.settled = true; });
     return awaitExecution(execution);
   }
-  async function captureImageValue() {
+  async function captureImageValue(navigationStage) {
     frame = undefined;
+    navigationStage?.('observe_tab');
     let tab = await selected();
     // Window creation is not document readiness, especially on a cold native
     // Windows launch. Wait only for browser navigation metadata, never page
     // JS/DOM or a site-specific selector. SPA loading can still be visible in
     // the resulting picture and requires ordinary visual review.
+    navigationStage?.('document_load');
     const until = Math.min(Date.now() + 8000, config.deadlineAt);
     while (tab.status === 'loading' && Date.now() < until) { await pause(100); tab = await chrome.tabs.get(tab.id); }
     allowedNavigation(tab.url);
     // Capture the selected renderer without selecting its browser tab: on
     // macOS even tabs.update({active:true}) can activate the containing app.
+    navigationStage?.('observe_attach');
     await attach(tab.id);
     if (documentFailures.has(tab.id)) throw Error('document_blocked');
     if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
+    navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
     if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    navigationStage?.('credential_guard');
     await credentialGuard(tab.id);
+    navigationStage?.('layout');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
     let scale = Math.min(1, 1440 / viewport.clientWidth);
     let result;
     for (let attempt = 0; attempt < 2; attempt++) {
+      navigationStage?.('compositor_capture');
       result = await command(tab.id, 'Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false,
         clip: { x: viewport.pageX, y: viewport.pageY, width: viewport.clientWidth, height: viewport.clientHeight, scale } });
       const header = Uint8Array.from(atob(result.data.slice(0, 48)), c => c.charCodeAt(0));
       const view = new DataView(header.buffer);
       const width = view.getUint32(16), height = view.getUint32(20);
       if (width <= 1920 && height <= 1440) {
+        navigationStage?.('credential_recheck');
         await credentialGuard(tab.id);
         const frameId = crypto.randomUUID();
         frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
@@ -643,37 +651,46 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     throw Error('operation_failed');
   }
-  async function captureDefault() { return currentDialog() ? captureDialog() : config.observationMode === 'text' ? captureText() : capture(); }
-  async function captureText(args = {}) {
-    return observeFrame(() => captureTextValue(args));
+  async function captureDefault(navigationStage) {
+    return currentDialog() ? captureDialog() : config.observationMode === 'text' ? captureText({}, navigationStage) : capture(navigationStage);
   }
-  async function capture() { return observeFrame(() => captureImageValue()); }
+  async function captureText(args = {}, navigationStage) {
+    return observeFrame(() => captureTextValue(args, navigationStage));
+  }
+  async function capture(navigationStage) { return observeFrame(() => captureImageValue(navigationStage)); }
   async function observeFrame(read) {
     observedFrameId = undefined;
     const value = await requestPacing.observe(read);
     if (value.state === 'ready') observedFrameId = value.frameId;
     return value;
   }
-  async function captureTextValue(args = {}) {
+  async function captureTextValue(args = {}, navigationStage) {
     frame = undefined;
+    navigationStage?.('observe_tab');
     let tab = await selected();
     // Wait only for existing browser load metadata; no DOM/selector polling.
     // SPA updates can still return a partial/empty observation, like an image.
+    navigationStage?.('document_load');
     const until = Math.min(Date.now() + 8000, config.deadlineAt);
     while (tab.status === 'loading' && Date.now() < until) { await pause(100); tab = await chrome.tabs.get(tab.id); }
     allowedNavigation(tab.url);
     if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
+    navigationStage?.('observe_attach');
     await attach(tab.id);
     if (documentFailures.has(tab.id)) throw Error('document_blocked');
+    navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
     if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    navigationStage?.('layout');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
     const generation = navigationGeneration;
+    navigationStage?.('text_read');
     const observation = await chrome.tabs.sendMessage(tab.id, { kind: 'read_rendered_text', ...args }, { frameId: 0 });
     if (observation?.error) throw Error(['invalid_input', 'manual_control_active'].includes(observation.error) ? observation.error : 'operation_failed');
     // A navigation during extraction cannot mint a token for the old document.
+    navigationStage?.('frame_recheck');
     const after = await command(tab.id, 'Page.getFrameTree');
     if (generation !== navigationGeneration || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
@@ -682,7 +699,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
       scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation };
   }
-  async function execute(op, args) {
+  async function execute(op, args, navigationStage) {
     // Cleanup remains available after the lease; it can only close this owned
     // profile's windows, never send new input or navigate an external page.
     if (Date.now() >= config.deadlineAt && !['close-windows', 'snapshot-session-auth'].includes(op)) throw Error('lease_expired');
@@ -780,11 +797,13 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       return { state: 'closed' };
     }
     if (manual || authenticating) throw Error('manual_control_active');
+    navigationStage?.('policy_queue');
     await guardUpdate;
     if (guardFailed) throw Error('document_blocked');
     if (op === 'navigate') {
       const url = allowedNavigation(args.url);
       frame = undefined;
+      navigationStage?.('navigate_tab');
       await tabCleanup;
       if (tabCleanupFailed) throw Error('tab_limit_reached');
       const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => tabBudget.contains(t.id) && allowed(t.url));
@@ -793,10 +812,13 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
       else if ((await chrome.windows.getAll({ windowTypes: ['normal'] })).length) target = await chrome.tabs.create({ url: 'about:blank', active: false });
       else target = (await chrome.windows.create({ url: 'about:blank', focused: false, width: 1440, height: 1000 })).tabs?.[0];
+      navigationStage?.('navigate_attach');
       await attach(target.id);
+      navigationStage?.('navigate_update');
       await chrome.tabs.update(target.id, { url });
+      navigationStage?.('navigate_settle');
       await pause(1000);
-      return captureDefault();
+      return captureDefault(navigationStage);
     }
     if (op === 'screenshot') return capture();
     if (['read-text', 'submit', 'request-ready'].includes(op) && config.observationMode !== 'text') throw Error('invalid_input');
@@ -978,8 +1000,19 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (!message || typeof message.id !== 'string' || typeof message.operation !== 'string' || (bootstrapState !== 'ready' && !['close-windows', 'restore-session-auth'].includes(message.operation))) return;
+      // Closed, synthetic-only witnesses for the exact original command.
+      // Emit before the await: a stuck browser API cannot publish its outcome.
+      // The request id only correlates the private pipe; it is never logged.
+      const navigationStage = config.fixtureOnly === true && message.operation === 'navigate'
+        ? phase => send({ kind: 'navigation_fixture_stage', id: message.id, phase }) : undefined;
+      navigationStage?.('received');
       const run = async () => {
-        try { send({ kind: 'result', id: message.id, result: await executeWithDialogs(message.operation, message.args || {}) }); }
+        navigationStage?.('dequeued');
+        try {
+          const result = await executeWithDialogs(message.operation, message.args || {}, navigationStage);
+          navigationStage?.('result_ready');
+          send({ kind: 'result', id: message.id, result });
+        }
         catch (error) {
           const pacingReason = { BROWSER_REQUEST_PREVIOUS_RESULT_NOT_REVIEWED: 'request_not_reviewed', BROWSER_REQUEST_NO_RESULT_TO_REVIEW: 'request_not_ready' }[error.message];
           const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required', 'upload_control_required'].includes(error.message) ? error.message : 'operation_failed');

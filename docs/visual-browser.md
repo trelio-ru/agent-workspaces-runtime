@@ -190,7 +190,11 @@ If navigation after closing a sibling fails, the fixture keeps that one call's
 elapsed time and validated result reason/diagnostic. The surviving worker's
 closed navigation trace distinguishes an extension reply or refusal, a missing
 or closed socket, and the extension response timeout from the outer worker
-request failure.
+request failure. The synthetic extension emits closed milestones before each
+await on the original navigation. Its host correlates the private request in
+memory and persists only the latest validated phase on a refusal. This separates
+missing extension delivery or queue stalls from tab update, document load,
+credential checks and native screenshot capture without changing the deadline.
 No Error text/path, owner descriptor, extra native observation, input/save retry
 or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
 Parallel fixture shutdown preserves the first body/close assertion if later

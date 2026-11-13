@@ -15,7 +15,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[];
@@ -41,7 +41,10 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
           if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
           // Protocol-only native stub. Full PNG/MCP validation is independently
           // exercised by the real Chromium fixture, not this header stand-in.
-          if (method === 'Page.captureScreenshot') return { data: pngHeader.toString('base64') };
+          if (method === 'Page.captureScreenshot') {
+            await screenshot?.();
+            return { data: pngHeader.toString('base64') };
+          }
           if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
             clicks++;
             if (immediateAck) { queueMicrotask(() => open()); return {}; }
@@ -73,13 +76,13 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } },
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
-    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual,
+    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, fixtureOnly,
     observationMode: image ? 'image' : 'text', ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
     const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
-    for (let i = 0; i < 300; i++) { await new Promise(resolve => setTimeout(resolve, 1)); const result = sent.find(value => value.id === id); if (result) return result.result; }
+    for (let i = 0; i < 300; i++) { await new Promise(resolve => setTimeout(resolve, 1)); const result = sent.find(value => value.kind === 'result' && value.id === id); if (result) return result.result; }
     throw Error('synthetic_command_timeout');
   };
   if (!policyFailure) await dispatch('restore-session-auth', { cookies: [], replace: false });
@@ -95,6 +98,29 @@ test('the exact owned bootstrap page is reused only after policy/auth and commit
   assert.deepEqual(worker.navigation,['about:blank','https://example.test/']);
   assert.ok(worker.sent.some(value=>value.kind==='hello'));
   assert.equal((await worker.dispatch('read-text')).state,'ready');
+});
+
+test('a stalled native capture marks the original navigation before it can reply, only in synthetic fixtures', async () => {
+  let enter, resume;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const stalled = new Promise(resolve => { resume = resolve; });
+  const worker = await dialogWorker({ image: true, fixtureOnly: true, screenshot: () => { enter(); return stalled; } });
+  const request = worker.dispatch('navigate', { url: 'https://example.test/second' });
+  try {
+    await entered;
+    const trace = worker.sent.filter(value => value.kind === 'navigation_fixture_stage');
+    assert.deepEqual(trace.map(value => value.phase), ['received', 'dequeued', 'policy_queue', 'navigate_tab',
+      'navigate_attach', 'navigate_update', 'navigate_settle', 'observe_tab', 'document_load', 'observe_attach',
+      'frame_tree', 'credential_guard', 'layout', 'compositor_capture']);
+    assert.equal(new Set(trace.map(value => value.id)).size, 1);
+    assert.ok(trace.every(value => Object.keys(value).sort().join() === 'id,kind,phase'));
+    assert.equal(worker.sent.some(value => value.kind === 'result' && value.id === trace[0].id), false);
+  } finally { resume(); }
+  assert.equal((await request).state, 'ready');
+  assert.equal(worker.navigation.filter(url => url.endsWith('/second')).length, 1, 'the original update occurs once');
+  const ordinary = await dialogWorker({ image: true });
+  assert.equal((await ordinary.dispatch('navigate', { url: 'https://example.test/second' })).state, 'ready');
+  assert.equal(ordinary.sent.some(value => value.kind === 'navigation_fixture_stage'), false);
 });
 
 test('native confirm unblocks the original input through a separate observed answer, never a second click', async () => {

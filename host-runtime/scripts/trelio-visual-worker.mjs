@@ -5,7 +5,7 @@ import { readPrivateJsonFile, writePrivateJsonFile } from './trelio-workspace.mj
 import { loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser } from './trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualNavigationFixturePhase } from './trelio-visual-extension-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, visualStartupPhase, visualStatus } from './trelio-visual-result.mjs';
 import { createVisualControlServer, withVisualOwnerFileLock, readVisualOwner,
   publishVisualWorkerOwner, createVisualIdleSupervisor } from './trelio-visual-session.mjs';
@@ -37,6 +37,8 @@ function fixtureDiagnostic(value) {
     // URLs and request identity must never reach the persisted tail.
     if (!['sent', 'reply_received', 'extension_error', 'response_timeout', 'socket_unavailable', 'socket_closed'].includes(value.outcome)) return;
     record.outcome = value.outcome;
+    const phase = visualNavigationFixturePhase(value.phase);
+    if (phase) record.phase = phase;
   }
   const finishing = finishingStages.includes(value.stage);
   // A ready/save failure is not startup. Preserve only its closed original

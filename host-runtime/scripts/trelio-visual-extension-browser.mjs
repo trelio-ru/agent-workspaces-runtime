@@ -43,6 +43,10 @@ export const visualLifecycleFailureEvidence = error => {
 const PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKPrbp7ylW5XVUNtVR2PDaIA2kv25iXiGrP/MmoU5T0j1+cg9wUHghUL9XFTe/XlADHXIQHovydsKcNrUvI2NzWfoQhdmfADfhRrBebR7vOsF551zdKLY5Kc8G9tjmJ5SqXNsiqZthvuoTD9WrjI9sypTG9bCiYPwZJ44PfJpKk7L7/ei4pQgkrO19+5/09ofA90Yn/fA1YAG8peUWcwFHqH5hE0q/U/ktWQJCAuahMXvGv2IloMoJ0zS9lqkfI01fn3lWkA48Hl/qcx6UKzUud5r6SHAUcR9XrCTXs5n/rY9b8SLCGOHz/ltKVhah9M4U1ALm17bvZRzRO8Cl+ESwIDAQAB';
 const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY, 'base64')).digest('hex').slice(0, 32)].map(c => String.fromCharCode(97 + parseInt(c, 16))).join('');
 const fault = code => Object.assign(new Error(code), { code });
+const navigationFixturePhases = new Set(['received', 'dequeued', 'policy_queue', 'navigate_tab', 'navigate_attach',
+  'navigate_update', 'navigate_settle', 'observe_tab', 'document_load', 'observe_attach', 'frame_tree',
+  'credential_guard', 'layout', 'compositor_capture', 'credential_recheck', 'text_read', 'frame_recheck', 'result_ready']);
+export const visualNavigationFixturePhase = phase => navigationFixturePhases.has(phase) ? phase : undefined;
 
 /** Starting a Chromium profile is not a service-worker readiness signal. An
  * owned extension page sends one value-free runtime event to wake MV3 before
@@ -402,6 +406,16 @@ export class ExtensionVisualBrowser {
             && ['arm_sent', 'main_received', 'main_play_changed', 'main_armed', 'source_wait_expired'].includes(value.stage)) {
             this.testDiagnostics?.({ stage: 'audio_player', phase: value.stage }); return;
           }
+          if (value.kind === 'navigation_fixture_stage') {
+            // Attribute only to the original outstanding fixture navigation,
+            // from its owned extension connection. Keep one value in RAM so
+            // a healthy native action never contends with per-stage disk I/O.
+            const pending = this.policy.fixtureOnly && this.#socket === ws && typeof value.id === 'string'
+              ? this.#pending.get(value.id) : undefined;
+            const phase = visualNavigationFixturePhase(value.phase);
+            if (phase) pending?.recordNavigationPhase?.(phase);
+            return;
+          }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
           const pending = this.#pending.get(value.id); if (!pending) return;
           pending.reportNavigation?.(value.result?.state === 'error' ? 'extension_error' : 'reply_received');
@@ -510,8 +524,10 @@ export class ExtensionVisualBrowser {
     // The detached native fixture needs the outcome of this exact request.
     // A timeout, closed socket and an extension refusal all have the same
     // public error on some paths. Keep only the fixed stage, never args or ids.
+    let lastPhase;
     const reportNavigation = operation === 'navigate' && this.testDiagnostics
-      ? outcome => this.testDiagnostics({ stage: 'navigation_transport', outcome })
+      ? outcome => this.testDiagnostics({ stage: 'navigation_transport', outcome,
+        ...(lastPhase && ['response_timeout', 'socket_closed', 'extension_error'].includes(outcome) ? { phase: lastPhase } : {}) })
       : undefined;
     if (!this.#socket || this.#socket.readyState !== 1) {
       reportNavigation?.('socket_unavailable');
@@ -524,7 +540,7 @@ export class ExtensionVisualBrowser {
         reportNavigation?.('response_timeout');
         reject(fault('operation_failed'));
       }, 40_000);
-      this.#pending.set(id, { resolve, reject, timer, ...(reportNavigation ? { reportNavigation } : {}) });
+      this.#pending.set(id, { resolve, reject, timer, ...(reportNavigation ? { reportNavigation, recordNavigationPhase: phase => { lastPhase = phase; } } : {}) });
       this.#socket.send(JSON.stringify({ id, operation, args }));
       reportNavigation?.('sent');
     });
