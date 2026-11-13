@@ -398,6 +398,8 @@ publication tooling также остаются вне этого публичн
 - Обычный local MCP использует один непродлеваемый бюджет 60 секунд, включая
   подготовку, HTTP/body и 429 waits. HTTP standalone/background bridge также
   ограничен 60 секундами; transport failure не запускает sleep/replay.
+  Штатный OAuth/MCP к Trelio использует тот же 60-секундный HTTP-лимит.
+  Лимит сторонних Remote MCP не применяется к этому маршруту.
   Human company search готовит полный снимок и ищет в одном изолированном
   процессе. Подтверждённая обработка файлов или Workspace обновляет 10-минутный
   idle deadline, exact admitted poll — отдельный 10-минутный observer deadline,

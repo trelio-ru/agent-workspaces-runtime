@@ -7456,10 +7456,16 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         "Подключите Trelio инструментом trelio_connect. Вход выполняется только в браузере.");
       return current.accessToken;
     };
+    // This connection is pinned to Trelio's own MCP endpoint. The provider
+    // transport defaults to a shorter limit, which would cut off native calls
+    // before their Trelio budget expires. Forward the enclosing signal so
+    // catalogue reads and session recovery still consume the original budget.
+    const requestTrelioMcp = (request, signal) =>
+      httpRequest(request, { signal, timeoutMs: TRELIO_CALL_BUDGET_MS });
     const rpcOnce = async (method, params, signal, token, targetSession = session) => {
       throwIfAborted(signal);
-      const response = await httpRequest({ config: config(), credential: token ?? await credential(signal),
-        sessionId: targetSession?.sessionId, payload: { jsonrpc: "2.0", id: ++sequence, method, ...(params ? { params } : {}) } }, { signal });
+      const response = await requestTrelioMcp({ config: config(), credential: token ?? await credential(signal),
+        sessionId: targetSession?.sessionId, payload: { jsonrpc: "2.0", id: ++sequence, method, ...(params ? { params } : {}) } }, signal);
       return { response, result: assertJsonRpcResult(response, method) };
     };
     const sessionMissing = error => error instanceof RemoteMcpHostError && error.code === "REMOTE_MCP_SESSION_NOT_FOUND";
@@ -7494,8 +7500,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
           clientInfo: { name: `trelio-${nativeClient}`, version: getHostRuntimeVersion() } }, signal, token, null);
         if (result?.protocolVersion !== PROTOCOL) throw fail("TRELIO_HARNESS_PROTOCOL_INVALID", "Trelio не согласовал MCP protocol.");
         const next = { sessionId: response.sessionId ?? null, instructions: result.instructions ?? "" };
-        await httpRequest({ config: config(), credential: token, sessionId: next.sessionId,
-          payload: { jsonrpc: "2.0", method: "notifications/initialized" } }, { signal });
+        await requestTrelioMcp({ config: config(), credential: token, sessionId: next.sessionId,
+          payload: { jsonrpc: "2.0", method: "notifications/initialized" } }, signal);
         session = next;
         return session;
       })();

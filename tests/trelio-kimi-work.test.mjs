@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildKimiWorkBundle, installKimiWorkBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
-import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, remoteMcpHttpRequest, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { connectRemoteMcpOAuth } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { remoteMcpOAuthSessionAccount } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
@@ -332,6 +333,84 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
     assert.equal(direct.result.structuredContent.effectiveInstructions.markdown, "FULL AUTHORITY");
     assert.equal(calls, 5);
   } finally { input.end(); await running; }
+});
+
+test("Kimi native HTTP calls survive the provider deadline and share one 60-second call budget", { timeout: 10_000 }, async t => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const send = result => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result }));
+    };
+    switch (payload.method) {
+      case "initialize":
+        send({ protocolVersion: "2025-03-26" });
+        break;
+      case "notifications/initialized":
+        response.writeHead(202).end();
+        break;
+      case "tools/list":
+        send({ tools: [{ name: "search" }, { name: "get_task" }, { name: "update_task_title" }] });
+        break;
+      case "tools/call":
+        requests.push(payload.params.name);
+        pending.resolve({ send, closed: new Promise(resolve => response.once("close", resolve)) });
+        break;
+      default:
+        response.writeHead(400).end();
+    }
+  });
+  let pending;
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const connection = createHarnessConnection({
+    nativeClient: "kimi-work",
+    httpJson: async () => ({ body: metadata }),
+    vault: { read: async () => ({ accessToken: "synthetic-token", expiresAt: Date.now() + 120_000 }) },
+    // Replace DNS/endpoint in the test only. Exercise the real HTTP timer and
+    // response parser with the options selected by the production connection.
+    httpRequest: (request, options) => remoteMcpHttpRequest(request, {
+      ...options,
+      resolveEndpoint: async endpoint => {
+        assert.equal(endpoint, `${origin}/mcp`);
+        return { endpoint: new URL(`http://127.0.0.1:${server.address().port}/mcp`), address: "127.0.0.1", family: 4 };
+      },
+    }),
+  });
+  const handler = createKimiMcpHandler({ connection });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  for (const [message, name] of [
+    [call("search"), "search"],
+    [call("trelio_call_tool", { name: "get_task", arguments: {} }), "get_task"],
+  ]) {
+    pending = Promise.withResolvers();
+    const reply = handler(message);
+    const { send } = await pending.promise;
+    t.mock.timers.tick(21_000);
+    send(output({ name }));
+    assert.deepEqual((await reply).result.structuredContent, { name });
+  }
+
+  pending = Promise.withResolvers();
+  const timedOut = handler(call("update_task_title"));
+  // Charge setup to the same call before its tool HTTP timer starts. This
+  // makes the outer deadline expire first even if the wire request stalls.
+  t.mock.timers.tick(5_000);
+  const { closed } = await pending.promise;
+  t.mock.timers.tick(55_000);
+  assert.equal((await timedOut).result.structuredContent.code, "TRELIO_CALL_TIMEOUT");
+  await closed;
+  assert.deepEqual(requests, ["search", "get_task", "update_task_title"]);
 });
 
 test("Kimi never replays an ambiguous mutation and exposes only a closed failure", async () => {
