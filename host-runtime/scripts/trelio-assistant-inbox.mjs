@@ -32,12 +32,14 @@ const integer = (value, min, max) => {
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId','acceptedHead','finishPending']);
+  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
-  if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined))inputError();
+  if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined)
+    ||value.namedArchive!==undefined&&(value.namedArchive!==true||value.finishPending!==true))inputError();
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
-    ...(value.finishPending===true?{finishPending:true}:{})};
+    ...(value.finishPending===true?{finishPending:true}:{}),
+    ...(value.namedArchive===true?{namedArchive:true}:{})};
 };
 export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',
@@ -45,6 +47,9 @@ export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
 ]);
 // The accepted variant has no writable Workspace capability, even if an
 // older client advertises the draft catalogue while the device updates.
+export const ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS=Object.freeze(
+  ASSISTANT_WORKSPACE_DRAFT_TOOLS.filter(name=>name!=='complete_assistant_pass'),
+);
 export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract','complete_assistant_pass',
 ]);
@@ -54,10 +59,15 @@ const taskReadParent=value=>{
   if(Object.keys(value).length!==fields.length)inputError();
   return Object.fromEntries(fields.map(key=>[key,uuid(value[key])]));
 };
+const namedArchiveAcceptedIdentity = value => {
+  const selected=workspaceDraftIdentity(value);
+  if(!selected.acceptedHead||selected.finishPending||selected.namedArchive)inputError();
+  return selected;
+};
 const continuationIntent = value => {
   const fields=['passId','expectedLeaseRevision','clientRequestId','terminalTurnId','terminalMarkerId','reviewId','resumeAttempted','resumed','started'];
-  object(value,[...fields,'capacity','workspaceDraft','taskReadParent']);
-  const modes=[value.capacity===true,value.workspaceDraft!==undefined,value.taskReadParent!==undefined].filter(Boolean).length;
+  object(value,[...fields,'capacity','workspaceDraft','taskReadParent','namedArchiveSettled']);
+  const modes=[value.capacity===true,value.workspaceDraft!==undefined,value.taskReadParent!==undefined,value.namedArchiveSettled!==undefined].filter(Boolean).length;
   if(modes>1||Object.keys(value).length!==fields.length+modes
     ||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
     ||value.resumed&&!value.resumeAttempted||value.started&&!value.resumed||value.resumeAttempted&&value.reviewId===null)inputError();
@@ -65,7 +75,8 @@ const continuationIntent = value => {
     expectedLeaseRevision:integer(value.expectedLeaseRevision,0,2_147_483_646),reviewId:value.reviewId===null?null:uuid(value.reviewId),
     resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started,...(value.capacity===true?{capacity:true}:{}),
     ...(value.workspaceDraft===undefined?{}:{workspaceDraft:workspaceDraftIdentity(value.workspaceDraft)}),
-    ...(value.taskReadParent===undefined?{}:{taskReadParent:taskReadParent(value.taskReadParent)})};
+    ...(value.taskReadParent===undefined?{}:{taskReadParent:taskReadParent(value.taskReadParent)}),
+    ...(value.namedArchiveSettled===undefined?{}:{namedArchiveSettled:namedArchiveAcceptedIdentity(value.namedArchiveSettled)})};
 };
 /** A read-only dispatch guard for the current signed MCP worker. Once a draft
  * intent is reserved, even a stale advertised catalogue cannot permit another
@@ -2071,7 +2082,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     /** Only structural history is appended. A native continuation permits a NEW
      * marker, never resetting the original native-start or replaying a turn.
      * The coordinator supplies positive terminal read-back before this call. */
-    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false,workspaceDraft,taskReadParent:parentRead}) {
+    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false,workspaceDraft,taskReadParent:parentRead,namedArchiveSettled}) {
       if(typeof capacity!=='boolean'||capacity&&prerequisiteKey===null)inputError();
       if(workspaceDraft!==undefined){
         if(capacity||prerequisiteKey===null||passId===null)inputError();
@@ -2080,6 +2091,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(parentRead!==undefined){
         if(capacity||workspaceDraft!==undefined||prerequisiteKey===null||passId===null)inputError();
         parentRead=taskReadParent(parentRead);
+      }
+      if(namedArchiveSettled!==undefined){
+        if(capacity||workspaceDraft!==undefined||parentRead!==undefined||prerequisiteKey===null||passId===null)inputError();
+        namedArchiveSettled=namedArchiveAcceptedIdentity(namedArchiveSettled);
       }
       if(prerequisiteKey!==null&&(typeof prerequisiteKey!=='string'||!/^[0-9a-f]{64}$/u.test(prerequisiteKey)))inputError();
       return transaction(()=>{
@@ -2093,7 +2108,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(last&&last.terminalTurnId===terminalTurnId){
           if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId
             ||JSON.stringify(last.workspaceDraft)!==JSON.stringify(workspaceDraft)
-            ||JSON.stringify(last.taskReadParent)!==JSON.stringify(parentRead))fail('ASSISTANT_INBOX_CONFLICT');
+            ||JSON.stringify(last.taskReadParent)!==JSON.stringify(parentRead)
+            ||JSON.stringify(last.namedArchiveSettled)!==JSON.stringify(namedArchiveSettled))fail('ASSISTANT_INBOX_CONFLICT');
           return Object.freeze(continuationIntent(last));
         }
         // Twenty remains the unchanged retry bound for one actual trusted hook
@@ -2107,13 +2123,20 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           ||last.terminalMarkerId!==parentRead.parentMarkerId||last.terminalTurnId!==parentRead.parentTurnId
           ||last.passId!==passId||last.reviewId!==terminalMarkerId||terminalTurnId===parentRead.parentTurnId
           ||terminalMarkerId===parentRead.parentMarkerId))fail('ASSISTANT_INBOX_CONFLICT');
-        if(last&&(!last.started||last.workspaceDraft||last.taskReadParent)||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
+        // A read-only continuation that reached one exact started archive
+        // finish can settle that save once. Never grant another ordinary turn.
+        if(workspaceDraft?.namedArchive&&(!last?.taskReadParent||!last.started||last.passId!==passId))fail('ASSISTANT_INBOX_CONFLICT');
+        if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
+          ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
+          fail('ASSISTANT_INBOX_CONFLICT');
+        if(last&&(!last.started||last.namedArchiveSettled||last.workspaceDraft&&!namedArchiveSettled||last.taskReadParent&&!workspaceDraft?.namedArchive)
+          ||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
         const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
           resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{}),
-          ...(parentRead?{taskReadParent:parentRead}:{})});
+          ...(parentRead?{taskReadParent:parentRead}:{}),...(namedArchiveSettled?{namedArchiveSettled}:{})});
         if(prerequisiteKey!==null){
           const ordinal=integer((latest?.ordinal??0)+1,1,2_147_483_647);
           // Capacity retries have no attempt cap and cannot spend/reset the

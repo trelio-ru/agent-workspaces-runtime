@@ -13828,6 +13828,40 @@ const synchronizePersistentWorkspaceToAcceptedHead = async ({
   }
 };
 
+/** A finish can add its own immutable worklog after the portable draft
+ * checkpoint. The draft and candidate may be sibling commits after the
+ * common index rebuild. Only exact trees differing by this Run's one newly
+ * generated journal entry qualify, never an arbitrary local continuation. */
+export const retainedAssistantFinishDraftHead = async (metadata, candidateHead) => {
+  const draftHead = metadata.draftHead ?? null;
+  if (draftHead === null || draftHead === candidateHead) return draftHead;
+  const exactHead = value => typeof value === "string" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value);
+  if (!exactHead(draftHead) || !exactHead(candidateHead) || !exactHead(metadata.baseHead)) {
+    throw new Error("Retained Workspace finish lacks an exact Git revision.");
+  }
+  const { workspaceDirectory, automaticWorklogPath } = metadata;
+  if (typeof automaticWorklogPath !== "string"
+    || !/^worklog\/\d{4}-\d{2}-\d{2}-run-[0-9a-f-]{36}\.md$/u.test(automaticWorklogPath)
+    || !automaticWorklogPath.endsWith(`-run-${requireUuid(metadata.runId, "run")}.md`)) {
+    throw new Error("Retained Workspace finish lacks its own automatic worklog.");
+  }
+  await runGit(["merge-base", "--is-ancestor", metadata.baseHead, draftHead], { cwd: workspaceDirectory });
+  await runGit(["merge-base", "--is-ancestor", metadata.baseHead, candidateHead], { cwd: workspaceDirectory });
+  const { stdout } = await runGit(
+    ["diff", "--name-status", "--no-renames", "-z", draftHead, candidateHead, "--"],
+    { cwd: workspaceDirectory },
+  );
+  if (stdout !== `A\0${automaticWorklogPath}\0`
+    || await readGitTreeEntry(workspaceDirectory, metadata.baseHead, automaticWorklogPath)) {
+    throw new Error("Retained Workspace candidate differs from the portable draft.");
+  }
+  const entry = await readGitTreeEntry(workspaceDirectory, candidateHead, automaticWorklogPath);
+  if (entry?.mode !== "100644" || entry.objectType !== "blob") {
+    throw new Error("Retained Workspace finish contains an unsafe automatic worklog.");
+  }
+  return draftHead;
+};
+
 const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssistantFinish, localMaterializationSignal, assertAssistantMaterializationCurrent) => {
   const token = await requireToken(origin);
   let compatibility = await ensureBridgeCompatibility(origin, token);
@@ -14056,7 +14090,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       || existingRun.status !== "expired"
       || existingRun.baseHead !== retainedAssistantFinish.baseHead
       || runOverview?.workspace?.acceptedHead !== retainedAssistantFinish.baseHead
-      || existingRun.draftHead && existingRun.draftHead !== retainedAssistantFinish.candidateHead
+      || (existingRun.draftHead ?? null) !== retainedAssistantFinish.draftHead
       || existingRun.candidateHead
     )) {
       throw new Error("Исходный Run изменился перед восстановлением незавершённого сохранения.");
@@ -16795,7 +16829,7 @@ const mergeWorkspaceRun = async options => {
   return withWorkspaceFinishLock(requireUuid(metadata.runId, "run"), () => mergeWorkspaceRunUnlocked(options));
 };
 
-const finish = async (options) => {
+const finish = async (options, { retainedAssistantHandoff = false } = {}) => {
   const { metadata } = await findRunMetadata();
   const runId = requireUuid(metadata.runId, "run");
   // The MCP registry prevents repeats within one host. This private process
@@ -16860,6 +16894,27 @@ const finish = async (options) => {
         return;
       }
     }
+    if (retainedAssistantHandoff) {
+      // A named-archive recovery can only finish an already committed
+      // handoff. A missing receipt never authorizes a reconstructed handoff.
+      const handoff = finishSnapshot?.latestCheckpoint;
+      const run = finishSnapshot?.run;
+      if (!handoff || !run || !hasFinishRecoveryMarker(current)
+        || current.scopeType !== "project" && current.scopeType !== "company"
+        || run.status !== "running" || run.baseHead !== current.baseHead
+        || run.leaseId !== current.leaseId || run.fencingToken !== current.fencingToken
+        || !current.draftHead || run.draftHead !== current.draftHead
+        || handoff.runId !== runId || handoff.checkpointType !== "handoff"
+        || handoff.candidateHead !== current.draftHead
+        || await getGitStatus(current.workspaceDirectory, current.objects || [])) {
+        throw new Error("The exact named Workspace handoff could not be confirmed.");
+      }
+      const { stdout } = await runGit(["rev-parse", "HEAD"], { cwd: current.workspaceDirectory });
+      if (stdout.trim() !== current.candidateHead || current.materializedHead !== current.candidateHead) {
+        throw new Error("The retained named Workspace candidate changed.");
+      }
+      await retainedAssistantFinishDraftHead(current, current.candidateHead);
+    }
     finishProgressStage = "validating";
     try {
       reportFinishProgress("validating");
@@ -16867,7 +16922,9 @@ const finish = async (options) => {
       reportFinishProgress("heartbeat");
       await heartbeat();
       reportFinishProgress("checkpoint");
-      await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
+      if (!retainedAssistantHandoff) {
+        await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
+      }
       reportFinishProgress("preparing");
       await submitWithMergeRecovery(options);
       reportFinishProgress("cleanup");
@@ -20815,7 +20872,7 @@ export const recoverBridgePluginUpgrade = async (
   }
 };
 
-export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
+export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, retainedAssistantHandoff, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -20875,7 +20932,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
   } else if (command === "pause") {
     await pause(options);
   } else if (command === "finish") {
-    await finish(options);
+    await finish(options, { retainedAssistantHandoff });
   } else if (command === "submit") {
     await submitWithMergeRecovery(options);
   } else if (command === "merge") {
