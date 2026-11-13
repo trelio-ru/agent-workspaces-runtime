@@ -547,6 +547,10 @@ const pendingFinishHistory=()=>{
   const effect=(tool,args,value)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
     arguments:{taskPass:locators.taskPass,...args},result:{structuredContent:value}});
   const questionId=randomUUID(),controlId=randomUUID(),receiptId=randomUUID();
+  // Real Codex persists an encrypted exact task read with structuredContent
+  // null and one JSON text block. Mutation and finish receipts remain typed.
+  turn.items.splice(1,0,{...effect('get_task',{},null),result:{structuredContent:null,
+    content:[{type:'text',text:JSON.stringify({effectiveInstructions:{status:'complete'},tasks:[{id:locators.taskPass.taskId}]})}]}});
   turn.items.splice(-4,4,
     effect('ask_assistant_owner',{clientRequestId:randomUUID()},
       {id:questionId,path:'/profile/',state:'pending',replayed:false}),
@@ -562,8 +566,13 @@ test('a started finish is recoverable without treating its pending handle or ear
   assert.equal(assistantInterruptedAcceptedWorkspace(turn,terminalMarkerId,taskPass),null);
   assert.deepEqual(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),workspaceDraft);
   for(const change of [
+    value=>{value.items[1].result.content[0].text='Read done';},
+    value=>{value.items[1].result.content[0].text='{"code":"UNAVAILABLE"}';},
+    value=>{value.items[1].result.isError=true;},
     value=>{value.items.at(-3).result.structuredContent.replayed=true;},
     value=>{value.items.at(-2).result.structuredContent.receiptId=null;},
+    value=>{const item=value.items.at(-2);item.result={content:[{type:'text',
+      text:JSON.stringify(item.result.structuredContent)}],structuredContent:null};},
     value=>{value.items.at(-2).arguments.visibility='other';},
     value=>{value.items.at(-2).result.structuredContent.taskId=randomUUID();},
     value=>{value.items.at(-2).arguments.taskPass={...taskPass,passId:randomUUID()};},

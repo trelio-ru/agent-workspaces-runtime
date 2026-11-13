@@ -1270,7 +1270,19 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!item.arguments||Object.getPrototypeOf(item.arguments)!==Object.prototype)return null;
-    const args=item.arguments,result=item.result?.structuredContent;
+    const args=item.arguments;
+    let result=item.result?.structuredContent;
+    // Codex may persist a native task read as one JSON text block. This
+    // compatibility is for known reads only; no prose or JSON-in-text can
+    // stand in for a mutation, Run preparation, or finish receipt.
+    const content=item.result?.content;
+    if(allowPending&&draftReads.has(item.tool)&&result==null&&Array.isArray(content)&&content.length===1
+      &&content[0]?.type==='text'&&typeof content[0].text==='string'&&Buffer.byteLength(content[0].text)<=512*1024){
+      try{
+        const parsed=JSON.parse(content[0].text);
+        if(parsed&&Object.getPrototypeOf(parsed)===Object.prototype&&!Object.hasOwn(parsed,'code'))result=parsed;
+      }catch{} // Malformed content is not an executed read.
+    }
     const success=item.status==='completed'&&item.error==null&&item.result?.isError!==true&&result&&typeof result==='object';
     // For the unknown-outcome branch the started finish must be the final
     // tool. A subsequent status/error or unrelated call needs its own proof.

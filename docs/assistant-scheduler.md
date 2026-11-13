@@ -610,7 +610,8 @@ If the final tool returned an in-progress finish and its exact native poll
 handle, treat that handle as evidence of the attempted save only. The same
 bounded history can include a settled owner question and a control
 update with a positive native receipt for this task and pass. These calls are
-not exposed to the recovery turn. Browser and provider operations, an
+not exposed to the recovery turn. A native read can have one bounded JSON
+text block in retained history; write receipts must be structured. Browser and provider operations, an
 unconfirmed effect, a different Run, or a tool call after the pending finish
 still refuse this path.
 
