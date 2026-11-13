@@ -12,6 +12,11 @@ const timestamp = value => { if (!Number.isSafeInteger(value) || value < 0 || va
 const cadenceValues = ['every_30_minutes','hourly','every_3_hours','every_6_hours','every_12_hours','daily','weekly','fortnightly','monthly'];
 export const ASSISTANT_CADENCES = Object.freeze(cadenceValues);
 export const ASSISTANT_GOAL_STATES = Object.freeze(['active','waiting_external','waiting_owner','blocked','completed','cancelled']);
+const clockOf = (value, cadence) => {
+  if (value == null) return null;
+  if (cadence !== 'daily' || typeof value !== 'string' || !/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/u.test(value)) invalid();
+  return value;
+};
 const cadenceOf = value => { if (!cadenceValues.includes(value)) invalid(); return value; };
 const closed = (value, keys) => {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).some(key => !keys.includes(key))) invalid();
@@ -24,10 +29,12 @@ const formatter = zone => {
 /** Only the trusted exact backend receipt supplies continuation. Event text,
  * native completed turns and local files cannot author schedule changes. */
 export const assistantPassContinuation = value => {
-  closed(value, ['goalState','cadence','timeZone']);
-  if (Object.keys(value).length !== 3 || !ASSISTANT_GOAL_STATES.includes(value.goalState)) invalid();
+  closed(value, ['goalState','cadence','timeZone','dailyLocalTime']);
+  if (!ASSISTANT_GOAL_STATES.includes(value.goalState)) invalid();
   cadenceOf(value.cadence); formatter(value.timeZone);
-  return Object.freeze({ goalState:value.goalState,cadence:value.cadence,timeZone:value.timeZone });
+  const dailyLocalTime = clockOf(value.dailyLocalTime, value.cadence);
+  return Object.freeze({ goalState:value.goalState,cadence:value.cadence,timeZone:value.timeZone,
+    ...(Object.hasOwn(value,'dailyLocalTime') ? {dailyLocalTime} : {}) });
 };
 const parts = (format, at) => Object.fromEntries(format.formatToParts(at).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
 const localEpoch = p => Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
@@ -59,9 +66,20 @@ const fromLocal = (format, target, milliseconds) => {
   return forward[0].at + milliseconds;
 };
 
-export const nextAssistantRun = ({ cadence, anchorAt, after, timeZone }) => {
+export const nextAssistantRun = ({ cadence, anchorAt, after, timeZone, dailyLocalTime }) => {
   cadenceOf(cadence); timestamp(anchorAt); timestamp(after);
-  const format = formatter(timeZone);
+  const format = formatter(timeZone), fixed = clockOf(dailyLocalTime, cadence);
+  if (fixed !== null) {
+    // Calculate from today's wall clock, not the finish time of the previous
+    // pass. A late pass skips missed slots; it neither drifts nor catches up.
+    const [hour, minute] = fixed.split(':').map(Number);
+    const today = localEpoch({ ...parts(format, after), hour, minute, second: 0 });
+    for (let offset = 0; offset < 3; offset++) {
+      const candidate = fromLocal(format, localFromEpoch(today + offset * 86_400_000), 0);
+      if (candidate > after) return timestamp(candidate);
+    }
+    fail('ASSISTANT_SCHEDULE_TIMEZONE_UNAVAILABLE');
+  }
   const elapsed = { every_30_minutes: 1_800_000, hourly: 3_600_000, every_3_hours: 10_800_000,
     every_6_hours: 21_600_000, every_12_hours: 43_200_000 }[cadence];
   if (elapsed) return timestamp(anchorAt + Math.max(1, Math.floor((after-anchorAt)/elapsed)+1) * elapsed);
@@ -111,7 +129,7 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
   db.exec('CREATE TABLE IF NOT EXISTS assistant_schedule_meta(version INTEGER NOT NULL)');
   transact(() => {
     const versions = all('SELECT version FROM assistant_schedule_meta');
-    if (versions.length && (versions.length !== 1 || versions[0].version !== 1)) fail('ASSISTANT_SCHEDULE_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1,2].includes(versions[0].version))) fail('ASSISTANT_SCHEDULE_UNSUPPORTED_SCHEMA');
     db.exec(`CREATE TABLE IF NOT EXISTS assistant_schedule_tasks (
       task_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, source_json TEXT NOT NULL,
       thread_id TEXT NOT NULL UNIQUE, cadence TEXT NOT NULL, time_zone TEXT NOT NULL,
@@ -120,6 +138,11 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
       report_sequence INTEGER NOT NULL DEFAULT 0,
       last_completed_at INTEGER, last_cycle_at INTEGER, last_delivery_id TEXT, last_receipt TEXT
     )`);
+    // Keep legacy readers working until a pinned clock is actually committed.
+    // Then v2 fences old executors, which would silently resume from the anchor.
+    if (!all('PRAGMA table_info(assistant_schedule_tasks)').some(column => column.name === 'daily_local_time')) {
+      db.exec('ALTER TABLE assistant_schedule_tasks ADD COLUMN daily_local_time TEXT');
+    }
     if (!versions.length) run('INSERT INTO assistant_schedule_meta VALUES(1)');
   });
   const rowOf = input => {
@@ -130,7 +153,8 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
   const output = row => row ? { ...JSON.parse(row.scope_json), source: JSON.parse(row.source_json), threadId: row.thread_id,
     cadence: row.cadence, timeZone: row.time_zone, state: row.state, revision: row.revision, reportSequence: row.report_sequence,
     nextRunAt: row.state === 'active' ? row.next_run_at : null, lastCompletedAt: row.last_completed_at,
-    lastCycleAt: row.last_cycle_at } : null;
+    lastCycleAt: row.last_cycle_at,
+    ...(row.daily_local_time !== null ? {dailyLocalTime:clockOf(row.daily_local_time,row.cadence)} : {}) } : null;
   return {
     register({ scope, source, threadId, cadence, timeZone }) {
       const { key, scope: exact } = keyOf(scope); threadId = id(threadId); cadenceOf(cadence); formatter(timeZone);
@@ -197,8 +221,9 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
         const row = rowOf(scope);
         if (row.revision !== expectedRevision || row.state !== 'active') fail('ASSISTANT_SCHEDULE_CONFLICT');
         if (row.cadence === cadence && row.time_zone === timeZone) return output(row);
+        if (row.daily_local_time!==null) fail('ASSISTANT_SCHEDULE_CLOCK_PROTOCOL_REQUIRED');
         const at = timestamp(now());
-        run('UPDATE assistant_schedule_tasks SET cadence=?,time_zone=?,anchor_at=?,next_run_at=?,revision=revision+1,report_sequence=report_sequence+1 WHERE task_key=?',
+        run('UPDATE assistant_schedule_tasks SET cadence=?,time_zone=?,daily_local_time=NULL,anchor_at=?,next_run_at=?,revision=revision+1,report_sequence=report_sequence+1 WHERE task_key=?',
           cadence, timeZone, at, nextAssistantRun({ cadence, anchorAt: at, after: at, timeZone }), row.task_key);
         return output(rowOf(scope));
       });
@@ -222,19 +247,25 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
         if (row.last_receipt !== receipt) fail('ASSISTANT_SCHEDULE_CONFLICT');
         return;
       }
-      let cadence=row.cadence,timeZone=row.time_zone,state=row.state,anchor=row.anchor_at;
+      let cadence=row.cadence,timeZone=row.time_zone,state=row.state,anchor=row.anchor_at,dailyLocalTime=row.daily_local_time;
       if(completion!==null) {
         closed(completion,['continuation','bindingState']);
         if(Object.keys(completion).length!==2 || !['accepted','done'].includes(completion.bindingState)) invalid();
         const continuation=assistantPassContinuation(completion.continuation);
         cadence=continuation.cadence;timeZone=continuation.timeZone;
         state=completion.bindingState==='done' || ['completed','cancelled'].includes(continuation.goalState)?'done':'active';
-        if(cadence!==row.cadence || timeZone!==row.time_zone) anchor=completedAt;
+        if (Object.hasOwn(continuation,'dailyLocalTime')) dailyLocalTime=continuation.dailyLocalTime;
+        else if (dailyLocalTime!==null && (cadence!==row.cadence || timeZone!==row.time_zone)) {
+          // A legacy backend receipt cannot silently reset an existing pin.
+          fail('ASSISTANT_SCHEDULE_CLOCK_PROTOCOL_REQUIRED');
+        }
+        if(cadence!==row.cadence || timeZone!==row.time_zone || dailyLocalTime!==row.daily_local_time) anchor=completedAt;
       }
-      const next = state === 'active' ? nextAssistantRun({ cadence, anchorAt: anchor, after: completedAt, timeZone }) : row.next_run_at;
-      const configurationChanged=Number(cadence!==row.cadence || timeZone!==row.time_zone || state!==row.state);
-      run('UPDATE assistant_schedule_tasks SET cadence=?,time_zone=?,state=?,anchor_at=?,next_run_at=?,last_completed_at=?,last_cycle_at=?,last_delivery_id=?,last_receipt=?,revision=revision+?,report_sequence=report_sequence+1 WHERE task_key=?',
-        cadence,timeZone,state,anchor,next,completedAt,scheduled && completedAt >= row.next_run_at ? completedAt : row.last_cycle_at,deliveryId,receipt,configurationChanged,row.task_key);
+      const next = state === 'active' ? nextAssistantRun({ cadence, anchorAt: anchor, after: completedAt, timeZone, dailyLocalTime }) : row.next_run_at;
+      const configurationChanged=Number(cadence!==row.cadence || timeZone!==row.time_zone || state!==row.state || dailyLocalTime!==row.daily_local_time);
+      if (dailyLocalTime!==null) run('UPDATE assistant_schedule_meta SET version=2 WHERE version=1');
+      run('UPDATE assistant_schedule_tasks SET cadence=?,time_zone=?,daily_local_time=?,state=?,anchor_at=?,next_run_at=?,last_completed_at=?,last_cycle_at=?,last_delivery_id=?,last_receipt=?,revision=revision+?,report_sequence=report_sequence+1 WHERE task_key=?',
+        cadence,timeZone,dailyLocalTime,state,anchor,next,completedAt,scheduled && completedAt >= row.next_run_at ? completedAt : row.last_cycle_at,deliveryId,receipt,configurationChanged,row.task_key);
     },
   };
 };

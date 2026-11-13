@@ -42,6 +42,64 @@ test('daily/weekly wall times follow DST; overlaps run once and gaps move forwar
   assert.throws(() => next('monthly','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','Unknown/Zone'), /INVALID_INPUT/);
 });
 
+test('a fixed daily time uses the next local slot, never a late completion anchor', () => {
+  const run = (after, dailyLocalTime = '20:00', timeZone = 'Europe/Moscow') => new Date(nextAssistantRun({
+    cadence:'daily', anchorAt:at('2026-03-01T02:00:00Z'), after:at(after), timeZone, dailyLocalTime,
+  })).toISOString();
+  assert.equal(run('2026-11-13T16:59:59Z'), '2026-11-13T17:00:00.000Z');
+  assert.equal(run('2026-11-13T17:00:00Z'), '2026-11-14T17:00:00.000Z');
+  assert.equal(run('2026-11-13T17:17:00Z'), '2026-11-14T17:00:00.000Z');
+  assert.equal(run('2026-03-08T06:30:00Z','02:30','America/New_York'), '2026-03-08T07:30:00.000Z');
+  assert.equal(run('2026-11-01T05:40:00Z','01:30','America/New_York'), '2026-11-02T06:30:00.000Z');
+  for (const invalid of ['8:00','24:00','20:60','20:00Z'])
+    assert.throws(() => run('2026-11-13T16:59:59Z',invalid), /INVALID_INPUT/);
+});
+
+test('legacy schedule rows upgrade without losing the timer and fixed receipt survives restart atomically', async t => {
+  const database = new DatabaseSync(':memory:'); t.after(() => database.close());
+  let clock = at('2026-11-13T16:45:00Z');
+  let scheduler = createAssistantScheduler({database,now:()=>clock});
+  const scope={origin:'https://example.test',assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID()};
+  const source={origin:scope.origin,assistantId:scope.assistantId,companyId:scope.companyId,
+    provider:'trelio',accountId:randomUUID(),bindingId:randomUUID()};
+  const plan=scheduler.register({scope,source,threadId:randomUUID(),cadence:'every_30_minutes',timeZone:'Europe/Moscow'});
+  database.exec('ALTER TABLE assistant_schedule_tasks DROP COLUMN daily_local_time');
+  scheduler = createAssistantScheduler({database,now:()=>clock});
+  assert.deepEqual(scheduler.get(scope),plan);
+  let interrupt=true;
+  const inbox=createAssistantInbox({database,now:()=>clock,onDeliveryCompleted:result=>{
+    scheduler.completeInsideInboxTransaction(result);
+    if(interrupt) throw new Error('interrupt after schedule write');
+  }});
+  inbox.register(source); inbox.applyTaskState(source,{taskId:scope.taskId,state:'accepted',expectedRevision:0});
+  const pass=async()=>{
+    const delivery=await inbox.claimDelivery({authorize:async()=>true,scheduledTask:{scope:source,taskId:scope.taskId}});
+    inbox.startDelivery(delivery.deliveryId);
+    return delivery.deliveryId;
+  };
+  const receipt={bindingState:'accepted',continuation:{goalState:'waiting_external',cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00'}};
+  clock=at('2026-11-13T17:17:00Z');
+  const first=await pass();
+  assert.throws(()=>inbox.completeDelivery(first,'verified-one',receipt),/interrupt after schedule write/);
+  assert.deepEqual(scheduler.get(scope),plan);
+  assert.equal(database.prepare('SELECT version FROM assistant_schedule_meta').get().version,1);
+  interrupt=false;inbox.completeDelivery(first,'verified-one',receipt);
+  assert.equal(database.prepare('SELECT version FROM assistant_schedule_meta').get().version,2);
+  scheduler=createAssistantScheduler({database,now:()=>clock});
+  assert.equal(scheduler.get(scope).dailyLocalTime,'20:00');
+  assert.equal(scheduler.get(scope).nextRunAt,at('2026-11-14T17:00:00Z'));
+  assert.throws(()=>scheduler.setCadence(scope,{cadence:'weekly',timeZone:'Europe/Moscow',expectedRevision:1}),/CLOCK_PROTOCOL_REQUIRED/);
+  clock=at('2026-11-14T17:12:00Z'); const second=await pass();
+  const {dailyLocalTime,...legacy}=receipt.continuation;
+  assert.throws(()=>inbox.completeDelivery(second,'verified-two',{...receipt,continuation:{...legacy,cadence:'weekly'}}),/CLOCK_PROTOCOL_REQUIRED/);
+  inbox.completeDelivery(second,'verified-two',{...receipt,continuation:legacy});
+  assert.equal(scheduler.get(scope).nextRunAt,at('2026-11-15T17:00:00Z'));
+  clock=at('2026-11-15T17:24:00Z');const third=await pass();
+  inbox.completeDelivery(third,'verified-three',{...receipt,continuation:{...legacy,dailyLocalTime:null}});
+  assert.equal(scheduler.get(scope).dailyLocalTime,undefined);
+  assert.equal(scheduler.get(scope).nextRunAt,at('2026-11-16T17:24:00Z'));
+});
+
 test('one chat per task; actual cyclic completion and inbox event processing commit atomically', async t => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   let clock = at('2026-10-20T09:00:00Z');

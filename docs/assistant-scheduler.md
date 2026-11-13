@@ -545,8 +545,12 @@ boundary. A started native invocation is reconciled, never repeated.
 `complete_assistant_pass` stays a backend-validated model action with a fresh
 observed proof and accepted evidence. The host's fixed
 `/runtime/task-pass/outcome` read validates a strict committed receipt and
-`continuation={goalState,cadence,timeZone}`; pending or any wrong/extra field is
-uncertainty. Receipt lookup does not retry the model/action and exposes no
+`continuation={goalState,cadence,timeZone,dailyLocalTime?}`. The fixed device
+and MCP calls advertise schedule protocol 2; earlier backends keep the original
+shape. A valid `HH:mm` applies only to the daily task cadence. Use it for an
+explicit owner time in the applicable timezone, not an estimate or provider
+text. `null` clears a pin, omission preserves it. Pending or any wrong/extra
+field is uncertainty. Receipt lookup does not retry the model/action and exposes no
 arbitrary HTTP. A closed pass accepts SessionEnd cleanup only, no new signature.
 
 Owner cancellation has an executable native flow: exact sealed
@@ -557,8 +561,14 @@ existing own canonical Run settlement and original outcome reconciliation.
 
 Positive native read-back and the exact backend receipt must both exist.
 Continuation, inbox processing, completion timestamps and next-run are committed
-inside the same SQLite transaction. Changed cadence resets its anchor to this
-completion; unchanged cadence preserves its calendar anchor. A completed goal
+inside the same SQLite transaction. Ordinary changed cadence resets its anchor
+to this completion; unchanged cadence preserves its calendar anchor. A fixed
+daily clock computes the next future local slot even after a late pass, follows
+the existing DST policy, and skips missed slots. The additive SQLite column
+preserves existing schedules. The same commit that first saves a pin marks the
+schedule schema v2 so a rollback to an incompatible worker cannot drift the
+timer. An older backend receipt cannot implicitly change a pinned cadence or
+timezone. A completed goal
 stops only this assistant's cycle, and ordinary accepted-task rediscovery cannot
 restart it. A new permitted mention may resume the same chat and commit a new
 active goal. Native task `done` permits reconciliation of the original pass,

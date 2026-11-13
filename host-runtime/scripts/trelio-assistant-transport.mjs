@@ -414,6 +414,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
         // never substitutes device authorization, task ACL or observed proof.
         headers: { accept: 'application/json', 'x-trelio-host-runtime-version':getHostRuntimeVersion(),
           ...(operation==='heartbeat'?{'x-trelio-assistant-operation-protocol':'1'}:{}),
+          ...(operation==='passOutcome'?{'x-trelio-assistant-schedule-protocol':'2'}:{}),
           ...(['healthRead','healthReport'].includes(operation)?{'x-trelio-assistant-health-protocol':'3'}:{}),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           ...(credential ? { authorization: `Bearer ${credential}` } : {}) },
@@ -3624,9 +3625,14 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       const active=typeof readActivePass==='function'?await readActivePass():null;
       // This only narrows a single native MCP session's presentation. Every
       // handler retains its genuine pass/proof/ACL checks independently.
-      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: metadataProfile!==null?metadataProfile==='task'?{}:{'x-trelio-assistant-capability-profile':metadataProfile}:active?.kind==='source_intake'
-        ?{'x-trelio-assistant-capability-profile':'source_intake'}:["remote_mcp","skill_setup","company_context"].includes(presentationProfile)?{'x-trelio-assistant-capability-profile':presentationProfile}:{},
-        authentication: { type: "assistant_device" } };
+      const selectedProfile=metadataProfile??(active?.kind==='source_intake'?'source_intake':presentationProfile);
+      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: {
+        ...(['source_intake','remote_mcp','skill_setup','company_context'].includes(selectedProfile)
+          ?{'x-trelio-assistant-capability-profile':selectedProfile}:{}),
+        // The loader chooses compatibility. No model argument or tool result
+        // can activate it; native pass, proof and material checks still apply.
+        'x-trelio-assistant-schedule-protocol':'2',
+      }, authentication: { type: "assistant_device" } };
       const session = await protocol.createRemoteSession(config, credential, request, { signal: boundedSignal });
       try { return await action({ protocol, config, credential, session, request, signal: boundedSignal }); }
       finally { await protocol.closeRemoteSession(config, credential, session.sessionId, request, { signal: boundedSignal }); }
@@ -4375,6 +4381,13 @@ export const materializeAssistantAttachment = async ({ result, attachmentId, ori
   }
 };
 
+// Local-only mirror reader modes are outside the generated native policy.
+const assistantNarrowManifestModes = new Map([
+    ['search_tasks', ['tasks', 'tasks_fence']],
+    ['list_projects', ['projects']],
+    ['list_my_tasks', ['task_inventory']],
+    ['list_project_tasks', ['task_inventory']],
+]);
 // BEGIN GENERATED ASSISTANT WORKSPACE POLICY
 // Generated portable assistant Workspace route/proof policy. Do not edit by hand.
 /** Portable closed route/proof policy. Backend and host generate one copy of
@@ -4387,12 +4400,6 @@ export const ASSISTANT_WORKSPACE_PREFIX = "/api/digital-assistants/runtime/works
 export const ASSISTANT_WORKSPACE_PROOF_TOOL = "assistant_workspace_data_plane";
 export const ASSISTANT_WORKSPACE_RECIPIENT_HEADER = "x-trelio-assistant-encryption-device";
 const assistantWorkspacePolicyDenied = () => new AssistantWorkspacePolicyError();
-const assistantNarrowManifestModes = new Map([
-  ['search_tasks', ['tasks', 'tasks_fence']],
-  ['list_projects', ['projects']],
-  ['list_my_tasks', ['task_inventory']],
-  ['list_project_tasks', ['task_inventory']],
-]);
 /** Names only: both profiles still validate canonical native schemas and ACL.
  * v2 owner consent enables this read capability; these names never authorize
  * a mutation, another company or a source task as the writable pass target. */
@@ -4623,13 +4630,15 @@ export const assistantSourceProcessingProofTool = (structuralManifestSha256) => 
 /** Structural evidence for the SAME observed runtime signer. The protected
  * host verifies the computed own accepted WORK.md locally; neither its bytes,
  * name nor plaintext hash crosses the encrypted data boundary. Native receipt,
- * current envelope and material/retraction/CAS checks remain server authority. */
-export const assistantEncryptedMaterialProofPayload = (input) => JSON.stringify(["assistant-encrypted-material/v1", input.assistantId, input.deviceId,
+ * current envelope and material/retraction/CAS checks remain server authority.
+ * Omission preserves v1 signing bytes; a pin and explicit clear differ in v2. */
+export const assistantEncryptedMaterialProofPayload = (input) => JSON.stringify([input.dailyLocalTime === undefined ? "assistant-encrypted-material/v1" : "assistant-encrypted-material/v2", input.assistantId, input.deviceId,
     input.companyId, input.taskId, input.passId, input.deliveryId, input.bindingId,
     input.bindingRevision, input.threadId, input.clientRequestId, input.workspaceId,
     input.workspaceHead, input.acceptedRunId ?? null, input.noChange, input.goalState,
     input.cadence, input.timeZone, input.cryptoDeviceId, input.envelopeId, input.scopeId,
-    input.scopeEpoch, input.previousOutcomeId, input.previousHead, input.references.map(ref => [ref.sourceId, ref.sourceRevision, ref.routeId, ref.eventOrdinal])]);
+    input.scopeEpoch, input.previousOutcomeId, input.previousHead, input.references.map(ref => [ref.sourceId, ref.sourceRevision, ref.routeId, ref.eventOrdinal]),
+    ...(input.dailyLocalTime === undefined ? [] : [input.dailyLocalTime])]);
 export const assistantEncryptedMaterialProofTool = (structuralManifestSha256) => {
     if (!/^[0-9a-f]{64}$/u.test(structuralManifestSha256))
         throw assistantWorkspacePolicyDenied();

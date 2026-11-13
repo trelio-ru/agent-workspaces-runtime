@@ -1397,7 +1397,7 @@ publication tooling также остаются вне этого публичн
   and each joiner's cancellation remain intact. See the [OAuth contract](docs/agent-workspace-runtime.md#remote-mcp-oauth-sessions).
 - Assistant owner actions: live sealed intent and persisted decision; never text-as-approval. Signup is one attempt, never site success. See [contract](docs/assistant-scheduler.md#exact-owner-action-client).
 - Encrypted incremental saves select only the own Run/current native v2 base manifest; same reader/crypto and native late ACL. See the scheduler encrypted Run contract.
-- Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery).
+- Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
 - Encrypted own cancellation reuses SAME managed audit codec/store/collision equality; no human retry/local cleanup.
 - Own abandoned Workspace cancellation is a server-only dedicated MCP call with
   the live native schema. No local cancel/restore alias, cleanup, human flag or
