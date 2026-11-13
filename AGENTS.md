@@ -1434,6 +1434,10 @@ publication tooling также остаются вне этого публичн
   The same native writer rereads both before renewing the original pass; no
   provider/source/owner-answer inputs or unknown effects qualify.
   [Contract](docs/assistant-scheduler.md#interrupted-read-only-task-continuation).
+  A later exact named-archive finish may settle through its separate restricted
+  tool set and retained native handoff. Only accepted native/clean Git evidence
+  permits one subsequent ordinary task continuation; the archive alone never
+  releases the pass. [Contract](docs/assistant-scheduler.md#interrupted-named-archive-finish).
 - Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
 - Encrypted own cancellation reuses SAME managed audit codec/store/collision equality; no human retry/local cleanup.
 - Own abandoned Workspace cancellation is a server-only dedicated MCP call with

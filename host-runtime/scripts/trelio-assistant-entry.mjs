@@ -2802,14 +2802,16 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
  * list filtering hides unrelated tools; this check also rejects stale
  * catalogues and disallowed operations of the generic continuation tool. */
 const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
-  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS}=await import('./trelio-assistant-inbox.mjs');
+  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS,ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS}=await import('./trelio-assistant-inbox.mjs');
   const accepted=draft.acceptedHead!==undefined;
   const interruptedFinish=draft.finishPending===true;
   const same=value=>value?.workspaceId===draft.workspaceId&&value?.runId===draft.runId;
-  let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS).includes(name);
+  let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:draft.namedArchive
+    ?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS).includes(name);
   if(!accepted&&name==='prepare_assistant_workspace_run')permitted=same(args)&&args.relatedWorkspaceIds===undefined;
   if(!accepted&&name==='continue_assistant_workspace_action')permitted=
-    ['open','status','heartbeat','checkpoint','finish'].includes(args.operation)
+    (!draft.namedArchive||args.operation!=='checkpoint')
+    &&['open','status','heartbeat','checkpoint','finish'].includes(args.operation)
     &&same(args.operation==='open'?args.parameters:args.runIdentity)
     &&(args.operation!=='checkpoint'||!interruptedFinish&&args.parameters?.type==='draft')
     &&(args.operation!=='finish'||args.parameters?.taskOutcome==='no_status_change');
@@ -2818,7 +2820,7 @@ const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
     permitted=same(args.runIdentity)&&(interruptedFinish?['list','read']:['list','read','replace'])
       .includes(parseAssistantRunFileCommand(args.command).action);
   }
-  if(name==='complete_assistant_pass')permitted=args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
+  if(name==='complete_assistant_pass')permitted=!draft.namedArchive&&args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
     &&(accepted||interruptedFinish
       ?(accepted?args.workspaceHead===draft.acceptedHead:/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(args.workspaceHead??''))
         &&['active','waiting_external','waiting_owner','blocked','completed'].includes(args.goalState)
@@ -4065,6 +4067,23 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         return {schemaVersion:1,operation:'status',stdout:'',stderr:'',nativeRunStatus,localWorkspaceState:'unverified'};
       }
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(pending?.namedArchive===true&&plan.localAction.operation==='status'&&nativeRunStatus?.status==='accepted'){
+        // An accepted server revision can arrive before its local terminal
+        // marker. Prove exact clean Git state without running a second finish
+        // or pretending the enclosing task's WORK.md was accepted.
+        return common.withWorkspaceFinishLock(plan.runIdentity.runId,async()=>{
+          const metadata=await common.readAssistantWorkspaceRunMetadata(root);
+          const head=(await common.runGit(['rev-parse','HEAD'],{cwd:directory})).stdout.trim();
+          if(!['project','company'].includes(metadata.scopeType)||metadata.workspaceId!==plan.runIdentity.workspaceId
+            ||metadata.runId!==plan.runIdentity.runId||metadata.company?.id!==plan.scope.companyId
+            ||metadata.origin!==identity.origin||!sameLocalPath(metadata.workspaceDirectory??'',directory)
+            ||metadata.candidateHead!==head||metadata.materializedHead!==head
+            ||metadata.baseHead!==nativeRunStatus.baseHead||head!==nativeRunStatus.candidateHead
+            ||await common.getGitStatus(directory,metadata.objects??[]))fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+          return {schemaVersion:1,operation:'status',stderr:'',nativeRunStatus,stdout:JSON.stringify({...plan.runIdentity,
+            baseHead:metadata.baseHead,candidateHead:head,terminalStatus:'accepted',dirty:false})};
+        });
+      }
     }
     if(plan.localAction.operation==='secret_company_create'||plan.localAction.operation==='secret_input'){
       const {handleAssistantCompanySecretCreation}=await import('./trelio-secret-generate.mjs');
@@ -4160,10 +4179,14 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
                 ||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)
                 ||await common.getGitStatus(directory,metadata.objects??[]))
                 fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+              let draftHead;
+              try{draftHead=await common.retainedAssistantFinishDraftHead(metadata,head);}
+              catch{fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');}
               await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
-                baseHead:metadata.baseHead,candidateHead:head}});
+                baseHead:metadata.baseHead,candidateHead:head,draftHead}});
             });
           }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart,assistantMaterializationSignal:materialization,
+            retainedAssistantHandoff:pending?.namedArchive===true&&plan.localAction.operation==='finish',
             ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
               ?{assertAssistantMaterializationCurrent:async claimed=>{
                 materialization.throwIfAborted();

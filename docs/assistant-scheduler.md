@@ -678,6 +678,34 @@ terminal read-back permit the existing atomic completion/release boundary.
 Tests cover the journal and owning App Server ordering, a real native plugin
 allowlist, and the signed request argument fence.
 
+### Interrupted named archive finish
+
+An interrupted read-only continuation may already have reached a separately
+authorized named Workspace save. The latest complete native history must show
+the exact existing Run, completed open or exact status of that open, verified
+local replacement and portable checkpoint, and one started finish with matching
+polls. Only a positively confirmed shared control creation can accompany the
+save. Foreign Runs, provider actions, unknown writes and routed events refuse.
+One subsequent restricted turn settles the save without editing the files,
+recreating the committed handoff or completing the enclosing task.
+
+The same protected finish lock verifies the native expired Run, local clean
+candidate and base before claim. A portable draft may differ by the exact
+new automatic worklog entry of that Run. Both commits must descend from the
+same accepted base and the diff must contain only that added regular blob.
+The fresh native handoff still has to bind the same portable draft, lease and
+Run. After that check, the common candidate validator and acceptance CAS publish
+the saved material without a second handoff.
+
+The coordinator allows one new ordinary continuation only after the restricted
+turn finishes and exact native accepted status matches the clean local candidate.
+The same exclusive native writer rechecks that evidence and pending task outcome
+before renewal. Reuse the accepted archive and reconcile previous effects. Only
+a genuine task outcome and canonical WORK.md advance the schedule or release the
+pass. Each recovered invocation has one finite preflight ceiling and samples its
+verified renewed lease once. A watchdog cannot extend that observation deadline.
+
+
 ## Company model selection
 
 There is one owner-selected model/effort pair per assistant/company and no

@@ -2951,6 +2951,10 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
   const f=fixture(t),ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
   const oldTurn=randomUUID(),oldMarker=randomUUID(),parentTurn=randomUUID(),newMarker=randomUUID();
   let durableOutcome=false,owned=false,views=0,renewals=0,attempts=0;
+  const timers=[],setTimer=globalThis.setTimeout;
+  t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
+    timers.push(delay);return setTimer(callback,delay,...args);
+  });
   f.authority.workMode='task';
   f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
   f.options.client.readBusinessOutcome=async args=>durableOutcome?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
@@ -2978,8 +2982,11 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
     assert.equal(options.taskReadRecovery.parentTurnId,parentTurn);
     assert.equal(options.taskReadRecovery.terminalMarkerId,oldMarker);
     if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+    assert.equal(options.passTimeoutMs,30*60_000,'one outer bound includes preflight');
+    const nativeLeaseTimersBefore=timers.filter(delay=>delay===20*60_000).length;
     if(ending==='receipt-appeared')durableOutcome=true;
     await options.beforeInvocation();
+    assert.equal(timers.filter(delay=>delay===20*60_000).length,nativeLeaseTimersBefore+1,'sample only the exact renewed lease once');
     if(ending==='interrupted'){options.startInvocation();return {state:'uncertain'};}
     durableOutcome=true;return ordinaryRun(input,options);
   };
@@ -3012,5 +3019,85 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
       assert.equal(f.database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(original.deliveryId).state,'complete');
     }
     assert.equal(views,1);assert.equal(renewals,ending==='receipt-appeared'?0:1);assert.equal(attempts,2);
+  }finally{await f.coordinator.close();}
+});
+
+
+test('retained named archive settles once, then requires a separate native task outcome',async t=>{
+  const f=fixture(t),ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
+  const originalTurn=randomUUID(),readMarker=randomUUID(),interruptedRead=randomUUID();
+  const saveMarker=randomUUID(),savedTurn=randomUUID(),resumeMarker=randomUUID();
+  const archive={workspaceId:randomUUID(),runId:randomUUID()};
+  const acceptedHead='a'.repeat(40);
+  let finishedArchive=false,businessComplete=false,saveStarts=0,businessStarts=0,renewals=0,updates=0;
+  f.authority.workMode='task';
+  f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  f.options.client.readBusinessOutcome=async args=>businessComplete?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
+  f.options.native.readDelivery=async(_thread,marker,options={})=>{
+    if(marker===readMarker)return options.interruptedWorkspaceDraft?.namedArchive
+      ?{state:'interrupted_workspace_draft',turnId:interruptedRead,workspaceDraft:{...archive,finishPending:true,namedArchive:true}}
+      :{state:'uncertain',turnId:interruptedRead};
+    if(marker===saveMarker){
+      if(!finishedArchive)return {state:'uncertain',turnId:savedTurn};
+      if(options.acceptedNamedArchive){
+        assert.deepEqual(options.acceptedNamedArchive.run,archive);
+        return {state:'named_archive_saved',turnId:savedTurn,namedArchiveSettled:{...archive,acceptedHead}};
+      }
+      return {state:'completed',turnId:savedTurn,receipt:`codex:${_thread}:${savedTurn}`};
+    }
+    return f.deliveries.get(marker)??{state:'uncertain'};
+  };
+  f.options.passHost.continuePass=async(args,expected)=>{
+    assert.deepEqual(expected,f.activePass());
+    const pass=f.passes.get(expected.deliveryId);
+    const marker=args.terminalTurnId===interruptedRead?saveMarker:resumeMarker;
+    if(args.continuation==='resume'){
+      assert.equal(pass.leaseRevision,args.expectedLeaseRevision);renewals++;
+      Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
+        leaseExpiresAt:new Date(f.options.now()+1_200_000).toISOString()});
+    }
+    const resumed=pass.leaseRevision>args.expectedLeaseRevision;
+    return {schemaVersion:2,state:resumed?'resumed':'approved',reviewId:marker,invocationId:marker,
+      resumed:resumed?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+  };
+  f.options.native.run=async(input,options)=>{
+    if(options.workspaceDraftRecovery?.workspaceDraft.namedArchive){
+      assert.equal(input.deliveryId,saveMarker);assert.equal(options.namedArchiveResume,undefined);
+      await options.beforeInvocation();options.startInvocation();saveStarts++;finishedArchive=true;
+      return {state:'completed',turnId:savedTurn,receipt:`codex:${input.threadId}:${savedTurn}`};
+    }
+    if(options.namedArchiveResume){
+      assert.equal(input.deliveryId,resumeMarker);
+      assert.deepEqual(options.namedArchiveResume.archive,{...archive,acceptedHead});
+      assert.equal(options.namedArchiveResume.terminalMarkerId,saveMarker);
+      assert.equal(finishedArchive,true);businessStarts++;
+      // Keep the native pending outcome until the existing start CAS is crossed.
+      await options.beforeInvocation();businessComplete=true;
+      return ordinaryRun(input,{...options,beforeInvocation:undefined});
+    }
+    return ordinaryRun(input,options);
+  };
+  try{
+    f.events.push({id:randomUUID(),revision:'archive-recovery',taskId:f.taskId,wake:true});
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    const active=f.activePass(),pass=f.passes.get(active.deliveryId),inbox=createAssistantInbox({database:f.database,now:f.options.now});
+    const first=inbox.preparePassContinuation(active.deliveryId,{passId:active.passId,expectedLeaseRevision:0,
+      terminalTurnId:originalTurn,terminalMarkerId:active.deliveryId,prerequisiteKey:'a'.repeat(64)});
+    const parentMarker=randomUUID();
+    inbox.updatePassContinuation(active.deliveryId,first.clientRequestId,{reviewId:parentMarker,resumeAttempted:true,resumed:true,started:true});
+    const read=inbox.preparePassContinuation(active.deliveryId,{passId:active.passId,expectedLeaseRevision:1,
+      terminalTurnId:randomUUID(),terminalMarkerId:parentMarker,prerequisiteKey:'a'.repeat(64),
+      taskReadParent:{parentMarkerId:active.deliveryId,parentTurnId:originalTurn}});
+    inbox.updatePassContinuation(active.deliveryId,read.clientRequestId,{reviewId:readMarker,resumeAttempted:true,resumed:true,started:true});
+    f.advance(21*60_000);Object.assign(pass,{state:'review_required',leaseRevision:2});
+    assert.equal(await f.coordinator.updateRuntimeAtBoundary(async()=>{updates++;assert.equal(await f.coordinator.workOnce(),null);}),true);
+    assert.equal(updates,1);assert.equal(renewals,0);
+    await f.coordinator.workOnce();
+    assert.equal(saveStarts,1);assert.equal(businessStarts,0);assert.ok(f.activePass());
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,0);
+    await f.coordinator.workOnce();
+    assert.equal(saveStarts,1);assert.equal(businessStarts,1);assert.equal(renewals,2);assert.equal(f.activePass(),null);
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,1);
   }finally{await f.coordinator.close();}
 });

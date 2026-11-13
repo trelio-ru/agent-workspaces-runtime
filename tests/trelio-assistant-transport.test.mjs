@@ -3158,6 +3158,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       workspaceRun:runIdentity,lockDirectory:path.join(os.tmpdir(),'synthetic-writer-locks'),lock:(_file,action)=>action()});
     const readFetch=globalThis.fetch,uploads=new Map(),storedPayloads=[payload];
     let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null,handoffTargetMode='valid';
+    let nativeHandoffs=0;
     let claims=0,workspaceBundleReads=0;
     globalThis.fetch=async(url,options)=>{
       const parsed=new URL(url),base='/api/digital-assistants/runtime/workspace';
@@ -3188,6 +3189,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       if(parsed.pathname===`${base}/runs/${runId}/heartbeat`)return json(nativeRun);
       if(parsed.pathname===`${base}/runs/${runId}/codex-conversation`)return json(null);
       if(parsed.pathname===`${base}/runs/${runId}/checkpoints`){
+        nativeHandoffs++;
         const input=JSON.parse(options.body);assert.equal(input.fencingToken,nativeRun.fencingToken);
         // Match the real native service: named project/company Runs reject
         // even no_status_change, whereas task Runs require that exact value.
@@ -3295,12 +3297,21 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       const original=JSON.parse(await fs.readFile(metadataPath,'utf8'));
       await fs.writeFile(path.join(writable,'interrupted-save.md'),'RETAINED_INTERRUPTED_SAVE');
       await common.runGit(['add','interrupted-save.md'],{cwd:writable});
+      await common.runGit(['commit','-m','Retained portable draft'],{cwd:writable});
+      const draftHead=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
+      // Match the retained shape: an exact sibling candidate includes the
+      // same material and only this Run's newly generated worklog.
+      await common.runGit(['reset','--soft',head],{cwd:writable});
+      const automaticWorklogPath=`worklog/2026-11-13-run-${runId}.md`;
+      await fs.mkdir(path.join(writable,'worklog'),{recursive:true});
+      await fs.writeFile(path.join(writable,automaticWorklogPath),'SYNTHETIC_HANDOFF_WORKLOG');
+      await common.runGit(['add',automaticWorklogPath],{cwd:writable});
       await common.runGit(['commit','-m','Retained finish candidate'],{cwd:writable});
       const candidate=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
       const {createFinishRecoveryMarker}=await import('../host-runtime/scripts/trelio-workspace-finish-recovery.mjs');
       await fs.writeFile(metadataPath,JSON.stringify({...original,candidateHead:candidate,materializedHead:candidate,
-        finishRecovery:createFinishRecoveryMarker(original)}));
-      nativeRun={...nativeRun,status:'expired'};
+        draftHead,automaticWorklogPath,finishRecovery:createFinishRecoveryMarker(original)}));
+      nativeRun={...nativeRun,status:'expired',draftHead};
       const execute=localAction=>common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(
         {...writerPlan,localAction},{withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),
           readDraftRecovery:async()=>({...runIdentity,finishPending:true})}));
@@ -3313,6 +3324,11 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       await assert.rejects(execute(writerPlan.localAction),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
       assert.equal(claims,before.claims,'a changed local candidate must not spend a native claim');
       await common.runGit(['restore','interrupted-save.md'],{cwd:writable});
+      const otherDraft=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
+      nativeRun={...nativeRun,draftHead:otherDraft};
+      await assert.rejects(execute(writerPlan.localAction));
+      assert.equal(claims,before.claims,'a changed native portable draft must refuse before claim');
+      nativeRun={...nativeRun,draftHead};
       const recovered=await execute(writerPlan.localAction);
       assert.equal(recovered.operation,'open');
       assert.equal(claims,before.claims+1);
@@ -3325,7 +3341,9 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       assert.equal(refreshed.materializedHead,candidate);
       // Restore this synthetic tree to start the independent older fixture.
       await common.runGit(['reset','--hard',head],{cwd:writable});
-      await fs.writeFile(metadataPath,JSON.stringify({...refreshed,candidateHead:null,materializedHead:head,finishRecovery:undefined}));
+      await fs.writeFile(metadataPath,JSON.stringify({...refreshed,candidateHead:null,draftHead:null,materializedHead:head,
+        automaticWorklogPath:undefined,finishRecovery:undefined}));
+      nativeRun={...nativeRun,draftHead:null};
     }
 
     // A saved encrypted draft and a later local committed delta are both real
@@ -3406,12 +3424,30 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
     assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
     assert.equal(Object.hasOwn(latestCheckpoint,'taskOutcome'),!named);
+    let readDraftRecovery;
+    if(named){
+      // The accepted named revision recovers the already committed handoff
+      // under its own Run. No synthetic new checkpoint or task outcome.
+      const metadataPath=path.join(path.dirname(writable),'.trelio-run.json');
+      const metadata=JSON.parse(await fs.readFile(metadataPath,'utf8'));
+      await common.runGit(['add','--all'],{cwd:writable});
+      await common.runGit(['commit','-m','Retained named archive handoff'],{cwd:writable});
+      const candidateHead=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
+      const {createFinishRecoveryMarker}=await import('../host-runtime/scripts/trelio-workspace-finish-recovery.mjs');
+      await fs.writeFile(metadataPath,JSON.stringify({...metadata,draftHead:candidateHead,candidateHead,materializedHead:candidateHead,
+        finishRecovery:createFinishRecoveryMarker(metadata)}));
+      nativeRun={...nativeRun,draftHead:candidateHead};
+      latestCheckpoint={...latestCheckpoint,runId,candidateHead};
+      readDraftRecovery=async()=>({...runIdentity,finishPending:true,namedArchive:true});
+    }
+    const handoffsBeforeFinish=nativeHandoffs;
     stage('finish');let finished;
     try{finished=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(finishPlan,{
-      withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));}
+      withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),readDraftRecovery}));}
     catch(error){throw new Error((deniedFixtureRoute??'fixture-native')+' '+error.code);}
 
     assert.equal(finished.operation,'finish');assert.equal(nativeRun.status,'accepted');assert.equal(acceptedPublications,1);
+    if(named)assert.equal(nativeHandoffs,handoffsBeforeFinish,'an accepted retained archive must not write another handoff');
     assert.equal(baseManifestReads,1,'a second save reads the native selected encrypted base manifest once');
     assert.ok(reusedFileCount>=1);
     await common.withWorkspaceExecutionProfile(writerProfile,async()=>{

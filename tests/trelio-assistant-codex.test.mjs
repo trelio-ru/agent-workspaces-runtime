@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -584,6 +584,91 @@ test('a started finish is recoverable without treating its pending handle or ear
   ]){
     const edited=structuredClone(turn);change(edited);
     assert.equal(assistantInterruptedPendingWorkspaceFinish(edited,terminalMarkerId,taskPass),null);
+  }
+});
+
+test('an interrupted named archive permits only recovery of its positively witnessed save',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=draftHistory();
+  const [marker,prepare,open,_refusal,replace]=turn.items;
+  const target=prepare.result.structuredContent.workspace;
+  Object.assign(target,{scopeType:'project',scopeKey:`workspace:${workspaceDraft.workspaceId}`,taskId:null});
+  const openHandle=randomUUID(),finishHandle=randomUUID();
+  const call=(tool,args,result,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+    arguments:{...args,taskPass},result:{structuredContent:result}});
+  const action=(operation,parameters,result,status)=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,runIdentity:workspaceDraft},result,status);
+  const pending=(operation,operationId)=>({schemaVersion:1,operation,state:'running',operationId,
+    nextCall:{tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,operation:'status',
+      parameters:{finishOperationId:operationId},runIdentity:workspaceDraft}}});
+  open.arguments.schemaVersion=1;open.result.structuredContent=pending('open',openHandle);
+  const finishInput={taskOutcome:'no_status_change'};
+  turn.items=[marker,prepare,open,action('status',{finishOperationId:openHandle},pending('open',openHandle)),
+    action('status',{finishOperationId:openHandle},{code:'TRELIO_RUNTIME_HOOK_FAILED'},'failed'),
+    action('status',{}, {schemaVersion:1,operation:'status',stdout:JSON.stringify({...workspaceDraft,
+      baseHead:'a'.repeat(40),terminalStatus:null,dirty:false})}),
+    call('use_assistant_workspace_files',{runIdentity:workspaceDraft,command:{action:'read',path:'WORKSPACE_CONTEXT.md'}},
+      {code:'ASSISTANT_MCP_LOCAL_WORKSPACE_FILES_FAILED'},'failed'),
+    replace,action('checkpoint',{type:'draft'},{schemaVersion:1,operation:'checkpoint'}),
+    action('finish',finishInput,{code:'TRELIO_WORKSPACE_ACTION_INVALID_INPUT'},'failed'),
+    action('finish',finishInput,pending('finish',finishHandle)),
+    call('create_task_control',{visibility:'shared',clientRequestId:randomUUID()},
+      {schemaVersion:1,operation:'create_task_control',taskId:taskPass.taskId,resultId:randomUUID(),receiptId:randomUUID()}),
+    action('status',{finishOperationId:finishHandle},pending('finish',finishHandle)),
+    call('get_task_sections',{}, {schemaVersion:3}),
+  ];
+  const receiptLookup=randomUUID();
+  turn.items.push({type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_status',status:'completed',
+    arguments:{operationReceipt:receiptLookup},result:{structuredContent:{state:'not_recorded',clientRequestId:receiptLookup,companies:[]}}});
+  assert.deepEqual(assistantInterruptedNamedWorkspaceFinish(turn,terminalMarkerId,taskPass),
+    {...workspaceDraft,finishPending:true,namedArchive:true});
+  assert.equal(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),null);
+  for(const edit of [
+    x=>{x.items[1].result.structuredContent.workspace.companyId=randomUUID();},
+    x=>{delete x.items[1].arguments.runId;},
+    x=>{x.items[5].result.structuredContent.stdout='{}';},
+    x=>{x.items[7].result.structuredContent.sha256='0'.repeat(64);},
+    x=>{x.items[8].status='failed';},
+    x=>{delete x.items[11].result.structuredContent.receiptId;},
+    x=>{x.items.at(-3).arguments.parameters.finishOperationId=randomUUID();},
+    x=>{x.items.at(-3).status='inProgress';},
+    x=>{x.items.at(-1).result.structuredContent.clientRequestId=randomUUID();},
+    x=>{x.items.at(-1).result.structuredContent.state='recorded';},
+    x=>{x.items.push(call('use_assistant_browser',{command:{operation:'navigate'}},{state:'ready'}));},
+    x=>{x.items.push(call('execute_assistant_operation',{operation:'skill_run'},{state:'completed'}));},
+    x=>{x.items.push(call('complete_assistant_pass',{}, {state:'completed'}));},
+  ]){
+    const changed=structuredClone(turn);edit(changed);
+    assert.equal(assistantInterruptedNamedWorkspaceFinish(changed,terminalMarkerId,taskPass),null);
+  }
+});
+
+test('named-archive settlement requires the real restricted turn and exact accepted read-back',()=>{
+  const run={workspaceId:randomUUID(),runId:randomUUID()},deliveryId=randomUUID();
+  const taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const baseHead='a'.repeat(40),candidateHead='b'.repeat(40);
+  const {companyId,taskId}=taskPass;
+  const text=`${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify({companyId,taskId})}\nRecover only the existing named Workspace save. Read exact status for workspaceId=${run.workspaceId}, runId=${run.runId}, without the old poll handle.\n`;
+  const status={...run,terminalStatus:'accepted',baseHead,candidateHead,dirty:false};
+  const turn={id:randomUUID(),status:'completed',items:[
+    {type:'userMessage',content:[{type:'text',text}]},
+    {type:'mcpToolCall',server:'trelio-assistant',tool:'continue_assistant_workspace_action',status:'completed',
+      arguments:{schemaVersion:1,operation:'status',parameters:{},runIdentity:run,taskPass},
+      result:{structuredContent:{schemaVersion:1,operation:'status',stdout:JSON.stringify(status),
+        nativeRunStatus:{status:'accepted',baseHead,candidateHead}}}},
+  ]};
+  assert.deepEqual(assistantAcceptedNamedArchive(turn,deliveryId,taskPass,run),{...run,acceptedHead:candidateHead});
+  for(const edit of [
+    x=>{x.status='interrupted';},
+    x=>{x.items[0].content[0].text=text.replace('Recover only','Proceed with');},
+    x=>{x.items[1].arguments.runIdentity={...run,runId:randomUUID()};},
+    x=>{x.items[1].result.structuredContent.nativeRunStatus.candidateHead='c'.repeat(40);},
+    x=>{x.items[1].result.structuredContent.stdout=JSON.stringify({...status,dirty:true});},
+    x=>{x.items[1].result.structuredContent.stdout=JSON.stringify({...status,terminalStatus:null});},
+    x=>{x.items.push({...x.items[1],tool:'complete_assistant_pass'});},
+    x=>{x.items.push({...x.items[1],tool:'use_assistant_browser'});},
+  ]){
+    const changed=structuredClone(turn);edit(changed);
+    assert.equal(assistantAcceptedNamedArchive(changed,deliveryId,taskPass,run),null);
   }
 });
 

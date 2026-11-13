@@ -8,7 +8,7 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
-import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
+import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity } from './trelio-workspace.mjs';
 
@@ -46,8 +46,10 @@ export const assistantCodexExecutionArguments = () => ['app-server','--listen','
  * disabled; the sole permitted server must come from the verified assistant
  * plugin. A user server with the same name must never impersonate that plugin.
  * No config file, enabled setting or native hook trust is changed on disk. */
-const workspaceRecoveryTools=mode=>mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
-const workspaceRecoveryModeFor=options=>options.workspaceDraftRecovery?.workspaceDraft?.acceptedHead!==undefined
+const workspaceRecoveryTools=mode=>mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS
+  :mode==='named_archive'?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
+const workspaceRecoveryModeFor=options=>options.workspaceDraftRecovery?.workspaceDraft?.namedArchive===true?'named_archive'
+  :options.workspaceDraftRecovery?.workspaceDraft?.acceptedHead!==undefined
   ?'accepted':options.workspaceDraftRecovery?.workspaceDraft?.finishPending===true
     ?'finish_pending':Boolean(options.workspaceDraftRecovery);
 export const assistantCodexExecutionOverrides = (configuration,workspaceDraftRecovery=false) => {
@@ -132,7 +134,8 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
   if(server.runtimeStatus!=='connected'
     ||(workspaceDraftRecovery==='accepted'?['get_assistant_status','complete_assistant_pass']:
       workspaceDraftRecovery?['get_assistant_status','prepare_assistant_workspace_run','continue_assistant_workspace_action',
-      'use_assistant_workspace_files','complete_assistant_pass']:['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'])
+        'use_assistant_workspace_files',...(workspaceDraftRecovery==='named_archive'?[]:['complete_assistant_pass'])]
+        :['get_assistant_status','use_assistant_workspace_files','use_assistant_browser'])
       .some(name=>server.tools[name]?.name!==name)
     ||workspaceDraftRecovery&&Object.entries(server.tools).some(([name,tool])=>!workspaceRecoveryTools(workspaceDraftRecovery).includes(name)||tool?.name!==name))
     fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
@@ -1194,7 +1197,8 @@ const sameDraftRun=(value,expected)=>value&&expected&&Object.getPrototypeOf(valu
 const acceptedWorkspaceHead=value=>typeof value==='string'&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
 const sameWorkspaceRecovery=(value,expected)=>value&&expected
   &&value.runId===expected.runId&&value.workspaceId===expected.workspaceId
-  &&value.acceptedHead===expected.acceptedHead&&value.finishPending===expected.finishPending;
+  &&value.acceptedHead===expected.acceptedHead&&value.finishPending===expected.finishPending
+  &&value.namedArchive===expected.namedArchive;
 const exactDraftPass=(value,expected)=>value&&Object.getPrototypeOf(value)===Object.prototype
   &&Object.keys(value).sort().join(',')==='companyId,passId,taskId'
   &&['companyId','passId','taskId'].every(key=>UUID.test(expected?.[key]??'')&&value[key]===expected[key]);
@@ -1449,12 +1453,200 @@ export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>
   assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,false);
 export const assistantInterruptedPendingWorkspaceFinish=(turn,deliveryId,taskPass)=>
   assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,true);
+/** A named archive has an independent accepted revision. Its save can be
+ * recovered without claiming the enclosing task is complete. This closed
+ * trace admits only one Run, one file delta, a positive portable checkpoint
+ * and the same pending finish. Browser/skill/provider calls always refuse.
+ */
+export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)=>{
+  if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
+    ||!exactDraftPass(taskPass,taskPass)||!Array.isArray(turn.items)||turn.items.length<8||turn.items.length>128)return null;
+  const [original,...items]=turn.items;
+  if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
+    ||typeof original.content[0].text!=='string'||!original.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return null;
+  let run=null,openHandle=null,opened=false,changed=false,draft=false,finishHandle=null,control=false;
+  const nextPoll=(value,operation,run)=>value.operation===operation&&value.schemaVersion===1
+    &&value.state==='running'&&UUID.test(value.operationId??'')&&value.nextCall?.tool==='continue_assistant_workspace_action'
+    &&value.nextCall.arguments?.schemaVersion===1&&value.nextCall.arguments.operation==='status'
+    &&sameDraftRun(value.nextCall.arguments.runIdentity,run)
+    &&Object.keys(value.nextCall.arguments.parameters??{}).join(',')==='finishOperationId'
+    &&value.nextCall.arguments.parameters.finishOperationId===value.operationId;
+  for(const item of items){
+    if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
+    const args=item?.arguments;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype)return null;
+    let value=item.result?.structuredContent;
+    const readOnlyTool=draftReads.has(item.tool)||item.tool==='get_assistant_status'||item.tool==='get_assistant_background_status';
+    if(value==null&&readOnlyTool&&item.result?.content?.length===1&&item.result.content[0]?.type==='text'
+      &&typeof item.result.content[0].text==='string'&&Buffer.byteLength(item.result.content[0].text)<=512*1024){
+      try{value=JSON.parse(item.result.content[0].text);}catch{return null;}
+    }
+    const ok=item.status==='completed'&&item.error==null&&item.result?.isError!==true
+      &&value&&Object.getPrototypeOf(value)===Object.prototype&&!Object.hasOwn(value,'code');
+    if(item.tool==='get_assistant_status'||item.tool==='get_assistant_background_status'){
+      if(item.tool==='get_assistant_status'&&Object.keys(args).join(',')==='operationReceipt'){
+        if(!ok||!UUID.test(args.operationReceipt??'')||value.clientRequestId!==args.operationReceipt
+          ||value.state!=='not_recorded'||Object.keys(value).sort().join(',')!=='clientRequestId,companies,state'
+          ||!Array.isArray(value.companies))return null;
+        continue;
+      }
+      if(!ok||Object.keys(args).some(key=>key!=='view')
+        ||item.tool==='get_assistant_background_status'&&Object.keys(args).length)return null;
+      continue;
+    }
+    if(!exactDraftPass(args.taskPass,taskPass))return null;
+    if(draftReads.has(item.tool)){
+      if(!ok&&!(item.tool==='get_trelio_tool_contract'&&localDraftRefusal(item,'ASSISTANT_MCP_INPUT_INVALID')))return null;
+      continue;
+    }
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(run||!ok||value.prepared!==true||!UUID.test(args.workspaceId??'')||!UUID.test(args.runId??'')
+        ||args.relatedWorkspaceIds!==undefined||value.workspace?.id!==args.workspaceId||value.run?.id!==args.runId
+        ||!['project','company'].includes(value.workspace.scopeType)||value.workspace.companyId!==taskPass.companyId
+        ||value.workspace.scopeKey!==`workspace:${args.workspaceId}`||value.workspace.taskId!==null)return null;
+      run={workspaceId:args.workspaceId,runId:args.runId};
+      continue;
+    }
+    if(!run)return null;
+    if(item.tool==='create_task_control'){
+      // Polling the asynchronous save may be interleaved with one settled
+      // control creation. Its own positive receipt excludes unknown effects.
+      if(!opened||control||!ok||args.visibility!=='shared'||args.ownerDecisionId!==undefined
+        ||!UUID.test(args.clientRequestId??'')||value.schemaVersion!==1||value.operation!==item.tool||value.taskId!==taskPass.taskId
+        ||!UUID.test(value.resultId??'')||!UUID.test(value.receiptId??'')
+        ||Object.keys(value).sort().join(',')!=='operation,receiptId,resultId,schemaVersion,taskId')return null;
+      control=true;continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'){
+      if(!opened||finishHandle||!sameDraftRun(args.runIdentity,run))return null;
+      let command;
+      try{command=parseAssistantRunFileCommand(args.command);}catch{return null;}
+      if(command.action==='replace'){
+        if(changed||!ok||value.state!=='draft_updated'||value.sha256!==createHash('sha256').update(command.text,'utf8').digest('hex'))return null;
+        changed=true;
+      }else if(!['list','read'].includes(command.action)||!ok&&!localDraftRefusal(item,'ASSISTANT_MCP_LOCAL_WORKSPACE_FILES_FAILED'))return null;
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return null;
+    if(args.operation==='open'){
+      if(opened||openHandle||!ok||!sameDraftRun(args.parameters,run)||!nextPoll(value,'open',run))return null;
+      openHandle=value.operationId;
+      continue;
+    }
+    if(!sameDraftRun(args.runIdentity,run))return null;
+    if(args.operation==='status'){
+      const handle=args.parameters?.finishOperationId;
+      if(handle!==undefined){
+        if(Object.keys(args.parameters).join(',')!=='finishOperationId'||handle!==(finishHandle??openHandle))return null;
+        if(!ok){
+          // A failed open status request carries no write authority. The
+          // later exact local/native status must still prove the opened Run.
+          if(finishHandle||!localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED'))return null;
+        }else if(value.operationId!==handle||!nextPoll(value,finishHandle?'finish':'open',run))return null;
+      }else{
+        if(!openHandle||finishHandle||!ok||Object.keys(args.parameters??{}).length||value.operation!=='status'
+          ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65536)return null;
+        let status;try{status=JSON.parse(value.stdout);}catch{return null;}
+        if(status?.runId!==run.runId||status.workspaceId!==run.workspaceId||status.terminalStatus
+          ||!acceptedWorkspaceHead(status.baseHead)||typeof status.dirty!=='boolean')return null;
+        opened=true;
+      }
+      continue;
+    }
+    if(!opened||finishHandle)return null;
+    if(args.operation==='checkpoint'){
+      if(draft||!changed||!ok||args.parameters?.type!=='draft'||value.schemaVersion!==1
+        ||value.operation!=='checkpoint')return null;
+      draft=true;
+    }else if(args.operation==='finish'){
+      if(!draft||args.parameters?.taskOutcome!=='no_status_change')return null;
+      if(!ok){
+        if(!localDraftRefusal(item,'TRELIO_WORKSPACE_ACTION_INVALID_INPUT'))return null;
+      }else{
+        if(!nextPoll(value,'finish',run))return null;
+        finishHandle=value.operationId;
+      }
+    }else return null;
+  }
+  if(!finishHandle)return null;
+  // Return only structural locators. A retained handoff must come from the
+  // exact native checkpoint, never the prompt or recreated prose.
+  return {...run,finishPending:true,namedArchive:true};
+};
+/** A completed save-only turn may qualify for one ordinary continuation.
+ * The final native status is structural proof of the exact named accepted
+ * candidate. No other mutation or provider receipt can enter this phase. */
+export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
+  if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='completed'||turn.error!=null
+    ||!exactDraftPass(taskPass,taskPass)||!sameDraftRun(run,run)||!UUID.test(run.workspaceId)||!UUID.test(run.runId)
+    ||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>128)return null;
+  const [original,...items]=turn.items;
+  if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
+    ||typeof original.content[0].text!=='string')return null;
+  const lines=original.content[0].text.split('\n',3);
+  if(lines[0]!==assistantDeliveryMarker(deliveryId)||!lines[1]?.startsWith('TRELIO_ASSISTANT_SCOPE ')
+    ||!lines[2]?.startsWith(`Recover only the existing named Workspace save. Read exact status for workspaceId=${run.workspaceId}, runId=${run.runId}, `))return null;
+  let scope;
+  try{scope=JSON.parse(lines[1].slice('TRELIO_ASSISTANT_SCOPE '.length));}catch{return null;}
+  if(scope?.companyId!==taskPass.companyId||scope.taskId!==taskPass.taskId||scope.sourceReferences!==undefined
+    ||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return null;
+  let acceptedHead=null;
+  for(const item of items){
+    if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
+    const args=item?.arguments,value=item?.result?.structuredContent;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype
+      ||item.status!=='completed'||item.error!=null||item.result?.isError===true
+      ||!value||Object.getPrototypeOf(value)!==Object.prototype||Object.hasOwn(value,'code'))return null;
+    if(item.tool==='get_assistant_status'){
+      if(Object.keys(args).some(key=>key!=='view'))return null;
+      continue;
+    }
+    if(!exactDraftPass(args.taskPass,taskPass))return null;
+    if(draftReads.has(item.tool))continue;
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(!sameDraftRun({workspaceId:args.workspaceId,runId:args.runId},run)
+        ||args.relatedWorkspaceIds!==undefined||value.prepared!==true
+        ||value.workspace?.id!==run.workspaceId||value.run?.id!==run.runId
+        ||value.workspace.companyId!==taskPass.companyId||!['project','company'].includes(value.workspace.scopeType)
+        ||value.workspace.scopeKey!==`workspace:${run.workspaceId}`||value.workspace.taskId!==null)return null;
+      continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'){
+      if(!sameDraftRun(args.runIdentity,run)||!['read','list'].includes(args.command?.action))return null;
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1
+      ||!sameDraftRun(args.operation==='open'?args.parameters:args.runIdentity,run)
+      ||!['open','status','heartbeat','finish'].includes(args.operation)
+      ||args.operation==='finish'&&args.parameters?.taskOutcome!=='no_status_change')return null;
+    if(args.operation==='status'&&Object.keys(args.parameters??{}).length===0){
+      if(value.operation!=='status'||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65536)return null;
+      let status;try{status=JSON.parse(value.stdout);}catch{return null;}
+      if(status?.workspaceId!==run.workspaceId||status.runId!==run.runId||typeof status.dirty!=='boolean')return null;
+      const native=value.nativeRunStatus;
+      if(native?.status==='accepted'){
+        if(status.terminalStatus!=='accepted'||status.dirty!==false||!acceptedWorkspaceHead(native.candidateHead)||native.candidateHead!==status.candidateHead
+          ||native.baseHead!==status.baseHead||native.baseHead===native.candidateHead||acceptedHead&&acceptedHead!==native.candidateHead)return null;
+        acceptedHead=native.candidateHead;
+      }
+    }
+  }
+  return acceptedHead?{...run,acceptedHead}:null;
+};
+const readAcceptedNamedArchiveTurn=async(request,threadId,deliveryId,{taskPass,run})=>{
+  const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
+  const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
+  const archive=assistantAcceptedNamedArchive(turn,deliveryId,taskPass,run);
+  return archive?{state:'named_archive_saved',turnId:turn.id,namedArchiveSettled:archive}:{state:'uncertain'};
+};
 const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   // Only the latest full turn can qualify. A second message or any unknown
   // action leaves the original uncertainty intact. No transcript leaves RAM.
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
-  const workspaceDraft=assistantInterruptedAcceptedWorkspace(turn,deliveryId,taskPass)
+  const {namedArchive, ...pass}=taskPass??{};
+  const workspaceDraft=namedArchive===true?assistantInterruptedNamedWorkspaceFinish(turn,deliveryId,pass)
+    :assistantInterruptedAcceptedWorkspace(turn,deliveryId,taskPass)
     ??assistantInterruptedPendingWorkspaceFinish(turn,deliveryId,taskPass)
     ??assistantInterruptedWorkspaceDraft(turn,deliveryId,taskPass);
   return workspaceDraft?{state:'interrupted_workspace_draft',turnId:turn.id,workspaceDraft}:{state:'uncertain'};
@@ -1478,6 +1670,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   return readNative(threadId, async (_thread, request) => {
     if(options.interruptedWorkspaceDraft!==undefined)
       return readInterruptedDraftTurn(request,threadId,deliveryId,options.interruptedWorkspaceDraft);
+    if(options.acceptedNamedArchive!==undefined)
+      return readAcceptedNamedArchiveTurn(request,threadId,deliveryId,options.acceptedNamedArchive);
     if(options.interruptedTaskRead!==undefined)
       return readInterruptedTaskReadTurn(request,threadId,deliveryId,options.interruptedTaskRead);
     if(options.readOnlyPreparation!==undefined){
@@ -1854,9 +2048,24 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
       ||![terminalMarkerId,terminalTurnId,workspaceDraft?.workspaceId,workspaceDraft?.runId].every(value=>UUID.test(value??''))
       ||workspaceRecoveryMode==='accepted'&&!acceptedWorkspaceHead(workspaceDraft.acceptedHead)
       ||workspaceDraft.finishPending!==undefined&&(workspaceDraft.finishPending!==true||workspaceDraft.acceptedHead!==undefined)
+      ||workspaceDraft.namedArchive!==undefined&&(workspaceDraft.namedArchive!==true||workspaceDraft.finishPending!==true
+        ||workStateContext.ownerQuestionIds!==undefined)
       ||terminalMarkerId===deliveryId||options.continuationReview?.priorTurnId!==terminalTurnId
       ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
+  }
+  if(options.namedArchiveResume!==undefined){
+    const witness=options.namedArchiveResume;
+    if(!witness||Object.getPrototypeOf(witness)!==Object.prototype
+      ||Object.keys(witness).sort().join(',')!=='archive,taskPass,terminalMarkerId,terminalTurnId'
+      ||!exactDraftPass(witness.taskPass,witness.taskPass)||!witness.archive
+      ||!acceptedWorkspaceHead(witness.archive.acceptedHead)||!UUID.test(witness.archive.workspaceId??'')||!UUID.test(witness.archive.runId??'')
+      ||!UUID.test(witness.terminalMarkerId??'')||witness.terminalMarkerId===deliveryId
+      ||witness.terminalTurnId!==options.continuationReview?.priorTurnId
+      ||witness.taskPass.companyId!==workStateContext.companyId||witness.taskPass.taskId!==workStateContext.taskId
+      ||intakeContext!==undefined||workStateContext.workMode==='discussion'||workStateContext.sourceReferences!==undefined
+      ||workStateContext.ownerQuestionIds!==undefined||options.workspaceDraftRecovery!==undefined||options.taskReadRecovery!==undefined
+      ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')fail('ASSISTANT_CODEX_INVALID_INPUT');
   }
   if(options.taskReadRecovery!==undefined){
     const recovery=options.taskReadRecovery;
@@ -2066,7 +2275,8 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // another live writer. thread/resume above acquired Codex's exclusive
       // writer without starting any turn. Inspect again from that SAME server
       // before calling the host's protected pass renewal and one-use start.
-      const current=await readInterruptedDraftTurn(request,threadId,terminalMarkerId,taskPass);
+      const current=await readInterruptedDraftTurn(request,threadId,terminalMarkerId,
+        workspaceDraft.namedArchive===true?{...taskPass,namedArchive:true}:taskPass);
       if(current.turnId!==terminalTurnId||!sameWorkspaceRecovery(current.workspaceDraft,workspaceDraft))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
@@ -2078,6 +2288,13 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       const current=await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{
         taskPass,parentMarkerId,parentTurnId,assistantId:workStateContext.assistantUserId});
       if(current.state!=='interrupted_task_read'||current.turnId!==terminalTurnId)
+        fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    }
+    if(options.namedArchiveResume){
+      const {archive,terminalMarkerId,terminalTurnId,taskPass}=options.namedArchiveResume;
+      const {workspaceId,runId}=archive;
+      const witness=await readAcceptedNamedArchiveTurn(request,threadId,terminalMarkerId,{taskPass,run:{workspaceId,runId}});
+      if(witness.turnId!==terminalTurnId||!sameWorkspaceRecovery(witness.namedArchiveSettled,archive))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
     const workflow=options.readinessProbe===true?null
@@ -2116,6 +2333,8 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
         const {workspaceDraft}=options.workspaceDraftRecovery;
         if(workspaceDraft.acceptedHead!==undefined)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly confirm the result already accepted in the immediately preceding interrupted turn. Use its saved WORK.md content and the live task to determine the actual goal state, cadence and timezone. Use complete_assistant_pass with workspaceId=${workspaceDraft.workspaceId}, acceptedRunId=${workspaceDraft.runId}, workspaceHead=${workspaceDraft.acceptedHead}, noChange=false and no processed source references. This closes the pass, so keep an unfinished goal active, waiting or blocked as recorded in the accepted material. If the result or its accepted state cannot be verified, leave the pass unresolved.\n`;
+        if(workspaceDraft.namedArchive===true)
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nRecover only the existing named Workspace save. Read exact status for workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}, without the old poll handle. If the server already accepted it, verify the clean exact candidate and stop. Otherwise prepare and open this same expired Run and read both returned pinned authority files in full. Use finish with taskOutcome=no_status_change and a brief technical summary, evidence and next action; the host uses the previously committed handoff without changing it. Observe the new exact poll until native acceptance. No file edits, additional Run, controls, question, provider or task-completion tool. The archive's accepted state alone does not complete the assignment. If native acceptance cannot be verified, leave the original outcome unresolved.\n`;
         if(workspaceDraft.finishPending===true)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nSettle only the interrupted save in this SAME pass. First call continue_assistant_workspace_action (schemaVersion=1, operation=status, parameters={}, runIdentity={workspaceId:${workspaceDraft.workspaceId},runId:${workspaceDraft.runId}}). Do not poll the old handle. Inspect nativeRunStatus. If the server already accepted this Run, verify its accepted head and clean local tree; do not reopen or submit. Only if the server shows expired, the exact local candidate is intact, and the original save has ended, prepare/open this same Run; read both pinned authority files and existing WORK.md, then preserve the original material with the ordinary finish (taskOutcome=no_status_change). Follow only the new finish nextCall until terminal and verify exact native acceptance. Read the existing owner question and controls as needed; do not repeat any question, control change, provider read or write, or edit draft files. Only after verified acceptance, complete_assistant_pass with the actual goal state and cadence, same accepted Run/head, noChange=false and no processed source references. Waiting for an existing answer does not complete the goal. If save state, material, or business result is ambiguous, stop with the original fence intact.\n`;
         return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nContinue this SAME pass only to preserve its interrupted Workspace draft. Read the live task and original results. Prepare the exact existing Workspace Run with workspaceId=${workspaceDraft.workspaceId} and runId=${workspaceDraft.runId}. Use its returned open, read both pinned authority files, and inspect the recovered files. Keep the result already obtained. Save and verify acceptance through the ordinary finish with taskOutcome=no_status_change, then use complete_assistant_pass with this accepted Run/head and no processedSourceReferences only when the original result is confirmed. Do not repeat the browser check, publish another comment, send a message, create a Run or make any other task or provider change. If exact draft or outcome evidence is missing, preserve the draft and report the blocker.\n`;
@@ -2133,6 +2352,8 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       // UUID/path locators enter the native stdin prompt. READY stays tool-free
       // and receives no task state or request to create a file.
       const scope = options.readinessProbe === true ? '' : `TRELIO_ASSISTANT_${workStateContext?.kind==='source_intake'?'INTAKE':'SCOPE'} ${JSON.stringify(workStateContext)}\n`;
+      const namedArchiveResume=options.namedArchiveResume
+        ? 'The previous recovery turn finished the already retained archive save only. Reuse that accepted archive revision. Continue the original task from the first unfinished step, with current task authority, provider access, original receipts and deduplication. The previous save is not a task result. Do not repeat the old control or owner question.\n':'';
       const readRecovery=options.taskReadRecovery
         ? 'The interrupted continuation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';
       const recovery=options.continuationReview
@@ -2169,7 +2390,7 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       'Unsupported authentication or OS prompts are concrete blockers. Save progress, ask the owner the specific missing decision or setup and wait. Read back an uncertain result before further input. Never replay it or switch transport.',
       'Source intake stays read-only. Close windows when this work finishes or enters owner waiting. Saved login is retained, and the runtime also closes idle windows after ten minutes. Verify the actual site outcome before reporting success.\n',
     ].join(' '):'';
-  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${readRecovery}${replyOnly}${instruction}\n${browserRecovery}${conversationTracking}${scheduled}`;
+  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${readRecovery}${namedArchiveResume}${replyOnly}${instruction}\n${browserRecovery}${conversationTracking}${scheduled}`;
 };
 
 // Windows telemetry is deliberately a fixed native read, never model-authored
