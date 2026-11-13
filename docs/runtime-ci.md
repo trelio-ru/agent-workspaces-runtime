@@ -24,6 +24,12 @@ Both macOS matrices use the hosted `macos-15-intel` pool. All native checks,
 platform-specific security assertions and Windows artifacts are part of release
 evidence. The release uses the exact tested commit.
 
+Cross-repository checks read the plugin checkout separately. The shell
+manifest assertions cover the current Code Mode registrations, the 3.3.0
+local MCP exception and the older hook registrations. Runtime release precedes
+shell rollout, so the bundled instruction checks also accept equivalent
+wording from the installed shell and the new candidate.
+
 The native Linux browser lane probes the hosted Ubuntu suite over HTTPS before
 selecting the main archive or the Linux Kernel Archives mirror. The probe only checks reachability. APT
 still refreshes and validates signed indexes and packages before the unchanged
