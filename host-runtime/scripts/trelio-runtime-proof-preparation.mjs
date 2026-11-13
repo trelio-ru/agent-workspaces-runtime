@@ -42,14 +42,14 @@ export const runtimeProofBindingPath = ({ configDirectory, runtimeSessionId }) =
 );
 
 export const saveRuntimeProofBinding = async ({
-  configDirectory, origin, clientSessionId, runtimeSessionId, expiresAt, writePrivateJsonFile,
+  configDirectory, origin, clientSessionId, runtimeSessionId, expiresAt, stateNamespace = "", writePrivateJsonFile,
 }) => {
   const file = runtimeProofBindingPath({ configDirectory, runtimeSessionId });
   if (!file || !clientSessionId) throw new RuntimeProofPreparationError("invalid");
-  // Only the hook calls this writer. No environment/agent-supplied chat ID
+  // Only local runtime admission calls this writer. No agent-supplied chat ID
   // participates in the later lookup, and the index contains no signing key.
   await writePrivateJsonFile(file, { schemaVersion: 1, origin: new URL(origin).origin,
-    runtimeSessionId, stateKey: hash(`${origin}\n${clientSessionId}`), expiresAt });
+    runtimeSessionId, stateKey: hash(`${origin}\n${stateNamespace}${clientSessionId}`), expiresAt });
 };
 
 export const prepareRuntimeProofSubmission = async ({

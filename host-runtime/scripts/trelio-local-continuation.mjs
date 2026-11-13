@@ -1,6 +1,7 @@
 import path from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { readCodexTranscript, parseCodexMcpOutput } from "./trelio-instruction-reuse.mjs";
+import { CODEX_RUNTIME_LOCAL_NAMESPACE, CODEX_RUNTIME_REMOTE_NAMESPACE } from "./trelio-codex-routing.mjs";
 
 const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -53,8 +54,13 @@ export const recoverSelectedContinuation = ({ method, original, result, input })
 
 /** A ref is only correlation, never execution authority or a request cache. */
 export const collectLocalContinuationArguments = ({ header, rows, hookInput, input, now = Date.now() }) => {
-  if (!SUPPORTED_CODEX.has(header?.cli_version) || header.id !== hookInput.session_id || hookInput.agent_id
+  if (!(SUPPORTED_CODEX.has(header?.cli_version)
+    || header?.cli_version === "0.167.0-alpha.3.2" && hookInput.codex_mcp_version === header.cli_version)
+    || header.id !== hookInput.session_id || hookInput.agent_id
     || typeof hookInput.tool_use_id !== "string" || !uuid.test(input.parameters?.nativeCallRef || "")) return null;
+  const useMcpNamespaces = typeof hookInput.codex_mcp_version === "string";
+  const localNamespace = useMcpNamespaces ? CODEX_RUNTIME_LOCAL_NAMESPACE : "mcp__trelio_remote_skills";
+  const remoteNamespace = useMcpNamespaces ? CODEX_RUNTIME_REMOTE_NAMESPACE : "mcp__trelio";
   const calls = new Map();
   let candidate = null;
   let duplicates = false;
@@ -73,11 +79,11 @@ export const collectLocalContinuationArguments = ({ header, rows, hookInput, inp
       try { args = JSON.parse(p.arguments); } catch { continue; }
       if (!record(args)) continue;
       if (p.call_id === hookInput.tool_use_id) {
-        const sameCall = p.namespace === "mcp__trelio_remote_skills" && p.name === "continue_trelio_local_action"
+        const sameCall = p.namespace === localNamespace && p.name === "continue_trelio_local_action"
           && canonical(clean(args)) === canonical(clean(input));
         return sameCall && !duplicates ? candidate : null;
       }
-      if (p.namespace === "mcp__trelio" && p.name === input.parameters.nativeTool) {
+      if (p.namespace === remoteNamespace && p.name === input.parameters.nativeTool) {
         calls.set(p.call_id, args);
       }
     } else if (p.type === "function_call_output") {

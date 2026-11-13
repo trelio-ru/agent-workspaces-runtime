@@ -17,7 +17,8 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
 import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
+import { cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
+import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
 import { recoverSelectedContinuation, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import { withPrivateProcessSession, TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, withTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
@@ -48,6 +49,8 @@ import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctor
 import {
   CODEX_ROUTING_APPLY_TOOL_NAME,
   CODEX_ROUTING_PLAN_TOOL_NAME,
+  CODEX_RUNTIME_LOCAL_SERVER,
+  CODEX_RUNTIME_ROUTING_INSTRUCTIONS,
   CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
   CodexRoutingConfigError,
   applyCodexTrelioHookRouting,
@@ -325,7 +328,9 @@ export const AGENT_SKILL_ROUTING_INSTRUCTIONS = [
 const CODEX_LEGACY_MCP_RESTART_INSTRUCTION = "Runtime автоматически удалил legacy MCP server trelio-mcp из пользовательского config.toml Codex. Полностью перезапусти Codex/ChatGPT до следующего защищённого чтения. До перезапуска не вызывай уже загруженные mcp__trelio_mcp__*; используй только штатные mcp__trelio__* и mcp__trelio_remote_skills__* после restart.";
 const CODEX_LEGACY_MCP_BLOCKED_INSTRUCTION = "Runtime обнаружил проблему автоматического удаления legacy MCP server trelio-mcp. Не используй mcp__trelio_mcp__*. Запусти diagnose_trelio_installation и выполни возвращённое exact recovery; не объявляй установку готовой до устранения этого действия.";
 
-export const buildAgentSkillRoutingInstructions = (legacyMcpMigration = null) => {
+export const buildAgentSkillRoutingInstructions = (legacyMcpMigration = null, codexMcpRuntime = false) => {
+  if (codexMcpRuntime) return CODEX_RUNTIME_ROUTING_INSTRUCTIONS
+    + AGENT_SKILL_ROUTING_INSTRUCTIONS.replace(CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, "");
   if (legacyMcpMigration?.status === "removed") {
     return `${CODEX_LEGACY_MCP_RESTART_INSTRUCTION}\n\n${AGENT_SKILL_ROUTING_INSTRUCTIONS}`;
   }
@@ -5746,6 +5751,7 @@ export const handleToolCall = async (
     codexHookSettingsRead = inspectCodexTrelioHookSettings,
     codexRoutingApply = applyCodexTrelioHookRouting,
     codexLegacyMcpMigration = null,
+    codexMcpRuntime = false,
   } = {},
 ) => {
   throwIfAborted(signal);
@@ -6076,12 +6082,13 @@ export const handleToolCall = async (
       origin,
       clientKind: rawArguments.clientKind,
       includeHookStartup: rawArguments.intent === "diagnostics"
+        && !codexMcpRuntime
         && !["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind),
       signal,
     });
     let codexRouting = null;
     let codexHookSettings = null;
-    if (rawArguments.clientKind === "codex") {
+    if (rawArguments.clientKind === "codex" && !codexMcpRuntime) {
       codexHookSettings = await codexHookSettingsRead();
       try {
         codexRouting = await codexRoutingPlan();
@@ -6127,6 +6134,7 @@ export const handleToolCall = async (
       codexRouting,
       codexHookSettings,
       codexLegacyMcpMigration,
+      codexMcpRuntime,
       workingFolder,
       publicService,
       readTarget,
@@ -6321,6 +6329,7 @@ export const isHostRuntimeUpgradeRequiredError = (error) => (
 export const startHostRuntimeMcpDelegate = async ({
   environment = process.env,
   initializeParams,
+  runtimeArguments = [],
   enqueueResponse,
   spawnProcess = spawn,
   statFile = fs.lstat,
@@ -6344,7 +6353,7 @@ export const startHostRuntimeMcpDelegate = async ({
 
   let child;
   try {
-    child = spawnProcess(process.execPath, [loaderPath, "mcp"], {
+    child = spawnProcess(process.execPath, [loaderPath, "mcp", ...runtimeArguments], {
       env: {
         ...environment,
         // The explicit __update immediately above already performed the bounded
@@ -6655,6 +6664,7 @@ export const handleLocalMcpMessage = async (
     proposalCapabilityConfigDirectory,
     clientCapabilities = null,
     clientInfo = null,
+    codexMcpRuntime = false,
     textCompatibility = false,
     requestClient = null,
     codexLegacyMcpMigration = null,
@@ -6678,13 +6688,13 @@ export const handleLocalMcpMessage = async (
           resources: { listChanged: false, subscribe: false },
         },
         serverInfo: {
-          name: "trelio-remote-skills",
+          name: codexMcpRuntime ? CODEX_RUNTIME_LOCAL_SERVER : "trelio-remote-skills",
           version: HOST_RUNTIME_VERSION,
         },
         // Server-wide instructions are intentionally returned by the static
         // local host: this makes skill-first routing visible before Codex
         // decides that a browser or another currently exposed tool is easier.
-        instructions: buildAgentSkillRoutingInstructions(codexLegacyMcpMigration),
+        instructions: buildAgentSkillRoutingInstructions(codexLegacyMcpMigration, codexMcpRuntime),
       },
     };
   }
@@ -6765,8 +6775,13 @@ export const handleLocalMcpMessage = async (
         : null;
       const execute = async (callSignal) => {
         try {
-          return await callTool(origin, String(message.params?.name || ""), message.params?.arguments,
-            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, textCompatibility,
+          const name = String(message.params?.name || "");
+          const args = codexMcpRuntime && name === TRELIO_LOCAL_ACTION_TOOL.name
+            ? await prepareCodexMcpToolArguments({ metadata: message.params?._meta, clientInfo,
+              toolName: "mcp__trelio_remote_skills__continue_trelio_local_action", input: message.params?.arguments, signal: callSignal })
+            : message.params?.arguments;
+          return await callTool(origin, name, args,
+            { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, textCompatibility, codexMcpRuntime,
               requestClient, codexLegacyMcpMigration, ...(codexThreadId ? { codexThreadId } : {}),
               ...(nativeCodex && message.params?.name === "open_codex_connection_wizard" ? { codexFolderSetupClient: true } : {}) });
         } catch (error) {
@@ -6875,6 +6890,8 @@ export const runStdioHost = async ({
   legacyMcpMigration = removeCodexLegacyTrelioMcpRegistration,
   migrateClientConfiguration = migrateCodexLegacyTrelioMcpForRuntime,
   startRuntimeDelegate = startHostRuntimeMcpDelegate,
+  runtimeArguments = [],
+  codexMcpRuntime = false,
   spawnProcess = spawn,
   statFile = fs.lstat,
   diagnosticReporter = createAgentDiagnosticReporter({ origin, environment }),
@@ -6933,6 +6950,7 @@ export const runStdioHost = async ({
       runtimeDelegatePromise = startRuntimeDelegate({
         environment,
         initializeParams: clientInitializeParams,
+        runtimeArguments,
         enqueueResponse,
         spawnProcess,
         statFile,
@@ -7090,6 +7108,7 @@ export const runStdioHost = async ({
         signal: controller?.signal,
         clientCapabilities,
         clientInfo: clientInitializeParams?.clientInfo,
+        codexMcpRuntime,
         textCompatibility,
         requestClient,
         notifyClient: enqueueResponse,
@@ -7389,14 +7408,17 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
    */
   const createHarnessConnection = ({
     httpRequest = remoteMcpHttpRequest, httpJson = oauthHttpJson,
-    connectOAuth = connectRemoteMcpOAuth, vault, nativeClient = "deepseek-harness",
+    connectOAuth = connectRemoteMcpOAuth, vault, nativeClient = "deepseek-harness", clientCapabilities = {},
   } = {}) => {
-    if (!["deepseek-harness", "kimi-work", "multitool"].includes(nativeClient)) {
+    if (!["deepseek-harness", "kimi-work", "multitool", "codex"].includes(nativeClient)) {
       throw fail("TRELIO_NATIVE_CLIENT_INVALID", "Неизвестный native OAuth client.");
     }
     const isKimi = nativeClient === "kimi-work";
     const isMultiTool = nativeClient === "multitool";
-    const publicProfile = isMultiTool
+    const isCodex = nativeClient === "codex";
+    const publicProfile = isCodex
+      ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS.codex, name: "Trelio – Codex", authRequired: "TRELIO_CODEX_AUTH_REQUIRED" }
+      : isMultiTool
       ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS.multitool, name: "Trelio – Мультитул", authRequired: "TRELIO_MULTITOOL_AUTH_REQUIRED" }
       : isKimi
         ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS["kimi-work"], name: "Trelio – Kimi Work", authRequired: "TRELIO_KIMI_AUTH_REQUIRED" }
@@ -7468,7 +7490,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       if (initializing) return initializing;
       initializing = (async () => {
         const token = await credential(signal);
-        const { response, result } = await rpcOnce("initialize", { protocolVersion: PROTOCOL, capabilities: {},
+        const { response, result } = await rpcOnce("initialize", { protocolVersion: PROTOCOL, capabilities: clientCapabilities,
           clientInfo: { name: `trelio-${nativeClient}`, version: getHostRuntimeVersion() } }, signal, token, null);
         if (result?.protocolVersion !== PROTOCOL) throw fail("TRELIO_HARNESS_PROTOCOL_INVALID", "Trelio не согласовал MCP protocol.");
         const next = { sessionId: response.sessionId ?? null, instructions: result.instructions ?? "" };
@@ -7521,8 +7543,13 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         return tools;
       },
       async call(method, args, signal) {
-        await initialize(signal);
         return (await rpc("tools/call", { name: method, arguments: args }, signal)).result;
+      },
+      async readResource(uri, signal) {
+        return (await rpc("resources/read", { uri }, signal)).result;
+      },
+      async listResources(signal) {
+        return (await rpc("resources/list", {}, signal)).result;
       },
       instructions: () => session?.instructions ?? "",
     };
@@ -8031,6 +8058,195 @@ export const createMultiToolConnection = ({
 };
 
 
+const CODEX_CONNECT_TOOL = {
+  name: "trelio_connect",
+  description: "Connect Trelio in Codex through the browser. Set reauthorize only to replace a revoked or insufficient grant. Continue the original request after approval.",
+  inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+};
+
+const CODEX_RUNTIME_POLICY_INSTRUCTIONS = "Trelio checks the model and reasoning effort of the current Codex tool call. The local runtime supplies one-use proof automatically. Never supply runtimeSessionProof or instruction reuse keys. If disconnected or challenged for additional OAuth scopes, call trelio_connect, with reauthorize=true only for a replaced or insufficient grant, and retry the original call once after browser consent. On an admission failure preserve its exact code and reason. Use trelio-diagnostics for missing or invalid observations. Never bypass the check through another connection or direct HTTP. ";
+
+const codexInstructions = upstream => CODEX_RUNTIME_ROUTING_INSTRUCTIONS + CODEX_RUNTIME_POLICY_INSTRUCTIONS
+  + upstream.replace(/^Codex: direct Trelio outside functions\.exec:.*?before reporting a blocker\. /u, "")
+    .replace(/Trelio runtime policy is enforced by the approved Agent Workspaces client hook,.*?shell scripts\. /su, "")
+    .replace(/MCP_REAUTHORIZATION_REQUIRED\/insufficient_scope:.*?reopen only for old clients\. /su, "");
+
+const isMissingRuntimeProof = result => result?.structuredContent?.code === "TRELIO_RUNTIME_HOOK_REQUIRED"
+  ? result.structuredContent.reason === "missing"
+  : result?.content?.some(block => block.type === "text" && block.text?.startsWith("TRELIO_RUNTIME_HOOK_REQUIRED (missing)"));
+
+/** A separate MCP registration preserves the existing Trelio tool names, schemas
+ * and App resources. The local runtime owns only transport and preparation;
+ * the server remains the authority for catalogue ACL, model policy and writes. */
+export const createCodexMcpHandler = ({
+  connect = (clientCapabilities) => createHarnessConnection({ nativeClient: "codex", clientCapabilities }),
+  prepare = prepareCodexMcpToolArguments,
+} = {}) => {
+  let connection;
+  const authFailure = error => ["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(error?.code);
+  let toolsByName = null;
+  const lastWindows = new Map();
+  const readsAuthority = new Set(["get_task", "get_tasks", "get_agent_instructions",
+    "get_task_instruction_page", "get_project_meta", "get_task_create_meta", "get_workspace", "fetch"]);
+  // MCP can observe compaction only on a later call. Require fresh authority
+  // before a subsequent protected operation in the same thread/window.
+  const updateWindow = (metadata, clientInfo) => {
+    const sessionId = observeCodexMcpTurn(metadata, clientInfo)?.sessionId;
+    const windowId = metadata?.windowId;
+    if (!sessionId || typeof windowId !== "string" || !windowId || windowId.length > 256) return null;
+    const last = lastWindows.get(sessionId);
+    if (last?.windowId === windowId) return last;
+    const state = { windowId, compacted: Boolean(last) };
+    lastWindows.delete(sessionId);
+    if (lastWindows.size >= 64) lastWindows.delete(lastWindows.keys().next().value);
+    lastWindows.set(sessionId, state);
+    return state;
+  };
+  const catalog = async signal => {
+    const tools = await connection.listTools(signal);
+    if (tools.some(tool => tool.name === CODEX_CONNECT_TOOL.name)) {
+      throw new RemoteMcpHostError("TRELIO_CODEX_CATALOG_CONFLICT", "Trelio вернул несовместимый каталог.");
+    }
+    toolsByName = new Map(tools.map(tool => [tool.name, tool]));
+    return [...tools.map(tool => {
+      // The backend contract is shared with old clients. Keep its App
+      // metadata and schemas while replacing the legacy dispatch reminder.
+      const { description, ...definition } = tool;
+      return { ...definition, description: description?.replace(
+        "Approved PreToolUse hook injects one-use runtimeSessionProof; never supply it.",
+        "The Codex runtime supplies proof automatically; never supply it.") };
+    }), CODEX_CONNECT_TOOL];
+  };
+  return async (message, { signal, clientInfo, clientCapabilities, notifyClient, runtimeUpgradeRecovery } = {}) => {
+    if (message?.jsonrpc !== "2.0" || message.id === null || message.id === undefined) return null;
+    const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
+    try {
+      if (message.method === "initialize") {
+        if (clientInfo?.name !== "codex-mcp-client") throw new RemoteMcpHostError("TRELIO_CODEX_CLIENT_REQUIRED", "Откройте Trelio в Codex.");
+        // Native Codex renders Apps. Never advertise a fallback interaction to
+        // the remote session that this request transport cannot relay.
+        toolsByName = null;
+        connection = connect({ ...(clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]
+          ? { extensions: { [MCP_APP_CLIENT_EXTENSION]: clientCapabilities.extensions[MCP_APP_CLIENT_EXTENSION] } } : {}) });
+        // Leave most of the startup window to the signed loader and catalog.
+        // An unavailable instruction bootstrap cannot hide the login tool.
+        const bootstrapSignal = AbortSignal.any([AbortSignal.timeout(3_000), ...(signal ? [signal] : [])]);
+        await connection.initialize?.(bootstrapSignal).catch(() => undefined);
+        return reply({ protocolVersion: message.params?.protocolVersion || REMOTE_MCP_PROTOCOL_VERSION,
+          serverInfo: { name: "Trelio", version: HOST_RUNTIME_VERSION },
+          capabilities: { tools: { listChanged: true }, resources: {} },
+          instructions: codexInstructions(connection.instructions?.() ?? "") });
+      }
+      if (message.method === "ping") return reply({});
+      if (!connection) throw new RemoteMcpHostError("TRELIO_CODEX_CLIENT_REQUIRED", "Не согласован маршрут Codex MCP.");
+      if (message.method === "tools/list") {
+        try { return reply({ tools: await catalog(signal) }); }
+        catch (error) { if (authFailure(error)) return reply({ tools: [CODEX_CONNECT_TOOL] }); throw error; }
+      }
+      if (message.method === "resources/list") {
+        try { return reply(await connection.listResources(signal)); }
+        catch (error) { if (authFailure(error)) return reply({ resources: [] }); throw error; }
+      }
+      if (message.method === "resources/read" && typeof message.params?.uri === "string") {
+        return reply(await connection.readResource(message.params.uri, signal));
+      }
+      if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } };
+
+      const { name, arguments: raw = {}, _meta: metadata } = message.params ?? {};
+      if (typeof name !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(name) || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Некорректный вызов Trelio.");
+      }
+      if (name === CODEX_CONNECT_TOOL.name) {
+        if (Object.keys(raw).some(key => key !== "reauthorize") || (raw.reauthorize !== undefined && typeof raw.reauthorize !== "boolean")) {
+          throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Некорректные параметры входа в Trelio.");
+        }
+        await withPrivateProcessSession(() => connection.connect(signal, raw.reauthorize === true), signal);
+        await catalog(signal);
+        await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+        return reply(buildTextResult({ connected: true, instructions: codexInstructions(connection.instructions?.() ?? "") }));
+      }
+
+      const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(async () => {
+        // App-only actions carry their own server capability. Every other
+        // tool goes through the same protection classification as the hook.
+        if (!toolsByName) await catalog(callSignal);
+        const tool = toolsByName?.get(name);
+        if (!tool) throw new RemoteMcpHostError("TRELIO_CODEX_TOOL_UNAVAILABLE", "Инструмент недоступен в каталоге Trelio.");
+        const appOnly = tool._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app");
+        const window = appOnly ? null : updateWindow(metadata, clientInfo);
+        const policyClass = tool._meta?.["trelio/runtimePolicy"]?.class;
+        if (window?.compacted && !readsAuthority.has(name)
+          && !["discovery", "recovery", "human_action"].includes(policyClass)) {
+          const code = "TRELIO_CODEX_CONTEXT_RELOAD_REQUIRED";
+          window.compacted = false;
+          return { content: [{ type: "text", text: `${code}: ${TRELIO_COMPACTION_RECOVERY_CONTEXT}` }],
+            ...(tool.outputSchema ? {} : { structuredContent: { code, dispatched: false } }), isError: true };
+        }
+        let args = cleanNativeRuntimeToolArguments(raw);
+        let pairingRequired;
+        if (!appOnly) {
+          try {
+            args = await prepare({
+              metadata, clientInfo, toolName: `mcp__trelio__${name}`, input: args, signal: callSignal,
+            });
+          } catch (error) {
+            // Only a typed failure during local preparation can establish
+            // that there is no remote tool to replay. Use the existing
+            // signed loader handoff and preserve the original frame.
+            if (runtimeUpgradeRecovery && isHostRuntimeUpgradeRequiredError(error)
+              && await runtimeUpgradeRecovery(error, message, callSignal)) return null;
+            if (error?.code !== "TRELIO_BRIDGE_PAIRING_REQUIRED") throw error;
+            // Policy-disabled companies already allow ordinary direct calls
+            // without proof. The backend owns that decision. With no device
+            // yet, it can still enforce policy, OAuth and ACL on this one call.
+            pairingRequired = error;
+          }
+        }
+        const result = await connection.call(name, args, callSignal);
+        if (window && readsAuthority.has(name) && !result?.isError
+          && result?.structuredContent?.effectiveInstructions?.status === "loaded") window.compacted = false;
+        if (args.runtimeSessionProof || !isMissingRuntimeProof(result)) return result;
+        if (pairingRequired) throw pairingRequired;
+        // No metadata came with this protected call. Preserve the denial,
+        // while avoiding legacy advice to enable hooks in the new client.
+        const code = "TRELIO_RUNTIME_OBSERVATION_REQUIRED";
+        const details = { code, reason: "missing",
+          message: "Codex не передал модель текущего хода. Повторите вызов из обычного чата Codex с актуальным клиентом." };
+        // Match upstream's omitted structured error when a success-only
+        // output schema would otherwise make the client reject this result.
+        return { ...buildTextResult(details),
+          ...(result.structuredContent ? { structuredContent: details } : {}), isError: true };
+      }, callSignal), { signal });
+      return result === null ? null : reply(result);
+    } catch (error) {
+      const pairing = error?.code === "TRELIO_BRIDGE_PAIRING_REQUIRED" && error.pairing;
+      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code)
+        ? error.code : "TRELIO_CODEX_MCP_FAILED";
+      if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32000, message: code } };
+      if (authFailure(error)) toolsByName = null;
+      const reason = pairing ? "Вызовите approve_agent_workspace_bridge_pairing с этими полями. После подтверждения повторите исходный вызов один раз."
+        : authFailure(error) ? (code === "TRELIO_CODEX_AUTH_REQUIRED"
+          ? "Подключите Trelio через trelio_connect и продолжите исходный запрос."
+          : "Повторно подтвердите доступ через trelio_connect с reauthorize=true и продолжите исходный запрос.")
+        : error instanceof RemoteMcpHostError ? error.message
+        : "Trelio не смог подготовить или завершить вызов. Для записи сначала проверьте состояние.";
+      const details = { code, message: reason, ...(pairing
+        ? { pairingId: pairing.pairingId, deviceName: pairing.deviceName } : {}) };
+      return reply({ ...buildTextResult(details),
+        ...(toolsByName?.get(message.params?.name)?.outputSchema ? {} : { structuredContent: details }), isError: true });
+    }
+  };
+};
+
+export const runCodexMcpStdioHost = ({ profile, ...options }) => runStdioHost({
+  ...options, origin: DEFAULT_ORIGIN, codexMcpRuntime: true, runtimeArguments: ["--codex", profile],
+  // This namespace does not own the legacy configuration. An old loaded
+  // client may still depend on those registrations during the transition.
+  migrateClientConfiguration: async () => null,
+  ...(profile === "remote" ? { handleMessage: createCodexMcpHandler(options) } : {}),
+});
+
 export const runMultiToolStdioHost = (options = {}) => {
   if (workspaceBridgeClientEnvironment().TRELIO_WORKSPACE_CLIENT_PROFILE !== "multitool") {
     throw new Error("TRELIO_MULTITOOL_PROFILE_REQUIRED");
@@ -8048,7 +8264,8 @@ if (isDirectModuleInvocation(import.meta.url)) {
   // can observe a partially initialized module during direct Node startup.
   const args = process.argv.slice(2);
   const start = args.length === 0 ? runStdioHost
-    : args.length === 2 && args[0] === "--kimi-work" && args[1] === "remote" ? runKimiStdioHost
+    : args.length === 2 && args[0] === "--codex" && ["remote", "local"].includes(args[1]) ? () => runCodexMcpStdioHost({ profile: args[1] })
+      : args.length === 2 && args[0] === "--kimi-work" && args[1] === "remote" ? runKimiStdioHost
       : args.length === 2 && args[0] === "--kimi-work" && args[1] === "local" ? runKimiLocalStdioHost
         : args.length === 1 && args[0] === "--multitool" ? runMultiToolStdioHost
           : async () => { throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED"); };

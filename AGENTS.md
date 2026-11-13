@@ -470,6 +470,11 @@ publication tooling также остаются вне этого публичн
   symlink entries в package/private storage. Проверяй всю signed loader →
   entrypoint → hook цепочку через Windows shells, а не только stub loader.
 - Навигация task Run без хуков использует только per-call Codex MCP metadata; UUID передаётся через private open stdin, отдельно от допуска модели. См. [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
+- Обычный Codex Desktop получает модель и effort из outer MCP frame и
+  выдаёт одноразовый proof через прежний paired bridge с источником
+  `codex_mcp`. Старые и новые сессии имеют раздельный private state.
+  Имена `trelio-runtime` и `trelio-runtime-local` находятся вне matcher
+  старого `PreToolUse`. Не читать или менять hook trust ради перехода.
 - Запуск новых чатов Codex в общем `trelio-codex-conversation.mjs` – [личная привязка папки](docs/agent-workspace-runtime.md#codex-new-chat); company задачи не определяет launch root. Без existing managed binding hook молчит: чтение задачи не запускает onboarding и не просит выбрать или привязать папку.
 - Явный setup Codex использует [локальный мастер](docs/agent-workspace-runtime.md#codex-connection-wizard): личный bridge → App-only выбор папки → CAS planner → registration read-back. Хуки не нужны для настройки; название подключения остаётся локальным.
 - Синхронизация названия связанного чата – optional механика runtime после Run lifecycle,

@@ -38,6 +38,19 @@ const rows = [call("source", "mcp__trelio", "create_task", original), output,
   call("current", "mcp__trelio_remote_skills", "continue_trelio_local_action", input)];
 const collect = (changes = {}) => collectLocalContinuationArguments({ header, rows, hookInput, input, now, ...changes });
 
+test("Codex MCP recovers only its exact renamed continuation in the current call", () => {
+  const version = "0.167.0-alpha.3.2";
+  const mcpHeader = { ...header, cli_version: version };
+  const mcpInput = { ...hookInput, codex_mcp_version: version };
+  const mcpRows = [call("source", "mcp__trelio_runtime", "create_task", original), output,
+    call("current", "mcp__trelio_runtime_local", "continue_trelio_local_action", input)];
+  const expected = { ...original };
+  delete expected.runtimeSessionProof;
+  assert.deepEqual(collect({ header: mcpHeader, hookInput: mcpInput, rows: mcpRows }), expected);
+  assert.equal(collect({ header: mcpHeader, hookInput: mcpInput }), null);
+  assert.equal(collect({ header: mcpHeader, hookInput: { ...mcpInput, tool_use_id: "different-call" }, rows: mcpRows }), null);
+});
+
 const nativeCheckpoint = { runId: "11111111-1111-4111-8111-111111111111",
   leaseId: "22222222-2222-4222-8222-222222222222", fencingToken: 2, checkpointType: "analysis",
   summary: "Checkpoint with structured evidence", evidence: [{ source: "test", checked: true }],

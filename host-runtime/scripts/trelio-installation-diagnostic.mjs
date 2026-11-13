@@ -8,7 +8,10 @@
  * actions that a bundled skill can apply under its existing confirmation rules.
  */
 
-import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPACES } from "./trelio-codex-routing.mjs";
+import {
+  CODEX_RUNTIME_LOCAL_NAMESPACE, CODEX_RUNTIME_REMOTE_NAMESPACE, CODEX_RUNTIME_ROUTING_INSTRUCTIONS,
+  CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPACES,
+} from "./trelio-codex-routing.mjs";
 import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "./trelio-component-versions.mjs";
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
@@ -64,7 +67,7 @@ export const normalizeDiagnosticReadTarget = (value) => {
   };
 };
 
-const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder, publicService, requiredActions }) => {
+const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime }) => {
   const target = normalizeDiagnosticReadTarget(readTarget ?? workingFolder?.scope);
   const nextCall = target
     ? { toolName: target.taskNumber !== undefined ? "get_task" : "get_agent_instructions", arguments: target }
@@ -79,7 +82,7 @@ const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder
     state,
     readResult: "not_checked",
     invocation: "direct",
-    ...(clientKind === "codex" ? { namespace: "mcp__trelio" } : {}),
+    ...(clientKind === "codex" ? { namespace: codexMcpRuntime ? CODEX_RUNTIME_REMOTE_NAMESPACE : "mcp__trelio" } : {}),
     targetSource: readTarget ? "request" : target ? "existing_folder_binding" : "company_discovery",
     nextCall: state === "client_read_required" ? nextCall : null,
     ...(blockers.length ? { prerequisiteActions: blockers } : {}),
@@ -146,7 +149,7 @@ const buildCodexMcpRecoveryInspection = (restartRequired) => ({
   },
 });
 
-const buildClientInspection = (clientKind, intent, requiredActions) => (
+const buildClientInspection = (clientKind, intent, requiredActions, codexMcpRuntime) => (
   clientKind === "codex"
     ? {
         // These are expected client capabilities, not observations made by
@@ -156,16 +159,17 @@ const buildClientInspection = (clientKind, intent, requiredActions) => (
           state: "not_checked",
           scope: "current_chat_model_tools",
           invocation: "direct",
-          expectedNamespaces: [...CODEX_TRELIO_DIRECT_TOOL_NAMESPACES],
+          expectedNamespaces: codexMcpRuntime
+            ? [CODEX_RUNTIME_REMOTE_NAMESPACE, CODEX_RUNTIME_LOCAL_NAMESPACE] : [...CODEX_TRELIO_DIRECT_TOOL_NAMESPACES],
           nestedInventoryIsComplete: false,
           checks: ["direct_tool_schema_present", "safe_direct_read_result"],
-          instructions: CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
+          instructions: codexMcpRuntime ? CODEX_RUNTIME_ROUTING_INSTRUCTIONS : CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
         },
-        hookDispatch: {
+        ...(!codexMcpRuntime && { hookDispatch: {
           scope: "owning_app_server_and_current_chat",
           checks: ["loaded_definition", "current_definition_trust_and_enabled", "effective_hooks_and_managed_only_policy", "pretooluse_started_and_completed"],
           instructions: "Сопоставь текущий чат и call_id с владеющим App Server, его версией, effective config и hook events. Версия CLI из PATH и новый дочерний codex.exe не доказывают версию/перезапуск owner. Имя dispatch из журнала не является tool_name hook; не выводи ошибку matcher из их различия. Если клиент не раскрывает эти сведения, сохрани unknown, без изменения trust/config/OAuth.",
-        },
+        } }),
         ...(intent === "diagnostics" ? { mcpRecovery: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions)) } : {}),
         pluginInventory: {
           command: "codex plugin list --json",
@@ -438,6 +442,7 @@ export const buildTrelioInstallationDiagnostic = ({
   codexRouting = null,
   codexHookSettings = null,
   codexLegacyMcpMigration = null,
+  codexMcpRuntime = false,
   workingFolder = null,
   publicService = null,
   readTarget = null,
@@ -450,7 +455,8 @@ export const buildTrelioInstallationDiagnostic = ({
       "Локальная диагностика не вернула structured object.",
     );
   }
-  if (clientKind === "codex" && (!codexRouting || typeof codexRouting !== "object")) {
+  const legacyCodex = clientKind === "codex" && !codexMcpRuntime;
+  if (legacyCodex && (!codexRouting || typeof codexRouting !== "object")) {
     throw new TrelioInstallationDiagnosticError(
       "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_RESULT",
       "Проверка Codex direct routing не вернула structured object.",
@@ -464,9 +470,9 @@ export const buildTrelioInstallationDiagnostic = ({
   } else if (clientKind === "codex" && codexLegacyMcpMigration?.status === "blocked") {
     requiredActions.push(buildBlockedLegacyMcpRemovalAction(codexLegacyMcpMigration));
   }
-  if (clientKind === "codex" && codexRouting.status === "action_required") {
+  if (legacyCodex && codexRouting.status === "action_required") {
     requiredActions.push(buildCodexRoutingAction(codexRouting));
-  } else if (clientKind === "codex" && codexRouting.status !== "ready") {
+  } else if (legacyCodex && codexRouting.status !== "ready") {
     requiredActions.push(buildBlockedCodexRoutingAction(codexRouting));
   }
   if (intent === "onboarding" && local.connection?.status !== "ready" && local.connection?.status !== "not_checked") {
@@ -533,7 +539,7 @@ export const buildTrelioInstallationDiagnostic = ({
     local: buildLocalSummary(local, clientKind),
     ...(publicService ? { publicService } : {}),
     codexRouting: clientKind === "codex" ? codexRouting : null,
-    codexHookSettings: clientKind === "codex"
+    codexHookSettings: legacyCodex
       ? codexHookSettings ?? { status: "unknown", scope: "user_config_on_disk", effectiveState: "unknown" }
       : null,
     codexLegacyMcpMigration: clientKind === "codex" && codexLegacyMcpMigration
@@ -546,7 +552,7 @@ export const buildTrelioInstallationDiagnostic = ({
             : {}),
         }
       : null,
-    clientInspection: buildClientInspection(clientKind, intent, requiredActions),
+    clientInspection: buildClientInspection(clientKind, intent, requiredActions, codexMcpRuntime),
     requiredActions,
     warnings,
     ...(intent === "diagnostics" ? {
@@ -567,7 +573,7 @@ export const buildTrelioInstallationDiagnostic = ({
     } : {}),
     liveVerification: {
       ...(intent === "diagnostics" ? {
-        read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions }),
+        read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime }),
         connectionRecovery: {
           ...buildTrelioConnectionRecovery(publicService, requiredActions),
           ...(clientKind === "codex" ? { clientInspection: "clientInspection.mcpRecovery" } : {}),
@@ -585,7 +591,7 @@ export const buildTrelioInstallationDiagnostic = ({
         nextTool: "list_companies",
         successProves: "oauth_bearer_usable_for_current_client_process",
       },
-      hook: ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
+      hook: codexMcpRuntime || ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
         nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",

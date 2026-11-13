@@ -32,7 +32,10 @@ import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpo
 import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment, readCodexNavigationThreadId, buildDeepseekDesktopClientBundle } from "./trelio-codex-conversation.mjs";
-import { readCodexPluginEnablement, readCodexAssistantMarketplaceSource } from "./trelio-codex-routing.mjs";
+import {
+  CODEX_RUNTIME_LOCAL_SERVER, CODEX_RUNTIME_REMOTE_SERVER,
+  readCodexPluginEnablement, readCodexAssistantMarketplaceSource,
+} from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
 import {
@@ -986,6 +989,19 @@ const readObservedRuntimeHookContract = (hooksManifest, eventName) => {
   };
 };
 
+/** A loaded Codex package opts into this route by declaring both exact stdio
+ * profiles. A shared Claude manifest or absent descriptor is insufficient. */
+export const usesCodexMcpRuntime = (manifest) => {
+  const servers = manifest?.mcpServers;
+  return [[CODEX_RUNTIME_REMOTE_SERVER, "remote"], [CODEX_RUNTIME_LOCAL_SERVER, "local"]].every(([name, profile]) => {
+    const server = servers?.[name];
+    return server?.command === "./scripts/launch-trelio-node" && !server.url
+      && JSON.stringify(server.args) === JSON.stringify([
+        "./scripts/trelio-host-runtime-loader.mjs", "mcp", "--codex", profile,
+      ]);
+  });
+};
+
 /**
  * Inspect only the exact bundle that loaded this bridge. Cache scanning could
  * accidentally diagnose another installed version and recreate the stale-task
@@ -1045,7 +1061,8 @@ export const inspectBundledPlugin = async ({
   // An explicit empty native declaration suppresses conventional Claude hooks.
   // Codex must inspect the independently installed component instead; otherwise
   // doctor would falsely report ready from a file Codex intentionally ignores.
-  const separateCodexHooks = clientKind === "codex"
+  const codexMcpRuntime = clientKind === "codex" && usesCodexMcpRuntime(codexManifest.value);
+  const separateCodexHooks = !codexMcpRuntime && clientKind === "codex"
     && JSON.stringify(codexManifest.value?.hooks) === '{"hooks":{}}';
   let component = null;
   let hooksManifest = legacyHooksManifest;
@@ -1094,7 +1111,7 @@ export const inspectBundledPlugin = async ({
   );
   if (component && component.status !== "ready") {
     issues.push("CODEX_HOOK_COMPONENT_REQUIRED");
-  } else if (!hooksReady) {
+  } else if (!codexMcpRuntime && !hooksReady) {
     issues.push("RUNTIME_HOOK_CONTRACT_MISMATCH");
   }
 
@@ -1105,7 +1122,7 @@ export const inspectBundledPlugin = async ({
       codexVersion,
       claudeVersion,
     },
-    hooks: {
+    hooks: codexMcpRuntime ? { status: "not_applicable", runtimeAdmission: "codex_mcp" } : {
       status: hooksReady ? "ready" : "action_required",
       definitionSha256: hooksManifest.raw
         ? crypto.createHash("sha256").update(hooksManifest.raw).digest("hex")
@@ -4329,6 +4346,8 @@ export const startHumanCodexPluginPreservation = (options = {}) => {
   const inspectHookComponent = options.inspectHookComponent ?? inspectHumanCodexHookComponent;
   const ready = main.ready.then(async entry => {
     if (closed || entry?.profile !== "human") return entry;
+    const manifest = await readDiagnosticJsonFile(path.join(entry.installedPath, ".codex-plugin/plugin.json"));
+    if (usesCodexMcpRuntime(manifest.value)) return entry;
     const requirement = await readHumanCodexHookComponentRequirement(entry.installedPath);
     if (!requirement || closed) return entry;
     let component = await inspectHookComponent({ ...options, pluginDirectory: entry.installedPath, environment });

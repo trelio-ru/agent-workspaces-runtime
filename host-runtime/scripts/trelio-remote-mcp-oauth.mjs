@@ -17,6 +17,7 @@ const CALLBACK_TIMEOUT_MS = 10 * 60 * 1_000;
 // The native connection and the OAuth engine share this inventory so a client
 // cannot reach the browser with a profile the engine does not recognize.
 export const TRELIO_NATIVE_OAUTH_CLIENT_IDS = Object.freeze({
+  codex: "trelio_agent_workspaces_v1",
   "kimi-work": "trelio_kimi_work_agent_workspaces_v1",
   multitool: "trelio_multitool_agent_workspaces_v1",
 });

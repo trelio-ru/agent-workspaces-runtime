@@ -5753,25 +5753,10 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
   ]) {
     assert.equal((await stat(path.join(pluginDirectory, assetPath))).isFile(), true);
   }
-  // Codex resolves relative MCP paths against the plugin root and owns the
-  // env allowlist/timeouts. Keep this byte-for-byte host contract independent
-  // from Claude, which resolves plain relative paths against the project cwd.
-  // Since shell 3.2.4 both Codex servers also publish schemas directly: hiding
-  // them behind deferred/Code Mode calls would bypass client PreToolUse. This
-  // is a shell contract, independent of this signed runtime's release version.
-  // The independently published shell may add its bounded remote handshake
-  // timeout without requiring a signed-runtime release. Accept both historical
-  // omission and the current exact value; keep every routing/OAuth field strict.
-  const { startup_timeout_sec: remoteStartupTimeout, ...remoteMcp } = codexManifest.mcpServers.trelio;
-  if (remoteStartupTimeout !== undefined) assert.equal(remoteStartupTimeout, 60);
-  assert.deepEqual(remoteMcp, {
-    url: "https://trelio.ru/mcp",
-    omit_tools_from: ["deferred", "code_mode"],
-    oauth: {
-      clientId: "trelio_agent_workspaces_v1",
-    },
-  });
-  assert.deepEqual(codexManifest.mcpServers["trelio-remote-skills"], {
+  // Both generations can be installed independently of the runtime release.
+  // Validate the actual shell shape, including the direct dispatch policy.
+  const servers = codexManifest.mcpServers;
+  const localMcp = {
     command: "./scripts/launch-trelio-node",
     omit_tools_from: ["deferred", "code_mode"],
     args: ["./scripts/trelio-host-runtime-loader.mjs", "mcp"],
@@ -5789,7 +5774,25 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
       "PATH",
     ],
     tool_timeout_sec: 660,
-  });
+  };
+  if (Object.hasOwn(servers, "trelio-runtime")) {
+    assert.deepEqual(Object.keys(servers).sort(), ["trelio-runtime", "trelio-runtime-local"]);
+    assert.deepEqual(servers["trelio-runtime"], {
+      ...localMcp, args: [...localMcp.args, "--codex", "remote"], startup_timeout_sec: 60,
+    });
+    assert.deepEqual(servers["trelio-runtime-local"], {
+      ...localMcp, args: [...localMcp.args, "--codex", "local"],
+    });
+  } else {
+    const { startup_timeout_sec: remoteStartupTimeout, ...remoteMcp } = servers.trelio;
+    if (remoteStartupTimeout !== undefined) assert.equal(remoteStartupTimeout, 60);
+    assert.deepEqual(remoteMcp, {
+      url: "https://trelio.ru/mcp",
+      omit_tools_from: ["deferred", "code_mode"],
+      oauth: { clientId: "trelio_agent_workspaces_v1" },
+    });
+    assert.deepEqual(servers["trelio-remote-skills"], localMcp);
+  }
   // Claude requires an explicit remote transport and its plugin-root variable
   // for bundled executables. Otherwise `claude mcp list` silently skips the
   // HTTP server and spawns the local launcher from the user's project folder.
@@ -6277,7 +6280,7 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   assert.match(onboardingAgentMetadata, /\$trelio-project-onboarding/u);
   assert.match(workerAgentMetadata, /для работы с Trelio и безопасного сохранения результата/u);
 });
-test("Codex installation reuses approved hooks and gates missing proof before starter onboarding", async () => {
+test("Codex installation checks the loaded transport before starter onboarding", async () => {
   const repositoryRoot = pluginRepositoryRoot;
   const instructionPaths = [
     path.join(repositoryRoot, "README.md"),
@@ -6285,6 +6288,8 @@ test("Codex installation reuses approved hooks and gates missing proof before st
     path.join(pluginDirectory, "README.md"),
   ];
 
+  const manifest = JSON.parse(await readFile(path.join(pluginDirectory, ".codex-plugin", "plugin.json"), "utf8"));
+  const mcpRuntime = Object.hasOwn(manifest.mcpServers, "trelio-runtime");
   for (const instructionPath of instructionPaths) {
     const instructions = await readFile(instructionPath, "utf8");
     const installIndex = instructions.indexOf(
@@ -6302,22 +6307,28 @@ test("Codex installation reuses approved hooks and gates missing proof before st
       starterIndex > liveProbeIndex,
       `${instructionPath} must describe the live hook probe before the starter prompt`,
     );
-    assert.match(instructions, /Codex Desktop/u);
-    assert.match(instructions, /Codex CLI[\s\S]{0,100}`\/hooks`/u);
-    assert.match(instructions, /настройка\s+продолжается\s+без паузы/u);
-    assert.match(instructions, /TRELIO_RUNTIME_HOOK_REQUIRED/u);
-    assert.match(instructions, /reason=missing/u);
-    assert.match(instructions, /не доверяет\s+plugin-bundled\s+hooks\s+автоматически/u);
-    assert.match(instructions, /bypass-флаг/u);
-    assert.match(instructions, /plan_codex_trelio_hook_routing/u);
-    assert.match(instructions, /features\.code_mode\.direct_only_tool_namespaces/u);
-    assert.match(instructions, /отдельно\s+спрашивает разрешение/u);
-    assert.match(
-      instructions,
-      /(?:полностью\s+перезапустите|полный\s+(?:restart|перезапуск)) Codex\/ChatGPT/u,
-    );
+    if (mcpRuntime) {
+      const connectIndex = instructions.indexOf("trelio_connect", installIndex);
+      assert.ok(connectIndex > installIndex && connectIndex < liveProbeIndex);
+      assert.match(instructions, /(?:hooks|PreToolUse|matcher)/u);
+    } else {
+      assert.match(instructions, /Codex Desktop/u);
+      assert.match(instructions, /Codex CLI[\s\S]{0,100}`\/hooks`/u);
+      assert.match(instructions, /настройка\s+продолжается\s+без паузы/u);
+      assert.match(instructions, /TRELIO_RUNTIME_HOOK_REQUIRED/u);
+      assert.match(instructions, /reason=missing/u);
+      assert.match(instructions, /не доверяет\s+plugin-bundled\s+hooks\s+автоматически/u);
+      assert.match(instructions, /bypass-флаг/u);
+      assert.match(instructions, /plan_codex_trelio_hook_routing/u);
+      assert.match(instructions, /features\.code_mode\.direct_only_tool_namespaces/u);
+      assert.match(instructions, /отдельно\s+спрашивает разрешение/u);
+      assert.match(
+        instructions,
+        /(?:полностью\s+перезапустите|полный\s+(?:restart|перезапуск)) Codex\/ChatGPT/u,
+      );
+    }
     assert.match(instructions, /этом же\s+чате/u);
-    assert.match(instructions, /новый чат с той же выбранной папкой нужен только/iu);
+    assert.match(instructions, /новый чат с той же выбранной\s+папкой\s+нужен\s+только/iu);
     assert.doesNotMatch(instructions, /новый чат\s+(?:того же )?проекта/iu);
   }
 });

@@ -334,6 +334,7 @@ jobs:
           node tests/trelio-codex-routing.test.mjs
           node tests/trelio-codex-conversation.test.mjs
           node tests/trelio-codex-launch.test.mjs
+          node tests/trelio-codex-mcp.test.mjs
           node tests/trelio-company-encryption.test.mjs
           node tests/trelio-context-search-matching.test.mjs
           node tests/trelio-context-search-ranking.test.mjs

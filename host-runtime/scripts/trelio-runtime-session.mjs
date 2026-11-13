@@ -3,7 +3,7 @@
 /**
  * Always-on runtime admission for Codex and Claude Code.
  *
- * The hook observes model/effort, registers an Ed25519 public key through
+ * The client boundary observes model/effort, registers an Ed25519 public key through
  * the paired bridge, and injects a fresh signature after each protected tool
  * call has been authored by the model. The private key never enters chat,
  * tool output, MCP arguments, Workspace or backend storage.
@@ -49,7 +49,9 @@ import os from "node:os";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 
 import {
+  AGENT_RUNTIME_EFFORT_LEVELS,
   detectAgentRuntimeAttestation,
+  findRecentCodexRolloutPath,
   resolveRuntimeClientSessionId,
 } from "./trelio-runtime-attestation.mjs";
 import {
@@ -67,11 +69,12 @@ import {
   resolveNativeProposalRouteMarkerPaths,
 } from "./trelio-proposal-route-guard.mjs";
 import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mjs";
+import { normalizeCodexNavigationThreadId } from "./trelio-codex-conversation.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
 import { recoverLocalContinuationArguments, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import {
   canInspectInstructionDelivery, hasManagedInstructionKeys, instructionContextBoundary,
-  manageInstructionKeys,
+  manageInstructionKeys, withoutModelInstructionKeys,
 } from "./trelio-instruction-reuse.mjs";
 
 import {
@@ -192,11 +195,11 @@ const resolveRuntimeStateDirectory = async (configDirectory = null) => {
   return path.join(resolveWorkspaceBridgeConfigDirectory(), "runtime-sessions");
 };
 
-const statePathFor = async (clientSessionId, origin) => {
+const statePathFor = async (clientSessionId, origin, namespace = "") => {
   const runtimeDirectory = await resolveRuntimeStateDirectory();
   return path.join(
     runtimeDirectory,
-    `${crypto.createHash("sha256").update(`${origin}\n${clientSessionId}`).digest("hex")}.json`,
+    `${crypto.createHash("sha256").update(`${origin}\n${namespace}${clientSessionId}`).digest("hex")}.json`,
   );
 };
 
@@ -551,8 +554,10 @@ const createRuntimeState = async ({
     origin, clientSessionId, observation, publicKeySpki,
     claudeDesktopSessionId, previousRuntimeSessionId: previousState?.runtimeSessionId,
   });
-  if (previousState && (!registration.runtimeRefreshSupported
-    || Date.parse(registration.expiresAt) > Date.parse(previousState.expiresAt)
+  // A new-route registration must confirm the exact observation even on its
+  // first call. A rollback server may keep legacy pinning only for legacy hooks.
+  if ((previousState || observation.source === "codex_mcp") && (!registration.runtimeRefreshSupported
+    || (previousState && Date.parse(registration.expiresAt) > Date.parse(previousState.expiresAt))
     || !sameRuntimeConfiguration(registration.observation, observation))) {
     throw Object.assign(new Error("сервер не подтвердил неизменяемый снимок новой конфигурации runtime"), { code: "TRELIO_RUNTIME_REFRESH_INVALID" });
   }
@@ -639,7 +644,15 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
   // Compatibility lifecycle: runtime-session-refresh-v1 in Trelio's legacy registry.
   // Old servers keep their original ABI. This is capability negotiation, never
   // a plaintext/proof fallback after an error from a supported refresh route.
-  if (state.runtimeRefreshSupported === false) return state;
+  const codexMcp = nativeRuntimeObservation.getStore()?.source === "codex_mcp";
+  const requireRefreshSupport = () => {
+    if (codexMcp) throw Object.assign(new Error("Сервер не подтвердил обновление наблюдения Codex MCP."),
+      { code: "TRELIO_RUNTIME_REFRESH_INVALID" });
+  };
+  if (state.runtimeRefreshSupported === false) {
+    requireRefreshSupport();
+    return state;
+  }
   const observation = await observeRuntimeForHook(hookInput);
   if (!observation.modelId || observation.evidenceLevel !== "local_observed") {
     throw Object.assign(new Error("текущий hook не смог определить модель; повторите запрос после появления данных текущего хода"),
@@ -665,6 +678,7 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
         // Only the absent additive endpoint identifies a legacy backend.
         // Authentication, revocation, transport and policy errors stay closed.
         if (error.statusCode !== 404) throw error;
+        requireRefreshSupport();
         current = { ...current, runtimeRefreshSupported: false };
         await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
         return current;
@@ -675,13 +689,16 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
       current = { ...current, observation: registration.observation, runtimeRefreshSupported: registration.runtimeRefreshSupported };
       await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
     }
-    if (!current.runtimeRefreshSupported) return current;
+    if (!current.runtimeRefreshSupported) {
+      requireRefreshSupport();
+      return current;
+    }
     // A failed observation is not evidence of a configuration change. Keep
     // the previous known effort for the SAME model and original TTL. The
     // backend still evaluates this pinned snapshot against company policy:
     // a previously insufficient effort does not become an admission here.
     // Never lend another model's effort, or invent one for a first unknown.
-    if (observation.source !== "deepseek_native" && observation.modelId === current.observation?.modelId
+    if (observation.source !== "deepseek_native" && observation.source !== "codex_mcp" && observation.modelId === current.observation?.modelId
       && observation.effortLevel === null && current.observation.effortLevel !== null) return current;
     if (sameRuntimeConfiguration(current.observation, observation) && !needsLocator(current)) {
       if (current.pendingRefresh) {
@@ -823,7 +840,10 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
   }
   const clientSessionId = resolveRuntimeClientSessionId(hookInput);
   if (!clientSessionId) throw Object.assign(new Error("клиент не передал session_id"), { code: "TRELIO_RUNTIME_SESSION_ID_REQUIRED" });
-  const filePath = await statePathFor(clientSessionId, origin);
+  // A previously loaded companion can still run during a rolling update.
+  // Its lifecycle owns a different local file, even for the same Codex chat.
+  const namespace = nativeRuntimeObservation.getStore()?.source === "codex_mcp" ? "codex-mcp:" : "";
+  const filePath = await statePathFor(clientSessionId, origin, namespace);
   let state = await readRuntimeState(filePath);
   const hostLocator = claudeHostLocator(process.env, process.platform);
   // Reuse evidence only within the same native host tab. A different host
@@ -867,13 +887,16 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
   const updatedInput = await manageInstructionKeys({
     hookInput, identity, input: toolInput, boundary: state.instructionContext,
   });
-  if (identity.status === "local" && toolInput.route === "action") {
+  if (identity.status === "local" && (toolInput.route === "action"
+    || (toolInput.route === "context" && toolInput.parameters.operation === "native_read"
+      && toolName === "get_agent_instructions"))) {
     // A private locator lets the local host validate this hook's original
     // signature before a long preparation and renew only that same nonce.
     // No key/model/effort is added to the MCP envelope or client environment.
     await withRuntimeHookStage("runtime_state_write", () => saveRuntimeProofBinding({
       configDirectory: bridge.resolveWorkspaceBridgeConfigDirectory(), origin, clientSessionId,
       runtimeSessionId: state.runtimeSessionId, expiresAt: state.expiresAt,
+      stateNamespace: namespace,
       writePrivateJsonFile: bridge.writePrivateJsonFile,
     }));
   }
@@ -923,10 +946,63 @@ export const prepareNativeRuntimeToolArguments = async ({ sessionId, observation
       || typeof sessionId !== "string" || !sessionId || sessionId.length > 256) {
     throw Object.assign(new Error("Harness не подтвердил текущую модель и сессию."), { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
   }
-  const hookInput = { hook_event_name: "PreToolUse", session_id: `${desktop === true ? "dsh-desktop" : "dsh"}:${sessionId}`,
-    tool_name: toolName, tool_input: Object.fromEntries(Object.entries(structuredClone(input)).filter(([key]) =>
-      !["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"].includes(key))) };
+  return prepareObservedRuntimeToolArguments({
+    sessionId: `${desktop === true ? "dsh-desktop" : "dsh"}:${sessionId}`, observation, toolName, input, signal,
+  });
+};
+
+/** The ordinary Codex chat attaches its effective settings to the outer MCP
+ * frame. Read the frame only: no model-authored arguments, prior turn, or
+ * SessionStart file can supply settings for this invocation. */
+export const observeCodexMcpTurn = (metadata, clientInfo, now = new Date()) => {
+  if (clientInfo?.name !== "codex-mcp-client") return null;
+  const turn = metadata?.["x-codex-turn-metadata"];
+  const sessionId = normalizeCodexNavigationThreadId(metadata?.threadId);
+  const modelId = turn?.model;
+  if (!sessionId || !turn || (turn.thread_id !== undefined && normalizeCodexNavigationThreadId(turn.thread_id) !== sessionId)
+    || typeof turn?.turn_id !== "string" || !turn.turn_id || turn.turn_id.length > 256
+    || typeof modelId !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,254}$/u.test(modelId)) return null;
+  return { sessionId, observation: {
+    schemaVersion: 1, clientFamily: "codex", source: "codex_mcp", evidenceLevel: "local_observed",
+    modelId, effortLevel: AGENT_RUNTIME_EFFORT_LEVELS.includes(turn.reasoning_effort) ? turn.reasoning_effort : null,
+    observedAt: now.toISOString(),
+  } };
+};
+
+export const cleanNativeRuntimeToolArguments = (input) => Object.fromEntries(Object.entries(input ?? {}).filter(([key]) =>
+  !["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"].includes(key)));
+
+export const prepareCodexMcpToolArguments = ({ metadata, clientInfo, toolName, input, signal }) => {
+  const evidence = observeCodexMcpTurn(metadata, clientInfo);
+  const cleaned = cleanNativeRuntimeToolArguments(input);
+  // The existing backend still decides whether the current company requires
+  // evidence. A missing observation never reuses an injected legacy proof.
+  if (!evidence) return withoutModelInstructionKeys(cleaned,
+    resolveTrelioHookToolIdentity({ tool_name: toolName, tool_input: cleaned }));
+  return prepareObservedRuntimeToolArguments({ ...evidence, toolName, input, signal,
+    codexCallId: metadata.callId, codexVersion: metadata["x-codex-turn-metadata"].codex_version });
+};
+
+const prepareObservedRuntimeToolArguments = async ({
+  sessionId, observation, toolName, input, signal, codexCallId, codexVersion,
+}) => {
+  // Shared preparation keeps proposal files, private continuation recovery,
+  // registration, refresh and proof renewal behind the same existing boundary.
+  const hookInput = { hook_event_name: "PreToolUse", session_id: sessionId,
+    tool_name: toolName, tool_input: cleanNativeRuntimeToolArguments(input) };
   let updated = hookInput.tool_input;
+  // Some encrypted continuations carry a reference to arguments left in the
+  // originating chat. Recover only that exact recorded tool call, as before.
+  // Model and effort still come exclusively from the current MCP request.
+  if (observation.source === "codex_mcp" && updated.parameters?.nativeCallRef
+    && typeof codexCallId === "string" && codexCallId.length <= 256) {
+    const transcript = await findRecentCodexRolloutPath(sessionId);
+    if (transcript) {
+      hookInput.transcript_path = transcript;
+      hookInput.tool_use_id = codexCallId;
+      hookInput.codex_mcp_version = codexVersion;
+    }
+  }
   const emit = ({ hookSpecificOutput: decision }) => {
     if (decision?.permissionDecision === "deny") throw Object.assign(new Error(decision.permissionDecisionReason),
       { code: "TRELIO_LOCAL_PROPOSAL_ROUTE_REQUIRED" });
@@ -935,8 +1011,6 @@ export const prepareNativeRuntimeToolArguments = async ({ sessionId, observation
   const deadline = AbortSignal.any([AbortSignal.timeout(22_000), ...(signal ? [signal] : [])]);
   await withPrivateProcessSession(() => nativeRuntimeObservation.run(Object.freeze({ ...observation }),
     async () => {
-      // Native profiles are long-lived and have no command SessionStart hook.
-      // Reuse the bounded expired-state sweep without a background interval.
       if (Date.now() >= nativeCleanupAfter) {
         nativeCleanupAfter = Date.now() + 30 * 60_000;
         await cleanupStaleRuntimeSessions().catch(() => undefined);

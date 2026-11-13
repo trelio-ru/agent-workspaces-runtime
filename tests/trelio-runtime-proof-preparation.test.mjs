@@ -6,7 +6,7 @@ import { buildRuntimeSessionProof } from "../host-runtime/scripts/trelio-runtime
 import { prepareRuntimeProofSubmission, saveRuntimeProofBinding,
   submitPreparedRuntimeProof } from "../host-runtime/scripts/trelio-runtime-proof-preparation.mjs";
 
-const fixture = async (overrides = {}) => {
+const fixture = async ({ stateNamespace = "", ...overrides } = {}) => {
   let clock = Date.parse("2026-10-13T09:18:29.000Z");
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
   const origin = "https://proof-tests.invalid";
@@ -18,9 +18,9 @@ const fixture = async (overrides = {}) => {
   const files = new Map();
   const clientSessionId = crypto.randomUUID();
   await saveRuntimeProofBinding({ configDirectory, origin, clientSessionId,
-    runtimeSessionId: state.runtimeSessionId, expiresAt: state.expiresAt,
+    runtimeSessionId: state.runtimeSessionId, expiresAt: state.expiresAt, stateNamespace,
     writePrivateJsonFile: async (file, value) => files.set(file, value) });
-  const stateKey = crypto.createHash("sha256").update(`${origin}\n${clientSessionId}`).digest("hex");
+  const stateKey = crypto.createHash("sha256").update(`${origin}\n${stateNamespace}${clientSessionId}`).digest("hex");
   files.set(path.join(configDirectory, "runtime-sessions", `${stateKey}.json`), state);
   const proof = buildRuntimeSessionProof({ state, toolName: nativeTool, now: new Date(clock) });
   const create = input => prepareRuntimeProofSubmission({ origin, nativeTool, proof,
@@ -32,6 +32,18 @@ const fixture = async (overrides = {}) => {
     age: p => clock - Date.parse(p.issuedAt),
     verify: p => crypto.verify(null, payload(p), publicKey, Buffer.from(p.signature, "base64url")) };
 };
+
+test("the Codex MCP proof renews only from its separate private state", async () => {
+  const f = await fixture({ stateNamespace: "codex-mcp:" });
+  const prepared = await f.create();
+  f.advance(180_000);
+  try {
+    const proof = prepared.forSubmission();
+    assert.equal(f.age(proof), 0);
+    assert.equal(proof.nonce, f.proof.nonce);
+    assert.ok(f.verify(proof));
+  } finally { prepared.close(); }
+});
 
 test("four-minute preparation renews the same one-use proof without extending its 120s TTL", async () => {
   const f = await fixture();

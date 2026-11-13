@@ -165,6 +165,37 @@ const parseJsonLinesFromTail = async (filePath) => {
   }
 };
 
+// A normal MCP frame supplies the thread UUID but no rollout path. Search only
+// the UUIDv7 creation date and the recent dated directories for this exact
+// suffix. The neighboring dates cover UTC/local day differences.
+export const findRecentCodexRolloutPath = async (threadId, environment = process.env, now = Date.now()) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(threadId || "")) return null;
+  const root = path.join(environment.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
+  const creation = threadId[14] === "7" ? Number.parseInt(threadId.slice(0, 13).replace("-", ""), 16) : 0;
+  const times = [now, now - 86400_000, now - 2 * 86400_000];
+  if (creation > 0 && creation <= now) times.push(creation, creation - 86400_000, creation + 86400_000);
+  const visited = new Set();
+  let match = null;
+  for (const time of times) {
+    const date = new Date(time);
+    const segments = [date.getFullYear(), date.getMonth() + 1, date.getDate()].map(value => String(value).padStart(2, "0"));
+    const directory = path.join(root, ...segments);
+    if (visited.has(directory)) continue;
+    visited.add(directory);
+    try {
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      if (entries.length > 2048) return null;
+      const matches = entries.filter(entry => entry.isFile() && entry.name.startsWith("rollout-")
+        && entry.name.endsWith(`-${threadId}.jsonl`));
+      if (matches.length > 1 || matches.length === 1 && match) return null;
+      if (matches.length === 1) match = path.join(directory, matches[0].name);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+    }
+  }
+  return match;
+};
+
 const findCodexRolloutPath = async (threadId, environment) => {
   if (!THREAD_ID_PATTERN.test(String(threadId || ""))) return null;
   const codexRoot = environment.CODEX_HOME

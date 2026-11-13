@@ -8,6 +8,15 @@ export const CODEX_TRELIO_DIRECT_TOOL_NAMESPACES = Object.freeze([
   "mcp__trelio",
   "mcp__trelio_remote_skills",
 ]);
+// Separate MCP registration names keep the immutable legacy PreToolUse
+// matchers away from new Desktop calls, even while both plugins are enabled.
+// Backend tool names and server-selected route identifiers stay canonical.
+export const CODEX_RUNTIME_REMOTE_SERVER = "trelio-runtime";
+export const CODEX_RUNTIME_LOCAL_SERVER = "trelio-runtime-local";
+export const CODEX_RUNTIME_REMOTE_NAMESPACE = "mcp__trelio_runtime";
+export const CODEX_RUNTIME_LOCAL_NAMESPACE = "mcp__trelio_runtime_local";
+export const CODEX_RUNTIME_ROUTING_INSTRUCTIONS =
+  "In this Codex plugin, the exact backend route server trelio means mcp__trelio_runtime and trelio-remote-skills means mcp__trelio_runtime_local. Use their direct tools and forward exact arguments unchanged. Never call a legacy namespace in place of this route. ";
 // The namespaces are deliberately excluded from nested Code Mode dispatch so
 // the client can run PreToolUse before every protected call. ALL_TOOLS is an
 // inventory of nested-call capabilities, not evidence of model tool exposure.

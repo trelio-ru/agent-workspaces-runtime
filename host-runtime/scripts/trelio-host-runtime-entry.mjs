@@ -36,12 +36,14 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
   // including its bounded foreground update and signature verification. Keep
   // the forwarded selector closed at both executable boundaries: an old
   // runtime rejects these arguments instead of entering a foreign local host.
+  const codexProfile = mode === "mcp" && argumentsAfterMode.length === 2
+    && argumentsAfterMode[0] === "--codex" && ["remote", "local"].includes(argumentsAfterMode[1]);
   const kimiProfile = mode === "mcp" && argumentsAfterMode.length === 2
     && argumentsAfterMode[0] === "--kimi-work"
     && ["remote", "local"].includes(argumentsAfterMode[1]);
   const multiToolProfile = mode === "mcp" && argumentsAfterMode.length === 1
     && argumentsAfterMode[0] === "--multitool";
-  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !multiToolProfile) {
+  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !multiToolProfile && !codexProfile) {
     throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED");
   }
 
