@@ -16,7 +16,7 @@ export const CODEX_RUNTIME_LOCAL_SERVER = "trelio-runtime-local";
 export const CODEX_RUNTIME_REMOTE_NAMESPACE = "mcp__trelio_runtime";
 export const CODEX_RUNTIME_LOCAL_NAMESPACE = "mcp__trelio_runtime_local";
 export const CODEX_RUNTIME_ROUTING_INSTRUCTIONS =
-  "In this Codex plugin, the exact backend route server trelio means mcp__trelio_runtime and trelio-remote-skills means mcp__trelio_runtime_local. Use their direct tools and forward exact arguments unchanged. Never call a legacy namespace in place of this route. ";
+  "In this Codex plugin, the exact backend route server trelio means mcp__trelio_runtime and trelio-remote-skills means mcp__trelio_runtime_local. Use the exact tool on the available Codex route, direct or Code Mode. Never call a legacy namespace. In Code Mode, forward the server-selected continuation with all required original arguments from the call that produced it. Keep the route and validated seed unchanged. If needed, keep the result and original input in store()/load() between calls. ";
 // The namespaces are deliberately excluded from nested Code Mode dispatch so
 // the client can run PreToolUse before every protected call. ALL_TOOLS is an
 // inventory of nested-call capabilities, not evidence of model tool exposure.

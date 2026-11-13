@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCodexMcpHandler, handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
   cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments,
@@ -83,9 +84,25 @@ test("new Codex diagnostics route the read to stdio without checking or changing
   });
   const report = result.structuredContent ?? JSON.parse(result.content[0].text);
   assert.equal(report.liveVerification.read.namespace, "mcp__trelio_runtime");
+  assert.equal(report.liveVerification.read.invocation, "direct_or_code_mode");
+  assert.match(report.liveVerification.read.instructions, /Code Mode/u);
+  assert.equal(report.clientInspection.toolExposure.invocation, "direct_or_code_mode");
+  assert.deepEqual(report.clientInspection.toolExposure.checks, ["tool_available_on_current_route", "safe_read_result"]);
+  assert.match(report.clientInspection.mcpRecovery.evidence.instructions, /direct и Code Mode/u);
   assert.equal(report.liveVerification.hook.state, "not_applicable");
   assert.equal(report.clientInspection.hookDispatch, undefined);
   assert.deepEqual(report.requiredActions, []);
+});
+
+test("bootstrap recovery keeps the hook-free Codex route when local tools are unavailable", () => {
+  const report = buildTrelioBootstrapVerification({
+    local: { plugin: { status: "ready", hooks: { runtimeAdmission: "codex_mcp" } },
+      node: { status: "ready" }, git: { status: "ready" } },
+    publicService: { state: "available" },
+  });
+  assert.equal(report.readVerification.invocation, "direct_or_code_mode");
+  assert.match(report.clientRecoveryByKind.selection, /Code Mode/u);
+  assert.ok(report.clientRecoveryByKind.codex.verification.checks.includes("safe_read_in_target_thread"));
 });
 
 test("an unpaired Codex call leaves the company decision to the backend and returns exact pairing on denial", async () => {

@@ -2502,24 +2502,27 @@ Parser принимает только последнюю complete строку 
 
 ## Диагностика готовности
 
-В Codex `mcp__trelio` и `mcp__trelio_remote_skills` вызываются напрямую,
-вне `functions.exec`, чтобы клиент исполнил `PreToolUse`. `ALL_TOOLS`
-описывает доступные nested calls; отсутствие direct namespaces в нём не является
-отказом MCP. Подсказки Code Mode/output budget и `store()/load()` применяются
-только к реально доступным nested tools. Общий текст формируется одним runtime
-источником для initialize, диагностики и managed folder block.
+В обычном Codex новые `mcp__trelio_runtime` и `mcp__trelio_runtime_local`
+вызываются через доступный direct tool или Code Mode. Runtime использует
+outer metadata текущего вызова в обоих маршрутах. В Code Mode локальное
+продолжение передаёт полный original input вместе с возвращённым
+`providerSelection`: native recovery из direct transcript не читает exec.
+Храни exact input и результат в `store()/load()`, если продолжение идёт
+следующим exec. Подтверждение мутаций и проверка шифрованного маршрута
+сохраняются. Для legacy Codex с хуками `mcp__trelio` и
+`mcp__trelio_remote_skills` по-прежнему вызываются напрямую.
 
-`clientInspection.toolExposure` задаёт ожидаемые namespaces и две проверки:
-direct schema в текущем ходе и безопасное прямое чтение. Сам local MCP не видит
-model toolset owner-процесса, поэтому exposure и `readiness.checks.toolExposure`
-остаются `not_checked`; config, CLI inventory и server `ready` не подтверждают
-их. Успешный вызов доказывает только проверенный инструмент/ход. Если прямой
-schema нет, агент сразу запускает `trelio-diagnostics`, а не заканчивает работу
-общим отказом. Один local `diagnose_trelio_installation` с
+`clientInspection.toolExposure` задаёт ожидаемые namespaces и одно безопасное
+чтение через доступный маршрут. Local MCP не видит model toolset owner-процесса,
+поэтому exposure и `readiness.checks.toolExposure` остаются `not_checked`.
+Config, CLI inventory и server `ready` не подтверждают доступность инструмента.
+Для нового маршрута отсутствие только direct schema или только nested tool
+не доказывает отсутствия обоих. Один local `diagnose_trelio_installation` с
 `clientKind=codex,intent=diagnostics` собирает проверяемые факты; если tool тоже
-не доступен напрямую, допускается только read-only bootstrap навыка с exact
-loaded plugin launcher и routing plan. Protected calls через nested exec,
-browser/HTTP/другой MCP этим не разрешаются. Непроверенное состояние не объявляется
+не доступен на подходящем маршруте, допускается только read-only bootstrap
+навыка через exact loaded plugin launcher. Legacy routing plan применим только
+к hook-маршруту. Диагностика не разрешает обходить выбранный маршрут через
+browser/HTTP/другой MCP. Непроверенное состояние не объявляется
 недоступностью; само отсутствие schema не доказывает неисправность config или OAuth.
 
 Diagnostic runtime автоматически проверяет anonymous GET `/mcp` (ожидаемый 405),

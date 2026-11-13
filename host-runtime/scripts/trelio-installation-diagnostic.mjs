@@ -20,12 +20,14 @@ const requiresClientRestart = (requiredActions) => requiredActions.some((action)
   action.restartRequired === true || action.plan?.restartRequired === true
 ));
 
-export const buildTrelioConnectionRecovery = (publicService, requiredActions = []) => ({
+export const buildTrelioConnectionRecovery = (publicService, requiredActions = [], codexMcpRuntime = false) => ({
   state: ["available", "recovered"].includes(publicService?.state)
     ? "verify_current_client_tools" : "public_service_not_confirmed",
   connectionRetried: false,
   restartRequired: requiresClientRestart(requiredActions),
-  instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema действительно отсутствует в текущем ходе, перейди к client recovery для фактического клиента: это наблюдение о выдаче tools, не доказательство failed startup. Не заканчивай повтором doctor или общим отказом без следующего шага. Не объявляй старый 5xx текущей ошибкой. Без наблюдаемого client blocker или exact requiredAction не советуй restart; login, pairing и переустановка требуют своих отдельных оснований. Не придумывай команды или API reconnect.",
+  instructions: codexMcpRuntime
+    ? "Public probes и doctor не подтверждают доступ модели. После available/recovered проверь доступный маршрут текущего чата (direct или Code Mode) одним безопасным чтением. При точном отказе следуй его причине. Client recovery нужен только при подтверждённом сбое MCP или отсутствии инструмента на доступных маршрутах."
+    : "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema действительно отсутствует в текущем ходе, перейди к client recovery для фактического клиента: это наблюдение о выдаче tools, не доказательство failed startup. Не заканчивай повтором doctor или общим отказом без следующего шага. Не объявляй старый 5xx текущей ошибкой. Без наблюдаемого client blocker или exact requiredAction не советуй restart; login, pairing и переустановка требуют своих отдельных оснований. Не придумывай команды или API reconnect.",
 });
 
 const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"]);
@@ -41,8 +43,8 @@ export class TrelioInstallationDiagnosticError extends Error {
 
 /**
  * Prepare one ordinary native read, without executing it from the local MCP.
- * Only the owning client sees its model's direct schemas and can dispatch the
- * normal hook/proof. A successful doctor, cached catalogue or empty ALL_TOOLS
+ * Only the owning client sees the tools available to the current turn and can
+ * dispatch an ordinary read with its proof. A doctor or a cached catalogue
  * cannot replace that evidence. Keeping selection here avoids asking the model
  * to reconstruct tool names/arguments or mistake an untested read for a failure.
  */
@@ -81,13 +83,16 @@ const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder
   return {
     state,
     readResult: "not_checked",
-    invocation: "direct",
+    invocation: codexMcpRuntime ? "direct_or_code_mode" : "direct",
     ...(clientKind === "codex" ? { namespace: codexMcpRuntime ? CODEX_RUNTIME_REMOTE_NAMESPACE : "mcp__trelio" } : {}),
     targetSource: readTarget ? "request" : target ? "existing_folder_binding" : "company_discovery",
     nextCall: state === "client_read_required" ? nextCall : null,
     ...(blockers.length ? { prerequisiteActions: blockers } : {}),
-    insufficientEvidence: ["empty_nested_ALL_TOOLS", "public_service_available", "server_ready", "cli_inventory"],
-    instructions: "При state=client_read_required выполни nextCall обычным прямым MCP-вызовом в текущем чате, вне functions.exec. Пустой ALL_TOOLS не проверяет direct schema. До фактического ответа или точного отказа клиента чтение остаётся not_checked: не объявляй инструменты недоступными и не повторяй doctor вместо чтения. Если direct schema действительно отсутствует, укажи отсутствие direct schema и чтение not_checked; не выдумывай вызов и не обходи его shell/HTTP/local proxy. После успешного чтения продолжай исходную работу; list_companies проверяет только OAuth и требует затем выбрать exact scope. Обычные ACL/proof/E2EE и отдельный refresh существующей папки сохраняются; исходную mutation не повторяй.",
+    insufficientEvidence: [codexMcpRuntime ? "one_route_unavailable" : "empty_nested_ALL_TOOLS",
+      "public_service_available", "server_ready", "cli_inventory"],
+    instructions: codexMcpRuntime
+      ? "Выполни nextCall в текущем чате через доступный маршрут указанного namespace. Если direct schema нет, проверь точный инструмент в Code Mode. После фактического отказа сохрани его причину, без shell/HTTP и повторов mutation. list_companies подтверждает OAuth, после него выбери exact scope для защищённого чтения. ACL/proof/E2EE действуют в обоих маршрутах."
+      : "При state=client_read_required выполни nextCall обычным прямым MCP-вызовом в текущем чате, вне functions.exec. Пустой ALL_TOOLS не проверяет direct schema. До фактического ответа или точного отказа клиента чтение остаётся not_checked: не объявляй инструменты недоступными и не повторяй doctor вместо чтения. Если direct schema действительно отсутствует, укажи отсутствие direct schema и чтение not_checked; не выдумывай вызов и не обходи его shell/HTTP/local proxy. После успешного чтения продолжай исходную работу; list_companies проверяет только OAuth и требует затем выбрать exact scope. Обычные ACL/proof/E2EE и отдельный refresh существующей папки сохраняются; исходную mutation не повторяй.",
   };
 };
 
@@ -110,7 +115,7 @@ const requireEnum = (value, allowed, fieldName) => {
  * and never present toggling as a substitute for a required process restart.
  * Archive is excluded entirely: it can delete a chat's associated automation.
  */
-const buildCodexMcpRecoveryInspection = (restartRequired) => ({
+const buildCodexMcpRecoveryInspection = (restartRequired, codexMcpRuntime = false) => ({
   state: "client_preflight_required",
   connectionRetried: false,
   restartRequired,
@@ -121,9 +126,12 @@ const buildCodexMcpRecoveryInspection = (restartRequired) => ({
   appliesTo: "observed_client_tool_exposure_gap_or_failed_mcp_connection",
   evidence: {
     state: "not_checked",
-    accepted: ["direct_schema_absent_in_current_turn", "diagnosed_stale_or_failed_mcp_connection"],
-    insufficient: ["empty_nested_ALL_TOOLS", "public_probe_timeout", "cli_inventory"],
-    instructions: "Сначала проверь реально доступную direct schema текущего хода. Отсутствие только в ALL_TOOLS не является отсутствием инструмента. Если direct schema отсутствует даже при server ready, предложи восстановление выдачи tools; не приписывай серверу тайм-аут и не требуй ещё один doctor. Наличие schema ведёт к обычному direct read; его ACL/OAuth/hook-отказ разбирается по точному коду, а не через toggle.",
+    accepted: [codexMcpRuntime ? "tool_absent_from_available_current_turn_routes" : "direct_schema_absent_in_current_turn",
+      "diagnosed_stale_or_failed_mcp_connection"],
+    insufficient: [codexMcpRuntime ? "one_route_unavailable" : "empty_nested_ALL_TOOLS", "public_probe_timeout", "cli_inventory"],
+    instructions: codexMcpRuntime
+      ? "Проверь доступные маршруты текущего хода: direct и Code Mode. Если один не показывает инструмент, проверь другой, когда он есть. При доступном инструменте выполни обычное чтение. Разбери точный ACL/OAuth/runtime-отказ по коду."
+      : "Сначала проверь реально доступную direct schema текущего хода. Отсутствие только в ALL_TOOLS не является отсутствием инструмента. Если direct schema отсутствует даже при server ready, предложи восстановление выдачи tools; не приписывай серверу тайм-аут и не требуй ещё один doctor. Наличие schema ведёт к обычному direct read; его ACL/OAuth/hook-отказ разбирается по точному коду, а не через toggle.",
   },
   preferred: {
     method: "config/mcpServer/reload",
@@ -136,16 +144,17 @@ const buildCodexMcpRecoveryInspection = (restartRequired) => ({
     method: "toggle_trelio_plugin",
     state: restartRequired ? "not_applicable" : "client_action_required",
     automatic: false,
-    instructions: "При наблюдаемом отсутствии direct schema в текущем ходе либо подтверждённом зависшем/неудачном MCP startup предложи два варианта: выключить и включить сам плагин Trelio Agent Workspaces в настройках Codex/ChatGPT → Плагины либо полностью выйти из приложения и открыть его снова. Сначала предложи переключение плагина как вариант без полного выхода. Нужен переключатель всего плагина, не отдельного MCP-сервера; дождись выключения, затем включения и вернись в прежний чат. Шаг выполняет пользователь либо доступный штатный client tool; local runtime не автоматизирует UI и не редактирует config ради имитации reload. Если переключателя нет или проверка после переключения не прошла, используй полный выход. Exact requiredAction с restartRequired=true требует полного выхода: переключение его не заменяет. Не удаляй/переустанавливай плагин, не меняй OAuth, pairing или hook trust.",
+    instructions: `При ${codexMcpRuntime ? "наблюдаемом отсутствии инструмента на доступных маршрутах текущего хода" : "наблюдаемом отсутствии direct schema в текущем ходе"} либо подтверждённом зависшем/неудачном MCP startup предложи два варианта: выключить и включить сам плагин Trelio Agent Workspaces в настройках Codex/ChatGPT → Плагины либо полностью выйти из приложения и открыть его снова. Сначала предложи переключение плагина как вариант без полного выхода. Нужен переключатель всего плагина, не отдельного MCP-сервера; дождись выключения, затем включения и вернись в прежний чат. Шаг выполняет пользователь либо доступный штатный client tool; local runtime не автоматизирует UI и не редактирует config ради имитации reload. Если переключателя нет или проверка после переключения не прошла, используй полный выход. Exact requiredAction с restartRequired=true требует полного выхода: переключение его не заменяет. Не удаляй/переустанавливай плагин, не меняй OAuth, pairing или hook trust.`,
   },
   restartAlternative: {
     method: "fully_quit_and_reopen_application",
     automatic: false,
-    instructions: "Полностью завершить Codex/ChatGPT обычной командой выхода, открыть заново и вернуться в тот же чат. Закрытие окна или создание нового чата в прежнем процессе не являются полным выходом. Предложи этот вариант при наблюдаемом отсутствии direct schema, подтверждённом stale/failed MCP либо обязательном process restart; не повторяй уже выполненный restart без нового evidence и не завершай процессы автоматически.",
+    instructions: `Полностью завершить Codex/ChatGPT обычной командой выхода, открыть заново и вернуться в тот же чат. Закрытие окна или создание нового чата в прежнем процессе не являются полным выходом. Предложи этот вариант при ${codexMcpRuntime ? "отсутствии инструмента на доступных маршрутах" : "наблюдаемом отсутствии direct schema"}, подтверждённом stale/failed MCP либо обязательном process restart; не повторяй уже выполненный restart без нового evidence и не завершай процессы автоматически.`,
   },
   verification: {
-    checks: ["same_thread_preserved", "linked_schedules_preserved", "fresh_mcp_starting_then_ready", "safe_direct_read_in_target_thread"],
-    instructions: "После выбранного варианта вернись в тот же чат, проверь direct schema и одно безопасное обычное чтение с прежними ACL/proof/E2EE. ready подтверждает соединение, но не выдачу инструментов модели. Чат не архивировать, расписания не удалять/переносить/пересоздавать: unarchive их не восстанавливает. Не посылай сообщение в другой чат без отдельного разрешения и не повторяй mutation. Неизвестную проверку обозначь not_checked.",
+    checks: ["same_thread_preserved", "linked_schedules_preserved", "fresh_mcp_starting_then_ready",
+      codexMcpRuntime ? "safe_read_in_target_thread" : "safe_direct_read_in_target_thread"],
+    instructions: `После выбранного варианта вернись в тот же чат, проверь ${codexMcpRuntime ? "доступный маршрут" : "direct schema"} и одно безопасное обычное чтение с прежними ACL/proof/E2EE. ready подтверждает соединение, но не выдачу инструментов модели. Чат не архивировать, расписания не удалять/переносить/пересоздавать: unarchive их не восстанавливает. Не посылай сообщение в другой чат без отдельного разрешения и не повторяй mutation. Неизвестную проверку обозначь not_checked.`,
   },
 });
 
@@ -154,15 +163,17 @@ const buildClientInspection = (clientKind, intent, requiredActions, codexMcpRunt
     ? {
         // These are expected client capabilities, not observations made by
         // this stdio process. A disk config or successful MCP initialize cannot
-        // tell us which direct schemas the owner delivered to the current turn.
+        // tell us which tools the owner delivered to the current turn.
         toolExposure: {
           state: "not_checked",
           scope: "current_chat_model_tools",
-          invocation: "direct",
+          invocation: codexMcpRuntime ? "direct_or_code_mode" : "direct",
           expectedNamespaces: codexMcpRuntime
             ? [CODEX_RUNTIME_REMOTE_NAMESPACE, CODEX_RUNTIME_LOCAL_NAMESPACE] : [...CODEX_TRELIO_DIRECT_TOOL_NAMESPACES],
           nestedInventoryIsComplete: false,
-          checks: ["direct_tool_schema_present", "safe_direct_read_result"],
+          checks: codexMcpRuntime
+            ? ["tool_available_on_current_route", "safe_read_result"]
+            : ["direct_tool_schema_present", "safe_direct_read_result"],
           instructions: codexMcpRuntime ? CODEX_RUNTIME_ROUTING_INSTRUCTIONS : CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
         },
         ...(!codexMcpRuntime && { hookDispatch: {
@@ -170,7 +181,7 @@ const buildClientInspection = (clientKind, intent, requiredActions, codexMcpRunt
           checks: ["loaded_definition", "current_definition_trust_and_enabled", "effective_hooks_and_managed_only_policy", "pretooluse_started_and_completed"],
           instructions: "Сопоставь текущий чат и call_id с владеющим App Server, его версией, effective config и hook events. Версия CLI из PATH и новый дочерний codex.exe не доказывают версию/перезапуск owner. Имя dispatch из журнала не является tool_name hook; не выводи ошибку matcher из их различия. Если клиент не раскрывает эти сведения, сохрани unknown, без изменения trust/config/OAuth.",
         } }),
-        ...(intent === "diagnostics" ? { mcpRecovery: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions)) } : {}),
+        ...(intent === "diagnostics" ? { mcpRecovery: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions), codexMcpRuntime) } : {}),
         pluginInventory: {
           command: "codex plugin list --json",
           proves: ["installed_plugin_version", "plugin_enabled_state"],
@@ -414,18 +425,23 @@ const buildLocalRequiredActions = (local) => {
  */
 export const buildTrelioBootstrapVerification = ({ local, publicService }) => {
   const requiredActions = buildLocalRequiredActions(local);
+  // Use the detected shell's admission profile for the conditional Codex branch.
+  // This still does not identify the owning client's current turn or toolset.
+  const codexMcpRuntime = local.plugin?.hooks?.runtimeAdmission === "codex_mcp";
   return {
     connectionRecovery: {
-      ...buildTrelioConnectionRecovery(publicService, requiredActions),
+      ...buildTrelioConnectionRecovery(publicService, requiredActions, codexMcpRuntime),
       clientInspection: "clientRecoveryByKind",
     },
     readVerification: buildDiagnosticReadVerification({
-      clientKind: null, publicService, requiredActions,
+      clientKind: null, publicService, requiredActions, codexMcpRuntime,
     }),
     clientRecoveryByKind: {
       clientKind: "not_checked",
-      selection: "Используй только ветку фактического клиента. CLI не определяет clientKind, direct toolset или effective routing. Codex: обычный прямой MCP-вызов вне functions.exec; ветка codex применяется только после проверки её evidence. Для другого клиента используй его штатные возможности, не инструкции Codex.",
-      codex: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions)),
+      selection: codexMcpRuntime
+        ? "Используй ветку фактического клиента. Для нового Codex MCP проверь доступный direct или Code Mode маршрут. Версия CLI сама не доказывает доступность инструментов."
+        : "Используй только ветку фактического клиента. CLI не определяет clientKind, direct toolset или effective routing. Codex: обычный прямой MCP-вызов вне functions.exec; ветка codex применяется только после проверки её evidence. Для другого клиента используй его штатные возможности, не инструкции Codex.",
+      codex: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions), codexMcpRuntime),
     },
   };
 };
@@ -575,7 +591,7 @@ export const buildTrelioInstallationDiagnostic = ({
       ...(intent === "diagnostics" ? {
         read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime }),
         connectionRecovery: {
-          ...buildTrelioConnectionRecovery(publicService, requiredActions),
+          ...buildTrelioConnectionRecovery(publicService, requiredActions, codexMcpRuntime),
           ...(clientKind === "codex" ? { clientInspection: "clientInspection.mcpRecovery" } : {}),
         },
       } : {}),
@@ -583,7 +599,8 @@ export const buildTrelioInstallationDiagnostic = ({
         toolExposure: {
           state: "not_checked",
           inspection: "clientInspection.toolExposure",
-          successProves: "only_the_direct_tool_and_current_turn_actually_checked",
+          successProves: codexMcpRuntime ? "only_the_tool_route_and_current_turn_actually_checked"
+            : "only_the_direct_tool_and_current_turn_actually_checked",
         },
       } : {}),
       oauth: {
