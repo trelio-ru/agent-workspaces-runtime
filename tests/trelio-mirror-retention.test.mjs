@@ -784,6 +784,51 @@ test('Windows delete-pending mkdir retries only the unacquired claim and retains
   }
 });
 
+test('Windows delete-pending scan can reacquire an atomic mirror claim; persistent refusal keeps the live owner', async t => {
+  const f = await fixture(t);
+  const root = await f.schema(MIRROR_SCHEMA_VERSION, 1);
+  const lock = path.join(root, 'retention.lock'), id = randomUUID();
+  const nonce = path.join(lock, `${process.pid}-${id}.json`);
+  await ensurePrivateDirectory(lock);
+  await writePrivateJsonFile(nonce, { id, pid: process.pid });
+  const denied = Object.assign(new Error('synthetic delete-pending scan'), { code: 'EPERM', syscall: 'scandir' });
+  const scan = fs.readdir, platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  let attempts = 0, operations = 0, released = false;
+  fs.readdir = async (target, ...args) => {
+    if (target !== lock) return scan(target, ...args);
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    attempts++;
+    throw denied;
+  };
+  try {
+    const work = async () => { operations++; return true; };
+    await assert.rejects(withCompanyMirrorRetentionLock(root, work), error => error === denied);
+    assert.equal(attempts, 6);
+    assert.equal(operations, 0);
+    assert.deepEqual(await scan(lock), [path.basename(nonce)]);
+    Object.defineProperty(process, 'platform', platform);
+    fs.readdir = async (target, ...args) => {
+      if (target !== lock || released) return scan(target, ...args);
+      // Keep the current identity through the failed scan. Release it only
+      // while the contender waits, exactly as the actual Windows owner does.
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+      setTimeout(async () => {
+        Object.defineProperty(process, 'platform', platform);
+        await fs.unlink(nonce);
+        await fs.rmdir(lock);
+        released = true;
+      }, 0);
+      throw denied;
+    };
+    assert.equal(await withCompanyMirrorRetentionLock(root, work), true);
+    assert.equal(operations, 1);
+    assert.equal(released, true);
+  } finally {
+    fs.readdir = scan;
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
 test('Windows rename denial counts as contention only with an observed destination', async t => {
   const f = await fixture(t);
   const root = await f.schema(MIRROR_SCHEMA_VERSION, 1);

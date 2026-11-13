@@ -117,6 +117,7 @@ const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, dea
   const ownerPath = path.join(lock, ownerName);
   let attempted = false;
   let claimSharingRetries = 0;
+  let inspectionSharingRetries = 0;
   let claimedIdentity;
   for (;;) {
     // Cancellation affects only this contender. It cannot steal the current
@@ -178,7 +179,21 @@ const runWithRetentionClaim = async (operation, { root, lock, ownerName, id, dea
       try {
         observedLock = await fs.lstat(lock);
         if (!observedLock.isDirectory() || observedLock.isSymbolicLink()) throw new Error("Unsafe mirror lock.");
-        const entries = await fs.readdir(lock);
+        let entries;
+        try { entries = await fs.readdir(lock); }
+        catch (error) {
+          // NTFS can still report the same directory identity during the
+          // brief delete-pending window. This is only an unacquired atomic
+          // claim's structural scan: retry admission within the old clock,
+          // never run the protected operation or remove an unseen owner.
+          if (staged && process.platform === "win32" && error.syscall === "scandir"
+            && ["EPERM", "EACCES"].includes(error.code)
+            && inspectionSharingRetries++ < 5 && Date.now() + 20 < deadline) {
+            await sleep(20);
+            continue;
+          }
+          throw error;
+        }
         if (staged && entries.length === 0) {
           // Atomic claim publication means only a release (including a dead
           // owner's recovery) can leave this layout's lock empty. rmdir

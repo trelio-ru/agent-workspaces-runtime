@@ -40,22 +40,25 @@ test('lifecycle failure callbacks contain closed original errno/syscall only, ne
 
 test('native alert/confirm is observed and answered without replay in text/image modes and restored profiles deny notifications', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-native-dialog-')));
-  const effects = []; let snapshot, browser;
+  const effects = []; let snapshot, browser, clickStarts = 0;
   t.signal.addEventListener('abort', () => browser?.abort(), { once: true });
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://fixture.test');
+    if (url.pathname === '/click-start') { clickStarts++; response.end(); return; }
     if (url.pathname === '/effect') { effects.push({ answer: url.searchParams.get('answer'), count: url.searchParams.get('count'), permission: url.searchParams.get('permission') }); response.end(); return; }
+    const left = url.searchParams.get('layout') === 'offset' ? 220 : 20;
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><title>Native dialog fixture</title><body>
       <p>Notification state: <span id="permission"></span></p>
-      <button style="position:absolute;left:20px;top:100px;width:300px;height:60px" onclick="
+      <button style="position:absolute;left:${left}px;top:100px;width:300px;height:60px" onclick="
         window.clicks=(window.clicks||0)+1;
+        navigator.sendBeacon('/click-start');
         const accepted=confirm('Synthetic confirm?');
         alert('Synthetic follow-up alert');
         fetch('/effect?answer='+accepted+'&amp;count='+window.clicks+'&amp;permission='+Notification.permission);
         document.getElementById('result').textContent='ORIGINAL_ACTION_FINISHED';">Open confirm</button>
       <p id="result" style="position:absolute;top:200px"></p>
-      <button style="position:absolute;left:20px;top:300px;width:300px;height:60px"
+      <button style="position:absolute;left:${left}px;top:300px;width:300px;height:60px"
         onclick="prompt('PRIVATE_UNSUPPORTED_PROMPT','PRIVATE_DEFAULT')">Open unsupported prompt</button>
       <script>document.getElementById('permission').textContent=Notification.permission;</script>`);
   });
@@ -64,15 +67,29 @@ test('native alert/confirm is observed and answered without replay in text/image
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
   const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason })); return value; };
+  const click = (view, observationMode, label, imagePoint) => {
+    if (observationMode === 'image') return browser.call('click', { frameId: view.frameId, ...imagePoint });
+    // The text fixture consumes the actual viewport hit target from the
+    // renderer. Hard-coded offsets can point to another layer or miss the
+    // control on a different hosted display. The one native click and every
+    // dialog/effect assertion are unchanged. No click retry is allowed.
+    const targets = view.controls.filter(control => control.role === 'button' && control.label === label);
+    assert.equal(targets.length, 1, 'fixture button must be a unique observed hit target');
+    const [{ x, y }] = targets;
+    assert.ok(Number.isInteger(x) && x >= 0 && x < view.width
+      && Number.isInteger(y) && y >= 0 && y < view.height, 'observed target is inside the exact viewport');
+    return browser.call('click', { frameId: view.frameId, x, y });
+  };
   try {
     for (const observationMode of ['text', 'image']) {
       browser = new ExtensionVisualBrowser({ dependencies, store, observationMode,
         policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin],
         lease: { deadlineAt: Date.now() + 75_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
-      let view = ready(await browser.call('navigate', { url: origin }));
+      const url = observationMode === 'text' ? origin + '/?layout=offset' : origin;
+      let view = ready(await browser.call('navigate', { url }));
       if (observationMode === 'text') assert.match(view.text, /Notification state:\s+denied/);
-      view = ready(await browser.call('click', { frameId: view.frameId, x: 100, y: 125 }));
-      if (observationMode === 'text') assert.match(view.text, /Synthetic confirm/);
+      view = ready(await click(view, observationMode, 'Open confirm', { x: 100, y: 125 }));
+      if (observationMode === 'text') assert.match(view.text, /Synthetic confirm/, JSON.stringify({ phase: 'confirm', clickStarts, effects: effects.length }));
       else { assert.ok(view.image); assert.equal(view.text, undefined); }
       const spent = view.frameId;
       view = ready(await browser.call('key', { frameId: view.frameId, key: 'Escape' }));
@@ -87,7 +104,7 @@ test('native alert/confirm is observed and answered without replay in text/image
       for (let attempt = 0; effects.length < expected && attempt < 40; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
       assert.equal(effects.length, expected);
       assert.deepEqual(effects.at(-1), { answer: 'false', count: '1', permission: 'denied' });
-      const unsupported = await browser.call('click', { frameId: view.frameId, x: 100, y: 325 });
+      const unsupported = await click(view, observationMode, 'Open unsupported prompt', { x: 100, y: 325 });
       assert.equal(unsupported.state, 'manual_input_required');
       assert.equal((await browser.call('status')).state, 'manual_input_required');
       assert.doesNotMatch(JSON.stringify(unsupported), /PRIVATE_/);

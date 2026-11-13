@@ -147,6 +147,12 @@ revalidation, credential input and generic transport/policy errors remain
 fail-closed. Native fixtures still require positive success and exact submit
 counts; neither user-facing pixels nor native error prose cross this boundary.
 
+The dialog fixture uses the unique rendered text hit target on a shifted
+layout, rather than a guessed offset. Both text and image still make one
+native click, observe both dialogs, and check the original effect count.
+Synthetic handler-entry evidence distinguishes missed input from an
+unobserved dialog without retrying the click.
+
 Planning uploads `runtime-ci-plan/ci-plan.json`, binding the complete diff,
 base/head, full profile, required jobs and exact GitHub run/attempt. The tag job
 selects the latest dispatched workflow for the same repository and tagged SHA,
