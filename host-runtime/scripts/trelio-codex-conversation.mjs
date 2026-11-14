@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from 'node:crypto';
+import http from "node:http";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const NAVIGATION_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -468,6 +469,84 @@ const wizardError = code => Object.assign(new Error(code), { code });
 // navigation. It neither changes the stable plugin shell nor uses a business Run.
 export const CODEX_CONNECTION_RESOURCE = "ui://trelio/codex-connection-v1.html";
 export const CODEX_CONNECTION_ACTION = "codex_connection_app_action";
+
+// Short-lived loopback server. Only the browser that reaches this machine
+// after the authenticated approval can deliver the server's one-use receipt.
+// The verifier and bridge credential stay in the local process.
+export const confirmDesktopBrowser = async (origin, { companySlug, provider, runtimeSessionId }, dependencies = {}) => {
+  if (!/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(companySlug)
+    || !["codex", "claude", "deepseek", "cursor-grok", "antigravity", "kimi-work", "multitool"].includes(provider)
+    || (runtimeSessionId !== undefined && !UUID.test(runtimeSessionId))) {
+    throw wizardError("DESKTOP_BROWSER_CONFIRMATION_INVALID");
+  }
+  const bridge = dependencies.bridge ?? await import("./trelio-workspace.mjs");
+  const deadline = AbortSignal.timeout(55_000);
+  const signal = dependencies.signal ? AbortSignal.any([deadline, dependencies.signal]) : deadline;
+  const token = await bridge.loadToken(origin, { signal });
+  if (!token?.startsWith("twb_")) throw wizardError("CODEX_CONNECTION_PAIRING_REQUIRED");
+  const verifier = crypto.randomBytes(32).toString("base64url");
+  const codeChallenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const base = "/api/agent-workspaces/desktop-connections/challenges";
+  const page = new URL(`/${encodeURIComponent(companySlug)}/agent-work/`, origin);
+  let challengeId, port, finishing = false;
+  let complete;
+  const result = new Promise(resolve => { complete = resolve; });
+  const onAbort = () => complete(false);
+  const server = http.createServer(async (incoming, outgoing) => {
+    const host = `127.0.0.1:${port}`;
+    const url = new URL(incoming.url || "/", `http://${host}`);
+    const [receipt] = url.searchParams.getAll("receipt");
+    const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer" };
+    if (!challengeId || finishing || incoming.method !== "GET" || incoming.headers.host !== host
+      || incoming.socket.remoteAddress !== "127.0.0.1" || incoming.socket.localAddress !== "127.0.0.1"
+      || incoming.socket.localPort !== port || url.pathname !== "/trelio-device"
+      || url.searchParams.size !== 1 || !/^[A-Za-z0-9_-]{43}$/u.test(receipt ?? "")) {
+      outgoing.writeHead(403, headers).end("Forbidden");
+      return;
+    }
+    finishing = true;
+    try {
+      const response = await bridge.request(origin, token, `${base}/${challengeId}/finish`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ verifier, receipt }), signal,
+      });
+      if ((await response.json()).connected !== true) throw wizardError("DESKTOP_BROWSER_CONFIRMATION_INVALID");
+      // Strip the receipt before returning to the Trelio page.
+      outgoing.writeHead(303, { ...headers, location: page.href });
+      outgoing.end(() => complete(true));
+    } catch {
+      outgoing.writeHead(400, headers);
+      outgoing.end("Не удалось подтвердить компьютер. Начните подключение заново в приложении.", () => complete(false));
+    }
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    port = server.address().port;
+    const response = await bridge.request(origin, token,
+      `/api/agent-workspaces/companies/${encodeURIComponent(companySlug)}/desktop-connections/challenges`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, codeChallenge, port, ...(runtimeSessionId ? { runtimeSessionId } : {}) }), signal,
+      });
+    challengeId = (await response.json()).id;
+    if (!UUID.test(challengeId)) throw wizardError("DESKTOP_BROWSER_CONFIRMATION_INVALID");
+    page.searchParams.set("confirmComputer", challengeId);
+    // Create a separate URL for the initial page so the final redirect drops
+    // both the challenge identifier and the one-use receipt.
+    const approvalUrl = page.href;
+    page.search = "";
+    signal.addEventListener("abort", onAbort, { once: true });
+    signal.throwIfAborted();
+    await (dependencies.openBrowser ?? bridge.openBrowser)(approvalUrl, { signal });
+    if (!(await result)) throw wizardError("DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED");
+    return { connected: true };
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    server.closeAllConnections();
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+  }
+};
 const wizardCapabilities = new Map();
 const wizardBusy = new Set();
 const WIZARD_LIFETIME_MS = 30 * 60 * 1000;
@@ -635,7 +714,7 @@ const prepareWizardDirectory = async (folderPath, createFolder, filesystem, sign
 
 export const handleCodexConnectionAction = async (origin, input, dependencies = {}) => {
   if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
-    || !["state", "pick", "save", "connect"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+    || !["state", "pick", "save", "connect", "confirm_browser"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
   const cap = wizardCapabilities.get(input.capabilityToken);
   if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw wizardError("CODEX_CONNECTION_EXPIRED");
   if (wizardBusy.has(cap.busyKey)) throw wizardError("CODEX_CONNECTION_BUSY");
@@ -717,10 +796,15 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       link.searchParams.set("prompt", `[@Trelio Agent Workspaces](plugin://trelio-agent-workspaces@trelio-plugins) Работаем с компанией Trelio ${cap.company.slug}. Прочитай инструкции выбранной рабочей папки.`);
       cap.state.openUrl = link.href;
     }
+    if (input.action === "confirm_browser") {
+      if (cap.state.stage !== "ready") throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
+      await confirmDesktopBrowser(origin, { companySlug: cap.company.slug, provider: "codex",
+        runtimeSessionId: cap.parameters.runtimeSessionId }, { bridge, signal: dependencies.signal });
+      cap.state.browserConfirmed = true;
+    }
     return wizardResult(input.capabilityToken, cap, cap.state);
   } catch (error) {
-    cap.state.stage = "folder";
-    delete cap.state.openUrl;
+    if (input.action !== "confirm_browser") { cap.state.stage = "folder"; delete cap.state.openUrl; }
     // Paths and native exception text belong only to local IO. Expose closed
     // codes so a permission/network failure cannot leak private directory names.
     const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "CODEX_CONNECTION_FAILED";
@@ -755,7 +839,7 @@ export const codexConnectionAppResource = () => ({
 <label class="choice"><input id="create" type="checkbox">Создать папку, если её ещё нет</label><div class="actions"><button id="pick" type="button">Выбрать существующую</button><button type="submit">Сохранить выбор</button></div></form></section>
 <p class="muted">По кнопке «Подключить» сохраним в папке файлы AGENTS.md и CLAUDE.md и зарегистрируем путь в вашем аккаунте Trelio. Файлы настройки сохраняют существующий текст</p>
 <div class="actions"><button id="connect" class="primary" type="button">Подключить</button></div></div>
-<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p>Откройте задачу в Trelio и нажмите «Начать в Codex». При первом запуске выберите эту папку – Trelio запомнит выбор в этом браузере</p><div class="actions"><button class="primary" id="open" type="button">Открыть рабочую папку в Codex</button><button id="recheck" type="button">Проверить ещё раз</button></div></section>
+<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p id="browser-help">Подтвердите компьютер в браузере, чтобы открывать задачи Trelio в этой папке.</p><div class="actions"><button class="primary" id="confirm-browser" type="button">Подтвердить этот компьютер</button><button id="open" type="button">Открыть рабочую папку в Codex</button><button id="recheck" type="button">Проверить ещё раз</button></div></section>
 <p id="status" role="status" aria-live="polite"></p>
 </main><script>
 (function(){'use strict';
@@ -799,8 +883,12 @@ function render(result) {
   $('display-name').value = meta.displayName;
   $('folder-path').value = meta.folderPath;
   $('create').checked = meta.createFolder;
-  var done = meta.stage === 'ready' && !result.isError;
+  var done = meta.stage === 'ready';
   $('setup').hidden = done; $('done').hidden = !done;
+  $('confirm-browser').hidden = meta.browserConfirmed === true;
+  $('browser-help').textContent = meta.browserConfirmed === true
+    ? 'Браузер подтверждён. Теперь из задачи Trelio можно открыть новый чат в Codex.'
+    : 'Подтвердите компьютер в браузере, чтобы открывать задачи Trelio в этой папке.';
   if (meta.errorCode) {
     var messages = {
       CODEX_CONNECTION_PICKER_UNAVAILABLE:'Окно выбора папки недоступно. Укажите абсолютный путь в поле «Локальная папка»',
@@ -861,6 +949,7 @@ $('connect').onclick = function() {
   if ($('settings').hidden || $('settings').reportValidity()) return action('connect', fields());
 };
 $('recheck').onclick = function() { return action('connect') };
+$('confirm-browser').onclick = function() { return action('confirm_browser') };
 $('open').onclick = async function() {
   if (state && state.openUrl) try { await rpc('ui/open-link', {url:state.openUrl}) }
   catch(e) { notice('Codex не открыл ссылку. Начните новую задачу в Trelio кнопкой «Начать в Codex»', true) }

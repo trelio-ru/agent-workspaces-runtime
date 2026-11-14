@@ -5,13 +5,48 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId, createDeepseekDesktopNavigation } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId, createDeepseekDesktopNavigation, confirmDesktopBrowser } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { createHash, randomUUID } from "node:crypto";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const managed = line => `<!-- trelio-agent-workspaces:start -->\n## Trelio\n${line}\n<!-- trelio-agent-workspaces:end -->\n`;
 const canonical = managed("Папка привязана к компании «Company A» (`company-a`). Это контекст работы, а не привязка Git-репозитория.");
 const localBridge = { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile };
 const execFileAsync = promisify(execFile);
+
+test("browser confirmation uses only a local listener and sends its verifier to the exact challenge", async () => {
+  const id = randomUUID();
+  const receipt = "A".repeat(43);
+  let port, challenge, callback;
+  const bridge = {
+    loadToken: async () => "twb_fixture",
+    request: async (origin, token, endpoint, request) => {
+      assert.equal(origin, "https://trelio.ru");
+      assert.equal(token, "twb_fixture");
+      const input = JSON.parse(request.body);
+      if (!endpoint.endsWith("/finish")) {
+        assert.equal(input.provider, "codex");
+        ({ port, codeChallenge: challenge } = input);
+        return { json: async () => ({ id }) };
+      }
+      assert.match(endpoint, new RegExp(`/${id}/finish$`, "u"));
+      assert.equal(input.receipt, receipt);
+      assert.equal(createHash("sha256").update(input.verifier).digest("base64url"), challenge);
+      return { json: async () => ({ connected: true }) };
+    },
+  };
+  assert.deepEqual(await confirmDesktopBrowser("https://trelio.ru", { companySlug: "company-a", provider: "codex" }, {
+    bridge,
+    openBrowser: async url => {
+      assert.equal(url, `https://trelio.ru/company-a/agent-work/?confirmComputer=${id}`);
+      const base = `http://127.0.0.1:${port}`;
+      assert.equal((await fetch(`${base}/wrong?receipt=${receipt}`)).status, 403);
+      callback = await fetch(`${base}/trelio-device?receipt=${receipt}`, { redirect: "manual" });
+    },
+  }), { connected: true });
+  assert.equal(callback.status, 303);
+  assert.equal(callback.headers.get("location"), "https://trelio.ru/company-a/agent-work/");
+});
 const state = { runtimeSessionId: "11111111-1111-4111-8111-111111111111",
   observation: { clientFamily: "codex" }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
 
@@ -328,7 +363,7 @@ test("native folder dialog uses fixed code on macOS/Windows/Linux and preserves 
 test("wizard App handles real host RPC, disables duplicate actions and renders verified/error results", async t => {
   const fixture = await wizardFixture(t);
   const listeners = {}, messages = [], elements = new Map();
-  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "recheck", "open", "main"]) {
+  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "recheck", "open", "main", "confirm-browser", "browser-help"]) {
     elements.set(id, { hidden: id === "settings", value: "", checked: false, textContent: "", disabled: false,
       setAttribute() {}, focus() {}, reportValidity: () => true });
   }
@@ -355,6 +390,7 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   receive({ jsonrpc: "2.0", id: calls[0].id, result: submitted });
   await clicked;
   assert.equal(elements.get("done").hidden, false);
+  assert.equal(elements.get("confirm-browser").hidden, false);
   assert.equal(elements.get("connect").disabled, false);
   const recheck = elements.get("recheck").onclick();
   const next = messages.filter(message => message.method === "tools/call").at(-1);

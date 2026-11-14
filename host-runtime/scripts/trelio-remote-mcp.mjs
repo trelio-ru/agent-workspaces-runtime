@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -4057,6 +4057,11 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
+  { name: "confirm_desktop_browser", description: "After the user asks to connect this computer and the local workspace is verified, open Trelio in the system browser for its explicit confirmation.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["companySlug", "provider"],
+      properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
+        provider: { type: "string", enum: ["claude", "deepseek", "cursor-grok", "antigravity", "kimi-work", "multitool"] } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
   { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action. The user selects the folder in the App.",
     inputSchema: { type: "object", additionalProperties: false, required: ["companySlug"],
       properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
@@ -4066,7 +4071,7 @@ const LOCAL_TOOLS = [
   { name: CODEX_CONNECTION_ACTION, description: "Local Codex connection wizard action.",
     inputSchema: { type: "object", additionalProperties: false, required: ["capabilityToken", "action"],
       properties: { capabilityToken: { type: "string", minLength: 40, maxLength: 100 },
-        action: { type: "string", enum: ["state", "pick", "save", "connect"] }, settings: { type: "object" } } },
+        action: { type: "string", enum: ["state", "pick", "save", "connect", "confirm_browser"] }, settings: { type: "object" } } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: { ui: { visibility: ["app"] }, "openai/visibility": "private", "trelio/sensitiveInput": true } },
   TRELIO_LOCAL_ACTION_TOOL,
@@ -6023,6 +6028,17 @@ export const handleToolCall = async (
     );
   }
   if (name === CODEX_CONNECTION_ACTION) return handleCodexConnectionAction(origin, rawArguments, { signal });
+  if (name === "confirm_desktop_browser") {
+    if (!rawArguments || Object.keys(rawArguments).some(key => !["companySlug", "provider"].includes(key))
+      || rawArguments.provider === "codex") throw new RemoteMcpHostError(
+        "DESKTOP_BROWSER_CONFIRMATION_INVALID", "Недопустимый запрос на подтверждение компьютера.");
+    try {
+      return buildTextResult(await confirmDesktopBrowser(origin, rawArguments, { signal }));
+    } catch (error) {
+      const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "DESKTOP_BROWSER_CONFIRMATION_FAILED";
+      throw new RemoteMcpHostError(code, "Браузер не подтвердил компьютер. Повторите действие подключения в приложении.");
+    }
+  }
   if (name === "open_codex_connection_wizard") {
     // The shared OAuth profile cannot identify the desktop app. Require the
     // local Codex MCP connection for the paired-device action; legacy actions
