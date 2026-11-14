@@ -6374,7 +6374,9 @@ test("plugin exposes focused value-free diagnostics through one runtime plan", a
   assert.match(diagnosticsSkill, /`REVIEW_CODEX_DIRECT_ROUTING`/u);
   assert.match(diagnosticsSkill, /`REPAIR_CODEX_DIRECT_ROUTING_MANUALLY`/u);
   assert.match(diagnosticsSkill, /`BRIDGE_CONNECTION_NOT_READY`[\s\S]{0,100}предупреждение/u);
-  assert.match(diagnosticsSkill, /он ничего не устанавливает, не применяет, не\s+авторизует/iu);
+  // The stable shell and current shell express the same read-only diagnostic
+  // contract with different copy. Require the guarantee in either wording.
+  assert.match(diagnosticsSkill, /он ничего не устанавливает, не применяет, не\s+авторизует|Диагностика только читает\s+состояние/iu);
   assert.match(diagnosticsSkill, /допустим только bootstrap fallback/u);
   assert.match(diagnosticsSkill, /trelio-host-runtime-loader\.mjs bridge doctor --json/u);
   assert.match(diagnosticsSkill, /не сканируй cache/u);
