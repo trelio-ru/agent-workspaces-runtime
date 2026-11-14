@@ -4057,11 +4057,6 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
-  { name: "confirm_desktop_browser", description: "After the user asks to connect this computer and the local workspace is verified, open Trelio in the system browser for its explicit confirmation.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["companySlug", "provider"],
-      properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
-        provider: { type: "string", enum: ["claude", "deepseek", "cursor-grok", "antigravity", "kimi-work", "multitool"] } } },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
   { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action. The user selects the folder in the App.",
     inputSchema: { type: "object", additionalProperties: false, required: ["companySlug"],
       properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
@@ -6028,17 +6023,6 @@ export const handleToolCall = async (
     );
   }
   if (name === CODEX_CONNECTION_ACTION) return handleCodexConnectionAction(origin, rawArguments, { signal });
-  if (name === "confirm_desktop_browser") {
-    if (!rawArguments || Object.keys(rawArguments).some(key => !["companySlug", "provider"].includes(key))
-      || rawArguments.provider === "codex") throw new RemoteMcpHostError(
-        "DESKTOP_BROWSER_CONFIRMATION_INVALID", "Недопустимый запрос на подтверждение компьютера.");
-    try {
-      return buildTextResult(await confirmDesktopBrowser(origin, rawArguments, { signal }));
-    } catch (error) {
-      const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "DESKTOP_BROWSER_CONFIRMATION_FAILED";
-      throw new RemoteMcpHostError(code, "Браузер не подтвердил компьютер. Повторите действие подключения в приложении.");
-    }
-  }
   if (name === "open_codex_connection_wizard") {
     // The shared OAuth profile cannot identify the desktop app. Require the
     // local Codex MCP connection for the paired-device action; legacy actions
@@ -6066,6 +6050,25 @@ export const handleToolCall = async (
     ));
   }
   if (name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME) {
+    // Explicit setup only. This uses the existing onboarding intent, while
+    // ordinary diagnosis never opens a browser or changes a binding.
+    if (rawArguments?.intent === "onboarding" && rawArguments?.folderOnboarding?.confirmBrowser === true) {
+      const { clientKind, folderOnboarding } = rawArguments;
+      const providers = { "claude-code": "claude", cursor: "cursor-grok", antigravity: "antigravity",
+        "deepseek-harness": "deepseek", "kimi-work": "kimi-work", multitool: "multitool" };
+      if (!Object.hasOwn(providers, clientKind)
+        || Object.keys(rawArguments).some(key => !["clientKind", "intent", "folderOnboarding"].includes(key))
+        || Object.keys(folderOnboarding).some(key => !["companySlug", "confirmBrowser"].includes(key))) {
+        throw new RemoteMcpHostError("DESKTOP_BROWSER_CONFIRMATION_INVALID", "Недопустимый запрос на подтверждение компьютера.");
+      }
+      try {
+        return buildTextResult(await confirmDesktopBrowser(origin, { companySlug: folderOnboarding.companySlug,
+          provider: providers[clientKind] }, { signal }));
+      } catch (error) {
+        const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "DESKTOP_BROWSER_CONFIRMATION_FAILED";
+        throw new RemoteMcpHostError(code, "Браузер не подтвердил компьютер. Повторите действие подключения в приложении.");
+      }
+    }
     const folderOnboardingIntent = rawArguments?.intent === "folder_onboarding";
     if (
       !rawArguments
