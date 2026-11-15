@@ -281,7 +281,7 @@ test("wizard creates a chosen folder, preserves existing text, registers and rea
   assert.equal(binding.company.slug, "company-a");
   assert.ok((await fs.readFile(path.join(chosen, "CLAUDE.md"), "utf8")).includes("AGENTS.md"));
   assert.ok(!JSON.stringify({ content: result.content, structuredContent: result.structuredContent }).includes(chosen), "Private paths/names stay outside model content");
-  assert.equal(new URL(result._meta["trelio/codexConnection"].openUrl).searchParams.get("path"), chosen);
+  assert.equal(result._meta["trelio/codexConnection"].folderPath, chosen);
   const instruction = path.join(chosen, "AGENTS.md");
   const humanText = "# My existing human rules\n\n" + await fs.readFile(instruction, "utf8");
   await fs.writeFile(instruction, humanText);
@@ -297,6 +297,80 @@ test("wizard creates a chosen folder, preserves existing text, registers and rea
   assert.equal(denied.isError, true);
   assert.equal(denied.structuredContent.verified, false);
   assert.ok(!JSON.stringify(denied).includes("native private message"));
+});
+
+test("browser confirmation rereads access after real challenge and loopback revocation failures", async t => {
+  for (const phase of ["challenge", "finish"]) await t.test(phase, async t => {
+    const fixture = await wizardFixture(t);
+    const chosen = path.join(fixture.root, "browser-recovery");
+    const settings = { folderPath: chosen, displayName: "Browser recovery", createFolder: true };
+    assert.equal((await fixture.action("connect", settings)).structuredContent.verified, true);
+    // Establish a previous receipt too: failing to bind another browser must
+    // not keep that old success visible as the result of the new attempt.
+    assert.equal((await fixture.action("confirm_browser", undefined, {
+      confirmBrowser: async () => ({ connected: true }),
+    }))._meta["trelio/codexConnection"].browserConfirmed, true);
+
+    const id = randomUUID(), receipt = "B".repeat(43);
+    const request = fixture.bridge.request;
+    let port, codeChallenge, creates = 0, finishes = 0, callbackStatus;
+    fixture.bridge.request = async (origin, token, endpoint, options = {}) => {
+      if (endpoint.endsWith("/desktop-connections/challenges")) {
+        creates++;
+        if (phase === "challenge") {
+          // Revoke only AFTER the action's initial liveWizardContext succeeded.
+          fixture.allowed = false;
+          return request(origin, token, endpoint, options);
+        }
+        ({ port, codeChallenge } = JSON.parse(options.body));
+        return { json: async () => ({ id }) };
+      }
+      if (endpoint.endsWith("/finish")) {
+        finishes++;
+        const input = JSON.parse(options.body);
+        assert.equal(input.receipt, receipt);
+        assert.equal(createHash("sha256").update(input.verifier).digest("base64url"), codeChallenge);
+        fixture.allowed = false;
+      }
+      return request(origin, token, endpoint, options);
+    };
+    fixture.bridge.openBrowser = async url => {
+      assert.equal(new URL(url).searchParams.get("confirmComputer"), id);
+      const callback = await fetch(`http://127.0.0.1:${port}/trelio-device?receipt=${receipt}`, { redirect: "manual" });
+      callbackStatus = callback.status;
+    };
+    // Use the production confirmation helper and real localhost HTTP server.
+    // Its safe loopback response intentionally omits the backend's ACL error;
+    // the wizard must discover current denial through its own final GET.
+    const result = await fixture.action("confirm_browser");
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.verified, false);
+    assert.equal(result.structuredContent.stage, "folder");
+    assert.equal(result.structuredContent.code, "ACCESS_DENIED");
+    assert.equal(result._meta["trelio/codexConnection"].browserConfirmed, undefined);
+    assert.equal(creates, 1);
+    assert.equal(finishes, phase === "finish" ? 1 : 0, "Never replay confirmation after an ambiguous refusal");
+    assert.equal(callbackStatus, phase === "finish" ? 400 : undefined);
+    assert.equal(fixture.puts, 1, "Access recovery never re-registers the folder");
+    assert.ok(!JSON.stringify(result).includes("native private message"));
+  });
+});
+
+test("browser success cannot retain readiness after its account changes", async t => {
+  const fixture = await wizardFixture(t);
+  assert.equal((await fixture.action("connect", { folderPath: path.join(fixture.root, "late-account-change"),
+    displayName: "Account fence", createFolder: true })).structuredContent.verified, true);
+  const result = await fixture.action("confirm_browser", undefined, {
+    confirmBrowser: async () => {
+      fixture.memberId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      return { connected: true };
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.verified, false);
+  assert.equal(result.structuredContent.code, "CODEX_CONNECTION_SCOPE_CHANGED");
+  assert.equal(result._meta["trelio/codexConnection"].browserConfirmed, undefined);
+  assert.equal(fixture.puts, 1);
 });
 
 test("wizard refuses another company's binding and a repository; denied setup writes no instructions", async t => {
@@ -363,7 +437,7 @@ test("native folder dialog uses fixed code on macOS/Windows/Linux and preserves 
 test("wizard App handles real host RPC, disables duplicate actions and renders verified/error results", async t => {
   const fixture = await wizardFixture(t);
   const listeners = {}, messages = [], elements = new Map();
-  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "recheck", "open", "main", "confirm-browser", "browser-help"]) {
+  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "main", "confirm-browser", "browser-help"]) {
     elements.set(id, { hidden: id === "settings", value: "", checked: false, textContent: "", disabled: false,
       setAttribute() {}, focus() {}, reportValidity: () => true });
   }
@@ -420,11 +494,32 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   assert.equal(fixture.puts, 1);
   assert.equal(elements.get("confirm-browser").hidden, false);
   assert.equal(elements.get("connect").disabled, false);
-  const recheck = elements.get("recheck").onclick();
+  const bindBrowser = elements.get("confirm-browser").onclick();
+  const bindRequest = messages.filter(message => message.method === "tools/call").at(-1);
+  const bound = await handleCodexConnectionAction(fixture.origin, structuredClone(bindRequest.params.arguments), {
+    bridge: fixture.bridge,
+    confirmBrowser: async (_origin, input) => assert.equal(input.provider, "codex"),
+  });
+  receive({ jsonrpc: "2.0", id: bindRequest.id, result: bound }); await bindBrowser;
+  assert.equal(elements.get("confirm-browser").textContent, "Привязать другой браузер");
+  const repeatBinding = elements.get("confirm-browser").onclick();
+  const repeat = messages.filter(message => message.method === "tools/call").at(-1);
+  const expired = await handleCodexConnectionAction(fixture.origin, structuredClone(repeat.params.arguments), {
+    bridge: fixture.bridge, confirmBrowser: async () => {
+      throw Object.assign(new Error("timeout"), { code: "DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED" });
+    },
+  });
+  receive({ jsonrpc: "2.0", id: repeat.id, result: expired }); await repeatBinding;
+  assert.equal(elements.get("done").hidden, false);
+  assert.match(elements.get("status").textContent, /Привязка не завершена/u);
+  assert.equal(elements.get("confirm-browser").textContent, "Привязать к браузеру");
+  assert.doesNotMatch(elements.get("browser-help").textContent, /Привязка подтверждена/u);
+  assert.equal(fixture.puts, 1, "Browser repair never repeats folder registration");
+  const retryBinding = elements.get("confirm-browser").onclick();
   const next = messages.filter(message => message.method === "tools/call").at(-1);
   fixture.allowed = false;
   const refused = await handleCodexConnectionAction(fixture.origin, structuredClone(next.params.arguments), { bridge: fixture.bridge });
-  receive({ jsonrpc: "2.0", id: next.id, result: refused }); await recheck;
+  receive({ jsonrpc: "2.0", id: next.id, result: refused }); await retryBinding;
   assert.equal(elements.get("done").hidden, true);
   assert.equal(elements.get("setup").hidden, false);
   assert.match(elements.get("status").textContent, /ACCESS_DENIED/u);

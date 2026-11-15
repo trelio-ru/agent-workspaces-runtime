@@ -516,7 +516,7 @@ export const confirmDesktopBrowser = async (origin, { companySlug, provider, run
       outgoing.end(() => complete(true));
     } catch {
       outgoing.writeHead(400, headers);
-      outgoing.end("Не удалось подтвердить компьютер. Начните подключение заново в приложении.", () => complete(false));
+      outgoing.end("Не удалось привязать браузер. Откройте новую страницу привязки из приложения.", () => complete(false));
     }
   });
   try {
@@ -720,6 +720,7 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
   if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw wizardError("CODEX_CONNECTION_EXPIRED");
   if (wizardBusy.has(cap.busyKey)) throw wizardError("CODEX_CONNECTION_BUSY");
   wizardBusy.add(cap.busyKey);
+  let preserveVerifiedFolder = false;
   try {
     // Expiry, membership, bridge grant and client availability are independent
     // of the hidden App capability and are checked again before every action.
@@ -754,7 +755,7 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       schemaVersion: 1, folderPath: cap.state.folderPath, displayName: cap.state.displayName, createFolder: cap.state.createFolder,
     });
     if (input.action === "state" && cap.state.stage === "ready") {
-      cap.state.stage = "folder"; delete cap.state.openUrl;
+      cap.state.stage = "folder";
     }
     if (input.action === "connect") {
       // A previously rendered success never grants a blind registration replay.
@@ -792,27 +793,51 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       }
       dependencies.signal?.throwIfAborted();
       cap.state.stage = "ready";
-      const link = new URL("codex://threads/new");
-      link.searchParams.set("path", folder.folderPath);
-      link.searchParams.set("prompt", `[@Trelio Agent Workspaces](plugin://trelio-agent-workspaces@trelio-plugins) Работаем с компанией Trelio ${cap.company.slug}. Прочитай инструкции выбранной рабочей папки.`);
-      cap.state.openUrl = link.href;
     }
     if (input.action === "confirm_browser") {
       if (cap.state.stage !== "ready") throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
-      await confirmDesktopBrowser(origin, { companySlug: cap.company.slug, provider: "codex",
-        runtimeSessionId: cap.parameters.runtimeSessionId }, { bridge, signal: dependencies.signal });
+      // This attempt may target another browser. A previous receipt cannot
+      // describe its result, even though the registered folder stays reusable.
+      delete cap.state.browserConfirmed;
+      let confirmationError;
+      try {
+        await (dependencies.confirmBrowser ?? confirmDesktopBrowser)(origin, { companySlug: cap.company.slug, provider: "codex",
+          runtimeSessionId: cap.parameters.runtimeSessionId }, { bridge, signal: dependencies.signal });
+      } catch (error) {
+        confirmationError = error || wizardError("DESKTOP_BROWSER_CONFIRMATION_FAILED");
+      }
+      // The browser exchange may take almost a minute. A timeout alone says
+      // nothing about a grant revoked during that wait, and the loopback must
+      // not expose backend errors. Recheck the SAME account/device under the
+      // original call budget, on success and failure, without replaying either
+      // folder registration or confirmation. Unknown/denied access invalidates
+      // readiness; only a positive fresh read preserves the verified folder.
+      dependencies.signal?.throwIfAborted();
+      const finalContext = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
+      if (wizardBindingKey(origin, finalContext.token, finalContext.context) !== cap.busyKey) {
+        throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
+      }
+      dependencies.signal?.throwIfAborted();
+      if (confirmationError) {
+        preserveVerifiedFolder = true;
+        throw confirmationError;
+      }
       cap.state.browserConfirmed = true;
     }
     return wizardResult(input.capabilityToken, cap, cap.state);
   } catch (error) {
-    if (input.action !== "confirm_browser") { cap.state.stage = "folder"; delete cap.state.openUrl; }
+    // Keep a browser-only failure separate from folder setup only after its
+    // final live access check. Every other refusal hides the old ready state.
+    if (!preserveVerifiedFolder) cap.state.stage = "folder";
     // Only the Git classifier can expose its reviewed, path-free description.
     // Other errors still use closed codes so private I/O stays in the host.
     const gitBlocker = projectFolderGitHistoryBlocker(error);
     const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "CODEX_CONNECTION_FAILED";
     return { ...wizardResult(input.capabilityToken, cap, cap.state), isError: true,
-      content: [{ type: "text", text: gitBlocker?.message ?? `Codex connection not verified (${code}).` }],
-      structuredContent: { stage: "folder", verified: false, code,
+      content: [{ type: "text", text: gitBlocker?.message ?? (preserveVerifiedFolder
+        ? `Codex подключён, но привязка браузера не завершена (${code}).`
+        : `Codex connection not verified (${code}).`) }],
+      structuredContent: { stage: cap.state.stage, verified: cap.state.stage === "ready", code,
         ...(gitBlocker ? { details: gitBlocker.details } : {}),
         ...(["missing", "invalid", "expired", "replayed"].includes(error?.reason ?? error?.payload?.reason)
           ? { reason: error?.reason ?? error?.payload?.reason } : {}) },
@@ -842,7 +867,7 @@ export const codexConnectionAppResource = () => ({
 <label class="choice"><input id="create" type="checkbox">Создать папку, если её ещё нет</label><div class="actions"><button id="pick" type="button">Выбрать существующую</button><button type="submit">Сохранить выбор</button></div></form></section>
 <p class="muted">По кнопке «Подключить» сохраним в папке файлы AGENTS.md и CLAUDE.md и зарегистрируем путь в вашем аккаунте Trelio. Файлы настройки сохраняют существующий текст</p>
 <div class="actions"><button id="connect" class="primary" type="button">Подключить</button></div></div>
-<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p id="browser-help">Подтвердите компьютер в браузере, чтобы открывать задачи Trelio в этой папке.</p><div class="actions"><button class="primary" id="confirm-browser" type="button">Подтвердить этот компьютер</button><button id="open" type="button">Открыть рабочую папку в Codex</button><button id="recheck" type="button">Проверить ещё раз</button></div></section>
+<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p id="browser-help">Свяжите браузер с Codex, чтобы открывать новые чаты из задач Trelio.</p><div class="actions"><button class="primary" id="confirm-browser" type="button">Привязать к браузеру</button></div></section>
 <p id="status" role="status" aria-live="polite"></p>
 </main><script>
 (function(){'use strict';
@@ -888,12 +913,13 @@ function render(result) {
   $('create').checked = meta.createFolder;
   var done = meta.stage === 'ready';
   $('setup').hidden = done; $('done').hidden = !done;
-  $('confirm-browser').hidden = meta.browserConfirmed === true;
+  $('confirm-browser').textContent = meta.browserConfirmed === true ? 'Привязать другой браузер' : 'Привязать к браузеру';
   $('browser-help').textContent = meta.browserConfirmed === true
-    ? 'Браузер подтверждён. Теперь из задачи Trelio можно открыть новый чат в Codex.'
-    : 'Подтвердите компьютер в браузере, чтобы открывать задачи Trelio в этой папке.';
+    ? 'Привязка подтверждена. Из задачи Trelio можно открыть новый чат в Codex.'
+    : 'Свяжите браузер с Codex, чтобы открывать новые чаты из задач Trelio.';
   if (meta.errorCode) {
     var messages = {
+      DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED:'Привязка не завершена. Откройте страницу привязки снова',
       CODEX_CONNECTION_PICKER_UNAVAILABLE:'Окно выбора папки недоступно. Укажите абсолютный путь в поле «Локальная папка»',
       CODEX_CONNECTION_BINDING_CONFLICT:'Эта папка связана с другой компанией или проектом. Выберите отдельную папку',
       CODEX_CONNECTION_REGISTRATION_UNCONFIRMED:'Trelio пока не подтвердил регистрацию. Проверьте соединение и повторите проверку',
@@ -918,7 +944,8 @@ async function action(kind, settings) {
   if (busy || !cap) return;
   var requestCap = cap;
   setBusy(true);
-  notice(kind === 'connect' ? 'Проверяем папку, сохраняем настройки и подтверждаем регистрацию в Trelio…' : 'Проверяем подключение…', false);
+  notice(kind === 'connect' ? 'Проверяем папку, сохраняем настройки и подтверждаем регистрацию в Trelio…'
+    : kind === 'confirm_browser' ? 'Подтвердите привязку в открывшейся вкладке Trelio…' : 'Проверяем подключение…', false);
   try {
     var args = {capabilityToken:requestCap, action:kind};
     if (settings) args.settings = settings;
@@ -951,12 +978,7 @@ $('pick').onclick = function() { return action('pick', fields()) };
 $('connect').onclick = function() {
   if ($('settings').hidden || $('settings').reportValidity()) return action('connect', fields());
 };
-$('recheck').onclick = function() { return action('connect') };
 $('confirm-browser').onclick = function() { return action('confirm_browser') };
-$('open').onclick = async function() {
-  if (state && state.openUrl) try { await rpc('ui/open-link', {url:state.openUrl}) }
-  catch(e) { notice('Codex не открыл ссылку. Начните новую задачу в Trelio кнопкой «Начать в Codex»', true) }
-};
 window.addEventListener('message', function(event) {
   if (event.source !== window.parent) return;
   var m = event.data;

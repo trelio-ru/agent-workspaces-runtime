@@ -482,6 +482,9 @@ publication tooling также остаются вне этого публичн
   старого `PreToolUse`. Не читать или менять hook trust ради перехода.
 - Запуск новых чатов Codex в общем `trelio-codex-conversation.mjs` – [личная привязка папки](docs/agent-workspace-runtime.md#codex-new-chat); company задачи не определяет launch root. Без existing managed binding hook молчит: чтение задачи не запускает onboarding и не просит выбрать или привязать папку.
 - Явный setup Codex использует [локальный мастер](docs/agent-workspace-runtime.md#codex-connection-wizard): личный bridge → App-only выбор папки → CAS planner → registration read-back. Хуки не нужны для настройки; название подключения остаётся локальным.
+- Привязка браузера повторяется отдельно от настройки папки. Подтверждение
+  открывает браузер, а локальный listener держит verifier до одноразового
+  обмена. Team/Run access и срок браузерной привязки принадлежат backend.
 - Синхронизация названия связанного чата – optional механика runtime после Run lifecycle,
   без модели, для task/project/company Workspace, включая unfiled:
   [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).

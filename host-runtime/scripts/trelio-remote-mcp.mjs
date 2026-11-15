@@ -6055,7 +6055,7 @@ export const handleToolCall = async (
     // ordinary diagnosis never opens a browser or changes a binding.
     if (rawArguments?.intent === "onboarding" && rawArguments?.folderOnboarding?.confirmBrowser === true) {
       const { clientKind, folderOnboarding } = rawArguments;
-      const providers = { "claude-code": "claude", cursor: "cursor-grok", antigravity: "antigravity",
+      const providers = { codex: "codex", "claude-code": "claude", cursor: "cursor-grok", antigravity: "antigravity",
         "deepseek-harness": "deepseek", "kimi-work": "kimi-work", multitool: "multitool" };
       if (!Object.hasOwn(providers, clientKind)
         || Object.keys(rawArguments).some(key => !["clientKind", "intent", "folderOnboarding"].includes(key))
@@ -6067,7 +6067,7 @@ export const handleToolCall = async (
           provider: providers[clientKind] }, { signal }));
       } catch (error) {
         const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "DESKTOP_BROWSER_CONFIRMATION_FAILED";
-        throw new RemoteMcpHostError(code, "Браузер не подтвердил компьютер. Повторите действие подключения в приложении.");
+        throw new RemoteMcpHostError(code, "Привязка браузера не завершена. Попросите открыть страницу привязки заново в этом приложении.");
       }
     }
     const folderOnboardingIntent = rawArguments?.intent === "folder_onboarding";
