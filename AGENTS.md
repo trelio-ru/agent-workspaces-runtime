@@ -818,6 +818,8 @@ publication tooling также остаются вне этого публичн
   Native detail/list/fetch и read-only подготовка строк реестра/typed task fields
   обновляют stale locator один раз под исходным deadline; fresh sync без readable
   fallback. Row/task CAS, payload uploads и mutation POST не входят в retry.
+  [Encrypted task list](docs/agent-workspace-runtime.md#пагинация-зашифрованных-списков-задач)
+  выбирает страницу из versioned inventory до exact detail reads.
   Reviewed canonical actions и single/bundle proposal targets не требуют mirror;
   historical/nested aliases, domain evidence и unknown methods сохраняют discovery.
   Completed Workspace prefixes share that SAME encrypted scratchpad/quota and

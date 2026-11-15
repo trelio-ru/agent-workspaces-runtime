@@ -3982,6 +3982,15 @@ const buildMirror = async ({
     || !Array.isArray(rawManifest.tasks)
     || !Array.isArray(rawManifest.acceptedWorkspaces)
     || !Array.isArray(rawManifest.contextDocuments)
+    || (rawManifest.taskInventoryVersion !== undefined &&
+      (rawManifest.schemaVersion !== 2 || rawManifest.projection !== "task_inventory"
+        || rawManifest.taskInventoryVersion !== 1
+        || rawManifest.tasks.some(task => typeof task?.isArchived !== "boolean"
+          || (task.dueAt !== null && typeof task.dueAt !== "string")
+          || !Number.isInteger(task.urgency)
+          || typeof task.status?.code !== "string"
+          || typeof task.status?.kind !== "string" || typeof task.status?.stopDeadlineTracking !== "boolean"
+          || !Array.isArray(task.assignees) || !Array.isArray(task.participants) || !Array.isArray(task.controls))))
     // Schema 2 deliberately makes the backend projection authoritative. An
     // absent array must therefore fail closed instead of silently producing an
     // empty encrypted-company search index.
@@ -4041,6 +4050,7 @@ const buildMirror = async ({
       number: task.number,
       revisionToken: task.revisionToken,
       title: task.title,
+      ...(manifest.taskInventoryVersion === 1 ? { taskListEntry: task } : {}),
       payload: null,
     }));
   } else {
@@ -5948,7 +5958,7 @@ const buildLocalListedTask = (mirror, record, rawInput) => {
   };
 };
 
-const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
+const selectTaskListPage = (mirror, rawInput, personal) => {
   const projectSlug = rawInput?.projectSlug
     ? normalizeBoundedString(rawInput.projectSlug, "projectSlug", 120)
     : null;
@@ -5969,7 +5979,7 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
   const tasks = (mirror.tasks ?? []).filter((record) => {
     if (!matchesProjectScope(record)) return false;
     if (personal && !projectSlug && archivedProjectIds.has(record.projectId)) return false;
-    const task = record.payload?.task ?? {};
+    const task = record.payload?.task ?? record.taskListEntry ?? {};
     const isArchived = Boolean(task.isArchived || task.archivedAt);
     if (archiveState === "active" && isArchived) return false;
     if (archiveState === "archived" && !isArchived) return false;
@@ -6027,16 +6037,27 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
       if (!buildContextTaskListSearchText(record.number, task, project).includes(query)) return false;
     }
     return true;
-  }).map((record) => buildLocalListedTask(mirror, record, rawInput));
+  });
 
   if (personal) {
+    const date = ({ taskListEntry, payload }) => {
+      const dueAt = (payload?.task ?? taskListEntry)?.dueAt;
+      return typeof dueAt === "string" && dueAt ? dueAt.slice(0, 10) : "9999-12-31";
+    };
     tasks.sort((left, right) => (
-      String(left.dueDate || "9999-12-31").localeCompare(String(right.dueDate || "9999-12-31"))
-      || String(right.id).localeCompare(String(left.id))
+      date(left).localeCompare(date(right)) || String(right.id).localeCompare(String(left.id))
     ));
   }
 
-  const page = tasks.slice(offset, offset + limit);
+  const records = tasks.slice(offset, offset + limit);
+  return { records, projectSlug, matchesProjectScope, archiveState, relation,
+    pagination: { limit, offset, total: tasks.length, hasMore: offset + records.length < tasks.length } };
+};
+
+const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
+  const { records, projectSlug, matchesProjectScope, archiveState, relation, pagination } =
+    mirror.taskListPage ?? selectTaskListPage(mirror, rawInput, personal);
+  const page = records.map(record => buildLocalListedTask(mirror, record, rawInput));
   const filters = {
     statusCode: rawInput?.statusCode ?? null,
     statusKind: rawInput?.statusKind ?? null,
@@ -6071,7 +6092,7 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
           : null,
         filters,
         tasks: page,
-        pagination: { limit, offset, total: tasks.length, hasMore: offset + page.length < tasks.length },
+        pagination,
       }
     : {
         company: buildLocalCompanySummary(page[0]?.company ?? mirror.company),
@@ -6084,7 +6105,7 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
         archiveState,
         filters,
         tasks: page,
-        pagination: { limit, offset, total: tasks.length, hasMore: offset + page.length < tasks.length },
+        pagination,
       };
 };
 
@@ -6827,7 +6848,20 @@ const hydrateMirrorForNativeRead = async ({ ready, nativeTool, input, signal }) 
       )),
     };
   }
-  const selection = selectNativeReadDetails(ready.mirror, nativeTool, input);
+  // The versioned inventory has the same list filters available before any
+  // detail IO. Freeze the page and its total together. The existing revision
+  // refresh reruns this selection on the new manifest if a page task changes.
+  const isTaskList = nativeTool === "list_my_tasks" || nativeTool === "list_project_tasks";
+  // Full-text and explicit member filters can depend on historical member
+  // summaries absent from the board. Keep the exact-detail path for them.
+  const needsDetailForMatching = String(input?.query ?? "").trim() || input?.createdByMemberId
+    || input?.assigneeMemberId || input?.participantMemberId;
+  const taskListPage = isTaskList && ready.taskInventoryReady && !needsDetailForMatching
+    ? selectTaskListPage(ready.mirror, input, nativeTool === "list_my_tasks")
+    : null;
+  const selection = taskListPage
+    ? { taskIds: taskListPage.records.map(record => record.id), documentIds: [] }
+    : selectNativeReadDetails(ready.mirror, nativeTool, input);
   let taskOverlay = ready.mirror;
   let contextOverlay = ready.mirror;
   if (selection.taskIds.length > 0) {
@@ -6849,6 +6883,13 @@ const hydrateMirrorForNativeRead = async ({ ready, nativeTool, input, signal }) 
       companyEncryption: ready.companyEncryption,
       signal,
     });
+  }
+  if (taskListPage) {
+    const byId = new Map(taskOverlay.tasks.map(task => [task.id, task]));
+    return {
+      ...taskOverlay,
+      taskListPage: { ...taskListPage, records: taskListPage.records.map(record => byId.get(record.id)) },
+    };
   }
   if (taskOverlay === ready.mirror && contextOverlay === ready.mirror) return ready.mirror;
   return {
@@ -8964,10 +9005,11 @@ export const readNarrowCompanyContext = async ({
     return buildMirror({ origin, requestOrigin: provider.requestOrigin, token: provider.token,
       companyEncryption: provider.companyEncryption, rawManifest: selected, previous, signal, taskSearchOnly });
   };
-  const prepare = async () => ({
-    ...provider,
-    mirror: await buildCandidate(await readManifest(), null),
-  });
+  const prepare = async () => {
+    const manifest = await readManifest();
+    return { ...provider, mirror: await buildCandidate(manifest, null),
+      taskInventoryReady: manifest.taskInventoryVersion === 1 };
+  };
   const ready = projection === "tasks" ? await buildStableCompanyMirror({
     previous: null, readManifest, readFence: () => read("tasks_fence"), buildCandidate,
     publish: async mirror => mirror,

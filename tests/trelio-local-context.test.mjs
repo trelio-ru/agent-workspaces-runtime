@@ -1906,6 +1906,69 @@ test("narrow encrypted reads preserve matching and never start a Workspace downl
   await assert.rejects(run("list_projects"), { code: "LOCAL_CONTEXT_INVALID_MANIFEST" });
 });
 
+test("encrypted task lists read exact details only for their selected page", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid";
+  const provider = { requestOrigin: origin, token: "synthetic",
+    companyEncryption: { runtime: { company: mirror.company } } };
+  const { payload, ...locator } = mirror.tasks[0];
+  const groupId = crypto.randomUUID();
+  const summaries = Array.from({ length: 300 }, (_, index) => {
+    const id = crypto.randomUUID();
+    return {
+      ...locator, id, number: index + 1, revisionToken: `${id}:1:2:3:4`,
+      status: { code: "active", kind: "active", stopDeadlineTracking: index === 1 },
+      urgency: 2,
+      dueAt: index < 5 ? `2020-01-0${index + 1}` : null,
+      isArchived: index === 2,
+      assignees: index === 4 ? [{ memberId: mirror.viewer.memberId }] : [{ groupId }],
+      participants: [], controls: [],
+    };
+  });
+  summaries[0].status.kind = "done";
+  let conflicts = 1;
+  const calls = [];
+  globalThis.fetch = async url => {
+    const request = new URL(url);
+    assert.equal(request.origin, origin);
+    if (request.pathname.endsWith("/manifest")) {
+      assert.equal(request.search, "?projection=task_inventory");
+      calls.push("manifest");
+      return Response.json({
+        ...mirror, provider: "local_company_context", schemaVersion: 2,
+        projection: "task_inventory", taskInventoryVersion: 1, tasks: summaries,
+        viewerGroupIds: [groupId], acceptedWorkspaces: [], contextDocuments: [], searchDocuments: [],
+      });
+    }
+    const number = Number(request.pathname.split("/").at(-1));
+    calls.push(number);
+    const task = summaries[number - 1];
+    assert.equal(request.searchParams.get("expectedRevision"), task.revisionToken);
+    // Simulate the original page task becoming archived between the manifest
+    // and its exact read. The next request must select from the new inventory.
+    if (conflicts > 0) {
+      conflicts--;
+      task.isArchived = true;
+      return Response.json({ code: "LOCAL_CONTEXT_GENERATION_CHANGED" }, { status: 409 });
+    }
+    return Response.json({ task: { ...payload, task: { ...payload.task, ...task, title: "Exact detail" } } });
+  };
+  const read = (nativeTool, input) => readNarrowCompanyContext({
+    origin, companySlug: mirror.company.slug, nativeTool, input, provider,
+  });
+  const overdue = await read("list_my_tasks", { relation: "assigned", dueState: "overdue", limit: 1 });
+  assert.deepEqual(calls.splice(0), ["manifest", 4, "manifest", 5]);
+  assert.deepEqual(overdue.tasks.map(task => [task.number, task.title]), [[5, "Exact detail"]]);
+  assert.deepEqual(overdue.pagination, { limit: 1, offset: 0, total: 1, hasMore: false });
+  const archived = await read("list_project_tasks", { projectSlug: "mobile-legacy", archiveState: "archived", limit: 1, offset: 1 });
+  assert.deepEqual(calls.splice(0), ["manifest", 4]);
+  assert.deepEqual(archived.pagination, { limit: 1, offset: 1, total: 2, hasMore: false });
+  const empty = await read("list_my_tasks", { relation: "participant", limit: 1 });
+  assert.deepEqual(calls.splice(0), ["manifest"]);
+  assert.deepEqual(empty.tasks, []);
+});
+
 test("native task search keeps ordinary lexical result ids and never needs a remote query", () => {
   const result = handleNativeLocalContextRead(mirror, "search_tasks", {
     queries: ["офлайн синхронизация", "релевантный контекст"],
