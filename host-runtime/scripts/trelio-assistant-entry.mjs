@@ -3658,7 +3658,12 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       if(owned&&failures===1)return null;
       throw error;
     };
+    // Several admitted polls can see the same completed worker value. Only
+    // one may validate it: a late check of the rejected snapshot could
+    // otherwise exhaust the retry while a fresh worker is already running.
+    if(searchJobs.get(key)!==job||!searches.has(key,result.operationId)||job.validating)return null;
     if(job.controller.signal.aborted)return refuseAbortedCompletion();
+    job.validating=true;
     // This is an undelivered value, not a reusable search cache. Each poll has
     // already consumed fresh native admission. Revalidate the SAME native
     // manifest, pass and recipient in a NEW short worker before releasing any
@@ -3674,7 +3679,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       // Even a lookalike timeout code from this DIFFERENT short validator
       // cannot grant an owned search/first-sync resume.
       rememberSearchFailure(key,job,error);throw error;
-    }
+    }finally{job.validating=false;}
     if(current?.schemaVersion!==1||typeof current.current!=='boolean'
       ||Object.keys(current).sort().join(',')!=='current,schemaVersion'){
       searches.discardTerminal(key,result.operationId,key);

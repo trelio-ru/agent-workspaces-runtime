@@ -807,7 +807,8 @@ publication tooling также остаются вне этого публичн
   Human search delivery refreshes a rejected snapshot once under the same
   operation ID and deadline. Typed final manifest conflicts share this limit.
   Recipient/ACL refusals never restart the query. Managed validation reports
-  the same optimistic conflict to its existing bounded refresh.
+  the same optimistic conflict to its existing bounded refresh. One managed
+  poll validates each completed worker result at a time; concurrent polls stay pending.
   Native detail/list/fetch и read-only подготовка строк реестра/typed task fields
   обновляют stale locator один раз под исходным deadline; fresh sync без readable
   fallback. Row/task CAS, payload uploads и mutation POST не входят в retry.

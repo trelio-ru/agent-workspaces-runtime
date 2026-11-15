@@ -42,6 +42,45 @@ test('pending search validates its generation and consumes one result rather tha
   assert.equal(queries,3);assert.equal(checks,3);assert.equal(new Set(f.admissions).size,3);
 });
 
+test('concurrent assistant polls cannot validate the same generation or exhaust its refresh',async t=>{
+  const deferred=()=>{
+    let resolve;
+    return {promise:new Promise(done=>{resolve=done;}),resolve};
+  };
+  const stale=deferred(),fresh=deferred(),staleStarted=deferred(),freshStarted=deferred();
+  let launches=0,checks=0;
+  const f=await pendingSearchFixture(t,{
+    search:()=>f.value(`SOURCE_${++launches}`),
+    validate:async()=>{
+      if(++checks===1){staleStarted.resolve();return stale.promise;}
+      if(launches===1)return {schemaVersion:1,current:false};
+      if(checks===2){freshStarted.resolve();return fresh.promise;}
+      return {schemaVersion:1,current:true};
+    },
+  });
+  const first=f.call();
+  try{
+    await staleStarted.promise;
+    // On a broken coordinator this waiter enters the second validator while
+    // the first is still checking the same worker result.
+    assert.equal((await f.call()).structuredContent.state,'preparing');
+    assert.equal(checks,1);
+    stale.resolve({schemaVersion:1,current:false});
+    assert.equal((await first).structuredContent.state,'preparing');
+    const recovered=f.call();
+    await freshStarted.promise;
+    assert.equal((await f.call()).structuredContent.state,'preparing');
+    assert.equal(checks,2);
+    fresh.resolve({schemaVersion:1,current:true});
+    assert.equal((await recovered).structuredContent.results[0].title,'SOURCE_2');
+    assert.equal(launches,2);
+    assert.equal(new Set(f.admissions).size,4);
+  }finally{
+    stale.resolve({schemaVersion:1,current:false});
+    fresh.resolve({schemaVersion:1,current:true});
+  }
+});
+
 test('pending search refuses a native revocation once and never returns the retained result',async t=>{
   const refusal=Object.assign(Error(),{code:'ASSISTANT_COMPANY_CONTEXT_ACCESS_DENIED'});let checks=0;
   const f=await pendingSearchFixture(t,{validate:async()=>{checks++;throw refusal;}});

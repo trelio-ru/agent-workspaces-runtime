@@ -1948,6 +1948,9 @@ The final manifest can reject a concurrent change with native HTTP 409
 `LOCAL_CONTEXT_GENERATION_CHANGED` before computing its version. This exact
 optimistic conflict follows the same bounded refresh as a version mismatch,
 after checking the current pass and recipient again. Other refusals end the read.
+Only one admitted poll validates a completed worker result at a time. Overlapping
+polls stay in preparation and cannot consume a second attempt or receive the result
+twice. A cancelled validation leaves the result to a subsequent admitted poll.
 Exact `workspace:`/`workspace-file:` sources keep their independent native path.
 The composed native fixture offers a genuinely slow 32-second whole-company
 refresh after READY and tests both task/context fetches through the old wire.
