@@ -2530,6 +2530,18 @@ Config, CLI inventory и server `ready` не подтверждают досту
 browser/HTTP/другой MCP. Непроверенное состояние не объявляется
 недоступностью; само отсутствие schema не доказывает неисправность config или OAuth.
 
+Для Claude Code Local `liveVerification.oauth.recovery` и условная ветка
+`clientRecoveryByKind.claudeCode` CLI bootstrap задают один маршрут запуска
+OAuth. Отсутствующий `list_companies` ведёт к проверке точного plugin-scoped
+сервера через `claude mcp list` из выбранной постоянной папки. Только при
+подтверждённом запросе на подключение/восстановление и статусе
+`Needs authentication` агент сам запускает один штатный `claude mcp login`
+и ждёт браузерного согласия. На macOS Bash даёт CLI псевдотерминал через
+`/usr/bin/script`, скрывая вывод OAuth; на Windows используется локальная
+консоль. Агент повторяет безопасное чтение в текущем чате. При `Connected`
+и отсутствующих tools нужна новая сессия с той же папкой, без нового OAuth.
+Этот план не запускает процесс и не меняет состояние диагностики `unverified`.
+
 Diagnostic runtime автоматически проверяет anonymous GET `/mcp` (ожидаемый 405),
 `/.well-known/oauth-protected-resource/mcp` и
 `/.well-known/oauth-authorization-server` (200 и canonical resource/issuer).

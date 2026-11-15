@@ -3619,6 +3619,33 @@ test("native Codex recovery inspection is absent from onboarding and other clien
     const payload = JSON.parse(result.content[0].text);
     assert.equal(payload.clientInspection.mcpRecovery, undefined, `${clientKind}/${intent}`);
     assert.equal(payload.liveVerification.connectionRecovery?.clientInspection, undefined);
+    assert.equal(Boolean(payload.liveVerification.oauth.recovery), clientKind === "claude-code");
+  }
+});
+
+test("Claude installation diagnostic routes a confirmed OAuth challenge to agent-owned browser launch", async () => {
+  const bootstrap = buildTrelioBootstrapVerification({ local: readyLocalInstallationDiagnosis });
+  assert.equal(bootstrap.clientRecoveryByKind.clientKind, "not_checked");
+  for (const intent of ["onboarding", "diagnostics"]) {
+    const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+      clientKind: "claude-code", intent,
+    }, {
+      localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    });
+    const payload = JSON.parse(result.content[0].text);
+    const oauth = payload.liveVerification.oauth;
+    assert.equal(oauth.state, "unverified");
+    assert.equal(oauth.nextTool, "list_companies");
+    const { recovery } = oauth;
+    assert.deepEqual(recovery, bootstrap.clientRecoveryByKind.claudeCode);
+    assert.equal(recovery.serverName, "plugin:trelio-agent-workspaces:trelio");
+    assert.equal(recovery.inventoryCommand, "claude mcp list");
+    assert.equal(recovery.loginCommand, "claude mcp login plugin:trelio-agent-workspaces:trelio");
+    assert.equal(recovery.macosBashCommand,
+      "/usr/bin/script -q /dev/null claude mcp login plugin:trelio-agent-workspaces:trelio </dev/null >/dev/null 2>&1");
+    assert.match(recovery.instructions, /если пользователь попросил подключение или восстановление и точный сервер показывает Needs authentication/iu);
+    assert.match(recovery.instructions, /сам запусти его один раз/iu);
+    assert.match(recovery.instructions, /повтори list_companies в текущем чате/iu);
   }
 });
 

@@ -1256,6 +1256,9 @@ publication tooling также остаются вне этого публичн
   direct transcript recovery не распознаёт exec. Legacy hooks и assistant
   execution сохраняют свой прямой маршрут. Диагностика проверяет доступные
   маршруты текущего чата. [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
+- Диагностика Claude Code Local возвращает точную проверку статуса OAuth и
+  штатный запуск браузера агентом при подтверждённом запросе на подключение.
+  [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
 - Local tools/list скрывает owner/admin-only private-skill management по свежему

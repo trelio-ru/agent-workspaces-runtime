@@ -30,6 +30,25 @@ export const buildTrelioConnectionRecovery = (publicService, requiredActions = [
     : "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema действительно отсутствует в текущем ходе, перейди к client recovery для фактического клиента: это наблюдение о выдаче tools, не доказательство failed startup. Не заканчивай повтором doctor или общим отказом без следующего шага. Не объявляй старый 5xx текущей ошибкой. Без наблюдаемого client blocker или exact requiredAction не советуй restart; login, pairing и переустановка требуют своих отдельных оснований. Не придумывай команды или API reconnect.",
 });
 
+const CLAUDE_TRELIO_MCP_SERVER = "plugin:trelio-agent-workspaces:trelio";
+const CLAUDE_TRELIO_LOGIN_COMMAND = `claude mcp login ${CLAUDE_TRELIO_MCP_SERVER}`;
+
+// Only the owning chat can inspect or start its native OAuth flow. Missing
+// tools do not prove auth failure, and the doctor must remain read-only.
+// macOS Claude CLI needs a terminal to open the browser automatically. The
+// PTY wraps the exact native command and keeps OAuth URLs out of tool output.
+const buildClaudeOAuthRecovery = () => ({
+  serverName: CLAUDE_TRELIO_MCP_SERVER,
+  inventoryCommand: "claude mcp list",
+  loginCommand: CLAUDE_TRELIO_LOGIN_COMMAND,
+  macosBashCommand: `/usr/bin/script -q /dev/null ${CLAUDE_TRELIO_LOGIN_COMMAND} </dev/null >/dev/null 2>&1`,
+  instructions: [
+    "Для Claude Code Local, если list_companies недоступен или вернул ошибку входа, сам проверь inventoryCommand из выбранной постоянной папки текущей сессии. Отсутствие инструмента не доказывает, что нужен вход.",
+    "Если пользователь попросил подключение или восстановление и точный сервер показывает Needs authentication, а OAuth ещё не запущен, сам запусти его один раз из этой папки через доступный Claude CLI. На macOS из Bash выполни macosBashCommand, на Windows запусти loginCommand в локальной консоли с ожиданием завершения. Если доступный CLI найден по абсолютному пути, используй его вместо claude. Пользователь только входит в браузере и подтверждает доступ. Не поручай ему запуск команды и не передавай OAuth URL, callback, коды или токены в чат.",
+    "После завершения повтори list_companies в текущем чате. Если сервер Connected, а инструмент всё ещё отсутствует, продолжи в новой локальной сессии с той же папкой без повторного входа. Если CLI недоступен, не видит сервер или запуск запрещён, сообщи наблюдённую причину и укажи штатное окно подключения выбранного сервера в Claude Desktop.",
+  ].join(" "),
+});
+
 const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
@@ -212,7 +231,7 @@ const buildClientInspection = (clientKind, intent, requiredActions, codexMcpRunt
       } : {
         mcpInventory: {
           command: "claude mcp list",
-          remoteServerName: "plugin:trelio-agent-workspaces:trelio",
+          remoteServerName: CLAUDE_TRELIO_MCP_SERVER,
           localServerName: "plugin:trelio-agent-workspaces:trelio-remote-skills",
           proves: ["remote_mcp_registration", "local_mcp_registration"],
           doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof"],
@@ -442,6 +461,7 @@ export const buildTrelioBootstrapVerification = ({ local, publicService }) => {
         ? "Используй ветку фактического клиента. Для нового Codex MCP проверь доступный direct или Code Mode маршрут. Версия CLI сама не доказывает доступность инструментов."
         : "Используй только ветку фактического клиента. CLI не определяет clientKind, direct toolset или effective routing. Codex: обычный прямой MCP-вызов вне functions.exec; ветка codex применяется только после проверки её evidence. Для другого клиента используй его штатные возможности, не инструкции Codex.",
       codex: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions), codexMcpRuntime),
+      claudeCode: buildClaudeOAuthRecovery(),
     },
   };
 };
@@ -607,6 +627,7 @@ export const buildTrelioInstallationDiagnostic = ({
         state: "unverified",
         nextTool: "list_companies",
         successProves: "oauth_bearer_usable_for_current_client_process",
+        ...(clientKind === "claude-code" ? { recovery: buildClaudeOAuthRecovery() } : {}),
       },
       hook: codexMcpRuntime || ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
