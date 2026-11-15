@@ -111,17 +111,95 @@ test("verified hydration extends observed search past idle, with a fixed overall
   }
 });
 
-test("company search refuses changed generations, oversized answers and duplicate concurrent delivery", async () => {
-  let nativeCurrent = false, invalidatedReaders = 0, executions = 0;
-  const stale = createCompanySearchOperations({ ...searchOptions,
-    execute: async () => { executions++; return searchValue; }, validate: async () => nativeCurrent,
-    closeReader: async () => { invalidatedReaders++; } });
-  await assert.rejects(stale.read("https://synthetic.invalid", searchInput), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
-  assert.equal(invalidatedReaders, 1, "A stale startup snapshot must not survive a failed final generation fence");
-  nativeCurrent = true;
-  assert.deepEqual(await stale.read("https://synthetic.invalid", searchInput), searchValue.result);
-  assert.equal(executions, 2, "Only the explicit new search runs again, after dropping the stale reader");
-  await stale.close();
+test("company search refreshes a stale generation once under the original continuation", async () => {
+  const origin = "https://synthetic.invalid";
+  const updated = { generation: "b".repeat(64), result: { results: [{ title: "NEW_SNAPSHOT" }] } };
+  const oldValidation = pending();
+  const validationStarted = pending();
+  const concurrentValidation = pending();
+  let executions = 0, validations = 0, invalidatedReaders = 0, admissionReads = 0;
+  const reader = createCompanySearchOperations({ ...searchOptions,
+    authorize: async () => { admissionReads++; return { binding: "recipient" }; },
+    execute: async (_origin, input) => {
+      assert.deepEqual(input, searchInput, "A compact poll cannot replace the original request");
+      if (++executions === 1) return searchValue;
+      assert.equal(invalidatedReaders, 1, "Drop the stale warm reader before starting the retry");
+      return updated;
+    },
+    validate: async (_origin, input, value) => {
+      assert.deepEqual(input, searchInput);
+      if (++validations === 1) {
+        validationStarted.resolve();
+        return oldValidation.promise;
+      }
+      if (validations === 2) return concurrentValidation.promise;
+      return value.generation === updated.generation;
+    },
+    closeReader: async () => { invalidatedReaders++; },
+  });
+  const slowSearch = reader.read(origin, searchInput);
+  await validationStarted.promise;
+  // An identical direct invocation joins the first validation. Its mismatch
+  // starts the only retry while the original validation is still outstanding.
+  const concurrent = reader.read(origin, searchInput);
+  concurrentValidation.resolve(false);
+  const retrying = await concurrent;
+  assert.equal(retrying.state, "preparing");
+  oldValidation.resolve(true);
+  const late = await slowSearch;
+  assert.equal(late.operationId, retrying.operationId);
+  assert.equal(late.state, "preparing", "A late validation cannot expose the discarded answer");
+  assert.doesNotMatch(JSON.stringify(retrying), /PRIVATE_QUERY|PRIVATE_ANSWER/u);
+  const poll = retrying.nextCall.arguments.parameters;
+  assert.deepEqual(await reader.read(origin, poll, { operationId: retrying.operationId }), updated.result);
+  await assert.rejects(reader.read(origin, poll, { operationId: retrying.operationId }), { code: "LOCAL_CONTEXT_SEARCH_UNKNOWN" });
+  assert.equal(executions, 2);
+  assert.equal(admissionReads, 4);
+  await reader.close();
+});
+
+test("company search bounds real manifest conflicts and fails closed on access and deadlines", async () => {
+  const origin = "https://synthetic.invalid";
+  for (const failure of ["mismatch", "optimistic_conflict", "access", "deadline"]) {
+    let executions = 0;
+    const optimisticConflict = Object.assign(new Error("Native manifest conflict"), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+    const reader = createCompanySearchOperations({ ...searchOptions,
+      timeoutMs: failure === "deadline" ? 55 : 1000,
+      isValidationConflict: error => error === optimisticConflict,
+      execute: async (_origin, _input, _admission, { signal }) => {
+        if (++executions === 2 && failure === "deadline")
+          await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        return searchValue;
+      },
+      validate: async () => {
+        if (failure === "access")
+          throw Object.assign(new Error("Recipient changed"), { code: "LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED" });
+        if (failure === "optimistic_conflict") throw optimisticConflict;
+        return false;
+      },
+    });
+    if (failure === "access") {
+      await assert.rejects(reader.read(origin, searchInput), { code: "LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED" });
+      assert.equal(executions, 1, "Access changes never start a retry");
+    } else {
+      const retrying = await reader.read(origin, searchInput);
+      assert.equal(retrying.state, "preparing");
+      const poll = () => reader.read(origin, retrying.nextCall.arguments.parameters, { operationId: retrying.operationId });
+      if (failure === "deadline") {
+        await new Promise(resolve => setTimeout(resolve, 60));
+        await assert.rejects(poll(), { code: "LOCAL_CONTEXT_SEARCH_TIMEOUT" });
+      } else {
+        await assert.rejects(poll(), error => failure === "optimistic_conflict"
+          ? error === optimisticConflict : error.code === "LOCAL_CONTEXT_GENERATION_CHANGED");
+      }
+      assert.equal(executions, 2);
+      await assert.rejects(poll(), { code: "LOCAL_CONTEXT_SEARCH_UNKNOWN" });
+    }
+    await reader.close();
+  }
+});
+
+test("company search rejects oversized answers and duplicate concurrent delivery", async () => {
   const oversized = createCompanySearchOperations({ ...searchOptions, execute: async () => ({ ...searchValue, result: { text: "x".repeat(513 * 1024) } }) });
   await assert.rejects(oversized.read("https://synthetic.invalid", searchInput), { code: "LOCAL_CONTEXT_SEARCH_FAILED" });
   await oversized.close();

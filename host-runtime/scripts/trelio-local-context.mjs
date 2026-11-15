@@ -8573,7 +8573,11 @@ export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug,
   const provider = await resolveLocalCompanyProvider({origin, companySlug:normalizeCompanySlug(companySlug), signal,
     ...(expectedBinding ? { existingOnly: true } : {}) });
   if (provider.nativeProvider) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed.");
-  if (expectedBinding && humanSearchBinding(origin, provider) !== expectedBinding) return false;
+  if (expectedBinding && humanSearchBinding(origin, provider) !== expectedBinding) {
+    // A changed recipient is an access refusal, not a stale content snapshot.
+    // The human search coordinator may refresh only the latter.
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED", "Доступ к подготовленному поиску изменился. Получите новый native маршрут.");
+  }
   const manifest = await fetchManifest({origin:provider.requestOrigin, token:provider.token,
     companySlug:normalizeCompanySlug(companySlug), signal, projection: NARROW_CONTEXT_PROJECTION.get(nativeTool)});
   if (!MIRROR_GENERATION_PATTERN.test(String(manifest?.generation ?? "")))
@@ -8727,6 +8731,7 @@ const createHumanCompanySearches = () => {
       () => isTrelioLocalCompanyGenerationCurrent(
         origin, input.companySlug, value.generation, { signal, expectedBinding: admission.binding, nativeTool: input.nativeTool }), signal),
     closeReader: humanSearchReader.close,
+    isValidationConflict: isLocalProjectionRevisionConflict,
     errorFactory: (code, message, details) => new TrelioLocalContextError(code, message, details),
   });
 };

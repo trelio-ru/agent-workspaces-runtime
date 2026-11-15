@@ -1944,6 +1944,10 @@ short `state:preparing` responses retain `nextCall.tool:fetch` and its original
 selection in RAM. Another ID cannot launch a parallel reader or reset its clock.
 Sync plus exact hydration shares the same ten-minute child/two-child ceiling,
 fresh per-poll proof, late generation/pass/recipient checks and consumed result.
+The final manifest can reject a concurrent change with native HTTP 409
+`LOCAL_CONTEXT_GENERATION_CHANGED` before computing its version. This exact
+optimistic conflict follows the same bounded refresh as a version mismatch,
+after checking the current pass and recipient again. Other refusals end the read.
 Exact `workspace:`/`workspace-file:` sources keep their independent native path.
 The composed native fixture offers a genuinely slow 32-second whole-company
 refresh after READY and tests both task/context fetches through the old wire.

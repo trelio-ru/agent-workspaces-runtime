@@ -113,9 +113,13 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       if (!entry || entry.id!==id || entry.scope!==scope || entry.state==='running') return false;
       entries.delete(key);return true;
     },
+    async settle(key, id, scope) {
+      const entry = entries.get(key);
+      if (entry && entry.id === id && entry.scope === scope) await entry.done;
+    },
     has(key, id) { return entries.get(key)?.id === id; },
     active(key) { const entry = entries.get(key); return entry?.state === "running" ? snapshot(entry) : null; },
-    async start({ key, scope, fingerprint, pollAction, execute, signal }) {
+    async start({ key, scope, fingerprint, pollAction, execute, signal, background = false }) {
       signal?.throwIfAborted();
       prune();
       let entry = entries.get(key);
@@ -152,7 +156,9 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       }, (error) => {
         entry.state = "failed"; entry.error = error; entry.endedAt = Date.now();
       }));
-      return wait(entry, signal);
+      // Search can register its bounded replacement before returning the
+      // next poll. Finish callers still wait on the same cancellable receipt.
+      return background ? snapshot(entry) : wait(entry, signal);
     },
     async poll(key, id, signal, scope) {
       const entry = entries.get(key);
@@ -170,47 +176,118 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
  * failed-entry replacement. A poll is an exact retained operation, not replay.
  * Only a bounded answer lives here; the isolated reader owns the corpus. */
 export const createCompanySearchOperations = ({ authorize, execute, validate, closeReader = async () => {},
-  waitMs = 10_000, timeoutMs = 2 * 60 * 60_000, idleMs = 10 * 60_000,
+  isValidationConflict = () => false, waitMs = 10_000, timeoutMs = 2 * 60 * 60_000, idleMs = 10 * 60_000,
   retentionMs = 600_000, errorFactory = operationError } = {}) => {
   const operations = createWorkspaceFinishOperations({ waitMs, errorFactory });
   let current = null, closed = false;
   const fail = (code, message) => { throw errorFactory(code, message); };
-  const pending = (value, entry) => ({ schemaVersion: 1, state: "preparing", readOnly: true,
-    operationId: value.operationId, elapsedMs: value.elapsedMs,
+  const pending = entry => ({ schemaVersion: 1, state: "preparing", readOnly: true,
+    operationId: entry.id, elapsedMs: Math.round(performance.now() - entry.startedAt),
     progress: { stage: entry.stage, stageElapsedMs: Math.max(0, Math.round(performance.now() - entry.stageAt)), timings: { ...entry.timings } },
     nextCall: { server: "trelio-remote-skills", tool: "continue_trelio_local_action", arguments: {
       schemaVersion: 1, route: "context", parameters: { companySlug: entry.input.companySlug,
-        nativeTool: entry.input.nativeTool, operation: "search_poll", arguments: {}, searchOperationId: value.operationId },
+        nativeTool: entry.input.nativeTool, operation: "search_poll", arguments: {}, searchOperationId: entry.id },
     } },
     instruction: "Подготовка и поиск продолжаются. Вызовите nextCall; это продолжение одной операции, а не новый поиск. preparing не является результатом поиска.",
   });
+  const discard = (entry) => {
+    clearTimeout(entry.deadlineTimer);
+    clearTimeout(entry.retentionTimer);
+    operations.discardTerminal("search", entry.attempt.id, entry.binding);
+    if (current === entry) current = null;
+  };
+  const retire = (entry) => {
+    // Stop delivery immediately. Keep ownership until the child and registry
+    // have settled, so a new query cannot join the retiring reader or attempt.
+    entry.retiring ??= (async () => {
+      entry.controller.abort();
+      clearTimeout(entry.retentionTimer);
+      try { await closeReader(); }
+      finally {
+        await operations.settle("search", entry.attempt.id, entry.binding);
+        discard(entry);
+      }
+    })();
+    return entry.retiring;
+  };
+  const setStage = (entry, stage) => {
+    const now = performance.now();
+    entry.timings[entry.stage] = (entry.timings[entry.stage] ?? 0) + Math.max(0, Math.round(now - entry.stageAt));
+    entry.stage = stage;
+    entry.stageAt = now;
+  };
+  const startAttempt = (entry, admission, { signal, refresh = false } = {}) => {
+    const attempt = { refresh, settled: false, validations: 0 };
+    entry.attempt = attempt;
+    const waiting = operations.start({
+      key: "search", scope: entry.binding, fingerprint: entry.fingerprint, signal, pollAction: {}, background: refresh,
+      execute: async () => {
+        const operationSignal = entry.controller.signal;
+        const idleTimerForRemainingBudget = () => setTimeout(() => controllerAbort(entry, "idle"),
+          Math.max(0, entry.idleUntil - performance.now()));
+        let idleTimer = idleTimerForRemainingBudget();
+        entry.observerTimer = setTimeout(() => controllerAbort(entry, "unobserved"), idleMs);
+        try {
+          if (refresh) await closeReader();
+          operationSignal.throwIfAborted();
+          if (performance.now() >= entry.idleUntil) {
+            controllerAbort(entry, "idle");
+            operationSignal.throwIfAborted();
+          }
+          const value = await execute(entry.origin, entry.input, admission, { signal: operationSignal,
+            onProgress: stage => {
+              // Only verified hydration renews the idle budget. Replacing a
+              // stale reader keeps both the original deadline and idle clock.
+              if (stage === "hydration_progress") {
+                if (entry.stage === "hydrating" && !operationSignal.aborted) {
+                  entry.idleUntil = performance.now() + idleMs;
+                  clearTimeout(idleTimer);
+                  idleTimer = idleTimerForRemainingBudget();
+                }
+                return;
+              }
+              setStage(entry, stage);
+            } });
+          operationSignal.throwIfAborted();
+          // Even a malformed child cannot retain a corpus or unbounded response.
+          if (!value || typeof value.generation !== "string" || !/^[a-f0-9]{64}$/u.test(value.generation)
+            || !value.result || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024)
+            fail("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный результат изолированного поиска.");
+          return value;
+        } finally {
+          clearTimeout(idleTimer);
+          clearTimeout(entry.observerTimer);
+          entry.observerTimer = null;
+          attempt.settled = true;
+          if (current === entry && !entry.retiring) {
+            entry.retentionTimer = setTimeout(() => discard(entry), retentionMs);
+            entry.retentionTimer.unref?.();
+          }
+        }
+      },
+    });
+    // Register the private attempt ID before a simultaneous poll can join it.
+    attempt.id = operations.active("search")?.operationId;
+    return waiting;
+  };
   return {
     async read(origin, input, { signal, operationId } = {}) {
       signal?.throwIfAborted();
       if (closed) fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Поисковый host закрыт. Выполните новый поиск через native Trelio.");
-      // Every wait obtains fresh provider/credential/scope admission BEFORE it
-      // looks up an answer. Operation UUID and equal query text grant no ACL.
+      // A poll obtains fresh provider and recipient admission even when its
+      // only effect is to join an already running retry.
       let admission;
       try { admission = await authorize(origin, input, { signal }); }
       catch (error) {
-        if (!signal?.aborted && current) {
-          const refused = current;
-          refused.controller.abort(); clearTimeout(refused.retentionTimer);
-          await closeReader();
-          operations.discardTerminal("search", refused.id, refused.binding);
-          if (current === refused) current = null;
-        }
+        if (!signal?.aborted && current) await retire(current);
         throw error;
       }
+      signal?.throwIfAborted();
       if (admission.nativeProvider) {
-        if (current) {
-          current.controller.abort(); clearTimeout(current.retentionTimer);
-          await closeReader();
-          operations.discardTerminal("search", current.id, current.binding);
-          current = null;
-        }
+        if (current) await retire(current);
         return admission.result;
       }
+      if (closed) fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Поисковый host закрыт. Выполните новый поиск через native Trelio.");
       const fingerprint = canonicalJson({ origin, input });
       let entry = current;
       const poll = input.operation === "search_poll";
@@ -220,114 +297,86 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
         fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Операция поиска неизвестна этому host. Выполните новый поиск через native Trelio.");
       if (poll && !operationId) fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Продолжение поиска требует точный идентификатор операции.");
       if (entry && entry.binding !== admission.binding) {
-        entry.controller.abort(); clearTimeout(entry.retentionTimer);
-        await closeReader();
-        operations.discardTerminal("search", entry.id, entry.binding);
-        if (current === entry) current = null;
+        await retire(entry);
         fail("LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED", "Доступ к подготовленному поиску изменился. Получите новый native маршрут.");
       }
-      if (!operationId && entry && !entry.settled && entry.fingerprint !== fingerprint)
-        throw errorFactory("LOCAL_CONTEXT_SEARCH_IN_PROGRESS", "Предыдущий поиск ещё готовится. Продолжите его nextCall перед новым запросом.",
-          pending(operations.active("search"), entry));
-      if (!operationId && (!entry || entry.settled && entry.fingerprint !== fingerprint)) {
-        if (entry) { clearTimeout(entry.retentionTimer); operations.discardTerminal("search", entry.id, entry.binding); }
-        const controller = new AbortController();
-        entry = { origin, input: structuredClone(input), fingerprint, binding: admission.binding, controller,
-          stage: "starting", stageAt: performance.now(), timings: {}, settled: false };
-        current = entry;
+      if (entry?.retiring) fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Операция поиска завершена. Выполните новый поиск через native Trelio.");
+      if (!operationId && entry && entry.fingerprint !== fingerprint) {
+        if (!entry.attempt.settled || entry.attempt.validations > 0)
+          throw errorFactory("LOCAL_CONTEXT_SEARCH_IN_PROGRESS", "Предыдущий поиск ещё готовится. Продолжите его nextCall перед новым запросом.",
+            pending(entry));
+        discard(entry);
+        entry = null;
       }
-      // Only a valid admitted continuation keeps this worker observed. This
-      // lease never substitutes for verified progress or the hard deadline.
-      if (!entry.controller.signal.aborted) entry.observerTimer?.refresh();
-      const render = async value => {
-        entry.id = value.operationId;
-        if (value.state === "running") return pending(value, entry);
-        entry.stage = "validating";
-        // Completion is undelivered data, not a reusable authorization cache.
-        // Fresh native manifest equality and recipient identity fence delivery.
-        if (!await validate(origin, input, value, admission, { signal }))
-          throw rememberDiagnosticDetail(errorFactory("LOCAL_CONTEXT_GENERATION_CHANGED", "Контекст изменился во время поиска. Выполните новый native поиск."),
-            { kind: "generation", stage: "search_delivery", reason: "search_generation_changed" });
-        signal?.throwIfAborted();
-        if (entry.delivered || current !== entry)
-          fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Этот результат поиска уже выдан. Выполните новый native поиск.");
-        entry.delivered = true;
-        clearTimeout(entry.retentionTimer);
-        operations.discardTerminal("search", entry.id, entry.binding);
-        if (current === entry) current = null;
-        return value.result;
-      };
+      let waiting;
+      if (!entry) {
+        const startedAt = performance.now();
+        entry = { id: randomUUID(), origin, input: structuredClone(input), fingerprint, binding: admission.binding,
+          controller: new AbortController(), startedAt, idleUntil: startedAt + idleMs,
+          stage: "starting", stageAt: startedAt, timings: {} };
+        current = entry;
+        entry.deadlineTimer = setTimeout(() => controllerAbort(entry, "deadline"), timeoutMs);
+        entry.deadlineTimer.unref?.();
+        waiting = startAttempt(entry, admission, { signal });
+      } else {
+        if (!entry.controller.signal.aborted) entry.observerTimer?.refresh();
+        waiting = operations.poll("search", entry.attempt.id, signal, entry.binding);
+      }
+      const attempt = entry.attempt;
+      const operationSignal = entry.controller.signal;
       try {
-        const value = operationId || entry.id
-          ? await operations.poll("search", operationId ?? entry.id, signal, entry.binding)
-          : await operations.start({ key: "search", scope: entry.binding, fingerprint, signal, pollAction: {},
-            execute: async () => {
-              // Registry ownership is already synchronous. Retain the ID even
-              // if the first waiter is cancelled before receiving nextCall, so
-              // TTL/EOF can erase this exact undelivered terminal value later.
-              entry.id ??= operations.active("search").operationId;
-              const timer = setTimeout(() => controllerAbort(entry, "deadline"), timeoutMs);
-              const idleTimer = setTimeout(() => controllerAbort(entry, "idle"), idleMs);
-              entry.observerTimer = setTimeout(() => controllerAbort(entry, "unobserved"), idleMs);
-              try {
-                const value = await execute(origin, entry.input, admission, { signal: entry.controller.signal,
-                  onProgress: stage => {
-                    // Only the isolated reader can report verified file or
-                    // Workspace progress. Polls, stage changes and transport
-                    // retries cannot renew the idle budget or hard deadline.
-                    if (stage === "hydration_progress") {
-                      if (entry.stage === "hydrating" && !entry.controller.signal.aborted) idleTimer.refresh();
-                      return;
-                    }
-                    // The reader adapter supplies a closed stage vocabulary.
-                    // Timings contain no corpus size, content or identifiers.
-                    const now = performance.now();
-                    entry.timings[entry.stage] = (entry.timings[entry.stage] ?? 0) + Math.max(0, Math.round(now - entry.stageAt));
-                    entry.stage = stage; entry.stageAt = now;
-                  } });
-                entry.controller.signal.throwIfAborted();
-                // No corpus, source bytes, keys or unbounded result can enter
-                // the short-wait registry, even from a malformed reader pipe.
-                if (!value || typeof value.generation !== "string" || !/^[a-f0-9]{64}$/u.test(value.generation)
-                  || !value.result || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024)
-                  fail("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный результат изолированного поиска.");
-                return value;
-              } finally {
-                clearTimeout(timer);
-                clearTimeout(idleTimer);
-                clearTimeout(entry.observerTimer);
-                entry.observerTimer = null;
-                entry.settled = true;
-                entry.retentionTimer = setTimeout(() => {
-                  operations.discardTerminal("search", entry.id, entry.binding);
-                  if (current === entry) current = null;
-                }, retentionMs);
-                entry.retentionTimer.unref?.();
-              }
-            } });
-        return await render(value);
-      } catch (error) {
-        // Cancelling a waiter leaves the same reader and deadline intact.
-        // A real validation refusal discards retained plaintext immediately.
-        if (!signal?.aborted && entry.settled) {
-          // A failed generation/recipient fence invalidates this warm reader,
-          // not only its answer. Otherwise the next explicit search can reuse
-          // the same stale startup snapshot and fail forever until its TTL.
-          // A late duplicate poll must never close a newer query's reader.
-          if (current === entry) await closeReader();
+        const value = await waiting;
+        signal?.throwIfAborted();
+        if (current !== entry || entry.retiring)
+          fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Операция поиска завершена. Выполните новый поиск через native Trelio.");
+        operationSignal.throwIfAborted();
+        if (attempt !== entry.attempt || value.state === "running") return pending(entry);
+        let valid, validationConflict;
+        attempt.validations++;
+        try {
+          setStage(entry, "validating");
+          // A computed answer is undelivered data. Recheck the exact native
+          // generation and recipient on this poll, including after recovery.
+          valid = await validate(origin, entry.input, value, admission,
+            { signal: signal ? AbortSignal.any([signal, operationSignal]) : operationSignal });
+        } catch (error) {
+          // The manifest can itself fail with a typed optimistic conflict
+          // before returning any generation. It shares the same retry budget.
+          if (!isValidationConflict(error)) throw error;
+          validationConflict = error;
+        } finally { attempt.validations--; }
+        signal?.throwIfAborted();
+        if (current !== entry || entry.retiring)
+          fail("LOCAL_CONTEXT_SEARCH_UNKNOWN", "Этот результат поиска уже выдан. Выполните новый native поиск.");
+        operationSignal.throwIfAborted();
+        if (attempt !== entry.attempt) return pending(entry);
+        if (!valid) {
+          if (attempt.refresh)
+            throw validationConflict ?? rememberDiagnosticDetail(errorFactory("LOCAL_CONTEXT_GENERATION_CHANGED", "Контекст изменился во время поиска. Выполните новый native поиск."),
+              { kind: "generation", stage: "search_delivery", reason: "search_generation_changed" });
+          // Claim the one read-only retry synchronously. Other polls may
+          // finish checking the rejected answer, but cannot publish it or
+          // launch another reader. Keep the original public operation ID.
           clearTimeout(entry.retentionTimer);
-          operations.discardTerminal("search", entry.id, entry.binding);
-          if (current === entry) current = null;
+          operations.discardTerminal("search", attempt.id, entry.binding);
+          setStage(entry, "starting");
+          await startAttempt(entry, admission, { refresh: true });
+          return pending(entry);
         }
+        discard(entry);
+        return value.result;
+      } catch (error) {
+        // A cancelled waiter leaves the reader and original deadline intact.
+        // A real refusal must erase the retained answer and close the reader.
+        if (!signal?.aborted && current === entry && (attempt.settled || entry.retiring))
+          await retire(entry);
         throw error;
       }
     },
     async close() {
       closed = true;
-      clearTimeout(current?.retentionTimer);
-      current?.controller.abort();
-      await closeReader();
-      current = null;
+      if (current) await retire(current);
+      else await closeReader();
     },
   };
   function controllerAbort(entry, reason) {

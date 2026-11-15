@@ -3890,8 +3890,19 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     await assertCurrent(signal);
     if(request.operation==='company_context_validate'){
       const context=await loadContext();
-      const currentGeneration=await context.isTrelioLocalCompanyGenerationCurrent(current.identity.origin,
-        request.descriptor.companySlug,request.generation,{signal});
+      let currentGeneration;
+      try {
+        currentGeneration=await context.isTrelioLocalCompanyGenerationCurrent(current.identity.origin,
+          request.descriptor.companySlug,request.generation,{signal});
+      } catch(error) {
+        // A final manifest can detect a native optimistic conflict before it
+        // returns a version to compare. Use the existing false result to let
+        // the parent refresh under its original deadline and two-child cap.
+        // Other HTTP refusals retain their terminal behavior.
+        if(!(error instanceof TrelioApiError&&error.statusCode===409&&error.code==='LOCAL_CONTEXT_GENERATION_CHANGED'))throw error;
+        currentGeneration=false;
+      }
+      signal?.throwIfAborted();
       await assertCurrent(signal);return {schemaVersion:1,current:currentGeneration};
     }
     if(request.operation==='company_context_prepare'){

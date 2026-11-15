@@ -804,6 +804,10 @@ publication tooling также остаются вне этого публичн
   обработка read-conflicts всех этапов чтения обязательны по
   [runtime contract](docs/agent-workspace-runtime.md). Публикация не повторяется;
   HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` сохраняет code без backend payload/details.
+  Human search delivery refreshes a rejected snapshot once under the same
+  operation ID and deadline. Typed final manifest conflicts share this limit.
+  Recipient/ACL refusals never restart the query. Managed validation reports
+  the same optimistic conflict to its existing bounded refresh.
   Native detail/list/fetch и read-only подготовка строк реестра/typed task fields
   обновляют stale locator один раз под исходным deadline; fresh sync без readable
   fallback. Row/task CAS, payload uploads и mutation POST не входят в retry.

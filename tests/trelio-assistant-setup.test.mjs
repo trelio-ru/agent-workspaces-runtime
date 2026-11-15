@@ -2984,6 +2984,30 @@ test('company common read failures survive actual child frames without private e
  }
 });
 
+test('assistant search validator exposes only optimistic manifest conflicts as a changed generation',async()=>{
+ const {TrelioApiError}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+ const descriptor={nativeTool:'search',companySlug:'synthetic'};
+ const binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ const request={operation:'company_context_validate',descriptor,binding,generation:'a'.repeat(64)};
+ const conflict=new TrelioApiError(409,'synthetic conflict',null,'LOCAL_CONTEXT_GENERATION_CHANGED');
+ const run=async(error,{revoke=false}={})=>{
+  let reads=0;
+  const options={withProfile:async action=>action({identity:{origin:'https://synthetic.test'},
+   prepareCompanyContextRead:async()=>({runtime:{scope:{id:binding.scopeId,epoch:binding.scopeEpoch},
+    device:{id:binding.deviceId},envelope:{id:++reads===2&&revoke?randomUUID():binding.envelopeId}}})}),
+   loadContext:async()=>({isTrelioLocalCompanyGenerationCurrent:async()=>{throw error;}})};
+  const value=await executeAssistantCompanyContextRequest(request,options);
+  assert.equal(reads,2,'A version conflict still requires the final native binding check');
+  return value;
+ };
+ assert.deepEqual(await run(conflict),{schemaVersion:1,current:false});
+ await assert.rejects(run(conflict,{revoke:true}),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+ await assert.rejects(run(new TrelioApiError(403,'synthetic refusal',null,'FORBIDDEN')),error=>
+  error.code?.startsWith('ASSISTANT_COMPANY_CONTEXT_'));
+ const lookalike=Object.assign(new Error('same public code'),{statusCode:409,code:'LOCAL_CONTEXT_GENERATION_CHANGED'});
+ await assert.rejects(run(lookalike),{code:'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED'});
+});
+
 test('company preparation separates its bounded private lifetime from fresh query reads and rejects foreign operations before I/O',async()=>{
  const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
  const opened={runtime:{scope:{id:binding.scopeId,epoch:binding.scopeEpoch},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}};let assertions=0,prepares=0,reads=0;const modes=[];
