@@ -2150,7 +2150,7 @@ export const renderCredentialPage = ({ resolved, nonce, errorMessage = "" }) => 
   return renderLocalFormPage({
     title: `Подключение ${resolved.skill.title}`, heading: resolved.skill.title,
     sections: [
-      { paragraphs: ["Credential сохраняется только на этом устройстве и не передаётся Trelio, агенту, чату или workspace."] },
+      { paragraphs: ["Credential сохраняется только на этом устройстве и не передаётся Trelio, агенту, чату или папке в Трелио."] },
       ...(help ? [{ paragraphs: [help.instructions], links: [{ label: `${help.label} · ${new URL(help.url).hostname}`, url: help.url }] }] : []),
       { ...(errorMessage ? { notice: { tone: "error", text: errorMessage } } : {}), fields: [
         { name: "credential", label: "Personal Bearer PAT", type: "password", minLength: 8, maxLength: MAX_CREDENTIAL_BYTES, required: true, autofocus: true },
@@ -7465,7 +7465,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         throw fail("TRELIO_HARNESS_OAUTH_METADATA_INVALID", "Trelio не предоставил актуальный каталог OAuth scopes.");
       }
       if (isMultiTool && !multiToolScopes.every(scope => scopes.includes(scope))) {
-        throw fail("TRELIO_MULTITOOL_SCOPES_UNAVAILABLE", "Trelio не предоставил scopes для Workspace.");
+        throw fail("TRELIO_MULTITOOL_SCOPES_UNAVAILABLE", "Trelio не предоставил разрешения для папки.");
       }
       config().authentication.scopes = isMultiTool ? multiToolScopes : [...new Set(scopes)].sort();
       identity = { remoteMcp: { configFingerprint: crypto.createHash("sha256")

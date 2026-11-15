@@ -99,7 +99,7 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
       // the same diagnostic action a new MultiTool chat sees.
       await fs.writeFile(path.join(root, "AGENTS.md"), current
         .replace(/^Мультитул:.*\n\n/mu, "")
-        .replace(/^Для чтения принятого Workspace.*\n\n/mu, "")
+        .replace(/^Для чтения принятых материалов папки.*\n\n/mu, "")
         .replace("Для записи или редактирования материалов открой Agent Run",
           "Для задачи или именованного воркспейса сначала открой Agent Run")
         .replace(/^- для точной задачи вызови.*$/mu, "- для точной задачи вызови `get_task`;"));

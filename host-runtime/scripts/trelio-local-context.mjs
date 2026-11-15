@@ -12501,7 +12501,7 @@ export const buildEncryptedRestoreHandoffArguments = (scopeType) => {
     "--type",
     "handoff",
     "--summary",
-    "Подготовлено локальное восстановление ранее принятой версии Workspace",
+    "Подготовлено локальное восстановление ранее принятой версии папки",
     "--evidence",
     "Исторический encrypted snapshot расшифрован и проверен локальным bridge",
     "--next-action",
@@ -12687,7 +12687,7 @@ const restoreEncryptedWorkspaceLocally = async ({
           "--no-gpg-sign",
           "--no-verify",
           "-m",
-          "Восстановить принятую версию Workspace",
+          "Восстановить принятую версию папки",
         ],
         { cwd: workspaceDirectory, signal },
       );
@@ -12699,7 +12699,7 @@ const restoreEncryptedWorkspaceLocally = async ({
     await runWorkspaceBridge(origin, checkpointArguments, { cwd: workspaceDirectory, signal });
     await runWorkspaceBridge(
       origin,
-      ["submit", "--message", "Восстановить принятую версию Workspace"],
+      ["submit", "--message", "Восстановить принятую версию папки"],
       { cwd: workspaceDirectory, signal },
     );
   } catch (error) {

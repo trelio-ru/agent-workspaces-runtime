@@ -1785,7 +1785,7 @@ test("company encryption key page is local-only copy and escapes company names",
   assert.match(html, /Ключ шифрования/u);
   assert.match(html, /Private &lt;Company&gt; &amp; &quot;team&quot;/u);
   assert.doesNotMatch(html, /Private <Company>/u);
-  assert.match(html, /не попадёт в Trelio, командную строку, Workspace или логи/u);
+  assert.match(html, /не попадёт в Trelio, командную строку, папку в Трелио или логи/u);
   assert.match(html, /name="secret"/u);
   assert.match(html, /name="confirmation"/u);
 });
@@ -2834,7 +2834,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
     );
     assert.match(
       AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN,
-      /Native Trelio MCP и bundled bridge являются единственным штатным control\/data plane/u,
+      /Native Trelio MCP и bundled bridge – единственный control\/data plane/u,
     );
     assert.match(
       AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN,
@@ -4740,7 +4740,7 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
           env: fixtureEnv,
         },
       ),
-      /В workspace нет изменений для finish/u,
+      /В папке нет изменений для finish/u,
     );
     assert.equal(heartbeatAttempts, 0);
 
@@ -5947,7 +5947,7 @@ test("compact protected runtime keeps the immutable Run safety kernel", () => {
     /trust подтверждён.*не повторяй.*диагностируй owning client process/u,
     /активного PreToolUse hook означает, что Hooks уже работают/u,
     /Не обходи gate другим MCP, HTTP, browser или shell/iu,
-    /Native Trelio MCP и bundled bridge являются единственным штатным control\/data plane/u,
+    /Native Trelio MCP и bundled bridge – единственный control\/data plane/u,
     /загружай только соответствующий reference.*не читай все references заранее/u,
     /`\.\.\/context\/agent-instructions\.md`.*`\.\.\/context\/user-profile\.md`.*`\.\.\/context\/run-checkpoint\.json`.*`WORKSPACE_CONTEXT\.md`/u,
     /pinned authority snapshot.*не заменяй его более новой live revision/u,
@@ -6066,10 +6066,10 @@ test("workspace worker routes every high-risk scenario to a mandatory reference"
   assert.match(agentRunReference, /run-recovery\.md/u);
   assert.match(relationsReference, /двумя независимыми стабильными\s+идентификаторами/u);
   assert.match(relationsReference, /вызови\s+`link_workspace_task` без формального подтверждения/u);
-  assert.match(relationsReference, /весь принятый Workspace\s+текущим и будущим читателям задачи/u);
+  assert.match(relationsReference, /всю принятую папку\s+текущим и будущим читателям задачи/u);
   assert.match(relationsReference, /редакторы –\s+write\/Run/u);
   assert.match(relationsReference, /Комментарий или\s+уведомление не добавляй без отдельной просьбы/u);
-  assert.match(relationsReference, /неясность раскрытия всего Workspace требуют вопроса/u);
+  assert.match(relationsReference, /неясность раскрытия всей папки требуют вопроса/u);
   assert.match(relationsReference, /Слабое совпадение\s+игнорируй/u);
   assert.match(relationsReference, /`link_workspace_project`/u);
   assert.match(relationsReference, /Основной проект и правила сохраняются/u);
@@ -6739,7 +6739,7 @@ test("workspace skill transfers workspaces only with two-sided management author
   assert.match(workspaceSkill, /confirmCompanyWideAccess: true/u);
   assert.match(workspaceSkill, /WORKSPACE_TRANSFER_STATE_CHANGED/u);
   assert.match(workspaceSkill, /Не отменяй\s+чужой Run ради переноса/u);
-  assert.match(workspaceSkill, /UUID Workspace, принятая Git-история,\s+ревизии, связи задач, проектов/u);
+  assert.match(workspaceSkill, /UUID папки, принятая Git-история,\s+ревизии, связи задач, проектов/u);
 });
 
 test("task handoff requires an explicit outcome and keeps unresolved work out of completion", () => {

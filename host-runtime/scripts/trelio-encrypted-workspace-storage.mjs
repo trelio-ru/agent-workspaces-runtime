@@ -67,7 +67,7 @@ export const publishEncryptedWorkspaceRecord = async ({ metadata, kind, record, 
   const saved = await (await api(`/api/agent-workspaces/runs/${metadata.runId}/encrypted-storage/publication?${query}`)).json();
   if (saved !== null) {
     ensure(saved && canonicalJson(saved.record) === canonicalJson(record) && saved.signature === signature && saved.result,
-      "Сервер сохранил другой подписанный результат encrypted Workspace.");
+      "Сервер сохранил другой подписанный результат зашифрованной папки.");
     return saved.result;
   }
   return publish();
@@ -80,7 +80,7 @@ export const cacheEncryptedWorkspaceRecord = async ({ cacheDirectory, key, creat
   const saved = await readPrivateJsonFile(filename, { maximumBytes: 2 * ENCRYPTED_WORKSPACE_MAX_MANIFEST_BYTES });
   if (Object.keys(saved).length) {
     ensure(saved.key === canonicalJson(key) && saved.record && typeof saved.record === "object",
-      "Повреждён checkpoint encrypted Workspace.");
+      "Повреждён checkpoint зашифрованной папки.");
     return saved.record;
   }
   const record = await create();
@@ -345,14 +345,14 @@ export const materializeEncryptedWorkspaceChain = async ({
     const headerLength = prefix.readUInt32BE(8);
     ensure(prefix.subarray(0, 8).toString("ascii") === "TRELIOH1" && headerLength >= 2
       && headerLength <= ENCRYPTED_WORKSPACE_MAX_MANIFEST_BYTES && 12 + headerLength < stat.size,
-    "Повреждён encrypted Workspace history container.");
+    "Повреждён контейнер зашифрованной истории папки.");
     const headerBytes = await readPart(source, 12, headerLength);
     const header = JSON.parse(headerBytes.toString("utf8"));
     ensure(headerBytes.equals(Buffer.from(canonicalJson(header))) && header.schemaVersion === 1
       && header.companyId === companyEncryption.runtime.company.id && header.workspaceId === expectedWorkspaceId
       && Array.isArray(header.revisions) && header.revisions.length >= 2
       && header.revisions.length <= ENCRYPTED_WORKSPACE_MAX_CHAIN_LENGTH,
-    "Encrypted история относится к другому Workspace или формату.");
+    "Зашифрованная история относится к другой папке или формату.");
     await git(["init", "--bare", repository]);
     let offset = 12 + headerLength;
     let previous = null;

@@ -192,9 +192,9 @@ export const LEGACY_WORKSPACE_CONTEXT_FILE_NAME = "PROJECT_CONTEXT.md";
 export const buildAgentWorkspaceRuntimeAgentsMarkdown = (
   workspaceContextFileName = WORKSPACE_CONTEXT_FILE_NAME, { assistant = false } = {},
 ) => { const lines = [
-  "# Инструкции Trelio Agent Workspace",
+  "# Инструкции папки",
   "",
-  "Этот защищённый файл создан bridge для текущего Run и не входит в принятую Git-историю workspace.",
+  "Этот защищённый файл создан bridge для текущего Run и не входит в принятую Git-историю папки.",
   "",
   "## Границы",
   "",
@@ -204,19 +204,19 @@ export const buildAgentWorkspaceRuntimeAgentsMarkdown = (
   "- Новый Run записывает ровно в одну папку в Трелио: папку задачи либо выбранную именованную папку. Company/project задают ACL и immutable правила, а дополнительный контекст приходит только через явно закреплённые related task/workspace heads.",
   `- Для изменения личного профиля или company/project правил оцени область \`current_request\` / \`task\` / \`personal\` / \`project\` / \`company\`, подготовь exact diff через \`plan_my_agent_profile_update\` или \`plan_agent_instructions_update\` и публикуй только после явного подтверждения. Не прячь инструкции в \`${workspaceContextFileName}\`; новая revision действует только на будущие Runs.`,
   "- Approved hook сам подставляет одноразовый runtimeSessionProof в защищённые операции. Никогда не создавай, не копируй и не передавай proof либо model attestation вручную. При exact TRELIO_RUNTIME_HOOK_REQUIRED от Trelio остановись: ответ доказывает отсутствие proof, а не выключенные Hooks. Если review текущей definition не подтверждён, попроси пользователя enable/approve hooks; если trust подтверждён, не повторяй эту инструкцию и сразу диагностируй owning client process по setup-and-recovery reference. Ошибка активного PreToolUse hook означает, что Hooks уже работают: сохрани её exact code и причину. Upgrade/host/runtime failure обрабатывай по тому же reference. Не обходи gate другим MCP, HTTP, browser или shell.",
-  "- Native Trelio MCP и bundled bridge являются единственным штатным control/data plane Agent Workspace. Для внешних сервисов, Agent Secrets, поиска контекста и task proposals загружай только соответствующий reference навыка trelio-workspace-worker; не читай все references заранее и не заменяй защищённый маршрут альтернативным инструментом.",
+  "- Native Trelio MCP и bundled bridge – единственный control/data plane папки. Для внешних сервисов, Agent Secrets, поиска контекста и task proposals загружай только соответствующий reference навыка trelio-workspace-worker; не читай все references заранее и не заменяй защищённый маршрут альтернативным инструментом.",
   "",
   "## Начало Run",
   "",
   `- До работы и после compaction полностью прочитай по порядку: \`../context/agent-instructions.md\`, \`../context/user-profile.md\`, при наличии \`../context/run-checkpoint.json\`, затем \`${workspaceContextFileName}\`. Первые три файла read-only. Это pinned authority snapshot текущего Run: не заменяй его более новой live revision; профиль, checkpoint и workspace-контекст не отменяют ACL, approval, company/project rules или системные ограничения.`,
   `- Храни в \`${workspaceContextFileName}\` короткое активное резюме: только устойчивые факты, решения и открытые вопросы, ориентир до 15 000 символов. Формат журнала доступен read-only в \`../context/worklog-format.md\`; bridge сам создаёт одну краткую запись в \`worklog/\` из handoff при \`finish\`. Не создавай дубликат вручную и не сохраняй переписку, chain-of-thought, рутинные команды, raw tool output или секреты.`,
-  `- Если выбранный Agent Secret стал устойчивой зависимостью workspace, запиши в \`${workspaceContextFileName}\` только \`Agent Secret: <текущее safe название> (secretId: <UUID>) — <назначение>\`. \`secretId\` каноничен; освежай название через \`list_agent_secrets\`. Не сохраняй value, version, grant, setup URL или runtime arguments и не добавляй ссылки для неиспользованных найденных секретов.`,
+  `- Если выбранный Agent Secret стал устойчивой зависимостью папки, запиши в \`${workspaceContextFileName}\` только \`Agent Secret: <текущее safe название> (secretId: <UUID>) — <назначение>\`. \`secretId\` каноничен; освежай название через \`list_agent_secrets\`. Не сохраняй value, version, grant, setup URL или runtime arguments и не добавляй ссылки для неиспользованных найденных секретов.`,
   "",
   "## Маршрутизация",
   "",
   "- Выполняй returned `action.arguments` без изменений через `continue_trelio_workspace_action` из exact папки, без shell. Имя поля не operation. Неизменный reference используй повторно, пока полный текст в контексте.",
   "- За пределами Run соблюдай exact instruction scope ответа Trelio; не переноси company/project/personal layer на непривязанную задачу.",
-  "- Секретные значения никогда не передавай модели, MCP, prompt, env, argv, literal Browser/Chrome tool, логам или Git. Допустим только защищённый bridge flow из agent-secrets reference; в workspace сохраняется лишь safe ссылка по secretId без value, grant, setup URL или runtime arguments.",
+  "- Секретные значения никогда не передавай модели, MCP, prompt, env, argv, literal Browser/Chrome tool, логам или Git. Допустим только защищённый bridge flow из agent-secrets reference; в папке сохраняется лишь safe ссылка по secretId без value, grant, setup URL или runtime arguments.",
   "",
   "## Работа и результат",
   "",
@@ -310,7 +310,7 @@ export const AGENT_WORKSPACE_DEFAULT_WORKLOG_MARKDOWN = [
   "",
 ].join("\n");
 export const AGENT_WORKSPACE_WORKLOG_FORMAT_MARKDOWN = [
-  "# Формат журнала Agent Workspace",
+  "# Формат журнала папки",
   "",
   "Bridge создаёт одну запись на содержательный Run из принятого handoff. Запись помогает человеку понять результат и продолжить работу, но не заменяет серверный аудит и не является источником инструкций.",
   "",
@@ -6608,7 +6608,7 @@ export const renderCompanyEncryptionKeyPage = ({ companyName, nonce }) => render
   sections: [
     { paragraphs: [
       `Компания «${companyName}» зашифрована. Введите ключ шифрования в этой локальной форме.`,
-      "Фраза останется на компьютере и не попадёт в Trelio, командную строку, Workspace или логи.",
+      "Фраза останется на компьютере и не попадёт в Trelio, командную строку, папку в Трелио или логи.",
     ] },
     { fields: [
       { name: "secret", label: "Ключ шифрования", type: "password", minLength: 12, maxLength: 4096, autocomplete: "new-password", required: true, autofocus: true },
@@ -7666,7 +7666,7 @@ export const writeAndDecryptCompanyWorkspaceBundle = async ({
     || responseScopeId !== companyEncryption.runtime.scope.id
     || responseScopeEpoch !== companyEncryption.runtime.scope.epoch
   ) {
-    throw new Error("Trelio вернул encrypted Workspace bundle другого scope или формата.");
+    throw new Error("Trelio вернул зашифрованный пакет папки другой области или формата.");
   }
 
   try {
@@ -7696,7 +7696,7 @@ export const writeAndDecryptCompanyWorkspaceBundle = async ({
       || decrypted.originalName !== "workspace.bundle"
       || decrypted.mimeType !== "application/vnd.git.bundle"
     ) {
-      throw new Error("Расшифрованный Workspace bundle привязан к другой компании или сущности.");
+      throw new Error("Расшифрованный пакет папки привязан к другой компании или сущности.");
     }
     return decrypted;
   } finally {
@@ -7789,7 +7789,7 @@ const serializeWorkspaceObjectPointer = ({ sha256, sizeBytes, contentType }) => 
     || sizeBytes <= 0
     || !/^[A-Za-z0-9!#$&^_.+\-/]{1,255}$/.test(contentType)
   ) {
-    throw new Error("Не удалось сформировать корректный указатель workspace object.");
+    throw new Error("Не удалось сформировать корректный указатель файлового объекта папки.");
   }
 
   return [
@@ -10596,7 +10596,7 @@ const validateCachedObject = async (pointer) => {
 
 const downloadResponseIntoCache = async (response, pointer) => {
   if (!response.body) {
-    throw new Error("Trelio вернул пустой поток workspace object.");
+    throw new Error("Trelio вернул пустой поток файлового объекта папки.");
   }
 
   const cachePath = getCachedObjectPath(pointer.sha256);
@@ -10613,7 +10613,7 @@ const downloadResponseIntoCache = async (response, pointer) => {
       receivedBytes += chunk.byteLength;
 
       if (receivedBytes > pointer.sizeBytes) {
-        callback(new Error(`Workspace object ${pointer.sha256} превысил заявленный размер.`));
+        callback(new Error(`Файловый объект папки ${pointer.sha256} превысил заявленный размер.`));
         return;
       }
 
@@ -10630,7 +10630,7 @@ const downloadResponseIntoCache = async (response, pointer) => {
     );
 
     if (receivedBytes !== pointer.sizeBytes || hash.digest("hex") !== pointer.sha256) {
-      throw new Error(`Workspace object ${pointer.sha256} не прошёл локальную проверку.`);
+      throw new Error(`Файловый объект папки ${pointer.sha256} не прошёл локальную проверку.`);
     }
 
     try {
@@ -10655,7 +10655,7 @@ const downloadResponseIntoCache = async (response, pointer) => {
   const verifiedCachePath = await validateCachedObject(pointer);
 
   if (!verifiedCachePath) {
-    throw new Error(`Workspace object ${pointer.sha256} не появился в cache после проверки.`);
+    throw new Error(`Файловый объект папки ${pointer.sha256} не появился в cache после проверки.`);
   }
 
   return verifiedCachePath;
@@ -10684,7 +10684,7 @@ const copyCachedObjectToDestination = async (cachePath, destination, pointer) =>
     const copied = await hashFile(temporaryPath);
 
     if (copied.sha256 !== pointer.sha256 || copied.sizeBytes !== pointer.sizeBytes) {
-      throw new Error(`Локальная копия workspace object ${pointer.sha256} повреждена.`);
+      throw new Error(`Локальная копия файлового объекта папки ${pointer.sha256} повреждена.`);
     }
 
     if (process.platform === "win32") {
@@ -10714,7 +10714,7 @@ export const inspectWorkspaceFile = async (filePath) => {
   const fileStat = await fs.lstat(filePath);
 
   if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
-    throw new Error(`Workspace содержит неподдерживаемый тип файла: ${filePath}`);
+    throw new Error(`Папка содержит неподдерживаемый тип файла: ${filePath}`);
   }
 
   if (fileStat.size <= MAX_INLINE_TEXT_BYTES) {
@@ -10752,7 +10752,7 @@ export const assertMaterializedWorkspaceFileTypes = async (workspaceDirectory) =
     // only; otherwise an agent could follow legacy content into unrelated
     // local data, and chmod must never follow that link while hardening.
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error(`Workspace содержит неподдерживаемый тип файла: ${filePath}`);
+      throw new Error(`Папка содержит неподдерживаемый тип файла: ${filePath}`);
     }
   }
 };
@@ -10852,7 +10852,7 @@ export const assertEncryptedCandidateSafe = async ({ workspaceDirectory, baseHea
   const trackedPaths = await listTrackedWorkspacePaths(workspaceDirectory);
 
   if (trackedPaths.length > (storageLimits?.maxFiles ?? MAX_ENCRYPTED_WORKSPACE_FILE_COUNT)) {
-    throw new Error("Зашифрованный Workspace содержит слишком много файлов.");
+    throw new Error("Зашифрованная папка содержит слишком много файлов.");
   }
 
   let totalBytes = 0;
@@ -10873,16 +10873,16 @@ export const assertEncryptedCandidateSafe = async ({ workspaceDirectory, baseHea
       || /[\u0000-\u001f\u007f]/u.test(filePath)
       || hasGitControlSegment
     ) {
-      throw new Error(`Workspace содержит небезопасный путь: ${filePath}`);
+      throw new Error(`Папка содержит небезопасный путь: ${filePath}`);
     }
     if (isForbiddenWorkspaceSecretPath(filePath)) {
-      throw new Error(`Workspace содержит запрещённый secret path: ${filePath}`);
+      throw new Error(`Папка содержит запрещённый secret path: ${filePath}`);
     }
 
     const fileStat = await fs.lstat(path.join(workspaceDirectory, filePath));
 
     if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
-      throw new Error(`Workspace содержит неподдерживаемый тип файла: ${filePath}`);
+      throw new Error(`Папка содержит неподдерживаемый тип файла: ${filePath}`);
     }
     totalBytes += fileStat.size;
     if (storageLimits && fileStat.size > storageLimits.maxFileBytes) {
@@ -10902,7 +10902,7 @@ export const assertEncryptedCandidateSafe = async ({ workspaceDirectory, baseHea
     }
 
     if (!storageLimits && totalBytes > MAX_ENCRYPTED_WORKSPACE_TREE_BYTES) {
-      throw new Error("Зашифрованный Workspace превышает локальный лимит полного снимка.");
+      throw new Error("Зашифрованная папка превышает локальный лимит полного снимка.");
     }
   }
 
@@ -10926,7 +10926,7 @@ export const assertEncryptedCandidateSafe = async ({ workspaceDirectory, baseHea
       });
 
     if (protectedChanges.length > 0 && !allowsLegacyWorkspaceMetadataRemoval) {
-      throw new Error("Candidate изменяет защищённые control-файлы Agent Workspace.");
+      throw new Error("Candidate изменяет защищённые control-файлы папки.");
     }
   }
 
@@ -11054,7 +11054,7 @@ export const validateEncryptedAgentWorkspaceDerivedArtifacts = async ({
       && filePath.endsWith("/extraction-manifest.json"),
   );
   if (manifestPaths.length > ENCRYPTED_DERIVED_ARTIFACT_MAX_COUNT) {
-    throw new Error("Зашифрованный Workspace содержит слишком много extraction manifests.");
+    throw new Error("Зашифрованная папка содержит слишком много extraction manifests.");
   }
 
   const manifests = [];
@@ -11723,7 +11723,7 @@ export const resolveWorkspaceContextFileName = async (workspaceDirectory) => {
 
   if (hasCanonicalContext && hasLegacyContext) {
     throw new Error(
-      `Workspace одновременно содержит ${WORKSPACE_CONTEXT_FILE_NAME} и ${LEGACY_WORKSPACE_CONTEXT_FILE_NAME}; продолжение неоднозначно.`,
+      `Папка одновременно содержит ${WORKSPACE_CONTEXT_FILE_NAME} и ${LEGACY_WORKSPACE_CONTEXT_FILE_NAME}; продолжение неоднозначно.`,
     );
   }
 
@@ -11739,7 +11739,7 @@ export const resolveWorkspaceContextFileName = async (workspaceDirectory) => {
   }
 
   throw new Error(
-    `Workspace не содержит обязательный ${WORKSPACE_CONTEXT_FILE_NAME}.`,
+    `Папка не содержит обязательный ${WORKSPACE_CONTEXT_FILE_NAME}.`,
   );
 };
 
@@ -11966,7 +11966,7 @@ export const buildRunContextSpecifications = (runId, rawContextHeads = {}) => {
     // Backend не должен присылать один workspace дважды как parent и related.
     // Локальная проверка не даёт такому ответу перезаписать уже выбранный путь.
     if (seenWorkspaceIds.has(workspaceId)) {
-      throw new Error(`Workspace ${workspaceId} повторяется в контексте Agent Run.`);
+      throw new Error(`Папка ${workspaceId} повторяется в контексте Agent Run.`);
     }
     seenWorkspaceIds.add(workspaceId);
     specifications.push({
@@ -12389,7 +12389,7 @@ const acquireRunRegistryLock = async () => {
     try {
       lockStat = await fs.lstat(RUN_REGISTRY_LOCK_DIRECTORY);
       if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) {
-        throw new Error("Локальная блокировка реестра Workspace имеет небезопасный тип.");
+        throw new Error("Локальная блокировка реестра папок имеет небезопасный тип.");
       }
       owner = await readPrivateJsonFile(path.join(
         RUN_REGISTRY_LOCK_DIRECTORY,
@@ -12416,7 +12416,7 @@ const acquireRunRegistryLock = async () => {
     await wait(25);
   }
 
-  throw new Error("Не удалось получить локальную блокировку реестра Agent Workspace.");
+  throw new Error("Не удалось получить локальную блокировку реестра папок.");
 };
 
 const releaseRunRegistryLock = async ({ ownerToken }) => {
@@ -12991,7 +12991,7 @@ const acquireWorkspaceOpenLock = async (workspaceId, kind = "open") => {
       const lockError = new Error(
         kind === "finish"
           ? "TRELIO_WORKSPACE_FINISH_IN_PROGRESS: finish этого Run ещё выполняется другим локальным процессом. Проверьте его состояние; второй процесс сохранения не запущен."
-          : "Этот Agent Workspace уже открывается другим локальным процессом. Дождитесь завершения открытия и повторите команду.",
+          : "Эта папка уже открывается другим локальным процессом. Дождитесь завершения открытия и повторите команду.",
       );
       lockError.code = kind === "finish" ? "TRELIO_WORKSPACE_FINISH_IN_PROGRESS" : "TRELIO_WORKSPACE_OPEN_LOCKED";
       throw lockError;
@@ -13002,7 +13002,7 @@ const acquireWorkspaceOpenLock = async (workspaceId, kind = "open") => {
     await fs.rm(lockPath, { recursive: true, force: true });
   }
 
-  throw new Error("Не удалось получить локальную блокировку Agent Workspace.");
+  throw new Error("Не удалось получить локальную блокировку папки.");
 };
 
 const releaseWorkspaceOpenLock = async ({ lockPath, ownerToken }) => {
@@ -13409,13 +13409,13 @@ const assertValidMaterializedRoot = async (
     || normalizeOrigin(metadata.origin || DEFAULT_ORIGIN) !== origin
     || !sameLocalPath(String(metadata.workspaceDirectory || ""), path.join(rootDirectory, "workspace"))
   ) {
-    throw new Error("Локальный каталог принадлежит другому или повреждённому Trelio Workspace.");
+    throw new Error("Локальный каталог принадлежит другой или повреждённой папке в Трелио.");
   }
 
   const gitDirectoryStat = await fs.stat(path.join(rootDirectory, "workspace", ".git"));
 
   if (!gitDirectoryStat.isDirectory()) {
-    throw new Error("Каталог Workspace повреждён: локальный Git workspace отсутствует.");
+    throw new Error("Каталог папки в Трелио повреждён: локальный Git-каталог отсутствует.");
   }
 };
 
@@ -13464,7 +13464,7 @@ const loadExactWorkspaceRun = async ({
     || (rawSnapshot.latestCheckpoint !== null
       && rawSnapshot.latestCheckpoint?.runId !== runId)
   ) {
-    throw new Error("Trelio вернул Agent Run другого Workspace.");
+    throw new Error("Trelio вернул Agent Run другой папки.");
   }
   return hydrateAgentCompanyEncryptedJson({
     value: rawSnapshot,
@@ -13508,7 +13508,7 @@ const preflightWorkspaceDirectory = async ({
       && overview?.company?.id
       && existingMetadata.company.id !== overview.company.id
     ) {
-      throw new Error("Локальный Workspace принадлежит другой компании Trelio.");
+      throw new Error("Локальная копия папки принадлежит другой компании Trelio.");
     }
     const localRunState = await loadRunState(existingMetadata.runId);
     const continuingSameRun = requestedRunId === existingMetadata.runId;
@@ -13585,8 +13585,8 @@ const preflightWorkspaceDirectory = async ({
   if (directoryOption || !sameLocalPath(rootDirectory, defaultPersistentRoot)) {
     throw new Error(
       directoryOption
-        ? "Выбранный --dir уже существует, но не принадлежит Trelio Workspace."
-        : "Локальный root уже существует, но не принадлежит Trelio Workspace.",
+        ? "Выбранный --dir уже существует, но не принадлежит папке в Трелио."
+        : "Локальный root уже существует, но не принадлежит папке в Трелио.",
     );
   }
 
@@ -13756,7 +13756,7 @@ const synchronizePersistentWorkspaceToAcceptedHead = async ({
   companyEncryption,
 }) => {
   if (!GIT_OBJECT_PATTERN.test(String(acceptedHead || ""))) {
-    throw new Error("Trelio не вернул корректную принятую ревизию Workspace.");
+    throw new Error("Trelio не вернул корректную принятую ревизию папки.");
   }
 
   const workspaceDirectory = metadata.workspaceDirectory;
@@ -13799,14 +13799,14 @@ const synchronizePersistentWorkspaceToAcceptedHead = async ({
         expectedWorkspaceHead: acceptedHead,
         inspectResponse: (response) => {
           if (response.headers.get("x-trelio-accepted-head") !== acceptedHead) {
-            throw new Error("Trelio вернул bundle другой принятой ревизии Workspace.");
+            throw new Error("Trelio вернул bundle другой принятой ревизии папки.");
           }
         },
       });
     } else {
       const response = await request(origin, token, pathname);
       if (response.headers.get("x-trelio-accepted-head") !== acceptedHead) {
-        throw new Error("Trelio вернул bundle другой принятой ревизии Workspace.");
+        throw new Error("Trelio вернул bundle другой принятой ревизии папки.");
       }
       await writeResponseToFile(response, bundlePath);
     }
@@ -13891,7 +13891,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       || !UUID_PATTERN.test(String(rawOverview.company.id || ""))
       || typeof rawOverview.company.slug !== "string"
     ) {
-      throw new Error("Trelio не вернул компанию Agent Workspace.");
+      throw new Error("Trelio не вернул компанию папки.");
     }
     if (
       workspaceRouting.company
@@ -13900,7 +13900,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
         || rawOverview.company.slug !== workspaceRouting.company.slug
       )
     ) {
-      throw new Error("Trelio вернул Workspace другой компании после выбора data plane.");
+      throw new Error("Trelio вернул папку другой компании после выбора data plane.");
     }
     // Продолжение существующего Run может содержать зашифрованные pinned
     // инструкции. Поэтому устройство и scope открываются до чтения snapshot и
@@ -14045,7 +14045,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   if (requestedRunId) {
     const existingRun = await loadRunState(requestedRunId);
     if (!existingRun) {
-      throw new Error("Run не найден в указанном workspace или недоступен пользователю.");
+      throw new Error("Run не найден в указанной папке или недоступен пользователю.");
     }
     // This object is an in-process option of the signed assistant worker,
     // never a flag or a model-selected path. The worker holds the existing
@@ -14142,7 +14142,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     || !UUID_PATTERN.test(String(runPayload.company.id || ""))
     || typeof runPayload.company.slug !== "string"
   ) {
-    throw new Error("Trelio не вернул компанию Agent Workspace.");
+    throw new Error("Trelio не вернул компанию папки.");
   }
   if (
     workspaceRouting.company
@@ -14417,7 +14417,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   }
 
   if (rootDirectoryExists && !directoryPreflight.legacyContainer) {
-    throw new Error("Локальный root существует, но не прошёл persistent Workspace preflight.");
+    throw new Error("Локальный root существует, но не прошёл проверку постоянной папки в Трелио.");
   }
 
   if (!rootDirectoryExists) {
@@ -14596,7 +14596,7 @@ const validateWorkspaceReadSnapshot = (rawSnapshot, workspaceId) => {
     || typeof company?.name !== "string"
     || !rawSnapshot.agentInstructionsSnapshot
   ) {
-    throw new Error("Trelio вернул некорректный read-only snapshot Agent Workspace.");
+    throw new Error("Trelio вернул некорректный снимок папки для чтения.");
   }
 
   return { acceptedHead, company };
@@ -14656,7 +14656,7 @@ const removePreviousWorkspaceInspection = async (rootDirectory, workspaceId) => 
     const rootStat = await fs.lstat(rootDirectory);
 
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-      throw new Error(`Read-only Workspace path имеет небезопасный тип: ${rootDirectory}`);
+      throw new Error(`Путь снимка папки для чтения имеет небезопасный тип: ${rootDirectory}`);
     }
     const metadata = await readPrivateJsonFile(
       path.join(rootDirectory, ".trelio-inspection.json"),
@@ -14668,7 +14668,7 @@ const removePreviousWorkspaceInspection = async (rootDirectory, workspaceId) => 
       || !sameLocalPath(String(metadata.workspaceDirectory || ""), path.join(rootDirectory, "workspace"))
     ) {
       throw new Error(
-        `Существующий каталог не принадлежит read-only Workspace ${workspaceId}: ${rootDirectory}`,
+        `Существующий каталог не принадлежит снимку папки ${workspaceId} для чтения: ${rootDirectory}`,
       );
     }
 
@@ -15269,8 +15269,8 @@ const migrateEncryptedWorkspaceBrowserFiles = async (origin, options) => {
 
     process.stdout.write(
       result.migrated
-        ? `Файлы workspace перенесены: ${result.fileCount}.\n`
-        : `Файлы workspace уже были перенесены: ${result.fileCount}.\n`,
+        ? `Файлы папки перенесены: ${result.fileCount}.\n`
+        : `Файлы папки уже были перенесены: ${result.fileCount}.\n`,
     );
   });
 };
@@ -16221,7 +16221,7 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
         clientMetadataSource: metadata.clientMetadataSource,
       })
     ) {
-      throw new Error("Для handoff укажите материал через --file или оставьте изменения в workspace.");
+      throw new Error("Для handoff укажите материал через --file или оставьте изменения в папке.");
     }
 
     if (!nextActionInstruction.trim()) {
@@ -16549,8 +16549,8 @@ const assertRunHasMeaningfulChanges = async (commandName) => withRun(async ({ me
   if (meaningfulPaths.length === 0) {
     throw new Error(
       commandName === "pause"
-        ? "В workspace нет изменений для переносимого pause. Задайте подготовительный вопрос напрямую."
-        : "В workspace нет изменений для finish.",
+        ? "В папке нет изменений для переносимого pause. Задайте подготовительный вопрос напрямую."
+        : "В папке нет изменений для finish.",
     );
   }
 
@@ -16590,7 +16590,7 @@ const preserveOutdatedWorkspaceRun = async (options) => {
   if (state.metadata.draftHead !== head || await getGitStatus(state.metadata.workspaceDirectory, state.metadata.objects || [])) {
     const { "task-outcome": _handoffOutcome, ...draftOptions } = options;
     await checkpoint({ ...draftOptions, type: "draft",
-      summary: String(options.summary || "Сохранены изменения перед слиянием параллельных результатов Workspace") });
+      summary: String(options.summary || "Сохранены изменения перед слиянием параллельных результатов папки") });
   }
   const saved = (await findRunMetadata()).metadata;
   throw new WorkspaceMergeRequiredError({ workspaceId: saved.workspaceId, sourceRunId: saved.runId,
@@ -16786,7 +16786,7 @@ const mergeWorkspaceRunUnlocked = async (options) => {
   });
   const metadata = (await findRunMetadata()).metadata;
   if (await getGitStatus(metadata.workspaceDirectory, metadata.objects || [])) {
-    await checkpoint({ type: "draft", summary: "Объединены совместимые параллельные изменения Workspace" });
+    await checkpoint({ type: "draft", summary: "Объединены совместимые параллельные изменения папки" });
   }
 };
 
@@ -17090,7 +17090,7 @@ const prepareCandidateIndex = async ({
     const plannedObject = plannedObjectsByPath.get(filePath);
 
     if (!plannedObject) {
-      throw new Error(`Не удалось построить план workspace object для ${filePath}.`);
+      throw new Error(`Не удалось построить план файлового объекта папки для ${filePath}.`);
     }
 
     let object = progressByPath.get(filePath);
@@ -17275,7 +17275,7 @@ const verifyEncryptedProjectionSource = async ({
       actual.sha256 !== expectedExternalObject.sha256
       || actual.sizeBytes !== expectedExternalObject.sizeBytes
     ) {
-      throw new Error(`Workspace object ${filePath} изменился после подготовки candidate.`);
+      throw new Error(`Файловый объект папки ${filePath} изменился после подготовки candidate.`);
     }
     return actual;
   }
@@ -17292,7 +17292,7 @@ const verifyEncryptedProjectionSource = async ({
   const fileStat = await fs.lstat(absolutePath);
 
   if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
-    throw new Error(`Workspace содержит неподдерживаемый тип файла: ${filePath}`);
+    throw new Error(`Папка содержит неподдерживаемый тип файла: ${filePath}`);
   }
   return { sizeBytes: fileStat.size };
 };
@@ -17322,7 +17322,7 @@ const readEncryptedProjectionTree = async (workspaceDirectory, workspaceHead) =>
 const assertEncryptedProjectionFileType = async (workspaceDirectory, filePath) => {
   const fileStat = await fs.lstat(path.join(workspaceDirectory, filePath));
   if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
-    throw new Error(`Workspace содержит неподдерживаемый тип файла: ${filePath}`);
+    throw new Error(`Папка содержит неподдерживаемый тип файла: ${filePath}`);
   }
 };
 
@@ -17631,7 +17631,7 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
       const { workspaceDirectory } = metadata;
       const entries = await readEncryptedProjectionTree(workspaceDirectory, workspaceHead);
       const totalFiles = entries.length;
-      if (totalFiles > storage.limits.maxFiles) throw new Error("Зашифрованный Workspace содержит слишком много файлов.");
+      if (totalFiles > storage.limits.maxFiles) throw new Error("Зашифрованная папка содержит слишком много файлов.");
       const externalObjects = new Map((metadata.objects || []).map((object) => [object.filePath, object]));
       const manifestFiles = [];
       const files = [];
@@ -17707,7 +17707,7 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
         const sourcePath = path.join(directory, "manifest.json");
         const bytes = Buffer.from(canonicalJson({ schemaVersion: 1, kind: "agent-workspace-browser-manifest",
           projectionId, workspaceId: metadata.workspaceId, workspaceHead, files: manifestFiles }));
-        if (bytes.length > storage.limits.maxManifestBytes) throw new Error("Encrypted Workspace manifest превышает допустимый размер.");
+        if (bytes.length > storage.limits.maxManifestBytes) throw new Error("Манифест зашифрованной папки превышает допустимый размер.");
         await fs.writeFile(sourcePath, bytes, { flag: "wx", mode: 0o600 });
         manifest = await prepareCachedEncryptedWorkspaceFile({ cacheDirectory,
           cacheKey: encryptedWorkspaceCacheKey({ ...binding, kind: "manifest", projectionId }),
@@ -18091,7 +18091,7 @@ const submit = async (options) => withRun(async ({
   const head = prepared.head;
 
   if (head === metadata.baseHead) {
-    throw new Error("В workspace нет изменений для отправки.");
+    throw new Error("В папке нет изменений для отправки.");
   }
 
   let submissionMetadata = prepared.candidateMetadata;
@@ -18247,7 +18247,7 @@ const submit = async (options) => withRun(async ({
     process.stdout.write(
       promotedDraft
         ? "Зашифрованный draft принят без повторной отправки полного snapshot.\n"
-        : "Зашифрованный результат записан в рабочее пространство Trelio.\n",
+        : "Зашифрованный результат записан в папку в Трелио.\n",
     );
     if (encryptedDerivedArtifactManifests.length > 0) {
       process.stdout.write("Производные артефакты для проверки человеком:\n");
@@ -18301,7 +18301,7 @@ const submit = async (options) => withRun(async ({
         lastUsedAt: new Date().toISOString(),
         cleanupEligibleAfterDays: workspaceRootRetentionDays({ rootDirectory: path.dirname(metadataPath), metadata }, await readLocalSettings()),
       });
-      process.stdout.write("Результат записан в рабочее пространство Trelio.\n");
+      process.stdout.write("Результат записан в папку в Трелио.\n");
       process.stdout.write("Статус: принят автоматически.\n");
       process.stdout.write("Проверки структуры, безопасности и актуальности базовой версии пройдены.\n");
       if (result.taskStatusTransition?.state === "applied") {
@@ -19527,7 +19527,7 @@ const readRunStatusMap = async ({ origin, token, roots }) => {
         || overview.company?.slug !== routing.company.slug
       )
     ) {
-      throw new Error("Trelio вернул другой Workspace при проверке локального retention.");
+      throw new Error("Trelio вернул другую папку при проверке локального retention.");
     }
 
     for (const run of Array.isArray(overview.runs) ? overview.runs : []) {
@@ -20847,7 +20847,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
       // ordinary users should never need a legacy workflow.
       await migrateEncryptedWorkspaceBrowserFiles(origin, options);
     } else {
-      throw new Error("Команда encryption поддерживает setup и служебную миграцию файлов workspace.");
+      throw new Error("Команда encryption поддерживает setup и служебную миграцию файлов папки.");
     }
   } else if (command === "inspect") {
     if (positional.length !== 0) {

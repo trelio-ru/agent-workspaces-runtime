@@ -1209,7 +1209,8 @@ publication tooling также остаются вне этого публичн
 ## Граница plugin/runtime
 
 Пользовательское название Workspace – «папка в Трелио». В локальных
-подсказках отличай её от рабочей папки на компьютере. [Контракт](docs/agent-workspace-runtime.md).
+подсказках, ошибках и журнале отличай её от рабочей папки на компьютере.
+Exact legacy template bytes для распознавания при миграции не переписывай. [Контракт](docs/agent-workspace-runtime.md).
 
 - [Приватные задачи](docs/agent-workspace-runtime.md#приватные-задачи).
 

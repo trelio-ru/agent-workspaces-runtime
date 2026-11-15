@@ -134,7 +134,7 @@ const DRAFT_RECOVERY_REASON_CODES = new Set([
   "DIVERGED_HISTORY",
 ]);
 const GIT_HEAD_PATTERN = /^[0-9a-f]{40,64}$/u;
-const MESSAGE = "Для этого Agent Workspace зарегистрировано несколько локальных папок. "
+const MESSAGE = "Для этой папки в Трелио зарегистрировано несколько локальных папок. "
   + "Повторите тот же open, указав выбранный корень в parameters.directory "
   + "(CLI: --dir). workingDirectory задаёт cwd процесса, а не явный выбор корня. "
   + "Список не подтверждает чистоту Git или завершение прежнего Run: open проверит их до записи.";
@@ -271,7 +271,7 @@ export class WorkspaceDraftRecoveryRequiredError extends Error {
   }
 }
 
-const LAYOUT_MIGRATION_MESSAGE = "Старая локальная структура Agent Workspace содержит "
+const LAYOUT_MIGRATION_MESSAGE = "Старая локальная структура папки в Трелио содержит "
   + "записи, которые bridge не может безопасно перенести автоматически. Проверьте exact "
   + "rootDirectory и blockingEntries; bridge ничего не перемещал и не удалял.";
 
@@ -317,7 +317,7 @@ export class WorkspaceLayoutMigrationBlockedError extends Error {
   }
 }
 
-const UNFINISHED_RUN_RECLAIM_MESSAGE = "Локальная папка содержит незавершённый Agent Run этого Workspace. "
+const UNFINISHED_RUN_RECLAIM_MESSAGE = "Локальная папка содержит незавершённый Agent Run этой папки в Трелио. "
   + "Подготовьте и откройте этот exact Run через prepare_agent_workspace_run(runId), "
   + "сохраните его изменения и разберите состояние перед продолжением нового Run. "
   + "Bridge не отменяет Run, не захватывает чужую lease и не заменяет локальные файлы автоматически.";
@@ -354,7 +354,7 @@ export class WorkspaceRunReclaimRequiredError extends Error {
 }
 
 const ACTIVE_RUN_MESSAGE = "Для этого действия нужен открытый активный Trelio Agent Run. "
-  + "Подготовьте нужный Workspace через prepare_agent_workspace_run, выполните возвращённый "
+  + "Подготовьте нужную папку через prepare_agent_workspace_run, выполните возвращённый "
   + "open и повторите исходное действие один раз. Отсутствие .trelio-run.json в read-only "
   + "inspection является штатным и само по себе не означает старую локальную структуру.";
 
