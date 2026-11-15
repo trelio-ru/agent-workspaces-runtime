@@ -309,6 +309,7 @@ jobs:
         if: needs.ci-plan.outputs.profile == 'full'
         run: |
           node scripts/runtime-ci-plan.test.mjs
+          node scripts/runtime-main-checks.test.mjs
           node tests/context-budget.test.mjs
           node tests/trelio-browser-open.test.mjs
           node tests/trelio-browser-session.test.mjs

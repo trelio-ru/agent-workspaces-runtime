@@ -1,11 +1,45 @@
 # Runtime checks
 
 Ordinary `git:integrate` checks the complete diff against freshly fetched main
-inside its local ticket. The planner selects changed tests, tests of the
-affected runtime modules and syntax checks. Maintainer Markdown does not start
-runtime suites. The successful ticket binds the current base and exact commit.
-The canonical hook reads that ticket without launching tests or using GitHub
-Actions.
+inside its local ticket. `scripts/runtime-main-checks.mjs` reads the base and
+candidate Git trees through bounded `ls-tree`/`cat-file --batch` calls, without
+executing candidate modules. The successful ticket binds the current base and
+exact commit. The canonical hook reads that ticket without launching tests or
+using GitHub Actions.
+
+The main gate selects focused tested boundaries, not complete transitive runtime
+coverage. Literal imports/exports, literal dynamic imports and `new URL(...,
+import.meta.url)` connect source files and fixtures to their actual suites.
+Query/hash suffixes do not change the source identity. Test helpers are followed
+transitively. A changed module selects all its direct suites AND the nearest
+tested boundary on each production-consumer branch, even if it has its own unit
+test. At that boundary the proven same-name suite (or explicit reviewed owner)
+stops traversal; every unrelated client of a large Workspace/assistant entrypoint
+is not added. A text-only source assertion is direct coverage, never evidence
+that the asserted file's imports were executed. Full cross-module/native coverage
+remains a release responsibility.
+
+Both pinned revisions contribute edges, so a deleted/renamed helper cannot erase
+its surviving consumers. Changed tests execute once. A removed test needs a
+surviving renamed test or coverage of all former inputs; deleting the sole test
+is not a successful check. Computed imports, directory discovery and native
+inputs have small reviewed owner mappings in the same planner. Unknown changed
+executable/fixture paths stop with an exact path/reason requesting a focused test
+or owner mapping; they never silently fall back to unrelated smokes or the full
+release suite. The printed plan explains each selected suite's direct/consumer
+input. A selected native-owner suite provides only its portable/source-boundary
+assertions on the current OS, never proof that another OS's skipped native cases
+passed. Windows/ARM64/macOS/browser release lanes stay mandatory.
+
+The gate always checks the complete Git diff and the syntax of changed JavaScript.
+It verifies the local dependency installation once before selected tests. Root
+package changes check the tokenizer consumer; script-definition changes also
+select the Git guard. Bootstrap, native and workflow inputs have their own
+explicit owners. Only actual Git transport/queue/hooks/attributes changes select
+`test:git-guard`; an unrelated `.github` fixture does not. The composite Git guard
+runs its coordinator/finish suites once. Maintainer Markdown and `.gitignore`
+need only the complete diff check; other unclassified metadata fails closed.
+The full release workflow also executes the main-planner regression suite.
 
 An explicit release ticket publishes its exact branch and dispatches
 `runtime-tests.yml`. The release workflow always selects the full matrix for

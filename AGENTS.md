@@ -1417,8 +1417,12 @@ Exact legacy template bytes для распознавания при мигра�
 
 ## Проверки
 
-- Обычный локальный gate проверяет затронутые тесты и синтаксис. Правка
-  maintainer Markdown проверяет полный Git diff без запуска runtime.
+- Обычный локальный gate выбирает прямые suites и ближайшие проверяемые
+  consumer boundaries по обоим exact Git snapshots: [контракт](docs/runtime-ci.md).
+  Не заменяй реальные imports/fixtures совпадением префикса имени. Computed/native
+  inputs требуют явного owner; неизвестный executable/fixture блокирует план
+  до targeted coverage, без автоматического full или нерелевантного smoke.
+  Maintainer Markdown проверяет полный Git diff без запуска runtime.
   Полный набор из `.github/workflows/runtime-tests.yml` выполняет release.
   Tag проверяет plan, SHA, run/attempt и все обязательные результаты.
 - The Linux native browser gate probes Ubuntu's primary HTTPS archive, then
