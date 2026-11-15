@@ -101,6 +101,7 @@ import {
 import {
   prepareTrelioFolderOnboarding,
   prepareTrelioFolderDiagnostic,
+  projectFolderGitHistoryBlocker,
   TrelioFolderOnboardingError,
 } from "./trelio-folder-onboarding.mjs";
 import {
@@ -6134,11 +6135,13 @@ export const handleToolCall = async (
       } catch (error) {
         // Folder failure must not erase the independent component/OAuth plan.
         // Never expose arbitrary filesystem messages or instruction-file bytes.
+        const gitBlocker = projectFolderGitHistoryBlocker(error);
         workingFolder = {
           status: "blocked",
           reasonCode: error instanceof TrelioFolderOnboardingError
             ? error.code : ["EACCES", "EPERM", "ENOENT"].includes(error?.code)
               ? error.code : "TRELIO_FOLDER_DIAGNOSTIC_FAILED",
+          ...(gitBlocker ? { message: gitBlocker.message, details: gitBlocker.details } : {}),
         };
       }
     }
@@ -6649,6 +6652,8 @@ const safeErrorPayload = (error) => {
   if (error instanceof BridgeTransportError) return error.toJSON();
   if (error instanceof TrelioCallTimeoutError) return error.toJSON();
   if (error instanceof RuntimeProofPreparationError) return error.toJSON();
+  const gitBlocker = projectFolderGitHistoryBlocker(error);
+  if (gitBlocker) return gitBlocker;
   return {
     code: error instanceof RemoteMcpHostError
       || error instanceof AgentSkillInstructionBudgetError
@@ -6851,6 +6856,9 @@ export const handleLocalMcpMessage = async (
       // Reuse the published Trelio deadline bucket without widening the
       // backend-owned telemetry vocabulary or degrading this result to UNKNOWN.
       if (effectiveError instanceof TrelioCallTimeoutError) diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
+      // Folder Git evidence stays in the local result. Retain the existing
+      // host-error bucket in the backend-owned diagnostics vocabulary.
+      else if (effectiveError instanceof TrelioFolderOnboardingError) diagnosticCode = "REMOTE_MCP_HOST_ERROR";
       // These model-visible read-only lifecycle errors do not widen the
       // backend-owned telemetry catalogue. Preserve its existing buckets;
       // never pretend the search timeout was a failed/unknown mutation.

@@ -379,17 +379,45 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   const opened = await fixture.open();
   receive({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: opened });
   assert.equal(elements.get("setup").hidden, false);
-  elements.get("folder-path").value = path.join(fixture.root, "app-folder");
+  const existing = path.join(fixture.root, "existing-git-folder");
+  await fs.mkdir(existing);
+  const git = (...args) => execFileAsync("git", args, { cwd: existing, encoding: "utf8" });
+  await git("init", "--quiet");
+  const { stdout } = await git("write-tree");
+  const treeId = stdout.trim();
+  elements.get("folder-path").value = existing;
   elements.get("display-name").value = "App fixture"; elements.get("create").checked = true;
-  const clicked = elements.get("connect").onclick();
+  const blocked = elements.get("connect").onclick();
   await elements.get("connect").onclick();
   const calls = messages.filter(message => message.method === "tools/call");
   assert.equal(calls.length, 1);
   assert.equal(elements.get("connect").disabled, true);
-  const submitted = await handleCodexConnectionAction(fixture.origin, structuredClone(calls[0].params.arguments), { bridge: fixture.bridge });
-  receive({ jsonrpc: "2.0", id: calls[0].id, result: submitted });
+  const refusedGit = await handleCodexConnectionAction(fixture.origin, structuredClone(calls[0].params.arguments), { bridge: fixture.bridge });
+  receive({ jsonrpc: "2.0", id: calls[0].id, result: refusedGit });
+  await blocked;
+  assert.equal(refusedGit.structuredContent.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
+  assert.deepEqual(refusedGit.structuredContent.details.gitBlocker,
+    { reason: "orphan_tree", object: { type: "tree", id: treeId } });
+  assert.ok(!JSON.stringify(refusedGit.structuredContent).includes(existing));
+  assert.equal(elements.get("done").hidden, true);
+  assert.equal(elements.get("setup").hidden, false);
+  assert.ok(elements.get("status").textContent.includes(treeId));
+  assert.match(elements.get("status").textContent, /Автоматического восстановления.*отдельной папке/u);
+  assert.equal(fixture.puts, 0);
+  await assert.rejects(fs.access(path.join(existing, "AGENTS.md")), { code: "ENOENT" });
+  assert.equal((await git("cat-file", "-t", treeId)).stdout.trim(), "tree");
+
+  // Follow the recovery shown by the App. The original folder is still open
+  // for normal Codex work, and the separate folder goes through normal setup.
+  elements.get("folder-path").value = path.join(fixture.root, "app-folder");
+  const clicked = elements.get("connect").onclick();
+  const connect = messages.filter(message => message.method === "tools/call").at(-1);
+  const submitted = await handleCodexConnectionAction(fixture.origin, structuredClone(connect.params.arguments), { bridge: fixture.bridge });
+  receive({ jsonrpc: "2.0", id: connect.id, result: submitted });
   await clicked;
   assert.equal(elements.get("done").hidden, false);
+  assert.equal(elements.get("status").textContent, "Подключение проверено");
+  assert.equal(fixture.puts, 1);
   assert.equal(elements.get("confirm-browser").hidden, false);
   assert.equal(elements.get("connect").disabled, false);
   const recheck = elements.get("recheck").onclick();

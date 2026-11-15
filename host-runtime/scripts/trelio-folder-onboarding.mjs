@@ -79,6 +79,57 @@ export class TrelioFolderOnboardingError extends Error {
   }
 }
 
+const GIT_HISTORY_CODE = "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT";
+const GIT_BLOCKER_MESSAGES = Object.freeze({
+  commit_history: "В папке уже есть история коммитов Git.",
+  remotes_or_index: "В репозитории настроен удалённый репозиторий или в индексе Git есть файлы.",
+  unexpected_ref: "В репозитории есть ссылка Git, которая не соответствует служебным ссылкам Codex.",
+  unexpected_tree_entry: "Дерево снимка Codex содержит запись, которую Trelio не может безопасно использовать.",
+  commit_or_tag_object: "В репозитории найден объект коммита или тега Git.",
+  malformed_inventory_entry: "Git вернул запись об объекте, которую не удалось проверить.",
+  orphan_tree: "Ни одна допустимая служебная ссылка Codex не указывает на найденное дерево Git.",
+  orphan_blob: "Найденный объект Git не относится к разрешённым файлам инструкций или настроек.",
+  workspace_index: "Не удалось подтвердить, что рабочие материалы Trelio отсутствуют в индексе Git.",
+});
+const GIT_RECOVERY_MESSAGE = "Автоматического восстановления для этой папки нет. Чтобы сохранить исходную папку и её историю, оставьте её в Codex и подключите Trelio в отдельной папке вне Git-репозиториев.";
+
+class FolderGitHistoryError extends TrelioFolderOnboardingError {
+  #blocker;
+
+  constructor(reason, message, objectType, objectId) {
+    super(GIT_HISTORY_CODE, message);
+    this.#blocker = { reason };
+    // Report one validated Git object ID, never an inventory, ref name or path.
+    // A root path, a branch name and even tree-entry metadata can be private.
+    if (["tree", "blob", "commit", "tag"].includes(objectType)
+      && typeof objectId === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(objectId)) {
+      this.#blocker.object = { type: objectType, id: objectId };
+    }
+  }
+
+  toBlockerPayload() {
+    const { reason, object } = this.#blocker;
+    return {
+      code: GIT_HISTORY_CODE,
+      message: [
+        GIT_BLOCKER_MESSAGES[reason],
+        object && `Объект Git ${object.type} ${object.id}.`,
+        GIT_RECOVERY_MESSAGE,
+      ].filter(Boolean).join(" "),
+      details: {
+        gitBlocker: { reason, ...(object ? { object: { ...object } } : {}) },
+        recovery: { action: "select_separate_folder", sameFolderSupported: false },
+      },
+    };
+  }
+}
+
+// Only the actual classifier can provide a blocker. Never forward arbitrary
+// exception detail fields across the MCP or wizard boundary.
+export const projectFolderGitHistoryBlocker = (error) => (
+  error instanceof FolderGitHistoryError ? error.toBlockerPayload() : null
+);
+
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 const normalizeAbsoluteFolder = (value) => {
@@ -447,9 +498,10 @@ const inspectTree = async ({ gitPath, rootPath, treeId, execFileCommand }) => {
       || match.groups.type !== "blob"
       || !ROOT_ALLOWED_FILES.has(match.groups.file)
     ) {
-      throw new TrelioFolderOnboardingError(
-        "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+      throw new FolderGitHistoryError(
+        "unexpected_tree_entry",
         "A Codex turn-diff tree contains a path or object outside the onboarding allowlist.",
+        "tree", treeId,
       );
     }
     blobs.add(match.groups.object);
@@ -473,9 +525,10 @@ const inspectServiceGit = async ({
 
   const head = await runGit(gitPath, ["rev-parse", "--verify", "HEAD"], rootPath, execFileCommand);
   if (head.ok) {
-    throw new TrelioFolderOnboardingError(
-      "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+    throw new FolderGitHistoryError(
+      "commit_history",
       "The selected folder already contains Git commit history.",
+      "commit", head.stdout.trim(),
     );
   }
   const bare = await runGit(gitPath, ["rev-parse", "--is-bare-repository"], rootPath, execFileCommand);
@@ -501,8 +554,8 @@ const inspectServiceGit = async ({
     );
   }
   if (remotes.stdout.trim() || tracked.stdout.length > 0) {
-    throw new TrelioFolderOnboardingError(
-      "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+    throw new FolderGitHistoryError(
+      "remotes_or_index",
       "The selected folder contains remotes or indexed paths.",
     );
   }
@@ -582,9 +635,10 @@ const inspectServiceGit = async ({
       || symref !== ""
       || !SHA_PATTERN.test(objectId)
     ) {
-      throw new TrelioFolderOnboardingError(
-        "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+      throw new FolderGitHistoryError(
+        "unexpected_ref",
         "The selected repository contains a ref outside exact Codex turn-diff trees.",
+        objectType, objectId,
       );
     }
     referencedTrees.add(objectId);
@@ -603,15 +657,19 @@ const inspectServiceGit = async ({
     );
   }
   const objects = parseObjectInventory(inventory.stdout);
-  if (objects.some(({ objectId, type, size }) => (
+  const unexpectedObject = objects.find(({ objectId, type, size }) => (
     !SHA_PATTERN.test(objectId)
     || !["tree", "blob"].includes(type)
     || !Number.isSafeInteger(size)
     || size < 0
-  ))) {
-    throw new TrelioFolderOnboardingError(
-      "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+  ));
+  if (unexpectedObject) {
+    const { objectId, type } = unexpectedObject;
+    const commitOrTag = type === "commit" || type === "tag";
+    throw new FolderGitHistoryError(
+      commitOrTag ? "commit_or_tag_object" : "malformed_inventory_entry",
       "The selected repository contains commit, tag or malformed Git objects.",
+      type, objectId,
     );
   }
   const objectIds = new Set(objects.map(({ objectId }) => objectId));
@@ -624,10 +682,12 @@ const inspectServiceGit = async ({
   // A service repository has no ordinary history: every tree must be the exact
   // value of an allowed Codex ref. Otherwise an unreferenced tree could retain
   // an older instruction blob while still satisfying the root-path allowlist.
-  if (objects.some(({ objectId, type }) => type === "tree" && !referencedTrees.has(objectId))) {
-    throw new TrelioFolderOnboardingError(
-      "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+  const orphanTree = objects.find(({ objectId, type }) => type === "tree" && !referencedTrees.has(objectId));
+  if (orphanTree) {
+    throw new FolderGitHistoryError(
+      "orphan_tree",
       "The selected repository contains an orphan Git tree outside exact Codex turn-diff refs.",
+      "tree", orphanTree.objectId,
     );
   }
   const allowedBlobs = new Set();
@@ -640,10 +700,12 @@ const inspectServiceGit = async ({
     });
     for (const blob of treeBlobs) allowedBlobs.add(blob);
   }
-  if (objects.some(({ objectId, type }) => type === "blob" && !allowedBlobs.has(objectId))) {
-    throw new TrelioFolderOnboardingError(
-      "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+  const orphanBlob = objects.find(({ objectId, type }) => type === "blob" && !allowedBlobs.has(objectId));
+  if (orphanBlob) {
+    throw new FolderGitHistoryError(
+      "orphan_blob",
       "The selected repository contains an orphan Git blob without an allowed instruction path.",
+      "blob", orphanBlob.objectId,
     );
   }
 };
@@ -1164,8 +1226,8 @@ const verifyServiceGitIsolation = async ({
     execFileCommand,
   );
   if (!tracked.ok || tracked.stdout.length > 0) {
-    throw new TrelioFolderOnboardingError(
-      "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+    throw new FolderGitHistoryError(
+      "workspace_index",
       "The service Git index already contains Workspace paths.",
     );
   }

@@ -325,6 +325,9 @@ publication tooling также остаются вне этого публичн
   Проверяй реальные Git fixtures, сохранение refs/objects/config, stderr при
   exit 0 и literal paths без повышения Git minimum; отказы проверяй до записи.
   Похожий prefix либо допустимое имя сами по себе не доказывают service Git.
+  При отказе из-за Git-истории мастер и MCP передают одну причину, один
+  проверенный object ID, если он известен, и способ продолжить через отдельную
+  папку. Имена refs, пути и содержимое объектов не раскрываются.
 - Ошибка распознанного `PreToolUse` передаётся JSON-решением `deny` с причиной
   и process exit `0`: PowerShell может превратить блокирующий exit `2` в `1`.
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и

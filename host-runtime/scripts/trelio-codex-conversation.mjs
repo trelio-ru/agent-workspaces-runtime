@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from 'node:crypto';
 import http from "node:http";
+import { projectFolderGitHistoryBlocker } from "./trelio-folder-onboarding.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const NAVIGATION_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -805,16 +806,18 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
     return wizardResult(input.capabilityToken, cap, cap.state);
   } catch (error) {
     if (input.action !== "confirm_browser") { cap.state.stage = "folder"; delete cap.state.openUrl; }
-    // Paths and native exception text belong only to local IO. Expose closed
-    // codes so a permission/network failure cannot leak private directory names.
+    // Only the Git classifier can expose its reviewed, path-free description.
+    // Other errors still use closed codes so private I/O stays in the host.
+    const gitBlocker = projectFolderGitHistoryBlocker(error);
     const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "CODEX_CONNECTION_FAILED";
     return { ...wizardResult(input.capabilityToken, cap, cap.state), isError: true,
-      content: [{ type: "text", text: `Codex connection not verified (${code}).` }],
+      content: [{ type: "text", text: gitBlocker?.message ?? `Codex connection not verified (${code}).` }],
       structuredContent: { stage: "folder", verified: false, code,
+        ...(gitBlocker ? { details: gitBlocker.details } : {}),
         ...(["missing", "invalid", "expired", "replayed"].includes(error?.reason ?? error?.payload?.reason)
           ? { reason: error?.reason ?? error?.payload?.reason } : {}) },
       _meta: { "trelio/codexConnection": { capabilityToken: input.capabilityToken, companyName: cap.company.name,
-        ...cap.state, errorCode: code } } };
+        ...cap.state, errorCode: code, ...(gitBlocker ? { gitBlockerMessage: gitBlocker.message } : {}) } } };
   } finally { wizardBusy.delete(cap.busyKey); }
 };
 
@@ -897,7 +900,7 @@ function render(result) {
       CODEX_CONNECTION_READBACK_FAILED:'Не удалось подтвердить путь в Trelio. Повторите проверку',
       CODEX_CONNECTION_FOLDER_UNSAFE:'Папка содержит символическую ссылку. Выберите обычную локальную папку'
     };
-    notice((messages[meta.errorCode] || 'Настройка не завершена. Проверьте папку, повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
+    notice((meta.gitBlockerMessage || messages[meta.errorCode] || 'Настройка не завершена. Проверьте папку, повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
   } else notice(done ? 'Подключение проверено' : '', false);
   resize();
 }

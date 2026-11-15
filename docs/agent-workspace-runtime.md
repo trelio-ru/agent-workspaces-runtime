@@ -1638,6 +1638,18 @@ instruction/ignore blobs либо быть пустым. Commit/tag, orphan tree
 постороннее содержимое блокируют flow, включая unreachable objects. Проверка
 повторяется перед apply; `.git`, refs и objects сохраняются без изменений.
 
+При `TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT` общий classifier отдаёт
+закрытую причину `details.gitBlocker.reason` и, если проверил конкретный объект,
+один `details.gitBlocker.object` с типом и полным Git SHA. Для `orphan_tree` это
+дерево из полной инвентаризации, на которое не указывает ни один допустимый ref.
+Имена refs, пути и содержимое объектов остаются локальными. MCP plan/apply и
+мастер Codex сохраняют исходный код, а intent `diagnostics` добавляет ту же
+причину к `workingFolder`, сохраняя план других проверок. Поддерживаемый выход
+`details.recovery.action=select_separate_folder`: продолжить работу в исходной
+папке Codex и подключить Trelio в отдельной постоянной папке вне Git-репозиториев.
+Автоматического исправления той же папки нет (`sameFolderSupported=false`);
+runtime не чистит Git и не предлагает повторять тот же выбор.
+
 Любая диагностика в stderr metadata-read, даже при exit 0, блокирует неполную
 классификацию до записи: Git может пропустить повреждённый ref и вернуть
 успешный exit. Проверка не зависит от языка warning. Стандартный `core.symlinks`,

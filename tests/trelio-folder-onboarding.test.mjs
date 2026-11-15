@@ -11,9 +11,10 @@ import {
   applyTrelioFolderOnboarding,
   prepareTrelioFolderOnboarding,
   prepareTrelioFolderDiagnostic,
+  projectFolderGitHistoryBlocker,
 } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
 import { handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
-import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { handleLocalMcpMessage, handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
 const execFileAsync = promisify(execFile);
 const temporaryRoots = new Set();
@@ -712,7 +713,7 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
   await runGit(commitRoot, "init");
   await fs.writeFile(path.join(commitRoot, "AGENTS.md"), "# Existing instructions\n", "utf8");
   const tree = await writeTurnDiffTree(commitRoot);
-  await runGit(
+  const { stdout: commitId } = await runGit(
     commitRoot,
     "-c", "user.name=Trelio Test",
     "-c", "user.email=test@example.invalid",
@@ -720,28 +721,111 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
   );
   await assert.rejects(
     prepareTrelioFolderOnboarding({ folderPath: commitRoot }),
-    (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+    (error) => {
+      assert.equal(error.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
+      assert.deepEqual(projectFolderGitHistoryBlocker(error).details.gitBlocker,
+        { reason: "commit_or_tag_object", object: { type: "commit", id: commitId.trim() } });
+      return true;
+    },
   );
 
   const orphanTreeRoot = await makeRoot();
   await runGit(orphanTreeRoot, "init");
   await fs.writeFile(path.join(orphanTreeRoot, "AGENTS.md"), "# Orphan tree\n", "utf8");
-  await writeTurnDiffTree(orphanTreeRoot);
+  const orphanTreeId = await writeTurnDiffTree(orphanTreeRoot);
   await assert.rejects(
     prepareTrelioFolderOnboarding({ folderPath: orphanTreeRoot }),
-    (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+    (error) => {
+      assert.equal(error.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
+      assert.deepEqual(projectFolderGitHistoryBlocker(error).details.gitBlocker,
+        { reason: "orphan_tree", object: { type: "tree", id: orphanTreeId } });
+      return true;
+    },
   );
 
   const orphanRoot = await makeRoot();
   await runGit(orphanRoot, "init");
   const orphanFile = path.join(orphanRoot, ".git", "orphan-source");
   await fs.writeFile(orphanFile, "unreferenced object\n", "utf8");
-  await runGit(orphanRoot, "hash-object", "-w", orphanFile);
+  const { stdout: orphanBlobId } = await runGit(orphanRoot, "hash-object", "-w", orphanFile);
   await fs.rm(orphanFile);
   await assert.rejects(
     prepareTrelioFolderOnboarding({ folderPath: orphanRoot }),
-    (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+    (error) => {
+      assert.equal(error.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
+      assert.deepEqual(projectFolderGitHistoryBlocker(error).details.gitBlocker,
+        { reason: "orphan_blob", object: { type: "blob", id: orphanBlobId.trim() } });
+      return true;
+    },
   );
+});
+
+test("folder setup and both diagnostic intents preserve an orphan Git tree refusal through MCP", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const instructions = "# Private instruction canary\n";
+  const file = path.join(root, "AGENTS.md");
+  await fs.writeFile(file, instructions);
+  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  const treeId = await writeTurnDiffTree(root);
+  const historyCode = "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT";
+  const details = {
+    gitBlocker: { reason: "orphan_tree", object: { type: "tree", id: treeId } },
+    recovery: { action: "select_separate_folder", sameFolderSupported: false },
+  };
+  // Keep real Git inspection and MCP serialization. The independent component
+  // probes are stubbed so the fixture never diagnoses the real installation.
+  const telemetry = [];
+  const call = (params, overrides = {}) => handleLocalMcpMessage({
+    id: 1, jsonrpc: "2.0", method: "tools/call", params,
+  }, {
+    recordDiagnostic: (_tool, _args, code) => telemetry.push(code),
+    callTool: (origin, name, args, options) => handleToolCall(origin, name, args, {
+      ...options, codexMcpRuntime: true,
+      localPrerequisiteDiagnosis: async () => ({
+        status: "ready", platform: process.platform, node: { status: "ready" },
+        git: { status: "ready" }, connection: { status: "ready" },
+      }),
+      publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }),
+      ...overrides,
+    }),
+  });
+  const diagnosticParams = intent => ({
+    name: "diagnose_trelio_installation",
+    arguments: { clientKind: "codex", intent, folderOnboarding: { folderPath: root } },
+  });
+  const planned = (await call(diagnosticParams("folder_onboarding"))).result;
+  assert.equal(planned.isError, true);
+  const failed = JSON.parse(planned.content[0].text);
+  assert.equal(failed.code, historyCode);
+  assert.deepEqual(failed.details, details);
+  assert.ok(failed.message.includes(treeId));
+  assert.match(failed.message, /отдельной папке вне Git-репозиториев/u);
+  const applied = (await call({ name: prepared.plan.apply.toolName, arguments: prepared.plan.apply.arguments })).result;
+  assert.equal(applied.isError, true);
+  assert.deepEqual(JSON.parse(applied.content[0].text), failed);
+
+  const diagnosed = (await call(diagnosticParams("diagnostics"))).result;
+  const diagnostic = JSON.parse(diagnosed.content[0].text);
+  assert.deepEqual(diagnostic.workingFolder,
+    { status: "blocked", reasonCode: historyCode, message: failed.message, details });
+  assert.equal(diagnostic.liveVerification.oauth.nextTool, "list_companies");
+  for (const response of [planned, applied, diagnosed]) {
+    assert.ok(!JSON.stringify(response).includes(root));
+    assert.doesNotMatch(JSON.stringify(response), /Private instruction canary/u);
+  }
+
+  const lookalike = (await call(diagnosticParams("folder_onboarding"), { folderOnboardingPrepare: async () => {
+    throw new TrelioFolderOnboardingError(historyCode, "synthetic", { gitBlocker: { reason: "arbitrary detail" } });
+  } })).result;
+  assert.equal(JSON.parse(lookalike.content[0].text).code, "REMOTE_MCP_HOST_ERROR");
+  assert.doesNotMatch(JSON.stringify(lookalike), /arbitrary detail/u);
+  assert.deepEqual(telemetry, ["REMOTE_MCP_HOST_ERROR", "REMOTE_MCP_HOST_ERROR", "OK", "REMOTE_MCP_HOST_ERROR"]);
+  assert.equal(await fs.readFile(file, "utf8"), instructions);
+  assert.equal((await runGit(root, "cat-file", "-t", treeId)).stdout.trim(), "tree");
+  assert.equal((await runGit(root, "for-each-ref")).stdout, "");
+  await assert.rejects(fs.access(path.join(root, "CLAUDE.md")), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(root, ".gitignore")), { code: "ENOENT" });
 });
 
 test("service Git rejects history and unmanaged pre-existing Workspace paths", async () => {
