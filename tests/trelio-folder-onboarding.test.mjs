@@ -58,12 +58,12 @@ const binding = {
   project: { name: "Рабочий проект", slug: "work-project" },
 };
 
-for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work"]) {
+for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"]) {
   test(`${clientKind} binds and refreshes the folder without replacing personal instructions`, async () => {
     const root = await makeRoot();
     const personal = "# Personal\n\nKeep my formatting.\n";
     await fs.writeFile(path.join(root, "AGENTS.md"), personal);
-    const native = ["cursor", "antigravity", "deepseek-harness", "kimi-work"].includes(clientKind);
+    const native = ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind);
     const response = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
       clientKind, intent: "folder_onboarding", folderOnboarding: { folderPath: root, ...binding },
     });
@@ -94,6 +94,15 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
       assert.equal(codex.status, "ready");
       assert.equal(codex.instructions.templateSha256, healthy.instructions.templateSha256);
       await fs.writeFile(path.join(root, "AGENTS.md"), current.replace(`${guidance}\n`, ""));
+    } else if (clientKind === "multitool") {
+      // Exercise the installed form of the old block and refresh through
+      // the same diagnostic action a new MultiTool chat sees.
+      await fs.writeFile(path.join(root, "AGENTS.md"), current
+        .replace(/^Мультитул:.*\n\n/mu, "")
+        .replace(/^Для чтения принятого Workspace.*\n\n/mu, "")
+        .replace("Для записи или редактирования материалов открой Agent Run",
+          "Для задачи или именованного воркспейса сначала открой Agent Run")
+        .replace(/^- для точной задачи вызови.*$/mu, "- для точной задачи вызови `get_task`;"));
     } else {
       await makeTemplateOutdated(root);
     }
@@ -102,7 +111,15 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
     await handleTrelioWorkspaceActionOperation(
       "https://trelio.example", outdated.refresh.action.arguments, actionOptions,
     );
-    assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), current);
+    const refreshed = await fs.readFile(path.join(root, "AGENTS.md"), "utf8");
+    assert.equal(refreshed, current);
+    if (clientKind === "multitool") {
+      assert.match(refreshed, /^Мультитул:.*`trelio_find_tools`.*`trelio_call_tool`.*`authorityReadPlan`.*EOF/mu);
+      assert.match(refreshed, /`get_task`.*Прочитай нужные принятые материалы.*`prepare_agent_workspace_read`.*`bridge\.action`.*`agent-instructions\.md`.*`user-profile\.md`.*`WORKSPACE_CONTEXT\.md`.*Чтение выполняется без Agent Run.*До этой проверки не используй WebSearch/su);
+      assert.doesNotMatch(refreshed, /Для задачи или именованного воркспейса сначала открой Agent Run/u);
+      const codex = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+      assert.equal(codex.instructions.templateSha256, healthy.instructions.templateSha256);
+    }
     if (clientKind === "kimi-work") {
       const next = await prepareTrelioFolderDiagnostic({ folderPath: root }, "kimi-work");
       assert.equal(next.status, "ready");

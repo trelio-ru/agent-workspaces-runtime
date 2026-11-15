@@ -1717,8 +1717,11 @@ workspace/head и больше не защищает старые cache blobs о
 После `open` он работает в напечатанном `workspace/` и при необходимости создаёт внутренние
 `sources/`, `work/`, `artifacts/`, `derived/` и `worklog/` по runtime-контракту.
 
+Общий шаблон папки требует после `get_task` проверить канонический и
+релевантные связанные Workspace, когда для работы нужны материалы задачи.
 Для запроса только на чтение `prepare_agent_workspace_read` возвращает exact
-`trelio-workspace inspect` command. Она materialize-ит current accepted head и
+`bridge.action` к локальному MCP; прежний маршрут может вернуть команду
+`trelio-workspace inspect`. Bridge materialize-ит current accepted head и
 актуальные `agent-instructions.md` / `user-profile.md` в private read-only
 каталоге без Agent Run, lease, checkpoint или task mutation. Encrypted bundle
 остаётся ciphertext на backend и открывается только локальным bridge. Агент
@@ -3943,4 +3946,7 @@ browser-fill в этом клиенте не используются.
 inspect возвращают `authorityReadPlan` с локальными путями и последними
 строками двух файлов. Чат читает правила и профиль до EOF своим читателем.
 Bridge не дублирует их текст в MCP. Ошибка плана сохраняет уже выполненное
-действие и требует остановиться до получения полной authority.
+действие и требует остановиться до получения полной authority. Общий managed-блок
+`AGENTS.md` сохраняет этот порядок и вызов через `trelio_find_tools` /
+`trelio_call_tool` при отсутствии прямого инструмента в новом чате. Уже
+привязанная папка получает текущий шаблон через штатный диагностический refresh.

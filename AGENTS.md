@@ -1598,7 +1598,9 @@ See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
 [MultiTool](docs/agent-workspace-runtime.md#мультитул) uses the same signed loader
 and an independent OAuth/bridge namespace. The macOS installer returns one
 config entry. Exact open/inspect routes omit chat cwd; read the returned local
-authority through EOF before using the materialized Workspace.
+authority through EOF before using the materialized Workspace. The shared folder
+template checks relevant accepted task Workspaces after `get_task` and before
+external sources, using the read-only route unless a write is needed.
 Keep both fixed client IDs in the shared OAuth inventory and test each native
 adapter through the real callback and token exchange.
 Its bootstrap uses the SAME loader's bounded MCP update/startup path; both entry
