@@ -822,7 +822,10 @@ publication tooling также остаются вне этого публичн
   обновляют stale locator один раз под исходным deadline; fresh sync без readable
   fallback. Row/task CAS, payload uploads и mutation POST не входят в retry.
   [Encrypted task list](docs/agent-workspace-runtime.md#пагинация-зашифрованных-списков-задач)
-  выбирает страницу из versioned inventory до exact detail reads.
+  выбирает страницу из versioned inventory до exact detail reads и проверяет
+  final generation, включая пустую страницу. [Domain inventories/exact reads](docs/agent-workspace-runtime.md#списки-и-точечные-чтения-структурированного-контекста)
+  не открывают чужие домены/Workspace-файлы; legacy negotiation, scope ACL,
+  bounded retry и native preview/matching сохраняются.
   Reviewed canonical actions и single/bundle proposal targets не требуют mirror;
   historical/nested aliases, domain evidence и unknown methods сохраняют discovery.
   Completed Workspace prefixes share that SAME encrypted scratchpad/quota and

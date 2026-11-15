@@ -37,6 +37,7 @@ import {
 } from "./trelio-workspace-directory.mjs";
 import {
   buildContextSearchPreview,
+  buildContextPageListPreview,
   matchesContextListDocument,
   buildContextTaskListSearchText,
   matchesContextTaskDueState,
@@ -3636,6 +3637,7 @@ const resolveLocalCompanyProvider = async ({
       token,
       companyEncryption,
       requestOrigin: resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
+      companyContextCapabilities: compatibility?.companyContext ?? null,
     };
     // A managed profile/opaque token dies with ONE invocation. Persist only
     // the SAME encrypted generation, never its decrypted RAM/token/key object
@@ -3681,14 +3683,33 @@ const readHumanSearchSource = async (read, signal) => {
 const NARROW_CONTEXT_PROJECTION = new Map([
   ["list_projects", "projects"], ["list_my_tasks", "task_inventory"], ["list_project_tasks", "task_inventory"],
   ["search_tasks", "tasks"], ["search_agent_guidance", "guidance"], ["search_agent_secrets", "secrets"],
+  ["list_contacts", "contacts"], ["list_registries", "registries"],
+  ["list_knowledge_base_pages", "knowledge_pages"], ["list_regular_work", "regular_work"],
+  ["list_workspaces", "workspaces"], ["search_meetings", "meetings"],
 ]);
+const CONTEXT_DOMAIN_PROJECTIONS = new Map([
+  ["contact", "contacts"], ["registry", "registries"], ["knowledge_page", "knowledge_pages"],
+  ["regular_work", "regular_work"], ["meeting", "meetings"],
+]);
+const NARROW_INVENTORY_PROJECTIONS = new Set([...CONTEXT_DOMAIN_PROJECTIONS.values(), "workspaces"]);
+const contextReadProjection = (nativeTool, input) => NARROW_CONTEXT_PROJECTION.get(nativeTool)
+  ?? CONTEXT_DOMAIN_PROJECTIONS.get(contextDocumentLocator(nativeTool, input)?.type);
+
 
 const fetchManifest = async ({ origin, token, companySlug, signal, projection }) => {
-  const suffix = projection ? `?projection=${encodeURIComponent(projection)}` : "";
+  // Old servers validate the query projection enum strictly. Negotiate newly
+  // introduced domains through an ignored-on-old-server header instead: the
+  // SAME response is then filtered before hydration, never a 400 retry/fallback.
+  const negotiated = NARROW_INVENTORY_PROJECTIONS.has(projection);
+  const suffix = projection && !negotiated ? `?projection=${encodeURIComponent(projection)}` : "";
   const manifest = await readJson(await request(origin, token,
-    `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest${suffix}`, { signal }));
+    `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest${suffix}`, {
+      signal, ...(negotiated ? { headers: { "x-trelio-context-projection": projection } }
+        : projection === "task_inventory" ? { headers: { "x-trelio-task-inventory-version": "2" } } : {}),
+    }));
   const expected = projection === "tasks_fence" ? "tasks" : projection;
-  // Pre-upgrade servers ignore the query and return the original full manifest.
+  // Pre-projection servers ignore the known query; current legacy servers
+  // ignore new domain headers. Both return the original full manifest.
   // Only an absent discriminator can use that compatibility path. A selected
   // narrow projection must never be confused with another domain or full cache.
   if (manifest?.projection !== undefined && manifest.projection !== expected)
@@ -3984,13 +4005,27 @@ const buildMirror = async ({
     || !Array.isArray(rawManifest.contextDocuments)
     || (rawManifest.taskInventoryVersion !== undefined &&
       (rawManifest.schemaVersion !== 2 || rawManifest.projection !== "task_inventory"
-        || rawManifest.taskInventoryVersion !== 1
+        || ![1, 2].includes(rawManifest.taskInventoryVersion)
         || rawManifest.tasks.some(task => typeof task?.isArchived !== "boolean"
           || (task.dueAt !== null && typeof task.dueAt !== "string")
           || !Number.isInteger(task.urgency)
           || typeof task.status?.code !== "string"
           || typeof task.status?.kind !== "string" || typeof task.status?.stopDeadlineTracking !== "boolean"
-          || !Array.isArray(task.assignees) || !Array.isArray(task.participants) || !Array.isArray(task.controls))))
+          || !Array.isArray(task.assignees) || !Array.isArray(task.participants) || !Array.isArray(task.controls)
+          || (rawManifest.taskInventoryVersion === 2 && (typeof task.status.name !== "string"
+            || typeof task.descriptionPlainText !== "string" || !Object.hasOwn(task, "createdBy"))))))
+    || (rawManifest.contextInventoryVersion === 1 && ["contacts", "registries", "workspaces"].includes(rawManifest.projection)
+      && (typeof rawManifest.inventoryAccess?.company !== "boolean" || !Array.isArray(rawManifest.inventoryAccess?.projectIds)
+        || rawManifest.inventoryAccess.projectIds.some(id => !UUID_PATTERN.test(id))))
+    || (rawManifest.contextInventoryVersion !== undefined &&
+      (rawManifest.schemaVersion !== 2 || rawManifest.contextInventoryVersion !== 1
+        || !NARROW_INVENTORY_PROJECTIONS.has(rawManifest.projection)
+        || rawManifest.contextDocuments.some(document => {
+          const payload = document?.payload;
+          const key = document?.type === "knowledge_page" ? "page" : document?.type === "regular_work" ? "catalogSummary" : document?.type;
+          return !payload || typeof payload !== "object" || Array.isArray(payload)
+            || !payload[key] || typeof payload[key] !== "object" || Array.isArray(payload[key]);
+        })))
     // Schema 2 deliberately makes the backend projection authoritative. An
     // absent array must therefore fail closed instead of silently producing an
     // empty encrypted-company search index.
@@ -4050,7 +4085,7 @@ const buildMirror = async ({
       number: task.number,
       revisionToken: task.revisionToken,
       title: task.title,
-      ...(manifest.taskInventoryVersion === 1 ? { taskListEntry: task } : {}),
+      ...(manifest.taskInventoryVersion ? { taskListEntry: task } : {}),
       payload: null,
     }));
   } else {
@@ -4128,7 +4163,7 @@ const buildMirror = async ({
     const cached = previousContextDocuments.get(document.id);
     return cached?.revisionToken === document.revisionToken
       ? { cached }
-      : { source: inheritAgentCompanyEncryptedSnapshot(rawManifest, usesBackendSearchProjections ? {
+      : { source: inheritAgentCompanyEncryptedSnapshot(rawManifest, usesBackendSearchProjections && rawManifest.contextInventoryVersion !== 1 ? {
           id: document.id,
           type: document.type,
           title: document.title,
@@ -4137,7 +4172,7 @@ const buildMirror = async ({
           projectSlug: document.projectSlug ?? null,
         } : document) };
   });
-  const contextDocuments = await hydrateChangedCompanyMirrorRecords({
+  let contextDocuments = await hydrateChangedCompanyMirrorRecords({
     records: contextDocumentRecords,
     load: async (document) => document,
     hydrate: (value) => hydrateAgentCompanyEncryptedJson({
@@ -4148,6 +4183,19 @@ const buildMirror = async ({
       signal,
     }),
   });
+  if (rawManifest.contextInventoryVersion === 1) {
+    contextDocuments = contextDocuments.map(document => {
+      if (document.type !== "knowledge_page") return document;
+      const { bodyPlainText, ...page } = document.payload.page;
+      // The encrypted index carries a marker for the body. Truncating that
+      // marker on the server is not truncating its eventual plaintext. Derive
+      // exactly the native preview AFTER hydration and omit the full body from
+      // this inventory result, including its ordinary list matching corpus.
+      return { ...document, payload: { ...document.payload,
+        page: { ...page, previewText: buildContextPageListPreview(bodyPlainText) },
+      } };
+    });
+  }
   let searchDocuments;
   if (usesBackendSearchProjections) {
     const previousSearchDocuments = new Map(
@@ -4195,6 +4243,9 @@ const buildMirror = async ({
     company: manifest.company,
     viewer: manifest.viewer,
     viewerGroupIds: manifest.viewerGroupIds ?? [],
+    ...(manifest.contextInventoryVersion !== undefined ? { contextInventoryVersion: manifest.contextInventoryVersion } : {}),
+    ...(manifest.regularWorkCatalog !== undefined ? { regularWorkCatalog: manifest.regularWorkCatalog } : {}),
+    ...(manifest.inventoryAccess !== undefined ? { inventoryAccess: manifest.inventoryAccess } : {}),
     projects: manifest.projects ?? [],
     // Named company/project workspaces are metadata records. Accepted Git
     // bundles remain in `workspaces` below so existing materialization code can
@@ -4742,8 +4793,8 @@ const buildSearchDocuments = (mirror) => {
     // management read can reproduce the native includeArchived contract. They
     // must not silently re-enter ordinary relevance search.
     if (
-      contextDocument.type === "contact"
-      && contextDocument.payload?.contact?.isArchived
+      (contextDocument.type === "contact" && contextDocument.payload?.contact?.isArchived)
+      || (contextDocument.type === "registry" && contextDocument.payload?.registry?.state === "archived")
     ) {
       continue;
     }
@@ -5938,6 +5989,7 @@ const buildLocalListedTask = (mirror, record, rawInput) => {
     archiveState: task.isArchived || task.archivedAt ? "archived" : "active",
     urgency: task.urgency,
     dueAt: task.dueAt ?? null,
+    dueAtTime: task.dueAtTime ?? null,
     dueDate,
     deadlineTone: task.deadlineTone ?? null,
     hasUnreadNotifications: Boolean(task.hasUnreadNotifications),
@@ -5969,7 +6021,7 @@ const selectTaskListPage = (mirror, rawInput, personal) => {
   const archiveState = String(rawInput?.archiveState || "active");
   const relation = String(rawInput?.relation || "all");
   const offset = Math.max(0, Math.trunc(Number(rawInput?.offset) || 0));
-  const limit = Math.max(1, Math.min(100, Math.trunc(Number(rawInput?.limit) || 50)));
+  const limit = Math.max(1, Math.min(100, Math.trunc(Number(rawInput?.limit) || 20)));
   const projectNameById = new Map((mirror.projects ?? []).map((project) => [project.id, project.name]));
   const archivedProjectIds = new Set((mirror.projects ?? [])
     .filter((project) => project.isArchived)
@@ -6370,12 +6422,29 @@ const searchUnifiedGuidanceFromMirror = (mirror, rawInput) => {
   }, input.guidanceLimit);
 };
 
+// A task-derived project title is not project-wide inventory permission.
+// The server records successful native list scopes even when they have zero
+// rows, so a denied scope cannot silently become a successful empty page.
+const assertInventoryScopeAccess = (mirror, type, rawInput) => {
+  if (mirror.contextInventoryVersion !== 1 || !["contact", "registry", "workspace"].includes(type)) return;
+  const projectSlug = rawInput?.projectSlug;
+  if (projectSlug) {
+    const project = resolveMirrorProjectBySlug(mirror, projectSlug);
+    if (!project) throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND", "Project is absent from the current inventory.");
+    if (!mirror.inventoryAccess?.projectIds?.includes(project.id))
+      throw new TrelioLocalContextError("MCP_PROJECT_METADATA_ACCESS_REQUIRED", "Project-level access is required to list this scope.");
+  } else if (type !== "contact" && mirror.inventoryAccess?.company !== true) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_ACCESS_DENIED", "Company-wide inventory access is required.");
+  }
+};
+
 const listDomainDocumentsFromMirror = (mirror, type, rawInput) => {
+  assertInventoryScopeAccess(mirror, type, rawInput);
   const query = String(rawInput?.query || "").trim();
   const projectSlug = rawInput?.projectSlug ? String(rawInput.projectSlug).trim() : null;
   const matchesProjectScope = buildMirrorProjectScopeMatcher(mirror, projectSlug);
   const offset = Math.max(0, Math.trunc(Number(rawInput?.offset) || 0));
-  const limit = Math.max(1, Math.min(500, Math.trunc(Number(rawInput?.limit) || 100)));
+  const limit = Math.max(1, Math.min(type === "contact" ? 500 : 100, Math.trunc(Number(rawInput?.limit) || 20)));
   const items = (mirror.contextDocuments ?? []).filter((document) => {
     if (document.type !== type || !matchesProjectScope(document)) return false;
     // Unlike aggregate contacts, an omitted registry project means company
@@ -6407,9 +6476,16 @@ const listDomainDocumentsFromMirror = (mirror, type, rawInput) => {
     title: document.title,
     projectSlug: document.projectSlug ?? null,
     revisionToken: document.revisionToken,
-    summary: document.payload?.[
-      type === "knowledge_page" ? "page" : type === "regular_work" ? "set" : type
-    ] ?? null,
+    summary: (() => {
+      const summary = document.payload?.[type === "knowledge_page" ? "page" : type === "regular_work" ? "set" : type] ?? null;
+      if (type !== "contact" || mirror.contextInventoryVersion !== 1 || !summary) return summary;
+      // Contact matching uses its complete description, while native catalog
+      // output exposes only a 180-character preview. A protected marker cannot
+      // be truncated on the backend; project after local hydration instead.
+      const { descriptionPlainText, ...catalog } = summary;
+      return { ...catalog, descriptionPreview: sliceUtf16CodePoints(String(descriptionPlainText ?? "")
+        .trim().replace(/\s+/gu, " "), 0, 180) };
+    })(),
   }));
   return {
     schemaVersion: 1,
@@ -6490,7 +6566,7 @@ const listRegularWorkFromMirror = (mirror, rawInput) => {
     document.projectId,
     Boolean(document.payload?.viewer?.canEdit),
   ]));
-  const projects = [...projectById.values()].map((project) => ({
+  const projects = mirror.regularWorkCatalog?.projects ?? [...projectById.values()].map((project) => ({
       ...buildLocalProjectSummary(project),
       // Company managers are authoritative for every visible project. For an
       // ordinary member, exact set reads prove edit access only for projects
@@ -6499,8 +6575,11 @@ const listRegularWorkFromMirror = (mirror, rawInput) => {
       publicPath: project.publicPath
         ?? `/${encodeURIComponent(mirror.company.slug)}/${encodeURIComponent(project.slug)}/`,
   }));
+  const offset = Math.max(0, Math.trunc(Number(rawInput?.offset) || 0));
+  const limit = Math.max(1, Math.min(100, Math.trunc(Number(rawInput?.limit) || 20)));
   const sets = documents.map((document) => {
     const payload = document.payload ?? {};
+    if (mirror.contextInventoryVersion === 1) return payload.catalogSummary;
     const set = payload.set ?? {};
     const items = Array.isArray(payload.items)
       ? payload.items.filter((item) => item?.state !== "archived")
@@ -6528,8 +6607,9 @@ const listRegularWorkFromMirror = (mirror, rawInput) => {
   return {
     company: buildLocalCompanySummary(documents[0]?.payload?.company ?? mirror.company),
     projects,
-    sets,
-    viewer: {
+    sets: sets.slice(offset, offset + limit),
+    pagination: { limit, offset, total: sets.length, hasMore: offset + limit < sets.length },
+    viewer: mirror.regularWorkCatalog?.viewer ?? {
       memberId: documents[0]?.payload?.viewer?.memberId ?? mirror.viewer?.memberId ?? null,
       canCreate: projects.some((project) => project.canEdit),
     },
@@ -6677,6 +6757,7 @@ const getRegistryFromMirror = (mirror, rawInput) => {
 };
 
 const listWorkspacesFromMirror = (mirror, rawInput) => {
+  assertInventoryScopeAccess(mirror, "workspace", rawInput);
   const projectSlug = rawInput?.projectSlug ? String(rawInput.projectSlug).trim() : null;
   const project = projectSlug ? resolveMirrorProjectBySlug(mirror, projectSlug) : null;
   if (projectSlug && !project) {
@@ -6708,6 +6789,8 @@ const listWorkspacesFromMirror = (mirror, rawInput) => {
       ?? workspacesById.get(workspace.id)?.acceptedHead
       ?? null,
   }));
+  const offset = Math.max(0, Math.trunc(Number(rawInput?.offset) || 0));
+  const limit = Math.max(1, Math.min(100, Math.trunc(Number(rawInput?.limit) || 20)));
   return {
     schemaVersion: 1,
     provider: "local_company_context",
@@ -6717,15 +6800,76 @@ const listWorkspacesFromMirror = (mirror, rawInput) => {
       project: buildLocalProjectSummary(project),
     },
     generation: mirror.generation,
-    workspaces,
+    workspaces: workspaces.slice(offset, offset + limit),
+    pagination: { limit, offset, total: workspaces.length, hasMore: offset + limit < workspaces.length },
   };
 };
 
-const findProjectedContextDocumentId = (mirror, sourceType, predicate) => {
-  const projection = (mirror.searchDocuments ?? []).find((document) => (
-    document?.metadata?.sourceType === sourceType && predicate(document)
-  ));
-  return projection?.metadata?.contextDocumentId ?? null;
+// Native exact reads and search/fetch use one locator grammar. A structural
+// reference chooses an object only: scope ACL and revisions still come from
+// the current native endpoint. Historical aliases are resolved from the same
+// domain inventory, never from a different company's search result.
+const CONTEXT_DOCUMENT_TOOLS = new Map([
+  ["get_contact", "contact"], ["get_knowledge_base_page", "knowledge_page"],
+  ["get_registry", "registry"], ["get_regular_work", "regular_work"], ["get_meeting", "meeting"],
+]);
+const CONTEXT_LIST_TOOLS = new Map([
+  ["list_contacts", "contact"], ["list_knowledge_base_pages", "knowledge_page"],
+  ["list_registries", "registry"], ["list_regular_work", "regular_work"],
+]);
+const parseContextFetchLocator = rawId => {
+  if (typeof rawId !== "string") return null;
+  const id = normalizeBoundedString(rawId, "resultId", 4096);
+  const parts = id.split(":").map(decodeMirrorDocumentIdPart);
+  if (parts[0] === "context" && parts.length === 3 && [...CONTEXT_DOCUMENT_TOOLS.values()].includes(parts[1]))
+    return { type: parts[1], documentId: parts[2], anyProject: true };
+  if (parts[0] === "contact" && parts.length === 3)
+    return { type: "contact", companySlug: parts[1], documentId: parts[2] };
+  if (parts[0] === "meeting" && parts.length === 2) return { type: "meeting", documentId: parts[1] };
+  if (parts[0] === "knowledge-page" && parts.length === 3)
+    return { type: "knowledge_page", companySlug: parts[1], pageSlug: parts[2] };
+  if (parts[0] === "registry" && parts[2] === "company" && parts.length === 4)
+    return { type: "registry", companySlug: parts[1], projectSlug: null, registrySlug: parts[3] };
+  if (parts[0] === "registry" && parts[2] === "project" && parts.length === 5)
+    return { type: "registry", companySlug: parts[1], projectSlug: parts[3], registrySlug: parts[4] };
+  if (/^(?:https?:\/\/|\/)/u.test(id)) {
+    const locator = parseMirrorDocumentUrl(id);
+    if (CONTEXT_DOCUMENT_TOOLS.has(({ contact: "get_contact", knowledge_page: "get_knowledge_base_page",
+      registry: "get_registry", regular_work: "get_regular_work", meeting: "get_meeting" })[locator?.type])) {
+      return { ...locator, documentId: locator.contactId ?? locator.setId };
+    }
+  }
+  return null;
+};
+
+const contextDocumentLocator = (nativeTool, input) => {
+  if (nativeTool === "fetch") return parseContextFetchLocator(input?.id ?? input?.resultId);
+  const type = CONTEXT_DOCUMENT_TOOLS.get(nativeTool);
+  return type ? { ...input, type, documentId: input?.contactId ?? input?.meetingId ?? input?.setId } : null;
+};
+
+const matchesContextDocumentScope = (mirror, document, locator) => {
+  const matchesProject = buildMirrorProjectScopeMatcher(mirror, locator.projectSlug || null);
+  return matchesProject(document) && (locator.type !== "registry" || locator.anyProject
+    || locator.projectSlug || (!document.projectId && !document.projectSlug));
+};
+
+const selectContextDocument = (mirror, locator) => {
+  if (locator.companySlug) assertMirrorDocumentCompany(mirror, locator.companySlug);
+  return (mirror.contextDocuments ?? []).find(document => {
+    if (document.type !== locator.type || !matchesContextDocumentScope(mirror, document, locator)) return false;
+    if (locator.documentId) return document.id === locator.documentId;
+    const slug = locator.registrySlug ?? locator.pageSlug;
+    const summary = document.payload?.[locator.type === "knowledge_page" ? "page" : locator.type];
+    if (summary?.slug === slug || summary?.slugAliases?.includes(slug) || `e-${document.id}` === slug) return true;
+    // Old schema-2 mirrors carry only revision descriptors. Their protected
+    // slug aliases reside in backend-selected referenceValues, not payloads.
+    return (mirror.searchDocuments ?? []).some(projected => (
+      projected?.metadata?.sourceType === locator.type
+      && projected.metadata.contextDocumentId === document.id
+      && collectText(projected.referenceValues).includes(String(slug))
+    ));
+  }) ?? null;
 };
 
 const taskIdsForLocators = (mirror, locators) => locators.map((locator) => (
@@ -6735,76 +6879,26 @@ const taskIdsForLocators = (mirror, locators) => locators.map((locator) => (
 const selectNativeReadDetails = (mirror, nativeTool, input) => {
   if (nativeTool === "fetch") {
     const resultId = String(input?.id || input?.resultId || "");
-    if (resultId.startsWith("task:")) {
-      const [companySlug, projectSlug, taskNumber] = resultId
-        .slice("task:".length)
-        .split("/")
-        .map(decodeURIComponent);
-      return {
-        taskIds: taskIdsForLocators(mirror, [{ companySlug, projectSlug, taskNumber: Number(taskNumber) }]),
-        documentIds: [],
-      };
-    }
-    if (resultId.startsWith("context:")) {
-      const [, sourceType, documentId] = resultId.split(":");
-      const exists = (mirror.contextDocuments ?? []).some((document) => (
-        document.type === sourceType && document.id === documentId
-      ));
-      return { taskIds: [], documentIds: exists ? [documentId] : [] };
+    const locator = resultId.startsWith("task:") ? parseMirrorTaskResultId(resultId)
+      : /^(?:https?:\/\/|\/)/u.test(resultId) ? parseMirrorDocumentUrl(resultId) : null;
+    if (locator && (resultId.startsWith("task:") || locator.type === "task")) {
+      assertMirrorDocumentCompany(mirror, locator.companySlug);
+      return { taskIds: taskIdsForLocators(mirror, [locator]), documentIds: [] };
     }
   }
   if (["list_project_tasks", "list_my_tasks"].includes(nativeTool)) {
     const matchesProject = buildMirrorProjectScopeMatcher(mirror, input?.projectSlug || null);
-    return {
-      taskIds: (mirror.tasks ?? []).filter(matchesProject).map((task) => task.id),
-      documentIds: [],
-    };
+    return { taskIds: (mirror.tasks ?? []).filter(matchesProject).map(task => task.id), documentIds: [] };
   }
-  if (nativeTool === "get_task") {
-    return { taskIds: taskIdsForLocators(mirror, [input]), documentIds: [] };
-  }
-  if (nativeTool === "get_tasks" || nativeTool === "get_task_instruction_page") {
+  if (nativeTool === "get_task") return { taskIds: taskIdsForLocators(mirror, [input]), documentIds: [] };
+  if (nativeTool === "get_tasks" || nativeTool === "get_task_instruction_page")
     return { taskIds: taskIdsForLocators(mirror, input.tasks ?? []), documentIds: [] };
-  }
-
-  const allOfType = (type) => (mirror.contextDocuments ?? [])
-    .filter((document) => document.type === type)
-    .map((document) => document.id);
-  if (nativeTool === "list_knowledge_base_pages") return { taskIds: [], documentIds: allOfType("knowledge_page") };
-  if (nativeTool === "list_contacts") return { taskIds: [], documentIds: allOfType("contact") };
-  if (nativeTool === "list_registries") return { taskIds: [], documentIds: allOfType("registry") };
-  if (nativeTool === "list_regular_work") return { taskIds: [], documentIds: allOfType("regular_work") };
-  if (nativeTool === "search_meetings") return { taskIds: [], documentIds: [] };
-
-  let sourceType = null;
-  let documentId = null;
-  if (nativeTool === "get_knowledge_base_page") {
-    sourceType = "knowledge_page";
-    documentId = findProjectedContextDocumentId(mirror, sourceType, (document) => (
-      collectText(document.referenceValues).includes(String(input.pageSlug))
-    ));
-  } else if (nativeTool === "get_contact") {
-    sourceType = "contact";
-    documentId = String(input.contactId || "");
-  } else if (nativeTool === "get_registry") {
-    sourceType = "registry";
-    const matchesProject = buildMirrorProjectScopeMatcher(mirror, input.projectSlug || null);
-    documentId = findProjectedContextDocumentId(mirror, sourceType, (document) => (
-      matchesProject(document.metadata ?? {})
-      && collectText(document.referenceValues).includes(String(input.registrySlug || ""))
-    ));
-  } else if (nativeTool === "get_regular_work") {
-    sourceType = "regular_work";
-    documentId = String(input.setId || "");
-  } else if (nativeTool === "get_meeting") {
-    sourceType = "meeting";
-    documentId = String(input.meetingId || "");
-  }
-  if (!sourceType) return { taskIds: [], documentIds: [] };
-  const descriptor = (mirror.contextDocuments ?? []).find((document) => (
-    document.type === sourceType && document.id === documentId
-  ));
-  return { taskIds: [], documentIds: descriptor ? [descriptor.id] : [] };
+  const listType = CONTEXT_LIST_TOOLS.get(nativeTool);
+  if (listType) return { taskIds: [], documentIds: (mirror.contextDocuments ?? [])
+    .filter(document => document.type === listType).map(document => document.id) };
+  const locator = contextDocumentLocator(nativeTool, input);
+  const document = locator ? selectContextDocument(mirror, locator) : null;
+  return { taskIds: [], documentIds: document ? [document.id] : [] };
 };
 
 const hydrateMirrorForNativeRead = async ({ ready, nativeTool, input, signal }) => {
@@ -6852,14 +6946,18 @@ const hydrateMirrorForNativeRead = async ({ ready, nativeTool, input, signal }) 
   // detail IO. Freeze the page and its total together. The existing revision
   // refresh reruns this selection on the new manifest if a page task changes.
   const isTaskList = nativeTool === "list_my_tasks" || nativeTool === "list_project_tasks";
-  // Full-text and explicit member filters can depend on historical member
-  // summaries absent from the board. Keep the exact-detail path for them.
-  const needsDetailForMatching = String(input?.query ?? "").trim() || input?.createdByMemberId
-    || input?.assigneeMemberId || input?.participantMemberId;
+  // Legacy inventories lack the complete native board matching fields. Keep
+  // their detail fallback; v2 explicitly guarantees the canonical list corpus.
+  const needsDetailForMatching = ready.taskInventoryVersion !== 2 && (String(input?.query ?? "").trim()
+    || input?.createdByMemberId || input?.assigneeMemberId || input?.participantMemberId);
   const taskListPage = isTaskList && ready.taskInventoryReady && !needsDetailForMatching
     ? selectTaskListPage(ready.mirror, input, nativeTool === "list_my_tasks")
     : null;
-  const selection = taskListPage
+  // A negotiated domain inventory is the complete native LIST payload,
+  // not a detail descriptor. Loading every body here would undo pagination
+  // and make a one-row list depend on unrelated registry/history content.
+  const hasListInventory = ready.mirror.contextInventoryVersion === 1 && CONTEXT_LIST_TOOLS.has(nativeTool);
+  const selection = hasListInventory ? { taskIds: [], documentIds: [] } : taskListPage
     ? { taskIds: taskListPage.records.map(record => record.id), documentIds: [] }
     : selectNativeReadDetails(ready.mirror, nativeTool, input);
   let taskOverlay = ready.mirror;
@@ -7195,6 +7293,7 @@ const fetchMirrorRegistry = (
     "registry",
     (document) => (
       matchesProjectScope(document)
+      && (projectSlug || (!document.projectId && !document.projectSlug))
       && (
         document.payload?.registry?.slug === registrySlug
         || document.payload?.registry?.slugAliases?.includes?.(registrySlug)
@@ -8891,6 +8990,62 @@ export const exactWorkspaceReadId = (nativeTool, input) => {
   return null;
 };
 
+/** UUID-only exact document reads need no company cache. Slug aliases still
+ * require the matching domain's protected inventory; no local alias guess may
+ * become a remote path. Capabilities are negotiated by the existing bridge
+ * compatibility read, not inferred from an HTTP refusal. */
+export const exactContextDocumentReadLocator = (nativeTool, input) => {
+  const locator = contextDocumentLocator(nativeTool, input);
+  if (!locator) return null;
+  const id = locator.documentId ?? (CANONICAL_LOCAL_ROUTE_PATTERN.test(locator.registrySlug ?? locator.pageSlug ?? "")
+    ? (locator.registrySlug ?? locator.pageSlug).slice(2) : null);
+  if (!UUID_PATTERN.test(id ?? "") || (locator.projectSlug && !CANONICAL_LOCAL_ROUTE_PATTERN.test(locator.projectSlug))) return null;
+  return { ...locator, documentId: id };
+};
+
+export const readFreshExactContextDocument = async ({
+  companySlug, nativeTool, input, selection, provider, signal, unfiledQueue,
+  requestJson = async pathname => readJson(await request(provider.requestOrigin, provider.token, pathname, { signal })),
+  hydrate = value => hydrateAgentCompanyEncryptedJson({ value, origin: provider.requestOrigin,
+    token: provider.token, companyEncryption: provider.companyEncryption, signal }),
+}) => {
+  if (!selection || !UUID_PATTERN.test(selection.documentId ?? "") || !CONTEXT_DOMAIN_PROJECTIONS.has(selection.type))
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "An exact native document locator is required.");
+  if (selection.companySlug && selection.companySlug !== companySlug)
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact source belongs to another company.");
+  const query = new URLSearchParams({ context: "exact-v1" });
+  if (input?.occurrenceId) query.set("occurrenceId", normalizeUuid(input.occurrenceId, "occurrenceId"));
+  const pathname = `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}`
+    + `/documents/${selection.type}/${selection.documentId}`;
+  const validate = raw => {
+    if (raw?.company?.id !== provider.companyEncryption.runtime.company.id || raw.company?.slug !== companySlug)
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact source belongs to another company.");
+    const document = raw.contextDocuments?.[0];
+    if (raw.schemaVersion !== 2 || !/^[a-f0-9]{64}$/u.test(raw.revisionToken ?? "")
+      || !Array.isArray(raw.contextDocuments) || raw.contextDocuments.length !== 1
+      || document?.id !== selection.documentId || document.type !== selection.type
+      || !document.payload || !matchesContextDocumentScope(raw, document, selection))
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid exact document snapshot.");
+    return raw;
+  };
+  const raw = validate(await requestJson(`${pathname}?${query}`));
+  // Only this MVCC-selected document and its governing authority cross the
+  // shared hydrator. A late source/project/authority change must not release
+  // even a perfectly decrypted but now stale result to the model.
+  const mirror = await hydrate(raw);
+  const originalLocator = contextDocumentLocator(nativeTool, input);
+  if (originalLocator && selectContextDocument(mirror, originalLocator)?.id !== selection.documentId)
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND", "The selected source alias or scope changed.");
+  const result = handleNativeLocalContextRead(mirror, nativeTool, input);
+  signal?.throwIfAborted();
+  query.set("expectedContextRevision", raw.revisionToken);
+  const final = validate(await requestJson(`${pathname}?${query}`));
+  if (final.revisionToken !== raw.revisionToken)
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED", "Exact source changed during the read.");
+  signal?.throwIfAborted();
+  return unfiledQueue ? { ...result, unfiledQueue } : result;
+};
+
 /**
  * Read one target without starting, joining or publishing a company mirror.
  * The backend selects canonical ACL/redacted scope and authority in MVCC;
@@ -8973,15 +9128,19 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
 // Use the canonical server corpus and the same local matching, while keeping
 // narrow reads out of the writer, file pipeline and decrypted mirror cache.
 export const readNarrowCompanyContext = async ({
-  origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot,
+  origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot, unfiledQueue,
 }) => {
-  const projection = NARROW_CONTEXT_PROJECTION.get(nativeTool);
+  const withLiveContext = result => unfiledQueue ? { ...result, unfiledQueue } : result;
+  const projection = contextReadProjection(nativeTool, input);
   const read = async (selected = projection) => {
     const value = await fetchManifest({ origin: provider.requestOrigin, token: provider.token, companySlug, signal,
       projection: selected });
     if (value?.provider !== "local_company_context" || value.company?.slug !== companySlug
       || value.company?.id !== provider.companyEncryption.runtime.company.id
-      || !MIRROR_GENERATION_PATTERN.test(String(value.generation ?? ""))) {
+      || !MIRROR_GENERATION_PATTERN.test(String(value.generation ?? ""))
+      || !Array.isArray(value.contextDocuments)
+      || (value.schemaVersion === 2 && !Array.isArray(value.searchDocuments))
+      || (projection === "workspaces" && !Array.isArray(value.workspaces))) {
       throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Trelio returned an invalid narrow context projection.");
     }
     return value;
@@ -8990,17 +9149,29 @@ export const readNarrowCompanyContext = async ({
     ? readHumanSearchSource(() => read(), signal) : read();
   const buildCandidate = (raw, previous) => {
     const taskSearchOnly = projection === "tasks";
-    const documentType = taskSearchOnly ? "task" : projection === "secrets" ? "agent-secret" : null;
-    // Restrict even a legacy full response before hydration. For schema 1 the
-    // task-only path retains its existing per-task reader and never uses files.
+    const sourceType = [...CONTEXT_DOMAIN_PROJECTIONS].find(([, value]) => value === projection)?.[0];
+    const domainRead = Boolean(sourceType);
+    const exactDomainRead = domainRead && !CONTEXT_LIST_TOOLS.has(nativeTool) && nativeTool !== "search_meetings";
+    const acceptedHeads = new Map((raw.acceptedWorkspaces ?? []).map(workspace => [workspace.id, workspace.acceptedHead]));
+    // A legacy server may return a full company manifest from the negotiated
+    // header GET. Strip unrelated domains BEFORE protected payload hydration.
+    // Workspace lists only join accepted HEAD metadata; no file/bundle reader,
+    // writer lock or shared mirror publication belongs in an inventory request.
     const selected = inheritAgentCompanyEncryptedSnapshot(raw, {
-      ...raw, acceptedWorkspaces: [], workspaces: [], contextDocuments: [], instructions: null,
+      ...raw,
+      acceptedWorkspaces: [],
+      workspaces: projection === "workspaces" ? (raw.workspaces ?? []).map(workspace => ({ ...workspace,
+        acceptedHead: workspace.acceptedHead ?? workspace.repository?.acceptedHead ?? acceptedHeads.get(workspace.id) ?? null,
+      })) : [],
+      contextDocuments: domainRead ? (raw.contextDocuments ?? []).filter(document => document.type === sourceType) : [],
+      instructions: exactDomainRead ? raw.instructions : null,
       tasks: taskSearchOnly || projection === "task_inventory" ? raw.tasks : [],
       agentSkills: projection === "guidance" ? raw.agentSkills : null,
       agentProcedures: projection === "guidance" ? raw.agentProcedures : [],
-      ...(raw.schemaVersion === 2 ? {
-        searchDocuments: documentType === null ? [] : raw.searchDocuments?.filter(doc => doc.type === documentType),
-      } : {}),
+      ...(raw.schemaVersion === 2 ? { searchDocuments: (raw.searchDocuments ?? []).filter(document => (
+        taskSearchOnly ? document.type === "task" : projection === "secrets" ? document.type === "agent-secret"
+          : domainRead && (document.metadata?.sourceType === sourceType || document.type === sourceType)
+      )) } : {}),
     });
     return buildMirror({ origin, requestOrigin: provider.requestOrigin, token: provider.token,
       companyEncryption: provider.companyEncryption, rawManifest: selected, previous, signal, taskSearchOnly });
@@ -9008,18 +9179,63 @@ export const readNarrowCompanyContext = async ({
   const prepare = async () => {
     const manifest = await readManifest();
     return { ...provider, mirror: await buildCandidate(manifest, null),
-      taskInventoryReady: manifest.taskInventoryVersion === 1 };
+      taskInventoryReady: [1, 2].includes(manifest.taskInventoryVersion),
+      taskInventoryVersion: manifest.taskInventoryVersion };
   };
-  const ready = projection === "tasks" ? await buildStableCompanyMirror({
-    previous: null, readManifest, readFence: () => read("tasks_fence"), buildCandidate,
-    publish: async mirror => mirror,
-  }) : await prepare();
-  const mirror = projection === "task_inventory" ? await hydrateNativeReadWithRevisionRefresh({
-    origin, ready, nativeTool, input, signal, refreshReady: prepare,
-  }) : ready.mirror;
-  signal?.throwIfAborted();
-  onSearchSnapshot?.(mirror.serverGeneration);
-  return handleNativeLocalContextRead(mirror, nativeTool, input);
+  if (projection === "tasks") {
+    const ready = await buildStableCompanyMirror({
+      previous: null, readManifest, readFence: () => read("tasks_fence"), buildCandidate,
+      publish: async mirror => mirror,
+    });
+    signal?.throwIfAborted();
+    onSearchSnapshot?.(ready.mirror.serverGeneration);
+    return withLiveContext(handleNativeLocalContextRead(ready.mirror, nativeTool, input));
+  }
+  let ready = await prepare();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const locator = contextDocumentLocator(nativeTool, input);
+      if (locator && ready.mirror.contextInventoryVersion === 1) {
+        const document = selectContextDocument(ready.mirror, locator);
+        if (!document) throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND", "Exact source is absent from this domain inventory.");
+        if (provider.companyContextCapabilities?.exactDocumentReadVersion !== 1)
+          throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Inventory-only source requires a compatible exact document reader.");
+        // Inventory revisions intentionally fence summaries, not rich bodies.
+        // After local alias resolution ask the exact endpoint for its own new
+        // MVCC token; never submit a summary token as a full-document revision.
+        return await readFreshExactContextDocument({ companySlug, nativeTool, input,
+          selection: { ...locator, documentId: document.id,
+            // Alias resolution already established this immutable scope UUID.
+            // Raw exact responses carry protected aliases; do not compare an
+            // undecrypted string to the user's historical project spelling.
+            ...(locator.projectSlug && document.projectId ? { projectSlug: `e-${document.projectId}` } : {}),
+          }, provider, signal, unfiledQueue });
+      }
+      const mirror = projection === "task_inventory" || CONTEXT_LIST_TOOLS.has(nativeTool) || locator
+        ? await hydrateMirrorForNativeRead({ ready, nativeTool, input, signal }) : ready.mirror;
+      const result = handleNativeLocalContextRead(mirror, nativeTool, input);
+      // Selected task details only fence those rows: a new matching task or a
+      // member rename can change the page/total without touching their tokens.
+      // Domain summaries have no detail GET at all. Fence the SAME inventory,
+      // including empty pages, and share ONE rebuild budget with detail 409s.
+      // Never publish this partial company snapshot or turn a denied request
+      // into stale-cache success; both attempts keep the original signal.
+      if (projection === "task_inventory" || NARROW_INVENTORY_PROJECTIONS.has(projection)) {
+        const final = await readManifest();
+        if (final.generation !== mirror.serverGeneration) {
+          if (attempt === 0) { ready = await prepare(); continue; }
+          throw new TrelioLocalContextError("LOCAL_CONTEXT_GENERATION_CHANGED", "Domain inventory changed during the read.");
+        }
+      }
+      signal?.throwIfAborted();
+      onSearchSnapshot?.(mirror.serverGeneration);
+      return withLiveContext(result);
+    } catch (error) {
+      if (attempt !== 0 || !isLocalProjectionRevisionConflict(error)) throw error;
+      ready = await prepare();
+    }
+  }
+
 };
 
 export const handleTrelioLocalContextOperation = async (
@@ -9036,9 +9252,13 @@ export const handleTrelioLocalContextOperation = async (
     const nativeTool = String(rawInput?.nativeTool || "").trim();
     const input = rawInput?.arguments;
     const profile = currentWorkspaceExecutionProfile();
+    const readInventoryLiveContext = () => MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
+      ? readUnfiledResponseContext(origin, companySlug,
+        { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
     if (NARROW_CONTEXT_PROJECTION.has(nativeTool)
       && (nativeTool === "search_tasks" || !profile?.canReadCompanyContextExact?.(nativeTool))) {
-      return readNarrowCompanyContext({ origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot });
+      return readNarrowCompanyContext({ origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot,
+        unfiledQueue: await readInventoryLiveContext() });
     }
     if (profile?.canReadCompanyContextExact?.(nativeTool)) {
       if (!input || typeof input !== "object" || Array.isArray(input))
@@ -9060,7 +9280,20 @@ export const handleTrelioLocalContextOperation = async (
       if(source.companySlug!==companySlug)throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH","Exact source belongs to another company.");
       return readFreshExactTaskContext({origin,companySlug,nativeTool,input:{...input,...source},provider,signal});
     }
+    const documentSelection = exactContextDocumentReadLocator(nativeTool, input);
+    if (documentSelection && provider.companyContextCapabilities?.exactDocumentReadVersion === 1) {
+      const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
+        ? await readUnfiledResponseContext(origin, companySlug,
+          { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
+      return readFreshExactContextDocument({ companySlug, nativeTool, input,
+        selection: documentSelection, provider, signal, unfiledQueue });
+    }
     if(source?.type==="context")return readFreshManagedContextDocument({origin,companySlug,selection:source,provider,profile,signal});
+    // Historical aliases and older servers need discovery of this domain only.
+    // A failed capable exact read never reaches this compatibility branch.
+    if (contextReadProjection(nativeTool, input))
+      return readNarrowCompanyContext({ origin, companySlug, nativeTool, input, provider, signal, onSearchSnapshot,
+        unfiledQueue: await readInventoryLiveContext() });
     const workspaceId = exactWorkspaceReadId(nativeTool, input);
     if (workspaceId) {
       const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)

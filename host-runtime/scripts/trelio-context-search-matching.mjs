@@ -205,17 +205,75 @@ const listArray = (value) => Array.isArray(value) ? value : [];
 const listLower = (value) => String(value ?? "").toLocaleLowerCase("ru");
 /** PostgreSQL LIKE wildcard/escape semantics, including one Unicode code point. */
 export const compileContextListPattern = (rawQuery) => {
-    let pattern = "";
-    const characters = [...`%${listLower(rawQuery)}%`];
-    const literal = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const query = listLower(rawQuery);
+    // Most list queries contain no LIKE syntax. Preserve the native substring
+    // fast path instead of running BigInt transitions over every large value.
+    // Under /u the surrogate range matches ONLY unpaired surrogates: a literal
+    // lone half must not match inside a valid supplementary code point through
+    // String.includes. Those rare malformed strings retain the NFA semantics.
+    if (!/[%_\\\uD800-\uDFFF]/u.test(query))
+        return { test: value => value.includes(query) };
+    // LIKE accepts user-controlled '%' repetitions. Expanding them into '.*'
+    // made even a short negative match explore exponentially many partitions,
+    // blocking the event loop before its read deadline could abort the call.
+    // Compile the SAME pattern into a small NFA instead: bit i means that the
+    // next input code point may be consumed by pattern token i. Each code point
+    // advances every live state once using bitsets, with no backtracking/replay.
+    const literals = new Map();
+    let anyOne = 0n;
+    let anyMany = 0n;
+    let position = 1n;
+    let previousWasMany = false;
+    // Wrap before parsing escapes, exactly as SQL's `%${query}%` does. In
+    // particular a final backslash in query escapes the appended percent; it
+    // must remain a literal suffix, not become an extra trailing wildcard.
+    const characters = [...`%${query}%`];
     for (let index = 0; index < characters.length; index++) {
         const character = characters[index];
-        if (character === "\\" && index + 1 < characters.length)
-            pattern += literal(characters[++index]);
-        else
-            pattern += character === "%" ? "[\\s\\S]*" : character === "_" ? "[\\s\\S]" : literal(character);
+        if (character === "%") {
+            // Adjacent '%' have identical language. Collapsing them also means
+            // epsilon closure below needs only one shift, never an iterative scan.
+            if (previousWasMany)
+                continue;
+            anyMany |= position;
+            previousWasMany = true;
+        }
+        else {
+            previousWasMany = false;
+            if (character === "_")
+                anyOne |= position;
+            else {
+                const literal = character === "\\" && index + 1 < characters.length
+                    ? characters[++index]
+                    : character;
+                literals.set(literal, (literals.get(literal) ?? 0n) | position);
+            }
+        }
+        position <<= 1n;
     }
-    return new RegExp(`^(?:${pattern})$`, "u");
+    const close = (states) => states | ((states & anyMany) << 1n);
+    const accepting = position;
+    return {
+        test(value) {
+            let states = close(1n);
+            // for...of preserves the former Unicode-regexp rule: '_' consumes one
+            // code point, including a supplementary letter, emoji or newline.
+            // Memory depends on the pattern only; the value is never copied into
+            // a code-point array and no growing per-document state is retained.
+            for (const character of value) {
+                const consumeOne = (states & (anyOne | (literals.get(character) ?? 0n))) << 1n;
+                states = close(consumeOne | (states & anyMany));
+                if (states === 0n)
+                    return false;
+            }
+            return (states & accepting) !== 0n;
+        },
+    };
+};
+/** The index preview is also the searchable body of an ordinary page list. */
+export const buildContextPageListPreview = (value) => {
+    const body = String(value ?? "").trim().replace(/\s+/gu, " ");
+    return body.length <= 180 ? body : `${sliceUtf16CodePoints(body, 0, 177).trimEnd()}...`;
 };
 export const matchesContextListDocument = (type, payload, rawQuery) => {
     const query = rawQuery.trim();
@@ -233,8 +291,7 @@ export const matchesContextListDocument = (type, payload, rawQuery) => {
     if (type === "knowledge_page") {
         // Native list pages filters the compact index preview, never full body,
         // discussion, sidebar pages, audit actors or rich-text editor metadata.
-        const body = String(entity.bodyPlainText ?? "").trim().replace(/\s+/gu, " ");
-        const preview = entity.previewText ?? (body.length <= 180 ? body : `${sliceUtf16CodePoints(body, 0, 177).trimEnd()}...`);
+        const preview = entity.previewText ?? buildContextPageListPreview(entity.bodyPlainText);
         return [entity.title, entity.slug, preview].some((value) => listLower(value).includes(listLower(query)));
     }
     if (type === "registry") {

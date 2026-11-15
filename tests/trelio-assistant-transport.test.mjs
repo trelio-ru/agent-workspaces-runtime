@@ -2747,10 +2747,10 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
   try{
     // Exercise the actual native profile before the backend fixture: only
     // task-only search can place these structural selectors on its GET.
-    const plan = async (profile, suffix) => profile.prepareRequest({
+    const plan = async (profile, suffix, headers={}, endpoint='manifest') => profile.prepareRequest({
       origin: descriptor.requestOrigin, token: await profile.requireToken(f.identity.origin),
-      pathname: '/api/agent-workspaces/company-context/encrypted/manifest'+suffix,
-      options: {method:'GET'}, buildHeaders: () => new Headers(),
+      pathname: '/api/agent-workspaces/company-context/encrypted/'+endpoint+suffix,
+      options: {method:'GET',headers}, buildHeaders: (_token,selected) => new Headers(selected),
     });
     await read('search_tasks',{},async profile=>{
       for(const projection of ['tasks','tasks_fence']){
@@ -2769,6 +2769,37 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
         await assert.rejects(plan(profile,'?projection=tasks'),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
       });
     }
+    // Negotiate through the actual managed profile as well as the human
+    // reader. Header selection remains bound to the admitted native tool;
+    // exact GET permits only structural context mode and hash fences.
+    for(const [tool,projection,type] of [
+      ['list_contacts','contacts','contact'],['list_registries','registries','registry'],
+      ['list_knowledge_base_pages','knowledge_pages','knowledge_page'],['list_regular_work','regular_work','regular_work'],
+      ['list_workspaces','workspaces',null],['search_meetings','meetings','meeting'],
+    ])await read(tool,{},async profile=>{
+      const sent=await plan(profile,'',{'x-trelio-context-projection':projection});
+      assert.equal(sent.headers.get('x-trelio-context-projection'),projection);
+      await assert.rejects(plan(profile,'',{'x-trelio-context-projection':projection==='contacts'?'registries':'contacts'}),
+        {code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+      if(type)await assert.rejects(plan(profile,'?context=exact-v1',{},`documents/${type}/${randomUUID()}`),
+        {code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+    });
+    await read('list_my_tasks',{},async profile=>{
+      const sent=await plan(profile,'?projection=task_inventory',{'x-trelio-task-inventory-version':'2'});
+      assert.equal(sent.headers.get('x-trelio-task-inventory-version'),'2');
+      for(const version of ['1','3','private'])await assert.rejects(plan(profile,'?projection=task_inventory',
+        {'x-trelio-task-inventory-version':version}),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+    });
+    for(const [tool,type] of [['get_contact','contact'],['get_registry','registry'],['get_knowledge_base_page','knowledge_page'],
+      ['get_regular_work','regular_work'],['get_meeting','meeting'],['fetch','contact']])await read(tool,{},async profile=>{
+      const endpoint=`documents/${type}/${randomUUID()}`;
+      await plan(profile,'?context=exact-v1',{},endpoint);
+      await plan(profile,'?context=exact-v1&expectedContextRevision='+ 'a'.repeat(64),{},endpoint);
+      for(const suffix of ['?context=unknown','?expectedContextRevision='+ 'a'.repeat(64),
+        '?context=exact-v1&expectedContextRevision=private','?context=exact-v1&expectedRevision='+ 'b'.repeat(64),
+        '?context=exact-v1&context=exact-v1'])await assert.rejects(plan(profile,suffix,{},endpoint),
+          {code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+    });
     // A previously advertised immutable file is already an exact source, not
     // another company search. Exercise a genuinely cold managed task/owner
     // profile with the real HPKE manifest/file reader: no company mirror has
@@ -5132,4 +5163,13 @@ test('operation contract metadata strips host fields and refuses prose before HT
   assert.equal(calls,0);
   assert.deepEqual(await invoke({operation:'create_workspace',taskPass:{private:true},runtimeSessionProof:{private:true}}),{operation:'create_workspace'});
   assert.equal(calls,1);
+});
+
+test('inventory scope refusals preserve closed error identity without exposing provider text',async()=>{
+  const {assistantCompanyContextReadRefusalCode}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  for(const code of ['LOCAL_CONTEXT_ACCESS_DENIED','MCP_PROJECT_METADATA_ACCESS_REQUIRED']){
+    assert.equal(assistantCompanyContextReadRefusalCode(Object.assign(Error('PRIVATE_PROVIDER_TEXT'),{code})),
+      'ASSISTANT_COMPANY_CONTEXT_'+code);
+    assert.equal(assistantCompanyContextReadRefusalCode(Error('PRIVATE '+code)),null);
+  }
 });

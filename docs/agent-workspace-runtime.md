@@ -3542,19 +3542,62 @@ TextContent. Та же проверка применяется после hydrat
 
 ### Пагинация зашифрованных списков задач
 
-`list_my_tasks` и `list_project_tasks` в encrypted-компании используют штатный
-`task_inventory` manifest. Версия `taskInventoryVersion: 1` добавляет к прежним
-board-данным состояние архива и структурный статус. Runtime применяет
-структурные фильтры, сортировку и пагинацию локально под исходным deadline.
-Подробности загружаются только для записей выбранной страницы с прежним
-`expectedRevision` и актуальной task ACL. Пустая страница не вызывает detail
-GET. При конфликте повторное чтение manifest заново выбирает страницу один раз.
+`list_my_tasks` и `list_project_tasks` используют `task_inventory` manifest.
+Header `x-trelio-task-inventory-version: 2` согласует полный native board matcher:
+текст, текущие сотрудники/группы, структурные фильтры, сортировку и пагинацию.
+Backend без header сохраняет версию 1 для прежнего runtime; старый backend
+игнорирует новый header. Неизвестная или неполная версия отклоняется.
+Версия 1 сохраняет прежний detail fallback для текста и explicit people filters.
 
-JSON результата сохраняет точную проекцию подробностей. Старый manifest
-без версии, текстовый поиск и явно заданные UUID сотрудников сохраняют
-matching по exact details, чтобы учитывать исторические имена и роли.
-Неизвестная версия или неполная версионная проекция отклоняются. Поисковый
-текст и остальные фильтры не передаются backend при чтении manifest.
+Подробности загружаются только для выбранной страницы с `expectedRevision` и
+актуальной task ACL; пустая страница не вызывает detail GET. После hydration
+проверяется generation того же inventory, включая пустые страницы: добавленная
+задача или новое имя сотрудника могут менять total без изменения exact task
+revision. Detail 409 и final generation conflict делят один rebuild под исходным
+deadline. Access/transport failure не означает пустой список или свежий cache.
+JSON сохраняет exact detail projection, включая `dueAtTime`. Поиск и остальные
+фильтры остаются локальными; default page size 20 соответствует native.
+
+### Списки и точечные чтения структурированного контекста
+
+Контакты, реестры, БЗ, регулярная работа и Workspace используют отдельные
+недолговечные inventories. Новый header `x-trelio-context-projection` согласует
+`contacts`, `registries`, `knowledge_pages`, `regular_work`, `workspaces` или
+`meetings` без расширения legacy query enum. Старый backend возвращает обычный
+manifest; runtime удаляет посторонние домены до hydration. Частичный inventory
+не записывается в company mirror и не открывает принятые Workspace-файлы.
+
+`contextInventoryVersion: 1` содержит native list summaries без rich details,
+registry rows, истории или обсуждений. Все list-фильтры выполняются до пагинации;
+regular-work и Workspace list также соблюдают `offset`/`limit`. Final read того
+же inventory проверяет generation; разрешён один rebuild вместе с detail 409.
+`inventoryAccess` для contacts/registries/workspaces перечисляет доступные
+company/project scopes, включая разрешённый пустой список. Видимый project
+locator через задачу не даёт доступ к project inventory: отказ не превращается
+в `[]`. Company registries/workspaces без project остаются company-only.
+
+KB preview после расшифровки нормализуется и ограничивается native 180 символами;
+полный body не участвует в list matching. Контакт ищется по полному описанию,
+но отдаёт только 180-символьный preview. Сам body не копируется в list summary.
+Общий generated matcher сохраняет SQL LIKE `%`, `_`, backslash и Unicode,
+используя ограниченный автомат вместо backtracking regexp. Канонический source
+находится в backend; runtime-копия обновляется только generator.
+
+Compatibility GET объявляет `companyContext.exactDocumentReadVersion: 1` и
+`domainInventoryVersion: 1`. Только первый флаг включает `context=exact-v1`
+на существующем `/company-context/:company/documents/:type/:id`. Текущий UUID
+или `e-UUID` читает один источник и governing rules без company mirror. Финальный
+GET с `expectedContextRevision` проверяет source/authority/ACL snapshot перед
+выдачей. Он не повторяется через другой transport при access/error.
+
+Исторический alias сначала разрешается в inventory своего домена. Summary
+token не является revision полного документа: после выбора UUID читается exact
+snapshot с собственным token. Scope проверяется по разрешённому project UUID до
+hydration и по исходному alias после неё. `fetch` и `get_*` используют один
+selector для canonical IDs/URLs и company-only registry scope; одноимённый
+проектный реестр не может подменить company registry. При старом backend
+сохраняются legacy revision descriptors и только нужный detail GET. `fetch` и
+Workspace list продолжают включать существующий unfiled reminder.
 
 ### Точечное чтение зашифрованной задачи
 

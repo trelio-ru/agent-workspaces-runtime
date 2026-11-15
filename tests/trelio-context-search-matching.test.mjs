@@ -117,3 +117,23 @@ test("generated common text pages and guidance keep Unicode valid within legacy 
     assert.ok(value.isWellFormed()); assert.ok(value.length <= limit); assert.ok(!value.includes('\uFFFD'));
   }
 });
+
+test("ordinary wildcard list matching cannot block the host on adversarial no-match patterns", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const source = new URL("../host-runtime/scripts/trelio-context-search-matching.mjs", import.meta.url).href;
+  // A test-runner timeout cannot interrupt a blocked JavaScript regexp. Bound a
+  // real child so any reintroduction of backtracking fails rather than hangs CI.
+  const result = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { compileContextListPattern, buildContextPageListPreview } from ${JSON.stringify(source)};
+    const source = 'a'.repeat(200000);
+    for (const query of ['%a'.repeat(20) + '%absent', '_%'.repeat(40) + 'absent', '%'.repeat(120) + 'absent'])
+      assert.equal(compileContextListPattern(query).test(source), false);
+    assert.equal(compileContextListPattern('a_b').test('a💗b'), true);
+    assert.equal(compileContextListPattern('a_b').test('a💗💗b'), false);
+    assert.equal(buildContextPageListPreview('  hello   world  '), 'hello world');
+    console.log('bounded');
+  `], { timeout: 5000, maxBuffer: 1024 });
+  assert.equal(result.stdout.trim(), "bounded");
+});

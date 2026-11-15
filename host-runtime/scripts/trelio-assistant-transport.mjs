@@ -28,6 +28,7 @@ export class AssistantTransportError extends Error {
 // outdated accepted file from becoming a generic company-read failure merely
 // because it did not pass through the long-running search request boundary.
 const companyContextReadRefusals=new Set([
+  'LOCAL_CONTEXT_ACCESS_DENIED','MCP_PROJECT_METADATA_ACCESS_REQUIRED',
   'LOCAL_CONTEXT_BROWSER_PROJECTION_INVALID','LOCAL_CONTEXT_BROWSER_PROJECTION_MISSING',
   'LOCAL_CONTEXT_CACHE_INVALID','LOCAL_CONTEXT_COMPANY_MISMATCH','LOCAL_CONTEXT_GENERATION_CHANGED',
   'LOCAL_CONTEXT_INVALID_HYDRATION','LOCAL_CONTEXT_INVALID_MANIFEST','LOCAL_CONTEXT_MIRROR_INVALID',
@@ -2116,7 +2117,24 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           // projection or generation fence. Search terms remain device-only.
           const modes=route.routePattern.endsWith('/company-context/:companySlug/manifest')
             ? assistantNarrowManifestModes.get(companyRead.nativeTool) : undefined;
-          const allowedKeys=documentRoute?['expectedRevision','occurrenceId']:taskRoute?['expectedRevision']
+          // New negotiation stays structural and native-tool-bound. A header
+          // cannot turn a one-domain list into an unrelated inventory; legacy
+          // servers may ignore it without a second/fallback request.
+          let headers;try{headers=new Headers(options.headers??{});}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+          const inventory=headers.get('x-trelio-context-projection');
+          const taskVersion=headers.get('x-trelio-task-inventory-version');
+          const manifestRoute=route.routePattern.endsWith('/company-context/:companySlug/manifest');
+          const domainType=url.pathname.split('/').at(-2);
+          if(inventory!==null&&(!manifestRoute||url.searchParams.has('projection')
+              ||!assistantDomainManifestModes.get(companyRead.nativeTool)?.includes(inventory))
+            ||taskVersion!==null&&(!manifestRoute||taskVersion!=='2'||url.searchParams.get('projection')!=='task_inventory'
+              ||!modes?.includes('task_inventory')))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          const exactContext=url.searchParams.get('context');
+          if(exactContext!==null&&(!documentRoute||exactContext!=='exact-v1'
+              ||!(companyRead.nativeTool==='fetch'||assistantDomainReadTypes.get(companyRead.nativeTool)===domainType)
+              ||url.searchParams.has('expectedRevision'))
+            ||url.searchParams.has('expectedContextRevision')&&exactContext!=='exact-v1')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          const allowedKeys=documentRoute?['expectedRevision','occurrenceId','context','expectedContextRevision']:taskRoute?['expectedRevision']
             :revisionsRoute?['head','cursor','limit']:route.routePattern.endsWith('/bridge-routing')?['workspaceId','companySlug']
               :modes?['projection']:['head'];
           if(new Set(keys).size!==keys.length || keys.some(key=>!allowedKeys.includes(key))
@@ -2125,7 +2143,8 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
             || url.searchParams.has('workspaceId')&&!uuid.test(url.searchParams.get('workspaceId'))
             ||url.searchParams.has('companySlug')&&url.searchParams.get('companySlug')!==companyRead.companySlug
             ||url.searchParams.has('expectedRevision')&&!(documentRoute?SHA256:/^[a-f0-9:-]{1,255}$/u).test(url.searchParams.get('expectedRevision'))
-            ||url.searchParams.has('occurrenceId')&&!uuid.test(url.searchParams.get('occurrenceId'))
+            ||url.searchParams.has('expectedContextRevision')&&!SHA256.test(url.searchParams.get('expectedContextRevision'))
+            ||url.searchParams.has('occurrenceId')&&(!uuid.test(url.searchParams.get('occurrenceId'))||exactContext&&domainType!=='regular_work')
             ||url.searchParams.has('cursor')&&!assistantWorkspaceRevisionCursorIsStructural(url.searchParams.get('cursor'),url.pathname.split('/').at(-2))
             ||url.searchParams.has('limit')&&!/^(?:[1-9]|[1-4][0-9]|50)$/u.test(url.searchParams.get('limit')))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           // Only existing structural exact-task POST bodies are allowed. The
@@ -4388,6 +4407,20 @@ const assistantNarrowManifestModes = new Map([
     ['list_projects', ['projects']],
     ['list_my_tasks', ['task_inventory']],
     ['list_project_tasks', ['task_inventory']],
+]);
+// Header inventories and exact document reads are host mechanics, not new
+// model tools. Their vocabulary is closed independently of the route grammar.
+const assistantDomainReadTypes = new Map([
+  ['get_contact','contact'],['get_registry','registry'],['get_knowledge_base_page','knowledge_page'],
+  ['get_regular_work','regular_work'],['get_meeting','meeting'],
+]);
+const assistantDomainManifestModes = new Map([
+  ['list_contacts',['contacts']],['get_contact',['contacts']],
+  ['list_registries',['registries']],['get_registry',['registries']],
+  ['list_knowledge_base_pages',['knowledge_pages']],['get_knowledge_base_page',['knowledge_pages']],
+  ['list_regular_work',['regular_work']],['get_regular_work',['regular_work']],
+  ['list_workspaces',['workspaces']],['search_meetings',['meetings']],['get_meeting',['meetings']],
+  ['fetch',['contacts','registries','knowledge_pages','regular_work','meetings']],
 ]);
 // BEGIN GENERATED ASSISTANT WORKSPACE POLICY
 // Generated portable assistant Workspace route/proof policy. Do not edit by hand.

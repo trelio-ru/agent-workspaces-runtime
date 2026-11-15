@@ -1927,9 +1927,21 @@ common three-attempt optimistic conflict bound, current recipient/pass checks,
 task/archive/project corpus and fixed original invocation clock remain strict.
 Its snapshot is invocation-local RAM, with no new persistent cache or endpoint.
 
+Domain inventory headers remain bound to the admitted native list/read tool;
+fetch permits only the closed structured-source domain vocabulary. Task list
+version 2 requires its existing task-inventory projection. The managed transport
+admits `context=exact-v1` and a SHA-256 `expectedContextRevision` only on matching
+exact document reads, without mixing the legacy document revision token. Source
+ACL, pass/recipient checks and encrypted snapshot binding remain unchanged.
+Current capable servers give canonical UUID fetches the same mirror-independent
+exact source/authority reader as human clients; legacy servers retain their
+previous source revision path. The two inventory scope refusals remain typed
+through the common error projector rather than becoming a generic failure.
+
 Canonical task references in `fetch` reuse the SAME exact native task MVCC
-reader directly. Canonical `context:type:UUID` reads open the existing encrypted
-mirror only for its revision locator, then read current native ciphertext under
+reader directly. On servers without exact-document capability, canonical
+`context:type:UUID` reads open the existing encrypted mirror only for its
+revision locator, then read current native ciphertext under
 that object ACL/revision. Fresh source rules/profile use the existing canonical
 `get_agent_instructions` callback; the final native document read fences source
 move/revocation/revision changes. The cached document body is never returned or

@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import {
   hydrateNativeReadWithRevisionRefresh, hydrateLocalActionMirror, prepareLocalActionContext, canonicalizeLocalProposalTarget, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
+  exactContextDocumentReadLocator, readFreshExactContextDocument,
   buildStableCompanyMirror, readFullCompanyContextGeneration, readNarrowCompanyContext,
   createHumanCompanySearchReader,
   isHumanCompanySearch,
@@ -1904,7 +1905,7 @@ test("narrow encrypted reads preserve matching and never start a Workspace downl
   assert.equal((await run("search_agent_secrets", { query: "nothing synthetic" })).results.length, 0);
   const input = { companySlugs: ["acme"], queries: ["офлайн синхронизацию"] };
   assert.equal((await run("search_tasks", input)).tasks[0].id, "task:acme/mobile/17");
-  assert.deepEqual(requests.splice(0), ["projects", "task_inventory", "detail", "guidance", "secrets", "tasks", "tasks_fence"]);
+  assert.deepEqual(requests.splice(0), ["projects", "task_inventory", "detail", "task_inventory", "guidance", "secrets", "tasks", "tasks_fence"]);
   legacy = true;
   assert.equal((await run("search_tasks", input)).tasks.length, 1, "an old server does not re-enable file hydration");
   assert.deepEqual(requests.splice(0), ["tasks", "tasks_fence"]);
@@ -1967,14 +1968,14 @@ test("encrypted task lists read exact details only for their selected page", asy
     origin, companySlug: mirror.company.slug, nativeTool, input, provider,
   });
   const overdue = await read("list_my_tasks", { relation: "assigned", dueState: "overdue", limit: 1 });
-  assert.deepEqual(calls.splice(0), ["manifest", 4, "manifest", 5]);
+  assert.deepEqual(calls.splice(0), ["manifest", 4, "manifest", 5, "manifest"]);
   assert.deepEqual(overdue.tasks.map(task => [task.number, task.title]), [[5, "Exact detail"]]);
   assert.deepEqual(overdue.pagination, { limit: 1, offset: 0, total: 1, hasMore: false });
   const archived = await read("list_project_tasks", { projectSlug: "mobile-legacy", archiveState: "archived", limit: 1, offset: 1 });
-  assert.deepEqual(calls.splice(0), ["manifest", 4]);
+  assert.deepEqual(calls.splice(0), ["manifest", 4, "manifest"]);
   assert.deepEqual(archived.pagination, { limit: 1, offset: 1, total: 2, hasMore: false });
   const empty = await read("list_my_tasks", { relation: "participant", limit: 1 });
-  assert.deepEqual(calls.splice(0), ["manifest"]);
+  assert.deepEqual(calls.splice(0), ["manifest", "manifest"]);
   assert.deepEqual(empty.tasks, []);
 });
 
@@ -5700,5 +5701,362 @@ test("actual local task lists preserve supplementary Unicode in description prev
     const preview = result.tasks.find(task => task.id === fixture.tasks[0].id).descriptionPreview;
     assert.equal(preview, 'а'.repeat(499));
     assert.ok(preview.isWellFormed()); assert.ok(!preview.includes('\uFFFD'));
+  }
+});
+
+
+test("domain inventories paginate before details and never open unrelated accepted files", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid";
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  const ids = Array.from({ length: 300 }, () => crypto.randomUUID());
+  const cases = [
+    ["list_contacts", "contacts", "contact", "contact"],
+    ["list_registries", "registries", "registry", "registry"],
+    ["list_knowledge_base_pages", "knowledge_pages", "knowledge_page", "page"],
+    ["list_regular_work", "regular_work", "regular_work", "catalogSummary"],
+    ["list_workspaces", "workspaces", null, null],
+  ];
+  for (const [nativeTool, projection, type, key] of cases) {
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      const parsed = new URL(url);
+      assert.equal(parsed.pathname, "/api/agent-workspaces/company-context/acme/manifest", "lists require no document/detail/file GET");
+      assert.equal(parsed.search, "", "new projection names do not reach an old strict query enum");
+      assert.equal(new Headers(options.headers).get("x-trelio-context-projection"), projection);
+      requests.push(projection);
+      return Response.json({
+        ...mirror, provider: "local_company_context", schemaVersion: 2, projection, contextInventoryVersion: 1, inventoryAccess: { company: true, projectIds: [] },
+        tasks: [], searchDocuments: [], acceptedWorkspaces: ids.map(id => ({ id, acceptedHead: "c".repeat(40) })),
+        workspaces: ids.map((id, index) => ({ id, ownerScope: "company", state: "active", title: `Workspace ${index}` })),
+        contextDocuments: type ? ids.map((id, index) => ({ id, type, projectId: null, projectSlug: null,
+          title: `Object ${index}`, revisionToken: "a".repeat(64), payload: {
+            [key]: { id, displayName: `Object ${index}`, title: `Object ${index}`, slug: `object-${index}`, state: "active",
+              kind: "person", aliases: [], searchTerms: [], columns: [], bodyPlainText: "short body" },
+          },
+        })) : [],
+        regularWorkCatalog: { projects: [{ id: mirror.projects[0].id, canEdit: true }], viewer: { canCreate: true } },
+      });
+    };
+    const read = input => readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool,
+      input: { companySlug: "acme", ...input }, provider });
+    const page = await read({ offset: 11, limit: 1 });
+    const values = page.items ?? page.sets ?? page.workspaces;
+    assert.deepEqual(values.map(value => value.id), [ids[11]], nativeTool);
+    assert.deepEqual(page.pagination ?? { limit: page.limit, offset: page.offset, total: page.total, hasMore: page.hasMore },
+      { limit: 1, offset: 11, total: 300, hasMore: true });
+    if (nativeTool === "list_workspaces") assert.equal(values[0].acceptedHead, "c".repeat(40));
+    const defaultPage = await read({});
+    assert.equal((defaultPage.items ?? defaultPage.sets ?? defaultPage.workspaces).length, 20, nativeTool);
+    const empty = await read({ offset: 1000, limit: 1 });
+    assert.deepEqual(empty.items ?? empty.sets ?? empty.workspaces, []);
+    assert.equal(empty.pagination?.hasMore ?? empty.hasMore, false);
+    assert.equal(requests.length, 6, "each inventory has only its original read and final generation fence");
+  }
+});
+
+test("knowledge-page inventory matches and returns only the locally derived native preview", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid", id = crypto.randomUUID();
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  globalThis.fetch = async url => {
+    assert.ok(String(url).endsWith("/manifest"));
+    return Response.json({ ...mirror, provider: "local_company_context", schemaVersion: 2,
+      projection: "knowledge_pages", contextInventoryVersion: 1, tasks: [], workspaces: [], acceptedWorkspaces: [], searchDocuments: [],
+      contextDocuments: [{ id, type: "knowledge_page", revisionToken: "a".repeat(64), title: "Handbook", payload: {
+        page: { id, title: "Handbook", slug: "handbook", bodyPlainText: "  visible    words " + "x".repeat(300) + " INVISIBLE_TAIL" },
+      } }],
+    });
+  };
+  const read = query => readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool: "list_knowledge_base_pages", input: { query }, provider });
+  assert.equal((await read("INVISIBLE_TAIL")).total, 0, "native page query searches 180-character preview, not full decrypted body");
+  const page = (await read("visible words")).items[0].summary;
+  assert.equal(page.previewText.length, 180);
+  assert.equal(page.previewText.endsWith("..."), true);
+  assert.equal(Object.hasOwn(page, "bodyPlainText"), false);
+});
+
+test("domain inventory generation refresh is bounded and native refusals never become empty pages", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid", id = crypto.randomUUID();
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  let calls = 0, refusal = false, alwaysChanging = false;
+  globalThis.fetch = async () => {
+    calls++;
+    if (refusal) return Response.json({ code: "ACCESS_DENIED" }, { status: 403 });
+    return Response.json({ ...mirror, provider: "local_company_context", schemaVersion: 2,
+      projection: "contacts", contextInventoryVersion: 1, inventoryAccess: { company: true, projectIds: [] },
+      generation: alwaysChanging ? String(calls).padStart(64, "a") : (calls === 1 ? "a" : "b").repeat(64),
+      tasks: [], workspaces: [], acceptedWorkspaces: [], searchDocuments: [],
+      contextDocuments: [{ id, type: "contact", title: calls === 1 ? "old" : "current", revisionToken: "a".repeat(64),
+        payload: { contact: { id, displayName: "Person", kind: "person" } } }],
+    });
+  };
+  const read = () => readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool: "list_contacts", input: {}, provider });
+  assert.equal((await read()).items[0].title, "current");
+  assert.equal(calls, 4);
+  calls = 0; alwaysChanging = true;
+  await assert.rejects(read(), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+  assert.equal(calls, 4, "continuous changes never restart a third read budget");
+  calls = 0; refusal = true;
+  await assert.rejects(read(), { statusCode: 403 });
+  assert.equal(calls, 1);
+});
+
+test("every exact domain read uses one selected object and a final authority revision fence", async () => {
+  const id = crypto.randomUUID(), companySlug = "acme";
+  const provider = { companyEncryption: { runtime: { company: mirror.company } } };
+  for (const [nativeTool, type, key, input] of [
+    ["get_contact", "contact", "contact", { contactId: id }],
+    ["get_meeting", "meeting", "meeting", { meetingId: id }],
+    ["get_knowledge_base_page", "knowledge_page", "page", { pageSlug: `e-${id}` }],
+    ["get_registry", "registry", "registry", { registrySlug: `e-${id}` }],
+    ["get_regular_work", "regular_work", "set", { setId: id }],
+    ["fetch", "contact", "contact", { id: `contact:acme:${id}` }],
+    ["fetch", "meeting", "meeting", { id: `meeting:${id}` }],
+  ]) {
+    const calls = [];
+    const snapshot = { ...mirror, schemaVersion: 2, revisionToken: "d".repeat(64),
+      contextDocuments: [{ id, type, revisionToken: "c".repeat(64), projectId: null, projectSlug: null,
+        payload: { [key]: { id, slug: `e-${id}`, title: "Selected", columns: [] } } }],
+    };
+    const run = (mutateFinal = false) => readFreshExactContextDocument({ companySlug, nativeTool,
+      input: { companySlug, ...input }, selection: exactContextDocumentReadLocator(nativeTool, input), provider,
+      hydrate: async value => structuredClone(value), requestJson: async pathname => {
+        const url = new URL(pathname, "https://synthetic.invalid");
+        assert.equal(url.pathname, `/api/agent-workspaces/company-context/acme/documents/${type}/${id}`);
+        assert.equal(url.searchParams.get("context"), "exact-v1");
+        calls.push(url.searchParams.get("expectedContextRevision"));
+        return mutateFinal && calls.length === 2 ? { ...snapshot, revisionToken: "e".repeat(64) } : snapshot;
+      },
+    });
+    const result = await run();
+    assert.equal(nativeTool === "get_regular_work" ? result.set.id : result.document.id, id);
+    assert.deepEqual(calls.splice(0), [null, snapshot.revisionToken]);
+    await assert.rejects(run(true), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+    assert.deepEqual(calls.splice(0), [null, snapshot.revisionToken]);
+  }
+  assert.equal(exactContextDocumentReadLocator("get_registry", { registrySlug: "old-name" }), null);
+  assert.equal(exactContextDocumentReadLocator("get_registry", { registrySlug: `e-${id}`, projectSlug: "old-project" }), null);
+});
+
+test("canonical domain fetches hydrate the same selected source and preserve company registry scope", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const selectedId = crypto.randomUUID(), projectId = crypto.randomUUID();
+  for (const [type, nativeTool, input] of [
+    ["registry", "get_registry", { registrySlug: "vendors" }],
+    ["registry", "fetch", { id: "registry:acme:company:vendors" }],
+    ["registry", "fetch", { id: "https://trelio.ru/acme/registries/vendors/" }],
+    ["contact", "fetch", { id: `contact:acme:${selectedId}` }],
+    ["meeting", "fetch", { id: `meeting:${selectedId}` }],
+    ["knowledge_page", "fetch", { id: "knowledge-page:acme:handbook" }],
+  ]) {
+    const descriptor = { id: selectedId, type, projectId: null, projectSlug: null, revisionToken: "c".repeat(64) };
+    const wrong = { ...descriptor, id: crypto.randomUUID(), projectId, projectSlug: "other" };
+    const snapshot = { ...mirror, contextDocuments: type === "registry" ? [wrong, descriptor] : [descriptor], searchDocuments: [wrong, descriptor].map(doc => ({
+      referenceValues: ["vendors", "handbook"], metadata: { sourceType: type, contextDocumentId: doc.id,
+        projectId: doc.projectId, projectSlug: doc.projectSlug },
+    })) };
+    const calls = [];
+    globalThis.fetch = async url => {
+      const parsed = new URL(url); calls.push(parsed.pathname);
+      assert.equal(parsed.pathname, `/api/agent-workspaces/company-context/acme/documents/${type}/${selectedId}`);
+      const key = type === "knowledge_page" ? "page" : type;
+      return Response.json({ document: { ...descriptor, payload: { [key]: {
+        id: selectedId, slug: type === "registry" ? "vendors" : "handbook", columns: [],
+      } } } });
+    };
+    const hydrated = await hydrateNativeReadWithRevisionRefresh({ origin: "https://synthetic.invalid",
+      ready: { mirror: snapshot, requestOrigin: "https://synthetic.invalid", token: "synthetic" }, nativeTool, input });
+    assert.equal(calls.length, 1);
+    const result = handleNativeLocalContextRead(hydrated, nativeTool, { companySlug: "acme", ...input });
+    assert.equal(result.document.id, selectedId);
+  }
+});
+
+
+test("task inventory v2 filters text and people before page hydration and preserves due time", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid";
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  const source = mirror.tasks[0], assignee = { memberId: mirror.viewer.memberId, displayName: "Needle Person" };
+  const summaries = Array.from({ length: 300 }, (_, index) => ({
+    ...source, payload: undefined, id: crypto.randomUUID(), number: index + 1, revisionToken: "b".repeat(64),
+    title: `Item ${index}`, descriptionPlainText: "same native list text", createdBy: null,
+    status: { code: "active", name: "Active", kind: "active", stopDeadlineTracking: false },
+    assignees: index % 2 ? [assignee] : [], participants: [], controls: [], urgency: 0, dueAt: null, isArchived: false,
+  }));
+  let invalid = false;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("/manifest")) {
+      calls.push("manifest");
+      assert.equal(parsed.search, "?projection=task_inventory");
+      assert.equal(new Headers(options.headers).get("x-trelio-task-inventory-version"), "2");
+      return Response.json({ ...mirror, provider: "local_company_context", schemaVersion: 2,
+        projection: "task_inventory", taskInventoryVersion: 2,
+        tasks: invalid ? summaries.map(summary => ({ ...summary, status: { ...summary.status, name: undefined } })) : summaries,
+        contextDocuments: [], searchDocuments: [], workspaces: [], acceptedWorkspaces: [],
+      });
+    }
+    const number = Number(parsed.pathname.split("/").at(-1)); calls.push(number);
+    return Response.json({ task: { ...source.payload, task: { ...summaries[number - 1], dueAtTime: "16:15", title: "Exact page row" } } });
+  };
+  const read = () => readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool: "list_project_tasks",
+    input: { projectSlug: "mobile", assigneeMemberId: assignee.memberId, query: "needle person", offset: 2, limit: 1 }, provider });
+  const result = await read();
+  assert.deepEqual(calls.splice(0), ["manifest", 6, "manifest"]);
+  assert.equal(result.tasks[0].dueAtTime, "16:15");
+  assert.deepEqual(result.pagination, { limit: 1, offset: 2, total: 150, hasMore: true });
+  invalid = true;
+  await assert.rejects(read(), { code: "LOCAL_CONTEXT_INVALID_MANIFEST" });
+  assert.deepEqual(calls, ["manifest"], "an incomplete v2 projection is never treated as an empty match");
+});
+
+test("old server domain fallback stays narrow and a new alias inventory uses the exact reader", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid", id = crypto.randomUUID();
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  const document = { id, type: "contact", projectId: null, projectSlug: null, revisionToken: "b".repeat(64), title: "Selected",
+    payload: { contact: { id, displayName: "Selected", kind: "person" } } };
+  let modern = false;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("/manifest")) {
+      calls.push("manifest");
+      assert.equal(new Headers(options.headers).get("x-trelio-context-projection"), "contacts");
+      return Response.json({ ...mirror, provider: "local_company_context", schemaVersion: 2,
+        ...(modern ? { projection: "contacts", contextInventoryVersion: 1, inventoryAccess: { company: true, projectIds: [] } } : {}),
+        contextDocuments: [modern ? document : { ...document, payload: undefined },
+          { id: crypto.randomUUID(), type: "registry", title: "Unrelated", revisionToken: "a".repeat(64) }],
+        searchDocuments: [], acceptedWorkspaces: [{ id: crypto.randomUUID(), acceptedHead: "c".repeat(40) }],
+      });
+    }
+    assert.equal(parsed.pathname, `/api/agent-workspaces/company-context/acme/documents/contact/${id}`);
+    calls.push(parsed.searchParams.has("context") ? "exact" : "legacy-detail");
+    return Response.json(modern ? { ...mirror, schemaVersion: 2, revisionToken: "d".repeat(64), contextDocuments: [document] } : { document });
+  };
+  const input = { id: `contact:acme:${id}` };
+  const queue = { count: 1, instruction: "Existing queue reminder" };
+  const read = () => readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool: "fetch", input, provider, unfiledQueue: queue });
+  assert.deepEqual((await read()).unfiledQueue, queue);
+  assert.deepEqual(calls.splice(0), ["manifest", "legacy-detail", "manifest"]);
+  modern = true; provider.companyContextCapabilities = { exactDocumentReadVersion: 1 };
+  assert.deepEqual((await read()).unfiledQueue, queue);
+  assert.deepEqual(calls.splice(0), ["manifest", "exact", "exact"]);
+});
+
+test("contact inventory matches full descriptions but returns only their native preview", () => {
+  const id = crypto.randomUUID();
+  const result = handleNativeLocalContextRead({ ...mirror, contextInventoryVersion: 1, contextDocuments: [{
+    id, type: "contact", title: "Person", payload: { contact: { id, displayName: "Person", kind: "person",
+      descriptionPlainText: "a".repeat(300) + " matching-tail", descriptionPreview: "INCORRECT_FULL_PROTECTED_BODY" } },
+  }] }, "list_contacts", { query: "matching-tail" });
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].summary.descriptionPreview, "a".repeat(180));
+  assert.equal(Object.hasOwn(result.items[0].summary, "descriptionPlainText"), false);
+});
+
+test("archived registries remain exact-readable but never reenter legacy unified discovery", () => {
+  const id = crypto.randomUUID(), title = "Archived registry needle";
+  const snapshot = { ...mirror, searchDocuments: undefined, contextDocuments: [{ id, type: "registry", title,
+    payload: { registry: { id, slug: "old-registry", title, state: "archived" }, rows: [] } }] };
+  assert.equal(searchCompanyContextMirror(snapshot, ["registry needle"], 5).results.length, 0);
+  assert.equal(handleNativeLocalContextRead(snapshot, "get_registry", { registrySlug: "old-registry" }).document.id, id);
+  assert.equal(handleNativeLocalContextRead(snapshot, "list_registries", { includeArchived: true }).total, 1);
+});
+
+
+test("domain inventories distinguish denied project scope from an authorized empty page", () => {
+  const snapshot = { ...mirror, contextInventoryVersion: 1, contextDocuments: [], workspaceEntries: [],
+    inventoryAccess: { company: true, projectIds: [] } };
+  for (const nativeTool of ["list_contacts", "list_registries", "list_workspaces"]) {
+    assert.throws(() => handleNativeLocalContextRead(snapshot, nativeTool, { projectSlug: "mobile" }),
+      { code: "MCP_PROJECT_METADATA_ACCESS_REQUIRED" });
+    const allowed = handleNativeLocalContextRead({ ...snapshot,
+      inventoryAccess: { company: true, projectIds: [mirror.projects[0].id] } }, nativeTool, { projectSlug: "mobile-legacy" });
+    assert.deepEqual(allowed.items ?? allowed.workspaces, [], nativeTool);
+  }
+  assert.throws(() => handleNativeLocalContextRead({ ...snapshot, inventoryAccess: { company: false, projectIds: [] } },
+    "list_registries", {}), { code: "LOCAL_CONTEXT_ACCESS_DENIED" });
+});
+
+test("task inventory fences empty and populated pages against membership and new-task changes", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid", source = mirror.tasks[0];
+  const provider = { requestOrigin: origin, token: "synthetic", companyEncryption: { runtime: { company: mirror.company } } };
+  for (const initialHasMatch of [false, true]) {
+    let manifests = 0, details = 0;
+    const task = { ...source, payload: undefined, title: "Task", descriptionPlainText: "", createdBy: null,
+      status: { code: "active", name: "Active", kind: "active", stopDeadlineTracking: false },
+      assignees: [], participants: [], controls: [], isArchived: false, urgency: 0, dueAt: null,
+    };
+    globalThis.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/manifest")) {
+        manifests++;
+        // Only company membership/list data changes. The selected task's exact
+        // revision stays constant, so its detail GET cannot detect this race.
+        const changed = manifests > 1;
+        const tasks = !initialHasMatch && !changed ? [] : [{ ...task,
+          assignees: [{ memberId: mirror.viewer.memberId, displayName: changed ? "New name" : "Needle name" }] }];
+        return Response.json({ ...mirror, provider: "local_company_context", schemaVersion: 2,
+          projection: "task_inventory", taskInventoryVersion: 2,
+          generation: (changed ? "b" : "a").repeat(64), tasks,
+          contextDocuments: [], searchDocuments: [], workspaces: [], acceptedWorkspaces: [],
+        });
+      }
+      details++;
+      return Response.json({ task: source.payload });
+    };
+    const result = await readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool: "list_project_tasks",
+      input: { projectSlug: "mobile", ...(initialHasMatch ? { query: "needle" } : {}) }, provider });
+    assert.equal(result.pagination.total, initialHasMatch ? 0 : 1);
+    assert.equal(result.tasks.length, initialHasMatch ? 0 : 1);
+    assert.equal(manifests, 4, "initial + fence and exactly one rebuild + fence");
+    assert.equal(details, 1);
+  }
+  let manifests = 0;
+  globalThis.fetch = async () => Response.json({ ...mirror, provider: "local_company_context", schemaVersion: 2,
+    projection: "task_inventory", taskInventoryVersion: 2, generation: String(++manifests).padStart(64, "a"),
+    tasks: [], contextDocuments: [], searchDocuments: [], workspaces: [], acceptedWorkspaces: [],
+  });
+  await assert.rejects(readNarrowCompanyContext({ origin, companySlug: "acme", nativeTool: "list_my_tasks", input: {}, provider }),
+    { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+  assert.equal(manifests, 4);
+});
+
+test("exact document raw scope uses resolved UUID while hydrated aliases retain the original target", async () => {
+  const projectId = mirror.projects[0].id, id = crypto.randomUUID();
+  for (const [nativeTool, type, key, input] of [
+    ["get_registry", "registry", "registry", { registrySlug: "vendors-old", projectSlug: "project-old" }],
+    ["get_regular_work", "regular_work", "set", { setId: id, projectSlug: "project-old" }],
+    ["fetch", "knowledge_page", "page", { id: "knowledge-page:acme:handbook-old" }],
+  ]) {
+    const isPage = type === "knowledge_page";
+    const raw = { ...mirror, schemaVersion: 2, revisionToken: "d".repeat(64),
+      projects: [{ id: projectId, slug: `e-${projectId}`, slugAliases: ["opaque-protected-alias"] }],
+      contextDocuments: [{ id, type, projectId: isPage ? null : projectId, projectSlug: isPage ? null : `e-${projectId}`,
+        payload: { [key]: { id, slug: `e-${id}`, slugAliases: ["opaque-protected-alias"], columns: [] } } }],
+    };
+    const result = await readFreshExactContextDocument({ companySlug: "acme", nativeTool, input: { companySlug: "acme", ...input },
+      selection: { type, documentId: id, ...(isPage ? {} : { projectSlug: `e-${projectId}` }) },
+      provider: { companyEncryption: { runtime: { company: mirror.company } } },
+      requestJson: async () => raw,
+      hydrate: async () => ({ ...raw, projects: [{ ...raw.projects[0], slugAliases: ["project-old"] }],
+        contextDocuments: [{ ...raw.contextDocuments[0], payload: { [key]: { ...raw.contextDocuments[0].payload[key],
+          slugAliases: [isPage ? "handbook-old" : "vendors-old"] } } }],
+      }),
+    });
+    assert.equal(nativeTool === "get_regular_work" ? result.set.id : result.document.id, id);
   }
 });
