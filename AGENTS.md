@@ -1208,6 +1208,9 @@ publication tooling также остаются вне этого публичн
 
 ## Граница plugin/runtime
 
+Пользовательское название Workspace – «папка в Трелио». В локальных
+подсказках отличай её от рабочей папки на компьютере. [Контракт](docs/agent-workspace-runtime.md).
+
 - [Приватные задачи](docs/agent-workspace-runtime.md#приватные-задачи).
 
 - Human Codex main и его immutable hook-компонент используют тот же verifier и

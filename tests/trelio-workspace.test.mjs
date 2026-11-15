@@ -5940,7 +5940,7 @@ test("compact protected runtime keeps the immutable Run safety kernel", () => {
   for (const invariant of [
     /Не записывай в Git секреты, cookies, токены, локальные сессии, зависимости или кэши/u,
     /Не изменяй `AGENTS\.md`, `CLAUDE\.md`, `\.trelio\/\*\*` и read-only `\.\.\/context\/\*\*`/u,
-    /Новый Run записывает ровно в один воркспейс/u,
+    /Новый Run записывает ровно в одну папку в Трелио: папку задачи либо выбранную именованную папку/u,
     /exact diff.*только после явного подтверждения/u,
     /Approved hook сам подставляет одноразовый runtimeSessionProof/u,
     /TRELIO_RUNTIME_HOOK_REQUIRED.*отсутствие proof, а не выключенные Hooks/u,

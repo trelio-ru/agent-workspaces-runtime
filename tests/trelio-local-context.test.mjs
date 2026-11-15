@@ -1536,6 +1536,15 @@ test("local mixed search gives contacts no implicit type priority", () => {
   assert.deepEqual(mixed.map((result) => result.type), ["task", "contact"]);
 });
 
+test("local search uses the folder label when the saved title is empty", () => {
+  const source = structuredClone(mirror);
+  const entry = source.workspaceEntries[0];
+  entry.title = "";
+  const result = searchCompanyContextMirror(source, ["Папка"], 10)
+    .results.find((item) => item.id === `workspace:${entry.id}`);
+  assert.equal(result?.title, "Папка");
+});
+
 test("local search exposes archived workspaces as marked read-only history outside default inventory", () => {
   const archivedWorkspaceId = "77777777-7777-4777-8777-777777777777";
   const archivedWorkspace = {
@@ -4987,7 +4996,7 @@ test("workspace tombstones are exact-readable but cannot expose even stale local
   assert.deepEqual(handleNativeLocalContextRead(mirror, "list_workspaces", { includeArchived: true }).workspaces, []);
   assert.equal(searchCompanyContextMirror(mirror, ["Удалённый", "Не показывать"], 20).results.length, 0);
   assert.throws(() => getWorkspaceFileFromMirror(mirror, { workspaceId, workspaceHead, filePath: "secret.md" }),
-    (error) => error.code === "WORKSPACE_DELETED");
+    (error) => error.code === "WORKSPACE_DELETED" && error.message.startsWith("Папка удалена."));
 });
 
 test("company sync refreshes head conflicts and reuses only private candidates until stable", async () => {

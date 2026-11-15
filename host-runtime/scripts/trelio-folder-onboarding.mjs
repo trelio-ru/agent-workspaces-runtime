@@ -410,10 +410,10 @@ const buildManagedBindingBlock = ({ company, project }) => {
     );
   }
   lines.push(
-    "Не создавай рабочие материалы, `tmp/` или `output/` в корне этой папки. Для записи или редактирования материалов открой Agent Run и работай только в пути, который вернул bridge. Новый Workspace bridge размещает в `workspaces/<workspace-id>/`; внутри `workspace/` лежат редактируемые файлы, а `context/` и `.trelio-run.json` остаются служебными.",
+    "Не создавай рабочие материалы, `tmp/` или `output/` в корне этой папки. Для записи или редактирования материалов открой Agent Run и работай только в пути, который вернул bridge. Для новой папки в Трелио bridge создаёт локальный каталог `workspaces/<workspace-id>/`; внутри `workspace/` лежат редактируемые файлы, а `context/` и `.trelio-run.json` остаются служебными.",
     "Для bridge action `open` передай эту выбранную клиентом папку в `workingDirectory`; остальные returned arguments сохрани. Не подставляй cwd процесса MCP, каталог плагина или home.",
     "",
-    "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio относятся только к выданному bridge воркспейсу.",
+    "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio выполняются только в локальной папке, которую выдал bridge.",
     "",
     CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
     // Keep one shared template across clients: a Kimi refresh must not remove

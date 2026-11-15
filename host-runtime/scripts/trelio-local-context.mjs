@@ -4713,7 +4713,7 @@ const buildSearchDocuments = (mirror) => {
   }
   for (const workspace of mirror.workspaceEntries ?? []) {
     if (workspace.state === "deleted") continue;
-    const workspaceTitle = String(workspace.title || "Воркспейс");
+    const workspaceTitle = String(workspace.title || "Папка");
     const isArchived = workspace.state === "archived";
     const fields = compactSearchFields([
       buildSearchField("workspace-title", workspaceTitle),
@@ -7415,7 +7415,7 @@ export const getWorkspaceFileFromMirror = (
   }
 
   if ((mirror.workspaceEntries ?? []).some((entry) => entry.id === workspaceId && entry.state === "deleted")) {
-    throw new TrelioLocalContextError("WORKSPACE_DELETED", "Воркспейс удалён. Причина и автор доступны в get_workspace.");
+    throw new TrelioLocalContextError("WORKSPACE_DELETED", "Папка удалена. Причина и автор доступны в get_workspace.");
   }
   const workspace = (mirror.workspaces ?? []).find((candidate) => candidate.id === workspaceId);
   if (!workspace) {
