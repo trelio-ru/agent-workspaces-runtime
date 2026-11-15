@@ -328,6 +328,16 @@ Pending/registered session сохраняется; startup/resume не полу�
 изменение runtime не требует повторного одобрения hooks. Новая или изменённая
 definition требует отдельного доверия клиента.
 
+В human Codex MCP та же обязанность перечитывания закреплена в инструкциях.
+Смена `windowId` не подтверждает пропуск чтения: shell/Code Mode и отдельный
+local MCP могут уже вернуть полные pinned файлы, а native task rules приходят
+частями. Даже `effectiveInstructions.status=loaded` не доказывает чтение нужного
+Run или scope. Поэтому transport не выводит из этих сигналов разрешение или
+отказ и не требует фиктивного повторного вызова. Каждый обычный запрос проходит
+прежнюю подготовку proof по текущей модели и серверные ACL/policy; model-authored
+known keys удаляются. Legacy delivery adapter независимо сбрасывает evidence
+после context boundary и при непроверяемом retention возвращается к полному read.
+
 После распознавания события `PreToolUse` runtime возвращает ошибки через
 `hookSpecificOutput.permissionDecision = "deny"` и `permissionDecisionReason`,
 завершая процесс с кодом `0`. Это успешная доставка запрета, а не разрешение

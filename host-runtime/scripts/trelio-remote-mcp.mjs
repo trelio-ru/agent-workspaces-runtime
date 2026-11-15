@@ -17,8 +17,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
 import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
-import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
+import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
 import { recoverSelectedContinuation, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import { withPrivateProcessSession, TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, withTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
@@ -8119,23 +8118,6 @@ export const createCodexMcpHandler = ({
   let connection;
   const authFailure = error => ["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(error?.code);
   let toolsByName = null;
-  const lastWindows = new Map();
-  const readsAuthority = new Set(["get_task", "get_tasks", "get_agent_instructions",
-    "get_task_instruction_page", "get_project_meta", "get_task_create_meta", "get_workspace", "fetch"]);
-  // MCP can observe compaction only on a later call. Require fresh authority
-  // before a subsequent protected operation in the same thread/window.
-  const updateWindow = (metadata, clientInfo) => {
-    const sessionId = observeCodexMcpTurn(metadata, clientInfo)?.sessionId;
-    const windowId = metadata?.windowId;
-    if (!sessionId || typeof windowId !== "string" || !windowId || windowId.length > 256) return null;
-    const last = lastWindows.get(sessionId);
-    if (last?.windowId === windowId) return last;
-    const state = { windowId, compacted: Boolean(last) };
-    lastWindows.delete(sessionId);
-    if (lastWindows.size >= 64) lastWindows.delete(lastWindows.keys().next().value);
-    lastWindows.set(sessionId, state);
-    return state;
-  };
   const catalog = async signal => {
     const tools = await connection.listTools(signal);
     if (tools.some(tool => tool.name === CODEX_CONNECT_TOOL.name)) {
@@ -8207,15 +8189,15 @@ export const createCodexMcpHandler = ({
         const tool = toolsByName?.get(name);
         if (!tool) throw new RemoteMcpHostError("TRELIO_CODEX_TOOL_UNAVAILABLE", "Инструмент недоступен в каталоге Trelio.");
         const appOnly = tool._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app");
-        const window = appOnly ? null : updateWindow(metadata, clientInfo);
-        const policyClass = tool._meta?.["trelio/runtimePolicy"]?.class;
-        if (window?.compacted && !readsAuthority.has(name)
-          && !["discovery", "recovery", "human_action"].includes(policyClass)) {
-          const code = "TRELIO_CODEX_CONTEXT_RELOAD_REQUIRED";
-          window.compacted = false;
-          return { content: [{ type: "text", text: `${code}: ${TRELIO_COMPACTION_RECOVERY_CONTEXT}` }],
-            ...(tool.outputSchema ? {} : { structuredContent: { code, dispatched: false } }), isError: true };
-        }
+        // An MCP context-window change cannot attest whether the model reread
+        // its authority: pinned Run files may be read by a shell or the local
+        // adapter, while task rules may arrive in several instruction pages.
+        // Even a complete live read can belong to another scope and cannot
+        // replace a Run's pinned snapshot. Keep the mandatory recovery policy
+        // in the instructions, without inventing a read receipt or a one-shot
+        // refusal that disappears on retry. Every ordinary call still receives
+        // fresh observed-model preparation below and the backend's ACL/policy
+        // decision; context changes grant neither proof nor instruction reuse.
         let args = cleanNativeRuntimeToolArguments(raw);
         let pairingRequired;
         if (!appOnly) {
@@ -8237,8 +8219,6 @@ export const createCodexMcpHandler = ({
           }
         }
         const result = await connection.call(name, args, callSignal);
-        if (window && readsAuthority.has(name) && !result?.isError
-          && result?.structuredContent?.effectiveInstructions?.status === "loaded") window.compacted = false;
         if (args.runtimeSessionProof || !isMissingRuntimeProof(result)) return result;
         if (pairingRequired) throw pairingRequired;
         // No metadata came with this protected call. Preserve the denial,

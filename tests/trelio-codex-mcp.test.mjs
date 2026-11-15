@@ -20,12 +20,18 @@ test("Codex observes the current outer MCP frame and ignores legacy proof if its
   assert.equal(observeCodexMcpTurn(meta("gpt-6.1-sol", undefined), clientInfo).observation.effortLevel, null);
   assert.equal(observeCodexMcpTurn(meta("gpt-6.1-sol", "high"), { name: "claude-code" }), null);
   assert.equal(observeCodexMcpTurn({ threadId }, clientInfo), null);
-  assert.deepEqual(await prepareCodexMcpToolArguments({ clientInfo, toolName: "mcp__trelio__get_task",
-    input: { taskNumber: 42, runtimeSessionProof: "old-hook-proof", knownInstructionLayerKeys: ["old-layer"] },
-  }), { taskNumber: 42 });
+  for (const metadata of [undefined, { threadId, windowId: "window-2" },
+    meta("invalid model", "high", "window-3"),
+    { ...meta("gpt-6.1-sol", "high"), "x-codex-turn-metadata": { model: "gpt-6.1-sol" } },
+  ]) {
+    assert.deepEqual(await prepareCodexMcpToolArguments({ metadata, clientInfo, toolName: "mcp__trelio__get_task",
+      input: { taskNumber: 42, runtimeSessionProof: "old-hook-proof", knownInstructionLayerKeys: ["old-layer"],
+        knownInstructionRevisionKey: "old-revision", knownInstructionKey: "old-skill" },
+    }), { taskNumber: 42 });
+  }
 });
 
-test("Codex MCP passes only the new prepared proof, preserves Apps, and reports compaction before dispatch", async () => {
+test("Codex MCP keeps current proof and Apps across context changes without refusing unseen pinned reads", async () => {
   const received = [];
   const tools = [
     { name: "get_task", _meta: { "trelio/runtimePolicy": { class: "context" } } },
@@ -55,16 +61,122 @@ test("Codex MCP passes only the new prepared proof, preserves Apps, and reports 
   }), { clientInfo });
   assert.deepEqual((await call("get_task", "high")).result, result);
   assert.deepEqual((await call("get_task", "low")).result, result);
-  assert.deepEqual((await call("apply_proposal", undefined)).result, result);
-  const compacted = await call("update_task_title", "high", "window-2");
-  assert.equal(compacted.result.structuredContent.code, "TRELIO_CODEX_CONTEXT_RELOAD_REQUIRED");
+  assert.deepEqual((await call("apply_proposal", undefined, "window-2")).result, result);
+  // Pinned files read through shell/Code Mode or the independent local MCP do
+  // not produce remote MCP frames. Their absence in this handler is not proof
+  // of a skipped reread and must not cause a false refusal or a mutation retry.
+  assert.equal((await call("update_task_title", "high", "window-2")).result, result);
   assert.deepEqual(received, [
     { name: "get_task", args: { runtimeSessionProof: "high" } },
     { name: "get_task", args: { runtimeSessionProof: "low" } },
     { name: "apply_proposal", args: {} },
+    { name: "update_task_title", args: { runtimeSessionProof: "high" } },
   ]);
   assert.deepEqual((await handler(frame("resources/read", { uri: "ui://fixture" }), { clientInfo })).result,
     { contents: [{ uri: "ui://fixture" }] });
+});
+
+test("paged and standalone authority responses remain opaque to Codex transport across context changes", async () => {
+  const results = {
+    get_task: { content: [], structuredContent: { schemaVersion: 3,
+      effectiveInstructions: { status: "incomplete", layers: [], delivery: { pageCount: 2 } } } },
+    get_agent_instructions: { content: [], structuredContent: {
+      instructionRevisionKey: "fixture-revision", effective: { compiledMarkdown: "Fixture rules" },
+      personalProfile: { effective: { compiledMarkdown: "Fixture profile" } },
+    } },
+    get_agent_skill: { content: [{ type: "text", text: "Fixture skill instructions" }], structuredContent: { ready: true } },
+  };
+  const received = [];
+  const handler = createCodexMcpHandler({
+    connect: () => ({
+      listTools: async () => [...Object.keys(results), "get_task_instruction_page"].map(name => ({
+        name, _meta: { "trelio/runtimePolicy": { class: "context" } },
+      })),
+      call: async (name, args) => {
+        received.push({ name, args });
+        // Page responses deliberately have no effectiveInstructions.status:
+        // the domain reader owns assembly/digests, not the MCP transport.
+        return name === "get_task_instruction_page" ? { content: [], structuredContent: {
+          schemaVersion: 3, responseKind: "instruction_page", catalogRevisionKey: "fixture-catalog",
+          part: { partIndex: args.pageIndex, partCount: 2, markdown: `Fixture part ${args.pageIndex}` },
+          nextPageIndex: args.pageIndex === 0 ? 1 : null,
+        } } : results[name];
+      },
+    }),
+    prepare: async ({ input }) => ({ ...input, runtimeSessionProof: "fresh-fixture-proof" }),
+  });
+  await handler(frame("initialize"), { clientInfo });
+  const call = (name, windowId, args = {}) => handler(frame("tools/call", {
+    name, arguments: args, _meta: meta("gpt-6.1-sol", "high", windowId),
+  }), { clientInfo });
+  await call("get_task", "window-1");
+  assert.equal((await call("get_task", "window-2")).result, results.get_task);
+  for (let pageIndex = 0; pageIndex < 2; pageIndex++) {
+    const page = await call("get_task_instruction_page", "window-2", { pageIndex });
+    assert.equal(page.result.structuredContent.part.partIndex, pageIndex);
+  }
+  assert.equal((await call("get_agent_skill", "window-2")).result, results.get_agent_skill);
+  assert.equal((await call("get_agent_instructions", "window-3")).result, results.get_agent_instructions);
+  assert.equal((await call("get_agent_skill", "window-3")).result, results.get_agent_skill);
+  assert.deepEqual(received.map(({ name }) => name), ["get_task", "get_task", "get_task_instruction_page",
+    "get_task_instruction_page", "get_agent_skill", "get_agent_instructions", "get_agent_skill"]);
+});
+
+test("parallel changed-window calls preserve each admission and exact backend refusal without replay", async () => {
+  const received = [], prepared = [];
+  // A tool with a success-only outputSchema reports errors in text; adding a
+  // code/reason structured object would itself violate that real client ABI.
+  const refusal = { isError: true, content: [{ type: "text", text: "TRELIO_RUNTIME_POLICY_DENIED (fixture-policy)" }],
+    _meta: { appPayload: { preserved: true } } };
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const handler = createCodexMcpHandler({
+    connect: () => ({
+      listTools: async () => [{ name: "update_task_title",
+        outputSchema: { type: "object", properties: { updated: { type: "boolean" } }, required: ["updated"] },
+        _meta: { "trelio/runtimePolicy": { class: "mutation" } } }],
+      call: async (_name, args) => {
+        received.push(args);
+        if (args.title !== "baseline") await pending;
+        return refusal;
+      },
+    }),
+    prepare: async ({ metadata, input }) => {
+      const observation = observeCodexMcpTurn(metadata, clientInfo);
+      prepared.push({ title: input.title, effort: observation?.observation.effortLevel });
+      if (input.title === "denied") throw Object.assign(new Error("Fixture admission refusal"),
+        { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
+      return { ...input, runtimeSessionProof: observation?.observation.effortLevel };
+    },
+  });
+  await handler(frame("initialize"), { clientInfo });
+  // Warm the catalog before parallel calls; the test exercises overlapping
+  // business requests, not unrelated first-initialize catalog behavior.
+  await handler(frame("tools/list"), { clientInfo });
+  const call = (title, effort, windowId) => handler(frame("tools/call", {
+    name: "update_task_title", _meta: meta("gpt-6.1-sol", effort, windowId),
+    arguments: { title, runtimeSessionProof: "forged", knownInstructionLayerKeys: ["stale"],
+      knownInstructionRevisionKey: "stale-revision", knownInstructionKey: "stale-skill" },
+  }), { clientInfo });
+  assert.equal((await call("baseline", "high", "window-1")).result, refusal);
+  const calls = [call("left", "high", "window-2"), call("right", "low", "window-3")];
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(received.length, 3, "both concurrent requests reach their independent backend decision once");
+  } finally { release(); }
+  for (const response of await Promise.all(calls)) assert.equal(response.result, refusal);
+  const denial = (await call("denied", "high", "window-4")).result;
+  assert.equal(denial.isError, true);
+  assert.equal(denial.structuredContent, undefined);
+  assert.equal(JSON.parse(denial.content[0].text).code, "TRELIO_RUNTIME_OBSERVATION_REQUIRED");
+  assert.deepEqual(prepared, [
+    { title: "baseline", effort: "high" }, { title: "left", effort: "high" }, { title: "right", effort: "low" },
+    { title: "denied", effort: "high" },
+  ]);
+  assert.deepEqual(received, [
+    { title: "baseline", runtimeSessionProof: "high" },
+    { title: "left", runtimeSessionProof: "high" }, { title: "right", runtimeSessionProof: "low" },
+  ]);
 });
 
 test("new Codex diagnostics route the read to stdio without checking or changing legacy hook trust", async () => {

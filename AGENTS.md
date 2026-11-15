@@ -436,6 +436,9 @@ publication tooling также остаются вне этого публичн
 - `SessionStart source=compact` восстанавливает обязанность полного чтения
   pinned authority без замены Run/session. Контракт и ограничения –
   [README](README.md#ошибки-lifecycle-hooks); stable hook definition не меняется.
+  Human Codex MCP не подтверждает reread по `windowId` или форме remote response:
+  pinned/local reads ему не видны. Обязанность сохраняется в инструкциях;
+  свежие model proof, backend ACL и запрет неподтверждённых reuse keys независимы.
 - Поля `knownInstructionRevisionKey`/`knownInstructionLayerKeys` принадлежат
   host runtime: model hints удаляются до проверки доставки. Bounded adapter
   подтверждает полные direct Codex native и typed local mirror-read responses
