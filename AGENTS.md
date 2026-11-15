@@ -809,6 +809,9 @@ publication tooling также остаются вне этого публичн
   HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` сохраняет code без backend payload/details.
   Human search delivery refreshes a rejected snapshot once under the same
   operation ID and deadline. Typed final manifest conflicts share this limit.
+  Full human search negotiates a version-only fence under the same native ACL
+  before mirror publication and result delivery. Legacy servers answer with the
+  full manifest in that same GET. Follow the [search contract](docs/agent-workspace-runtime.md#подготовка-поиска-в-обычном-чате).
   Recipient/ACL refusals never restart the query. Managed validation reports
   the same optimistic conflict to its existing bounded refresh. One managed
   poll validates each completed worker result at a time; concurrent polls stay pending.

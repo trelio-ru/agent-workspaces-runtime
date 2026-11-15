@@ -3696,6 +3696,26 @@ const fetchManifest = async ({ origin, token, companySlug, signal, projection })
   return manifest;
 };
 
+// Old servers ignore the opt-in header and return the ordinary full manifest
+// in the same response. An invalid compact reply or a refusal cannot authorize
+// delivery of retained content or trigger a separate full-manifest request.
+export const readFullCompanyContextGeneration = async ({ origin, token, companySlug, signal }) => {
+  const value = await readJson(await request(origin, token,
+    `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest`, {
+      signal, headers: { "x-trelio-context-check": "generation-v1" },
+    }));
+  const compact = value?.kind === "company_context_generation";
+  if (typeof value?.generation !== "string" || !MIRROR_GENERATION_PATTERN.test(value.generation)
+    || (compact
+      ? value.schemaVersion !== 1 || Object.keys(value).length !== 3
+      : value.kind !== undefined || value.provider !== "local_company_context" || value.projection !== undefined
+        || value.company?.slug !== companySlug)) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Trelio returned an invalid search generation.");
+  }
+  signal?.throwIfAborted();
+  return { generation: value.generation };
+};
+
 const mapWithConcurrency = async (items, concurrency, mapper) => {
   const results = new Array(items.length);
   let nextIndex = 0;
@@ -4199,6 +4219,11 @@ export const syncCompanyContextMirror = async ({
   const requestOrigin = resolveCompanyEncryptionRequestOrigin(origin, companyEncryption);
   const readSource = readOnlyOnContention ? read => readHumanSearchSource(read, signal) : read => read();
   const readManifest = () => readSource(() => fetchManifest({ origin: requestOrigin, token, companySlug, signal }));
+  // The closing fence compares the same full generation as the initial
+  // manifest, but a human search does not need the projection a second time.
+  const readFence = IS_HUMAN_SEARCH_READER
+    ? () => readSource(() => readFullCompanyContextGeneration({ origin: requestOrigin, token, companySlug, signal }))
+    : readManifest;
   let lastProgress = -Infinity;
   const onHydrationProgress = readOnlyOnContention ? () => {
     // IPC progress is structural and rate-bounded. It contains no source names,
@@ -4235,6 +4260,7 @@ export const syncCompanyContextMirror = async ({
       onProgress,
       previous: previous ?? legacySeed,
       readManifest,
+      readFence,
       buildCandidate: async (rawManifest, reusable) => buildMirror({
         origin, requestOrigin, token, companyEncryption, rawManifest, readSource, onHydrationProgress,
         // Scan the scratchpad only when the fresh generation actually changed.
@@ -4256,7 +4282,7 @@ export const syncCompanyContextMirror = async ({
   // The isolated reader builds a complete fresh in-memory candidate, retaining
   // the same manifest and accepted-head fences without touching writer state.
   const result = await buildStableCompanyMirror({
-    onProgress, previous: previous ?? legacySeed, readManifest,
+    onProgress, previous: previous ?? legacySeed, readManifest, readFence,
     buildCandidate: (rawManifest, reusable) => buildMirror({
       origin, requestOrigin, token, companyEncryption, rawManifest, previous: reusable, signal,
       readSource, onHydrationProgress,
@@ -8578,8 +8604,11 @@ export const isTrelioLocalCompanyGenerationCurrent = async (origin, companySlug,
     // The human search coordinator may refresh only the latter.
     throw new TrelioLocalContextError("LOCAL_CONTEXT_SEARCH_ACCESS_CHANGED", "Доступ к подготовленному поиску изменился. Получите новый native маршрут.");
   }
-  const manifest = await fetchManifest({origin:provider.requestOrigin, token:provider.token,
-    companySlug:normalizeCompanySlug(companySlug), signal, projection: NARROW_CONTEXT_PROJECTION.get(nativeTool)});
+  const projection = NARROW_CONTEXT_PROJECTION.get(nativeTool);
+  const target = { origin: provider.requestOrigin, token: provider.token, companySlug: normalizeCompanySlug(companySlug), signal };
+  const manifest = expectedBinding && !projection
+    ? await readFullCompanyContextGeneration(target)
+    : await fetchManifest({ ...target, projection });
   if (!MIRROR_GENERATION_PATTERN.test(String(manifest?.generation ?? "")))
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_MANIFEST", "Invalid native generation.");
   signal?.throwIfAborted();

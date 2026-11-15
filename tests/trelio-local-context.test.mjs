@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import {
   hydrateNativeReadWithRevisionRefresh, hydrateLocalActionMirror, prepareLocalActionContext, canonicalizeLocalProposalTarget, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   exactWorkspaceReadId, exactCompanyFetchLocator, readFreshExactWorkspaceContext,
-  buildStableCompanyMirror, readNarrowCompanyContext,
+  buildStableCompanyMirror, readFullCompanyContextGeneration, readNarrowCompanyContext,
   createHumanCompanySearchReader,
   isHumanCompanySearch,
   createEncryptedSearchFileCache,
@@ -78,6 +78,36 @@ test("human search preparation excludes task-only reads, exact fetches and every
   for (const nativeTool of ["search_tasks", "get_task", "fetch", "create_task", "create_comment", "unknown"])
     assert.equal(isHumanCompanySearch({ operation: "native_read", nativeTool }), false);
   assert.equal(isHumanCompanySearch({ operation: "arbitrary", nativeTool: "search" }), false);
+});
+
+test("human full search accepts a compact generation or an existing server's manifest in one request", async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const origin = "https://synthetic.invalid", generation = "a".repeat(64);
+  const success = { schemaVersion: 1, kind: "company_context_generation", generation };
+  const legacy = { schemaVersion: 2, provider: "local_company_context", company: { slug: "acme" }, generation };
+  const replies = [
+    [200, success],
+    [200, legacy],
+    [200, { ...success, schemaVersion: 2 }],
+    [200, { ...success, searchDocuments: [] }],
+    [200, { ...legacy, projection: "tasks" }],
+    [200, { ...legacy, company: { slug: "other" } }],
+    [403, { code: "SCOPE_DENIED" }],
+  ];
+  let calls = 0;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), `${origin}/api/agent-workspaces/company-context/acme/manifest`);
+    assert.equal(new Headers(options.headers).get("x-trelio-context-check"), "generation-v1");
+    const [status, body] = replies[calls++];
+    return new Response(JSON.stringify(body), { status });
+  };
+  const read = () => readFullCompanyContextGeneration({ origin, token: "synthetic", companySlug: "acme" });
+  assert.deepEqual(await read(), { generation });
+  assert.deepEqual(await read(), { generation });
+  for (let i = 0; i < 4; i++) await assert.rejects(read(), { code: "LOCAL_CONTEXT_INVALID_MANIFEST" });
+  await assert.rejects(read(), { statusCode: 403 });
+  assert.equal(calls, replies.length, "No invalid or denied response triggers a fallback request");
 });
 
 test("isolated human search scans a 320-MiB corpus without blocking MCP or copying it into the parent", { timeout: 120_000 }, async t => {
