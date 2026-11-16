@@ -129,11 +129,12 @@ test(`first owner reply distinguishes dispatch uncertainty from a durable effect
  assert.equal(database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
 });
 
-for(const kind of ['owner_command','route_existing'])
+for(const scheduleVersion of [1,2])for(const kind of ['owner_command','route_existing'])
 for(const damage of ['none','missing_receipt','malformed_receipt','foreign_outcome','uncertain_state','parallel_uncertain'])
-test(`readonly dispatch status distinguishes confirmed owner waiting from unknown work (${kind}/${damage})`,t=>{
+test(`readonly dispatch status distinguishes confirmed owner waiting from unknown work (${scheduleVersion}/${kind}/${damage})`,t=>{
   const {database,inbox,advance}=memory(t),source=scope({provider:'telegram'});
   createAssistantScheduler({database});inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+  database.prepare('UPDATE assistant_schedule_meta SET version=?').run(scheduleVersion);
   page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
     conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`,
     ...(kind==='owner_command'?{ownerIdentityId:randomUUID()}:{})}]);
@@ -167,6 +168,17 @@ test(`readonly dispatch status distinguishes confirmed owner waiting from unknow
   }
   assert.equal(inbox.ownerIntake(row.id).settled,0,'a question stays pending, including after its answer window expires');
   assert.equal(database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+});
+
+for(const versions of [[],[0],[3],[1,2],[2,2]])test(`readonly dispatch summary refuses unknown or ambiguous scheduler metadata (${versions})`,t=>{
+  const {database}=memory(t);createAssistantScheduler({database});
+  database.exec('DELETE FROM assistant_schedule_meta');
+  for(const version of versions)database.prepare('INSERT INTO assistant_schedule_meta VALUES(?)').run(version);
+  const before=database.prepare('SELECT * FROM assistant_schedule_meta').all();
+  database.exec('PRAGMA query_only=ON');
+  assert.throws(()=>readAssistantInboxDispatchSummary({database,identity:{},companies:[]}),
+    {code:'ASSISTANT_INBOX_UNSUPPORTED_SCHEMA'});
+  assert.deepEqual(database.prepare('SELECT * FROM assistant_schedule_meta').all(),before,'a diagnostic never repairs schema metadata');
 });
 
 test('owner readiness verification preserves the original provision and consumes one durable independent marker',t=>{

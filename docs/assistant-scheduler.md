@@ -583,7 +583,11 @@ the existing DST policy, and skips missed slots. The additive SQLite column
 preserves existing schedules. The same commit that first saves a pin marks the
 schedule schema v2 so a rollback to an incompatible worker cannot drift the
 timer. An older backend receipt cannot implicitly change a pinned cadence or
-timezone. A completed goal
+timezone. The SELECT-only dispatch summary understands both known schedule
+versions, preserving its unchanged task/source projection and device-wide
+uncertainty checks. Committing a fixed clock must not make status unavailable
+or suppress the existing post-completion health recovery. Diagnostics never
+migrate schedules, calculate a new timer or clear health on their own. A completed goal
 stops only this assistant's cycle, and ordinary accepted-task rediscovery cannot
 restart it. A new permitted mention may resume the same chat and commit a new
 active goal. Native task `done` permits reconciliation of the original pass,

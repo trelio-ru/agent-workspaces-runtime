@@ -1986,8 +1986,9 @@ test('coexisting MAX account root and exact-chat sources select one triage queue
 });
 
 
-test('dispatch recovery requires native/business receipt plus durable completion, released pass and no retained uncertainty',async t=>{
+for(const fixedClock of [false,true])test(`dispatch recovery requires native/business receipt plus durable completion, released pass and no retained uncertainty (fixed clock=${fixedClock})`,async t=>{
   const f=fixture(t);let recoveries=0;
+  if(fixedClock)Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
   f.options.onBusinessConfirmed=async()=>{
     recoveries++;assert.equal(f.activePass(),null);
     assert.equal(f.database.prepare("select count(*) n from assistant_inbox_deliveries where state in ('started','uncertain')").get().n,0);
@@ -2010,8 +2011,45 @@ test('dispatch recovery requires native/business receipt plus durable completion
 });
 
 
+test('fixed daily completion survives file reopen, stays readable and starts the next scheduled cycle once',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-daily-summary-')),file=path.join(directory,'inbox.sqlite');
+  let database=new DatabaseSync(file),coordinator;
+  const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
+  Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
+  let recoveries=0;f.options.onBusinessConfirmed=async()=>{assert.equal(f.activePass(),null);recoveries++;};
+  try{
+    await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+    await coordinator.pollOnce();await coordinator.workOnce();
+    f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300001);
+    await coordinator.pollOnce();await coordinator.workOnce();
+    assert.equal(recoveries,1,'durable daily completion reaches the normal health boundary');
+    const original=coordinator.status()[0],snapshot=database.prepare('SELECT * FROM assistant_schedule_tasks').all();
+    assert.equal(original.dailyLocalTime,'20:00');
+    assert.equal(original.nextRunAt,Date.parse('2026-01-01T17:00:00Z'));
+    await coordinator.close();database.close();database=new DatabaseSync(file,{readOnly:true});
+    const before=database.prepare('PRAGMA data_version').get().data_version;
+    const identity=f.identity,companies=[{companyId:f.companyId,memberId:f.memberId}];
+    // Use an actual read-only handle after restart, not a writable constructor:
+    // schema compatibility cannot silently migrate schedules or erase fences.
+    const {readAssistantInboxDispatchSummary}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+    const summary=readAssistantInboxDispatchSummary({database,identity,companies});
+    assert.equal(summary.uncertainDeliveries,0);assert.equal(summary.acceptedTasks,1);assert.equal(summary.unprovisionedTasks,0);
+    assert.equal(database.prepare('PRAGMA data_version').get().data_version,before);
+    assert.deepEqual(database.prepare('SELECT * FROM assistant_schedule_tasks').all(),snapshot);
+    database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});
+    assert.notEqual((await coordinator.dispatchStatus()).state,'unknown');
+    await coordinator.workOnce();assert.equal(f.counts().runs,1,'status/restart does not replay completed work');
+    f.advance(original.nextRunAt-f.options.now());await coordinator.workOnce();
+    assert.equal(f.counts().runs,2);assert.equal(recoveries,2);
+    assert.equal(coordinator.status()[0].threadId,original.threadId,'the next cycle retains the permanent task chat');
+    assert.equal(coordinator.status()[0].nextRunAt,Date.parse('2026-01-02T17:00:00Z'));
+    await coordinator.workOnce();assert.equal(f.counts().runs,2,'one slot never produces a catch-up burst');
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 test('another retained device delivery suppresses dispatch recovery even after this task committed',async t=>{
   const f=fixture(t);let recoveries=0;f.options.onBusinessConfirmed=async()=>{recoveries++;};
+  Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
   await f.coordinator.close();const next=createAssistantCoordinator(f.options);
   await next.pollOnce();await next.workOnce();
   const release=f.options.passHost.releasePass;

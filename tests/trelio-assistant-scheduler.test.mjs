@@ -3,7 +3,7 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { nextAssistantRun, createAssistantScheduler } from '../host-runtime/scripts/trelio-assistant-scheduler.mjs';
-import { createAssistantInbox } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { createAssistantInbox,readAssistantInboxDispatchSummary } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const at = text => Date.parse(text);
 const next = (cadence, anchor, after, timeZone='Europe/Moscow') => new Date(nextAssistantRun({ cadence,
   anchorAt: at(anchor), after: at(after), timeZone })).toISOString();
@@ -62,6 +62,9 @@ test('legacy schedule rows upgrade without losing the timer and fixed receipt su
   const scope={origin:'https://example.test',assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID()};
   const source={origin:scope.origin,assistantId:scope.assistantId,companyId:scope.companyId,
     provider:'trelio',accountId:randomUUID(),bindingId:randomUUID()};
+  const summary=()=>readAssistantInboxDispatchSummary({database,
+    identity:{origin:scope.origin,assistantId:scope.assistantId,deviceId:source.bindingId},
+    companies:[{companyId:scope.companyId,memberId:source.accountId}]});
   const plan=scheduler.register({scope,source,threadId:randomUUID(),cadence:'every_30_minutes',timeZone:'Europe/Moscow'});
   database.exec('ALTER TABLE assistant_schedule_tasks DROP COLUMN daily_local_time');
   scheduler = createAssistantScheduler({database,now:()=>clock});
@@ -80,19 +83,26 @@ test('legacy schedule rows upgrade without losing the timer and fixed receipt su
   const receipt={bindingState:'accepted',continuation:{goalState:'waiting_external',cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00'}};
   clock=at('2026-11-13T17:17:00Z');
   const first=await pass();
+  assert.equal(summary().uncertainDeliveries,1,'legacy status retains the started native delivery');
   assert.throws(()=>inbox.completeDelivery(first,'verified-one',receipt),/interrupt after schedule write/);
   assert.deepEqual(scheduler.get(scope),plan);
   assert.equal(database.prepare('SELECT version FROM assistant_schedule_meta').get().version,1);
+  assert.equal(summary().uncertainDeliveries,1,'rollback cannot turn uncertainty into an empty queue');
   interrupt=false;inbox.completeDelivery(first,'verified-one',receipt);
   assert.equal(database.prepare('SELECT version FROM assistant_schedule_meta').get().version,2);
+  assert.equal(summary().uncertainDeliveries,0,'the same committed fixed clock must remain readable to recovery');
+  assert.equal(summary().acceptedTasks,1);
+  assert.equal(summary().unprovisionedTasks,0);
   scheduler=createAssistantScheduler({database,now:()=>clock});
   assert.equal(scheduler.get(scope).dailyLocalTime,'20:00');
   assert.equal(scheduler.get(scope).nextRunAt,at('2026-11-14T17:00:00Z'));
   assert.throws(()=>scheduler.setCadence(scope,{cadence:'weekly',timeZone:'Europe/Moscow',expectedRevision:1}),/CLOCK_PROTOCOL_REQUIRED/);
   clock=at('2026-11-14T17:12:00Z'); const second=await pass();
+  assert.equal(summary().uncertainDeliveries,1,'schema2 still fences a newly started pass');
   const {dailyLocalTime,...legacy}=receipt.continuation;
   assert.throws(()=>inbox.completeDelivery(second,'verified-two',{...receipt,continuation:{...legacy,cadence:'weekly'}}),/CLOCK_PROTOCOL_REQUIRED/);
   inbox.completeDelivery(second,'verified-two',{...receipt,continuation:legacy});
+  assert.equal(summary().uncertainDeliveries,0);
   assert.equal(scheduler.get(scope).nextRunAt,at('2026-11-15T17:00:00Z'));
   clock=at('2026-11-15T17:24:00Z');const third=await pass();
   inbox.completeDelivery(third,'verified-three',{...receipt,continuation:{...legacy,dailyLocalTime:null}});

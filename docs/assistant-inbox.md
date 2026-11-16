@@ -1017,6 +1017,16 @@ fences stay visible even after that company's removal. No identifier/content is
 exported and no queued state is inferred from unknown/unrouted references or a
 future cycle. See [background status](assistant-scheduler.md#background-dispatch-diagnostics).
 
+The same reader accepts scheduler schemas 1 and 2: a fixed daily clock changes
+schedule execution, but not the canonical task/source identity projection used
+by diagnostics. It reads neither clock values nor scheduling decisions and never
+constructs the writable scheduler. Unknown, missing or duplicate schema markers
+remain errors. A real daily completion must keep status readable and reach the
+ordinary post-release health boundary; pending deliveries/intakes and unconfirmed
+prepared replies remain device-global fences under either schedule version.
+Real SQLite reopen and the next timed cycle are tested together with the
+coordinator, without a provider/model invocation or manual health recovery.
+
 
 Local-first connection reservations (`available`) are settings only. The native
 owner selection precedes their first SQLite registration; discovery filters them

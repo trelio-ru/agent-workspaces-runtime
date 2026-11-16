@@ -321,7 +321,13 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    // Scheduler v2 records a pinned daily wall clock. Its task/source identity
+    // projection is unchanged, so this SELECT-only reader accepts both known
+    // formats. Otherwise the very completion that commits a daily pin makes
+    // dispatch diagnostics unavailable and prevents its health recovery. This
+    // does not admit old schedule executors, interpret clocks or migrate state;
+    // unknown/multiple versions and all retained uncertainty still fail closed.
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
