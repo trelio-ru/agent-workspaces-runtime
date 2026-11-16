@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createCodexMcpHandler, handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import http from "node:http";
+import { PassThrough } from "node:stream";
+import { createCodexMcpHandler, createHarnessConnection, handleToolCall, remoteMcpHttpRequest,
+  RemoteMcpHostError, runCodexMcpStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { RemoteMcpOAuthError } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
@@ -14,6 +17,228 @@ const meta = (model, effort, windowId = "window-1") => ({
   threadId, windowId, "x-codex-turn-metadata": { turn_id: "turn", model, reasoning_effort: effort },
 });
 const frame = (method, params = {}) => ({ jsonrpc: "2.0", id: 1, method, params });
+const readResult = response => response.result.structuredContent ?? JSON.parse(response.result.content[0].text);
+
+test("catalogue transport failures preserve visible recovery and only closed reasons", async () => {
+  const privateMessage = "private-url?token=fixture-secret /private/credential.json";
+  const errors = [
+    ...["REMOTE_MCP_TIMEOUT", "REMOTE_MCP_HTTP_ERROR", "REMOTE_MCP_CONNECTION_CLOSED"]
+      .map(code => new RemoteMcpHostError(code, privateMessage, { privateMessage })),
+    ...["REMOTE_MCP_OAUTH_TIMEOUT", "REMOTE_MCP_OAUTH_NETWORK_ERROR", "REMOTE_MCP_OAUTH_HTTP_ERROR"]
+      .map(code => new RemoteMcpOAuthError(code, privateMessage)),
+    ...["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ECONNABORTED",
+      "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE"]
+      .map(code => Object.assign(new Error(privateMessage), { code, cause: privateMessage })),
+  ];
+  for (const error of errors) {
+    let reads = 0;
+    const handler = createCodexMcpHandler({ connect: () => ({
+      listTools: async () => { reads++; throw error; },
+      connect: () => assert.fail("network failure must not start OAuth"),
+      call: () => assert.fail("catalogue recovery must not dispatch work"),
+    }), prepare: () => assert.fail("catalogue read needs no fabricated runtime proof") });
+    await handler(frame("initialize"), { clientInfo });
+    const listed = await handler(frame("tools/list"));
+    assert.equal(listed.error, undefined);
+    assert.deepEqual(listed.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect"]);
+    assert.equal(listed.result._meta["trelio/catalogReason"], error.code);
+    assert.ok(listed.result.tools[0].description.includes(error.code), "reason reaches model without hidden metadata");
+    assert.equal(listed.result.tools[0].annotations.readOnlyHint, true);
+    assert.ok(Buffer.byteLength(JSON.stringify(listed.result.tools[0])) <= 750,
+      "failure-only schema and its closed reason stay bounded without enlarging the healthy catalogue");
+    const retried = await handler(frame("tools/call", { name: "trelio_retry_catalog", arguments: {} }));
+    assert.equal(retried.result.isError, true);
+    assert.equal(readResult(retried).code, "TRELIO_CODEX_CATALOG_UNAVAILABLE");
+    assert.equal(readResult(retried).reason, error.code);
+    assert.equal(readResult(retried).automaticRetry, false);
+    assert.equal(reads, 2, "one read per explicit request, no automatic retry");
+    assert.doesNotMatch(JSON.stringify([listed, retried]), /fixture-secret|credential\.json|privateMessage/u);
+    const invalid = await handler(frame("tools/call", { name: "trelio_retry_catalog", arguments: { reauthorize: true } }));
+    assert.equal(readResult(invalid).code, "TRELIO_CODEX_INPUT_INVALID");
+    assert.equal(reads, 2);
+  }
+});
+
+test("catalogue auth, integrity, vault and cancellation failures are not network recovery", async () => {
+  for (const code of ["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE",
+    "TRELIO_HARNESS_CATALOG_INVALID", "TRELIO_CODEX_CATALOG_CONFLICT", "REMOTE_MCP_HOST_BLOCKED",
+    "ERR_TLS_CERT_ALTNAME_INVALID", "PRIVATE_VAULT_FAILED"]) {
+    const handler = createCodexMcpHandler({ connect: () => ({
+      listTools: async () => { throw new RemoteMcpHostError(code, "private error prose"); },
+    }) });
+    await handler(frame("initialize"), { clientInfo });
+    const response = await handler(frame("tools/list"));
+    if (["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(code)) {
+      assert.deepEqual(response.result.tools.map(tool => tool.name), ["trelio_connect"]);
+    } else assert.equal(response.error.message, code);
+    assert.doesNotMatch(JSON.stringify(response), /private error prose/u);
+  }
+  for (const reserved of ["trelio_connect", "trelio_retry_catalog"]) {
+    const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => [{ name: reserved }] }) });
+    await handler(frame("initialize"), { clientInfo });
+    assert.equal((await handler(frame("tools/list"))).error.message, "TRELIO_CODEX_CATALOG_CONFLICT");
+  }
+  const controller = new AbortController();
+  const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => {
+    controller.abort(new RemoteMcpHostError("REMOTE_MCP_TIMEOUT", "caller cancellation"));
+    throw controller.signal.reason;
+  } }) });
+  await handler(frame("initialize"), { clientInfo });
+  assert.equal((await handler(frame("tools/list"), { signal: controller.signal })).error.message, "REMOTE_MCP_TIMEOUT");
+});
+
+test("catalogue startup is bounded and late readers cannot restore stale dispatch", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let release, observedSignal, reads = 0;
+  const started = Promise.withResolvers();
+  const handler = createCodexMcpHandler({ connect: () => ({ listTools: async signal => {
+    reads++;
+    if (reads === 1) {
+      observedSignal = signal;
+      started.resolve();
+      return await new Promise(resolve => { release = resolve; });
+    }
+    return [{ name: "current_tool" }];
+  }, call: () => assert.fail("late catalogue must not authorise removed tool") }) });
+  await handler(frame("initialize"), { clientInfo });
+  const listing = handler(frame("tools/list"));
+  await started.promise;
+  t.mock.timers.tick(10_000);
+  const failed = await listing;
+  assert.equal(failed.result._meta["trelio/catalogReason"], "TRELIO_CODEX_CATALOG_TIMEOUT");
+  assert.equal(observedSignal.aborted, true);
+  const notifications = [];
+  const recovered = await handler(frame("tools/call", { name: "trelio_retry_catalog", arguments: {} }),
+    { notifyClient: notification => notifications.push(notification) });
+  assert.equal(readResult(recovered).catalogStatus, "ready");
+  assert.deepEqual(notifications.map(row => row.method), ["notifications/tools/list_changed"]);
+  release([{ name: "stale_tool" }]);
+  await new Promise(resolve => setImmediate(resolve));
+  const stale = await handler(frame("tools/call", { name: "stale_tool", arguments: {} }));
+  assert.equal(readResult(stale).code, "TRELIO_CODEX_TOOL_UNAVAILABLE");
+  assert.equal(reads, 2);
+});
+
+test("an older concurrent catalogue result cannot replace or clear the latest dispatch map", async () => {
+  for (const fails of [false, true]) {
+    const first = Promise.withResolvers(), started = Promise.withResolvers();
+    let reads = 0;
+    const called = [];
+    const handler = createCodexMcpHandler({ connect: () => ({
+      listTools: async () => {
+        if (++reads === 1) { started.resolve(); return await first.promise; }
+        return [{ name: "current_tool" }];
+      },
+      call: async name => { called.push(name); return { content: [] }; },
+    }), prepare: async ({ input }) => input });
+    await handler(frame("initialize"), { clientInfo });
+    const older = handler(frame("tools/list"));
+    await started.promise;
+    await handler(frame("tools/list"));
+    if (fails) first.reject(new RemoteMcpHostError("REMOTE_MCP_HTTP_ERROR", "old failure"));
+    else first.resolve([{ name: "stale_tool" }]);
+    await older;
+    assert.equal(readResult(await handler(frame("tools/call", { name: "stale_tool" }))).code,
+      "TRELIO_CODEX_TOOL_UNAVAILABLE");
+    assert.equal((await handler(frame("tools/call", { name: "current_tool" }))).result.isError, undefined);
+    assert.deepEqual(called, ["current_tool"]);
+    assert.equal(reads, 2, "old failure cannot erase the completed newer read");
+  }
+});
+
+test("failed refresh invalidates cached tools while a dispatched mutation is never retried", async () => {
+  let unavailable = false, reads = 0, dispatched = 0, prepared = 0;
+  const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => {
+    reads++;
+    if (unavailable) throw new RemoteMcpHostError("REMOTE_MCP_HTTP_ERROR", "private upstream cause");
+    return [{ name: "update_task_title", outputSchema: { type: "object", required: ["updated"] } }];
+  }, call: async () => { dispatched++; throw new RemoteMcpHostError("REMOTE_MCP_HTTP_ERROR", "request outcome unknown"); } }),
+  prepare: async ({ input }) => { prepared++; return input; } });
+  await handler(frame("initialize"), { clientInfo });
+  await handler(frame("tools/list"));
+  const mutation = frame("tools/call", { name: "update_task_title", arguments: {} });
+  const unknown = await handler(mutation);
+  assert.equal(readResult(unknown).code, "REMOTE_MCP_HTTP_ERROR");
+  assert.equal(readResult(unknown).catalogStatus, undefined, "dispatch failure is never a catalogue failure");
+  assert.equal(dispatched, 1);
+  unavailable = true;
+  await handler(frame("tools/list"));
+  const blocked = await handler(mutation);
+  assert.equal(readResult(blocked).code, "TRELIO_CODEX_CATALOG_UNAVAILABLE");
+  assert.equal(blocked.result.structuredContent, undefined, "cached success-only output schema stays valid");
+  assert.equal(prepared, 1);
+  assert.equal(dispatched, 1);
+  assert.equal(reads, 3, "failed refresh cannot leave the old dispatch map active");
+});
+
+test("real Codex stdio survives HTTP 503 catalogue failure and reloads without OAuth or work replay", { timeout: 5_000 }, async () => {
+  let unavailable = true, catalogReads = 0, businessCalls = 0;
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks));
+    if (payload.method === "tools/list") {
+      catalogReads++;
+      if (unavailable) { response.writeHead(503); response.end("private backend diagnostic"); return; }
+    }
+    if (payload.method === "tools/call") businessCalls++;
+    response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "fixture-session" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: payload.id ?? null,
+      result: payload.method === "initialize" ? { protocolVersion: "2025-03-26" }
+        : { tools: [{ name: "list_companies", inputSchema: { type: "object", properties: {} } }] } }));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const input = new PassThrough(), output = new PassThrough();
+  let sequence = 0, buffer = "";
+  const pending = new Map(), notifications = [];
+  output.on("data", bytes => {
+    buffer += bytes.toString();
+    for (;;) {
+      const end = buffer.indexOf("\n"); if (end < 0) break;
+      const row = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
+      if (row.id === undefined) notifications.push(row);
+      else { pending.get(row.id)?.(row); pending.delete(row.id); }
+    }
+  });
+  const request = (method, params = {}) => new Promise(resolve => {
+    const id = ++sequence; pending.set(id, resolve);
+    input.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  });
+  const connection = createHarnessConnection({ nativeClient: "codex",
+    httpJson: async () => ({ body: { issuer: "https://trelio.ru", scopes_supported: ["mcp:read"] } }),
+    vault: { read: async () => ({ accessToken: "synthetic-token", expiresAt: Date.now() + 60_000 }),
+      write: () => assert.fail("catalogue retry must not replace credentials") },
+    connectOAuth: () => assert.fail("catalogue retry must not open OAuth"),
+    httpRequest: (args, options) => remoteMcpHttpRequest(args, { ...options, resolveEndpoint: async () => ({
+      endpoint: new URL(`http://mcp.test:${server.address().port}/mcp`), address: "127.0.0.1", family: 4,
+    }) }),
+  });
+  const running = runCodexMcpStdioHost({ profile: "remote", connect: () => connection,
+    inputStream: input, outputStream: output, environment: {}, preservePlugin: () => null,
+    startupTrace() {}, diagnosticReporter: { record() {}, close() {} } });
+  try {
+    assert.ok((await request("initialize", { clientInfo, protocolVersion: "2025-03-26" })).result);
+    const initial = await request("tools/list");
+    assert.deepEqual(initial.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect"]);
+    const retry = () => request("tools/call", { name: "trelio_retry_catalog", arguments: {} });
+    assert.equal(readResult(await retry()).reason, "REMOTE_MCP_HTTP_ERROR");
+    assert.equal(notifications.length, 0);
+    unavailable = false;
+    assert.equal(readResult(await retry()).catalogStatus, "ready");
+    assert.deepEqual(notifications.map(row => row.method), ["notifications/tools/list_changed"]);
+    const fresh = await request("tools/list");
+    assert.deepEqual(fresh.result.tools.map(tool => tool.name), ["list_companies", "trelio_connect"]);
+    assert.equal(fresh.result._meta, undefined, "healthy catalogue has no additional context cost");
+    assert.equal(catalogReads, 4);
+    assert.equal(businessCalls, 0);
+    assert.doesNotMatch(JSON.stringify([initial, fresh, notifications]), /private backend diagnostic|synthetic-token/u);
+  } finally {
+    input.end();
+    await running;
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
 
 test("Codex returns a manual OAuth link through ordinary tool text without premature connection or App capabilities", async () => {
   let ready = false, catalogReads = 0, notifications = 0, closes = 0;

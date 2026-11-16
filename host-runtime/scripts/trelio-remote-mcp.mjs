@@ -8160,6 +8160,78 @@ const CODEX_CONNECT_TOOL = {
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
 };
 
+// Discovery must produce recovery tools before the native 60-second business
+// request budget expires. One deadline covers metadata, credentials and every
+// catalogue page; slow dependencies cannot extend it or publish late schemas.
+const CODEX_CATALOG_TIMEOUT_MS = 10_000;
+const CODEX_RETRY_CATALOG_TOOL = {
+  name: "trelio_retry_catalog",
+  description: "Retry only the Trelio tool catalogue read. Does not open OAuth, change credentials or replay a business action.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+};
+
+/** Only reviewed transport failures qualify for a recoverable bootstrap list.
+ * In particular, a malformed catalogue, blocked endpoint, vault failure or
+ * caller cancellation must not be relabelled as a temporary network outage.
+ * Native exception prose can contain URLs/paths/credentials: retain a closed
+ * code and our own explanation, never its message, cause, stack or details. */
+const codexCatalogTransportFailure = error => {
+  const code = error?.code;
+  if (error instanceof RemoteMcpHostError) {
+    if (["TRELIO_CODEX_CATALOG_TIMEOUT", "REMOTE_MCP_TIMEOUT"].includes(code)) {
+      return { reason: code, message: "Истекло время ожидания каталога инструментов Trelio." };
+    }
+    if (code === "REMOTE_MCP_HTTP_ERROR") {
+      return { reason: code, message: "Сервер вернул HTTP-ошибку при загрузке каталога инструментов Trelio." };
+    }
+    if (code === "REMOTE_MCP_CONNECTION_CLOSED") {
+      return { reason: code, message: "Соединение прервалось до получения каталога инструментов Trelio." };
+    }
+  }
+  if (error instanceof RemoteMcpOAuthError) {
+    const messages = {
+      REMOTE_MCP_OAUTH_TIMEOUT: "Истекло время ожидания служебных данных подключения Trelio.",
+      REMOTE_MCP_OAUTH_NETWORK_ERROR: "Не удалось получить служебные данные подключения Trelio из-за сетевого сбоя.",
+      REMOTE_MCP_OAUTH_HTTP_ERROR: "Сервер вернул HTTP-ошибку при чтении служебных данных подключения Trelio.",
+    };
+    if (Object.hasOwn(messages, code)) return { reason: code, message: messages[code] };
+  }
+  // DNS and socket errors escape the pinned HTTP reader as ordinary Node
+  // errors. Do not reflect arbitrary error codes or infer a TLS/ACL repair.
+  if (error instanceof Error) {
+    const messages = {
+      ENOTFOUND: "DNS не смог определить адрес сервера Trelio.",
+      EAI_AGAIN: "DNS временно не смог определить адрес сервера Trelio.",
+      ECONNREFUSED: "Сервер Trelio отклонил сетевое соединение.",
+      ECONNRESET: "Соединение сброшено до получения каталога инструментов Trelio.",
+      ECONNABORTED: "Соединение прервано до получения каталога инструментов Trelio.",
+      ETIMEDOUT: "Истекло время ожидания сетевого соединения с Trelio.",
+      EHOSTUNREACH: "Сервер Trelio недоступен по сети.",
+      ENETUNREACH: "Сеть недоступна при подключении к Trelio.",
+      EPIPE: "Соединение закрылось при запросе каталога инструментов Trelio.",
+    };
+    if (Object.hasOwn(messages, code)) return { reason: code, message: messages[code] };
+  }
+  return null;
+};
+
+class CodexCatalogUnavailableError extends RemoteMcpHostError {
+  constructor(failure) {
+    super("TRELIO_CODEX_CATALOG_UNAVAILABLE", failure.message);
+    this.failure = failure;
+  }
+}
+
+const codexCatalogFailureResult = error => ({
+  code: error.code,
+  ...error.failure,
+  catalogStatus: "unavailable",
+  automaticRetry: false,
+  nextCall: { toolName: CODEX_RETRY_CATALOG_TOOL.name, arguments: {} },
+  instruction: "Повторите только чтение каталога через trelio_retry_catalog. Сетевой сбой не требует нового входа или переустановки. Исходное рабочее действие автоматически не повторяется.",
+});
+
 const CODEX_RUNTIME_POLICY_INSTRUCTIONS = "Trelio checks the model and reasoning effort of the current Codex tool call. The local runtime supplies one-use proof automatically. Never supply runtimeSessionProof or instruction reuse keys. If disconnected or challenged for additional OAuth scopes, call trelio_connect, with reauthorize=true only for a replaced or insufficient grant, and retry the original call once after browser consent. On an admission failure preserve its exact code and reason. Use trelio-diagnostics for missing or invalid observations. Never bypass the check through another connection or direct HTTP. ";
 
 const codexInstructions = upstream => CODEX_RUNTIME_ROUTING_INSTRUCTIONS + CODEX_RUNTIME_POLICY_INSTRUCTIONS
@@ -8181,20 +8253,40 @@ export const createCodexMcpHandler = ({
   let connection;
   const authFailure = error => ["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(error?.code);
   let toolsByName = null;
+  let catalogGeneration = 0;
   const catalog = async signal => {
-    const tools = await connection.listTools(signal);
-    if (tools.some(tool => tool.name === CODEX_CONNECT_TOOL.name)) {
-      throw new RemoteMcpHostError("TRELIO_CODEX_CATALOG_CONFLICT", "Trelio вернул несовместимый каталог.");
+    const generation = ++catalogGeneration;
+    try {
+      return await runWithAbortDeadline({ signal, timeoutMs: CODEX_CATALOG_TIMEOUT_MS,
+        timeoutError: () => new RemoteMcpHostError("TRELIO_CODEX_CATALOG_TIMEOUT", "Catalog read deadline."),
+        operation: async catalogSignal => {
+          const tools = await connection.listTools(catalogSignal);
+          // Even an uncooperative late reader cannot resurrect cached tools
+          // after timeout. Each failed refresh discards the old dispatch map;
+          // an older concurrent read cannot overwrite a newer observation.
+          throwIfAborted(catalogSignal);
+          if (tools.some(tool => [CODEX_CONNECT_TOOL.name, CODEX_RETRY_CATALOG_TOOL.name].includes(tool.name))) {
+            throw new RemoteMcpHostError("TRELIO_CODEX_CATALOG_CONFLICT", "Trelio вернул несовместимый каталог.");
+          }
+          if (generation === catalogGeneration) toolsByName = new Map(tools.map(tool => [tool.name, tool]));
+          return [...tools.map(tool => {
+            // The backend contract is shared with old clients. Keep its App
+            // metadata and schemas while replacing the legacy dispatch reminder.
+            const { description, ...definition } = tool;
+            return { ...definition, description: description?.replace(
+              "Approved PreToolUse hook injects one-use runtimeSessionProof; never supply it.",
+              "The Codex runtime supplies proof automatically; never supply it.") };
+          }), CODEX_CONNECT_TOOL];
+        } });
+    } catch (error) {
+      if (generation === catalogGeneration) toolsByName = null;
+      // Cancellation belongs to the caller, even when its reason resembles
+      // a transport error. Only our own deadline earns the bootstrap fallback.
+      if (signal?.aborted) throw normalizeAbortReason(signal);
+      const failure = codexCatalogTransportFailure(error);
+      if (failure) throw new CodexCatalogUnavailableError(failure);
+      throw error;
     }
-    toolsByName = new Map(tools.map(tool => [tool.name, tool]));
-    return [...tools.map(tool => {
-      // The backend contract is shared with old clients. Keep its App
-      // metadata and schemas while replacing the legacy dispatch reminder.
-      const { description, ...definition } = tool;
-      return { ...definition, description: description?.replace(
-        "Approved PreToolUse hook injects one-use runtimeSessionProof; never supply it.",
-        "The Codex runtime supplies proof automatically; never supply it.") };
-    }), CODEX_CONNECT_TOOL];
   };
   const handler = async (message, { signal, clientInfo, clientCapabilities, notifyClient, runtimeUpgradeRecovery } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === null || message.id === undefined) return null;
@@ -8205,6 +8297,7 @@ export const createCodexMcpHandler = ({
         // Native Codex renders Apps. Never advertise a fallback interaction to
         // the remote session that this request transport cannot relay.
         toolsByName = null;
+        catalogGeneration++;
         await connection?.close?.();
         connection = connect({ ...(clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]
           ? { extensions: { [MCP_APP_CLIENT_EXTENSION]: clientCapabilities.extensions[MCP_APP_CLIENT_EXTENSION] } } : {}) });
@@ -8221,7 +8314,18 @@ export const createCodexMcpHandler = ({
       if (!connection) throw new RemoteMcpHostError("TRELIO_CODEX_CLIENT_REQUIRED", "Не согласован маршрут Codex MCP.");
       if (message.method === "tools/list") {
         try { return reply({ tools: await catalog(signal) }); }
-        catch (error) { if (authFailure(error)) return reply({ tools: [CODEX_CONNECT_TOOL] }); throw error; }
+        catch (error) {
+          if (authFailure(error)) return reply({ tools: [CODEX_CONNECT_TOOL] });
+          if (!(error instanceof CodexCatalogUnavailableError)) throw error;
+          // Erroring tools/list can make the client drop the entire server.
+          // Advertise only host-owned recovery, never stale business schemas.
+          // The reason also goes in the visible tool description: _meta alone
+          // is not guaranteed to reach the model in every Codex route.
+          return reply({ tools: [{ ...CODEX_RETRY_CATALOG_TOOL,
+            description: `${error.failure.reason}: ${error.message} ${CODEX_RETRY_CATALOG_TOOL.description}`,
+          }, CODEX_CONNECT_TOOL], _meta: { "trelio/catalogStatus": "unavailable",
+            "trelio/catalogCode": error.code, "trelio/catalogReason": error.failure.reason } });
+        }
       }
       if (message.method === "resources/list") {
         try { return reply(await connection.listResources(signal)); }
@@ -8235,6 +8339,15 @@ export const createCodexMcpHandler = ({
       const { name, arguments: raw = {}, _meta: metadata } = message.params ?? {};
       if (typeof name !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(name) || !raw || typeof raw !== "object" || Array.isArray(raw)) {
         throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Некорректный вызов Trelio.");
+      }
+      if (name === CODEX_RETRY_CATALOG_TOOL.name) {
+        if (Object.keys(raw).length) throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Повтор чтения каталога не принимает параметры.");
+        // One explicit read reuses the same fixed-origin OAuth transport.
+        // There is no login, proof fabrication or replay of the failed action.
+        await catalog(signal);
+        await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+        return reply(buildTextResult({ catalogStatus: "ready", automaticRetry: false,
+          instruction: "Каталог Trelio загружен. Продолжите исходный запрос через обычные инструменты; рабочие действия не повторялись." }));
       }
       if (name === CODEX_CONNECT_TOOL.name) {
         if (Object.keys(raw).some(key => key !== "reauthorize") || (raw.reauthorize !== undefined && typeof raw.reauthorize !== "boolean")) {
@@ -8298,6 +8411,15 @@ export const createCodexMcpHandler = ({
       }, callSignal), { signal });
       return result === null ? null : reply(result);
     } catch (error) {
+      if (message.method === "tools/call" && error instanceof CodexCatalogUnavailableError) {
+        const result = buildTextResult(codexCatalogFailureResult(error));
+        // A previously advertised upstream tool may have a success-only
+        // outputSchema. The catalogue is now untrusted/unavailable, so use
+        // text for its error rather than inventing a structured success shape.
+        const { structuredContent, ...textResult } = result;
+        return reply({ ...([CODEX_CONNECT_TOOL.name, CODEX_RETRY_CATALOG_TOOL.name].includes(message.params?.name)
+          ? result : textResult), isError: true });
+      }
       const pairing = error?.code === "TRELIO_BRIDGE_PAIRING_REQUIRED" && error.pairing;
       const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code)
         ? error.code : "TRELIO_CODEX_MCP_FAILED";

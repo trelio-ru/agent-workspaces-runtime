@@ -1480,6 +1480,35 @@ primary project. Registry/contact/meeting связи semantic и сами дос
 
 ## Компактные ответы агента
 
+<a id="codex-catalog-recovery"></a>
+
+Codex main MCP ограничивает загрузку полного каталога десятью секундами,
+включая metadata, credential read и все страницы. При известных сетевых ошибках
+(DNS/socket, timeout, HTTP, обрыв ответа, транспорт OAuth metadata) `tools/list`
+успешно возвращает только host-owned `trelio_retry_catalog` и `trelio_connect`.
+Так ошибка чтения каталога не превращается в ошибку регистрации всего сервера.
+Описание recovery tool содержит безопасную причину и её закрытый код; `_meta`
+дополнительно возвращает `TRELIO_CODEX_CATALOG_UNAVAILABLE` и исходный код.
+Raw message, URL, пути, тела HTTP, cause/stack и credentials не раскрываются.
+Неизвестные ошибки, повреждённый каталог, конфликт зарезервированных имён,
+проверки endpoint/vault и отмена вызывающим клиентом сохраняют обычный отказ.
+Подтверждённый auth/scope отказ по-прежнему оставляет только `trelio_connect`.
+
+Каждый неуспешный refresh сбрасывает прежнюю dispatch map; частичные страницы
+и поздние результаты после deadline не публикуются. Более старый параллельный
+reader не может заменить или сбросить map нового наблюдения. Healthy `tools/list`
+сохраняет прежнюю форму: живой каталог и `trelio_connect`, без recovery schema.
+
+`trelio_retry_catalog` принимает только пустой объект и выполняет одно чтение
+через тот же fixed-origin transport. При успехе уведомляет клиента через
+`notifications/tools/list_changed`, чтобы клиент перечитал актуальные schemas.
+При повторном отказе отдаёт `isError`, понятную причину и точный следующий вызов.
+Этот путь не открывает OAuth, не меняет credentials и не повторяет рабочие
+действия. Ошибка уже отправленного `tools/call` не становится ошибкой каталога
+и не разрешает replay. Если каталог понадобился перед dispatch старого tool,
+отказ возвращается текстом без structured success payload для его outputSchema.
+Один лишь recovery catalogue не подтверждает доступность бизнес-инструментов.
+
 <a id="catalog-permissions"></a>
 
 Local MCP фильтрует пять company-private skill management definitions в

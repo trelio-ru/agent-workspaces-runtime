@@ -1313,6 +1313,9 @@ Exact legacy template bytes для распознавания при мигра�
 - Диагностика Claude Code Local возвращает точную проверку статуса OAuth и
   штатный запуск браузера агентом при подтверждённом запросе на подключение.
   [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
+- Сетевой отказ Codex tools/list сохраняет host-owned recovery и закрытый код
+  причины; повторяет только чтение каталога, без OAuth и replay рабочих действий.
+  [Контракт](docs/agent-workspace-runtime.md#codex-catalog-recovery).
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
 - Local tools/list скрывает owner/admin-only private-skill management по свежему
