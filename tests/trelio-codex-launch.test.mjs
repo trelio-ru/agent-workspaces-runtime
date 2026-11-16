@@ -280,10 +280,16 @@ test("wizard registers a service Git folder with nested Codex snapshot metadata 
   const snapshotGit = (...args) => execFileAsync("git", args, {
     cwd: chosen, encoding: "utf8", env: { ...process.env, GIT_INDEX_FILE: indexPath },
   });
-  const attachment = ".codex-remote-attachments/turn-id/attachment-id/1-Фото.JPG";
   const config = ".codex/config.toml";
-  const image = Buffer.from("synthetic fixture, no real attachment");
-  for (const [file, content] of [[config, "# Local Codex config\n"], [attachment, image]]) {
+  const cache = ".codex-remote-attachments/turn-id";
+  const attachments = new Map([
+    [`${cache}/image/1-Фото.JPG`, Buffer.from("synthetic image fixture")],
+    [`${cache}/document/report.pdf`, Buffer.from("synthetic PDF fixture")],
+    [`${cache}/text/plain text.txt`, Buffer.from("synthetic text fixture")],
+    [`${cache}/readme/README`, Buffer.from("synthetic extensionless fixture")],
+  ]);
+  const configContent = "# Local Codex config\n";
+  for (const [file, content] of [[config, configContent], ...attachments]) {
     await fs.mkdir(path.dirname(path.join(chosen, file)), { recursive: true });
     await fs.writeFile(path.join(chosen, file), content);
   }
@@ -317,15 +323,17 @@ test("wizard registers a service Git folder with nested Codex snapshot metadata 
   assert.equal(result.structuredContent.verified, true, JSON.stringify(result.content));
   assert.equal(fixture.puts, 1);
   assert.deepEqual(await readRepository(), before);
-  assert.deepEqual(await fs.readFile(path.join(chosen, attachment)), image);
-  assert.equal(await fs.readFile(path.join(chosen, config), "utf8"), "# Local Codex config\n");
+  for (const [file, content] of attachments) {
+    assert.deepEqual(await fs.readFile(path.join(chosen, file)), content);
+  }
+  assert.equal(await fs.readFile(path.join(chosen, config), "utf8"), configContent);
 
   await fs.mkdir(path.join(chosen, "workspaces"));
   await fs.writeFile(path.join(chosen, "workspaces", ".trelio-run.json"), "synthetic protected data");
   const next = await snapshot(capture.replace("1720000000000", "1720000000001") + "/head");
   const { stdout } = await git("ls-tree", "-r", "--name-only", "-z", next);
   assert.deepEqual(new Set(stdout.split("\0").slice(0, -1)), new Set([
-    ".gitignore", "AGENTS.md", "CLAUDE.md", config, attachment,
+    ".gitignore", "AGENTS.md", "CLAUDE.md", config, ...attachments.keys(),
   ]));
   assert.equal((await git("ls-files", "--stage", "-z")).stdout, "");
   const reopened = await fixture.action("connect");

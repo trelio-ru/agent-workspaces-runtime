@@ -491,7 +491,8 @@ test("core.symlinks=false does not admit symlink modes in Codex trees on any pla
   const environment = { GIT_INDEX_FILE: indexPath };
   // Construct the actual Git symlink object without OS symlink privileges;
   // this negative path also runs on the unprivileged Windows CI account.
-  await runGitWithEnvironment(root, environment, "update-index", "--add", "--cacheinfo", `120000,${blob},AGENTS.md`);
+  await runGitWithEnvironment(root, environment, "update-index", "--add", "--cacheinfo",
+    `120000,${blob},.codex-remote-attachments/turn/link.pdf`);
   const tree = (await runGitWithEnvironment(root, environment, "write-tree")).stdout.trim();
   await fs.rm(indexPath);
   const ref = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/base";
@@ -727,7 +728,7 @@ test("32-hex checkpoint names do not admit commit, tag or forbidden tree content
 
 test("reachable snapshots and live Codex metadata still enforce their path allowlist", async () => {
   const ref = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/head";
-  for (const file of ["workspaces/context/secret.txt", ".codex/other.toml", ".codex-remote-attachments/turn/data.txt"]) {
+  for (const file of ["workspaces/context/secret.txt", ".codex/other.toml", ".codex-remote-attachments/.hidden/file.txt"]) {
     const root = await makeRoot();
     await runGit(root, "init");
     await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });

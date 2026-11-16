@@ -37,7 +37,6 @@ const ROOT_ALLOWED_FILES = new Set([
 ]);
 const CODEX_ATTACHMENT_DIRECTORY = ".codex-remote-attachments";
 const CODEX_CONFIG_DIRECTORY = ".codex";
-const CODEX_IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 const MANAGED_START = "<!-- trelio-agent-workspaces:start -->";
 const MANAGED_END = "<!-- trelio-agent-workspaces:end -->";
 const IGNORE_START = "# trelio-agent-workspaces:ignore:start";
@@ -494,13 +493,12 @@ const isAllowedCodexMetadataEntry = (relativePath, type) => {
 
   const [root, ...segments] = relativePath.split("/");
   if (root !== CODEX_ATTACHMENT_DIRECTORY || relativePath.length > MAX_PATH_LENGTH) return false;
-  // Codex can retain nested image paths with user-supplied names. Restrict
-  // their namespace, file type and Windows path syntax without relying on
-  // the spelling, case or version of an attachment's generated ID.
+  // The reserved directory is the boundary for opaque attachment files.
+  // Both callers check entry types without opening the files. Validate path
+  // components without making assumptions about their names or formats.
   if (segments.some((segment) => !segment || segment.startsWith(".") || /[. ]$/u.test(segment)
     || /[\x00-\x1f\x7f\\:<>"|?*\ufffd]/u.test(segment))) return false;
-  return type === "tree" || (segments.length > 0
-    && CODEX_IMAGE_EXTENSIONS.has(path.posix.extname(segments.at(-1)).toLowerCase()));
+  return type === "tree" || (type === "blob" && segments.length > 0);
 };
 
 const inspectTree = async ({ gitPath, rootPath, treeId, objectsById, reachable, execFileCommand }) => {
