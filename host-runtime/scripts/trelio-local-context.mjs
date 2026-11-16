@@ -13323,7 +13323,18 @@ export const TRELIO_WORKSPACE_ACTION_TOOL = {
     properties: {
       schemaVersion: { type: "integer", const: TRELIO_WORKSPACE_ACTION_SCHEMA_VERSION },
       operation: { type: "string" },
-      parameters: { type: "object" },
+      // These editable handoff fields have one wire type across checkpoint,
+      // pause and finish. Publish them where the model forms its actual call;
+      // the separate native checkpoint accepts different object-shaped data.
+      // Other operations retain their server-selected parameters and the
+      // dispatcher's closed per-operation validation before any private I/O.
+      parameters: { type: "object", properties: {
+        summary: { type: "string" },
+        evidence: { type: "array", items: { type: "string" }, maxItems: 50 },
+        filePaths: { type: "array", items: { type: "string" }, maxItems: 1000 },
+        questions: { type: "array", items: { type: "string" }, maxItems: 50 },
+        nextAction: { type: "string" },
+      } },
       // Keep tools/list compact; the dispatcher performs the closed-key and
       // exact UUID validation before any registry or child-process access.
       runIdentity: { type: "object" },

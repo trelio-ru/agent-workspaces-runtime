@@ -80,7 +80,11 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // from becoming a host-level App surface after local provider selection.
   // One bounded layer-key array costs 46 bytes across the provider subset and
   // removes tens of KiB from each repeated exact read in the measured fixture.
-  localProviderToolSchemasBytes: 2_500,
+  // Five typed handoff fields add exactly 329 bytes / 82 o200k tokens to one
+  // tool, preventing evidence/nextAction objects from reaching the dispatcher.
+  // Account for this bounded ABI addition; prose/results and historical
+  // baselines retain their existing ceilings and comparison corpus.
+  localProviderToolSchemasBytes: 2_500 + 329,
   plainCompanyTaskRunPluginLayerBytes: 89_000,
   encryptedCompanyTaskRunPluginLayerBytes: 105_500,
   localMcpInstructionsBytes: 4_200,
@@ -93,7 +97,7 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // initialize instructions once per schema, not extra runtime instructions.
   // New setup-only opener: its own reviewed 672-byte/160-token ceiling is
   // additive. Existing method limits and normal task-Run ceilings stay fixed.
-  modelVisibleLocalToolSchemasBytes: 15_500 + 672,
+  modelVisibleLocalToolSchemasBytes: 15_500 + 672 + 329,
   // +schemaToolName lets doctor load one exact schema instead of every schema;
   // skill section routing adds one bounded initialize prefix, not response data.
   clientPrefixedLocalToolSchemasBytes: 75_000,
@@ -118,7 +122,7 @@ export const PLUGIN_CONTEXT_TOKEN_LIMITS = Object.freeze({
   localMcpInstructions: 650,
   modelVisibleLocalToolSchemas: 3_500 + 160,
   clientPrefixedLocalToolSchemas: 13_000 + 160 + 650,
-  clientPrefixedTaskRunLocalToolSchemas: 750,
+  clientPrefixedTaskRunLocalToolSchemas: 750 + 82,
   representativeLocalProposalResult: 1_650,
   representativeLocalAttachmentResult: 200,
   representativeReusedInstructionResult: 520,

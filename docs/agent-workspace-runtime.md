@@ -1915,6 +1915,15 @@ clean Git и принятый head проверяются обычным preflig
    файл уже входит в pinned base, bridge сохраняет прежнюю запись и привязывает
    текущий Run к новому детерминированному пути. Произвольный, отсутствующий в
    base либо небезопасный путь остаётся fail-closed ошибкой.
+
+   Local MCP tools/list описывает handoff поля parameters прямо в inputSchema:
+   summary/nextAction – string; evidence/questions – до 50 строк, filePaths – до
+   1000 строк. Они общие для checkpoint/pause/finish, остальные server-selected
+   параметры проверяются dispatcher по прежней per-operation схеме. Backend
+   checkpoint имеет другой wire format; объект evidence/nextAction не приводится
+   к строке автоматически. Типизация помогает caller до выполнения, не снимая
+   validation-before-child или требований handoff.
+
 7. Trelio принимает candidate атомарно, только пока current accepted head
    совпадает с pinned base head.
 

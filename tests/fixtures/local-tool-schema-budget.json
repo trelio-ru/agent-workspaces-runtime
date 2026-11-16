@@ -18,9 +18,10 @@
     "continue_trelio_workspace_action": {
       "modelVisible": true,
       "baselineBytes": 523,
-      "maxBytes": 576,
+      "maxBytes": 896,
       "baselineTokens": 111,
-      "maxTokens": 128
+      "maxTokens": 208,
+      "budgetReason": "Typed handoff parameters add 329 bytes / 82 o200k tokens; historical baseline remains unchanged; affected scenario ceilings account for the same delta."
     },
     "diagnose_trelio_installation": {
       "modelVisible": true,

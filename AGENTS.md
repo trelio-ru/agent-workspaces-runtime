@@ -904,6 +904,10 @@ publication tooling также остаются вне этого публичн
   container types/known keys and collector/journal phases under the SAME paired
   counters. Old servers strip details only; preserve UUIDs, bounds and retries.
   The canonical vocabulary is backend-owned; see the same diagnostics contract.
+  Native Codex tools/call records one settlement, including preparation/login;
+  upgrade delegates own their observation. Negotiate additive tool/field labels
+  before strict-server delivery. Journal ENOENT races are not corruption;
+  retain unread records on real I/O failures.
   Failed child допускает только closed failure category; classification не
   разрешает повтор mutation или передачу stdout/message в telemetry.
   Typed HTTP failure bridge передаётся отдельным final frame: только exact

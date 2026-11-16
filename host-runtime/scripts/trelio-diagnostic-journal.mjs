@@ -30,6 +30,18 @@ const entries = async directory => {
   }
   return result;
 };
+// Enumeration is not a lease: another collector may acknowledge an immutable
+// sample, or a writer may publish its temporary file, before our next syscall.
+// Only positive absence is benign. Permission and other I/O failures must stay
+// observable, and must never cause deletion of an unread pending observation.
+const statIfPresent = target => fs.lstat(target).catch(error => {
+  if (error.code === "ENOENT") return null;
+  throw error;
+});
+const unlinkIfPresent = target => fs.unlink(target).then(() => true).catch(error => {
+  if (error.code !== "ENOENT") throw error;
+  return false;
+});
 export const writeDiagnosticJournal = async (origin, sample, { directory = diagnosticJournalDirectory(origin) } = {}) => {
   if (!isDiagnosticObservation(sample)) return "journal_invalid";
   const bytes = JSON.stringify(sample);
@@ -67,13 +79,15 @@ export const readDiagnosticJournal = async (origin, { directory = diagnosticJour
       if (entry.name === "writer.lock") {
         // A crashed writer contains no state. Reclaim only an old empty exact
         // lock; never recursively delete a path supplied by a record.
-        const stat = await fs.lstat(target);
-        if (stat.isDirectory() && !stat.isSymbolicLink() && now - stat.mtimeMs > 60000) await fs.rmdir(target).catch(() => {});
+        const stat = await statIfPresent(target);
+        if (stat?.isDirectory() && !stat.isSymbolicLink() && now - stat.mtimeMs > 60000) await fs.rmdir(target).catch(() => {});
         continue;
       }
       if (/^[0-9a-f-]{36}\.tmp$/u.test(entry.name) && entry.isFile() && !entry.isSymbolicLink()) {
-        const stat = await fs.lstat(target);
-        if (now - stat.mtimeMs > 60000) { await fs.unlink(target); drop("journal_invalid", "temporary", "temporary_expired", stat); }
+        const stat = await statIfPresent(target);
+        if (stat && now - stat.mtimeMs > 60000 && await unlinkIfPresent(target)) {
+          drop("journal_invalid", "temporary", "temporary_expired", stat);
+        }
         continue;
       }
       if (!leafPattern.test(entry.name) || !entry.isFile() || entry.isSymbolicLink()) continue;
@@ -82,7 +96,7 @@ export const readDiagnosticJournal = async (origin, { directory = diagnosticJour
         handle = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
         stat = await handle.stat();
         if (!stat.isFile() || stat.size > MAX_BYTES) { drop("journal_invalid", "entry", !stat.isFile() ? "file_type_invalid" : "file_limit", stat); await handle.close(); handle = undefined; await fs.unlink(target).catch(() => {}); continue; }
-        if (now - stat.mtimeMs > TTL) { drop("journal_expired", "entry", "entry_ttl_expired", stat); await handle.close(); handle = undefined; await fs.unlink(target); continue; }
+        if (now - stat.mtimeMs > TTL) { drop("journal_expired", "entry", "entry_ttl_expired", stat); await handle.close(); handle = undefined; await unlinkIfPresent(target); continue; }
         // Recheck the byte bound while reading: stat alone cannot prevent a
         // concurrently growing local file from allocating an unbounded buffer.
         const bytes = Buffer.alloc(MAX_BYTES + 1);
@@ -97,9 +111,16 @@ export const readDiagnosticJournal = async (origin, { directory = diagnosticJour
         const sample = JSON.parse(bytes.subarray(0, length).toString("utf8"));
         stage = "validation"; reason = "io_failed";
         if (!isDiagnosticObservation(sample) || entry.name !== sample.id + ".json") { drop("journal_invalid", stage,
-          !isDiagnosticObservation(sample) ? "schema_invalid" : "filename_mismatch", stat); await handle.close(); handle = undefined; await fs.unlink(target); continue; }
+          !isDiagnosticObservation(sample) ? "schema_invalid" : "filename_mismatch", stat); await handle.close(); handle = undefined; await unlinkIfPresent(target); continue; }
         samples.push(sample);
-      } catch { drop("journal_invalid", stage, reason, stat); await handle?.close(); handle = undefined; await fs.unlink(target).catch(() => {}); }
+      } catch (error) {
+        // An absent leaf before open is already consumed elsewhere, not a
+        // damaged record. Once opened, a failing read/stat remains a failure.
+        if (!handle && !stat && error.code === "ENOENT") continue;
+        drop("journal_invalid", stage, reason, stat);
+        await handle?.close(); handle = undefined;
+        if (reason !== "io_failed") await unlinkIfPresent(target).catch(() => {});
+      }
       finally { await handle?.close(); }
     }
   } catch (error) { if (error.code !== "ENOENT") drop("journal_full", "directory", "directory_unavailable"); }

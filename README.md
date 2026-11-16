@@ -555,6 +555,15 @@ deadlines, credentials/Hook trust changes либо переинтерпрета�
 Report v6 хранит полную разбивку/coverage/omissions, loss reasons отдельно по
 единицам; Telegram – bounded subset. [Контракт](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
 
+Native Codex MCP считает tools/call, включая ошибки подготовки до HTTP и
+вход через trelio_connect. У каждого завершения один исход; переданный
+обновлённому runtime вызов считает делегат. tools/list/initialize не считаются.
+Имена native/local tools закрыты каталогом; structured code сохраняется через
+allowlist; typed host exception сохраняет код до исключения structuredContent
+из ответа по success-only schema. Returned isError без structured code – MCP_TOOL_ERROR. Human text/App payload
+не разбираются. Расширение покрытия меняет состав runtime/mcp знаменателя;
+старые сутки нельзя сравнивать как неизменную выборку вызовов.
+
 Local MCP считает returned isError без чтения payload, typed exceptions и
 TrelioApiError с закрытым code/HTTP-классом. Отдельная hook boundary включает
 SessionStart, относящиеся к Trelio PreToolUse и SessionEnd; JSON deny с exit 0 –
@@ -574,7 +583,12 @@ code. Legacy text, неверный frame и provider lookalike перед фи�
 
 GET diagnostics/capabilities согласует каталог (64 KiB/cache 5 минут).
 Неизвестный серверу код – DIAGNOSTICS_CODE_UNSUPPORTED с catalog_mismatch,
-остальной sample сохраняется. POST diagnostics/observations: 20 samples,
+остальной sample сохраняется. Каталоги tools/validationFields согласуются
+отдельно; старый сервер без этих полей получает исходные labels либо unknown.
+Совпавшие outcome-пары объединяются, catalog_mismatch считает каждый затронутый
+исход один раз. UUID/счётчики/frozen input неизменны, legacy v1 тоже получает
+только прежние имена. Lifecycle: diagnostics-v2-dimensions в backend legacy registry.
+POST diagnostics/observations: 20 samples,
 64 outcome-пар/1000 исходов/sample. 404/405 capabilities выбирает legacy errors
 с UNKNOWN на минуту, без знаменателя. Другой 4xx terminal; нет OAuth/pairing.
 
@@ -586,7 +600,11 @@ AbortSignal передаётся private worker. До реального зав�
 Hooks пишут строгую v2 schema в user-temp journal без private store, ACL repair,
 DPAPI или сети; POSIX 0700/0600, Windows inherited user-temp ACL. 256 entries,
 16 KiB/file, TTL 24 ч, bounded read/validation, UUID filename и atomic rename.
-Это техническая очередь, не secret store/authority.
+Это техническая очередь, не secret store/authority. Исчезнувшая между обходом
+и open запись уже могла быть подтверждена другим reader: ENOENT не является
+повреждением. Исчезнувшие lock/tmp не прерывают оставшийся обход. Настоящий I/O
+refusal учитывается, но непрочитанная запись сохраняется; только доказанно
+невалидные/истёкшие записи либо успешный ACK допускают удаление.
 Subprocess fixtures изолируют HOME/USERPROFILE, config directories и origin;
 CODEX_HOME без HOME не изолирует журнал. Тесты сохраняют настоящий writer в
 fixture-очереди и удаляют её после проверки. Stdio fixture также изолирует

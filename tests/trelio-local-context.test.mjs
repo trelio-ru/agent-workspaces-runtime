@@ -6060,3 +6060,18 @@ test("exact document raw scope uses resolved UUID while hydrated aliases retain 
     assert.equal(nativeTool === "get_regular_work" ? result.set.id : result.document.id, id);
   }
 });
+
+
+test("published workspace handoff schema matches the production validator instead of opaque objects", () => {
+  const fields = TRELIO_WORKSPACE_ACTION_TOOL.inputSchema.properties.parameters.properties;
+  assert.equal(fields.nextAction.type, "string");
+  assert.deepEqual(fields.evidence, { type: "array", items: { type: "string" }, maxItems: 50 });
+  for (const operation of ["checkpoint", "pause", "finish"]) {
+    const parameters = { summary: "Result", evidence: ["Verified"], nextAction: "Review", ...(operation === "checkpoint" ? { type: "draft" } : {}) };
+    assert.doesNotThrow(() => buildTrelioWorkspaceActionInvocation({ schemaVersion: 1, operation, parameters, workingDirectory: actionWorkingDirectory }));
+    for (const invalid of [{ evidence: [{ description: "Verified" }] }, { nextAction: { instruction: "Review" } }]) {
+      assert.throws(() => buildTrelioWorkspaceActionInvocation({ schemaVersion: 1, operation, parameters: { ...parameters, ...invalid }, workingDirectory: actionWorkingDirectory }),
+        error => error.diagnosticCode === "TRELIO_WORKSPACE_INPUT_WRONG_TYPE");
+    }
+  }
+});

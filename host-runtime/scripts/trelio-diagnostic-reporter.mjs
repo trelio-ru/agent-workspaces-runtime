@@ -16,6 +16,11 @@ const discardBody = async response => { await response.body?.cancel(); };
 // keeps additive observation signals from rejecting an otherwise valid batch.
 const LEGACY_LOSS_REASONS = ["queue_overflow", "delivery_timeout", "delivery_transport", "delivery_rejected",
   "credential_unavailable", "shutdown", "journal_full", "journal_invalid", "journal_expired", "catalog_mismatch", "unknown_code"];
+// Compatibility lifecycle: diagnostics-v2-dimensions in the backend legacy registry.
+// Older strict servers do not advertise these vocabularies. Downgrade only
+// labels, preserving the SAME frozen UUID and paired outcome counts.
+const LEGACY_TOOLS = ["unknown", "continue_trelio_workspace_action", "continue_trelio_local_action", "render_trelio_local_proposal", "diagnose_trelio_installation", "plan_codex_trelio_hook_routing", "apply_codex_trelio_hook_routing", "get_company_private_agent_skill_authoring_contract", "plan_company_private_agent_skill_create", "create_company_private_agent_skill", "plan_company_private_agent_skill_release", "publish_company_private_agent_skill_release", "connect_remote_agent_skill", "doctor_remote_agent_skill", "call_remote_agent_skill_tool", "forget_remote_agent_skill_credential", "runtime_hook"];
+const LEGACY_FIELDS = ["unknown", "parameters", "summary", "evidence", "filePaths", "questions", "nextAction", "taskOutcome", "message", "type", "workingDirectory", "runIdentity", "workspaceId", "runId", "schemaVersion", "operation", "tasks", "companySlug", "projectSlug", "taskNumber", "url", "skillId", "releaseId", "arguments", "clientKind", "version", "executable"];
 export const createObservationTransport = ({ fetchImpl = fetch, readToken = readExistingBridgeSessionToken } = {}) => {
   let capabilities;
   return async (origin, samples, { signal, context = {} } = {}) => {
@@ -60,7 +65,14 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
         if (data.lossReasons !== undefined && (!Array.isArray(data.lossReasons) || data.lossReasons.length > 256)) {
           throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "loss_catalog_invalid"));
         }
-        capabilities = { version: 2, codes: new Set(data.errorCodes.filter(code => contract.errorCodes.includes(code))),
+        if (["tools", "validationFields"].some(key => data[key] !== undefined &&
+          (!Array.isArray(data[key]) || data[key].length > 2000 || !data[key].includes("unknown") || data[key].some(value => typeof value !== "string")))) {
+          throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "capabilities_schema_invalid"));
+        }
+        capabilities = { version: 2,
+          tools: new Set((data.tools ?? LEGACY_TOOLS).filter(name => [...contract.localTools, ...contract.nativeTools, "runtime_hook"].includes(name))),
+          fields: new Set((data.validationFields ?? LEGACY_FIELDS).filter(field => contract.validationFields.includes(field))),
+          codes: new Set(data.errorCodes.filter(code => contract.errorCodes.includes(code))),
           losses: new Set((data.lossReasons ?? LEGACY_LOSS_REASONS).filter(reason => contract.lossReasons.includes(reason))),
           details: data.detailEvidenceVersion === contract.detailEvidence.version,
           expires: Date.now() + 300000 };
@@ -74,7 +86,7 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
     if (selected.version === 1) {
       // An explicitly old server gets only the permanent v1 UNKNOWN code.
       // Never post a new code blindly and lose unrelated events in its batch.
-      const events = samples.map(sample => ({ id: sample.id, tool: contract.localTools.includes(sample.tool) ? sample.tool : "unknown",
+      const events = samples.map(sample => ({ id: sample.id, tool: LEGACY_TOOLS.includes(sample.tool) && sample.tool !== "runtime_hook" ? sample.tool : "unknown",
         operation: contract.operations.includes(sample.operation) ? sample.operation : "unknown", code: "UNKNOWN",
         pluginVersion: sample.pluginVersion, runtimeVersion: sample.runtimeVersion,
         count: sample.outcomes.filter(row => !["OK", "ROUTED"].includes(row.code)).reduce((sum, row) => sum + row.count, 0),
@@ -83,17 +95,19 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
       payload = { schemaVersion: 1, events }; endpoint = "errors";
     } else {
       payload = { schemaVersion: 2, samples: samples.map(sample => {
+        const tool = selected.tools.has(sample.tool) ? sample.tool : "unknown";
         const outcomes = new Map(); let unsupported = 0;
         for (const row of sample.outcomes) {
           const code = ["OK", "ROUTED"].includes(row.code) || selected.codes.has(row.code) ? row.code : "DIAGNOSTICS_CODE_UNSUPPORTED";
-          if (code !== row.code) unsupported += row.count;
-          const key = code + ":" + row.field;
+          const field = selected.fields.has(row.field) ? row.field : "unknown";
+          if (code !== row.code || field !== row.field || tool !== sample.tool) unsupported += row.count;
+          const key = code + ":" + field;
           const prior = outcomes.get(key);
           // Compatibility: diagnostics-v2-detail-evidence in the backend legacy
           // registry. Build a projection; never mutate the frozen sample
           // shared by retries/journal acknowledgement. Old v2 servers receive
           // exactly the original strict schema with the SAME UUID and counts.
-          const target = prior ?? { code, field: row.field, count: 0 };
+          const target = prior ?? { code, field, count: 0 };
           target.count += row.count;
           if (!prior) outcomes.set(key, target);
           if (selected.details && code === row.code) for (const detail of row.details ?? [])
@@ -111,7 +125,7 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
           const target = losses.get("catalog_mismatch") ?? { reason: "catalog_mismatch", count: 0 };
           target.count = Math.min(1000000, target.count + unsupported); losses.set("catalog_mismatch", target);
         }
-        return { ...sample, outcomes: [...outcomes.values()], losses: [...losses.values()] };
+        return { ...sample, tool, outcomes: [...outcomes.values()], losses: [...losses.values()] };
       }) }; endpoint = "observations";
     }
     signal?.throwIfAborted();

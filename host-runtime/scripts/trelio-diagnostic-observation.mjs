@@ -84,7 +84,7 @@ export const buildDiagnosticObservation = (tool, args, code = "OK", {
   platform = process.platform, architecture = process.arch,
 } = {}) => ({
   id: randomUUID(), boundary: known(contract.boundaries, boundary, "mcp"),
-  tool: boundary === "hook" ? "runtime_hook" : known(contract.localTools, tool),
+  tool: boundary === "hook" ? "runtime_hook" : known([...contract.localTools, ...contract.nativeTools], tool),
   operation: known(boundary === "hook" ? contract.hookEvents : contract.operations, args?.operation ?? args?.route),
   platform: known(contract.platforms, platform), architecture: known(contract.architectures, architecture),
   pluginVersion: version(getPluginVersion(environment)), runtimeVersion: version(getHostRuntimeVersion(environment)),
@@ -103,7 +103,7 @@ export const isDiagnosticObservation = sample => {
     || !contract.architectures.includes(sample.architecture) || version(sample.pluginVersion) !== sample.pluginVersion
     || version(sample.runtimeVersion) !== sample.runtimeVersion) return false;
   if (sample.boundary === "hook" ? sample.tool !== "runtime_hook" || !contract.hookEvents.includes(sample.operation)
-    : !contract.localTools.includes(sample.tool) || !contract.operations.includes(sample.operation)) return false;
+    : ![...contract.localTools, ...contract.nativeTools].includes(sample.tool) || !contract.operations.includes(sample.operation)) return false;
   if (!Array.isArray(sample.outcomes) || sample.outcomes.length > 64 || !Array.isArray(sample.losses) || sample.losses.length > contract.lossReasons.length) return false;
   const pairs = new Set();
   for (const row of sample.outcomes) {

@@ -163,9 +163,14 @@ test("failed refresh invalidates cached tools while a dispatched mutation is nev
   assert.equal(dispatched, 1);
   unavailable = true;
   await handler(frame("tools/list"));
-  const blocked = await handler(mutation);
+  const observations = [];
+  const blocked = await handler(mutation, {
+    recordDiagnostic: (name, _args, code) => observations.push([name, code]),
+  });
   assert.equal(readResult(blocked).code, "TRELIO_CODEX_CATALOG_UNAVAILABLE");
   assert.equal(blocked.result.structuredContent, undefined, "cached success-only output schema stays valid");
+  assert.deepEqual(observations, [["update_task_title", "TRELIO_CODEX_CATALOG_UNAVAILABLE"]],
+    "the reporter receives the typed host failure even when the wire result must omit its structured code");
   assert.equal(prepared, 1);
   assert.equal(dispatched, 1);
   assert.equal(reads, 3, "failed refresh cannot leave the old dispatch map active");
@@ -520,10 +525,93 @@ test("a verified upgrade before remote dispatch hands the original Codex frame t
   await handler(frame("initialize", { protocolVersion: "2025-06-18" }), { clientInfo });
   const original = frame("tools/call", { name: "get_task", _meta: meta("gpt-6.1-sol", "high"), arguments: {} });
   let handedOff = false;
-  assert.equal(await handler(original, { clientInfo, runtimeUpgradeRecovery: (_error, message) => {
+  let observations = 0;
+  assert.equal(await handler(original, { clientInfo, recordDiagnostic: () => { observations++; }, runtimeUpgradeRecovery: (_error, message) => {
     assert.equal(message, original);
     handedOff = true;
     return true;
   } }), null);
   assert.ok(handedOff);
+  assert.equal(observations, 0, "the delegate owns the observation");
+});
+
+test("native diagnostics keep routing, login, malformed input and opaque failures distinct", async () => {
+  const observations = [], dispatched = [];
+  const results = [
+    { isError: true, structuredContent: { code: "MCP_LOCAL_CONTEXT_REQUIRED" }, content: [] },
+    // A success-only output schema may omit structured errors. Do not parse
+    // text or App metadata to recover a code; the backend owns that evidence.
+    { isError: true, content: [{ type: "text", text: "PRIVATE_ERROR" }], _meta: { private: true } },
+  ];
+  const handler = createCodexMcpHandler({ connect: () => ({
+    listTools: async () => [{ name: "get_task" }],
+    call: async name => { dispatched.push(name); return results.shift(); },
+    connect: async () => { throw new RemoteMcpHostError("TRELIO_CODEX_AUTH_REQUIRED", "PRIVATE_AUTH"); },
+  }), prepare: async ({ input }) => input });
+  const options = { clientInfo, recordDiagnostic: (name, _args, code) => observations.push([name, code]) };
+  await handler(frame("initialize"), options);
+  await handler(frame("tools/list"), options);
+  for (const params of [{ name: "get_task" }, { name: "get_task" }, { name: "trelio_connect" },
+    { name: "get_task", arguments: [] }, { name: "missing_tool" }]) {
+    assert.equal((await handler(frame("tools/call", params), options)).result.isError, true);
+  }
+  assert.deepEqual(observations, [["get_task", "ROUTED"], ["get_task", "MCP_TOOL_ERROR"],
+    ["trelio_connect", "TRELIO_CODEX_AUTH_REQUIRED"], ["get_task", "TRELIO_CODEX_INPUT_INVALID"],
+    ["missing_tool", "TRELIO_CODEX_TOOL_UNAVAILABLE"]]);
+  assert.deepEqual(dispatched, ["get_task", "get_task"]);
+  assert.doesNotMatch(JSON.stringify(observations), /PRIVATE/);
+});
+
+
+test("native Codex calls record one outcome through the real reporter, including pre-dispatch refusals", async () => {
+  const { createAgentDiagnosticReporter } = await import("../host-runtime/scripts/trelio-agent-diagnostics.mjs");
+  const batches = [], dispatched = [];
+  const reporter = createAgentDiagnosticReporter({ origin: "https://fixture.invalid", journal: null, delayMs: 60000,
+    send: async (_origin, samples) => { batches.push(...structuredClone(samples)); } });
+  const native = { content: [], structuredContent: { code: "ACCESS_DENIED", message: "PRIVATE_NATIVE" }, isError: true };
+  const handler = createCodexMcpHandler({ connect: () => ({
+    listTools: async () => ["get_task", "search", "get_task_review_context"].map(name => ({ name })),
+    call: async (name) => { dispatched.push(name); return name === "search" ? native : { content: [] }; },
+  }), prepare: async ({ input, toolName }) => {
+    if (toolName.endsWith("get_task_review_context")) throw new TrelioApiError(403, "PRIVATE_ERROR", null, "ACCESS_DENIED");
+    return input;
+  } });
+  const options = { clientInfo, recordDiagnostic: reporter.record };
+  try {
+    await handler(frame("initialize"), options); await handler(frame("tools/list"), options);
+    const results = await Promise.all(["get_task", "search", "get_task_review_context"].map(name => handler(frame("tools/call", {
+      name, arguments: { companySlug: "PRIVATE_SCOPE" }, _meta: meta("gpt-6.1-sol", "high"),
+    }), options)));
+    assert.equal(results[1].result, native);
+    assert.deepEqual(dispatched.sort(), ["get_task", "search"]);
+    await reporter.flush();
+    assert.deepEqual(batches.map(sample => [sample.tool, sample.outcomes[0].code, sample.outcomes[0].count]).sort(), [
+      ["get_task", "OK", 1], ["get_task_review_context", "ACCESS_DENIED", 1], ["search", "ACCESS_DENIED", 1],
+    ]);
+    assert.doesNotMatch(JSON.stringify(batches), /PRIVATE/);
+    // Telemetry failures are isolated from the native result and do not retry it.
+    assert.equal((await handler(frame("tools/call", { name: "search", arguments: {} }), {
+      clientInfo, recordDiagnostic: () => { throw Error("collector down"); },
+    })).result, native);
+    assert.equal(dispatched.length, 3);
+  } finally { reporter.close(); }
+});
+
+test("unknown native codes retain only UNKNOWN plus the existing collector gap", async () => {
+  const { createAgentDiagnosticReporter } = await import("../host-runtime/scripts/trelio-agent-diagnostics.mjs");
+  const batches = [];
+  const reporter = createAgentDiagnosticReporter({ origin: "https://fixture.invalid", journal: null, delayMs: 60000,
+    send: async (_origin, samples) => { batches.push(...structuredClone(samples)); } });
+  const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => [{ name: "search" }],
+    call: async () => ({ isError: true, structuredContent: { code: "PRIVATE_UNREVIEWED_CODE" }, content: [] }),
+  }), prepare: async ({ input }) => input });
+  const options = { clientInfo, recordDiagnostic: reporter.record };
+  try {
+    await handler(frame("initialize"), options);
+    await handler(frame("tools/call", { name: "search" }), options);
+    assert.equal(reporter.health().losses.unknown_code, 1);
+    await reporter.flush();
+    assert.equal(batches.find(sample => sample.tool === "search").outcomes[0].code, "UNKNOWN");
+    assert.doesNotMatch(JSON.stringify(batches), /PRIVATE/);
+  } finally { reporter.close(); }
 });

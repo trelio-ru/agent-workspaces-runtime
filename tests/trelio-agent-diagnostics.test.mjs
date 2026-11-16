@@ -612,3 +612,122 @@ test('timeout evidence freezes its original phase before synchronous abort liste
       [{kind:'delivery',stage:'observations_body',reason:'timeout',httpStatus:429,count:1}]);
   }finally{reporter.close();clearInterval(keep);}
 });
+
+
+test("journal acknowledgement between enumeration and open is not corruption", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-journal-ack-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const acknowledged = buildDiagnosticObservation("continue_trelio_workspace_action", { operation: "finish" });
+  const pending = buildDiagnosticObservation("continue_trelio_workspace_action", { operation: "open" });
+  for (const sample of [acknowledged, pending]) assert.equal(await writeDiagnosticJournal("fixture", sample, { directory }), "queued");
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, "open", async (target, ...args) => {
+    if (target === path.join(directory, acknowledged.id + ".json")) {
+      await acknowledgeDiagnosticJournal("fixture", [acknowledged], { directory });
+    }
+    return open(target, ...args);
+  });
+  const read = await readDiagnosticJournal("fixture", { directory });
+  assert.deepEqual(read.samples, [pending]);
+  assert.deepEqual(read.losses, {});
+  assert.equal(read.details, undefined);
+});
+
+test("journal I/O failures retain the immutable pending record for a later reader", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-journal-io-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const sample = buildDiagnosticObservation("continue_trelio_workspace_action", { operation: "finish" });
+  await writeDiagnosticJournal("fixture", sample, { directory });
+  const open = fs.open.bind(fs);
+  const mocked = t.mock.method(fs, "open", async (target, ...args) => {
+    if (target === path.join(directory, sample.id + ".json")) throw Object.assign(new Error("PRIVATE_IO"), { code: "EACCES" });
+    return open(target, ...args);
+  });
+  const read = await readDiagnosticJournal("fixture", { directory });
+  assert.equal(read.losses.journal_invalid, 1);
+  assert.equal(read.details[0].details[0].reason, "io_failed");
+  assert.doesNotMatch(JSON.stringify(read), /PRIVATE_IO/);
+  mocked.mock.restore();
+  assert.deepEqual((await readDiagnosticJournal("fixture", { directory })).samples, [sample]);
+});
+
+test("all registered local MCP tools have a closed diagnostic name, including wizard and App actions", async () => {
+  const catalog = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {
+    loadCatalogPermissions: async () => ({ companySkillManagement: true }),
+  });
+  for (const tool of catalog.result.tools) assert.equal(buildDiagnosticObservation(tool.name, {}).tool, tool.name);
+});
+
+test("new tool and validation dimensions negotiate down-level servers without losing paired counts", async () => {
+  for (const mode of ["new", "old", "legacy"]) {
+    let body;
+    const sample = buildDiagnosticObservation("get_task_review_context", {}, "MCP_ARGUMENT_SCHEMA_INVALID", { field: "proposalKinds" });
+    sample.outcomes.push({ code: "OK", field: "unknown", count: 4 });
+    const original = structuredClone(sample);
+    const transport = createObservationTransport({ readToken: async () => "synthetic", fetchImpl: async (url, options) => {
+      if (url.pathname.endsWith("capabilities")) return mode === "legacy" ? new Response(null, { status: 404 }) : Response.json({
+        schemaVersion: 2, errorCodes: contract.errorCodes,
+        ...(mode === "new" ? { tools: [...contract.localTools, ...contract.nativeTools, "runtime_hook"], validationFields: contract.validationFields } : {}),
+      });
+      body = JSON.parse(options.body); return new Response(null, { status: 204 });
+    } });
+    await transport("https://fixture.invalid", [sample]);
+    assert.deepEqual(sample, original, "projection must not mutate frozen retry input");
+    if (mode === "legacy") {
+      assert.equal(body.events[0].tool, "unknown"); assert.equal(body.events[0].count, 1);
+      assert.equal(body.events[0].id, sample.id); continue;
+    }
+    const delivered = body.samples[0];
+    assert.equal(delivered.id, sample.id);
+    assert.equal(delivered.tool, mode === "new" ? sample.tool : "unknown");
+    assert.equal(delivered.outcomes[0].field, mode === "new" ? "proposalKinds" : "unknown");
+    assert.deepEqual(delivered.outcomes.map(row => row.count), [1, 4]);
+    assert.deepEqual(delivered.losses, mode === "new" ? [] : [{ reason: "catalog_mismatch", count: 5 }]);
+    assert.ok(isDiagnosticObservation(delivered));
+  }
+});
+
+test("vanished writer artifacts do not abort the remaining journal scan", async t => {
+  for (const leaf of ["writer.lock", "00000000-0000-4000-8000-000000000000.tmp"]) {
+    await t.test(leaf, async sub => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-journal-publish-"));
+      sub.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const sample = buildDiagnosticObservation("continue_trelio_workspace_action", { operation: "open" });
+      await writeDiagnosticJournal("fixture", sample, { directory });
+      const target = path.join(directory, leaf);
+      if (leaf.endsWith(".lock")) await fs.mkdir(target); else await fs.writeFile(target, "temporary");
+      const lstat = fs.lstat.bind(fs);
+      sub.mock.method(fs, "lstat", async (file, ...args) => {
+        if (file === target) await fs.rm(target, { recursive: true, force: true });
+        return lstat(file, ...args);
+      });
+      const read = await readDiagnosticJournal("fixture", { directory });
+      assert.deepEqual(read.samples, [sample]);
+      assert.deepEqual(read.losses, {});
+    });
+  }
+});
+
+test("dimension downgrade merges colliding fields and rejects malformed capabilities before POST", async () => {
+  const sample = buildDiagnosticObservation("get_task_review_context", {}, "MCP_ARGUMENT_SCHEMA_INVALID", { field: "proposalKinds" });
+  sample.outcomes.push({ code: "MCP_ARGUMENT_SCHEMA_INVALID", field: "completionPlan", count: 2 });
+  const original = structuredClone(sample);
+  for (const dimensions of [{}, { tools: ["unknown", 1] }, { validationFields: "PRIVATE" }, { tools: [] }]) {
+    let posted;
+    const transport = createObservationTransport({ readToken: async () => "synthetic", fetchImpl: async (url, options) => {
+      if (url.pathname.endsWith("capabilities")) return Response.json({ schemaVersion: 2, errorCodes: contract.errorCodes, ...dimensions });
+      posted = JSON.parse(options.body); return new Response(null, { status: 204 });
+    } });
+    if (Object.keys(dimensions).length) {
+      await assert.rejects(transport("https://fixture.invalid", [sample]), error => error.reason === "delivery_rejected");
+      assert.equal(posted, undefined);
+    } else {
+      await transport("https://fixture.invalid", [sample]);
+      assert.equal(posted.samples[0].id, sample.id);
+      assert.deepEqual(posted.samples[0].outcomes, [{ code: "MCP_ARGUMENT_SCHEMA_INVALID", field: "unknown", count: 3 }]);
+      assert.deepEqual(posted.samples[0].losses, [{ reason: "catalog_mismatch", count: 3 }]);
+      assert.ok(isDiagnosticObservation(posted.samples[0]));
+    }
+    assert.deepEqual(sample, original);
+  }
+});

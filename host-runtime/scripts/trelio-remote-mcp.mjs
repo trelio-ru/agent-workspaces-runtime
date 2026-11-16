@@ -29,7 +29,7 @@ import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
 } from "./trelio-host-runtime-recovery.mjs";
-import { observationCode, readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
+import { readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
 import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import { spawn } from "node:child_process";
@@ -8288,9 +8288,27 @@ export const createCodexMcpHandler = ({
       throw error;
     }
   };
-  const handler = async (message, { signal, clientInfo, clientCapabilities, notifyClient, runtimeUpgradeRecovery } = {}) => {
+  const handler = async (message, { signal, clientInfo, clientCapabilities, notifyClient, runtimeUpgradeRecovery, recordDiagnostic } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === null || message.id === undefined) return null;
-    const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
+    let failureCode;
+    const reply = result => {
+      // This is the native Codex transport boundary, independently of the
+      // backend handler. Include local preparation refusals and login, exactly
+      // once at settlement. A verified upgrade handoff returns null and is
+      // observed by its delegate instead. Discovery/notifications are not calls.
+      // Native structured codes are projected through the closed catalogue by
+      // the reporter; never inspect human text, App payload or provider output.
+      if (message.method === "tools/call") {
+        let code = result?.isError === true ? failureCode ?? result.structuredContent?.code ?? "MCP_TOOL_ERROR" : "OK";
+        if (["MCP_LOCAL_CONTEXT_REQUIRED", "MCP_LOCAL_BRIDGE_REQUIRED"].includes(code)) code = "ROUTED";
+        // Let the reporter project unsupported codes AND retain its existing
+        // unknown_code loss signal. Pre-projecting to UNKNOWN here would hide
+        // that diagnostic gap; the reporter never serializes the raw value.
+        try { recordDiagnostic?.(message.params?.name, message.params?.arguments, code); }
+        catch { /* Optional diagnostics cannot replace the original response. */ }
+      }
+      return { jsonrpc: "2.0", id: message.id, result };
+    };
     try {
       if (message.method === "initialize") {
         if (clientInfo?.name !== "codex-mcp-client") throw new RemoteMcpHostError("TRELIO_CODEX_CLIENT_REQUIRED", "Откройте Trelio в Codex.");
@@ -8411,6 +8429,12 @@ export const createCodexMcpHandler = ({
       }, callSignal), { signal });
       return result === null ? null : reply(result);
     } catch (error) {
+      // Capture the typed host outcome before a recovery branch deliberately
+      // removes structuredContent to honor an upstream success-only schema.
+      // The reporter still projects this code through its closed vocabulary;
+      // neither text parsing nor a second observation is needed.
+      failureCode = error instanceof TrelioApiError ? bridgeHttpDiagnosticCode(error.statusCode, error.code)
+        : error instanceof TrelioCallTimeoutError ? "REMOTE_MCP_TRELIO_TIMEOUT" : safeErrorPayload(error).code;
       if (message.method === "tools/call" && error instanceof CodexCatalogUnavailableError) {
         const result = buildTextResult(codexCatalogFailureResult(error));
         // A previously advertised upstream tool may have a success-only
