@@ -125,9 +125,14 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       try { publishAuth(); } catch { authFailure(); }
     }
   }
+  const windowDiagnostic = event => {
+    if (config.fixtureOnly === true) send({ kind: 'window_fixture_event', event,
+      count: ownedWindows.size, stopping, inventoryReady: windowInventoryReady });
+  };
   chrome.windows.onCreated.addListener(window => {
     if (!['normal', 'popup'].includes(window.type)) return;
     if (windowInventoryReady) ownedWindows.add(window.id); else windowChanges.push({ id: window.id, removed: false });
+    windowDiagnostic('created');
   });
   chrome.tabs.onRemoved.addListener((_tabId, info) => { tabBudget.removed(_tabId); httpFailures.delete(_tabId); if (info.isWindowClosing) windowClosing(info.windowId, true); });
   // Numeric main-document evidence only: no request/response headers or body,
@@ -806,6 +811,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (op === 'ready') { manual = false; frame = undefined; return { state: 'saved_unverified' }; }
     if (op === 'close-windows' || (op === 'fixture-close-windows' && config.fixtureOnly)) {
       stopping = true;
+      windowDiagnostic('close_start');
       if (bootstrapState === 'pending') authReady?.reject(Error('lease_expired'));
       // The fixture command reproduces a human window-close without taking a
       // proactive host snapshot. It is unavailable to a production provider.
@@ -1014,7 +1020,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     return captureDefault(navigationStage);
   }
   function connect() {
-    if (Date.now() >= config.deadlineAt) return;
+    if (stopping || Date.now() >= config.deadlineAt) return;
     socket = new WebSocket(config.endpoint, ['trelio-visual-v1', config.token]);
     socket.onopen = () => {
       if (bootstrapState === 'ready') send({ kind: 'hello', version: 1 });
@@ -1059,13 +1065,24 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     };
     // Reconnect only the transport. Never resend a previous action or infer
     // its outcome from a missing reply after worker/browser disconnect.
-    socket.onclose = () => { frame = undefined; setTimeout(connect, 1000); };
+    socket.onclose = () => { frame = undefined; if (!stopping) setTimeout(connect, 1000); };
   }
   chrome.windows.onRemoved.addListener(windowId => {
     if (!windowInventoryReady) { windowChanges.push({ id: windowId, removed: true }); return; }
     ownedWindows.delete(windowId);
+    windowDiagnostic('removed');
     windowClosing(windowId);
-    if (!ownedWindows.size) send({ kind: 'windows_closed', manual });
+    if (!ownedWindows.size) {
+      // Freeze/send the final auth state above and the native window event
+      // before closing this transport. Keeping an MV3 WebSocket alive while
+      // the host waits for Chromium exit can retain a windowless browser.
+      // close() drains those queued frames; deliberate stop never reconnects
+      // or replays the closing command. Native process exit is still required
+      // before the host may save the profile.
+      stopping = true;
+      send({ kind: 'windows_closed', manual });
+      socket?.close();
+    }
   }, { windowTypes: ['normal', 'popup'] });
   // Connect before policy/window preparation so a native startup failure can
   // report one closed stage rather than disappear into a socket timeout.

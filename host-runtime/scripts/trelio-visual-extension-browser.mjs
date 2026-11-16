@@ -417,6 +417,13 @@ export class ExtensionVisualBrowser {
             this.#startupDiagnostic ||= visualStartupDiagnostic(stage, 'extension_bootstrap_failed');
             this.#terminal = 'bootstrap_failed'; return;
           }
+          if (value.kind === 'window_fixture_event' && this.policy.fixtureOnly
+            && ['created','removed','close_start'].includes(value.event)
+            && Number.isInteger(value.count) && value.count >= 0 && value.count <= 20
+            && typeof value.stopping === 'boolean' && typeof value.inventoryReady === 'boolean') {
+            this.testDiagnostics?.({ stage: 'window_event', event: value.event,
+              count: value.count, stopping: value.stopping, inventoryReady: value.inventoryReady }); return;
+          }
           if (value.kind === 'windows_closed') { this.testDiagnostics?.({ stage: 'windows_closed' }); this.#windowsClosed = true; if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
           if (value.kind === 'audio_fixture_stage' && this.policy.fixtureOnly === true
             && ['arm_sent', 'main_received', 'main_play_changed', 'main_armed', 'source_wait_expired'].includes(value.stage)) {

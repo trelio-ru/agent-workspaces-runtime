@@ -685,6 +685,10 @@ publication tooling также остаются вне этого публичн
   очищает overlay.
   Last-window handoff отправляется синхронно по tracked native window events:
   async windows query после закрытия может не получить callback при teardown.
+  Last-window auth/event frames drain before closing the owned MV3 WebSocket;
+  deliberate stop and an already queued reconnect never revive that transport.
+  A live connection can retain windowless Chromium. Keep actual native exit/close
+  before snapshot, the original deadline, explicit logout and no-replay fences.
   Legacy snapshots сохраняют native cookies, explicit empty overlay удаляет stale
   session rows. NetworkDataMigrated сохраняется вместе с native Cookie DB.
   Restore проверяет Base64 линейно до записи файлов: крупный IndexedDB entry
@@ -978,6 +982,12 @@ publication tooling также остаются вне этого публичн
   atomic rename and cleanup; Windows CreateProcess cwd is still MAX_PATH-bound
   independently of Git's long-file support. The compact 128-bit nonce also leaves
   room for native metadata probes. Composed native tests remain strict.
+  Pre-metadata partial opens may select at most four deterministic same-Run
+  siblings only with fresh native unsaved-Run evidence. Preserve all source
+  roots; compare complete Git index/HEAD and actual bytes, including ignored
+  work, against the freshly restored base before metadata publication. Refuse
+  links, divergent/staged/local work or new server work; never adopt or repair
+  old metadata. The SAME private admission, lock and deadline remain mandatory.
   Exact own-Run lifecycle reuses the human bridge private-session lifetime, not
   setup's 45s timer; caller/outer-hook cancellation and per-IPC/native lease checks remain.
   Native pre-handler 429/REQUEST_RATE_LIMITED has a closed distinct transport

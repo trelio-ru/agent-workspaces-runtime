@@ -19,7 +19,7 @@ const startWorker = (config, context) => {
 async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
-  const navigation=[];
+  const navigation=[], transport=[]; let windowCreated,windowRemoved,connections=0;
   let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
@@ -36,7 +36,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         async set(value) { policy.push(JSON.parse(JSON.stringify(value))); if (policyFailure === 'write') throw Error('PRIVATE_NOTIFICATION_ERROR'); },
         async get() { return { setting: policyFailure === 'read' ? 'ask' : 'block' }; },
       } },
-      debugger: { onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
+      debugger: { async detach() {}, onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
         async sendCommand(_source, method, args) {
           if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } }; }
           if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
@@ -68,7 +68,8 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
       webRequest: { onBeforeRequest: events, onHeadersReceived: events },
       cookies: { onChanged: events, async getAll() { return []; } },
       declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
-      windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
+      windows: { onCreated: {addListener(fn){windowCreated=fn;}}, onRemoved: {addListener(fn){windowRemoved=fn;}},
+        async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);} },
       tabs: { onCreated: events, onRemoved: events,
         async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
         async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
@@ -80,7 +81,11 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
           return { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false };
         },
       },
-    }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } },
+    }, WebSocket: class { static OPEN = 1;
+      constructor() { socket = this; this.readyState = 1; connections++; }
+      send(value) { const message=JSON.parse(value);sent.push(message);transport.push(message.kind); }
+      close(){this.readyState=3;transport.push('transport_closed');this.onclose?.();}
+    },
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, fixtureOnly,
@@ -93,7 +98,10 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     throw Error('synthetic_command_timeout');
   };
   if (!policyFailure) await dispatch('restore-session-auth', { cookies: [], replace: false });
-  return { dispatch, open, sent, answers, policy, raster, navigation, counts: () => ({ clicks, keys, keyUps, reads }),
+  return { dispatch, open, sent, answers, policy, raster, navigation, transport,
+    addWindow:id=>windowCreated({id,type:'normal'}), removeWindow:id=>windowRemoved(id),
+    disconnect:()=>socket.close(), connections:()=>connections,
+    counts: () => ({ clicks, keys, keyUps, reads }),
     set type(value) { nextType = value; }, set failAnswer(value) { answerFails = value; }, set chain(value) { nextDialog = value; },
     humanClose() { nativeEvent({ tabId: 1 }, 'Page.javascriptDialogClosed', {}); release?.({}); },
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
@@ -670,7 +678,7 @@ test('private auth observes logout but freezes before last-window cleanup and ne
     windows: { onCreated: { addListener(fn) { windowCreated = fn; } }, onRemoved: { addListener(fn) { windowRemoved = fn; } }, async getAll() { assert.ok(windows.length, 'no async window API after final profile close'); return windows; } },
     tabs: { onCreated: events, onRemoved: { addListener(fn) { tabRemoved = fn; } }, async query() { return [{ id: 1, url: 'about:blank' }]; }, async update() { return { id: 1, status: 'complete' }; } },
     cookies: { onChanged: { addListener(fn) { cookieChanged = fn; } }, async getAll() { return live; }, async set() { throw Error('unexpected_restore'); } },
-  }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
+  }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } close() { this.readyState = 3; this.onclose?.(); } } };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', manual: true, endpoint: 'ws://127.0.0.1/', token: 'synthetic', deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen();
@@ -692,13 +700,18 @@ test('private auth observes logout but freezes before last-window cleanup and ne
   live = []; cookieChanged({ removed: true, cause: 'explicit', cookie });
   assert.deepEqual((await dispatch('snapshot-session-auth')).cookies, [], 'an auth popup keeps the user session live after its normal window closes');
   live = [cookie]; cookieChanged({ removed: false, cause: 'explicit', cookie });
-  tabRemoved(2, { isWindowClosing: true, windowId: 2 });
-  live = []; cookieChanged({ removed: true, cause: 'explicit', cookie });
-  windows = []; windowRemoved(2); await tick();
-  assert.equal((await dispatch('snapshot-session-auth')).cookies.length, 1, 'browser profile-end cleanup cannot erase a completed manual login');
   const screenshot = await dispatch('screenshot');
   assert.equal(screenshot.reason, 'manual_control_active');
   assert.equal(JSON.stringify(screenshot).includes('SYNTHETIC_PRIVATE_AUTH'), false);
+  tabRemoved(2, { isWindowClosing: true, windowId: 2 });
+  live = []; cookieChanged({ removed: true, cause: 'explicit', cookie });
+  windows = []; windowRemoved(2); await tick();
+  // The final private payload must be delivered before the transport closes;
+  // a stopped browser cannot accept a new snapshot command as evidence.
+  const finalAuth = sent.filter(message => message.kind === 'session_auth').at(-1);
+  assert.equal(finalAuth.cookies.length, 1, 'browser profile-end cleanup cannot erase a completed manual login');
+  assert.equal(sent.at(-1).kind, 'windows_closed');
+  assert.equal(socket.readyState, 3);
 });
 
 test('lease expiry during private cookie restore cannot open a late provider window', async () => {
@@ -725,4 +738,27 @@ test('lease expiry during private cookie restore cannot open a late provider win
   assert.equal(sent.some(message => message.kind === 'hello'), false);
   assert.equal(sent.some(message => message.kind === 'bootstrap_failed' && message.stage === 'auth'), true);
   assert.equal(JSON.stringify(sent).includes('SYNTHETIC_PRIVATE'), false);
+});
+
+
+for(const manual of [true,false])test(`last native window drains auth and stops transport without reconnect: manual=${manual}`,async()=>{
+  const worker=await dialogWorker({manual});
+  worker.addWindow(2);worker.removeWindow(2);
+  assert.equal(worker.transport.includes('transport_closed'),false,'another native window still exists');
+  const before=worker.transport.length;
+  worker.removeWindow(1);
+  assert.deepEqual(worker.transport.slice(before),['session_auth','windows_closed','transport_closed']);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(worker.connections(),1,'intentional shutdown never revives the extension transport');
+  assert.deepEqual(worker.counts(),{clicks:0,keys:0,keyUps:0,reads:0},'shutdown never repeats provider input');
+});
+
+test('ordinary transport reconnect stays available, but its queued timer cannot revive a stopped browser',async()=>{
+  const ordinary=await dialogWorker();ordinary.disconnect();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(ordinary.connections(),2,'normal network reconnection is unchanged');
+  ordinary.removeWindow(1);
+  const stopped=await dialogWorker();stopped.disconnect();stopped.removeWindow(1);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(stopped.connections(),1,'already scheduled reconnect is fenced at dispatch');
 });

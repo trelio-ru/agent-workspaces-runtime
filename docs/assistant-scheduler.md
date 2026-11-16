@@ -3207,8 +3207,26 @@ setting is created, and a failed/unknown Git command is never replayed.
 
 After an older cancelled open left a positively empty root, common open may
 select its deterministic sibling for the exact admitted Run under the
-existing Workspace lock. The previous root, other Runs and unverified or
-nonempty directories are not adopted, overwritten or removed.
+existing Workspace lock. If an older opener stopped after writing base/context
+but before its private metadata, the SAME process-only admission may traverse
+at most four deterministic siblings, never enumerate unrelated roots. A fresh
+native exact Run must still be running/expired with no draft, candidate,
+checkpoint, blocker or handoff. Only ordinary workspace/context directories
+qualify; unexpected root entries or links refuse before reconstruction.
+
+The ordinary bundle/object reader independently restores the native base into
+the fresh sibling. Before related-context work and again before final native
+admission/metadata publication, every preserved writable tree must match that
+base: exact HEAD, complete staged index and all actual filesystem bytes,
+including ignored/untracked files and empty directories. Git clean bits cannot
+hide assume-unchanged/skip-worktree edits. Git metadata must be an ordinary
+directory without links/special entries; its bounded read shares the same
+original deadline and disables optional index writes/fsmonitor/replacement refs.
+Changed, incomplete or uncertain source refuses while preserving all its bytes.
+The previous roots, other Runs and unknown work are never adopted, overwritten,
+removed or assigned fabricated metadata. Only the newly created failed sibling
+uses its ordinary owned cleanup. This is technical materialization, not business
+completion, a new pass or permission to replay any external action.
 
 ### Encrypted Run and accepted material completion
 

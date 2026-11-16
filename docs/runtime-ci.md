@@ -172,6 +172,20 @@ Full Windows also executes the real Workspace recovery/cleanup fixtures from
 `trelio-workspace.test.mjs`: isolated retention with live siblings, protected
 local changes, retention-only source discovery, persistent checkout reuse and
 repeat recovery opens. Path-parser tests alone do not cover native deletion.
+Pre-metadata recovery composes the actual encrypted own-Run/related-history
+opener with an empty original and a preserved partial sibling. Server work and
+local edits refuse without overwriting their source. The real-Git negative
+suite also covers staged-only, ignored, assume-unchanged/skip-worktree, divergent
+history, metadata, special roots/junctions and cancellation; each case compares
+every source byte and Git metadata before/after the refused read.
+
+Last-window shutdown tests materialize the real extension worker and assert
+auth -> windows_closed -> transport-close order for manual and ordinary exits.
+Nonfinal windows retain transport; ordinary network reconnect stays available,
+but an already queued timer cannot revive a deliberate stop. The existing native
+manual close/ready/logout/crash fixture still requires actual browser exit and
+exact snapshot counts on every OS, with no extra time, input replay or relaxed
+logout assertion.
 
 ## Exact tag verification
 

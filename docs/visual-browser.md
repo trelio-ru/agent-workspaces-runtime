@@ -584,6 +584,20 @@ Top-frame anchor routing не доказывает отсутствие акти
 post-creation защитой. Сбой удаления блокирует дальнейшее content observation.
 Окна/вкладки обычного браузера пользователя находятся в другом профиле.
 
+При закрытии последнего tracked окна extension сначала замораживает и отправляет
+финальный private auth snapshot и `windows_closed`, затем штатно закрывает свой
+WebSocket. Его `close()` сохраняет порядок уже поставленных в очередь frames.
+Живое MV3-соединение может удерживать Chromium после исчезновения окон, пока host
+ждёт native exit. Осознанная остановка запрещает reconnect, включая timer,
+запланированный прежним network disconnect; обычный разрыв при живых окнах
+сохраняет прежнее переподключение без повторения команды. Закрытие socket само
+по себе не подтверждает остановку или сохранение: host по-прежнему ждёт настоящий
+native exit/close под исходным deadline до snapshot/disposal. Explicit logout,
+manual gate и crash retention не меняются.
+Fixture-only диагностика различает закрытые created/removed/close_start,
+bounded число окон и boolean stopping/inventoryReady. Она не выдаёт window IDs,
+URLs, cookies или native prose и не добавляет наблюдение/input/retry.
+
 `close`, lease expiry и worker signals закрывают все normal/popup окна своего
 профиля. При сбое graceful stop exact-child watchdog завершает только собственный
 процесс; crash не выдаётся за успешное сохранение. User browser process/PID из

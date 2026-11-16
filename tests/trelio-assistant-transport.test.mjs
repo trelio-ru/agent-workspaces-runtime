@@ -3326,16 +3326,65 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     const writerPlan={prepared:true,scope:plan.scope,encryptedLifecycle:descriptor,localAction:{schemaVersion:1,operation:'open',
       parameters:{...runIdentity,runtimeSessionId:f.runtime.state.runtimeSessionId}}};
     stage('open');
-    const opened=await common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
+    const open=()=>common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
+    let opened=await open();
     let writable=path.join(assistantTaskStorageDirectory(common.resolveWorkspaceBridgeConfigDirectory(),{
       origin:f.identity.origin,assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
       companyId:f.pass.companyId,taskId:f.pass.taskId}),'workspaces',descriptor.workspaceId,'workspace');
+    if(!named){
+      // Reproduce an old opener stopped after base/context materialization but
+      // before metadata publication. Keep its complete real Git/files intact,
+      // and the empty original root, exactly as the failed native lifecycle.
+      const {workspaceRecoveryDirectory}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+      const original=path.dirname(writable),partial=workspaceRecoveryDirectory(original,descriptor.workspaceId,runId);
+      await fs.rename(original,partial);await fs.mkdir(original);
+      await fs.rm(path.join(partial,'.trelio-run.json'));
+      const before=await common.fingerprintWorkspaceInspection(path.join(partial,'workspace'));
+      const nextRoot=workspaceRecoveryDirectory(partial,descriptor.workspaceId,runId);
+      // Native work is a hard boundary, even if the failed local opener left
+      // only pristine bytes. Each refusal must precede a claim or new root.
+      for(const field of ['draftHead','candidateHead','blockerJson','handoffJson']){
+        const previous=nativeRun[field],beforeClaims=claims;
+        nativeRun[field]=field.endsWith('Head')?head:{state:'synthetic'};
+        try{await assert.rejects(open);assert.equal(claims,beforeClaims);
+          await assert.rejects(fs.lstat(nextRoot),{code:'ENOENT'});
+        }finally{if(previous===undefined)delete nativeRun[field];else nativeRun[field]=previous;}
+      }
+      // A real unsaved edit survives the failed reconstruction unchanged. The
+      // fresh sibling may be removed only by its own failed-open cleanup.
+      await fs.writeFile(path.join(partial,'workspace','result.md'),'UNSAVED_LOCAL_WORK');
+      await assert.rejects(open);
+      assert.equal(await fs.readFile(path.join(partial,'workspace','result.md'),'utf8'),'UNSAVED_LOCAL_WORK');
+      await assert.rejects(fs.lstat(nextRoot),{code:'ENOENT'});
+      await fs.writeFile(path.join(partial,'workspace','result.md'),'SELECTED_ACCEPTED_FILE');
+      // Change the preserved source only after the first pristine comparison,
+      // while the real related archive is downloading. Final publication must
+      // recheck the source, not reuse an earlier clean result.
+      const ordinaryFetch=globalThis.fetch;let changedLate=false;
+      globalThis.fetch=async(url,options)=>{
+        const response=await ordinaryFetch(url,options);
+        if(new URL(url).pathname.endsWith('/context/related/'+relatedId+'/encrypted-bundle')){
+          changedLate=true;await fs.writeFile(path.join(partial,'workspace','result.md'),'LATE_LOCAL_WORK');
+        }
+        return response;
+      };
+      try{await assert.rejects(open);assert.equal(changedLate,true);
+        assert.equal(await fs.readFile(path.join(partial,'workspace','result.md'),'utf8'),'LATE_LOCAL_WORK');
+        await assert.rejects(fs.lstat(nextRoot),{code:'ENOENT'});
+      }finally{globalThis.fetch=ordinaryFetch;await fs.writeFile(path.join(partial,'workspace','result.md'),'SELECTED_ACCEPTED_FILE');}
+      const beforeClaims=claims;
+      opened=await open();writable=path.join(workspaceRecoveryDirectory(partial,descriptor.workspaceId,runId),'workspace');
+      assert.equal(await common.fingerprintWorkspaceInspection(path.join(partial,'workspace')),before,'partial source bytes remain untouched');
+      assert.equal((await fs.readdir(original)).length,0,'empty original stays untouched');
+      assert.equal(await fs.stat(path.join(partial,'.trelio-run.json')).then(()=>true,()=>false),false,'no fabricated ownership metadata');
+      assert.equal(claims,beforeClaims+1,'one new explicit open, no claim replay');
+    }
     assert.equal(await fs.readFile(path.join(writable,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');
     assert.equal(await fs.readFile(path.join(path.dirname(writable),'context','agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
     assert.equal(opened.operation,'open');
-    assert.equal(relatedReads,1,'one original related GET, never a transport retry');
+    assert.equal(relatedReads,named?1:3,'one original related GET per explicit open, never a transport retry');
     assert.equal(relatedOrdinaryBudgets,0,'related local Git must not inherit the ordinary transport minute');
     const relatedDirectory=path.join(path.dirname(writable),'context','related',relatedId);
     assert.equal(await fs.readFile(path.join(relatedDirectory,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');

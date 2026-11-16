@@ -7806,11 +7806,11 @@ const inferWorkspaceObjectContentType = (filePath) => {
     || "application/octet-stream";
 };
 
-const hashFile = async (filePath) => {
+const hashFile = async (filePath, signal) => {
   const hash = crypto.createHash("sha256");
   let sizeBytes = 0;
 
-  for await (const chunk of createReadStream(filePath)) {
+  for await (const chunk of createReadStream(filePath, { signal })) {
     sizeBytes += chunk.byteLength;
     hash.update(chunk);
   }
@@ -13887,6 +13887,59 @@ export const retainedAssistantFinishDraftHead = async (metadata, candidateHead) 
   return draftHead;
 };
 
+/** Preservation-only recovery of a pre-metadata open, never adoption. Native
+ * base bytes are reconstructed independently by the ordinary bundle/object
+ * engine. Compare real files (including ignored files), HEAD and complete index,
+ * not Git's cached clean bit. Retain every source byte and its Git history even
+ * on success. A staged edit, hidden flag, divergent HEAD, extra file, symlink or
+ * newly published metadata refuses; no cleanup/metadata repair is authorised.
+ */
+export const assertPristineIncompleteWorkspaceRoots = async (roots, freshWorkspace, baseHead, signal) => {
+  if (!roots.length) return;
+  const env = { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "false" };
+  const index = (directory) => runGit(["ls-files", "--stage", "-z"], { cwd: directory, env, signal });
+  const expectedIndex = (await index(freshWorkspace)).stdout;
+  const expectedBytes = await fingerprintWorkspaceInspection(freshWorkspace, { signal });
+  for (const root of roots) {
+    signal?.throwIfAborted();
+    const rootStat = await fs.lstat(root);
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
+      || entries.some(entry => !["workspace", "context"].includes(entry.name)
+        || !entry.isDirectory() || entry.isSymbolicLink())) {
+      throw new Error("Незавершённая локальная копия изменилась до восстановления.");
+    }
+    const directory = path.join(root, "workspace");
+    const gitStat = await fs.lstat(path.join(directory, ".git"));
+    if (!gitStat.isDirectory() || gitStat.isSymbolicLink()) {
+      throw new Error("Незавершённая локальная копия не содержит безопасный Git.");
+    }
+    // The pre-metadata tree has no trusted ownership record. Refuse links and
+    // special nodes anywhere in its Git metadata before Git could follow them.
+    // This read-only walk shares the original open clock and never repairs ACLs.
+    let gitEntries = 0;
+    const verifyGitEntries = async (current) => {
+      signal?.throwIfAborted();
+      for (const entry of await fs.readdir(current, { withFileTypes: true })) {
+        if (++gitEntries > 100_000) throw new Error("Незавершённый Git превышает предел проверки.");
+        const item = path.join(current, entry.name), stat = await fs.lstat(item);
+        if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+          throw new Error("Незавершённый Git содержит неподдерживаемый тип файла.");
+        }
+        if (stat.isDirectory()) await verifyGitEntries(item);
+      }
+    };
+    await verifyGitEntries(path.join(directory, ".git"));
+    const head = (await runGit(["rev-parse", "HEAD"], { cwd: directory, env, signal })).stdout.trim();
+    if (head !== baseHead || (await index(directory)).stdout !== expectedIndex
+      || await fingerprintWorkspaceInspection(directory, { signal }) !== expectedBytes) {
+      throw new Error("Незавершённая локальная копия содержит несохранённые изменения.");
+    }
+  }
+  signal?.throwIfAborted();
+};
+
 const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssistantFinish, localMaterializationSignal, assertAssistantMaterializationCurrent) => {
   const token = await requireToken(origin);
   let compatibility = await ensureBridgeCompatibility(origin, token);
@@ -14023,30 +14076,61 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     loadRunState,
     loadRunSnapshot,
   });
+  const incompleteRoots = [];
   let directoryPreflight;
   try {
-    // An old cancelled assistant opener may have created only an empty root.
-    // Do not delete or adopt it. Before claim, admit a single fresh sibling
-    // only for the exact server-returned own Run. Nonempty/unknown directories,
-    // existing sibling data and ordinary CLI users keep the usual preflight.
+    // A cancelled old opener can leave base/context bytes without publishing
+    // its private metadata. Never adopt/delete these directories or infer
+    // ownership from their name. Only an exact admitted, unsaved own Run may
+    // open a fresh deterministic sibling; below, every preserved writable tree
+    // must match the freshly materialized native base byte-for-byte before the
+    // new metadata can become usable. Unknown/dirty sources remain hard errors.
     if (localMaterializationSignal && requestedRunId && rootDirectoryExists && options.dir
       && currentWorkspaceExecutionProfile()?.kind === "digital_assistant"
-      && runOverview?.workspace?.id === workspaceId && !await readOptionalRunMetadata(rootDirectory)
-      && (await fs.readdir(rootDirectory)).length === 0) {
+      && runOverview?.workspace?.id === workspaceId && !await readOptionalRunMetadata(rootDirectory)) {
       const originalRun = await loadRunSnapshot(requestedRunId);
       if (originalRun?.run?.id === requestedRunId && originalRun.run.workspaceId === workspaceId
         && ["running", "expired"].includes(originalRun.run.status)
-        && !originalRun.run.candidateHead && !originalRun.run.draftHead) {
-        const sibling = workspaceRecoveryDirectory(rootDirectory, workspaceId, requestedRunId);
-        // Exact nonrecursive mkdir below still protects against a late creator.
-        const siblingPreflight = await preflight(sibling, true);
-        if (siblingPreflight.existingMetadata && siblingPreflight.existingMetadata.runId !== requestedRunId) {
-          throw new Error("Отдельный корень уже принадлежит другому Run.");
+        && GIT_OBJECT_PATTERN.test(originalRun.run.baseHead)
+        && !expiredRunHasServerWork(originalRun)) {
+        for (let depth = 0; depth < 4; depth++) {
+          localMaterializationSignal.throwIfAborted();
+          const rootStat = await fs.lstat(rootDirectory);
+          if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+            throw new Error("Незавершённый локальный root не является безопасным каталогом.");
+          }
+          const entries = await fs.readdir(rootDirectory, { withFileTypes: true });
+          if (entries.some(entry => !["workspace", "context"].includes(entry.name)
+            || !entry.isDirectory() || entry.isSymbolicLink())
+            || (entries.length && !entries.some(entry => entry.name === "workspace"))) {
+            throw new Error("Незавершённый локальный root содержит неподтверждённые файлы.");
+          }
+          if (entries.length) incompleteRoots.push(rootDirectory);
+          const sibling = workspaceRecoveryDirectory(rootDirectory, workspaceId, requestedRunId);
+          let stat;
+          try { stat = await fs.lstat(sibling); }
+          catch (error) { if (error.code !== "ENOENT") throw error; }
+          if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) {
+            throw new Error("Отдельный корень не является безопасным каталогом.");
+          }
+          const siblingMetadata = stat ? await readOptionalRunMetadata(sibling) : null;
+          if (!stat || siblingMetadata) {
+            const siblingPreflight = await preflight(sibling, true);
+            if (siblingPreflight.existingMetadata?.runId
+              && siblingPreflight.existingMetadata.runId !== requestedRunId) {
+              throw new Error("Отдельный корень уже принадлежит другому Run.");
+            }
+            directoryPreflight = siblingPreflight;
+            rootDirectory = sibling;
+            rootDirectoryExists = directoryPreflight.rootDirectoryExists;
+            parallelOpen = true;
+            break;
+          }
+          // Only a derived sibling in this SAME parent is considered. A fixed
+          // bound prevents a disk census or unbounded chain of abandoned roots.
+          rootDirectory = sibling;
         }
-        directoryPreflight = siblingPreflight;
-        rootDirectory = sibling;
-        rootDirectoryExists = directoryPreflight.rootDirectoryExists;
-        parallelOpen = true;
+        if (!directoryPreflight) throw new Error("Превышен предел незавершённых локальных копий.");
       }
     }
     directoryPreflight ??= await preflight(rootDirectory);
@@ -14439,6 +14523,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     };
     localMaterializationSignal?.throwIfAborted();
     await assertAssistantMaterializationCurrent?.(agentRun);
+    await assertPristineIncompleteWorkspaceRoots(incompleteRoots, workspaceDirectory, agentRun.baseHead, localMaterializationSignal);
     await writeRunMetadata(metadataPath, refreshedMetadata);
     const contexts = await materializeRunContexts({
       origin: workspaceOrigin,
@@ -14465,6 +14550,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       runId,
     );
     localMaterializationSignal?.throwIfAborted();
+    await assertPristineIncompleteWorkspaceRoots(incompleteRoots, workspaceDirectory, agentRun.baseHead, localMaterializationSignal);
     await assertAssistantMaterializationCurrent?.(agentRun);
     await writeRunMetadata(metadataPath, {
       ...refreshedMetadata,
@@ -14544,6 +14630,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       workspaceDirectory,
     });
 
+    await assertPristineIncompleteWorkspaceRoots(incompleteRoots, workspaceDirectory, agentRun.baseHead, localMaterializationSignal);
     const contextHeads = agentRun.contextHeadsJson || {};
     const contexts = await materializeRunContexts({
       origin: workspaceOrigin,
@@ -14600,6 +14687,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     localMaterializationSignal?.throwIfAborted();
     // A long local history restore is not authority. Native independently
     // checks the exact own Run/pass and current lease before local publication.
+    await assertPristineIncompleteWorkspaceRoots(incompleteRoots, workspaceDirectory, agentRun.baseHead, localMaterializationSignal);
     await assertAssistantMaterializationCurrent?.(agentRun);
     await writeRunMetadata(metadataPath, metadata);
     await registerOpenedRoot();
@@ -14611,6 +14699,11 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     // root удаляется exact каталог; в legacy-container удаляются только три
     // новых пути persistent-layout, а старые UUID-каталоги не затрагиваются.
     if (ownsRootDirectory) {
+      // Related contexts may already be read-only when a late source/native
+      // guard refuses publication. Use the common no-follow context disposer
+      // only inside this newly created root; never chmod/delete a preserved
+      // partial source or mask a failed cleanup as a usable checkout.
+      await removeBridgeOwnedContextEntry(path.join(rootDirectory, "context"));
       await fs.rm(rootDirectory, { recursive: true, force: true });
       ownsRootDirectory = false;
     } else if (directoryPreflight.legacyContainer) {
@@ -14747,9 +14840,10 @@ const removePreviousWorkspaceInspection = async (rootDirectory, workspaceId) => 
 
 /** Hash actual bytes, not Git's cached stat/index: unchanged mtimes, ignored
  * files and assume-unchanged flags must not make an edited inspection reusable. */
-export const fingerprintWorkspaceInspection = async (directory) => {
+export const fingerprintWorkspaceInspection = async (directory, { signal } = {}) => {
   const digest = crypto.createHash("sha256");
   const walk = async (relative = "") => {
+    signal?.throwIfAborted();
     const entries = await fs.readdir(path.join(directory, relative), { withFileTypes: true });
     entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const entry of entries) {
@@ -14760,7 +14854,7 @@ export const fingerprintWorkspaceInspection = async (directory) => {
       if (stat.isSymbolicLink()) throw new Error("Inspection contains a symbolic link.");
       if (stat.isDirectory()) { digest.update(`directory\0${item}\0`); await walk(item); }
       else if (stat.isFile()) {
-        const file = await hashFile(absolute);
+        const file = await hashFile(absolute, signal);
         digest.update(`file\0${item}\0${file.sizeBytes}\0${file.sha256}\0`);
       } else throw new Error("Inspection contains an unsupported file type.");
     }
@@ -14768,6 +14862,7 @@ export const fingerprintWorkspaceInspection = async (directory) => {
   const root = await fs.lstat(directory);
   if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("Inspection root is not a regular directory.");
   await walk();
+  signal?.throwIfAborted();
   return digest.digest("hex");
 };
 

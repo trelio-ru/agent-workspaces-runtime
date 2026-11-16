@@ -98,6 +98,7 @@ import {
   WINDOWS_PRIVATE_ACL_SCRIPT,
   assertEncryptedCandidateSafe,
   assertMaterializedWorkspaceFileTypes,
+  assertPristineIncompleteWorkspaceRoots,
   applyAgentRulesHandshake,
   buildAgentWorkspaceRuntimeAgentsMarkdown,
   buildCompanyE2eeAgentSecretWrite,
@@ -12557,4 +12558,79 @@ test('assistant publication preflight reads only one exact official public ref a
   await assert.rejects(readAssistantPluginPublishedRef({profile:'assistantHooks',version:'0.1.0',sourceTag:true,readGit:()=>assert.fail('invalid source tag profile')}));
   assert.equal(await readAssistantPluginPublishedRef({profile:'assistantHooks',version:'0.1.0',readGit:async args=>{
     assert.equal(args.at(-1),'refs/tags/hooks-v0.1.0');return {stdout:`${'b'.repeat(40)}\trefs/tags/hooks-v0.1.0\n`,stderr:''};}}),true);
+});
+
+
+// This boundary deliberately reads real Git + filesystem state. Git's clean
+// bit is insufficient: ignored files, staged-only edits and assume-unchanged
+// work must never be abandoned by a new pre-metadata recovery checkout.
+test("incomplete Workspace recovery preserves pristine bytes and refuses hidden or divergent work", async () => {
+  const { cp, rename } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-partial-open-"));
+  const fresh = path.join(root, "fresh");
+  await mkdir(fresh);
+  try {
+    await runGit(fresh, ["init", "--initial-branch=main"]);
+    await runGit(fresh, ["config", "user.name", "Fixture"]);
+    await runGit(fresh, ["config", "user.email", "fixture@example.invalid"]);
+    await writeFile(path.join(fresh, "result.md"), "original\n");
+    await writeFile(path.join(fresh, ".gitignore"), "ignored.txt\n");
+    await runGit(fresh, ["add", "--all"]);
+    await runGit(fresh, ["commit", "-m", "Base"]);
+    const head = (await runGit(fresh, ["rev-parse", "HEAD"])).stdout.trim();
+    const mutations = {
+      pristine: async () => {},
+      edited: d => writeFile(path.join(d, "result.md"), "local edit\n"),
+      untracked: d => writeFile(path.join(d, "extra.md"), "local work\n"),
+      ignored: d => writeFile(path.join(d, "ignored.txt"), "local work\n"),
+      empty_directory: d => mkdir(path.join(d, "unsaved")),
+      deleted: d => rm(path.join(d, "result.md")),
+      staged_only: async d => {
+        await writeFile(path.join(d, "result.md"), "staged edit\n");
+        await runGit(d, ["add", "result.md"]);
+        await writeFile(path.join(d, "result.md"), "original\n");
+      },
+      assumed_unchanged: async d => {
+        await runGit(d, ["update-index", "--assume-unchanged", "result.md"]);
+        await writeFile(path.join(d, "result.md"), "hidden edit\n");
+      },
+      skip_worktree: async d => {
+        await runGit(d, ["update-index", "--skip-worktree", "result.md"]);
+        await writeFile(path.join(d, "result.md"), "hidden edit\n");
+      },
+      divergent_head: d => runGit(d, ["commit", "--allow-empty", "-m", "Local history"]),
+      metadata: d => writeFile(path.join(path.dirname(d), ".trelio-run.json"), "{}"),
+      unknown_root_file: d => writeFile(path.join(path.dirname(d), "notes.md"), "local work\n"),
+      missing_git: d => rm(path.join(d, ".git"), {recursive:true}),
+      git_file: async d => { await rename(path.join(d,".git"),path.join(root,"retained-git")); await writeFile(path.join(d,".git"),"gitdir: ../retained-git\n"); },
+      // Directory junctions need no symlink privilege on native Windows.
+      linked_git: async d => { await rm(path.join(d,".git"),{recursive:true}); await symlink(path.join(fresh,".git"),path.join(d,".git"),"junction"); },
+      linked_metadata: d => symlink(path.join(fresh,".git","objects"),path.join(d,".git","linked"),"junction"),
+      cancelled: async () => {},
+    };
+    // Hash every regular byte, including Git, and record links without following
+    // them. The refused operation must not even rewrite source Git metadata.
+    const capture = async directory => {
+      const rows=[];
+      const walk=async(relative="")=>{
+        for(const entry of (await readdir(path.join(directory,relative),{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name))){
+          const item=path.join(relative,entry.name),absolute=path.join(directory,item),info=await lstat(absolute);
+          if(info.isSymbolicLink())rows.push([item,"link"]);
+          else if(info.isDirectory()){rows.push([item,"dir"]);await walk(item);}
+          else rows.push([item,createHash("sha256").update(await readFile(absolute)).digest("hex")]);
+        }
+      };await walk();return rows;
+    };
+    for (const [kind, mutate] of Object.entries(mutations)) {
+      const partial=path.join(root,kind),directory=path.join(partial,"workspace");
+      await mkdir(partial);await cp(fresh,directory,{recursive:true});await mkdir(path.join(partial,"context"));
+      await mutate(directory);
+      const before=await capture(partial),controller=new AbortController();
+      if(kind==="cancelled")controller.abort(new Error("synthetic cancellation"));
+      const check=()=>assertPristineIncompleteWorkspaceRoots([partial],fresh,head,controller.signal);
+      if(kind==="pristine")await check();else await assert.rejects(check,undefined,kind);
+      assert.deepEqual(await capture(partial),before,kind+" source preserved");
+      await rm(partial,{recursive:true,force:true});
+    }
+  } finally { await rm(root,{recursive:true,force:true}); }
 });
