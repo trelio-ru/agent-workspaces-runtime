@@ -615,6 +615,9 @@ publication tooling также остаются вне этого публичн
   After a positively acknowledged authentication action, only a closed native
   receiver transition may repeat the value-free probe under the same deadline.
   Input, policy errors and unclassified transport failures remain non-retryable.
+  The exact native BFCache receiver-close constant shares that readonly mapping;
+  an initial probe or unknown input never gains retry authority. Compose the
+  materialized extension with the real attempt controller and unchanged clock.
   Parallel detached fixture failure tails are execution-owner-specific; ready
   retains closed stop/snapshot/persist/cleanup cause without retry or raw errors.
   Post-sibling navigation keeps the original validated reason, elapsed time and
@@ -626,6 +629,8 @@ publication tooling также остаются вне этого публичн
   Fresh navigation's initial screenshot/read-text retains the SAME closed
   fixture phases and original response reason, independently for both owners.
   No extra observation, retry, weaker assertion or longer deadline.
+  Scroll keeps the SAME original closed transport/input/capture phases and
+  response before cleanup; no additional input, capture or larger deadline.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
   Native manual-close regression shares the auth fixture's owned HTTP abort
   helper: abort its failed producer before HTTP-close waits, close listener/sockets

@@ -778,8 +778,14 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         // Only fixed browser transport diagnostics are reduced to a private
         // read-only transition. Do not expose renderer errors, retry input
         // or weaken the document/navigation checks above.
+        // Chromium also closes an outstanding receiver when its document is
+        // moved into BFCache. This is the native messaging constant, not site
+        // prose. It has the SAME meaning only for this value-free probe; the
+        // attempt controller still requires a positively acknowledged input
+        // and keeps its original deadline and consumed-step fences.
         if (error?.message === 'Could not establish connection. Receiving end does not exist.'
           || error?.message === 'The message port closed before a response was received.'
+          || error?.message === 'The page keeping the extension port is moved into back/forward cache, so the message channel is closed.'
           || error?.message === 'A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received')
           return { state: 'error', reason: 'authentication_document_transition' };
         throw error;
@@ -851,9 +857,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // manual gate, origin and original lease must still be valid then.
       return requestPacing.submit(() => execute(action, input));
     }
+    navigationStage?.('input_frame');
     const f = frame;
     if (!f || f.frameId !== args.frameId || Date.now() - f.at > 60_000) throw Error('stale_frame');
+    navigationStage?.('input_tab');
     const tab = await chrome.tabs.get(f.tabId); allowedNavigation(tab.url);
+    navigationStage?.('input_credential_guard');
     await credentialGuard(tab.id);
     frame = undefined; // consume before any input, including an unknown outcome
     const integer = (v, low, high) => Number.isInteger(v) && v >= low && v <= high;
@@ -984,7 +993,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (routed) await chrome.tabs.update(f.tabId, { url: routed });
     } else if (op === 'scroll') {
       if (!integer(args.deltaY, -1600, 1600) || !integer(args.deltaX ?? 0, -1600, 1600)) throw Error('invalid_input');
+      navigationStage?.('input_mouse_move');
       await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      navigationStage?.('input_mouse_wheel');
       await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaY: args.deltaY, deltaX: args.deltaX ?? 0 });
     } else if (op === 'type-text') {
       if (typeof args.text !== 'string' || !args.text.length || args.text.length > 4000) throw Error('invalid_input');
@@ -998,8 +1009,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       });
       await command(f.tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: spec[0], key: spec[1], code: spec[2], modifiers: spec[3] || 0 });
     } else throw Error('invalid_input');
+    navigationStage?.('input_settle');
     await pause(500);
-    return captureDefault();
+    return captureDefault(navigationStage);
   }
   function connect() {
     if (Date.now() >= config.deadlineAt) return;
@@ -1019,7 +1031,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // Fresh host navigation requests its first frame as screenshot/read-text.
       // Use the same private request correlation and closed phases for that
       // initial observation, without another read, input or readiness retry.
-      const navigationStage = config.fixtureOnly === true && ['navigate', 'screenshot', 'read-text'].includes(message.operation)
+      // Scroll has one native input followed by one ordinary observation. Its
+      // SAME pending-command witness distinguishes an input ACK stall from
+      // a later capture stall without replaying either or changing its clock.
+      const navigationStage = config.fixtureOnly === true && ['navigate', 'screenshot', 'read-text', 'scroll'].includes(message.operation)
         ? phase => send({ kind: 'navigation_fixture_stage', id: message.id, phase }) : undefined;
       navigationStage?.('received');
       const run = async () => {

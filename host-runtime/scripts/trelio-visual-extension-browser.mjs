@@ -45,7 +45,8 @@ const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_K
 const fault = code => Object.assign(new Error(code), { code });
 const navigationFixturePhases = new Set(['received', 'dequeued', 'policy_queue', 'navigate_tab', 'navigate_attach',
   'navigate_update', 'navigate_settle', 'observe_tab', 'document_load', 'observe_attach', 'frame_tree',
-  'credential_guard', 'layout', 'compositor_capture', 'credential_recheck', 'text_read', 'frame_recheck', 'result_ready']);
+  'credential_guard', 'layout', 'compositor_capture', 'credential_recheck', 'text_read', 'frame_recheck', 'result_ready',
+  'input_frame', 'input_tab', 'input_credential_guard', 'input_mouse_move', 'input_mouse_wheel', 'input_settle']);
 export const visualNavigationFixturePhase = phase => navigationFixturePhases.has(phase) ? phase : undefined;
 
 /** Starting a Chromium profile is not a service-worker readiness signal. An
@@ -544,7 +545,7 @@ export class ExtensionVisualBrowser {
     // read-text after startup. Trace that SAME original read as well: limiting
     // this evidence to an explicit navigate hides a first-capture stall. The
     // callback stays fixture-only and never changes a request or its budget.
-    const reportNavigation = ['navigate', 'screenshot', 'read-text'].includes(operation) && this.testDiagnostics
+    const reportNavigation = ['navigate', 'screenshot', 'read-text', 'scroll'].includes(operation) && this.testDiagnostics
       ? outcome => this.testDiagnostics({ stage: 'navigation_transport', operation, outcome,
         ...(lastPhase && ['response_timeout', 'socket_closed', 'extension_error'].includes(outcome) ? { phase: lastPhase } : {}) })
       : undefined;
@@ -570,7 +571,7 @@ export class ExtensionVisualBrowser {
     if (!this.testDiagnostics || !['authentication-probe', 'authentication-fill', 'authentication-follow'].includes(operation)) return result;
     const report = value => this.testDiagnostics({ stage: 'authentication_transport', operation,
       state: ['challenge', 'unknown', 'success', 'submitted', 'error'].includes(value?.state) ? value.state : 'other',
-      reason: ['operation_failed', 'document_blocked', 'navigation_blocked', 'session_closed', 'lease_expired', 'manual_control_active'].includes(value?.reason) ? value.reason : 'other' });
+      reason: ['operation_failed', 'document_blocked', 'navigation_blocked', 'session_closed', 'lease_expired', 'manual_control_active', 'authentication_document_transition'].includes(value?.reason) ? value.reason : 'other' });
     return result.then(value => { report(value); return value; }, error => { report({ state: 'error', reason: 'operation_failed' }); throw error; });
   }
   async #nativeDiagnostics() {

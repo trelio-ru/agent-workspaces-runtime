@@ -37,7 +37,7 @@ function fixtureDiagnostic(value) {
     // URLs and request identity must never reach the persisted tail.
     if (!['sent', 'reply_received', 'extension_error', 'response_timeout', 'socket_unavailable', 'socket_closed'].includes(value.outcome)) return;
     record.outcome = value.outcome;
-    if (['navigate', 'screenshot', 'read-text'].includes(value.operation)) record.operation = value.operation;
+    if (['navigate', 'screenshot', 'read-text', 'scroll'].includes(value.operation)) record.operation = value.operation;
     const phase = visualNavigationFixturePhase(value.phase);
     if (phase) record.phase = phase;
   }

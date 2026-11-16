@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
 import { randomUUID } from 'node:crypto';
+import { authenticateVisualBrowser, normalizeVisualAuthentication, visualAuthenticationFingerprint } from '../host-runtime/scripts/trelio-visual-session.mjs';
 const startWorker = (config, context) => {
   context.chrome.contentSettings ??= { notifications: { async set() {}, async get() { return { setting: 'block' }; } } };
   return vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
@@ -15,7 +16,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[];
@@ -45,6 +46,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
             await screenshot?.();
             return { data: pngHeader.toString('base64') };
           }
+          if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseWheel') await mouseWheel?.();
           if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
             clicks++;
             if (immediateAck) { queueMicrotask(() => open()); return {}; }
@@ -105,23 +107,79 @@ test('the exact owned bootstrap page is reused only after policy/auth and commit
   assert.equal((await worker.dispatch('read-text')).state,'ready');
 });
 
-test('authentication maps only known native receiver transitions from a top-frame probe', async () => {
-  const expected = 'Could not establish connection. Receiving end does not exist.';
+const nativeReceiverTransitions = [
+  'Could not establish connection. Receiving end does not exist.',
+  'The message port closed before a response was received.',
+  'A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received',
+  'The page keeping the extension port is moved into back/forward cache, so the message channel is closed.',
+];
+for (const [index, expected] of nativeReceiverTransitions.entries()) test(`authentication maps only native receiver transition ${index} from a top-frame probe`, async () => {
   let nativeError = expected, reads = 0, writes = 0;
   const worker = await dialogWorker({ authenticationMessage(message, target) {
     assert.equal(target.frameId, 0);
     if (message.kind === 'authentication-probe') reads++;
-    else if (message.kind === 'authentication-fill') writes++;
+    else if (['authentication-fill', 'authentication-follow'].includes(message.kind)) writes++;
     else assert.fail(message.kind);
     throw Error(nativeError);
   } });
   assert.equal((await worker.dispatch('authentication-start')).state, 'connected');
   assert.deepEqual(await worker.dispatch('authentication-probe'), { state: 'error', reason: 'authentication_document_transition' });
   assert.deepEqual(await worker.dispatch('authentication-fill'), { state: 'error', reason: 'operation_failed' });
+  assert.deepEqual(await worker.dispatch('authentication-follow'), { state: 'error', reason: 'operation_failed' });
   nativeError = 'PRIVATE_PROVIDER_ERROR';
   assert.deepEqual(await worker.dispatch('authentication-probe'), { state: 'error', reason: 'operation_failed' });
-  assert.equal(reads, 2); assert.equal(writes, 1);
-  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_PROVIDER_ERROR|Receiving end/);
+  assert.equal(reads, 2); assert.equal(writes, 2);
+  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_PROVIDER_ERROR|Receiving end|back\/forward cache/);
+});
+
+// Compose the materialised extension with the actual attempt controller. A
+// worker-only mapping test cannot prove that the closed receiver result waits
+// under the original clock, preserves the durable fence and never fills twice.
+for (const mode of ['after_ack', 'initial', 'input_unknown', 'persistent', 'foreign_error']) test(`native BFCache receiver handling preserves the authentication attempt: ${mode}`, async () => {
+  const origin = 'https://example.test';
+  const definition = normalizeVisualAuthentication({ steps: [{ id: 'password', origin,
+    challenge: '#login-form', fields: { password: '#password' }, submit: '#submit' }],
+    success: [{ origin, selector: '#account' }] }, { origins: [origin] });
+  let saved = { schemaVersion: 1, fingerprint: visualAuthenticationFingerprint(definition),
+    login: '', password: 'SYNTHETIC_PASSWORD', totp: '', attempt: null };
+  const store = { async readCredentials() { return structuredClone(saved); },
+    async writeCredentials(value) { saved = structuredClone(value); } };
+  let fills = 0, probes = 0, transitions = 0, clock = 60_000;
+  const worker = await dialogWorker({ authenticationMessage(message, target) {
+    assert.equal(target.frameId, 0);
+    if (message.kind === 'authentication-fill') {
+      fills++;
+      assert.equal(saved.attempt.state, 'pending');
+      assert.deepEqual(saved.attempt.steps, ['password']);
+      if (mode === 'input_unknown') throw Error(nativeReceiverTransitions[3]);
+      return { state: 'submitted' };
+    }
+    assert.equal(message.kind, 'authentication-probe'); probes++;
+    if (!fills && mode !== 'initial') return { state: 'challenge', stepId: 'password', documentId: randomUUID() };
+    if (mode === 'foreign_error') throw Error('PRIVATE_LOOKALIKE: ' + nativeReceiverTransitions[3]);
+    if (mode !== 'after_ack' || transitions++ < 2) throw Error(nativeReceiverTransitions[3]);
+    return { state: 'success' };
+  } });
+  assert.equal((await worker.dispatch('authentication-start')).state, 'connected');
+  const run = () => authenticateVisualBrowser({ definition, store, active() {},
+    now: () => clock, wait: async ms => { clock += ms; }, send: worker.dispatch });
+  if (mode === 'after_ack') {
+    assert.equal((await run()).state, 'saved_unverified');
+    assert.equal(fills, 1); assert.equal(probes, 4); assert.equal(clock, 60_600);
+    assert.equal(saved.attempt.state, 'complete');
+  } else if (mode === 'persistent') {
+    assert.equal((await run()).reason, 'authentication_unknown');
+    assert.equal(clock, 90_000, 'the original thirty-second attempt deadline is not renewed');
+    assert.equal(saved.attempt.state, 'pending'); assert.equal(fills, 1);
+    await assert.rejects(run(), { code: 'authentication_unknown' });
+    assert.equal(fills, 1, 'restart cannot consume the input twice');
+  } else {
+    await assert.rejects(run(), { code: 'authentication_unknown' });
+    assert.equal(fills, mode === 'initial' ? 0 : 1);
+    assert.equal(probes, mode === 'foreign_error' ? 2 : 1);
+    assert.equal(saved.attempt?.state ?? null, mode === 'initial' ? null : 'pending');
+  }
+  assert.doesNotMatch(JSON.stringify(worker.sent), /SYNTHETIC_PASSWORD|PRIVATE_LOOKALIKE|back\/forward cache/);
 });
 
 test('a stalled native capture marks the original navigation before it can reply, only in synthetic fixtures', async () => {
@@ -175,6 +233,36 @@ for (const operation of ['screenshot', 'read-text']) test(`a fresh ${operation} 
   assert.equal(worker.counts().clicks, 0);
   const ordinary = await dialogWorker({ image });
   assert.equal((await ordinary.dispatch(operation)).state, 'ready');
+  assert.equal(ordinary.sent.some(value => value.kind === 'navigation_fixture_stage'), false);
+});
+
+for (const stalledPhase of ['input_mouse_wheel', 'compositor_capture']) test(`one scroll retains its original stalled ${stalledPhase} without input replay`, async () => {
+  let enter, resume, armed = false, captures = 0, wheels = 0;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const stalled = new Promise(resolve => { resume = resolve; });
+  const worker = await dialogWorker({ image: true, fixtureOnly: true,
+    mouseWheel() { wheels++; if (stalledPhase === 'input_mouse_wheel') { enter(); return stalled; } },
+    screenshot() { captures++; if (armed && stalledPhase === 'compositor_capture') { enter(); return stalled; } },
+  });
+  const first = await worker.dispatch('screenshot'); armed = true; worker.sent.length = 0;
+  const request = worker.dispatch('scroll', { frameId: first.frameId, x: 30, y: 40, deltaY: 100 });
+  try {
+    await entered;
+    const trace = worker.sent.filter(value => value.kind === 'navigation_fixture_stage');
+    assert.equal(trace.at(-1).phase, stalledPhase);
+    assert.equal(new Set(trace.map(value => value.id)).size, 1);
+    assert.ok(trace.every(value => Object.keys(value).sort().join() === 'id,kind,phase'));
+    assert.ok(trace.some(value => value.phase === 'input_mouse_wheel'));
+    assert.equal(worker.sent.some(value => value.kind === 'result'), false);
+    assert.equal(wheels, 1);
+    assert.equal(captures, stalledPhase === 'input_mouse_wheel' ? 1 : 2);
+  } finally { resume(); }
+  assert.equal((await request).state, 'ready');
+  assert.equal(wheels, 1); assert.equal(captures, 2);
+  assert.deepEqual(worker.navigation, ['https://example.test/']);
+  const ordinary = await dialogWorker({ image: true });
+  const frame = await ordinary.dispatch('screenshot');
+  assert.equal((await ordinary.dispatch('scroll', { frameId: frame.frameId, x: 30, y: 40, deltaY: 100 })).state, 'ready');
   assert.equal(ordinary.sent.some(value => value.kind === 'navigation_fixture_stage'), false);
 });
 

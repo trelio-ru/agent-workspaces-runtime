@@ -307,11 +307,21 @@ test('synthetic worker evidence retains closed failure categories and drops arbi
   scope.input={stage:'navigation_transport',outcome:'response_timeout',phase:'PRIVATE PHASE'};
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
   assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout'});
-  for (const operation of ['navigate', 'screenshot', 'read-text', 'PRIVATE_OPERATION']) {
+  for (const operation of ['navigate', 'screenshot', 'read-text', 'scroll', 'PRIVATE_OPERATION']) {
     scope.input={stage:'navigation_transport',operation,outcome:'response_timeout',phase:'compositor_capture',args:{token:'PRIVATE'}};
     vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
     assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout',
       ...(operation==='PRIVATE_OPERATION'?{}:{operation}),phase:'compositor_capture'});
+  }
+  // The SAME closed projector retains the last await of one scroll, never
+  // page/input/owner data. Unknown native strings remain omitted.
+  for (const phase of ['input_frame', 'input_tab', 'input_credential_guard',
+    'input_mouse_move', 'input_mouse_wheel', 'input_settle', 'PRIVATE_PHASE']) {
+    scope.input={stage:'navigation_transport',operation:'scroll',outcome:'response_timeout',phase,
+      args:{text:'PRIVATE INPUT'},message:'PRIVATE ERROR',requestId:'PRIVATE REQUEST'};
+    vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+    assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',operation:'scroll',
+      outcome:'response_timeout',...(phase==='PRIVATE_PHASE'?{}:{phase})});
   }
   const beforeInvalidOutcome=snapshots.length;
   scope.input={stage:'navigation_transport',outcome:'PRIVATE ERROR'};
@@ -582,7 +592,14 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
       reason: next.reason,
       diagnostic: next.diagnostic,
     }));
-    assert.equal((await call(1, 'scroll', { frameId: next.frameId, x: 300, y: 300, deltaY: 100 })).state, 'ready');
+    const scrollStarted = performance.now();
+    const scrolled = await call(1, 'scroll', { frameId: next.frameId, x: 300, y: 300, deltaY: 100 });
+    // The original scroll response must survive later shutdown diagnostics.
+    // Do not repeat input or capture to manufacture a successful observation.
+    assert.equal(scrolled.state, 'ready', 'the surviving browser scrolls once: ' + JSON.stringify({
+      elapsedMs: Math.round(performance.now() - scrollStarted), reason: scrolled.reason,
+      diagnostic: scrolled.diagnostic,
+    }));
   } catch (error) { failure = error; }
   finally {
     // Stop this fixture's listener even if a browser's queue never settles.

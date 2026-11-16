@@ -214,6 +214,10 @@ processes. This does not activate an app, change system policy or presentation,
 or replay navigation. The same selected tab, viewport, credential checks and
 deadline apply. Native two-owner tests retain their image, frame and closure
 assertions, including all three independent fresh lifecycles.
+The original scroll after sibling closure uses the SAME request trace. Closed
+phases distinguish frame/tab/credential checks, mouse move/wheel acknowledgement,
+settlement and capture. Preserve that original response before cleanup; never
+repeat the wheel or screenshot, extend its deadline or infer a fix from a trace.
 No Error text/path, owner descriptor, extra native observation, input/save retry
 or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
 Parallel fixture shutdown preserves the first body/close assertion if later
@@ -874,6 +878,14 @@ Pure tests проверяют recipe bounds, old fingerprint shape, одну п�
 отсутствие values в transition, lost response/loop/restart и pending fence.
 Native Chromium fixture проверяет полный password → choice → TOTP проход,
 а также foreign/path/popup/download/hidden/ambiguous/sensitive/CAPTCHA отказы.
+A top-frame readonly probe can lose its native receiver while the acknowledged
+form navigation moves the old document into Chromium's back/forward cache. Only
+the exact native messaging constant joins the existing document-transition
+result. The real attempt controller requires the preceding positive input ACK
+and retains its original deadline and consumed-step journal. Initial probes,
+unknown fill/follow and arbitrary lookalike errors remain hard refusals. A
+controlled real Chromium fixture reproduces this receiver closure without
+repeating input; composed tests enforce the unchanged clock and restart fence.
 Provider-specific селекторы, решения и личные данные в host не добавляются.
 
 Базовые public operations принимают только `{}`:

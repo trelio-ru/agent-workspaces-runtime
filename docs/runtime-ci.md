@@ -189,6 +189,13 @@ under the original attempt deadline. Initial probes, exact challenge
 revalidation, credential input and generic transport/policy errors remain
 fail-closed. Native fixtures still require positive success and exact submit
 counts; neither user-facing pixels nor native error prose cross this boundary.
+The exact Chromium BFCache receiver-close constant uses this same readonly
+mapping. Materialized-worker plus real-controller tests cover acknowledged
+transition, initial refusal, unknown input, the original thirty-second deadline
+and restart without replay. Native input/success assertions remain unchanged.
+The parallel native fixture retains the original post-sibling scroll response
+and closed pending phase, distinguishing wheel ACK from capture without extra
+input, observation or retries. Passing another lifecycle never erases a failure.
 
 The dialog fixture uses the unique rendered text hit target on a shifted
 layout, rather than a guessed offset. Both text and image still make one
