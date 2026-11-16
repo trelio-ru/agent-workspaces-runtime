@@ -3065,7 +3065,11 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       const stages=[...String(error.stdout??'').matchAll(/ASSISTANT_ENCRYPTED_INSPECTION_STAGE:(setup|inspect|open|recover|handoff|finish|material|done)\b/gu)];
       const boundary={stage:stages.at(-1)?.[1]??'not_observed',killed:error.killed===true,
         signal:['SIGTERM','SIGKILL'].includes(error.signal)?error.signal:null,
-        exitCode:Number.isSafeInteger(error.code)?error.code:null,gitStarts};
+        exitCode:Number.isSafeInteger(error.code)?error.code:null,gitStarts,
+        // A native Node abort never reaches the inner JavaScript catch. Keep
+        // only the known assertion bucket, not native stacks or private output.
+        nativeFailure:String(error.stderr??'').includes('Assertion failed: (env_->execution_async_id()) == (0)')
+          ?'node_async_scope_assertion':null};
       throw new Error((lines.slice(0,12).join('\n')||'Encrypted Workspace child failed')
         +'\nSynthetic child boundary: '+JSON.stringify(boundary)
         +'\nSynthetic Git diagnostic categories: '+([...categories].sort().join(',')||'none'));
@@ -3336,6 +3340,8 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     const relatedDirectory=path.join(path.dirname(writable),'context','related',relatedId);
     assert.equal(await fs.readFile(path.join(relatedDirectory,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');
     assert.equal(await fs.readFile(path.join(relatedDirectory,'related.md'),'utf8'),'RELATED_DELTA');
+    assert.equal((await fs.readdir(path.dirname(writable))).some(name=>name.startsWith('.ctx-')),false,
+      'the compact same-volume context stage is gone after publication');
     if(process.platform!=='win32')assert.equal((await fs.stat(path.join(relatedDirectory,'result.md'))).mode&0o222,0);
 
 
@@ -3367,6 +3373,8 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         assert.equal(chainSettled,true);assert.equal(originalClocks,1,'related restore never renews the original clock');
         await assert.rejects(fs.lstat(relatedDirectory),{code:'ENOENT'});
         assert.equal(await fs.readFile(path.join(backup,'related.md'),'utf8'),'RELATED_DELTA');
+        assert.equal((await fs.readdir(path.dirname(writable))).some(name=>name.startsWith('.ctx-')),false,
+          'cancelled restoration settles its own compact context stage');
       }finally{AbortSignal.timeout=savedTimeout;fs.rm=savedRm;await fs.rename(backup,relatedDirectory);}
       assert.equal(relatedOrdinaryBudgets,0,'existing-root open must use the same local deadline');
     }

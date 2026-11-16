@@ -3195,6 +3195,15 @@ another dependency. Reused roots repeat native Run/pass admission after related
 restoration, before publishing the completed metadata, as fresh roots do.
 The composed encrypted fixture includes an actual linked full/delta Git chain
 and cancellation after its verified import, before context publication.
+Related context staging is a unique short child of the verified Run root, with
+a compact 128-bit base64url nonce.
+Appending a staging UUID after the full related-Workspace path can exceed
+Windows CreateProcess's working-directory limit before Git even starts;
+some Git metadata probes also remain MAX_PATH-bound despite `core.longpaths`.
+The compact nonce leaves room for `objects/info/alternates`. The stage keeps the
+same-volume atomic rename, private root, original deadline and complete cleanup
+after success/cancellation. No existing files move early, no junction or system
+setting is created, and a failed/unknown Git command is never replayed.
 
 After an older cancelled open left a positively empty root, common open may
 select its deterministic sibling for the exact admitted Run under the

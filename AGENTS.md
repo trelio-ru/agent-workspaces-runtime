@@ -973,6 +973,11 @@ publication tooling также остаются вне этого публичн
   context-sync keeps its normal transport budget. Late cancellation cannot
   publish a staged context; final native admission also follows reused-root
   context restoration. No additional deadline, request or claim retry.
+  Context staging uses one short random child of that verified Run root, not
+  another UUID appended to the related-context path. Preserve same-volume
+  atomic rename and cleanup; Windows CreateProcess cwd is still MAX_PATH-bound
+  independently of Git's long-file support. The compact 128-bit nonce also leaves
+  room for native metadata probes. Composed native tests remain strict.
   Exact own-Run lifecycle reuses the human bridge private-session lifetime, not
   setup's 45s timer; caller/outer-hook cancellation and per-IPC/native lease checks remain.
   Native pre-handler 429/REQUEST_RATE_LIMITED has a closed distinct transport

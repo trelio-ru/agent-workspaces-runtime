@@ -12075,7 +12075,14 @@ const replaceMaterializedContext = async ({
   }
 
   const bundlePath = path.join(temporaryDirectory, `${specification.workspaceId}.bundle`);
-  const stagingDirectory = `${destination}.staging-${crypto.randomUUID()}`;
+  // Win32 process creation still limits cwd even when Git supports long file
+  // paths. Appending another UUID to context/related/<workspace UUID> can make
+  // the temporary checkout unlaunchable. Stage directly under this already
+  // verified Run root. A 128-bit base64url nonce keeps metadata probes shorter
+  // than a UUID spelling without reducing uniqueness. The final rename
+  // stays on the SAME volume. Never create an alias, move an existing context,
+  // retry Git or change system long-path settings after a failed launch.
+  const stagingDirectory = path.join(rootDirectory, `.ctx-${crypto.randomBytes(16).toString("base64url")}`);
   await ensureContextDirectoryChain(rootDirectory, specification.relativeDirectory);
 
   try {
