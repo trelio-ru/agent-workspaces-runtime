@@ -28,6 +28,66 @@ class AssistantMaterialTargetRefusal extends AssistantTransportError {
   constructor(){super('ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED');}
 }
 export const isAssistantMaterialTargetRefusal=error=>error instanceof AssistantMaterialTargetRefusal;
+// Only this pure parser can certify malformed browser-plan input. Key/ACL,
+// native grant and uncertain fill failures are never reclassified by code text.
+class AssistantBrowserPlanInputError extends AssistantTransportError {
+  constructor(){super('ASSISTANT_MCP_INPUT_INVALID');}
+}
+export const isAssistantBrowserPlanInputError=error=>error instanceof AssistantBrowserPlanInputError;
+
+/** Shared value-free normalization, before private profile/key/HTTP access.
+ * The encrypted signer calls the SAME parser again; no second argument grammar
+ * or model-owned normalized/signature form is introduced. Full URLs stay local. */
+export const normalizeAssistantPrivateBrowserArguments=async args=>{
+  const {normalizeSecretBrowserGrantTarget,normalizeSecretBrowserFieldSelector}=await import('./trelio-secret-browser.mjs');
+  const invalid=()=>{throw new AssistantBrowserPlanInputError();};
+  try{
+    if(!object(args)||args.schemaVersion!==1
+      ||Object.keys(args).some(key=>!['schemaVersion','operation','parameters','runIdentity','taskPass','runtimeSessionProof'].includes(key))
+      ||args.operation==='secret_browser_prepare'&&Object.hasOwn(args,'runIdentity'))throw new AssistantBrowserPlanInputError();
+    const parameters=args.parameters;
+    if(!object(parameters)||Object.hasOwn(parameters,'encryptedPlan'))invalid();
+    let selected,first;
+    if(args.operation==='secret_browser_prepare'){
+      if(Object.keys(parameters).sort().join(',')!=='runId,secretId,steps'||!UUID.test(parameters.runId??'')||!UUID.test(parameters.secretId??'')
+        ||!Array.isArray(parameters.steps)||parameters.steps.length<1||parameters.steps.length>10)invalid();
+      const seen=new Set();
+      const steps=parameters.steps.map((step,index)=>{
+        if(!object(step)||Object.keys(step).some(key=>!['targetUrl','frames','fields','activationSelector','submitSelector'].includes(key))
+          ||!Array.isArray(step.fields)||!step.fields.length||step.fields.length>50
+          ||index<parameters.steps.length-1&&step.submitSelector===undefined)invalid();
+        const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(step.targetUrl);first??=targetUrl;
+        const fields=step.fields.map(field=>{
+          if(!object(field)||!['accessibleName,fieldKey','fieldKey,selector'].includes(Object.keys(field).sort().join(','))
+            ||!/^[a-z][a-z0-9_]{0,63}$/u.test(field.fieldKey??'')||seen.has(field.fieldKey))invalid();
+          seen.add(field.fieldKey);
+          if(field.accessibleName!==undefined){
+            if(typeof field.accessibleName!=='string'||!field.accessibleName.trim()||field.accessibleName.length>120||/[\0-\x1f\x7f]/u.test(field.accessibleName))invalid();
+            return {fieldKey:field.fieldKey,accessibleName:field.accessibleName.trim().normalize('NFC')};
+          }
+          return {fieldKey:field.fieldKey,selector:normalizeSecretBrowserFieldSelector(field.selector)};
+        });
+        if(step.frames!==undefined&&(!Array.isArray(step.frames)||!step.frames.length||step.frames.length>4))invalid();
+        const frames=step.frames?.map(frame=>{
+          if(!object(frame)||Object.keys(frame).join(',')!=='targetUrl')invalid();
+          const {targetUrl:_,...binding}=normalizeSecretBrowserGrantTarget(frame.targetUrl);
+          if(binding.targetOrigin!==target.targetOrigin)invalid();return binding;
+        });
+        return {...target,fields,...(frames?{frames}:{}),...(step.activationSelector!==undefined?{activationSelector:normalizeSecretBrowserFieldSelector(step.activationSelector)}:{}),
+          ...(step.submitSelector!==undefined?{submitSelector:normalizeSecretBrowserFieldSelector(step.submitSelector)}:{})};
+      });
+      selected={schemaVersion:1,operation:args.operation,parameters:{secretId:parameters.secretId,runId:parameters.runId,steps}};
+    }else if(args.operation==='secret_browser_fill'){
+      if(Object.keys(parameters).sort().join(',')!=='grantId,targetUrl'||!UUID.test(parameters.grantId??'')
+        ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
+        ||Object.values(args.runIdentity).some(value=>!UUID.test(value??'')))invalid();
+      const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(parameters.targetUrl);first=targetUrl;
+      selected={schemaVersion:1,operation:args.operation,runIdentity:structuredClone(args.runIdentity),parameters:{grantId:parameters.grantId,...target}};
+    }else invalid();
+    return {selected,first};
+  }catch{throw new AssistantBrowserPlanInputError();}
+};
+
 // ONE closed projection for immediate exact reads and the background search
 // worker. These are existing common-reader refusals, not provider-selected
 // codes or a new recovery capability. Keeping the projector here prevents an
@@ -1565,48 +1625,19 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return {parameters:selected,...inspected};
     },
     async preparePrivateBrowserArguments(args,signal){
-      const {normalizeSecretBrowserGrantTarget,normalizeSecretBrowserFieldSelector}=await import('./trelio-secret-browser.mjs');
       const crypto=await import('./trelio-company-encryption.mjs');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
-      const current=()=>assertLivePass(signal),parameters=args.parameters;
-      if(!object(parameters)||Object.hasOwn(parameters,'encryptedPlan'))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-      let selected,first;
-      if(args.operation==='secret_browser_prepare'){
-        if(Object.keys(parameters).sort().join(',')!=='runId,secretId,steps'||!uuid.test(parameters.runId??'')||!uuid.test(parameters.secretId??'')
-          ||!Array.isArray(parameters.steps)||parameters.steps.length<1||parameters.steps.length>10)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-        const seen=new Set();
-        const steps=parameters.steps.map((step,index)=>{
-          if(!object(step)||Object.keys(step).some(key=>!['targetUrl','frames','fields','activationSelector','submitSelector'].includes(key))
-            ||!Array.isArray(step.fields)||!step.fields.length||step.fields.length>50
-            ||index<parameters.steps.length-1&&step.submitSelector===undefined)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-          const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(step.targetUrl);first??=targetUrl;
-          const fields=step.fields.map(field=>{
-            if(!object(field)||!['accessibleName,fieldKey','fieldKey,selector'].includes(Object.keys(field).sort().join(','))
-              ||!/^[a-z][a-z0-9_]{0,63}$/u.test(field.fieldKey??'')||seen.has(field.fieldKey))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-            seen.add(field.fieldKey);
-            if(field.accessibleName!==undefined){
-              if(typeof field.accessibleName!=='string'||!field.accessibleName.trim()||field.accessibleName.length>120||/[\0-\x1f\x7f]/u.test(field.accessibleName))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-              return {fieldKey:field.fieldKey,accessibleName:field.accessibleName.trim().normalize('NFC')};
-            }
-            return {fieldKey:field.fieldKey,selector:normalizeSecretBrowserFieldSelector(field.selector)};
-          });
-          if(step.frames!==undefined&&(!Array.isArray(step.frames)||!step.frames.length||step.frames.length>4))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-          const frames=step.frames?.map(frame=>{
-            if(!object(frame)||Object.keys(frame).join(',')!=='targetUrl')fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-            const {targetUrl:_,...binding}=normalizeSecretBrowserGrantTarget(frame.targetUrl);
-            if(binding.targetOrigin!==target.targetOrigin)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');return binding;
-          });
-          return {...target,fields,...(frames?{frames}:{}),...(step.activationSelector!==undefined?{activationSelector:normalizeSecretBrowserFieldSelector(step.activationSelector)}:{}),
-            ...(step.submitSelector!==undefined?{submitSelector:normalizeSecretBrowserFieldSelector(step.submitSelector)}:{})};
-        });
-        selected={schemaVersion:1,operation:args.operation,parameters:{secretId:parameters.secretId,runId:parameters.runId,steps}};
-      }else if(args.operation==='secret_browser_fill'){
-        if(Object.keys(parameters).sort().join(',')!=='grantId,targetUrl'||!uuid.test(parameters.grantId??'')
-          ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
-          ||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-        const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(parameters.targetUrl);first=targetUrl;
-        selected={schemaVersion:1,operation:args.operation,runIdentity:structuredClone(args.runIdentity),parameters:{grantId:parameters.grantId,...target}};
-      }else fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      const current=()=>assertLivePass(signal);
+      let normalized;
+      try{normalized=await normalizeAssistantPrivateBrowserArguments(args);}
+      catch(error){
+        // Only preparation has a model-authored plan and the new schema hint.
+        // Preserve the existing fill refusal: a returned one-use action must
+        // never be repaired or replayed through preparation's recovery path.
+        if(args.operation==='secret_browser_fill'&&isAssistantBrowserPlanInputError(error))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+        throw error;
+      }
+      const {selected,first}=normalized;
       await current();
       const device=await resolveAssistantCompanyEncryptionDevice({identity,companyId:pass.companyId,store,lockDirectory,
         assertCurrent:current,allowCreate:false,lock});

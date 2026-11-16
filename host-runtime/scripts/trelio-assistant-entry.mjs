@@ -11,7 +11,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,completeAssistantSourceIntakeDelivery,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode,assistantSecretListMetadataArguments } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode,assistantSecretListMetadataArguments,normalizeAssistantPrivateBrowserArguments,isAssistantBrowserPlanInputError } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
@@ -3156,6 +3156,18 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     withManagedContent=withProductionAssistantManagedContent,companyContextRead=false}={})=>{
   const inputCorrection=assistantSecretListInputCorrection(name,args);
   if(inputCorrection)return inputCorrection;
+  if(name==='continue_assistant_workspace_action'&&args?.operation==='secret_browser_prepare'){
+    try{await normalizeAssistantPrivateBrowserArguments(args);}
+    catch(error){
+      if(!isAssistantBrowserPlanInputError(error))throw error;
+      // Only locally rejected syntax reaches this branch. The suggested call
+      // reads static schema, never retries preparation or infers Secret access.
+      // Do not reflect caller URLs, IDs, holder, proof or malformed values.
+      return {isError:true,content:[{type:'text',text:'ASSISTANT_MCP_INPUT_INVALID: browser preparation arguments are invalid. No Secret read or grant preparation was dispatched. Read recovery.nextCall for the exact schema, inspect the empty form and submit a corrected plan. Argument correction needs no owner action, new login or new Run; native access checks still apply.'}],
+        structuredContent:{code:'ASSISTANT_MCP_INPUT_INVALID',inputIssue:'browser_preparation_arguments',
+          recovery:{readOnly:true,nextCall:{tool:'get_assistant_operation_contract',arguments:{operation:'secret_browser_prepare'}}}}};
+    }
+  }
   if(name==='continue_assistant_workspace_action'&&args.operation==='skill_run')
     assistantSkillGuidePart(args.parameters);
   // Constant native schema metadata contains no company content or grant.

@@ -3711,6 +3711,19 @@ body field or other Secret route can forward the device credential. Values
 remain in the protected browser/provider process. Its owned fallback profile is isolated
 by assistant/device/task; it never opens the ordinary human fallback profile.
 
+Before any private profile/key or HTTP access, browser preparation validates the
+model's complete plan using the SAME pure parser used by the encrypted signer.
+Malformed input returns `ASSISTANT_MCP_INPUT_INVALID` with a static read-only
+`get_assistant_operation_contract({operation:secret_browser_prepare})` next call.
+The native contract supplies nested `runId`, `secretId`, `steps`; root Run identity,
+holder and model-authored encrypted plans are forbidden. Missing selectors/steps
+cannot be guessed from an old observation, so the assistant inspects the empty
+form and supplies the corrected plan. Neither schema discovery nor input repair
+reads a Secret, creates a grant, asks for owner action, or retries preparation.
+Real native ACL/recipient/key refusals and uncertain fill retain their original
+identity and fences; they never enter syntax recovery. No caller values appear
+in the diagnostic. The full schema stays on demand, outside tools/list.
+
 Only value-free preflight and exact idempotent outcome reporting retain their
 existing bounded retries. In an encrypted task, preparation first normalizes
 the full URL locally through that SAME browser target parser. Only canonical

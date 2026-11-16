@@ -2038,9 +2038,19 @@ test('production content preflight refuses encrypted prose before the real MCP t
   }
   // URLs, Secret metadata and provider argv can also contain protected company
   // text. They must not reach native HTTP merely to receive its capability deny.
-  for(const operation of ['skill_run','secret_create','secret_browser_prepare','secret_browser_fill','secret_skill_prepare','secret_skill_run'])
+  for(const operation of ['skill_run','secret_create','secret_browser_fill','secret_skill_prepare','secret_skill_run'])
     await assert.rejects(client.callTool('continue_assistant_workspace_action',{schemaVersion:1,operation,parameters:{value:canary}}),
       {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+  // Preparation now rejects this malformed plan before opening a private
+  // profile. Its static schema hint must preserve the same no-content/no-HTTP
+  // guarantee; genuine encrypted requests below still use the original guard.
+  const invalidPlan=await client.callTool('continue_assistant_workspace_action',
+    {schemaVersion:1,operation:'secret_browser_prepare',parameters:{value:canary}});
+  assert.equal(invalidPlan.isError,true);
+  assert.equal(invalidPlan.structuredContent.code,'ASSISTANT_MCP_INPUT_INVALID');
+  assert.deepEqual(invalidPlan.structuredContent.recovery.nextCall,
+    {tool:'get_assistant_operation_contract',arguments:{operation:'secret_browser_prepare'}});
+  assert.equal(JSON.stringify(invalidPlan).includes(canary),false);
   assert.equal(remoteCalls,0);assert.equal(wire.join('').includes(canary),false);
   const retirement={operation:'retract',workspaceId:randomUUID(),runId:randomUUID(),expectedHead:'a'.repeat(40),
     errorKind:'incorrect_result',agentRecognizedOwnError:true};
@@ -2580,8 +2590,10 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     const env={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'AppData','Local'),
       TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_COMPANY_CONTEXT_FIXTURE:'1'};
     delete env.NODE_TEST_CONTEXT;
+    let childOrigin='task';
     try{
       for(const originKind of ['task','owner']){
+        childOrigin=originKind;
         const child=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted company source search',fileURLToPath(import.meta.url)],
           // This fixture now decrypts a full 4096-entity native snapshot, not
           // a one-field mock. Only its isolated crypto/child cleanup budget
@@ -2591,7 +2603,13 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
       }
     }catch(error){
       const lines=String(error.stdout??'').split('\n').filter(line=>/^\s*(?:error: [^|]|code: |at |stack:|TestContext\.|async )/u.test(line));
-      throw new Error(lines.slice(0,15).join('\n')||'Managed company source child failed');
+      // A killed child may leave no TAP assertion. Retain its closed process
+      // outcome instead of losing the distinction between timeout and failure;
+      // never print execFile's message/argv, private HOME or raw output.
+      const outcome={origin:childOrigin,killed:error.killed===true,
+        exitCode:Number.isInteger(error.code)?error.code:null,
+        signal:['SIGTERM','SIGKILL','SIGABRT','SIGSEGV'].includes(error.signal)?error.signal:null};
+      throw new Error(`Managed company source child failed ${JSON.stringify(outcome)}${lines.length?'\n'+lines.slice(0,15).join('\n'):''}`);
     }finally{await fs.rm(root,{recursive:true,force:true});}
     return;
   }
@@ -5351,6 +5369,82 @@ test('operation contract metadata strips host fields and refuses prose before HT
   assert.equal(calls,0);
   assert.deepEqual(await invoke({operation:'create_workspace',taskPass:{private:true},runtimeSessionProof:{private:true}}),{operation:'create_workspace'});
   assert.equal(calls,1);
+});
+
+test('browser preparation rejects malformed model plans before profile access and offers static schema only',async()=>{
+  const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {normalizeAssistantPrivateBrowserArguments}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const plan={schemaVersion:1,operation:'secret_browser_prepare',parameters:{runId:randomUUID(),secretId:randomUUID(),
+    steps:[{targetUrl:'https://example.test/PRIVATE_URL_CANARY',fields:[{fieldKey:'password',selector:'#password'}],submitSelector:'#submit'}]}};
+  const runIdentity={workspaceId:randomUUID(),runId:plan.parameters.runId};
+  const options={withProfile:()=>assert.fail('invalid input opened private profile'),
+    withManagedContent:()=>assert.fail('invalid input accessed content'),loadCommon:()=>assert.fail('invalid input accessed Run')};
+  for(const changed of [
+    {...plan,runIdentity,parameters:{holder:'company',secretId:plan.parameters.secretId}},
+    {...plan,runIdentity}, {...plan,parameters:{...plan.parameters,holder:'company'}},
+    {...plan,parameters:{...plan.parameters,steps:[]}},
+    {...plan,parameters:{...plan.parameters,steps:[{...plan.parameters.steps[0],fields:[]}]}},
+    {...plan,parameters:{...plan.parameters,steps:[{...plan.parameters.steps[0],fields:[{fieldKey:'password',selector:'#password',value:'PRIVATE_VALUE_CANARY'}]}]}},
+    {...plan,parameters:{...plan.parameters,steps:[{...plan.parameters.steps[0],frames:[{targetUrl:'https://foreign.test/frame'}]}]}},
+    {...plan,parameters:{...plan.parameters,encryptedPlan:{signature:'PRIVATE_SIGNATURE_CANARY'}}},
+    {...plan,extra:'PRIVATE_ROOT_CANARY'},
+  ]){
+    const before=structuredClone(changed);
+    const result=await withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args:changed},
+      ()=>assert.fail('invalid input dispatched preparation'),options);
+    assert.equal(result.isError,true);assert.equal(result.structuredContent.code,'ASSISTANT_MCP_INPUT_INVALID');
+    assert.deepEqual(result.structuredContent.recovery,{readOnly:true,nextCall:{tool:'get_assistant_operation_contract',arguments:{operation:'secret_browser_prepare'}}});
+    assert.doesNotMatch(JSON.stringify(result),/PRIVATE_|https:|signature|workspaceId/);
+    assert.deepEqual(changed,before);
+  }
+  const normalized=await normalizeAssistantPrivateBrowserArguments(plan);
+  assert.equal(normalized.selected.parameters.steps[0].targetOrigin,'https://example.test');
+  assert.equal(normalized.first,plan.parameters.steps[0].targetUrl);
+});
+
+test('production MCP can read browser schema after input refusal and retains actual encrypted/ACL failures without replay',async()=>{
+  const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture();f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:'encrypted'}];
+  const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  // Seed the ordinary protected synthetic device as production pairing does;
+  // the tested signer still refuses creating/replacing a missing device.
+  await resolveAssistantCompanyEncryptionDevice({identity:f.identity,companyId:f.pass.companyId,store:f.store,
+    lockDirectory:path.join(os.tmpdir(),'synthetic-browser-factory-key'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+  let profiles=0,reads=0,contracts=0,failure=null;
+  const proxy=await createProductionAssistantMcp({context:action=>action({identity:f.identity},{readActivePass:async()=>({kind:'task'})},f.store),
+    withProfile:action=>{profiles++;if(failure)throw failure;return action(f.profile);},
+    httpRequest:async input=>{
+      const m=input.payload,response=result=>({sessionId:'browser-prepare-factory',message:{jsonrpc:'2.0',id:m?.id,result}});
+      if(input.method==='DELETE'||m.method==='notifications/initialized')return response({});
+      if(m.method==='initialize')return response({protocolVersion:'2025-06-18'});
+      if(m.method==='tools/list')return response({tools:['continue_assistant_workspace_action','get_assistant_operation_contract']
+        .map(name=>({name,description:'Synthetic native contract',inputSchema:{type:'object'}}))});
+      assert.equal(m.method,'tools/call');
+      if(m.params.name==='get_assistant_operation_contract'){
+        contracts++;assert.deepEqual(m.params.arguments,{operation:'secret_browser_prepare'});
+        return response({content:[],structuredContent:{schemaVersion:1,operation:'secret_browser_prepare',executionTool:'continue_assistant_workspace_action'}});
+      }
+      reads++;assert.doesNotMatch(JSON.stringify(m),/PRIVATE_URL_CANARY/);
+      assert.equal(m.params.arguments.parameters.steps[0].targetOrigin,'https://example.test');
+      assert.equal(typeof m.params.arguments.parameters.encryptedPlan.signature,'string');
+      return response({isError:true,content:[{type:'text',text:'AGENT_SECRET_ACCESS_DENIED'}],structuredContent:{code:'AGENT_SECRET_ACCESS_DENIED'}});
+    }});
+  try{
+    const plan={schemaVersion:1,operation:'secret_browser_prepare',parameters:{runId:randomUUID(),secretId:randomUUID(),
+      steps:[{targetUrl:'https://example.test/PRIVATE_URL_CANARY',fields:[{fieldKey:'password',selector:'#password'}],submitSelector:'#submit'}]}};
+    const result=await proxy.callTool('continue_assistant_workspace_action',{...plan,runIdentity:{workspaceId:randomUUID(),runId:plan.parameters.runId},
+      parameters:{holder:'company',secretId:plan.parameters.secretId}});
+    assert.deepEqual([profiles,reads,contracts],[0,0,0]);
+    const next=result.structuredContent.recovery.nextCall;
+    assert.equal((await proxy.callTool(next.tool,next.arguments)).structuredContent.executionTool,'continue_assistant_workspace_action');
+    assert.deepEqual([profiles,reads,contracts],[0,0,1]);
+    const denied=await proxy.callTool('continue_assistant_workspace_action',plan);
+    assert.equal(denied.structuredContent.code,'AGENT_SECRET_ACCESS_DENIED');
+    assert.equal(denied.structuredContent.recovery,undefined);assert.equal(reads,1);
+    failure=new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    await assert.rejects(proxy.callTool('continue_assistant_workspace_action',plan),{code:failure.code});
+    assert.equal(reads,1,'actual crypto/native refusal never becomes a retry');
+  }finally{f.close();}
 });
 
 test('inventory scope refusals preserve closed error identity without exposing provider text',async()=>{

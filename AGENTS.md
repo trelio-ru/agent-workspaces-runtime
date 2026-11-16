@@ -1543,7 +1543,9 @@ Exact legacy template bytes для распознавания при мигра�
   crosses MCP. Browser preparation uses SAME URL parser, origin/hash-only native
   grant and managed target signature; full path/query stays local. Native
   context/consume retain genuine ABI/recipient/pass/Run checks. Unknown root or
-  step fields fail before HTTP. NEW encrypted private cards admit only native
+  step fields fail before HTTP. The SAME pure browser-plan parser rejects syntax
+  before private I/O and points only to the native on-demand preparation schema.
+  Real ACL/key/unknown-fill failures never become argument repair or replay. NEW encrypted private cards admit only native
   neutral metadata and sealed owner policy; task prose stays company ciphertext,
   values use SAME private writer/receipt. No company credential adoption/export.
   Sealed empty-card receipts
