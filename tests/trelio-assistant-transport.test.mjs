@@ -3528,6 +3528,8 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       workspaceId:descriptor.workspaceId,workspaceHead:selectedHead,acceptedRunId:runId,noChange:false,
       runtimeSessionProof:buildRuntimeSessionProof({state:f.runtime.state,toolName:'complete_assistant_pass'})};
     let completionCalls=0;
+    const downloadsBeforeMaterial=downloads;
+    const gitBeforeMaterial=await fs.readFile(process.env.GIT_TRACE2_EVENT);
     const completed=await common.withWorkspaceExecutionProfile(materialProfile,()=>withAssistantEncryptedMaterial({args:completion},async wire=>{
       completionCalls++;
       assert.doesNotMatch(JSON.stringify(wire),/Verified material result|SYNTHETIC_ENCRYPTED_DELIVERABLE|privateKey|WORK\.md/u);
@@ -3539,8 +3541,25 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         createPublicKey({key:Buffer.from(f.runtime.state.privateKeyPkcs8,'base64url'),format:'der',type:'pkcs8'}),Buffer.from(proof.signature,'base64url')),true);
       return {state:'confirmed'};
     },{withProfile:action=>action({...f,prepareWorkspaceMaterial:materialProfile.prepareWorkspaceMaterial})}));
-    assert.equal(completed.state,'confirmed');assert.equal(completionCalls,1);
-    const inspection=await common.withWorkspaceExecutionProfile(materialProfile,()=>common.inspectAcceptedWorkspace(f.identity.origin,{workspace:descriptor.workspaceId}));
+    if(named){
+      assert.equal(completed.isError,true);
+      assert.equal(completed.structuredContent.code,'ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED');
+      assert.deepEqual(completed.structuredContent.recovery,{readOnly:true,
+        nextCall:{tool:'prepare_assistant_workspace_read',arguments:{}}});
+      assert.equal(completionCalls,0,'named archive cannot dispatch task completion');
+      assert.equal(downloads,downloadsBeforeMaterial,'scope refuses before accepted bundle download');
+      assert.deepEqual(await fs.readFile(process.env.GIT_TRACE2_EVENT),gitBeforeMaterial,'scope refuses before Git materialization');
+      // Scope/recipient violations are still hard errors, never a suggestion
+      // to adopt another task or a canonical-Workspace recovery certificate.
+      mode='foreign';
+      await assert.rejects(common.withWorkspaceExecutionProfile(materialProfile,()=>withAssistantEncryptedMaterial({args:completion},
+        ()=>assert.fail('foreign completion dispatched'),{withProfile:action=>action({...f,prepareWorkspaceMaterial:materialProfile.prepareWorkspaceMaterial})})),
+        {code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+      mode='valid';
+    }else{assert.equal(completed.state,'confirmed');assert.equal(completionCalls,1);}
+    // A named archive remains independently readable; refusal of task evidence
+    // cannot delete, rewrite or prohibit the accepted related-context save.
+    const inspection=await common.withWorkspaceExecutionProfile(named?f.profile:materialProfile,()=>common.inspectAcceptedWorkspace(f.identity.origin,{workspace:descriptor.workspaceId}));
     await common.validateAcceptedAssistantWorkState({inspection,assistantId:f.identity.assistantId,workspaceHead:selectedHead,previousHead:selectedHead});
     await assert.rejects(common.validateAcceptedAssistantWorkState({inspection,assistantId:f.identity.assistantId,workspaceHead:selectedHead,previousHead:head}),
       'old accepted head without this assistant state cannot attest noChange');
@@ -5207,5 +5226,94 @@ test('inventory scope refusals preserve closed error identity without exposing p
     assert.equal(assistantCompanyContextReadRefusalCode(Object.assign(Error('PRIVATE_PROVIDER_TEXT'),{code})),
       'ASSISTANT_COMPANY_CONTEXT_'+code);
     assert.equal(assistantCompanyContextReadRefusalCode(Error('PRIVATE '+code)),null);
+  }
+});
+
+test('metadata-only Secret list corrects only a forbidden Run identity before managed content or native read',async()=>{
+  const {assistantSecretListInputCorrection,withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const sourceTaskId=randomUUID(),runIdentity={workspaceId:randomUUID(),runId:randomUUID()};
+  const metadata={schemaVersion:1,operation:'secret_list',parameters:{holder:'company',sourceTaskId,offset:3,limit:7}};
+  const args={...metadata,runIdentity,taskPass:{private:'PASS_CANARY'},runtimeSessionProof:{private:'PROOF_CANARY'}};
+  const options={withManagedContent:()=>assert.fail('invalid metadata input opened encryption'),
+    withProfile:()=>assert.fail('invalid metadata input opened a Run'),loadCommon:()=>assert.fail('invalid metadata input loaded the bridge')};
+  const response=await withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},
+    ()=>assert.fail('invalid input dispatched a Secret read'),options);
+  assert.equal(response.isError,true);
+  assert.equal(response.structuredContent.code,'ASSISTANT_MCP_INPUT_INVALID');
+  assert.deepEqual(response.structuredContent.recovery,{readOnly:true,nextCall:{tool:'continue_assistant_workspace_action',arguments:metadata}});
+  assert.match(response.content[0].text,/No secret read was dispatched/);
+  assert.match(response.content[0].text,/needs no owner action/);
+  assert.doesNotMatch(JSON.stringify(response),new RegExp([runIdentity.workspaceId,runIdentity.runId,'PASS_CANARY','PROOF_CANARY'].join('|')));
+  assert.deepEqual(args.parameters,metadata.parameters,'diagnostic must not mutate the pending input');
+  response.structuredContent.recovery.nextCall.arguments.parameters.limit=1;
+  assert.equal(args.parameters.limit,7,'the proposed read cannot alias caller state');
+  for(const changed of [
+    {...args,operation:'secret_browser_prepare'}, {...args,runIdentity:undefined},
+    {...args,runIdentity:{...runIdentity,unexpected:'PRIVATE_CANARY'}},
+    {...args,runIdentity:{...runIdentity,runId:'PRIVATE_CANARY'}},
+    {...args,encryptedContent:{private:'PRIVATE_CANARY'}}, {...args,extra:'PRIVATE_CANARY'},
+    {...args,parameters:{...metadata.parameters,query:'PRIVATE_CANARY'}},
+    {...args,parameters:{...metadata.parameters,sourceTaskId:'PRIVATE_CANARY'}},
+    {...args,parameters:{...metadata.parameters,holder:undefined}},
+    {...args,parameters:{...metadata.parameters,limit:51}},
+    {...args,parameters:{...metadata.parameters,offset:-1}},
+  ])assert.equal(assistantSecretListInputCorrection('continue_assistant_workspace_action',changed),null,
+    'unknown or multiply-invalid arguments must retain the ordinary refusal');
+  assert.equal(assistantSecretListInputCorrection('get_task',args),null);
+  const privateList=assistantSecretListInputCorrection('continue_assistant_workspace_action',{
+    schemaVersion:1,operation:'secret_list',parameters:{limit:9},runIdentity});
+  assert.deepEqual(privateList.structuredContent.recovery.nextCall.arguments.parameters,{limit:9});
+});
+
+test('production MCP Secret input correction preserves fresh dispatch and actual encrypted/native refusals',async()=>{
+  const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const identity={origin:'https://secret-input-factory.test',assistantId:randomUUID(),deviceId:randomUUID()},store=memoryStore();
+  await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{...identity,credential:`tda_${'f'.repeat(43)}`,expiresAt:1});
+  let managed=0,reads=0,refusal=null;const calls=[];
+  const proxy=await createProductionAssistantMcp({context:action=>action({identity},{readActivePass:async()=>({kind:'task'})},store),
+    withProfile:()=>assert.fail('structural private list cannot open company keys'),
+    withManagedContent:async(request,send)=>{
+      managed++;if(refusal)throw refusal;
+      return send(request.args);
+    },httpRequest:async input=>{
+      const m=input.payload,response=result=>({sessionId:'synthetic-secret-input',message:{jsonrpc:'2.0',id:m?.id,result}});
+      if(input.method==='DELETE'||m.method==='notifications/initialized')return response({});
+      if(m.method==='initialize')return response({protocolVersion:'2025-06-18'});
+      if(m.method==='tools/list')return response({tools:[{name:'continue_assistant_workspace_action',description:'Synthetic native continuation',inputSchema:{type:'object'}}]});
+      assert.equal(m.method,'tools/call');reads++;calls.push(m.params.arguments);
+      return response({isError:true,content:[{type:'text',text:'AGENT_SECRET_ACCESS_DENIED'}],structuredContent:{code:'AGENT_SECRET_ACCESS_DENIED'}});
+    }});
+  const metadata={schemaVersion:1,operation:'secret_list',parameters:{holder:'company',sourceTaskId:randomUUID()}};
+  const runIdentity={workspaceId:randomUUID(),runId:randomUUID()};
+  for(const selected of [metadata,{schemaVersion:1,operation:'secret_list',parameters:{limit:11}}]){
+    const before=[managed,reads],bad=await proxy.callTool('continue_assistant_workspace_action',{...selected,runIdentity});
+    assert.deepEqual([managed,reads],before,'argument failure never prepares content or dispatches the original read');
+    const next=bad.structuredContent.recovery.nextCall;
+    assert.deepEqual(next.arguments,selected);
+    const denied=await proxy.callTool(next.tool,next.arguments);
+    assert.equal(denied.structuredContent.code,'AGENT_SECRET_ACCESS_DENIED');
+    assert.equal(denied.structuredContent.recovery,undefined,'real native denial never becomes an argument correction');
+    assert.equal(reads,before[1]+1,'only the explicitly corrected call reads once');
+    assert.deepEqual(calls.at(-1),selected);
+    assert.equal(managed,before[0]+(selected.parameters.holder==='company'?1:0));
+  }
+  const before=reads;refusal=Object.assign(new Error('PRIVATE_FAILURE_CANARY'),{code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+  await assert.rejects(proxy.callTool('continue_assistant_workspace_action',metadata),error=>{
+    assert.equal(error.code,'ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    assert.equal(error.recovery,undefined);assert.doesNotMatch(error.message,/PRIVATE_FAILURE_CANARY/);return true;
+  });
+  assert.equal(reads,before,'actual encrypted refusal is not retried or rewritten');
+});
+
+test('material target correction cannot be forged by an upstream same-code refusal',async()=>{
+  const {withAssistantEncryptedMaterial}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture(),args={workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),noChange:false};
+  for(const error of [new AssistantTransportError('ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED'),
+    Object.assign(new Error('private upstream prose'),{code:'ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED'}),
+    new AssistantTransportError('ASSISTANT_WORKSPACE_BINDING_CHANGED')]){
+    await assert.rejects(withAssistantEncryptedMaterial({args},()=>assert.fail('upstream refusal dispatched completion'),{
+      withProfile:action=>action({...f,prepareWorkspaceMaterial:async()=>true}),
+      loadCommon:async()=>({inspectAcceptedWorkspace:async()=>{throw error;}}),
+    }),observed=>observed===error);
   }
 });

@@ -11,7 +11,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,completeAssistantSourceIntakeDelivery,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode,assistantSecretListMetadataArguments } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
@@ -20,7 +20,7 @@ import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindow
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
-import { assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
+import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
 import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from './trelio-skill-accounts.mjs';
 import { parseVisualSkillOutput, visualMcpResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
@@ -3127,6 +3127,25 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
   return {...snapshot,runIdentity,invocation};
 };
 
+/** A narrowly proven pre-dispatch INPUT refusal, not a replay decision.
+ * The generic live continuation schema has an optional Run identity, while
+ * metadata-only secret_list forbids it. Preserve that refusal but derive its
+ * corrected read mechanically from the SAME structural validator. Never infer
+ * this recovery from an error code or a provider response: an ACL/crypto/network
+ * failure must not become a claim that setup is unnecessary or a retry grant.
+ * No Run/proof/credential is reflected; the new read needs fresh native admission. */
+export const assistantSecretListInputCorrection=(name,args)=>{
+  if(name!=='continue_assistant_workspace_action'||!args||args.operation!=='secret_list')return null;
+  const {taskPass:_pass,runtimeSessionProof:_proof,runIdentity,...business}=args;
+  if(!runIdentity||typeof runIdentity!=='object'||Array.isArray(runIdentity)
+    ||Object.keys(runIdentity).sort().join(',')!=='runId,workspaceId'
+    ||Object.values(runIdentity).some(value=>typeof value!=='string'||!new RegExp(UUID,'u').test(value))
+    ||!assistantSecretListMetadataArguments(business))return null;
+  return {isError:true,content:[{type:'text',text:'ASSISTANT_MCP_INPUT_INVALID: secret_list is a metadata-only read and forbids runIdentity. No secret read was dispatched. Use recovery.nextCall with fresh host admission; it preserves the exact source task and paging. Correcting these arguments needs no owner action, login or new Run. Native access checks still apply.'}],
+    structuredContent:{code:'ASSISTANT_MCP_INPUT_INVALID',inputIssue:'run_identity_not_allowed',
+      recovery:{readOnly:true,nextCall:{tool:name,arguments:structuredClone(business)}}}};
+};
+
 /** Protect the SAME typed continuation BEFORE a remote MCP call can receive
  * summary, evidence, paths or questions. Keep the managed key/profile alive
  * only for this one bounded exchange; no plaintext or key-bearing closure
@@ -3135,6 +3154,8 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
 export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs'),
     withManagedContent=withProductionAssistantManagedContent,companyContextRead=false}={})=>{
+  const inputCorrection=assistantSecretListInputCorrection(name,args);
+  if(inputCorrection)return inputCorrection;
   if(name==='continue_assistant_workspace_action'&&args.operation==='skill_run')
     assistantSkillGuidePart(args.parameters);
   // Constant native schema metadata contains no company content or grant.
@@ -3304,14 +3325,9 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       ||typeof p.signature!=='string'||!/^[A-Za-z0-9_-]{86}$/u.test(p.signature)))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
   };
   if(name==='continue_assistant_workspace_action'&&args.operation==='secret_list'){
-    privateEnvelope();const p=args.parameters;
-    if(args.runIdentity!==undefined||!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).some(key=>!['holder','sourceTaskId','offset','limit'].includes(key))
-      ||p.holder!==undefined&&p.holder!=='company'
-      // The exact independently read task ID is structural metadata only.
-      // Native scope and card ACLs independently gate the returned snapshot.
-      ||p.sourceTaskId!==undefined&&(p.holder!=='company'||typeof p.sourceTaskId!=='string'||!new RegExp(UUID,'u').test(p.sourceTaskId))
-      ||p.offset!==undefined&&(!Number.isSafeInteger(p.offset)||p.offset<0)
-      ||p.limit!==undefined&&(!Number.isSafeInteger(p.limit)||p.limit<1||p.limit>50))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    privateEnvelope();
+    const {taskPass:_pass,runtimeSessionProof:_proof,...business}=args;
+    if(!assistantSecretListMetadataArguments(business))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
     return send(args);
   }
   if(name==='continue_assistant_workspace_action'&&args.operation==='skill_account_setup'){
@@ -3443,7 +3459,17 @@ export const withAssistantEncryptedMaterial = async ({args,signal},send,
     const basis=args.noChange?await client.readTaskMaterialBasis(locator,signal):null;
     if(args.noChange && (!basis || basis.workspaceId!==args.workspaceId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     const common=await loadCommon();
-    const inspection=await common.inspectAcceptedWorkspace(identity.origin,{workspace:args.workspaceId});
+    let inspection;
+    try{inspection=await common.inspectAcceptedWorkspace(identity.origin,{workspace:args.workspaceId});}
+    catch(error){
+      if(!isAssistantMaterialTargetRefusal(error))throw error;
+      // The host rejected this target before any completion dispatch. Offer
+      // only native read-only discovery of the task's canonical Workspace;
+      // saving useful task material remains an independent ordinary Run.
+      return {isError:true,content:[{type:'text',text:'Complete this pass from its canonical task Workspace. Read it, reconcile already accepted related archives, and save the task result before completing. Do not repeat earlier actions.'}],
+        structuredContent:{code:error.code,recovery:{readOnly:true,
+          nextCall:{tool:'prepare_assistant_workspace_read',arguments:{}}}}};
+    }
     await common.validateAcceptedAssistantWorkState({inspection,assistantId:identity.assistantId,workspaceHead:args.workspaceHead,
       previousHead:basis?.workspaceHead??null});
     const runtime=inspection.companyEncryption?.runtime;

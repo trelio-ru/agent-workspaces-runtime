@@ -1483,6 +1483,15 @@ Exact legacy template bytes для распознавания при мигра�
   and later clean accepted-head evidence remain mandatory. No failed write or
   unknown result qualifies. [Contract](docs/assistant-scheduler.md#interrupted-named-archive-finish).
 - Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
+  A completed ordinary post-archive turn may re-enter generic reconciliation
+  only after a changed verified hook/runtime fingerprint and fresh pending
+  native outcome. Preserve original save/start history and the existing bound;
+  restricted, unstarted and unknown turns cannot borrow this transition.
+  Encrypted completion checks native canonical-task scope before Git/bundle
+  materialization. A valid named archive offers canonical read-only discovery,
+  never completion replay or automatic task material. Metadata-only secret_list
+  similarly offers an exact argument correction only for a forbidden Run
+  selector; real ACL/encryption refusals remain unchanged. See the scheduler.
 - Encrypted own cancellation reuses SAME managed audit codec/store/collision equality; no human retry/local cleanup.
 - Own abandoned Workspace cancellation is a server-only dedicated MCP call with
   the live native schema. No local cancel/restore alias, cleanup, human flag or

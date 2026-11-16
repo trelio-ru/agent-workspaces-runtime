@@ -22,6 +22,12 @@ const ASSISTANT_MCP_RESULT_MAX_BYTES=512*1024;
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
 }
+// Only this local snapshot guard may offer a canonical-task correction. A
+// server/provider error bearing the same public code is not that evidence.
+class AssistantMaterialTargetRefusal extends AssistantTransportError {
+  constructor(){super('ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED');}
+}
+export const isAssistantMaterialTargetRefusal=error=>error instanceof AssistantMaterialTargetRefusal;
 // ONE closed projection for immediate exact reads and the background search
 // worker. These are existing common-reader refusals, not provider-selected
 // codes or a new recovery capability. Keeping the projector here prevents an
@@ -706,6 +712,19 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['request_assistant_profile_update
 export const supportsAssistantManagedContent=(name,args)=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name)
   ||name==='continue_assistant_workspace_action'&&(args?.operation==='skill_run'||args?.operation==='secret_skill_prepare'||args?.operation==='external_account_admit'
     ||args?.operation==='secret_list'&&args.parameters?.holder==='company');
+/** The same metadata-only shape is checked before BOTH ordinary structural
+ * forwarding and encrypted snapshot preparation. This does not read a card or
+ * authorize its source task: native ACL/pass/recipient checks still own that.
+ * In particular a Run identity is NOT an alternative source-task selector. */
+export const assistantSecretListMetadataArguments=value=>object(value)
+  &&value.schemaVersion===1&&value.operation==='secret_list'
+  &&Object.keys(value).every(key=>['schemaVersion','operation','parameters'].includes(key))
+  &&object(value.parameters)&&Object.keys(value.parameters).every(key=>['holder','sourceTaskId','offset','limit'].includes(key))
+  &&(value.parameters.holder===undefined||value.parameters.holder==='company')
+  &&(value.parameters.sourceTaskId===undefined||value.parameters.holder==='company'
+    &&typeof value.parameters.sourceTaskId==='string'&&UUID.test(value.parameters.sourceTaskId))
+  &&(value.parameters.offset===undefined||Number.isSafeInteger(value.parameters.offset)&&value.parameters.offset>=0)
+  &&(value.parameters.limit===undefined||Number.isSafeInteger(value.parameters.limit)&&value.parameters.limit>=1&&value.parameters.limit<=50);
 /** Local privacy/shape boundary, never native owner authority. This mirrors
  * only this closed value-free plan; the live native schema and decision still
  * revalidate all fields and the exact task/device before admission. */
@@ -800,11 +819,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   if(name==='request_assistant_action'&&business.operation==='create_external_account'&&!assistantExternalAccountPlan(business.fields)
     ||name==='continue_assistant_workspace_action'&&business.operation==='external_account_admit'&&!assistantExternalAccountAdmission(business.parameters))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   const secretMetadata=name==='continue_assistant_workspace_action'&&business.operation==='secret_list'&&business.parameters?.holder==='company';
-  if(secretMetadata&&(business.schemaVersion!==1||business.runIdentity!==undefined||Object.keys(business).some(key=>!['schemaVersion','operation','parameters'].includes(key))
-    ||Object.keys(business.parameters).some(key=>!['holder','sourceTaskId','offset','limit'].includes(key))
-    ||business.parameters.sourceTaskId!==undefined&&(typeof business.parameters.sourceTaskId!=='string'||!UUID.test(business.parameters.sourceTaskId))
-    ||business.parameters.offset!==undefined&&(!Number.isSafeInteger(business.parameters.offset)||business.parameters.offset<0)
-    ||business.parameters.limit!==undefined&&(!Number.isSafeInteger(business.parameters.limit)||business.parameters.limit<1||business.parameters.limit>50)))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+  if(secretMetadata&&!assistantSecretListMetadataArguments(business))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   const secretSkill=name==='continue_assistant_workspace_action'&&business.operation==='secret_skill_prepare';
   const skillArguments=name==='continue_assistant_workspace_action'&&business.operation==='skill_run';
   let originalSkillArguments=null;
@@ -1773,6 +1788,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(!matchesAssistantWorkspaceSnapshot(opened.context.workspace,inspection.workspaceId,pass) || opened.context.company?.id!==pass.companyId
         || opened.context.company?.slug!==inspection.companySlug || opened.context.encryption?.state!=='encrypted')
         fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      // A named archive is valid related context but cannot complete this task.
+      // Check native-selected scope before attaching payloads, taking the Git
+      // lock or downloading/materializing the accepted archive. Its existing
+      // save remains intact; only the canonical task can supply own WORK.md.
+      if(materialWorkspaceId && opened.context.workspace.scopeType!=='task')
+        throw new AssistantMaterialTargetRefusal();
       inspectionPayloads=opened.payloads;
       return opened.context;
     },

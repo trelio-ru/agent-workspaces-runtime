@@ -2079,6 +2079,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(!Array.isArray(history)||!history.length||history.length>20)inputError();
       return Object.freeze(continuationIntent(history.at(-1)));
     },
+    readPassContinuationPrerequisite(id) {
+      delivery(uuid(id));
+      return get('SELECT prerequisite_key FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id)?.prerequisite_key??null;
+    },
     /** Only structural history is appended. A native continuation permits a NEW
      * marker, never resetting the original native-start or replaying a turn.
      * The coordinator supplies positive terminal read-back before this call. */
@@ -2103,7 +2107,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(row.kind==='task'&&passId===null)inputError();
         const history=row.pass_continuation_json?JSON.parse(row.pass_continuation_json):[];
         if(!Array.isArray(history)||history.length>20)inputError();history.forEach(continuationIntent);
-        const latest=get('SELECT ordinal,intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
+        const latest=get('SELECT ordinal,intent_json,prerequisite_key FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
         const last=latest?continuationIntent(JSON.parse(latest.intent_json)):history.at(-1);
         if(last&&last.terminalTurnId===terminalTurnId){
           if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId
@@ -2129,7 +2133,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
           fail('ASSISTANT_INBOX_CONFLICT');
-        if(last&&(!last.started||last.namedArchiveSettled||last.workspaceDraft&&!namedArchiveSettled||last.taskReadParent&&!workspaceDraft?.namedArchive)
+        // The post-archive turn is ordinary task work. If it completed without
+        // an outcome, a NEW verified runtime/hook definition may reconcile it
+        // through generic completion recovery. Preserve every old intent and
+        // start bit; never re-enter a restricted mode or loop on the same build.
+        const postArchive=last?.namedArchiveSettled;
+        if(postArchive&&(last.passId!==passId||capacity||workspaceDraft||parentRead||namedArchiveSettled
+          ||prerequisiteKey===null||!latest||prerequisiteKey===latest.prerequisite_key))fail('ASSISTANT_INBOX_CONFLICT');
+        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled||last.taskReadParent&&!workspaceDraft?.namedArchive)
           ||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');

@@ -1633,6 +1633,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(live.state==='closed'||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
       ||live.bindingRevision!==saved.bindingRevision||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const retained=inbox.readPassContinuation(job.deliveryId);
+    const postArchive=Boolean(retained?.namedArchiveSettled&&retained.started&&result.state==='completed'&&!ownedHistory);
     // An interrupted snapshot alone is never a terminal receipt. Wait for the
     // exact prior lease to expire, and only consider a known task continuation
     // without routed provider inputs. A pending recovery keeps its own CAS.
@@ -1656,7 +1657,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||retained.workspaceDraft?.namedArchive&&!retained.started||retained.namedArchiveSettled&&retained.started
       ||live.workMode!=='task'||job.events.some(event=>event.conversation_key||event.owner_question_id)
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
-    if(parentRead||workspaceDraft?.namedArchive||archive)await assertPendingOutcome(signal);
+    if(postArchive&&(live.workMode!=='task'||job.events.some(event=>event.conversation_key||event.owner_question_id)
+      ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
+    if(parentRead||workspaceDraft?.namedArchive||archive||postArchive)await assertPendingOutcome(signal);
     // Do not consume another continuation intent/lease while the actual native
     // client has no usable hooks. Production reads its current task folder;
     // this is a budget/preflight witness only, not backend or observed proof.
@@ -1665,6 +1668,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         companyId:job.scope.companyId,taskId:job.taskId}),{signal}):null;
     if(typeof native.readPrerequisites==='function'&&(!prerequisites||typeof prerequisites.fingerprint!=='string'
       ||!/^[0-9a-f]{64}$/u.test(prerequisites.fingerprint)))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    // Native completion is not task success. After the ordinary post-archive
+    // turn, wait for an actual verified repair before generic reconciliation;
+    // the journal checks this again atomically when appending the new marker.
+    if(postArchive&&(!prerequisites||!inbox.readPassContinuationPrerequisite(job.deliveryId)
+      ||inbox.readPassContinuationPrerequisite(job.deliveryId)===prerequisites.fingerprint))return true;
     lease();await recheck();
     let intent=inbox.readPassContinuation(job.deliveryId);
     // A positively completed continuation without business material may inspect
@@ -1694,7 +1702,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const resume=async ownedSignal=>{
       // Re-read under the same native writer. The server also checks this
       // absence in the existing renewal CAS; neither check replays work.
-      if(parentRead||workspaceDraft?.namedArchive||archive)await assertPendingOutcome(ownedSignal);
+      if(parentRead||workspaceDraft?.namedArchive||archive||postArchive)await assertPendingOutcome(ownedSignal);
       if(review.state==='approved'&&!intent.resumeAttempted){
         // Persist before HTTP. A lost response is resolved ONLY by the read
         // branch; it cannot repeat the renewal or native model invocation.
@@ -1862,7 +1870,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             return continueTerminalPass(job,archive,signal,marker);
           return true;
         }
-        if(continued?.workspaceDraft||continued?.taskReadParent||continued?.namedArchiveSettled)return true;
+        if(continued?.workspaceDraft||continued?.taskReadParent||continued?.namedArchiveSettled&&!continued.started)return true;
         return continueTerminalPass(job,result,signal,marker);
       }
       notices.clear();

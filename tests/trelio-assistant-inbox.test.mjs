@@ -2001,3 +2001,42 @@ test('one exact interrupted-read continuation survives SQLite reload and cannot 
   assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=?').get(job.deliveryId).n,2);
   assert.equal(f.database.prepare('SELECT native_started FROM assistant_inbox_deliveries WHERE delivery_id=?').get(job.deliveryId).native_started,1);
 });
+
+test('post-archive completion repair preserves history and requires changed verified prerequisites',async t=>{
+  const f=memory(t),source=scope(),taskId=randomUUID(),passId=randomUUID();let inbox=f.inbox;
+  inbox.register(source);accept(inbox,source,taskId);page(inbox,source,[{id:'archive-task',revision:'1',taskId,wake:true}]);
+  const job=await inbox.claimDelivery({authorize:async()=>true});inbox.prepareTaskPass(job.deliveryId);inbox.startDelivery(job.deliveryId);
+  const key='a'.repeat(64),nextKey='b'.repeat(64),originalTurn=randomUUID();
+  let marker=job.deliveryId,revision=0;
+  const prepare=(terminalTurnId,extra={})=>inbox.preparePassContinuation(job.deliveryId,{passId,expectedLeaseRevision:revision,
+    terminalTurnId,terminalMarkerId:marker,prerequisiteKey:key,...extra});
+  const start=intent=>{
+    const reviewId=randomUUID();inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId,resumeAttempted:true,resumed:true,started:true});
+    marker=reviewId;revision++;return reviewId;
+  };
+  start(prepare(originalTurn));
+  const parent={parentMarkerId:job.deliveryId,parentTurnId:originalTurn};
+  start(prepare(randomUUID(),{taskReadParent:parent}));
+  const archive={workspaceId:randomUUID(),runId:randomUUID()};
+  start(prepare(randomUUID(),{workspaceDraft:{...archive,finishPending:true,namedArchive:true}}));
+  const settled={...archive,acceptedHead:'a'.repeat(40)};
+  const ordinary=prepare(randomUUID(),{namedArchiveSettled:settled});
+  assert.throws(()=>prepare(randomUUID(),{prerequisiteKey:nextKey}),/CONFLICT/,'unstarted ordinary turn cannot earn a repair');
+  start(ordinary);
+  const preserved=f.database.prepare('SELECT * FROM assistant_pass_continuations ORDER BY ordinal').all();
+  inbox=createAssistantInbox({database:f.database,now:()=>1000000});
+  assert.equal(inbox.readPassContinuationPrerequisite(job.deliveryId),key);
+  for(const invalid of [{},{prerequisiteKey:null},{prerequisiteKey:nextKey,passId:randomUUID()},
+    {prerequisiteKey:nextKey,capacity:true},{prerequisiteKey:nextKey,workspaceDraft:{...archive,finishPending:true,namedArchive:true}},
+    {prerequisiteKey:nextKey,namedArchiveSettled:settled},{prerequisiteKey:nextKey,taskReadParent:parent},
+    {prerequisiteKey:nextKey,terminalMarkerId:randomUUID()}])assert.throws(()=>prepare(randomUUID(),invalid),/CONFLICT/);
+  assert.deepEqual(f.database.prepare('SELECT * FROM assistant_pass_continuations ORDER BY ordinal').all(),preserved);
+  const terminalTurnId=randomUUID(),repair=prepare(terminalTurnId,{prerequisiteKey:nextKey});
+  assert.deepEqual(prepare(terminalTurnId,{prerequisiteKey:nextKey}),repair,'same pending repair keeps its exact one-use intent');
+  assert.equal(repair.namedArchiveSettled,undefined);assert.equal(repair.workspaceDraft,undefined);
+  start(repair);
+  assert.deepEqual(f.database.prepare('SELECT * FROM assistant_pass_continuations WHERE ordinal<=4 ORDER BY ordinal').all(),preserved);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+  assert.equal(f.database.prepare('SELECT native_started FROM assistant_inbox_deliveries').get().native_started,1);
+  assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,repair.clientRequestId,{started:true}),/CONFLICT/);
+});

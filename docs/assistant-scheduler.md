@@ -710,6 +710,17 @@ a genuine task outcome and canonical WORK.md advance the schedule or release the
 pass. Each recovered invocation has one finite preflight ceiling and samples its
 verified renewed lease once. A watchdog cannot extend that observation deadline.
 
+That subsequent turn is ordinary task work, not another restricted archive save.
+If native history confirms it completed but the task outcome is still pending,
+generic completion recovery becomes eligible only after the actual trusted
+hook/signed-runtime fingerprint changes. The same live accepted task, protected
+pass and pending native outcome are rechecked. Append one new ordinary intent
+under the existing twenty-per-fingerprint bound; keep the full previous archive,
+renewal and start history. Unstarted/interrupted/unknown turns, unchanged code,
+foreign passes and attempts to re-enter a restricted mode remain fenced. The
+ordinary native writer rechecks the completed parent before its one-use start;
+prior provider actions and archive saves are reconciled, never replayed.
+
 
 ## Company model selection
 
@@ -3224,6 +3235,14 @@ payloads and unrelated errors remain redacted; projection grants no retry.
 Encrypted `complete_assistant_pass` reads a fresh authenticated accepted snapshot
 through the SAME inspector/cache and full/delta chain validator. Its own computed
 WORK.md must be a regular nonempty UTF-8/no-NUL blob at that exact head, <=64 KiB.
+The material profile requires that native snapshot's canonical task scope before
+payload hydration, Git locks, bundle download or materialization. A valid named
+archive returns a local typed refusal with a read-only
+`prepare_assistant_workspace_read {}` next call; it never dispatches completion
+or changes the accepted archive. Foreign scope/company/recipient refusals remain
+hard failures. Only the owning local guard can offer this correction, not a
+same-code upstream error. The task result still requires ordinary authored
+material and native acceptance; there is no automatic copy/save or fake outcome.
 For noChange, the existing optional pass/read material basis selects a structural
 previous receipt/head; comparison happens in RAM within the verified ancestry.
 An editable local folder, copied file, cached head or model assertion cannot
@@ -4053,6 +4072,14 @@ The original pass remains the only task execution authority. Plain metadata
 is unchanged; encrypted metadata is a native-selected managed snapshot, hydrated in process
 with the SAME recipient/field codec. The ordinary private list is unchanged.
 No values, general payload resolver, new cache or extra grant are exposed.
+
+`secret_list` is metadata-only and omits `runIdentity`. A narrowly recognized
+otherwise valid call with that forbidden Run selector returns a static input
+diagnostic and the exact corrected read arguments before private/native I/O.
+Both plain and encrypted routes use the same pure argument predicate. Unknown
+or multiply-invalid input receives no correction; no read is automatically
+replayed. The explicit corrected call repeats ordinary native ACL/admission,
+and a real access/encryption failure is never converted into this suggestion.
 
 Existing browser and signed v2 authenticate continuations can USE a company
 card without changing its holder. Native current assistant membership, Secret

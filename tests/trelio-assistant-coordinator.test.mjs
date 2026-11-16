@@ -3023,15 +3023,15 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
 });
 
 
-test('retained named archive settles once, then requires a separate native task outcome',async t=>{
+for(const repaired of [false,true])test(`retained named archive settles once, then requires a separate native task outcome (repair=${repaired})`,async t=>{
   const f=fixture(t),ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
   const originalTurn=randomUUID(),readMarker=randomUUID(),interruptedRead=randomUUID();
-  const saveMarker=randomUUID(),savedTurn=randomUUID(),resumeMarker=randomUUID();
+  const saveMarker=randomUUID(),savedTurn=randomUUID(),resumeMarker=randomUUID(),ordinaryTurn=randomUUID(),repairedMarker=randomUUID();
   const archive={workspaceId:randomUUID(),runId:randomUUID()};
   const acceptedHead='a'.repeat(40);
-  let finishedArchive=false,businessComplete=false,saveStarts=0,businessStarts=0,renewals=0,updates=0;
+  let finishedArchive=false,businessComplete=false,saveStarts=0,businessStarts=0,renewals=0,updates=0,repairedStarts=0,fingerprint='a'.repeat(64);
   f.authority.workMode='task';
-  f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  f.options.native.readPrerequisites=async()=>({fingerprint});
   f.options.client.readBusinessOutcome=async args=>businessComplete?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
   f.options.native.readDelivery=async(_thread,marker,options={})=>{
     if(marker===readMarker)return options.interruptedWorkspaceDraft?.namedArchive
@@ -3050,7 +3050,7 @@ test('retained named archive settles once, then requires a separate native task 
   f.options.passHost.continuePass=async(args,expected)=>{
     assert.deepEqual(expected,f.activePass());
     const pass=f.passes.get(expected.deliveryId);
-    const marker=args.terminalTurnId===interruptedRead?saveMarker:resumeMarker;
+    const marker=args.terminalTurnId===interruptedRead?saveMarker:args.terminalTurnId===savedTurn?resumeMarker:repairedMarker;
     if(args.continuation==='resume'){
       assert.equal(pass.leaseRevision,args.expectedLeaseRevision);renewals++;
       Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
@@ -3072,7 +3072,14 @@ test('retained named archive settles once, then requires a separate native task 
       assert.equal(options.namedArchiveResume.terminalMarkerId,saveMarker);
       assert.equal(finishedArchive,true);businessStarts++;
       // Keep the native pending outcome until the existing start CAS is crossed.
-      await options.beforeInvocation();businessComplete=true;
+      await options.beforeInvocation();businessComplete=!repaired;
+      const result={...await ordinaryRun(input,{...options,beforeInvocation:undefined}),turnId:ordinaryTurn};
+      f.deliveries.set(input.deliveryId,result);return result;
+    }
+    if(input.deliveryId===repairedMarker){
+      assert.equal(options.namedArchiveResume,undefined);assert.equal(options.workspaceDraftRecovery,undefined);
+      assert.equal(options.continuationReview.priorTurnId,ordinaryTurn);
+      await options.beforeInvocation();businessComplete=true;repairedStarts++;
       return ordinaryRun(input,{...options,beforeInvocation:undefined});
     }
     return ordinaryRun(input,options);
@@ -3096,8 +3103,24 @@ test('retained named archive settles once, then requires a separate native task 
     await f.coordinator.workOnce();
     assert.equal(saveStarts,1);assert.equal(businessStarts,0);assert.ok(f.activePass());
     assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,0);
-    await f.coordinator.workOnce();
-    assert.equal(saveStarts,1);assert.equal(businessStarts,1);assert.equal(renewals,2);assert.equal(f.activePass(),null);
+    if(repaired){
+      await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+      assert.equal(f.database.prepare('SELECT failure_code FROM assistant_inbox_deliveries WHERE delivery_id=?').get(active.deliveryId).failure_code,
+        'ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+      const preserved=f.database.prepare('SELECT * FROM assistant_pass_continuations ORDER BY ordinal').all();
+      assert.equal(preserved.length,4);assert.equal(renewals,2);
+      await f.coordinator.workOnce();
+      assert.deepEqual(f.database.prepare('SELECT * FROM assistant_pass_continuations ORDER BY ordinal').all(),preserved);
+      assert.equal(repairedStarts,0,'same verified code cannot spin another ordinary turn');
+      // Reopen the real journal/coordinator as the signed runtime update does.
+      // Old archive/save/start evidence stays byte-identical after the repair.
+      await f.coordinator.close();fingerprint='b'.repeat(64);
+      const next=createAssistantCoordinator(f.options);
+      try{await next.workOnce();await next.workOnce();}finally{await next.close();}
+      assert.equal(repairedStarts,1);assert.equal(renewals,3);
+      assert.deepEqual(f.database.prepare('SELECT * FROM assistant_pass_continuations WHERE ordinal<=4 ORDER BY ordinal').all(),preserved);
+    }else{await f.coordinator.workOnce();assert.equal(renewals,2);}
+    assert.equal(saveStarts,1);assert.equal(businessStarts,1);assert.equal(f.activePass(),null);
     assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,1);
   }finally{await f.coordinator.close();}
 });
