@@ -508,7 +508,7 @@ const acceptedHistory=()=>{
     call('checkpoint',{type:'draft'},{operation:'checkpoint'}),
     call('finish',{taskOutcome:'no_status_change'},{operation:'finish',operationId,state:'running'}),
     call('status',{finishOperationId:operationId},{operation:'finish',operationId,state:'completed'}),
-    call('status',{},{operation:'status',stdout:JSON.stringify({...workspaceDraft,terminalStatus:'accepted',
+    call('status',{},{operation:'status',nativeRunStatus:{status:'accepted',candidateHead:acceptedHead,baseHead:'b'.repeat(40)},stdout:JSON.stringify({...workspaceDraft,terminalStatus:'accepted',
       candidateHead:acceptedHead,baseHead:'b'.repeat(40),dirty:false})}),
   );
   return {turn,terminalMarkerId,terminalTurnId,taskPass,workspaceDraft:{...workspaceDraft,acceptedHead}};
@@ -536,6 +536,91 @@ test('interruption after exact finish and accepted readback offers only outcome 
   assert.ok(tools.includes('complete_assistant_pass'));
   for(const tool of ['prepare_assistant_workspace_run','continue_assistant_workspace_action','use_assistant_workspace_files','use_assistant_browser'])
     assert.ok(!tools.includes(tool),tool);
+});
+
+// Compose the real native history shapes, including JSON-text-only reads,
+// asynchronous open, a pre-dispatch refusal and a closed read-only browser
+// visit. No private account, page or original task data enters this fixture.
+const acceptedObservationHistory=()=>{
+  const fixture=acceptedHistory(),{turn,taskPass,workspaceDraft}=fixture;
+  const {acceptedHead,...run}=workspaceDraft,handle=randomUUID();
+  const related=randomUUID(),prepare=turn.items[1];
+  prepare.arguments.relatedWorkspaceIds=[related];
+  prepare.result.structuredContent.contextHeads={related:[{workspaceId:related,head:'c'.repeat(40),scopeType:'project'}]};
+  const call=(tool,args,value,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+    arguments:{taskPass,...args},result:{structuredContent:value}});
+  const action=(operation,parameters,value,status='completed')=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,runIdentity:run},value,status);
+  const poll={schemaVersion:1,operation:'open',operationId:handle,state:'running',nextCall:{tool:'continue_assistant_workspace_action',
+    arguments:{schemaVersion:1,operation:'status',parameters:{finishOperationId:handle},runIdentity:run}}};
+  const open=turn.items[2];open.result.structuredContent=poll;
+  turn.items.splice(3,0,action('status',{finishOperationId:handle},poll),
+    action('status',{finishOperationId:handle},{code:'TRELIO_RUNTIME_HOOK_FAILED'},'failed'),
+    action('status',{}, {schemaVersion:1,operation:'status',nativeRunStatus:{status:'running'},stdout:JSON.stringify({...run,baseHead:'b'.repeat(40),dirty:false})}));
+  const read=call('get_task',{},null);read.result={structuredContent:null,content:[{type:'text',text:JSON.stringify({tasks:[{id:taskPass.taskId}]})}]};
+  turn.items.splice(1,0,read,action('status',{}, {schemaVersion:1,operation:'status',localWorkspaceState:'unverified',stdout:'{}'}));
+  const browser=(operation,args,state,image=false)=>{
+    const item=call('use_assistant_browser',{siteOrigin:'https://example.test',command:{operation,args}},null);
+    item.result={structuredContent:null,content:[{type:'text',text:JSON.stringify({state,reason:'none'})},
+      ...(image?[{type:'image',mimeType:'image/png',data:'synthetic'}]:[])]};return item;
+  };
+  const secretArgs={holder:'company',sourceTaskId:randomUUID()};
+  const secret=action('secret_list',secretArgs,{secrets:[]});delete secret.arguments.runIdentity;
+  turn.items.splice(-4,0,{type:'sleep'},
+    action('secret_list',secretArgs,{code:'ASSISTANT_MCP_INPUT_INVALID'},'failed'),secret,
+    browser('status',{},'saved_unverified'),browser('navigate',{url:'https://example.test/login'},'preparing'),
+    browser('status',{},'ready'),browser('screenshot',{},'ready',true),
+    action('secret_browser_prepare',{holder:'company',secretId:randomUUID(),siteOrigin:'https://example.test'},
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'},'failed'),browser('close',{},'closed'));
+  return fixture;
+};
+
+test('accepted canonical material after a closed observation permits outcome-only settlement, never replay',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=acceptedObservationHistory();
+  assert.deepEqual(assistantInterruptedAcceptedWorkspace(turn,terminalMarkerId,taskPass),workspaceDraft);
+  assert.equal(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),null);
+  assert.equal(assistantInterruptedWorkspaceDraft(turn,terminalMarkerId,taskPass),null);
+  const browser=(t,op)=>t.items.find(i=>i.tool==='use_assistant_browser'&&i.arguments.command.operation===op);
+  const action=(t,op)=>t.items.find(i=>i.arguments?.operation===op);
+  const reasons=[
+    t=>{t.status='inProgress';},t=>{t.error={code:'unknown'};},
+    t=>{delete t.items.at(-1).result.structuredContent.nativeRunStatus;},
+    t=>{t.items.at(-1).result.structuredContent.nativeRunStatus.status='running';},
+    t=>{t.items.at(-1).result.structuredContent.nativeRunStatus.candidateHead='c'.repeat(40);},
+    t=>{t.items.at(-1).result.structuredContent.nativeRunStatus.baseHead='c'.repeat(40);},
+    t=>{const i=t.items.at(-1);i.result={content:[{type:'text',text:JSON.stringify(i.result.structuredContent)}]};},
+    t=>{t.items[1].result.content[0].text='{"code":"UNKNOWN"}';},
+    t=>{t.items[2].arguments.runIdentity.runId=randomUUID();},
+    t=>{t.items.find(i=>i.tool==='prepare_assistant_workspace_run').result.structuredContent.contextHeads.related=[];},
+    t=>{t.items.find(i=>i.tool==='prepare_assistant_workspace_run').result.structuredContent.contextHeads.related[0].head='unknown';},
+    t=>{const ids=t.items.find(i=>i.tool==='prepare_assistant_workspace_run').arguments.relatedWorkspaceIds;ids.push(ids[0]);},
+    t=>{action(t,'open').result.structuredContent.nextCall.arguments.parameters.finishOperationId=randomUUID();},
+    t=>{t.items.find(i=>i.result?.structuredContent?.code==='TRELIO_RUNTIME_HOOK_FAILED').arguments.parameters.finishOperationId=randomUUID();},
+    t=>{t.items.find(i=>i.result?.structuredContent?.code==='TRELIO_RUNTIME_HOOK_FAILED').result.structuredContent.code='TRELIO_WORKSPACE_ACTION_FAILED';},
+    t=>{browser(t,'navigate').status='inProgress';},
+    t=>{browser(t,'navigate').arguments.command.operation='click';},
+    t=>{browser(t,'navigate').arguments.command.args.url='http://example.test';},
+    t=>{browser(t,'navigate').arguments.taskPass.passId=randomUUID();},
+    t=>{browser(t,'screenshot').arguments.siteOrigin='https://other.test';},
+    t=>{browser(t,'screenshot').arguments.command.args.text='not an observation';},
+    t=>{browser(t,'screenshot').result.isError=true;},
+    t=>{browser(t,'screenshot').result.content[0].text='{"state":"ready","reason":"operation_failed"}';},
+    t=>{browser(t,'screenshot').result.content.push({type:'text',text:'unknown'});},
+    t=>{t.items.splice(t.items.indexOf(browser(t,'close')),1);},
+    t=>{browser(t,'close').result.content[0].text='{"state":"preparing","reason":"none"}';},
+    t=>{const i=t.items.filter(i=>i.tool==='use_assistant_browser'&&i.arguments.command.operation==='status').at(-1);i.result.content[0].text='{"state":"preparing","reason":"none"}';},
+    t=>{action(t,'secret_browser_prepare').arguments.operation='secret_browser_fill';},
+    t=>{action(t,'secret_browser_prepare').arguments.parameters.steps=[];},
+    t=>{delete action(t,'secret_browser_prepare').arguments.runIdentity;},
+    t=>{action(t,'secret_browser_prepare').result.structuredContent.code='AGENT_SECRET_ACCESS_DENIED';},
+    t=>{action(t,'secret_browser_prepare').status='completed';},
+    t=>{action(t,'secret_list').result.structuredContent.code='UNKNOWN';},
+    t=>{t.items.push(structuredClone(browser(t,'status')));},
+  ];
+  for(const [index,mutate] of reasons.entries()){
+    const changed=structuredClone(turn);mutate(changed);
+    assert.equal(assistantInterruptedAcceptedWorkspace(changed,terminalMarkerId,taskPass),null,`refusal ${index}`);
+  }
 });
 
 const pendingFinishHistory=()=>{
@@ -773,11 +858,13 @@ for(const changed of [false,true])test(`native archive read and owned-writer rec
   }
 });
 
-for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
-  const {turn,...workspaceDraftRecovery}=state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
+for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending','accepted_observation','accepted_observation_busy','accepted_observation_changed','accepted_observation_unfiltered'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
+  const accepted=state==='accepted'||state.startsWith('accepted_observation');
+  const mode=state.startsWith('accepted_observation_')?state.slice('accepted_observation_'.length):state;
+  const {turn,...workspaceDraftRecovery}=state.startsWith('accepted_observation')?acceptedObservationHistory():state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
   const pluginId='trelio-digital-assistant@trelio-digital-assistants';
-  const tools=state==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
+  const tools=accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
   let reads=0,starts=0;
   const operation=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{
     executable:process.execPath,environment:{},workspaceDraftRecovery,requireAbsentMarker:true,
@@ -785,8 +872,8 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish
     readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
     readExecutionAvailability:async()=>true,beforeInvocation:async()=>{steps.push('renew');},startInvocation:()=>{starts++;},
     readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
-    spawnProcess:ownedRpc({threadId,cwd,priorTurn:state==='changed'?{...turn,id:randomUUID()}:turn,
-      resumeError:state==='busy'?{code:-32600,message:`thread ${threadId} already has an active writer`}:undefined,
+    spawnProcess:ownedRpc({threadId,cwd,priorTurn:mode==='changed'?{...turn,id:randomUUID()}:turn,
+      resumeError:mode==='busy'?{code:-32600,message:`thread ${threadId} already has an active writer`}:undefined,
       onRequest:request=>{
         if(request.method==='thread/resume'){
           steps.push('writer');
@@ -795,12 +882,12 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish
         if(request.method==='thread/turns/list'&&request.params.limit===1)steps.push('draft');
       },
       executionPolicy:(request,policy)=>{
-        if(request.method!=='mcpServerStatus/list'||state==='unfiltered')return policy;
+        if(request.method!=='mcpServerStatus/list'||mode==='unfiltered')return policy;
         policy.result.data[0].tools=Object.fromEntries(tools.map(name=>[name,{name}]));
         return policy;
       },
       onInput:text=>{
-        if(state==='accepted'){
+        if(accepted){
           assert.match(text,/Only confirm the result already accepted/u);
           assert.ok(text.includes(workspaceDraftRecovery.workspaceDraft.acceptedHead));
         }else if(state==='finish_pending'){
@@ -813,12 +900,12 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish
       },
     }),
   });
-  if(['confirmed','accepted','finish_pending'].includes(state)){
+  if(['confirmed','accepted','finish_pending','accepted_observation'].includes(mode)){
     assert.equal((await operation()).state,'completed');
     assert.deepEqual(steps,['writer','draft','renew']);assert.equal(starts,1);
   }else{
-    await assert.rejects(operation(),{code:state==='busy'?'ASSISTANT_CODEX_THREAD_BUSY':
-      state==='unfiltered'?'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    await assert.rejects(operation(),{code:mode==='busy'?'ASSISTANT_CODEX_THREAD_BUSY':
+      mode==='unfiltered'?'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
     assert.equal(starts,0);assert.ok(!steps.includes('renew'));
   }
 });

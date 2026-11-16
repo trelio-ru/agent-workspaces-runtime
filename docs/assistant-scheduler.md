@@ -641,6 +641,21 @@ opening, editing or submitting a Workspace in this mode. The outcome gate
 still verifies live acceptance and the assistant's own material. A confirmed
 pass may preserve an active or blocked task goal.
 
+That accepted-only certificate also permits an already closed, value-free
+managed browser visit (status, HTTPS navigation, screenshot, close), successful
+company Secret metadata and the exact historical pre-I/O argument refusals.
+Every browser call must have a completed native response; preparation must
+reach ready and positive close before finish. Input, authentication/fill,
+provider commands, unknown effects and late browser calls remain fenced.
+Related context must match the exact native pinned Workspace IDs and heads;
+it never becomes another writable target. Asynchronous open polls retain their
+original Run/handle, and a closed hook refusal of that read needs the later
+positive local/native open status. Known read JSON text is accepted, never
+JSON-text substitutes for a save receipt. Final acceptance requires BOTH clean
+local changed candidate and matching native accepted base/head. The same
+restricted outcome-only catalogue and signed argument checks are unchanged;
+this cannot reopen a Run, repeat the visit or perform the refused login.
+
 If the final tool returned an in-progress finish and its exact native poll
 handle, treat that handle as evidence of the attempted save only. The same
 bounded history can include a settled owner question and a control

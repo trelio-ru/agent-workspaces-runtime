@@ -167,6 +167,10 @@ publication tooling также остаются вне этого публичн
   Native tool filtering plus signed argument checks limit recovery to that
   Run; no external work, comment, source processing or retry of an attempted
   turn. Only native acceptance/outcome and the normal receipt close the pass.
+  Accepted-only settlement may retain a fully closed value-free browser visit,
+  metadata reads and proven pre-I/O syntax refusals; require the same native
+  pinned context and matching clean local/native accepted heads. No browser
+  input, Secret fill, provider call or unknown effect gains recovery or replay.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

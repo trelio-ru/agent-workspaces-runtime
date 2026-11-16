@@ -1341,6 +1341,7 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
   if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
     ||typeof original.content[0].text!=='string'||!original.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return null;
   let run=null,inspectedWorkspaceId=null,opened=false,changed=false,operationId=null,finished=false,acceptedHead;
+  let inspectedRun=null,openHandle=null,browserOrigin=null,browserPending=false,browserClosed=true;
   let questionId=null,controlReceiptId=null;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
@@ -1351,7 +1352,9 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
     // compatibility is for known reads only; no prose or JSON-in-text can
     // stand in for a mutation, Run preparation, or finish receipt.
     const content=item.result?.content;
-    if(allowPending&&draftReads.has(item.tool)&&result==null&&Array.isArray(content)&&content.length===1
+    const browserRead=!allowPending&&item.tool==='use_assistant_browser';
+    if((draftReads.has(item.tool)||browserRead)&&result==null&&Array.isArray(content)
+      &&(content.length===1||browserRead&&content.length===2&&content[1]?.type==='image')
       &&content[0]?.type==='text'&&typeof content[0].text==='string'&&Buffer.byteLength(content[0].text)<=512*1024){
       try{
         const parsed=JSON.parse(content[0].text);
@@ -1373,6 +1376,37 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       continue;
     }
     if(!exactDraftPass(args.taskPass,taskPass))return null;
+    // A positively accepted canonical candidate can settle its outcome after
+    // a completed value-free browser visit. This is NOT draft/unknown-finish
+    // recovery: no input, authentication, provider command or new browser call
+    // is exposed to the restricted continuation. Require the whole visit to
+    // settle and close before saving; preparing alone proves nothing.
+    if(browserRead){
+      if(!opened||operationId||!success||result.reason!=='none'
+        ||Object.keys(args).some(key=>!['siteOrigin','command','taskPass','runtimeSessionProof'].includes(key))
+        ||!args.command||Object.keys(args.command).sort().join(',')!=='args,operation'
+        ||!args.command.args||Object.getPrototypeOf(args.command.args)!==Object.prototype)return null;
+      let origin;try{origin=new URL(args.siteOrigin);}catch{return null;}
+      if(origin.protocol!=='https:'||origin.origin!==args.siteOrigin||origin.username||origin.password
+        ||browserOrigin!==null&&browserOrigin!==args.siteOrigin)return null;
+      browserOrigin=args.siteOrigin;
+      const command=args.command,keys=Object.keys(command.args).sort().join(',');
+      if(command.operation==='navigate'){
+        if(!browserClosed||keys!=='url'||!['preparing','ready'].includes(result.state))return null;
+        let target;try{target=new URL(command.args.url);}catch{return null;}
+        if(target.protocol!=='https:'||target.username||target.password)return null;
+        browserClosed=false;browserPending=result.state==='preparing';
+      }else if(command.operation==='status'){
+        if(keys||!['saved_unverified','preparing','ready','closed'].includes(result.state))return null;
+        if(result.state==='ready')browserPending=false;
+      }else if(command.operation==='screenshot'){
+        if(keys||browserClosed||browserPending||result.state!=='ready')return null;
+      }else if(command.operation==='close'){
+        if(keys||browserClosed||browserPending||result.state!=='closed')return null;
+        browserClosed=true;
+      }else return null;
+      continue;
+    }
     if(draftReads.has(item.tool)){
       if(!success&&!(item.tool==='get_trelio_tool_contract'&&localDraftRefusal(item,'ASSISTANT_MCP_INPUT_INVALID')))return null;
     }else if(item.tool==='get_agent_skill'){
@@ -1385,11 +1419,23 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       }else if(!acceptedHead||!success||args.workspaceId!==run.workspaceId||result.workspace?.id!==run.workspaceId)return null;
     }else if(item.tool==='prepare_assistant_workspace_run'){
       if(run||!success||result.prepared!==true||!UUID.test(args.workspaceId??'')||!UUID.test(result.run?.id??'')
-        ||args.runId!==undefined&&args.runId!==result.run.id||args.relatedWorkspaceIds!==undefined
+        ||args.runId!==undefined&&args.runId!==result.run.id||allowPending&&args.relatedWorkspaceIds!==undefined
         ||inspectedWorkspaceId!==null&&inspectedWorkspaceId!==args.workspaceId
         ||result.workspace?.id!==args.workspaceId||result.workspace.scopeType!=='task'
         ||result.workspace.taskId!==taskPass.taskId||result.workspace.companyId!==taskPass.companyId)return null;
+      if(args.relatedWorkspaceIds!==undefined){
+        // Pinned related material is read-only context, not a second writable
+        // Run. Only the accepted branch may retain its exact native selection;
+        // never invent a relation or carry this into draft/finish recovery.
+        const ids=args.relatedWorkspaceIds,heads=result.contextHeads?.related??[];
+        if(!Array.isArray(ids)||ids.length>20||new Set(ids).size!==ids.length
+          ||ids.some(id=>!UUID.test(id??'')||id===args.workspaceId)||!Array.isArray(heads)||heads.length>20
+          ||heads.some(row=>!UUID.test(row?.workspaceId??'')||!acceptedWorkspaceHead(row?.head))
+          ||new Set(heads.map(row=>row?.workspaceId)).size!==heads.length
+          ||ids.some(id=>!heads.some(row=>row?.workspaceId===id&&acceptedWorkspaceHead(row.head))))return null;
+      }
       run={workspaceId:args.workspaceId,runId:result.run.id};
+      if(inspectedRun&&!sameDraftRun(inspectedRun,run))return null;
     }else if(allowPending&&item.tool==='ask_assistant_owner'){
       if(!opened||questionId||!success||!UUID.test(args.clientRequestId??'')||!UUID.test(result.id??'')
         ||result.state!=='pending'||result.replayed!==false||Object.keys(result).sort().join(',')!=='id,path,replayed,state')return null;
@@ -1412,15 +1458,65 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
         changed=true;
       }else if(!['list','read'].includes(command.action))return null;
     }else if(item.tool==='continue_assistant_workspace_action'){
+      if(!allowPending&&args.schemaVersion===1&&args.operation==='status'&&!run){
+        // An initial read may report that the old checkout is unverified.
+        // It is neither an opened Run nor acceptance; bind the later native
+        // prepare to these exact locators and still require the full save.
+        if(inspectedRun||!success||result.schemaVersion!==1||result.operation!=='status'
+          ||Object.keys(args.parameters??{}).length||!sameDraftRun(args.runIdentity,args.runIdentity)
+          ||!UUID.test(args.runIdentity?.workspaceId??'')||!UUID.test(args.runIdentity?.runId??'')
+          ||result.localWorkspaceState!=='unverified')return null;
+        inspectedRun={workspaceId:args.runIdentity.workspaceId,runId:args.runIdentity.runId};continue;
+      }
+      if(!allowPending&&opened&&!operationId&&args.schemaVersion===1&&args.operation==='secret_list'){
+        // Metadata has no checkout/fill effect. The historical forbidden Run
+        // selector was rejected by the native input inventory before dispatch.
+        if(args.parameters?.holder!=='company'||!UUID.test(args.parameters.sourceTaskId??'')
+          ||Object.keys(args.parameters).sort().join(',')!=='holder,sourceTaskId')return null;
+        if(args.runIdentity!==undefined){
+          if(!sameDraftRun(args.runIdentity,run)||!localDraftRefusal(item,'ASSISTANT_MCP_INPUT_INVALID'))return null;
+        }else if(!success||Object.hasOwn(result,'code'))return null;
+        continue;
+      }
+      if(!allowPending&&opened&&!operationId&&args.schemaVersion===1&&args.operation==='secret_browser_prepare'){
+        // Legacy releases mislabeled this exact pre-I/O syntax refusal as an
+        // encryption failure. A forbidden root Run selector plus absent steps
+        // cannot reach Secret/key/grant I/O. Valid plans, fill calls and genuine
+        // ACL/key failures never qualify or gain a retry through this branch.
+        if(!sameDraftRun(args.runIdentity,run)||args.parameters?.runId!==undefined||args.parameters?.steps!==undefined
+          ||!['ASSISTANT_ENCRYPTED_CONTENT_REQUIRED','ASSISTANT_MCP_INPUT_INVALID'].some(code=>localDraftRefusal(item,code)))return null;
+        continue;
+      }
+      if(!allowPending&&run&&openHandle&&!operationId&&args.schemaVersion===1&&args.operation==='status'
+        &&sameDraftRun(args.runIdentity,run)){
+        const handle=args.parameters?.finishOperationId;
+        if(handle!==undefined){
+          if(opened||Object.keys(args.parameters).join(',')!=='finishOperationId'||handle!==openHandle)return null;
+          if(!success){if(!localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED'))return null;}
+          else if(result.operationId!==openHandle||!exactWorkspacePoll(result,'open',run))return null;
+          continue;
+        }
+        if(!opened){
+          if(!success||result.operation!=='status'||Object.keys(args.parameters??{}).length
+            ||typeof result.stdout!=='string'||Buffer.byteLength(result.stdout)>65_536)return null;
+          let status;try{status=JSON.parse(result.stdout);}catch{return null;}
+          if(status?.runId!==run.runId||status.workspaceId!==run.workspaceId||status.terminalStatus||!acceptedWorkspaceHead(status.baseHead)
+            ||typeof status.dirty!=='boolean'||result.nativeRunStatus?.status!=='running')return null;
+          opened=true;continue;
+        }
+      }
       if(!run||!success||args.schemaVersion!==1||result.schemaVersion!==1)return null;
       if(args.operation==='open'){
         if(opened||result.operation!=='open'||!sameDraftRun(args.parameters,run))return null;
-        opened=true;
+        if(!allowPending&&result.state==='running'){
+          if(openHandle||!exactWorkspacePoll(result,'open',run))return null;
+          openHandle=result.operationId;
+        }else opened=true;
       }else if(!opened||!sameDraftRun(args.runIdentity,run))return null;
       else if(args.operation==='checkpoint'){
         if(operationId||args.parameters?.type!=='draft'||result.operation!=='checkpoint')return null;
       }else if(args.operation==='finish'){
-        if(!changed||operationId||args.parameters?.taskOutcome!=='no_status_change'||result.operation!=='finish'
+        if(!changed||operationId||!browserClosed||browserPending||args.parameters?.taskOutcome!=='no_status_change'||result.operation!=='finish'
           ||!UUID.test(result.operationId??'')||!['running','completed'].includes(result.state))return null;
         if(allowPending){
           const next=result.nextCall;
@@ -1442,6 +1538,8 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
         if(status?.workspaceId!==run.workspaceId||status.runId!==run.runId||status.terminalStatus!=='accepted'
           ||status.dirty!==false||!acceptedWorkspaceHead(status.candidateHead)||!acceptedWorkspaceHead(status.baseHead)
           ||status.candidateHead===status.baseHead||acceptedHead&&acceptedHead!==status.candidateHead)return null;
+        const native=result.nativeRunStatus;
+        if(native?.status!=='accepted'||native.candidateHead!==status.candidateHead||native.baseHead!==status.baseHead)return null;
         acceptedHead=status.candidateHead;
       }else return null;
     }else return null;
