@@ -184,7 +184,13 @@ prose, URL/paths, native output, credentials и diagnostic на успешном
 Новых файлов журналов, native logging и telemetry dimensions нет.
 
 Parallel detached native fixtures keep one closed diagnostic tail per verified
-execution owner. Failed ready reports its original reason and that worker's
+execution owner. Fresh navigation starts a browser and requests its first
+frame through screenshot/read-text; those original observation operations
+carry the SAME closed request phases as explicit navigation. The fixture
+retains each initial result's reason/diagnostic and elapsed time before
+cleanup, never image/text/frame/owner data. No added observation, retry,
+deadline extension or weaker ready assertion is permitted by this evidence.
+Failed ready reports its original reason and that worker's
 stop/snapshot/persist/cleanup stage, allowed errno/syscall and owned-file category.
 If navigation after closing a sibling fails, the fixture keeps that one call's
 elapsed time and validated result reason/diagnostic. The surviving worker's

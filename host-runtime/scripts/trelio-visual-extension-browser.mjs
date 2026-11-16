@@ -540,8 +540,12 @@ export class ExtensionVisualBrowser {
     // A timeout, closed socket and an extension refusal all have the same
     // public error on some paths. Keep only the fixed stage, never args or ids.
     let lastPhase;
-    const reportNavigation = operation === 'navigate' && this.testDiagnostics
-      ? outcome => this.testDiagnostics({ stage: 'navigation_transport', outcome,
+    // A fresh navigate performs its initial observation through screenshot or
+    // read-text after startup. Trace that SAME original read as well: limiting
+    // this evidence to an explicit navigate hides a first-capture stall. The
+    // callback stays fixture-only and never changes a request or its budget.
+    const reportNavigation = ['navigate', 'screenshot', 'read-text'].includes(operation) && this.testDiagnostics
+      ? outcome => this.testDiagnostics({ stage: 'navigation_transport', operation, outcome,
         ...(lastPhase && ['response_timeout', 'socket_closed', 'extension_error'].includes(outcome) ? { phase: lastPhase } : {}) })
       : undefined;
     if (!this.#socket || this.#socket.readyState !== 1) {

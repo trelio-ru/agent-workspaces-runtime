@@ -623,6 +623,9 @@ publication tooling также остаются вне этого публичн
   fails shutdown, closes each own sibling independently and stops its synthetic
   listener on cancellation; failed evidence/active profiles remain intact.
   Authentication fixtures assert the first native navigation before input, distinguish its exact error/manual_control_active observation gate from startup failure, retain only common validated diagnostics and reset evidence per browser generation; no readiness inference, retry or deadline extension.
+  Fresh navigation's initial screenshot/read-text retains the SAME closed
+  fixture phases and original response reason, independently for both owners.
+  No extra observation, retry, weaker assertion or longer deadline.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
   Native manual-close regression shares the auth fixture's owned HTTP abort
   helper: abort its failed producer before HTTP-close waits, close listener/sockets

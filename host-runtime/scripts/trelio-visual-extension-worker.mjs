@@ -833,9 +833,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await pause(1000);
       return captureDefault(navigationStage);
     }
-    if (op === 'screenshot') return capture();
+    if (op === 'screenshot') return capture(navigationStage);
     if (['read-text', 'submit', 'request-ready'].includes(op) && config.observationMode !== 'text') throw Error('invalid_input');
-    if (op === 'read-text') return captureText(args);
+    if (op === 'read-text') return captureText(args, navigationStage);
     if (op === 'request-ready') {
       // Semantic completion is acknowledged against the exact latest fresh
       // observation, not an old result. Review itself dispatches no site input;
@@ -1016,7 +1016,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // Closed, synthetic-only witnesses for the exact original command.
       // Emit before the await: a stuck browser API cannot publish its outcome.
       // The request id only correlates the private pipe; it is never logged.
-      const navigationStage = config.fixtureOnly === true && message.operation === 'navigate'
+      // Fresh host navigation requests its first frame as screenshot/read-text.
+      // Use the same private request correlation and closed phases for that
+      // initial observation, without another read, input or readiness retry.
+      const navigationStage = config.fixtureOnly === true && ['navigate', 'screenshot', 'read-text'].includes(message.operation)
         ? phase => send({ kind: 'navigation_fixture_stage', id: message.id, phase }) : undefined;
       navigationStage?.('received');
       const run = async () => {

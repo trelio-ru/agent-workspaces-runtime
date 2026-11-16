@@ -15,7 +15,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, authenticationMessage } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[];
@@ -74,6 +74,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         async sendMessage(_id, message, target) {
           if (message.kind === 'authentication-guard') return { blocked: false };
           if (authenticationMessage && message.kind.startsWith('authentication-')) return authenticationMessage(message, target);
+          if (message.kind === 'read_rendered_text') await textObservation?.();
           return { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false };
         },
       },
@@ -143,6 +144,37 @@ test('a stalled native capture marks the original navigation before it can reply
   assert.equal(worker.navigation.filter(url => url.endsWith('/second')).length, 1, 'the original update occurs once');
   const ordinary = await dialogWorker({ image: true });
   assert.equal((await ordinary.dispatch('navigate', { url: 'https://example.test/second' })).state, 'ready');
+  assert.equal(ordinary.sent.some(value => value.kind === 'navigation_fixture_stage'), false);
+});
+
+// A fresh host navigate calls one of these reads after the one startup
+// navigation. Exercise the actual materialised worker while its original
+// native read is pending; a source-text assertion would miss a dropped
+// callback between execute and the screenshot/rendered-text implementation.
+for (const operation of ['screenshot', 'read-text']) test(`a fresh ${operation} retains its own stalled observation phase without another navigation`, async () => {
+  let enter, resume, calls = 0;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const stalled = new Promise(resolve => { resume = resolve; });
+  const read = () => { calls++; enter(); return stalled; };
+  const image = operation === 'screenshot';
+  const worker = await dialogWorker({ image, fixtureOnly: true, ...(image ? { screenshot: read } : { textObservation: read }) });
+  const request = worker.dispatch(operation);
+  try {
+    await entered;
+    const trace = worker.sent.filter(value => value.kind === 'navigation_fixture_stage');
+    assert.deepEqual(trace.map(value => value.phase), ['received', 'dequeued', 'policy_queue', 'observe_tab',
+      'document_load', 'observe_attach', 'frame_tree', ...(image ? ['credential_guard'] : []), 'layout',
+      image ? 'compositor_capture' : 'text_read']);
+    assert.equal(new Set(trace.map(value => value.id)).size, 1);
+    assert.ok(trace.every(value => Object.keys(value).sort().join() === 'id,kind,phase'));
+    assert.equal(worker.sent.some(value => value.kind === 'result' && value.id === trace[0].id), false);
+  } finally { resume(); }
+  assert.equal((await request).state, 'ready');
+  assert.equal(calls, 1);
+  assert.deepEqual(worker.navigation, ['https://example.test/']);
+  assert.equal(worker.counts().clicks, 0);
+  const ordinary = await dialogWorker({ image });
+  assert.equal((await ordinary.dispatch(operation)).state, 'ready');
   assert.equal(ordinary.sent.some(value => value.kind === 'navigation_fixture_stage'), false);
 });
 
@@ -281,7 +313,7 @@ test('lost file-selection acknowledgement consumes the original frame and never 
   let sequence = 0;
   const dispatch = async (operation, args = {}) => {
     const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
-    for (let i = 0; i < 30; i++) { await tick(); const item = sent.find(value => value.id === id); if (item) return item.result; }
+    for (let i = 0; i < 30; i++) { await tick(); const item = sent.find(value => value.kind === 'result' && value.id === id); if (item) return item.result; }
     throw Error('synthetic_command_timeout');
   };
   await dispatch('restore-session-auth', { cookies: [], replace: false });
@@ -367,7 +399,7 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
     const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
-    for (let i = 0; i < 40; i++) { await tick(); const result = sent.find(value => value.id === id); if (result) return result.result; }
+    for (let i = 0; i < 40; i++) { await tick(); const result = sent.find(value => value.kind === 'result' && value.id === id); if (result) return result.result; }
     throw Error('synthetic_command_timeout');
   };
   await dispatch('restore-session-auth', { cookies: [], replace: false });
@@ -452,7 +484,7 @@ for (const fixtureOnly of [false, true]) test(`audio source delivery rechecks na
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
     const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
-    for (let i = 0; i < 30; i++) { await tick(); const item = sent.find(value => value.id === id); if (item) return item.result; }
+    for (let i = 0; i < 30; i++) { await tick(); const item = sent.find(value => value.kind === 'result' && value.id === id); if (item) return item.result; }
     throw Error('synthetic_command_timeout');
   };
   await dispatch('restore-session-auth', { cookies: [], replace: false });

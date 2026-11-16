@@ -307,6 +307,12 @@ test('synthetic worker evidence retains closed failure categories and drops arbi
   scope.input={stage:'navigation_transport',outcome:'response_timeout',phase:'PRIVATE PHASE'};
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
   assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout'});
+  for (const operation of ['navigate', 'screenshot', 'read-text', 'PRIVATE_OPERATION']) {
+    scope.input={stage:'navigation_transport',operation,outcome:'response_timeout',phase:'compositor_capture',args:{token:'PRIVATE'}};
+    vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+    assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'navigation_transport',outcome:'response_timeout',
+      ...(operation==='PRIVATE_OPERATION'?{}:{operation}),phase:'compositor_capture'});
+  }
   const beforeInvalidOutcome=snapshots.length;
   scope.input={stage:'navigation_transport',outcome:'PRIVATE ERROR'};
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
@@ -552,8 +558,18 @@ for (const repetition of [1, 2, 3]) test(`native browser workers of two chats ke
       assert.equal(ready.state, 'saved_unverified', JSON.stringify({ index, reason: ready.reason,
         diagnostic: ready.diagnostic, workerEvidence: await evidence(index) }));
     }
-    const [a, b] = await Promise.all(owners.map((_, index) => call(index, 'navigate', { url: origin })));
-    assert.equal(a.state, 'ready'); assert.equal(b.state, 'ready');
+    const observations = await Promise.all(owners.map(async (_, index) => {
+      const navigationStarted = performance.now();
+      const value = await call(index, 'navigate', { url: origin });
+      return { value, elapsedMs: Math.round(performance.now() - navigationStarted) };
+    }));
+    // Preserve each ORIGINAL initial response before cleanup. The fresh
+    // launch uses screenshot internally, so the navigation-only trace used
+    // to omit its failure entirely. Never print image/body/frame/owner data,
+    // repeat the request or relax the same ready assertion.
+    observations.forEach(({ value, elapsedMs }, index) => assert.equal(value.state, 'ready',
+      JSON.stringify({ phase: 'initial_navigation', index, elapsedMs, reason: value.reason, diagnostic: value.diagnostic })));
+    const [a, b] = observations.map(({ value }) => value);
     assert.notEqual(a.sessionId, b.sessionId);
     assert.equal((await call(1, 'scroll', { frameId: a.frameId, x: 300, y: 300, deltaY: 100 })).reason, 'stale_frame');
     assert.equal((await call(0, 'close')).state, 'closed'); await closed(0);
