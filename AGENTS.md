@@ -968,6 +968,11 @@ publication tooling также остаются вне этого публичн
   locates the same child; no claim replay, longer HTTP deadline or second
   writer. An interrupted empty directory stays untouched. See
   [slow Workspace open](docs/assistant-scheduler.md#slow-workspace-open).
+  Pinned parent/related context shares that SAME original open signal through
+  encrypted-chain Git and checkout, on both new and reused roots. Ordinary
+  context-sync keeps its normal transport budget. Late cancellation cannot
+  publish a staged context; final native admission also follows reused-root
+  context restoration. No additional deadline, request or claim retry.
   Exact own-Run lifecycle reuses the human bridge private-session lifetime, not
   setup's 45s timer; caller/outer-hook cancellation and per-IPC/native lease checks remain.
   Native pre-handler 429/REQUEST_RATE_LIMITED has a closed distinct transport

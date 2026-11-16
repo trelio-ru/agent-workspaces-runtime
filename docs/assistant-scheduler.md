@@ -3185,6 +3185,17 @@ request and encrypted body retains its independent ordinary limit. Once an
 encrypted bundle is local, the verified Git history walk uses the child
 deadline; cancellation stops further Git commands and settles owned scratch
 cleanup. No retry, accepted write, provider action or new pass is implied.
+Pinned company/project/related contexts use that SAME original signal, including
+all encrypted-chain Git imports and the final read-only checkout, for both fresh
+and reused Run roots. Their downloads still have the ordinary request/body
+limit; local restoration never starts a new transport-minute budget. Explicit
+context-sync outside this admitted open retains its existing lifetime. A late
+cancelled filesystem result cannot replace a completed context or proceed to
+another dependency. Reused roots repeat native Run/pass admission after related
+restoration, before publishing the completed metadata, as fresh roots do.
+The composed encrypted fixture includes an actual linked full/delta Git chain
+and cancellation after its verified import, before context publication.
+
 After an older cancelled open left a positively empty root, common open may
 select its deterministic sibling for the exact admitted Run under the
 existing Workspace lock. The previous root, other Runs and unverified or

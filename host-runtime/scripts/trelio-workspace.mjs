@@ -12061,9 +12061,12 @@ const replaceMaterializedContext = async ({
   specification,
   temporaryDirectory,
   companyEncryption,
+  localMaterializationSignal,
 }) => {
+  localMaterializationSignal?.throwIfAborted();
   const destination = path.join(rootDirectory, specification.relativeDirectory);
   const currentHead = await readMaterializedContextHead(destination);
+  localMaterializationSignal?.throwIfAborted();
 
   if (currentHead === specification.head) {
     // Read-only parent/related context остаётся pointer-first. Конкретные
@@ -12088,9 +12091,14 @@ const replaceMaterializedContext = async ({
         companyEncryption,
         expectedWorkspaceId: specification.workspaceId,
         expectedWorkspaceHead: specification.head,
+        // Related archives are part of the original admitted open. Local
+        // history restoration shares that fixed clock with the writable base;
+        // the request/body retains its separate ordinary HTTP deadline.
+        signal: localMaterializationSignal,
+        localMaterializationSignal,
       });
     } else {
-      const contextResponse = await request(origin, token, endpoint);
+      const contextResponse = await request(origin, token, endpoint, { signal: localMaterializationSignal });
       await writeResponseToFile(contextResponse, bundlePath);
     }
     await materializeBundle({
@@ -12098,8 +12106,13 @@ const replaceMaterializedContext = async ({
       directory: stagingDirectory,
       head: specification.head,
       branch: "trelio-context",
+      signal: localMaterializationSignal,
     });
     await makeReadOnly(stagingDirectory);
+    // Filesystem permission work may settle after cancellation. Never replace
+    // an existing complete context with a late result or continue to another
+    // dependency after the SAME original materialization deadline expired.
+    localMaterializationSignal?.throwIfAborted();
 
     try {
       const destinationStat = await fs.lstat(destination);
@@ -12120,6 +12133,7 @@ const replaceMaterializedContext = async ({
 
     // Rename в пределах одного root атомарно переключает локальный snapshot:
     // агент не увидит наполовину распакованный related context.
+    localMaterializationSignal?.throwIfAborted();
     await fs.rename(stagingDirectory, destination);
     return { ...specification, directory: destination, changed: true };
   } finally {
@@ -12211,7 +12225,9 @@ const materializeRunContexts = async ({
   runId,
   contextHeads,
   companyEncryption = null,
+  localMaterializationSignal,
 }) => {
+  localMaterializationSignal?.throwIfAborted();
   const specifications = buildRunContextSpecifications(runId, contextHeads);
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-context-"));
   const contexts = [];
@@ -12226,8 +12242,10 @@ const materializeRunContexts = async ({
         specification,
         temporaryDirectory,
         companyEncryption,
+        localMaterializationSignal,
       }));
     }
+    localMaterializationSignal?.throwIfAborted();
     await reconcileMaterializedContextDirectories(rootDirectory, specifications);
   } finally {
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
@@ -14422,6 +14440,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       runId,
       contextHeads: refreshedMetadata.contextHeads,
       companyEncryption,
+      localMaterializationSignal,
     });
     const objects = await materializeWorkspaceObjects({
       origin: workspaceOrigin,
@@ -14438,6 +14457,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       latestRunCheckpoint,
       runId,
     );
+    localMaterializationSignal?.throwIfAborted();
+    await assertAssistantMaterializationCurrent?.(agentRun);
     await writeRunMetadata(metadataPath, {
       ...refreshedMetadata,
       contexts: serializeMaterializedContexts(contexts),
@@ -14524,6 +14545,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       runId,
       contextHeads,
       companyEncryption,
+      localMaterializationSignal,
     });
     await writeContextIndex(
       rootDirectory,

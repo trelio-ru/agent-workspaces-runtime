@@ -3181,10 +3181,38 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         ...baseFiles.map(file=>({id:file.id,kind:'content',sizeBytes:file.sizeBytes+1024,ciphertextSha256:'b'.repeat(64)}))]};
     let baseManifestReads=0,reusedFileCount=0;
     const runId=randomUUID(),runIdentity={workspaceId:descriptor.workspaceId,runId};
+    // A real linked encrypted context must use the SAME whole-open lifetime as
+    // the writable base. Native HTTP/body still has its own minute, but an
+    // ambient transport budget must not remain around the local Git chain.
+    // The prior fixture had no related context and missed this production path.
+    const relatedId=randomUUID(),relatedRevision=randomUUID();
+    const relatedCipher=path.join(os.homedir(),'related.trelioe1');
+    await encryptFileToCompanyContainer({sourcePath:bundle,destinationPath:relatedCipher,scopePublicEncryptionJwk:publicJwk,
+      originalName:'workspace.bundle',mimeType:'application/vnd.git.bundle',aad:{companyId:company.id,scopeId,scopeEpoch:1,
+        entityType:'agent_workspace_revision',entityId:relatedId,entityRevision:1,schemaVersion:1}});
+    await fs.writeFile(path.join(root,'related.md'),'RELATED_DELTA');await git(['add','related.md']);
+    await git(['commit','-m','Synthetic related delta']);
+    const relatedHead=(await git(['rev-parse','HEAD'])).stdout.trim(),relatedDeltaId=randomUUID();
+    const relatedDeltaBundle=path.join(os.homedir(),'related-delta.bundle'),relatedDeltaCipher=path.join(os.homedir(),'related-delta.trelioe1');
+    await git(['bundle','create',relatedDeltaBundle,'refs/heads/main','^'+head]);
+    await encryptFileToCompanyContainer({sourcePath:relatedDeltaBundle,destinationPath:relatedDeltaCipher,scopePublicEncryptionJwk:publicJwk,
+      originalName:'workspace.bundle',mimeType:'application/vnd.git.bundle',aad:{companyId:company.id,scopeId,scopeEpoch:1,
+        entityType:'agent_workspace_revision',entityId:relatedId,entityRevision:2,schemaVersion:1}});
+    await git(['reset','--hard',head]);
+    const relatedBytes=await fs.readFile(relatedCipher),relatedDeltaBytes=await fs.readFile(relatedDeltaCipher);
+    const relatedHeader=Buffer.from(canonicalJson({schemaVersion:1,
+      companyId:company.id,workspaceId:relatedId,revisions:[{id:relatedRevision,workspaceHead:head,baseHead:null,
+        bundleFormat:'full',parentRevisionId:null,scopeId,scopeEpoch:1,ciphertextSha256:digest(relatedBytes),ciphertextSizeBytes:relatedBytes.length},
+      {id:relatedDeltaId,workspaceHead:relatedHead,baseHead:head,bundleFormat:'delta',parentRevisionId:relatedRevision,
+        scopeId,scopeEpoch:1,ciphertextSha256:digest(relatedDeltaBytes),ciphertextSizeBytes:relatedDeltaBytes.length}]}));
+    const relatedSize=Buffer.alloc(4);relatedSize.writeUInt32BE(relatedHeader.length);
+    const relatedChain=Buffer.concat([Buffer.from('TRELIOH1'),relatedSize,relatedHeader,relatedBytes,relatedDeltaBytes]);
+    const {trelioCallSignal}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
+    let relatedReads=0,relatedOrdinaryBudgets=0;
     let nativeRun={id:runId,workspaceId:descriptor.workspaceId,status:'running',baseHead:head,draftHead:null,candidateHead:null,
       leaseId:randomUUID(),fencingToken:1,leaseExpiresAt:new Date(Date.now()+300_000).toISOString(),
       agentInstructionsSnapshotJson:snapshot.agentInstructionsSnapshot,userProfileSnapshotJson:snapshot.userProfileSnapshot,
-      contextHeadsJson:[],relatedWorkspaceSnapshotsJson:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      contextHeadsJson:{related:[{workspaceId:relatedId,head:relatedHead,scopeType:'project'}]},relatedWorkspaceSnapshotsJson:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
     const writerProfile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
       workspaceRun:runIdentity,lockDirectory:path.join(os.tmpdir(),'synthetic-writer-locks'),lock:(_file,action)=>action()});
     const readFetch=globalThis.fetch,uploads=new Map(),storedPayloads=[payload];
@@ -3273,6 +3301,15 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         nativeRun={...nativeRun,candidateHead:input.workspaceHead,status:'accepted',acceptedAt:new Date().toISOString()};
         return json({run:nativeRun});
       }
+      if(parsed.pathname===`${base}/runs/${runId}/context/related/${relatedId}/encrypted-bundle`){
+        relatedReads++;
+        if(trelioCallSignal())relatedOrdinaryBudgets++;
+        assert.ok(options.signal instanceof AbortSignal,'native HTTP keeps its independent bounded signal');
+        return new Response(relatedChain,{headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':relatedId,
+          'x-trelio-accepted-head':relatedHead,'x-trelio-encrypted-revision-id':relatedDeltaId,
+          'x-trelio-scope-id':scopeId,'x-trelio-scope-epoch':'1',
+          'x-trelio-ciphertext-sha256':digest(relatedDeltaBytes),'x-trelio-encrypted-bundle-format':'chain-v1'}});
+      }
       if(parsed.pathname===`${base}/runs/${runId}/encrypted-bundle`){
         workspaceBundleReads++;
         return draftTransport?new Response(draftTransport.bytes,{headers:draftTransport.headers}):new Response(bytes,{headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':descriptor.workspaceId,
@@ -3294,6 +3331,45 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     assert.equal(await fs.readFile(path.join(path.dirname(writable),'context','agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
     assert.equal(opened.operation,'open');
+    assert.equal(relatedReads,1,'one original related GET, never a transport retry');
+    assert.equal(relatedOrdinaryBudgets,0,'related local Git must not inherit the ordinary transport minute');
+    const relatedDirectory=path.join(path.dirname(writable),'context','related',relatedId);
+    assert.equal(await fs.readFile(path.join(relatedDirectory,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');
+    assert.equal(await fs.readFile(path.join(relatedDirectory,'related.md'),'utf8'),'RELATED_DELTA');
+    if(process.platform!=='win32')assert.equal((await fs.stat(path.join(relatedDirectory,'result.md'))).mode&0o222,0);
+
+
+    if(!named){
+      // A related restore on an existing checkout must also retain the same
+      // original signal. Isolate the completed context under a test-only name
+      // to require one more restore, then cancel after actual crypto/Git chain
+      // construction, before checkout publication. This does not fake a timer
+      // expiry or wait for a wall-clock race on slower native runners.
+      const backup=relatedDirectory+'-fixture-preserved';await fs.rename(relatedDirectory,backup);
+      const savedTimeout=AbortSignal.timeout,savedRm=fs.rm;
+      const cancellation=new AbortController();let originalClocks=0,chainSettled=false;
+      AbortSignal.timeout=function(ms){const original=savedTimeout.call(AbortSignal,ms);
+        if(ms!==8*60_000)return original;
+        originalClocks++;return AbortSignal.any([original,cancellation.signal]);};
+      fs.rm=async function(target,...args){
+        const result=await savedRm.call(this,target,...args);
+        if(String(target).endsWith(relatedId+'.bundle.trelioe1')&&!chainSettled){
+          // The chain's final cleanup happens only after its real Git import.
+          // Initial stale-file cleanup has no bundle yet, and cannot qualify.
+          try{await fs.stat(String(target).slice(0,-'.trelioe1'.length));chainSettled=true;
+            cancellation.abort(new Error('synthetic original materialization cancellation'));}catch{}
+        }
+        return result;
+      };
+      try{
+        await assert.rejects(common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
+          withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})})));
+        assert.equal(chainSettled,true);assert.equal(originalClocks,1,'related restore never renews the original clock');
+        await assert.rejects(fs.lstat(relatedDirectory),{code:'ENOENT'});
+        assert.equal(await fs.readFile(path.join(backup,'related.md'),'utf8'),'RELATED_DELTA');
+      }finally{AbortSignal.timeout=savedTimeout;fs.rm=savedRm;await fs.rename(backup,relatedDirectory);}
+      assert.equal(relatedOrdinaryBudgets,0,'existing-root open must use the same local deadline');
+    }
 
     const localMetadataPath=path.join(path.dirname(writable),'.trelio-run.json');
     const localMetadata=JSON.parse(await fs.readFile(localMetadataPath,'utf8'));
