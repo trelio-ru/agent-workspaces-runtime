@@ -13,8 +13,8 @@ import {
   discoverRemoteMcpOAuth,
   oauthHttpJson,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
-import { loadPersonalCredential, forgetPersonalCredential } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
-import { withWorkspaceExecutionProfile, writePrivateJsonFile, readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { loadPersonalCredential, forgetPersonalCredential, createHarnessConnection } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { BrowserOpenError, withWorkspaceExecutionProfile, writePrivateJsonFile, readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createRemoteMcpOAuthVault } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
 
 const config = {
@@ -113,18 +113,141 @@ test("OAuth cancellation while waiting closes the exact loopback listener", asyn
 test("OAuth callback timeout closes the listener without exchanging a code", async (t) => {
   let callback;
   try {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     await assert.rejects(connectRemoteMcpOAuth(callbackConfig, {
       httpJson: createOAuthTransport(),
       openBrowserFn: async (url) => {
         callback = new URL(new URL(url).searchParams.get("redirect_uri"));
         // Виртуализируем только JS timer; сам loopback server настоящий.
-        t.mock.timers.enable({ apis: ["setTimeout"] });
         setImmediate(() => t.mock.timers.tick(10 * 60 * 1_000));
       },
     }), (error) => error.code === "REMOTE_MCP_OAUTH_TIMEOUT");
   } finally {
     t.mock.timers.reset();
   }
+  await assertListenerClosed(callback);
+});
+
+for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness"]) {
+  test(`${nativeClient}: manual fallback survives the tool result and resumes the exact OAuth attempt`, async t => {
+    let stored, authorization, opens = 0, exchanges = 0, writes = 0;
+    let releaseToken;
+    const tokenGate = new Promise(resolve => { releaseToken = resolve; });
+    const httpJson = async (url, request = {}) => {
+      if (url.includes(".well-known")) return { body: { issuer: "https://trelio.ru",
+        authorization_endpoint: "https://trelio.ru/authorize", token_endpoint: "https://trelio.ru/token",
+        registration_endpoint: "https://trelio.ru/register", code_challenge_methods_supported: ["S256"],
+        scopes_supported: ["mcp:read", "mcp:workspaces:read", "mcp:workspaces:write"] } };
+      if (url.endsWith("/register")) return { body: { client_id: "synthetic-native", token_endpoint_auth_method: "none",
+        redirect_uris: JSON.parse(request.body).redirect_uris } };
+      assert.equal(url, "https://trelio.ru/token");
+      exchanges++;
+      const params = new URLSearchParams(request.body);
+      assert.equal(params.get("code"), "synthetic-manual-code");
+      assert.equal(createHash("sha256").update(params.get("code_verifier")).digest("base64url"), authorization.searchParams.get("code_challenge"));
+      await tokenGate;
+      return { body: { token_type: "Bearer", access_token: "synthetic-private-token", expires_in: 3600 } };
+    };
+    const connection = createHarnessConnection({ nativeClient, httpJson,
+      vault: { read: async () => stored, write: async (_origin, _identity, value) => { stored = value; writes++; } },
+      connectOAuth: (config, options) => connectRemoteMcpOAuth(config, { ...options, httpJson,
+        openBrowserFn: async url => {
+          opens++; authorization = new URL(url);
+          throw new BrowserOpenError("safe diagnostic", { stage: "shell_execute", nativeCode: 5, exitCode: 1 });
+        } }),
+      httpRequest: async ({ payload }) => ({ message: { jsonrpc: "2.0", id: payload.id,
+        result: { protocolVersion: "2025-03-26" } } }),
+    });
+    const tool = new AbortController();
+    try {
+      const pending = await connection.connect(tool.signal, true);
+      assert.equal(pending.status, "awaiting_authorization");
+      assert.equal(pending.connected, false);
+      assert.equal(pending.authorizationUrl, authorization.href);
+      assert.equal(pending.browser.nativeCode, 5);
+      assert.ok(Date.parse(pending.expiresAt) > Date.now() + 590_000);
+      tool.abort(); // The completed call no longer owns the live listener.
+      assert.deepEqual(await connection.connect(undefined, true), pending);
+      assert.deepEqual(await connection.connect(), pending);
+      assert.equal(opens, 1); assert.equal(exchanges, 0); assert.equal(writes, 0);
+      assert.ok(!JSON.stringify(pending).includes("code_verifier"));
+      const callback = new URL(authorization.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", authorization.searchParams.get("state"));
+      callback.searchParams.set("code", "synthetic-manual-code");
+      const forged = new URL(callback); forged.searchParams.set("state", "forged");
+      assert.equal(await requestCallback(forged), 403);
+      assert.equal(await requestCallback(callback), 200);
+      const confirming = await connection.connect();
+      assert.equal(confirming.status, "confirming_authorization");
+      assert.equal(confirming.authorizationUrl, undefined);
+      assert.equal(writes, 0);
+      releaseToken();
+      // Completion persists without a second tool call. Poll only after that
+      // background pipeline has had a turn; it must not start OAuth again.
+      for (let i = 0; i < 20 && !stored; i++) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(writes, 1);
+      await new Promise(resolve => setImmediate(resolve));
+      const result = await connection.connect(undefined, true);
+      assert.equal(result.connected, true);
+      assert.equal(result.authorizationUrl, undefined);
+      assert.ok(!JSON.stringify(result).includes("synthetic-private-token"));
+      assert.equal(opens, 1); assert.equal(exchanges, 1);
+      await assertListenerClosed(callback);
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const replacement = await connection.connect(undefined, true);
+      t.mock.timers.tick(600_000);
+      await new Promise(resolve => setImmediate(resolve));
+      await assert.rejects(connection.connect(undefined, true), { code: "REMOTE_MCP_OAUTH_TIMEOUT" });
+      t.mock.timers.reset();
+      assert.equal(opens, 2, "checking an expired attempt reports its outcome before starting another");
+      await assertListenerClosed(new URL(new URL(replacement.authorizationUrl).searchParams.get("redirect_uri")));
+      const final = await connection.connect(undefined, true);
+      await connection.close();
+      await assertListenerClosed(new URL(new URL(final.authorizationUrl).searchParams.get("redirect_uri")));
+      assert.equal(exchanges, 1); assert.equal(writes, 1);
+    } finally { releaseToken(); await connection.close(); }
+  });
+}
+
+test("manual OAuth keeps one deadline and closes on timeout or host cancellation", async t => {
+  for (const cancel of [false, true]) await t.test(cancel ? "host closes" : "deadline expires", async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const controller = new AbortController();
+    let handoff;
+    const ready = new Promise(resolve => { handoff = resolve; });
+    const completion = connectRemoteMcpOAuth(callbackConfig, {
+      httpJson: createOAuthTransport(), signal: controller.signal,
+      openBrowserFn: async () => { throw new BrowserOpenError("safe", { stage: "spawn", causeCode: "ENOENT" }); },
+      onManualAuthorization: handoff,
+    });
+    const pending = await ready;
+    const callback = new URL(new URL(pending.authorizationUrl).searchParams.get("redirect_uri"));
+    if (cancel) controller.abort(); else t.mock.timers.tick(600_000);
+    await assert.rejects(completion, error => {
+      assert.equal(error.code, cancel ? "REMOTE_MCP_OAUTH_CANCELLED" : "REMOTE_MCP_OAUTH_TIMEOUT");
+      if (!cancel) assert.equal(error.browser.causeCode, "ENOENT");
+      assert.ok(!JSON.stringify(error).includes("state="));
+      return true;
+    });
+    t.mock.timers.reset();
+    await assertListenerClosed(callback);
+  });
+});
+
+test("a callback that beats a slow opener completes without publishing a stale manual URL", async () => {
+  let callback;
+  const session = await connectRemoteMcpOAuth(callbackConfig, {
+    httpJson: createOAuthTransport(() => ({ body: { token_type: "Bearer", access_token: "synthetic-race", expires_in: 3600 } })),
+    onManualAuthorization: () => assert.fail("callback already consumed"),
+    openBrowserFn: async (url, { signal }) => {
+      const start = new URL(url); callback = new URL(start.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", start.searchParams.get("state")); callback.searchParams.set("code", "synthetic-code");
+      const closed = new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("helper stopped")), { once: true }));
+      void requestCallback(callback).catch(() => {});
+      return closed;
+    },
+  });
+  assert.equal(session.accessToken, "synthetic-race");
   await assertListenerClosed(callback);
 });
 

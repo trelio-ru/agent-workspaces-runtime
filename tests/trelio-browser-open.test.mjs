@@ -31,6 +31,7 @@ const createChild = () => {
     },
   });
   child.input = () => Buffer.concat(chunks).toString("utf8");
+  child.stdout = new EventEmitter();
   child.kill = () => {};
   return child;
 };
@@ -51,7 +52,7 @@ test("Windows browser opener hands off the entire URL through private stdin", as
   assert.equal(child.input(), syntheticUrl, "параметры после & должны доходить целиком");
   assert.equal(invocation.command, resolveWindowsPowerShellExecutable());
   assert.equal(invocation.options.shell, false);
-  assert.deepEqual(invocation.options.stdio, ["pipe", "ignore", "ignore"]);
+  assert.deepEqual(invocation.options.stdio, ["pipe", "pipe", "ignore"]);
   assert.equal(invocation.options.windowsHide, true);
   assert.equal(invocation.options.env, undefined, "URI не переносится через environment");
   assert.ok(invocation.args.includes("-NoProfile"));
@@ -129,6 +130,34 @@ test("Windows browser opener handles stdin errors and synchronous write failures
       // Закрытие helper может породить поздний EPIPE после уже выданного отказа.
       child.stdin.emit("error", new Error(syntheticUrl));
       assert.equal(kills, 1);
+    });
+  }
+});
+
+test("browser diagnostics distinguish native denial, spawn and stdin without private output", async () => {
+  for (const [kind, expected] of [
+    ["native", { stage: "shell_execute", nativeCode: 5, exitCode: 1 }],
+    ["spawn", { stage: "spawn", causeCode: "EACCES" }],
+    ["missing", { stage: "spawn", causeCode: "ENOENT" }],
+    ["stdin", { stage: "stdin", causeCode: "EPIPE" }],
+    ["raw", { stage: "helper_exit", exitCode: 1 }],
+    ["oversized", { stage: "helper_exit", exitCode: 1 }],
+  ]) {
+    const child = createChild();
+    const opening = openBrowser(syntheticUrl, { platform: "win32", spawnProcess: () => child });
+    if (["spawn", "missing", "stdin"].includes(kind)) {
+      const error = Object.assign(new Error(syntheticUrl), { code: kind === "stdin" ? "EPIPE" : kind === "spawn" ? "EACCES" : "ENOENT" });
+      (kind === "stdin" ? child.stdin : child).emit("error", error);
+    } else {
+      child.stdout.emit("data", Buffer.from(kind === "native" ? "TRELIO_BROWSER_OPEN_ERROR:5"
+        : kind === "raw" ? syntheticUrl : "x".repeat(200) + "TRELIO_BROWSER_OPEN_ERROR:5"));
+      child.emit("close", 1, null);
+    }
+    await assert.rejects(opening, error => {
+      assertPrivateFailure(error);
+      assert.deepEqual(error.diagnostics, expected);
+      assert.ok(!JSON.stringify(error).includes("synthetic-state"));
+      return true;
     });
   }
 });

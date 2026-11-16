@@ -5573,12 +5573,34 @@ const exchangePendingBridgePairing = async (
 };
 
 export class BrowserOpenError extends Error {
-  constructor(message, { cause } = {}) {
-    super(message, cause === undefined ? undefined : { cause });
+  constructor(message, diagnostics = {}) {
+    // Process exceptions can contain the authorization URL. Keep only this
+    // closed structural vocabulary; never retain the original Error as cause.
+    super(message);
     this.name = "BrowserOpenError";
     this.code = "BROWSER_OPEN_FAILED";
+    this.diagnostics = normalizeBrowserOpenDiagnostics(diagnostics);
   }
 }
+
+const normalizeBrowserOpenDiagnostics = (value = {}) => Object.freeze({
+  stage: ["input", "spawn", "stdin", "helper_exit", "shell_execute", "timeout"].includes(value.stage)
+    ? value.stage : "unknown",
+  ...(["EACCES", "EPERM", "ENOENT", "ENOEXEC", "EPIPE", "ETIMEDOUT", "UNKNOWN"].includes(value.causeCode)
+    ? { causeCode: value.causeCode } : {}),
+  ...(Number.isInteger(value.exitCode) && value.exitCode >= -2_147_483_648 && value.exitCode <= 2_147_483_647
+    ? { exitCode: value.exitCode } : {}),
+  ...(["SIGTERM", "SIGKILL", "SIGINT", "SIGABRT"].includes(value.signal) ? { signal: value.signal } : {}),
+  ...(Number.isInteger(value.nativeCode) && value.nativeCode >= 0 && value.nativeCode <= 65_535
+    ? { nativeCode: value.nativeCode } : {}),
+});
+
+export const browserOpenDiagnostics = error => error instanceof BrowserOpenError
+  ? normalizeBrowserOpenDiagnostics(error.diagnostics) : Object.freeze({ stage: "unknown" });
+
+const browserProcessFailure = (stage, error) => ({ stage,
+  causeCode: ["EACCES", "EPERM", "ENOENT", "ENOEXEC", "EPIPE", "ETIMEDOUT"].includes(error?.code)
+    ? error.code : "UNKNOWN" });
 
 // Windows разбирает `cmd /c start` как команду: `&` из OAuth query становится
 // разделителем, даже когда Node передал URL одним аргументом. Фиксированный
@@ -5596,7 +5618,22 @@ try {
   $startInfo.UseShellExecute = $true
   [System.Diagnostics.Process]::Start($startInfo) | Out-Null
   exit 0
-} catch { exit 1 }
+} catch {
+  # PowerShell wraps Win32Exception in MethodInvocationException. Inspect only
+  # a bounded inner chain, never Message/ToString/stack or the attempted URL.
+  $nativeCode = 0
+  $failure = $_.Exception
+  for ($i = 0; $i -lt 8 -and $null -ne $failure; $i++) {
+    if ($failure -is [System.ComponentModel.Win32Exception]) {
+      $nativeCode = $failure.NativeErrorCode
+      break
+    }
+    if ($failure -is [System.UnauthorizedAccessException]) { $nativeCode = 5; break }
+    $failure = $failure.InnerException
+  }
+  [Console]::Out.Write('TRELIO_BROWSER_OPEN_ERROR:' + $nativeCode)
+  exit 1
+}
 `;
 
 export const openBrowser = async (
@@ -5618,7 +5655,7 @@ export const openBrowser = async (
   if (windows && (
     typeof url !== "string" || !url || url.length > 32_768 || /[\0\r\n]/u.test(url)
   )) {
-    throw new BrowserOpenError("Ссылка для системного открытия браузера не прошла проверку.");
+    throw new BrowserOpenError("Ссылка для системного открытия браузера не прошла проверку.", { stage: "input" });
   }
   const [command, args] = platform === "darwin"
     // Use the system binary by its absolute path. Besides avoiding a modified
@@ -5636,19 +5673,31 @@ export const openBrowser = async (
     let child;
     try {
       child = spawnProcess(command, args, {
-        stdio: windows ? ["pipe", "ignore", "ignore"] : "ignore",
+        stdio: windows ? ["pipe", "pipe", "ignore"] : "ignore",
         windowsHide: true,
         shell: false,
       });
-    } catch {
+    } catch (error) {
       reject(new BrowserOpenError(
         "Не удалось запустить системное открытие браузера.",
+        browserProcessFailure("spawn", error),
       ));
       return;
     }
 
     let settled = false;
     let timeoutId = null;
+    // A fixed numeric marker is the helper's entire diagnostic protocol.
+    // Ignore malformed/oversized output instead of exposing native prose.
+    let diagnosticOutput = "";
+    let diagnosticOverflow = false;
+    child.stdout?.on("data", chunk => {
+      if (diagnosticOverflow) return;
+      if (Buffer.byteLength(diagnosticOutput) + chunk.length > 128) {
+        diagnosticOverflow = true;
+        diagnosticOutput = "";
+      } else diagnosticOutput += chunk.toString("utf8");
+    });
     const settle = (callback, value) => {
       if (settled) {
         return;
@@ -5682,9 +5731,10 @@ export const openBrowser = async (
     // Запуск helper ещё не доказывает передачу URI системе. Ждём exit 0,
     // но не завершения самого браузера. Raw spawn/stdin errors не сохраняем
     // даже как cause: они могут содержать приватный URL или process arguments.
-    child.once("error", () => stopWithError(
+    child.once("error", error => stopWithError(
       new BrowserOpenError(
         "Не удалось запустить системное открытие браузера.",
+        browserProcessFailure("spawn", error),
       ),
     ));
     child.once("close", (code, signal) => {
@@ -5694,11 +5744,15 @@ export const openBrowser = async (
       }
       const result = Number.isInteger(code)
         ? `код ${code}`
-        : `сигнал ${signal || "unknown"}`;
+        : `сигнал ${normalizeBrowserOpenDiagnostics({ signal }).signal || "unknown"}`;
+      const marker = !diagnosticOverflow && /^TRELIO_BROWSER_OPEN_ERROR:(\d{1,5})$/u.exec(diagnosticOutput);
+      const diagnostics = { stage: marker ? "shell_execute" : "helper_exit", exitCode: code, signal,
+        ...(marker ? { nativeCode: Number(marker[1]) } : {}) };
       settle(
         reject,
         new BrowserOpenError(
           `Системное открытие браузера завершилось с ошибкой (${result}).`,
+          diagnostics,
         ),
       );
     });
@@ -5714,21 +5768,23 @@ export const openBrowser = async (
       stopWithError(
         new BrowserOpenError(
           "Системное открытие браузера не завершилось вовремя.",
+          { stage: "timeout", causeCode: "ETIMEDOUT" },
         ),
       );
     }, openerTimeoutMs);
 
     if (windows) {
-      const failInput = () => stopWithError(new BrowserOpenError(
+      const failInput = error => stopWithError(new BrowserOpenError(
         "Не удалось передать ссылку системному открытию браузера.",
+        browserProcessFailure("stdin", error),
       ));
       // Listener остаётся после settlement, чтобы поздний EPIPE закрытого
       // helper не стал uncaught exception и не раскрыл содержимое pipe.
       child.stdin.on("error", failInput);
       try {
         child.stdin.end(url, "utf8");
-      } catch {
-        failInput();
+      } catch (error) {
+        failInput(error);
       }
     }
   });

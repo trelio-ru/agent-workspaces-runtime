@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
-import { openBrowser, renderLocalFormMessage, LOCAL_FORM_CSP } from "./trelio-workspace.mjs";
+import { openBrowser, browserOpenDiagnostics, renderLocalFormMessage, LOCAL_FORM_CSP } from "./trelio-workspace.mjs";
 
 const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;
 const OAUTH_TIMEOUT_MS = 20_000;
@@ -24,9 +24,12 @@ export const TRELIO_NATIVE_OAUTH_CLIENT_IDS = Object.freeze({
 const TRELIO_NATIVE_OAUTH_RESOURCE = "https://trelio.ru/mcp";
 
 export class RemoteMcpOAuthError extends Error {
-  constructor(code, message) {
+  constructor(code, message, diagnostics) {
     super(message);
     this.code = code;
+    // Only the opener's closed structural projection is accepted here. Never
+    // attach the original process Error, callback URL, code or token response.
+    if (diagnostics) this.browser = diagnostics;
   }
 }
 
@@ -230,21 +233,27 @@ const tokenFromResponse = (body, previousRefreshToken = null, maximumLifetimeSec
   };
 };
 
-const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, signal }) => {
+const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, signal, expiresAt, onManualAuthorization }) => {
   if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");
   let expectedPort = 0;
   const state = crypto.randomBytes(32).toString("base64url");
   let resolveCallback;
   let rejectCallback;
+  let callbackSettled = false;
+  let browser;
+  const openerController = new AbortController();
+  const openerSignal = signal ? AbortSignal.any([signal, openerController.signal]) : openerController.signal;
   const callback = new Promise((resolve, reject) => {
-    resolveCallback = resolve;
-    rejectCallback = reject;
+    resolveCallback = value => { callbackSettled = true; resolve(value); };
+    rejectCallback = error => { callbackSettled = true; reject(error); };
   });
   callback.catch(() => undefined);
   const server = http.createServer((incoming, outgoing) => {
     const host = `127.0.0.1:${expectedPort}`;
     if (
       incoming.method !== "GET"
+      || callbackSettled
+      || Date.now() >= expiresAt
       || incoming.headers.host !== host
       || incoming.socket.remoteAddress !== "127.0.0.1"
       || incoming.socket.localAddress !== "127.0.0.1"
@@ -292,28 +301,36 @@ const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, 
     });
     expectedPort = server.address().port;
     const redirectUri = `http://127.0.0.1:${expectedPort}/callback`;
-    const authorizeUrl = await buildAuthorizeUrl({ redirectUri, state });
-    try {
-      await openBrowserFn(authorizeUrl, { signal });
-    } catch {
-      // Отмена короткого OS helper остаётся отменой всего OAuth flow;
-      // общий opener catch не должен превращать её в ошибку браузера.
-      if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");
-      throw fail("REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED", "Не удалось открыть OAuth-страницу в браузере.");
-    }
-    if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");
-    const code = await Promise.race([
-      callback,
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(fail("REMOTE_MCP_OAUTH_TIMEOUT", "OAuth-подключение не завершено вовремя.")), CALLBACK_TIMEOUT_MS);
-      }),
-      new Promise((_, reject) => {
-        onAbort = () => reject(fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено."));
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }),
-    ]);
+    // One deadline covers registration, OS handoff and manual completion.
+    // Polling or choosing a different browser never renews state/PKCE/port.
+    timeout = setTimeout(() => rejectCallback(new RemoteMcpOAuthError("REMOTE_MCP_OAUTH_TIMEOUT",
+      "Время входа истекло (10 минут). Начните новую попытку подключения.", browser)), Math.max(1, expiresAt - Date.now()));
+    onAbort = () => rejectCallback(fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено."));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    const handoff = (async () => {
+      const authorizeUrl = await buildAuthorizeUrl({ redirectUri, state });
+      if (callbackSettled) return callback;
+      try { await openBrowserFn(authorizeUrl, { signal: openerSignal }); }
+      catch (error) {
+        // A valid callback may beat a slow OS helper. Cancellation and an
+        // already terminal callback must never expose a stale manual link.
+        if (callbackSettled) return callback;
+        if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");
+        browser = browserOpenDiagnostics(error);
+        if (!onManualAuthorization) throw new RemoteMcpOAuthError("REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED",
+          "Не удалось открыть OAuth-страницу в браузере.", browser);
+        // The caller may return this START URL to the human via ordinary tool
+        // output. Verifier, callback code and tokens remain process-only.
+        onManualAuthorization(Object.freeze({ authorizationUrl: authorizeUrl,
+          expiresAt: new Date(expiresAt).toISOString(), browser }));
+      }
+      return callback;
+    })();
+    const code = await Promise.race([callback, handoff]);
     return { code, redirectUri };
   } finally {
+    openerController.abort();
     if (timeout) clearTimeout(timeout);
     if (onAbort) signal?.removeEventListener("abort", onAbort);
     server.closeAllConnections();
@@ -327,8 +344,9 @@ export const connectRemoteMcpOAuth = async (
     // Host-only options: the native Trelio client shares this SAME S256/state/
     // origin-bound callback engine. External skill declarations cannot set them.
     clientName = "Trelio Remote MCP host", resource = null, maximumLifetimeSeconds = 86_400,
-    publicClientId = null } = {},
+    publicClientId = null, onManualAuthorization, onAuthorizationReceived } = {},
 ) => {
+  const expiresAt = Date.now() + CALLBACK_TIMEOUT_MS;
   // A fixed public profile is a host-owned choice, never part of an external
   // skill declaration. Keep the exact resource/id pair closed so this option
   // cannot turn another provider into Trelio's model-independent channel.
@@ -345,6 +363,8 @@ export const connectRemoteMcpOAuth = async (
     issuer: metadata.issuer,
     openBrowserFn,
     signal,
+    expiresAt,
+    onManualAuthorization,
     buildAuthorizeUrl: async ({ redirectUri: callbackUrl, state }) => {
       if (publicClientId === null) {
         const registration = await httpJson(metadata.registrationEndpoint, {
@@ -385,6 +405,7 @@ export const connectRemoteMcpOAuth = async (
       return url.toString();
     },
   });
+  onAuthorizationReceived?.();
   const tokenResponse = await httpJson(metadata.tokenEndpoint, {
     method: "POST",
     contentType: "application/x-www-form-urlencoded",

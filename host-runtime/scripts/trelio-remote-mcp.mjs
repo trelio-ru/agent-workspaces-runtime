@@ -7197,11 +7197,15 @@ export const runStdioHost = async ({
   for (const controller of activeToolCalls.values()) {
     controller.abort(createCancellationError());
   }
+  // A manual OAuth handoff has already answered its tools/call. Its listener
+  // still belongs to this transport, so close it explicitly on EOF as well.
+  const closingHandler = handleMessage.close?.();
   for (const [id, pending] of pendingClientRequests) {
     pendingClientRequests.delete(id);
     pending.reject(new Error("MCP transport closed before the client answered."));
   }
   await Promise.allSettled([...inFlightDispatches]);
+  await closingHandler;
   await closingSearches;
   await closingPluginPreservation;
   if (runtimeDelegatePromise) {
@@ -7533,25 +7537,79 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       })();
       try { return await initializing; } finally { initializing = null; }
     };
+    const establishConnection = (signal, reauthorize, onManualAuthorization, onAuthorizationReceived) => withPrivateProcessSession(async () => {
+      const target = await readMetadata(signal);
+      const current = await store.read(ORIGIN, target);
+      if (reauthorize || !current || current.expiresAt <= Date.now()) {
+        const created = await connectOAuth(config(), { signal, onManualAuthorization, onAuthorizationReceived,
+          resolveEndpoint: resolveSafeRemoteMcpEndpoint,
+          clientName: publicProfile?.name ?? "Trelio – DeepSeek Harness", resource: RESOURCE,
+          ...(publicProfile ? { publicClientId: publicProfile.id } : {}),
+          maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
+        throwIfAborted(signal);
+        await store.write(ORIGIN, target, created);
+        const saved = await store.read(ORIGIN, target);
+        if (!saved || saved.accessToken !== created.accessToken) throw fail("TRELIO_HARNESS_AUTH_STORE_FAILED", "OAuth не подтверждён системным хранилищем.");
+      }
+      // Explicit reconnect starts a new read-only MCP negotiation; it never
+      // repeats the prior business tool or revives a retired OAuth profile.
+      session = null;
+      await initialize(signal);
+      return { connected: true, protectedRead: "not_checked", saving: "not_checked" };
+    }, signal);
+    let attempt = null, closed = false;
+    // One native connection owns at most one live OAuth attempt. A manual
+    // handoff outlives the tool response but not the host or OAuth deadline.
+    // Keep the private session alive through token exchange and vault read-back;
+    // the caller's short-lived private scope must not own this background work.
+    const close = async () => {
+      closed = true;
+      const current = attempt;
+      current?.controller.abort(createCancellationError());
+      await current?.job;
+      if (attempt === current) attempt = null;
+    };
     return {
-      initialize,
+      initialize, close,
       async connect(signal, reauthorize = false) {
-        const target = await readMetadata(signal);
-        const current = await store.read(ORIGIN, target);
-        if (reauthorize || !current || current.expiresAt <= Date.now()) {
-          const created = await connectOAuth(config(), { signal, resolveEndpoint: resolveSafeRemoteMcpEndpoint,
-            clientName: publicProfile?.name ?? "Trelio – DeepSeek Harness", resource: RESOURCE,
-            ...(publicProfile ? { publicClientId: publicProfile.id } : {}),
-            maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
-          await store.write(ORIGIN, target, created);
-          const saved = await store.read(ORIGIN, target);
-          if (!saved || saved.accessToken !== created.accessToken) throw fail("TRELIO_HARNESS_AUTH_STORE_FAILED", "OAuth не подтверждён системным хранилищем.");
+        throwIfAborted(signal);
+        if (closed) throw new RemoteMcpOAuthError("REMOTE_MCP_OAUTH_CANCELLED", "Подключение закрыто вместе с клиентом.");
+        if (!attempt) {
+          const controller = new AbortController();
+          let ready;
+          const row = { controller, pending: null, outcome: null,
+            ready: new Promise(resolve => { ready = resolve; }) };
+          attempt = row;
+          const onAbort = () => controller.abort(createCancellationError());
+          signal?.addEventListener("abort", onAbort, { once: true });
+          // Synchronous assignment before starting work makes concurrent calls
+          // join the same listener, including repeated reauthorize=true calls.
+          row.job = establishConnection(controller.signal, reauthorize, manual => {
+            signal?.removeEventListener("abort", onAbort);
+            row.pending = { connected: false, status: "awaiting_authorization", ...manual,
+              message: "Браузер не открылся автоматически. Откройте ссылку на этом компьютере и подтвердите доступ до указанного времени.",
+              nextAction: "Покажите пользователю authorizationUrl как ссылку и expiresAt. Runtime продолжает ждать OAuth. После входа вызовите trelio_connect снова; он проверит эту же попытку. Не запрашивайте callback URL, код или токен." };
+            ready();
+          }, () => {
+            // A consumed URL is not useful during token exchange/vault checks.
+            // Keep the attempt resumable without asking the human to log in twice.
+            if (row.pending) row.pending = { connected: false, status: "confirming_authorization",
+              message: "Подтверждение получено. Проверяем подключение.",
+              nextAction: "Повторите trelio_connect для результата этой попытки. Новый вход не требуется." };
+          }).then(value => { row.outcome = { value }; }, error => { row.outcome = { error }; })
+            .finally(() => {
+              signal?.removeEventListener("abort", onAbort);
+              row.pending = null; // Do not retain expired/consumed start URLs.
+              ready();
+            });
         }
-        // Explicit reconnect starts a new read-only MCP negotiation; it never
-        // repeats the prior business tool or revives a retired OAuth profile.
-        session = null;
-        await initialize(signal);
-        return { connected: true, protectedRead: "not_checked", saving: "not_checked" };
+        const row = attempt;
+        await row.ready;
+        throwIfAborted(signal);
+        if (!row.outcome) return row.pending;
+        if (attempt === row) attempt = null;
+        if (row.outcome.error) throw row.outcome.error;
+        return row.outcome.value;
       },
       async listTools(signal) {
         await initialize(signal);
@@ -7683,13 +7741,14 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       catch (error) { for (const dispose of disposers) dispose(); disposers = []; throw error; }
     }, signal);
     ctx.tools.register({ name: "trelio_connect",
-      description: "Connect Trelio or refresh its MCP session and catalogue, reusing valid OAuth. Browser consent is needed for a missing, expired or explicitly replaced grant. Never supply tokens or codes in chat; previous business actions are not replayed.",
+      description: "Connect Trelio or refresh its MCP session. If awaiting_authorization, show authorizationUrl and expiresAt, then call again after consent to check the same attempt. Set reauthorize only to replace a revoked or insufficient grant. Never supply codes or tokens.",
       parameters: { type: "object", properties: { reauthorize: { type: "boolean", description: "Explicitly replace a revoked or insufficient OAuth grant in the browser." } }, additionalProperties: false },
       output: { schema: { type: "object", properties: {}, additionalProperties: true },
         render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }] },
       async execute(input, execution) {
         try {
-          const connected = await withPrivateProcessSession(() => connection.connect(execution.signal, input.reauthorize === true), execution.signal);
+          const connected = await connection.connect(execution.signal, input.reauthorize === true);
+          if (!connected.connected) return connected;
           await refresh(execution.signal);
           return connected;
         } catch (error) { throw nativeError(error); }
@@ -7701,7 +7760,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       // remain available just as it is with the two-server stdio setup.
       text: () => [connection.instructions(), AGENT_SKILL_ROUTING_INSTRUCTIONS].filter(Boolean).join("\n\n"),
     }));
-    ctx.effect(() => () => { disposed = true; for (const dispose of disposers) dispose(); disposers = []; });
+    ctx.effect(() => () => { disposed = true; void connection.close?.(); for (const dispose of disposers) dispose(); disposers = []; });
     try { await refresh(); }
     catch (error) {
       // Boot with the explicit recovery tool when no grant exists. A network,
@@ -7729,7 +7788,7 @@ export const createKimiMcpHandler = ({
   const clientLabel = multiTool ? "Мультитул" : "Kimi Work";
   const authRequired = multiTool ? "TRELIO_MULTITOOL_AUTH_REQUIRED" : "TRELIO_KIMI_AUTH_REQUIRED";
   const connectTool = { name: "trelio_connect", description:
-    `Connect Trelio in ${clientLabel} using browser OAuth, or refresh the catalogue using the existing grant. Set reauthorize only for an explicitly requested replacement of a revoked or insufficient grant. Never supply tokens or codes; previous business operations are not replayed.`,
+    `Connect Trelio in ${clientLabel} using browser OAuth. If awaiting_authorization, show authorizationUrl and expiresAt, then call again after consent to check the same attempt. Set reauthorize only to replace a revoked or insufficient grant. Never supply codes or tokens.`,
     inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false } };
   // Work can reuse its first tools/list result in later chats, including ones
   // started after OAuth succeeds. Keep discovery and invocation available from
@@ -7800,7 +7859,7 @@ export const createKimiMcpHandler = ({
   const instructions = multiTool
     ? "This is the MultiTool OAuth channel for Trelio. Use clientKind=multitool for local diagnostics and folder onboarding. Call trelio_connect before protected reads. The company policy applies without hooks or model verification; never author runtimeSessionProof. Execute exact returned tools and arguments. After open or inspect, read every file in authorityReadPlan in order through EOF before continuing. Stop if the plan is unavailable. Local routes use this same MCP catalogue. For missing tools use trelio_find_tools and trelio_call_tool. MCP Apps and browser-fill are unavailable. "
     : "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat: for missing direct tools, use trelio_find_tools to get the exact native schema and trelio_call_tool to invoke it. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
-  return async (message, { signal, notifyClient } = {}) => {
+  const handler = async (message, { signal, notifyClient } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
     const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
     try {
@@ -7822,8 +7881,9 @@ export const createKimiMcpHandler = ({
         if (Object.keys(input).some(key => key !== "reauthorize") || (input.reauthorize !== undefined && typeof input.reauthorize !== "boolean")) {
           throw invalidInput();
         }
+        const connected = await connection.connect(signal, input.reauthorize === true);
+        if (!connected.connected) return reply(textResult(JSON.stringify(connected), connected));
         const result = await withPrivateProcessSession(async () => {
-          const connected = await connection.connect(signal, input.reauthorize === true);
           // Verify the real catalogue before announcing its change. A callback
           // alone does not prove authentication, protected read or saving.
           await connection.listTools(signal);
@@ -7850,12 +7910,15 @@ export const createKimiMcpHandler = ({
       const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : multiTool ? "TRELIO_MULTITOOL_CONNECTION_FAILED" : "TRELIO_KIMI_CONNECTION_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id,
         error: { code: -32000, message: code, data: { code } } };
-      const reason = code === authRequired
+      const reason = error instanceof RemoteMcpOAuthError ? error.message : code === authRequired
         ? "Вызовите trelio_connect и продолжите исходный запрос после входа в этом чате."
         : "Проверьте доступ и повторите только безопасное чтение. Неизвестный результат изменения требует read-back.";
-      return reply({ ...textResult(`${code}: ${reason}`, { code }), isError: true });
+      const details = { code, message: reason, ...(error instanceof RemoteMcpOAuthError && error.browser ? { browser: error.browser } : {}) };
+      return reply({ ...textResult(`${code}: ${reason}`, details), isError: true });
     }
   };
+  handler.close = () => connection.close?.();
+  return handler;
 };
 
 export const runKimiStdioHost = (options = {}) => {
@@ -8092,7 +8155,7 @@ export const createMultiToolConnection = ({
 
 const CODEX_CONNECT_TOOL = {
   name: "trelio_connect",
-  description: "Connect Trelio in Codex through the browser. Set reauthorize only to replace a revoked or insufficient grant. Continue the original request after approval.",
+  description: "Connect Trelio through browser OAuth. If awaiting_authorization, show authorizationUrl and expiresAt, then call again after consent to check the same attempt. Set reauthorize only to replace a revoked or insufficient grant.",
   inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
 };
@@ -8133,7 +8196,7 @@ export const createCodexMcpHandler = ({
         "The Codex runtime supplies proof automatically; never supply it.") };
     }), CODEX_CONNECT_TOOL];
   };
-  return async (message, { signal, clientInfo, clientCapabilities, notifyClient, runtimeUpgradeRecovery } = {}) => {
+  const handler = async (message, { signal, clientInfo, clientCapabilities, notifyClient, runtimeUpgradeRecovery } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === null || message.id === undefined) return null;
     const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
     try {
@@ -8142,6 +8205,7 @@ export const createCodexMcpHandler = ({
         // Native Codex renders Apps. Never advertise a fallback interaction to
         // the remote session that this request transport cannot relay.
         toolsByName = null;
+        await connection?.close?.();
         connection = connect({ ...(clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]
           ? { extensions: { [MCP_APP_CLIENT_EXTENSION]: clientCapabilities.extensions[MCP_APP_CLIENT_EXTENSION] } } : {}) });
         // Leave most of the startup window to the signed loader and catalog.
@@ -8176,7 +8240,8 @@ export const createCodexMcpHandler = ({
         if (Object.keys(raw).some(key => key !== "reauthorize") || (raw.reauthorize !== undefined && typeof raw.reauthorize !== "boolean")) {
           throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Некорректные параметры входа в Trelio.");
         }
-        await withPrivateProcessSession(() => connection.connect(signal, raw.reauthorize === true), signal);
+        const connected = await connection.connect(signal, raw.reauthorize === true);
+        if (connected?.connected === false) return reply(buildTextResult(connected));
         await catalog(signal);
         await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         return reply(buildTextResult({ connected: true, instructions: codexInstructions(connection.instructions?.() ?? "") }));
@@ -8242,14 +8307,17 @@ export const createCodexMcpHandler = ({
         : authFailure(error) ? (code === "TRELIO_CODEX_AUTH_REQUIRED"
           ? "Подключите Trelio через trelio_connect и продолжите исходный запрос."
           : "Повторно подтвердите доступ через trelio_connect с reauthorize=true и продолжите исходный запрос.")
-        : error instanceof RemoteMcpHostError ? error.message
+        : error instanceof RemoteMcpHostError || error instanceof RemoteMcpOAuthError ? error.message
         : "Trelio не смог подготовить или завершить вызов. Для записи сначала проверьте состояние.";
       const details = { code, message: reason, ...(pairing
-        ? { pairingId: pairing.pairingId, deviceName: pairing.deviceName } : {}) };
+        ? { pairingId: pairing.pairingId, deviceName: pairing.deviceName } : {}),
+        ...(error instanceof RemoteMcpOAuthError && error.browser ? { browser: error.browser } : {}) };
       return reply({ ...buildTextResult(details),
         ...(toolsByName?.get(message.params?.name)?.outputSchema ? {} : { structuredContent: details }), isError: true });
     }
   };
+  handler.close = () => connection?.close?.();
+  return handler;
 };
 
 export const runCodexMcpStdioHost = ({ profile, ...options }) => runStdioHost({

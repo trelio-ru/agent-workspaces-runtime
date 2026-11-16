@@ -3,6 +3,7 @@ import test from "node:test";
 import { createCodexMcpHandler, handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { RemoteMcpOAuthError } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import {
   cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments,
 } from "../host-runtime/scripts/trelio-runtime-session.mjs";
@@ -13,6 +14,46 @@ const meta = (model, effort, windowId = "window-1") => ({
   threadId, windowId, "x-codex-turn-metadata": { turn_id: "turn", model, reasoning_effort: effort },
 });
 const frame = (method, params = {}) => ({ jsonrpc: "2.0", id: 1, method, params });
+
+test("Codex returns a manual OAuth link through ordinary tool text without premature connection or App capabilities", async () => {
+  let ready = false, catalogReads = 0, notifications = 0, closes = 0;
+  const pending = { connected: false, status: "awaiting_authorization",
+    authorizationUrl: "https://trelio.ru/oauth/authorize?state=synthetic-state&code_challenge=synthetic-challenge",
+    expiresAt: "2026-11-16T10:00:00.000Z", browser: { stage: "shell_execute", nativeCode: 5 } };
+  const handler = createCodexMcpHandler({ connect: () => ({
+    connect: async () => ready ? { connected: true } : pending,
+    listTools: async () => { catalogReads++; return []; },
+    close: async () => { closes++; },
+  }) });
+  await handler(frame("initialize"), { clientInfo, clientCapabilities: {} });
+  const call = () => handler(frame("tools/call", { name: "trelio_connect", arguments: {} }),
+    { clientInfo, notifyClient: async () => { notifications++; } });
+  const first = await call();
+  assert.equal(first.result.isError, undefined);
+  assert.deepEqual(JSON.parse(first.result.content[0].text), pending);
+  assert.equal(catalogReads, 0); assert.equal(notifications, 0);
+  ready = true;
+  assert.equal(JSON.parse((await call()).result.content[0].text).connected, true);
+  assert.equal(catalogReads, 1); assert.equal(notifications, 1);
+  await handler.close(); assert.equal(closes, 1);
+});
+
+test("Codex preserves typed OAuth causes while discarding arbitrary process messages", async () => {
+  const failures = [
+    new RemoteMcpOAuthError("REMOTE_MCP_OAUTH_TIMEOUT", "Время входа истекло (10 минут). Начните новую попытку подключения.", { stage: "spawn", causeCode: "ENOENT" }),
+    new RemoteMcpOAuthError("REMOTE_MCP_OAUTH_REJECTED", "OAuth-подключение отклонено."),
+    new Error("private callback code=synthetic-secret"),
+  ];
+  const handler = createCodexMcpHandler({ connect: () => ({ connect: async () => { throw failures.shift(); } }) });
+  await handler(frame("initialize"), { clientInfo });
+  const call = async () => (await handler(frame("tools/call", { name: "trelio_connect" }), { clientInfo })).result;
+  const timeout = await call();
+  assert.equal(timeout.isError, true);
+  assert.match(timeout.structuredContent.message, /10 минут/u);
+  assert.deepEqual(timeout.structuredContent.browser, { stage: "spawn", causeCode: "ENOENT" });
+  assert.equal((await call()).structuredContent.message, "OAuth-подключение отклонено.");
+  assert.doesNotMatch(JSON.stringify(await call()), /synthetic-secret/u);
+});
 
 test("Codex observes the current outer MCP frame and ignores legacy proof if its observation is absent", async () => {
   assert.equal(observeCodexMcpTurn(meta("gpt-6.1-sol", "high"), clientInfo).observation.effortLevel, "high");

@@ -2162,6 +2162,20 @@ test("stdio transport EOF aborts connect and closes its listener", async () => {
   await assertLoopbackPortClosed(listenerPort);
 });
 
+test("stdio EOF closes a handler's OAuth attempt after its tool response has already completed", async () => {
+  let closed = 0;
+  const handleMessage = Object.assign(async message => ({ jsonrpc: "2.0", id: message.id,
+    result: { content: [{ type: "text", text: "awaiting_authorization" }] } }), {
+    close: async () => { closed++; },
+  });
+  const harness = createStdioHarness(() => assert.fail("unexpected provider tool"), { handleMessage });
+  harness.send({ jsonrpc: "2.0", id: 31, method: "tools/call", params: { name: "trelio_connect" } });
+  await harness.waitForFrame(frame => frame.id === 31);
+  assert.equal(closed, 0);
+  await harness.close();
+  assert.equal(closed, 1);
+});
+
 const assertRejectedLoopbackCredential = async ({
   expectedDiagnostics,
   makeBody,

@@ -804,8 +804,12 @@ Optional failure не меняет proof и сохраняет нейтраль�
 `ProcessStartInfo` с `UseShellExecute=true`. Query (`&`, `+`, `=`, percent-encoding)
 и fragment передаются как данные, без `cmd /c start`, интерполяции в script,
 environment либо temporary file. Вход ограничен 32 768 UTF-16 code units;
-пустая строка, NUL, CR и LF отклоняются до запуска. Helper output подавляется,
-raw process/stdin errors не сохраняются в diagnostic или `cause`.
+пустая строка, NUL, CR и LF отклоняются до запуска. Stderr подавляется;
+stdout допускает только фиксированный numeric marker `TRELIO_BROWSER_OPEN_ERROR`
+в пределах 128 bytes. Raw process/stdin errors не сохраняются в diagnostic
+или `cause`. Диагностика содержит закрытый `stage`, errno `causeCode`, numeric
+`exitCode`/`nativeCode` и известный `signal`. Отказ `ShellExecute` с native code 5
+означает отказ ОС; он сам по себе не доказывает блокировку sandbox Codex.
 
 Opener ждёт exit `0` своего helper, а не только `spawn` или завершение stdin.
 Ненулевой exit, ошибка запуска/передачи и 5-секундный timeout дают
@@ -815,10 +819,44 @@ Opener ждёт exit `0` своего helper, а не только `spawn` ил�
 
 Передача URI не означает завершение OAuth. Отдельный callback слушает только
 exact IPv4 loopback, проверяет host, path, единственный state и issuer,
-сохраняет PKCE S256 и 10-минутный предел. Ошибка opener возвращает
-`REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED`, отмена, в том числе во время handoff, –
-`REMOTE_MCP_OAUTH_CANCELLED`; listener и timer очищаются в каждом исходе.
-Authorization URL и state остаются внутри процесса.
+сохраняет PKCE S256 и 10-минутный предел от начала OAuth-попытки, включая
+metadata/registration, OS handoff и ручной переход. Повторная проверка этот
+срок не продлевает. Подтверждение может прийти раньше завершения OS helper;
+тогда callback выигрывает, helper останавливается и устаревшая ссылка не выдаётся.
+
+В shared native connection (`trelio_connect` в Codex, Kimi Work, MultiTool и
+DeepSeek Harness) ошибка opener возвращает обычный успешный tool result с
+`connected:false`, `status:awaiting_authorization`, `authorizationUrl`,
+`expiresAt` (UTC ISO), безопасной диагностикой `browser` и дальнейшим действием.
+Агент показывает пользователю временную ссылку и срок; браузер должен работать
+на том же компьютере, где слушает loopback. Этот fallback не требует App,
+elicitation или специальной возможности клиента. Только start URL со state и
+PKCE challenge разрешён в ответе инструмента; verifier, callback URL с code и
+tokens остаются внутри runtime/OS vault, вне ответа, логов и diagnostic.
+Не сохранять start URL отдельно в файлы или настройки.
+
+Ответ инструмента не закрывает listener: runtime продолжает token exchange,
+сохранение и read-back OS vault и MCP negotiation. После callback статус
+`confirming_authorization` убирает использованную ссылку. Следующий
+`trelio_connect` возвращает состояние той же попытки, в том числе при повторном
+`reauthorize=true`; новая попытка не стартует параллельно. `connected:true`
+допустим только после vault read-back и MCP negotiation; адаптер проверяет
+каталог перед уведомлением `tools/list_changed`. Это не доказательство
+protected read или сохранения business-данных.
+
+При истечении срока возвращается `REMOTE_MCP_OAUTH_TIMEOUT` с предложением
+начать новую попытку, при отказе – `REMOTE_MCP_OAUTH_REJECTED`. Terminal outcome
+выдаётся при следующей проверке до разрешения нового входа. Отмена активного
+вызова до manual handoff отменяет OAuth; после возврата ссылки попыткой владеет
+host. EOF/закрытие native adapter отменяет и очищает её. Listener и timer
+очищаются при завершении, timeout и отмене. OAuth error сохраняет своё точное
+сообщение и безопасную opener-диагностику на MCP boundary; не заменять его
+общим советом о неизвестном исходе записи.
+
+Общий OAuth engine предоставляет host-only callback `onManualAuthorization`;
+caller без владельца продолжения сохраняет прежний terminal
+`REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED` с закрытым listener. Provider-skill
+connection и managed execution не получают фонового владельца автоматически.
 
 `tests/trelio-browser-open.test.mjs` проверяет transport и реальные Windows
 `ShellExecute`/URI handler через уникальный временный HKCU-протокол. В fixture
@@ -826,7 +864,10 @@ Authorization URL и state остаются внутри процесса.
 default HTTP handler не меняется. Этот native test обязателен в Windows job
 `runtime-tests.yml`; его skip на macOS/Linux не является Windows evidence.
 Callback/state/PKCE и очистка дополнительно проверяются
-`tests/trelio-remote-mcp-oauth.test.mjs`. Реальный login провайдера после выпуска
+`tests/trelio-remote-mcp-oauth.test.mjs`; `trelio-codex-mcp.test.mjs` проверяет
+обычную выдачу ссылки без App и отсутствие преждевременного успеха, а
+`trelio-remote-mcp.test.mjs` – cleanup завершённого handoff на EOF.
+Реальный login провайдера после выпуска
 требует отдельного разрешения и не заменяется synthetic CI.
 
 <a id="remote-mcp-oauth-sessions"></a>

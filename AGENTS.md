@@ -785,6 +785,11 @@ publication tooling также остаются вне этого публичн
   [контракту opener](docs/agent-workspace-runtime.md#системное-открытие-браузера):
   Windows handoff требует настоящего URI handler test; mock argv не подтверждает
   передачу полного OAuth URL, а успех helper не заменяет OAuth callback.
+  Native OAuth fallback выдаёт временный start URL и expiresAt обычным tool
+  result; агент показывает их человеку. Та же попытка живёт в runtime до
+  callback, отмены/EOF или общего 10-минутного deadline, без продления на poll.
+  Verifier/code/tokens не выдавать; raw opener errors не логировать. Диагностика
+  сохраняет этап и закрытые OS-коды, не угадывает sandbox по «Отказано в доступе».
 - Persistent messenger adapter по умолчанию использует `startInBackground=true`: headed
   process запускается без startup window, provider guards ставятся до exact
   inactive CDP target, viewport не изменяет native window bounds. Host не
