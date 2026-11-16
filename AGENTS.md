@@ -1475,7 +1475,10 @@ Exact legacy template bytes для распознавания при мигра�
   A later exact named-archive finish may settle through its separate restricted
   tool set and retained native handoff. Only accepted native/clean Git evidence
   permits one subsequent ordinary task continuation; the archive alone never
-  releases the pass. [Contract](docs/assistant-scheduler.md#interrupted-named-archive-finish).
+  releases the pass. A completed save history may retain only the closed hook
+  refusal of its exact open-status poll before finish; native handle/Run/pass
+  and later clean accepted-head evidence remain mandatory. No failed write or
+  unknown result qualifies. [Contract](docs/assistant-scheduler.md#interrupted-named-archive-finish).
 - Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
 - Encrypted own cancellation reuses SAME managed audit codec/store/collision equality; no human retry/local cleanup.
 - Own abandoned Workspace cancellation is a server-only dedicated MCP call with

@@ -699,6 +699,11 @@ the saved material without a second handoff.
 
 The coordinator allows one new ordinary continuation only after the restricted
 turn finishes and exact native accepted status matches the clean local candidate.
+An earlier closed hook refusal of a status read may remain in that completed
+history only for the same native-returned open handle, Run and task pass, before
+any finish attempt. This is read-only history, not a retry or an acceptance
+receipt. Failed open/finish, foreign handles, pending tools and unknown failures
+still refuse; the later exact clean accepted-head proof remains mandatory.
 The same exclusive native writer rechecks that evidence and pending task outcome
 before renewal. Reuse the accepted archive and reconcile previous effects. Only
 a genuine task outcome and canonical WORK.md advance the schedule or release the

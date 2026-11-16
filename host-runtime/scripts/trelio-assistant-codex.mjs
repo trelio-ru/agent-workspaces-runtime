@@ -1453,6 +1453,15 @@ export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>
   assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,false);
 export const assistantInterruptedPendingWorkspaceFinish=(turn,deliveryId,taskPass)=>
   assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,true);
+// A poll belongs to the one native operation and Run returned by the host.
+// Keep this proof identical when recovering a pending archive and when reading
+// its subsequently accepted history; a model-supplied handle is never evidence.
+const exactWorkspacePoll=(value,operation,run)=>value.operation===operation&&value.schemaVersion===1
+  &&value.state==='running'&&UUID.test(value.operationId??'')&&value.nextCall?.tool==='continue_assistant_workspace_action'
+  &&value.nextCall.arguments?.schemaVersion===1&&value.nextCall.arguments.operation==='status'
+  &&sameDraftRun(value.nextCall.arguments.runIdentity,run)
+  &&Object.keys(value.nextCall.arguments.parameters??{}).join(',')==='finishOperationId'
+  &&value.nextCall.arguments.parameters.finishOperationId===value.operationId;
 /** A named archive has an independent accepted revision. Its save can be
  * recovered without claiming the enclosing task is complete. This closed
  * trace admits only one Run, one file delta, a positive portable checkpoint
@@ -1465,12 +1474,6 @@ export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)
   if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
     ||typeof original.content[0].text!=='string'||!original.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return null;
   let run=null,openHandle=null,opened=false,changed=false,draft=false,finishHandle=null,control=false;
-  const nextPoll=(value,operation,run)=>value.operation===operation&&value.schemaVersion===1
-    &&value.state==='running'&&UUID.test(value.operationId??'')&&value.nextCall?.tool==='continue_assistant_workspace_action'
-    &&value.nextCall.arguments?.schemaVersion===1&&value.nextCall.arguments.operation==='status'
-    &&sameDraftRun(value.nextCall.arguments.runIdentity,run)
-    &&Object.keys(value.nextCall.arguments.parameters??{}).join(',')==='finishOperationId'
-    &&value.nextCall.arguments.parameters.finishOperationId===value.operationId;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     const args=item?.arguments;
@@ -1529,7 +1532,7 @@ export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)
     }
     if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return null;
     if(args.operation==='open'){
-      if(opened||openHandle||!ok||!sameDraftRun(args.parameters,run)||!nextPoll(value,'open',run))return null;
+      if(opened||openHandle||!ok||!sameDraftRun(args.parameters,run)||!exactWorkspacePoll(value,'open',run))return null;
       openHandle=value.operationId;
       continue;
     }
@@ -1542,7 +1545,7 @@ export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)
           // A failed open status request carries no write authority. The
           // later exact local/native status must still prove the opened Run.
           if(finishHandle||!localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED'))return null;
-        }else if(value.operationId!==handle||!nextPoll(value,finishHandle?'finish':'open',run))return null;
+        }else if(value.operationId!==handle||!exactWorkspacePoll(value,finishHandle?'finish':'open',run))return null;
       }else{
         if(!openHandle||finishHandle||!ok||Object.keys(args.parameters??{}).length||value.operation!=='status'
           ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65536)return null;
@@ -1563,7 +1566,7 @@ export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)
       if(!ok){
         if(!localDraftRefusal(item,'TRELIO_WORKSPACE_ACTION_INVALID_INPUT'))return null;
       }else{
-        if(!nextPoll(value,'finish',run))return null;
+        if(!exactWorkspacePoll(value,'finish',run))return null;
         finishHandle=value.operationId;
       }
     }else return null;
@@ -1590,13 +1593,26 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
   try{scope=JSON.parse(lines[1].slice('TRELIO_ASSISTANT_SCOPE '.length));}catch{return null;}
   if(scope?.companyId!==taskPass.companyId||scope.taskId!==taskPass.taskId||scope.sourceReferences!==undefined
     ||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return null;
-  let acceptedHead=null;
+  let acceptedHead=null,openHandle=null,finishStarted=false;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     const args=item?.arguments,value=item?.result?.structuredContent;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype
-      ||item.status!=='completed'||item.error!=null||item.result?.isError===true
-      ||!value||Object.getPrototypeOf(value)!==Object.prototype||Object.hasOwn(value,'code'))return null;
+      ||!value||Object.getPrototypeOf(value)!==Object.prototype)return null;
+    const ok=item.status==='completed'&&item.error==null&&item.result?.isError!==true&&!Object.hasOwn(value,'code');
+    if(!ok){
+      // An exact hook refusal of an already returned OPEN status read cannot
+      // have written anything. Retain that observation only before finish;
+      // failure of open/finish itself, another handle/Run/pass or an unknown
+      // result remains fenced. This grants no retry and is never acceptance:
+      // the later clean native accepted-head proof below is still mandatory.
+      if(!openHandle||finishStarted||acceptedHead||item.tool!=='continue_assistant_workspace_action'
+        ||args.schemaVersion!==1||args.operation!=='status'||!exactDraftPass(args.taskPass,taskPass)
+        ||!sameDraftRun(args.runIdentity,run)||Object.keys(args.parameters??{}).join(',')!=='finishOperationId'
+        ||args.parameters.finishOperationId!==openHandle||Object.keys(value).join(',')!=='code'
+        ||!localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED'))return null;
+      continue;
+    }
     if(item.tool==='get_assistant_status'){
       if(Object.keys(args).some(key=>key!=='view'))return null;
       continue;
@@ -1619,6 +1635,8 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
       ||!sameDraftRun(args.operation==='open'?args.parameters:args.runIdentity,run)
       ||!['open','status','heartbeat','finish'].includes(args.operation)
       ||args.operation==='finish'&&args.parameters?.taskOutcome!=='no_status_change')return null;
+    if(args.operation==='open')openHandle=exactWorkspacePoll(value,'open',run)?value.operationId:null;
+    if(args.operation==='finish')finishStarted=true;
     if(args.operation==='status'&&Object.keys(args.parameters??{}).length===0){
       if(value.operation!=='status'||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65536)return null;
       let status;try{status=JSON.parse(value.stdout);}catch{return null;}

@@ -672,6 +672,107 @@ test('named-archive settlement requires the real restricted turn and exact accep
   }
 });
 
+// Exercise the complete save-only history, rather than a lone accepted status:
+// a failed read during asynchronous open precedes successful authority reads,
+// one finish and its independent exact native/local acceptance read-back.
+const archiveWithRefusedOpenPoll=()=>{
+  const run={workspaceId:randomUUID(),runId:randomUUID()},deliveryId=randomUUID();
+  const taskPass={companyId:taskContext.companyId,taskId:taskContext.taskId,passId:randomUUID()};
+  const baseHead='a'.repeat(40),candidateHead='b'.repeat(40),openHandle=randomUUID(),finishHandle=randomUUID();
+  const call=(tool,args,value,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+    arguments:{...args,taskPass},result:{structuredContent:value}});
+  const action=(operation,parameters,value,status)=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...operation==='open'?{}:{runIdentity:run}},value,status);
+  const pending=(operation,operationId)=>({schemaVersion:1,operation,state:'running',operationId,
+    nextCall:{tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,operation:'status',
+      parameters:{finishOperationId:operationId},runIdentity:run}}});
+  const state=(accepted=false)=>({schemaVersion:1,operation:'status',stdout:JSON.stringify({...run,
+    baseHead,candidateHead,dirty:false,terminalStatus:accepted?'accepted':null}),
+    ...accepted?{nativeRunStatus:{status:'accepted',baseHead,candidateHead}}:{}});
+  const text=`${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(taskContext)}\nRecover only the existing named Workspace save. Read exact status for workspaceId=${run.workspaceId}, runId=${run.runId}, without the old poll handle.\n`;
+  const turn={id:randomUUID(),status:'completed',items:[
+    {type:'userMessage',content:[{type:'text',text}]},action('status',{},state()),
+    call('prepare_assistant_workspace_run',run,{prepared:true,run:{id:run.runId},workspace:{id:run.workspaceId,
+      companyId:taskPass.companyId,scopeType:'project',scopeKey:`workspace:${run.workspaceId}`,taskId:null}}),
+    action('open',run,pending('open',openHandle)),
+    action('status',{finishOperationId:openHandle},{code:'TRELIO_RUNTIME_HOOK_FAILED'},'failed'),
+    action('status',{},state()),
+    ...['context/agent-instructions.md','context/user-profile.md'].map(path=>call('use_assistant_workspace_files',
+      {runIdentity:run,command:{action:'read',path}},{state:'read'})),
+    action('finish',{taskOutcome:'no_status_change'},pending('finish',finishHandle)),
+    {type:'sleep'},action('status',{finishOperationId:finishHandle},pending('finish',finishHandle)),
+    action('status',{finishOperationId:finishHandle},{schemaVersion:1,operation:'finish',state:'completed'}),
+    action('status',{},state(true)),
+  ]};
+  return {turn,deliveryId,taskPass,run,candidateHead};
+};
+
+test('accepted named archive tolerates only its own pre-finish hook-refused open-status read',()=>{
+  const {turn,deliveryId,taskPass,run,candidateHead}=archiveWithRefusedOpenPoll();
+  assert.deepEqual(assistantAcceptedNamedArchive(turn,deliveryId,taskPass,run),{...run,acceptedHead:candidateHead});
+  for(const edit of [
+    x=>{x.items[4].arguments.parameters.finishOperationId=randomUUID();},
+    x=>{x.items[4].arguments.parameters.extra=true;},
+    x=>{x.items[4].arguments.runIdentity.runId=randomUUID();},
+    x=>{x.items[4].arguments.taskPass.passId=randomUUID();},
+    x=>{x.items[4].arguments.schemaVersion=2;},
+    x=>{x.items[4].arguments.operation='finish';},
+    x=>{x.items[4].arguments.operation='open';},
+    x=>{x.items[4].tool='use_assistant_browser';},
+    x=>{x.items[4].server='foreign';},
+    x=>{x.items[4].status='inProgress';},
+    x=>{x.items[4].status='completed';},
+    x=>{x.items[4].result.isError=false;},
+    x=>{x.items[4].result.structuredContent.code='ASSISTANT_MCP_LOCAL_WORKSPACE_FILES_FAILED';},
+    x=>{x.items[4].result.structuredContent.extra=true;},
+    x=>{x.items[4].error={message:'foreign failure'};},
+    x=>{x.items[3].result.structuredContent.nextCall.arguments.runIdentity={...run,runId:randomUUID()};},
+    x=>{x.items[3].result.structuredContent.nextCall.arguments.parameters.finishOperationId=randomUUID();},
+    x=>{x.items[3].result.structuredContent.state='completed';},
+    x=>{x.items.splice(3,1);},
+    x=>{x.items.splice(9,0,x.items.splice(4,1)[0]);},
+    x=>{x.items.push(structuredClone(x.items[4]));},
+    x=>{x.items.pop();},
+    x=>{x.items.at(-1).result.structuredContent.nativeRunStatus.status='submitted';},
+    x=>{x.items.at(-1).result.structuredContent.nativeRunStatus.candidateHead='c'.repeat(40);},
+  ]){
+    const changed=structuredClone(turn);edit(changed);
+    assert.equal(assistantAcceptedNamedArchive(changed,deliveryId,taskPass,run),null);
+  }
+});
+
+for(const changed of [false,true])test(`native archive read and owned-writer recheck compose refused-poll history (${changed?'changed':'confirmed'})`,async()=>{
+  const f=archiveWithRefusedOpenPoll(),threadId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
+  const read=await readAssistantCodexDelivery(threadId,f.deliveryId,{executable:process.execPath,environment:{},
+    acceptedNamedArchive:{taskPass:f.taskPass,run:f.run},spawnProcess:nativeRpc(request=>{
+      if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd}}};
+      assert.equal(request.method,'thread/turns/list');assert.equal(request.params.itemsView,'full');
+      assert.equal(request.params.limit,1);return {result:{data:[f.turn]}};
+    })});
+  assert.deepEqual(read,{state:'named_archive_saved',turnId:f.turn.id,namedArchiveSettled:{...f.run,acceptedHead:f.candidateHead}});
+  const deliveryId=randomUUID(),prior=structuredClone(f.turn);let reads=0;
+  if(changed)prior.items[4].arguments.parameters.finishOperationId=randomUUID();
+  const operation=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{
+    executable:process.execPath,environment:{},requireAbsentMarker:true,
+    continuationReview:{priorTurnId:f.turn.id,reviewId:deliveryId},
+    namedArchiveResume:{archive:read.namedArchiveSettled,taskPass:f.taskPass,terminalMarkerId:f.deliveryId,terminalTurnId:f.turn.id},
+    readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    readExecutionAvailability:async()=>true,beforeInvocation:async()=>{steps.push('renew');},startInvocation:()=>{steps.push('start');},
+    readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
+    spawnProcess:ownedRpc({threadId,cwd,priorTurn:prior,onRequest:request=>{
+      if(request.method==='thread/resume')steps.push('writer');
+      if(request.method==='thread/turns/list'&&request.params.limit===1)steps.push('accepted-read');
+    },onInput:text=>{assert.match(text,/Reuse that accepted archive revision/u);}}),
+  });
+  if(changed){
+    await assert.rejects(operation(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    assert.deepEqual(steps,['writer','accepted-read']);
+  }else{
+    assert.equal((await operation()).state,'completed');
+    assert.deepEqual(steps,['writer','accepted-read','renew','start']);
+  }
+});
+
 for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
   const {turn,...workspaceDraftRecovery}=state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
