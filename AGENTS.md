@@ -611,6 +611,10 @@ publication tooling также остаются вне этого публичн
   state/reason diagnostics retain the original failure and unchanged deadlines.
   Synthetic startup failures retain only closed startup phases and common native
   process categories; messages/paths/owner data never enter fixture evidence.
+  Fixture startup keeps at most 32 closed transport/bootstrap milestones in RAM,
+  emitting one snapshot after the original handshake. Distinguish absent socket
+  from a closed prior connection; no per-event disk writes, native logging,
+  extra API probes, retry or longer deadline. Revalidate at the file boundary.
   Owner-publication failures also retain an allowlisted filesystem syscall;
   authentication fixtures retain only closed reasons and synthetic effect counts.
   A failed authentication bootstrap also retains its current browser's numeric

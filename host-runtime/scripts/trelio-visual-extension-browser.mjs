@@ -49,6 +49,32 @@ const navigationFixturePhases = new Set(['received', 'dequeued', 'policy_queue',
   'input_frame', 'input_tab', 'input_credential_guard', 'input_mouse_move', 'input_mouse_wheel', 'input_settle']);
 export const visualNavigationFixturePhase = phase => navigationFixturePhases.has(phase) ? phase : undefined;
 
+// A missing socket at the deadline does not distinguish a never-started MV3
+// worker from a connection that opened and then disappeared. Keep the SAME
+// launch's closed milestones in RAM; emit one bounded fixture snapshot only
+// after the original handshake settles. No per-event private-file writes,
+// native logging, readiness probe, second launch or changed deadline.
+const startupFixturePhases = new Set(['browser_spawn', 'transport_upgrade', 'transport_rejected',
+  'transport_connected', 'transport_closed', 'transport_error', 'auth_requested',
+  'auth_received', 'hello', 'worker_started', 'policy_read', 'policy_write',
+  'notifications_write', 'notifications_read', 'window_inventory', 'tab_inventory',
+  'tab_cleanup', 'auth', 'window', 'blank_commit', 'debugger_attach',
+  'initial_navigation', 'auth_snapshot', 'ready']);
+export const visualStartupFixturePhase = phase => startupFixturePhases.has(phase) ? phase : undefined;
+export function createVisualStartupFixtureTrace(now = () => performance.now()) {
+  const started = now(), milestones = [];
+  return {
+    mark(phase) {
+      if (!visualStartupFixturePhase(phase)) return;
+      const elapsedMs = Math.max(0, Math.min(600_000, Math.round(now() - started)));
+      if (!Number.isSafeInteger(elapsedMs)) return;
+      milestones.push({ phase, elapsedMs });
+      if (milestones.length > 32) milestones.shift();
+    },
+    snapshot: () => milestones.map(value => ({ ...value })),
+  };
+}
+
 /** Starting a Chromium profile is not a service-worker readiness signal. An
  * owned extension page sends one value-free runtime event to wake MV3 before
  * the authenticated socket handshake. It contains no provider URL, token or
@@ -366,18 +392,26 @@ export class ExtensionVisualBrowser {
     this.#startupStage = 'extension_prepare';
     const extension = path.join(this.#directory, 'extension'); await prepareVisualPrivateDirectory(extension);
     const token = crypto.randomBytes(32).toString('hex');
+    const startupTrace = this.testDiagnostics ? createVisualStartupFixtureTrace() : undefined;
     this.#server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
     this.#wss = new this.dependencies.WebSocketServer({ noServer: true, maxPayload: (this.attachmentDownloads || this.audioDownloads ? 28 : 3) * 1024 * 1024, handleProtocols: protocols => protocols.has('trelio-visual-v1') ? 'trelio-visual-v1' : false });
     this.#server.on('upgrade', (req, socket, head) => {
+      startupTrace?.mark('transport_upgrade');
       const protocols = String(req.headers['sec-websocket-protocol'] || '').split(',').map(v => v.trim());
       const candidate = protocols.find(value => /^[0-9a-f]{64}$/u.test(value));
       const validToken = candidate && crypto.timingSafeEqual(Buffer.from(token), Buffer.from(candidate));
-      if (req.url !== '/extension' || req.headers.origin !== `chrome-extension://${EXTENSION_ID}` || !validToken || this.#socket?.readyState === 1) { socket.destroy(); return; }
+      if (req.url !== '/extension' || req.headers.origin !== `chrome-extension://${EXTENSION_ID}` || !validToken || this.#socket?.readyState === 1) { startupTrace?.mark('transport_rejected'); socket.destroy(); return; }
       this.#wss.handleUpgrade(req, socket, head, ws => {
         this.#socket = ws;
+        startupTrace?.mark('transport_connected');
         ws.on('message', data => {
           let value; try { value = JSON.parse(data.toString()); } catch { ws.close(); return; }
+          if (value.kind === 'startup_fixture_stage') {
+            if (this.policy.fixtureOnly && this.#socket === ws) startupTrace?.mark(value.phase);
+            return;
+          }
           if (value.kind === 'auth_required' && !this.#authHandshake) {
+            startupTrace?.mark('auth_requested');
             this.#authHandshake = true;
             // This local-only initialization never passes through call(), the
             // visual result validator or MCP. A reconnect cannot restore stale
@@ -389,6 +423,7 @@ export class ExtensionVisualBrowser {
             return;
           }
           if (value.kind === 'session_auth') {
+            startupTrace?.mark('auth_received');
             try { this.#sessionCookies = this.#cookies.validate(value.cookies); this.#authSnapshotReady = true; }
             catch {
               this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'storage_corrupt');
@@ -401,6 +436,7 @@ export class ExtensionVisualBrowser {
             this.#terminal = 'storage_unavailable'; this.#state = 'error'; return;
           }
           if (value.kind === 'hello' && value.version === 1) {
+            startupTrace?.mark('hello');
             if (this.#authSnapshotReady) this.#extensionReady = true;
             else {
               this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'extension_bootstrap_failed');
@@ -445,13 +481,14 @@ export class ExtensionVisualBrowser {
           this.#pending.delete(value.id); clearTimeout(pending.timer); pending.resolve(value.result);
         });
         ws.on('close', () => {
+          startupTrace?.mark('transport_closed');
           if (this.#socket === ws) this.#socket = undefined;
           for (const [id, pending] of this.#pending) {
             pending.reportNavigation?.('socket_closed');
             clearTimeout(pending.timer); pending.reject(fault('operation_failed')); this.#pending.delete(id);
           }
         });
-        ws.on('error', () => {});
+        ws.on('error', () => { startupTrace?.mark('transport_error'); });
       });
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
@@ -505,6 +542,7 @@ export class ExtensionVisualBrowser {
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
     this.#startupStage = 'browser_spawn';
+    startupTrace?.mark('browser_spawn');
     this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativeCompositorSwitches(process.platform, this.#headless), '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment());
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
@@ -533,6 +571,7 @@ export class ExtensionVisualBrowser {
     this.#startupStage = 'extension_connect';
     const until = Math.min(Date.now() + 25_000, this.lease.deadlineAt);
     while (!this.#extensionReady && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
+    if (startupTrace) this.testDiagnostics({ stage: 'startup_handshake', milestones: startupTrace.snapshot() });
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     if (!this.#extensionReady || this.#terminal) {
       this.#startupDiagnostic ||= visualStartupDiagnostic('extension_connect', this.#socket ? 'extension_not_ready' : 'extension_not_connected');

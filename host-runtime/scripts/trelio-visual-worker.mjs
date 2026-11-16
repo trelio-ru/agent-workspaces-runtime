@@ -5,7 +5,7 @@ import { readPrivateJsonFile, writePrivateJsonFile } from './trelio-workspace.mj
 import { loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser, visualNavigationFixturePhase } from './trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualNavigationFixturePhase, visualStartupFixturePhase } from './trelio-visual-extension-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, visualStartupPhase, visualStatus } from './trelio-visual-result.mjs';
 import { createVisualControlServer, withVisualOwnerFileLock, readVisualOwner,
   publishVisualWorkerOwner, createVisualIdleSupervisor } from './trelio-visual-session.mjs';
@@ -30,8 +30,18 @@ function fixtureDiagnostic(value) {
   // evidence as the in-process native fixture, including early browser exit.
   const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed', 'browser_quit', 'browser_stop_timeout', 'close_queue', 'close_manual', 'close_browser', 'close_snapshot', 'shutdown_start', 'shutdown_claim', 'shutdown_complete', 'navigation_transport'];
   const finishingStages = ['stopped_profile_snapshot_failed', 'stopped_profile_persist_failed', 'stopped_profile_cleanup_failed', 'manual_finish_failed'];
-  if (!stages.includes(value.stage) && !finishingStages.includes(value.stage)) return;
+  if (!stages.includes(value.stage) && !finishingStages.includes(value.stage) && value.stage !== 'startup_handshake') return;
   const record = { stage: value.stage };
+  if (value.stage === 'startup_handshake') {
+    // Revalidate the bounded RAM witness at its file boundary. Never persist
+    // request/header/error fields, arbitrary phase names or socket payloads.
+    if (!Array.isArray(value.milestones) || value.milestones.length > 32) return;
+    record.milestones = value.milestones.flatMap(item => {
+      const phase = visualStartupFixturePhase(item?.phase), elapsedMs = item?.elapsedMs;
+      return phase && Number.isSafeInteger(elapsedMs) && elapsedMs >= 0 && elapsedMs <= 600_000
+        ? [{ phase, elapsedMs }] : [];
+    });
+  }
   if (value.stage === 'navigation_transport') {
     // Track only the original fixture navigation. Arbitrary extension errors,
     // URLs and request identity must never reach the persisted tail.

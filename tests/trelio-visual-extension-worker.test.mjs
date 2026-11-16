@@ -16,7 +16,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel, policyRead, deferAuthentication = false } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[]; let windowCreated,windowRemoved,connections=0;
@@ -67,7 +67,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         } },
       webRequest: { onBeforeRequest: events, onHeadersReceived: events },
       cookies: { onChanged: events, async getAll() { return []; } },
-      declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
+      declarativeNetRequest: { async getSessionRules() { await policyRead?.(); return []; }, async updateSessionRules() {} },
       windows: { onCreated: {addListener(fn){windowCreated=fn;}}, onRemoved: {addListener(fn){windowRemoved=fn;}},
         async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);} },
       tabs: { onCreated: events, onRemoved: events,
@@ -97,7 +97,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     for (let i = 0; i < 300; i++) { await new Promise(resolve => setTimeout(resolve, 1)); const result = sent.find(value => value.kind === 'result' && value.id === id); if (result) return result.result; }
     throw Error('synthetic_command_timeout');
   };
-  if (!policyFailure) await dispatch('restore-session-auth', { cookies: [], replace: false });
+  if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
   return { dispatch, open, sent, answers, policy, raster, navigation, transport,
     addWindow:id=>windowCreated({id,type:'normal'}), removeWindow:id=>windowRemoved(id),
     disconnect:()=>socket.close(), connections:()=>connections,
@@ -107,6 +107,40 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
 }
+
+test('materialized startup emits closed fixture phases and ordinary startup emits none', async () => {
+  for (const fixtureOnly of [false, true]) {
+    const worker = await dialogWorker({ fixtureOnly, bootstrapUrl: 'chrome-extension://fixture/bootstrap.html' });
+    const phases = worker.sent.filter(value => value.kind === 'startup_fixture_stage');
+    if (fixtureOnly) {
+      const unique = [...new Set(phases.map(value => value.phase))];
+      assert.deepEqual(unique, ['policy_read', 'policy_write', 'notifications_write', 'notifications_read',
+        'window_inventory', 'tab_inventory', 'tab_cleanup', 'auth', 'window', 'blank_commit',
+        'debugger_attach', 'initial_navigation', 'auth_snapshot', 'ready']);
+      for (const value of phases) assert.deepEqual(Object.keys(value), ['kind', 'phase']);
+    } else assert.deepEqual(phases, []);
+    assert.deepEqual(worker.navigation, ['about:blank', 'https://example.test/']);
+    assert.equal(worker.sent.filter(value => value.kind === 'hello').length, 1);
+    assert.equal(worker.connections(), 1);
+  }
+});
+
+test('a cold pending policy read reports its phase when the original socket opens without another API attempt', async () => {
+  let release, reads = 0;
+  const pending = new Promise(resolve => { release = resolve; });
+  const worker = await dialogWorker({ fixtureOnly: true, deferAuthentication: true,
+    policyRead: async () => { reads++; await pending; } });
+  assert.equal(reads, 1);
+  assert.equal(worker.sent.filter(value => value.kind === 'startup_fixture_stage').at(-1).phase, 'policy_read');
+  assert.deepEqual(worker.navigation, []);
+  assert.equal(worker.sent.some(value => value.kind === 'hello'), false);
+  release(); await new Promise(resolve => setImmediate(resolve));
+  await worker.dispatch('restore-session-auth', { cookies: [], replace: false });
+  // The second ordinary policy installation admits the exact debugger-guarded
+  // tab. It is independent of the first pending call and is not a retry.
+  assert.equal(reads, 2);
+  assert.equal(worker.sent.filter(value => value.kind === 'hello').length, 1);
+});
 
 test('the exact owned bootstrap page is reused only after policy/auth and commits blank before provider navigation', async () => {
   const worker=await dialogWorker({bootstrapUrl:'chrome-extension://fixture/bootstrap.html'});

@@ -8,12 +8,33 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { ExtensionVisualBrowser, visualLifecycleFailureEvidence, visualExtensionBootstrapPage } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualLifecycleFailureEvidence, visualExtensionBootstrapPage, createVisualStartupFixtureTrace } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 import { syntheticDocx } from './fixtures/visual-docx.mjs';
 import vm from 'node:vm';
+
+test('startup fixture trace retains a bounded closed history without lending identity or mutable state', () => {
+  let time = 100;
+  const trace = createVisualStartupFixtureTrace(() => time);
+  trace.mark('browser_spawn'); time = 125.4;
+  trace.mark('transport_connected'); trace.mark('PRIVATE_SOCKET_ERROR');
+  assert.deepEqual(trace.snapshot(), [{ phase: 'browser_spawn', elapsedMs: 0 },
+    { phase: 'transport_connected', elapsedMs: 25 }]);
+  const exposed = trace.snapshot(); exposed[0].phase = 'PRIVATE'; exposed.push({ token: 'PRIVATE' });
+  assert.equal(trace.snapshot().length, 2);
+  assert.equal(trace.snapshot()[0].phase, 'browser_spawn');
+  // An unbounded reconnect stream cannot grow memory or persisted evidence.
+  // The trace observes the original launch and never runs a callback or timer.
+  for (let i = 0; i < 100; i++) { time++; trace.mark('transport_closed'); }
+  assert.equal(trace.snapshot().length, 32);
+  time = 1_000_000; trace.mark('hello');
+  assert.deepEqual(trace.snapshot().at(-1), { phase: 'hello', elapsedMs: 600_000 });
+  time = NaN; trace.mark('ready');
+  assert.equal(trace.snapshot().at(-1).phase, 'hello');
+  assert.doesNotMatch(JSON.stringify(trace.snapshot()), /PRIVATE|token|error/u);
+});
 
 test('extension bootstrap sends exactly one value-free wake event without a network request or retry', async () => {
   const page=visualExtensionBootstrapPage(),messages=[];

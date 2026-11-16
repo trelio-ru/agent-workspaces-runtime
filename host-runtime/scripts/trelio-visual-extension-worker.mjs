@@ -68,6 +68,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     return u.href;
   };
   const send = value => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
+  // Synthetic startup evidence uses only this already-owned authenticated
+  // transport. Retain the current fixed phase until it connects, so a cold
+  // policy stall can be located without another API call or a new clock.
+  let startupFixturePhase = 'worker_started';
+  const startupProgress = phase => {
+    if (config.fixtureOnly !== true || (bootstrapState === 'ready' && phase !== 'ready')) return;
+    startupFixturePhase = phase;
+    send({ kind: 'startup_fixture_stage', phase });
+  };
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const activeStartup = () => { if (stopping || Date.now() >= config.deadlineAt) throw Error('lease_expired'); };
   const privateAuthSnapshot = () => cookieState.validate([...authJar.values()]);
@@ -1023,6 +1032,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (stopping || Date.now() >= config.deadlineAt) return;
     socket = new WebSocket(config.endpoint, ['trelio-visual-v1', config.token]);
     socket.onopen = () => {
+      startupProgress(startupFixturePhase);
       if (bootstrapState === 'ready') send({ kind: 'hello', version: 1 });
       else if (bootstrapState === 'failed') send({ kind: 'bootstrap_failed', stage: bootstrapStage });
       else if (bootstrapStage === 'auth' && authReady && !authStarted) send({ kind: 'auth_required' });
@@ -1113,8 +1123,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // unnecessary persistent ruleset write before the first provider URL.
       // A service-worker reconnect never drops the browser's session rules.
       bootstrapStage = 'policy_read';
+      startupProgress('policy_read');
       const previous = await chrome.declarativeNetRequest.getSessionRules();
       bootstrapStage = 'policy_write';
+      startupProgress('policy_write');
       await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: previous.map(rule => rule.id), addRules: rules });
   }
   (async () => {
@@ -1125,21 +1137,28 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // before any provider URL; never rewrite unrelated saved Preferences or
       // touch the person's ordinary Chrome profile or OS notification policy.
       bootstrapStage = 'policy_write';
+      startupProgress('notifications_write');
       await chrome.contentSettings.notifications.set({ primaryPattern: '<all_urls>', setting: 'block', scope: 'regular' });
       bootstrapStage = 'policy_read';
+      startupProgress('notifications_read');
       if ((await chrome.contentSettings.notifications.get({ primaryUrl: config.initialUrl })).setting !== 'block') throw Error('document_blocked');
       bootstrapStage = 'window_inventory';
+      startupProgress('window_inventory');
       for (const window of await chrome.windows.getAll({ windowTypes: ['normal', 'popup'] })) ownedWindows.add(window.id);
       for (const change of windowChanges.splice(0)) { if (change.removed) ownedWindows.delete(change.id); else ownedWindows.add(change.id); }
       windowInventoryReady = true;
+      startupProgress('tab_inventory');
       for (const tab of await chrome.tabs.query({})) admitTab(tab);
+      startupProgress('tab_cleanup');
       await tabCleanup;
       if (tabCleanupFailed) throw Error('tab_limit_reached');
       activeStartup();
       bootstrapStage = 'auth';
+      startupProgress('auth');
       await new Promise((resolve, reject) => { authReady = { resolve, reject }; send({ kind: 'auth_required' }); });
       activeStartup();
       bootstrapStage = 'window';
+      startupProgress('window');
       // Host startup may open an owned extension wake tab; visible macOS lets this
       // extension create the initial inactive window. Navigate the owned blank
       // tab after guards exist, without selecting/focusing a tab on every
@@ -1162,20 +1181,24 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // about:blank first; this performs no HTTP and leaves DNR fully strict.
       // tabs.update may acknowledge before that commit, so poll only the native
       // URL/status metadata under the original lease, never page code/selectors.
+      startupProgress('blank_commit');
       if (initial.url !== 'about:blank') initial = await chrome.tabs.update(initial.id, { url: 'about:blank' });
       const blankUntil = Math.min(Date.now() + 8000, config.deadlineAt);
       while ((initial.status === 'loading' || initial.url !== 'about:blank') && Date.now() < blankUntil) { await pause(100); initial = await chrome.tabs.get(initial.id); }
       if (initial.url !== 'about:blank' || initial.status === 'loading') throw Error('document_blocked');
+      startupProgress('debugger_attach');
       await attach(initial.id);
+      startupProgress('initial_navigation');
       initial = await chrome.tabs.update(initial.id, { url: allowedNavigation(config.initialUrl) });
       // Manual setup must not announce its window before the first document has
       // loaded: a fast ready/close otherwise snapshots an unopened login page.
       // Read only browser tab metadata, under the original absolute deadline.
       const initialUntil = Math.min(Date.now() + 8000, config.deadlineAt);
       while (initial?.status === 'loading' && Date.now() < initialUntil) { await pause(100); initial = await chrome.tabs.get(initial.id); }
+      startupProgress('auth_snapshot');
       await refreshAuth();
       activeStartup();
-      bootstrapState = 'ready'; send({ kind: 'hello', version: 1 });
+      bootstrapState = 'ready'; startupProgress('ready'); send({ kind: 'hello', version: 1 });
     } catch {
       bootstrapState = 'failed'; send({ kind: 'bootstrap_failed', stage: bootstrapStage });
     }

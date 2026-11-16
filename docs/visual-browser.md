@@ -190,6 +190,15 @@ carry the SAME closed request phases as explicit navigation. The fixture
 retains each initial result's reason/diagnostic and elapsed time before
 cleanup, never image/text/frame/owner data. No added observation, retry,
 deadline extension or weaker ready assertion is permitted by this evidence.
+Startup also retains at most 32 closed transport/bootstrap milestones with
+bounded monotonic elapsed milliseconds in RAM. It writes one snapshot only
+after the original handshake settles, through that same fixture tail. An absent
+socket at expiry alone cannot distinguish an extension that never connected
+from one that connected and closed. The materialized synthetic worker reports
+its current fixed phase when its original socket opens, then before each
+existing startup await. There are no new API calls, native logs, per-event disk
+writes, model-visible fields or startup retries. Production emits none of these
+fixture frames; the file boundary revalidates both phases and bounds.
 Failed ready reports its original reason and that worker's
 stop/snapshot/persist/cleanup stage, allowed errno/syscall and owned-file category.
 If navigation after closing a sibling fails, the fixture keeps that one call's
