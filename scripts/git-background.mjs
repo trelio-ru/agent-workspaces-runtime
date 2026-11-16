@@ -31,31 +31,36 @@ export async function waitForIntegration(id, observe) {
   if (result.state !== 'succeeded') process.exitCode = 1;
 }
 
-/** Describe the next client step without pretending to have scheduled it.
- * Both launchers use this projection, including reattachment to a live ticket.
- * Admission proves only that the worker owns the integration; a client-owned
- * wake needs its own saved/read-back result and must respect client policy.
- * Keep this guidance out of durable tickets/receipts: it grants no Git rights.
+/** Admission is sufficient to release the chat. Keep client-facing guidance
+ * out of receipts, which record the result independently of any chat.
  */
 export function integrationLaunchResult(observation, canonicalDirectory) {
   const active = activeStates.has(observation.state);
-  return {...observation, followUp: active ? {
-    action: 'arrange_supported_chat_follow_up',
-    intervalMinutes: 15,
-    schedulingState: 'not_confirmed',
+  return {...observation, followUp: {
+    action: active ? 'end_turn_after_admission' : 'review_integration_result',
     canonicalDirectory,
-    blockingWaitArgs: ['--wait', observation.id],
-    instruction: 'Before ending this turn, arrange one supported follow-up in this same chat for this exact ticket. '
-      + 'Use a 15-minute native heartbeat only when client policy permits it, reuse an existing one and confirm it was saved. '
-      + 'Retain the ticket, canonical/task directories, branch, source SHA, authorised tag and remaining steps. '
-      + 'Do not loop over sleep/status or promise an automatic return from worker admission alone. '
-      + 'Without permitted scheduling, run npm run git:integrate -- --wait with this exact ticket from the canonical checkout and keep the tool session open until it exits.',
-  } : {
-    action: 'review_integration_result',
-    canonicalDirectory,
-    instruction: 'Review this exact terminal outcome before any retry. For success, verify fresh remote state and finish the task worktree and remaining authorised steps. '
-      + 'Do not schedule a heartbeat for an already settled integration or infer success from a missing ticket.',
+    statusArgs: ['--status', observation.id],
+    instruction: active
+      ? 'Report that this ticket was queued and end the turn. The worker continues independently. Read the exact result when the user returns. No automatic chat wake-up is registered.'
+      : 'Review this exact terminal outcome before any retry. Complete any recorded pending cleanup and remaining authorised release steps.',
   }};
+}
+
+/** Caller owns the live FIFO ticket and the short main mutex. Pass the
+ * repository's strict Git reader and candidate check so cleanup shares the
+ * same metadata, cleanliness and in-progress-operation rules as transport.
+ */
+export function finishIntegratedWorktree(canonical, entry, git, checkCandidate) {
+  if (entry.cwd === canonical || git(canonical, 'symbolic-ref', 'HEAD') !== 'refs/heads/main'
+    || git(canonical, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none')) {
+    throw Error('Local cleanup requires clean canonical main');
+  }
+  checkCandidate(entry.cwd, entry);
+  git(canonical, 'merge-base', '--is-ancestor', entry.sha, 'refs/remotes/origin/main');
+  // Removing without --force protects concurrent file edits and locked
+  // worktrees. CAS protects the branch if its tip moves during removal.
+  git(canonical, 'worktree', 'remove', entry.cwd);
+  git(canonical, 'update-ref', '-d', `refs/heads/${entry.branch}`, entry.sha);
 }
 
 function privateDirectory(directory) {

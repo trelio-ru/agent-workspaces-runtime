@@ -80,11 +80,10 @@ test('default admission detaches and the background alias reuses one owner throu
   const [first, duplicate] = await Promise.all([background(one), background(one, '--background')]);
   assert.equal(first.id, duplicate.id); assert.equal(queue(one).length, 1);
   assert.deepEqual(first.followUp, duplicate.followUp);
-  assert.equal(first.followUp.action, 'arrange_supported_chat_follow_up');
-  assert.equal(first.followUp.intervalMinutes, 15);
-  assert.equal(first.followUp.schedulingState, 'not_confirmed');
+  assert.equal(first.followUp.action, 'end_turn_after_admission');
   assert.equal(first.followUp.canonicalDirectory, f.main);
-  assert.deepEqual(first.followUp.blockingWaitArgs, ['--wait', first.id]);
+  assert.deepEqual(first.followUp.statusArgs, ['--status', first.id]);
+  assert.equal(first.followUp.blockingWaitArgs, undefined);
   await until(() => f.events().length === 1);
   assert.equal(fs.statSync(first.logPath).mode & 0o777, 0o600);
   // --tag without a launch-mode flag must detach as well; the same worker
@@ -106,6 +105,30 @@ test('default admission detaches and the background alias reuses one owner throu
   assert.equal(JSON.parse(observed.output).state, 'succeeded');
   assert.equal(JSON.parse(observed.output).followUp, undefined, 'status is an observation, not another scheduling request');
   assert.equal(status(f.main, '999999999999').state, 'unknown');
+});
+
+test('a detached task cleans only its own integrated worktree and records cleanup refusals', async t => {
+  const f = fixture(t), one = f.branch('one'), locked = f.branch('locked');
+  command(f.main, 'worktree', 'lock', locked);
+  const admit = async cwd => {
+    const launcher = await f.launch(cwd, '--finish-worktree').done;
+    assert.equal(launcher.code, 0, launcher.output);
+    return JSON.parse(launcher.output);
+  };
+  const first = await admit(one), second = await admit(locked);
+  assert.equal(status(f.main, second.id).state, 'waiting');
+  assert.equal(first.finishWorktree, true);
+  assert.equal(fs.existsSync(one), true);
+  fs.writeFileSync(path.join(f.root, 'release'), 'go');
+  await until(() => status(f.main, second.id).state === 'succeeded');
+  const integrated = status(f.main, first.id);
+  assert.equal(integrated.localCleanupState, 'complete');
+  assert.equal(fs.existsSync(one), false);
+  assert.equal(command(f.main, 'branch', '--list', 'codex/one'), '');
+  assert.equal(status(f.main, second.id).localCleanupState, 'pending');
+  assert.equal(fs.existsSync(locked), true);
+  assert.equal(command(f.main, 'rev-parse', 'codex/locked'), command(f.main, 'rev-parse', 'origin/main'));
+  assert.deepEqual(f.events(), ['codex/one', 'codex/locked']);
 });
 
 test('a rebased published task cleans up only the observed remote SHA', async t => {

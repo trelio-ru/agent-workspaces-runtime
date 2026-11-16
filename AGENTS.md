@@ -1434,19 +1434,19 @@ Exact legacy template bytes для распознавания при мигра�
   Shell transport retries only natural live-FIFO mutex acquisition under one fixed bound; never delete an unchanged dead/foreign claim, borrow authority or replay a push.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
-  В Codex запускай `npm run git:integrate -- --wait` и жди выхода команды в том же
-  tool session. Для существующего тикета используй `--wait <ticket>` из canonical
-  main. `waiting`/`running`/`verified` продолжают ход. При выходе разбери результат.
-  Обычный фоновый запуск требует подтверждённого follow-up там, где клиент
-  разрешает его, иначе сразу подключись через `--wait <ticket>`.
-  `--foreground` – диагностика, `not_confirmed` – автовозврат не подтверждён.
+  В Codex обычная задача: `npm run git:integrate -- --finish-worktree`.
+  После durable admission укажи тикет и заверши ход. Worker сам проверяет и
+  вливает ветку, затем убирает чистый worktree. На следующем обращении
+  прочитай `--status <ticket>` из canonical main. Ожидание, heartbeat и сводки
+  очереди в обычном ходе не нужны. При полном релизе жди один exact ticket
+  через `--wait` без промежуточных отчётов о CI, затем продолжай выпуск.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требуют полной матрицы Windows, ARM64, macOS и browser jobs при релизе.
   При обычном вливании их проверяет локальный план. [Контракт CI](docs/runtime-ci.md).
 - После read-back очередь удаляет свою опубликованную origin-ветку по SHA.
   Pending cleanup повторяется через `git:integrate -- --retry-cleanup <ticket>`.
-  После интеграции выполни из canonical checkout
-  `npm run git:finish-worktree -- <absolute-task-worktree>`.
+  При ручном запуске или `localCleanupState=pending` заверши worktree штатным
+  `git:finish-worktree` из canonical checkout.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
 - Stable runtime tag создаётся только по явной команде на runtime release и
   резервируется до CI через `npm run git:integrate -- --wait --tag vX.Y.Z` в Codex.

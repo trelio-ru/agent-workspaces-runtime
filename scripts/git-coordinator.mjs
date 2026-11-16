@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
-import {acknowledgeAdmission, integrationLaunchResult, launchBackground, waitForIntegration} from './git-background.mjs';
+import {acknowledgeAdmission, finishIntegratedWorktree, integrationLaunchResult, launchBackground, waitForIntegration} from './git-background.mjs';
 
 const SHA = /^[a-f0-9]{40}$/u;
 const ID = /^\d{12}$/u;
@@ -85,6 +85,7 @@ export function queue(cwd, attempt = 0) {
     if (row.schemaVersion !== 1 || row.id + '.json' !== name || !Number.isSafeInteger(row.pid) || row.pid < 1
       || row.pgid !== row.pid || typeof row.host !== 'string' || typeof row.cwd !== 'string'
       || !TASK_BRANCH.test(row.branch ?? '') || !SHA.test(row.sha ?? '')
+      || (row.finishWorktree !== undefined && (row.finishWorktree !== true || row.tag))
       || (row.remoteCleanupSha !== undefined && !SHA.test(row.remoteCleanupSha))
       || !['waiting', 'running', 'verified'].includes(row.state) || typeof row.tag !== 'string') throw Error('Invalid coordination ticket');
     return row;
@@ -115,6 +116,7 @@ function result(cwd, id) {
     || (value.remoteCleanupSha !== undefined && (!SHA.test(value.remoteCleanupSha) || !TASK_BRANCH.test(value.branch ?? '')))
     || (value.remoteCleanupState !== undefined && (!value.remoteCleanupSha
       || !['complete', 'changed', 'pending'].includes(value.remoteCleanupState)))
+    || (value.localCleanupState !== undefined && !['complete', 'pending'].includes(value.localCleanupState))
     || typeof value.cwd !== 'string' || typeof value.branch !== 'string' || typeof value.tag !== 'string'
     || !Number.isFinite(Date.parse(value.finishedAt))) throw Error('Invalid coordination result');
   return value;
@@ -327,6 +329,7 @@ async function retryRemoteCleanup(cwd, id) {
  */
 export async function coordinate(cwd, tag = '', actions = {}) {
   const config = policy(cwd), initial = candidate(cwd);
+  if (tag && actions.finishWorktree) throw Error('Release worktrees remain available for release finalization');
   if (actions.expected) candidate(cwd, actions.expected);
   if (tag && !/^(?:v|skill-[a-z0-9-]+-v|codex-hooks-source-v)\d+\.\d+\.\d+$/u.test(tag)) throw Error('Invalid immutable release tag');
   const canonical = fs.realpathSync(git(cwd, 'config', '--get', config.canonicalKey));
@@ -350,7 +353,8 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       if (duplicate) throw Object.assign(Error(`FIFO ${duplicate.id} already owns this task; inspect its status`), {code: 'INTEGRATION_ALREADY_QUEUED'});
       const row = {schemaVersion: 1, id: String(next).padStart(12, '0'), pid: process.pid, pgid: process.pid,
         host: startHost, stableHost, cwd: fs.realpathSync(cwd), ...initial, sourceSha: initial.sha, tag, state: 'waiting',
-        createdAt: new Date().toISOString(), ...(actions.logFile ? {logFile: actions.logFile} : {})};
+        createdAt: new Date().toISOString(), ...(actions.logFile ? {logFile: actions.logFile} : {}),
+        ...(actions.finishWorktree ? {finishWorktree: true} : {})};
       save(counter, next + 1); save(path.join(root(cwd), row.id + '.json'), row); return row;
     }, () => cancelled);
     console.log(`FIFO ${entry.id}: ${entry.branch}${tag ? ' / ' + tag : ''}`);
@@ -416,7 +420,7 @@ export async function coordinate(cwd, tag = '', actions = {}) {
     }
     assertPush(cwd, entry.sha, tag);
     await command(config.transport[0], [...config.transport.slice(1), ...(tag ? ['--tag', tag] : [])], cwd);
-    console.log(`FIFO ${entry.id} complete; finish this worktree from canonical main`);
+    if (!entry.finishWorktree) console.log(`FIFO ${entry.id} complete; finish this worktree from canonical main`);
     observation = {state: 'succeeded', outcome: 'integrated', ...finishRemoteCleanup(cwd, entry)};
   } catch (error) {
     observation = {state: cancelled ? 'interrupted' : 'failed', error: error.message.slice(0, 2000)};
@@ -428,39 +432,57 @@ export async function coordinate(cwd, tag = '', actions = {}) {
         if (Date.now() > deadline) throw Error(`FIFO ${entry.id} retained: child process group is still active`);
         await delay(100);
       }
-      await mutex(cwd, config, () => {
-        const current = queue(cwd).find(row => row.id === entry.id);
+      if (entry.finishWorktree && observation.state === 'succeeded') {
+        try {
+          if (cancelled) throw Error('Coordination interrupted');
+          // Refresh ancestry outside the mutex. The live FIFO ticket still
+          // excludes a new main integration while the network read runs.
+          await command('git', ['fetch', '--prune', 'origin'], canonical);
+          await mutex(canonical, config, () => finishIntegratedWorktree(canonical, entry, git, candidate), () => cancelled);
+          observation.localCleanupState = 'complete';
+        } catch (error) {
+          // Main has already been pushed and read back. Cleanup refusal must
+          // not replay CI or change the integration's terminal outcome.
+          console.error(`Integrated; local cleanup pending: ${error.message}`);
+          observation.localCleanupState = 'pending';
+        }
+      }
+      // A successful worker may have removed its original cwd. Queue identity
+      // and durable receipts are shared with the canonical checkout.
+      await mutex(canonical, config, () => {
+        const current = queue(canonical).find(row => row.id === entry.id);
         if (current && (current.pid !== process.pid || !local(current))) throw Error('Cannot remove another ticket');
-        if (current) { settle(cwd, entry, observation); fs.unlinkSync(path.join(root(cwd), entry.id + '.json')); }
+        if (current) { settle(canonical, entry, observation); fs.unlinkSync(path.join(root(canonical), entry.id + '.json')); }
       });
     }
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
 }
 
-function reusable(cwd, tag, identity) {
-  const entry = queue(cwd).find(row => row.cwd === cwd);
+function reusable(cwd, canonical, tag, identity, finishWorktree) {
+  const entry = queue(canonical).find(row => row.cwd === cwd);
   if (!entry) return null;
   if (entry.branch !== identity.branch || entry.tag !== tag || entry.sha !== identity.sha && entry.sourceSha !== identity.sha) {
     throw Error(`FIFO ${entry.id} owns another candidate; inspect before retrying`);
   }
-  const value = status(cwd, entry.id);
+  if (finishWorktree && entry.finishWorktree !== true) throw Error(`FIFO ${entry.id} already owns this task without automatic worktree cleanup`);
+  const value = status(canonical, entry.id);
   if (value.state === 'recovery_required') throw Error(`FIFO ${entry.id} needs recovery; no replacement was started`);
   return value;
 }
-async function background(cwd, tag) {
+async function background(cwd, canonical, tag, finishWorktree) {
   // Reattachment precedes clean-tree checks: the worker may be rebasing now.
   const identity = {branch: git(cwd, 'symbolic-ref', '--short', 'HEAD'), sha: git(cwd, 'rev-parse', 'HEAD')};
-  const existing = reusable(cwd, tag, identity);
+  const existing = reusable(cwd, canonical, tag, identity, finishWorktree);
   if (existing) return existing;
   candidate(cwd); policy(cwd);
   if (!fs.existsSync(root(cwd))) {
     try { fs.mkdirSync(root(cwd), {mode: 0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   }
   return launchBackground({cwd, script: fileURLToPath(import.meta.url), ...identity,
-    tagArguments: tag ? ['--tag', tag] : [], logDirectory: path.join(root(cwd), 'logs'),
+    tagArguments: tag ? ['--tag', tag] : finishWorktree ? ['--finish-worktree'] : [], logDirectory: path.join(root(cwd), 'logs'),
     observe: message => {
-      const value = message?.duplicate ? reusable(cwd, tag, identity) : status(cwd, message?.id);
+      const value = message?.duplicate ? reusable(cwd, canonical, tag, identity, finishWorktree) : status(canonical, message?.id);
       if (!value || value.state === 'unknown') throw Error('No durable coordination admission was found');
       return value;
     }});
@@ -483,11 +505,14 @@ export async function main(args = process.argv.slice(2)) {
     || !TASK_BRANCH.test(expected.branch ?? ''))) throw Error('Invalid background worker identity');
   if (backgroundWorker) args = args.slice(4);
   else if (worker || detached || foreground || wait) args = args.slice(1);
-  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag')) throw Error('Use git:integrate -- [--background | --foreground | --wait] [--tag TAG] | --wait TICKET | --status [TICKET] | --recover TICKET | --retry-cleanup TICKET');
+  const finishWorktree = args.length === 1 && args[0] === '--finish-worktree';
+  if (!(args.length === 0 || args.length === 2 && args[0] === '--tag' || finishWorktree && !wait && !worker && !foreground)) {
+    throw Error('Use git:integrate -- [--background] [--finish-worktree] | [--background | --foreground | --wait] [--tag TAG] | --wait TICKET | --status [TICKET] | --recover TICKET | --retry-cleanup TICKET');
+  }
   if (!['darwin', 'linux'].includes(process.platform) || Number(process.versions.node.split('.')[0]) < 22) throw Error('Coordinator requires native Linux/macOS and Node >=22');
   if (worker) return coordinate(cwd, args[1] ?? '');
   if (backgroundWorker) {
-    try { return await coordinate(cwd, args[1] ?? '', {expected, logFile: expected.logFile}); }
+    try { return await coordinate(cwd, args[1] ?? '', {expected, logFile: expected.logFile, finishWorktree}); }
     catch (error) {
       await acknowledgeAdmission(error.code === 'INTEGRATION_ALREADY_QUEUED' ? {duplicate: true} : {error: error.message});
       throw error;
@@ -496,8 +521,8 @@ export async function main(args = process.argv.slice(2)) {
   if (!foreground) {
     // Even with a waiting caller, the same detached worker owns the FIFO and
     // survives an interruption of the caller. Foreground remains diagnostic.
-    const result = await background(cwd, args[1] ?? '');
     const canonical = git(cwd, 'config', '--get', policy(cwd).canonicalKey);
+    const result = await background(cwd, canonical, args[1] ?? '', finishWorktree);
     if (wait) return waitForIntegration(result.id, id => status(canonical, id));
     return console.log(JSON.stringify(integrationLaunchResult(result, canonical)));
   }

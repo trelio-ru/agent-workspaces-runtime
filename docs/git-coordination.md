@@ -98,78 +98,45 @@ unrecorded remote refs are not automatically pruned.
 
 ## Background integration and chat follow-up
 
-`npm run git:integrate` always launches in the background; `--background` remains
-a compatible explicit alias. Append `--tag EXACT_TAG` for an already authorised
-release. Use `npm run git:integrate -- --wait [--tag EXACT_TAG]` in Codex.
-It starts or reuses the same detached worker, prints the admitted ticket when
-waiting, and keeps the current tool session open until the status is no longer
-active. `--foreground` remains a diagnostic mode whose signals reach its worker.
-To resume observation after interrupting the wait, run
-`npm run git:integrate -- --wait TICKET` from canonical main. This reads the
-exact ticket in the same clone without starting or signalling a worker.
-The final JSON has the same schema as `--status TICKET`. Only `succeeded` exits
-zero. Failure, interruption, recovery and unknown status require outcome review.
-There is no wait timeout while a ticket is active.
-The launcher exits only after the isolated worker acknowledges durable admission.
-Its JSON contains ticket ID, original/current SHA, worktree, branch and private
-log path. The worker inherits no terminal/stdin/output pipe, progresses FIFO
-without a model turn, and retains the existing repository CI/transport guards.
-It is not automatically restarted. The computer must stay on; local chat
-follow-up also needs the Codex desktop app running. The launch JSON includes
-`followUp.action=arrange_supported_chat_follow_up`, a 15-minute interval, the
-canonical checkout, `blockingWaitArgs` for this ticket and
-`schedulingState=not_confirmed`. These are next steps,
-never evidence that a scheduler was saved. Reattachment returns the same guidance;
-plain `--status` remains an observation without a new scheduling request. If the
-worker has already settled, launch instead requests `review_integration_result`.
+Use `npm run git:integrate -- --finish-worktree` for ordinary development
+in Codex. The launcher returns after durable admission. A chat reports the
+exact ticket as queued and ends its turn. The worker inherits no terminal
+or chat output pipe and runs the repository's own FIFO, CI and guarded
+transport while the computer is on. No scheduler or chat wake-up is
+registered. On a later request, read `--status TICKET` once from canonical main.
 
-Repeating background launch for the same live candidate returns its existing
-ticket. Concurrent admission is serialized by the same mutex. Another candidate,
-tag or unknown/dead owner refuses instead of spawning a replacement. A startup
-timeout/lost acknowledgement is ambiguous: inspect queue and the printed worker
-PID/log before retrying. Do not infer failure from the launcher's exit alone.
+With `--finish-worktree`, guarded success triggers local cleanup inside
+the same worker. It checks fresh remote ancestry and the exact committed
+candidate again, removes only its clean registered worktree without force,
+and removes its branch by SHA compare-and-swap. A refusal is recorded as
+`localCleanupState=pending` without changing integration success. Use
+the repository's cleanup helper if a retry is safe. Failed integrations
+retain their worktrees. `--finish-worktree` is only available for detached
+ordinary tickets. Manual `git:integrate` and its `--background` alias leave
+local cleanup to their caller.
 
-The worker writes an owner-only atomic result under the common Git directory's
-`trelio-git-coordination/results/` before removing its ticket; logs live beside
-it in `logs/`. Results keep original/rebased SHAs and distinguish actual guarded
-success from failure/interruption/recovery. A retained ticket takes precedence
-over any pre-crash receipt. These observations never replace fresh Git read-back,
-CI evidence or the canonical push guard. No state/log enters installed packages.
+An explicit terminal wait uses `--wait TICKET` from canonical main. For an
+already authorized full release in Codex use `--wait --tag EXACT_TAG` so the same
+turn can continue mandatory publication/activation after verified integration.
+Wait in the same tool session without reading waiting logs or narrating CI.
+Report terminal failure or a decision that requires the user. `--foreground`
+remains diagnostic. Stopping a waiter does not stop the detached worker.
+The final JSON has the same schema as `--status TICKET`; only
+`succeeded` exits zero. Never infer release completion from that receipt.
 
-An instruction to finish the development task authorises its temporary follow-up
-within the same scope; it does not authorise a new release or another task:
+The launch JSON identifies the ticket, original/current SHA, branch,
+worktree and private log. `followUp.action=end_turn_after_admission`
+reports the active worker and includes the exact `statusArgs`. An already
+settled worker returns `review_integration_result`. Plain `--status`
+returns an observation.
 
-1. Immediately after confirmed active admission, arrange ONE follow-up in the SAME
-   chat. Where the client's native tools and policy permit scheduled follow-up,
-   create or update a heartbeat for every 15 minutes. Save exact ticket,
-   canonical checkout, task worktree, branch, original SHA, authorised release tag
-   (if any) and remaining post-integration steps in its readable prompt. A repeated
-   wake/manual continuation reuses that automation and ticket.
-2. Confirm the follow-up was actually saved before ending the active turn; an
-   intent, launch JSON or `not_confirmed` field is insufficient. Without permitted
-   scheduling, immediately attach `--wait TICKET` and keep the active tool session
-   until it exits. A tool yield returns control to the agent while the waiter
-   remains active. Continue waiting in that session. If the client cannot run
-   the command, report that concrete blocker. Do not substitute model
-   `sleep`/`--status` calls or promise an automatic return.
-3. On each wake read exact ticket status from the same clone. While active, do no
-   edits/rebase/new CI/enqueue and end the check quietly. Notify only on completion,
-   failure, a meaningful change or required human action, never every 15 minutes.
-4. For `succeeded`, verify identity and fresh remote state, finish the task worktree
-   through its owner helper and complete already authorised publication/activation
-   and read-back. Integration success alone never completes a release.
-5. For failure/interruption/unknown state first establish the actual outcome;
-   never blindly rerun a push or CI. Use normal exact recovery only after its
-   guards pass. Diagnose the same task autonomously where authorised; pause the
-   heartbeat if a human decision blocks progress. Stop it after all required work
-   and cleanup are verified, so the monitor cannot wake forever.
+A repeat launch of the same live candidate returns its existing ticket,
+under the same admission mutex. Incompatible cleanup mode, a different
+candidate/tag or an unknown/dead owner require review. A lost acknowledgement
+is ambiguous: inspect the printed worker identity and admission before a retry.
 
-Do not put a 15-minute model wake between FIFO tickets: the live worker starts
-the next operation immediately. Do not remove another ticket/lock, add age-based
-takeover, relax CI/ACL or enable broad retries to implement sleeping.
-
-Tests use real bare remotes, linked worktrees and isolated worker groups. CI
-evidence is synthetic only in fixtures; production hooks/rebase/transport are
-exercised, including waiting behind another ticket, reattachment after stopping
-the reader, failure/unknown exit status, concurrent CI, occupied version,
-waiting-source mutation and dead-owner/live-descendant recovery.
+The worker records its terminal receipt under
+`trelio-git-coordination/results/` before releasing its ticket. Private
+logs live in `logs/`. A retained ticket takes precedence over a pre-crash
+receipt. Results keep the immutable source and rebased SHAs and never replace
+CI evidence or live push authorization.
