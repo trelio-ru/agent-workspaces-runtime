@@ -35,6 +35,9 @@ const ROOT_ALLOWED_FILES = new Set([
   "CLAUDE.md",
   ".gitignore",
 ]);
+const CODEX_ATTACHMENT_DIRECTORY = ".codex-remote-attachments";
+const CODEX_CONFIG_DIRECTORY = ".codex";
+const CODEX_IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 const MANAGED_START = "<!-- trelio-agent-workspaces:start -->";
 const MANAGED_END = "<!-- trelio-agent-workspaces:end -->";
 const IGNORE_START = "# trelio-agent-workspaces:ignore:start";
@@ -47,7 +50,7 @@ const IGNORE_BLOCK = [IGNORE_START, "/workspaces/", IGNORE_END].join("\n");
 // complete object inventory are still checked separately in inspectServiceGit.
 const CODEX_CHECKPOINT_REF = /^refs\/codex\/turn-diffs\/checkpoints\/(?:[0-9a-f]{32}\/[0-9a-f]{32}|[0-9a-f]{64}\/[0-9a-f]{64})\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CODEX_CAPTURE_REF = /^refs\/codex\/turn-diffs\/captures\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/(?:base|head)$/u;
-const SHA_PATTERN = /^[0-9a-f]{40,64}$/u;
+const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const ALLOWED_LOCAL_CONFIG_KEYS = new Set([
   "core.bare",
   "core.filemode",
@@ -87,8 +90,8 @@ const GIT_BLOCKER_MESSAGES = Object.freeze({
   unexpected_tree_entry: "Дерево снимка Codex содержит запись, которую Trelio не может безопасно использовать.",
   commit_or_tag_object: "В репозитории найден объект коммита или тега Git.",
   malformed_inventory_entry: "Git вернул запись об объекте, которую не удалось проверить.",
-  orphan_tree: "Ни одна допустимая служебная ссылка Codex не указывает на найденное дерево Git.",
-  orphan_blob: "Найденный объект Git не относится к разрешённым файлам инструкций или настроек.",
+  orphan_tree: "Найденное дерево Git недостижимо из допустимых служебных снимков Codex.",
+  orphan_blob: "Найденный объект Git недостижим по разрешённым путям в служебных снимках Codex.",
   workspace_index: "Не удалось подтвердить, что рабочие материалы Trelio отсутствуют в индексе Git.",
 });
 const GIT_RECOVERY_MESSAGE = "Автоматического восстановления для этой папки нет. Чтобы сохранить исходную папку и её историю, оставьте её в Codex и подключите Trelio в отдельной папке вне Git-репозиториев.";
@@ -481,38 +484,65 @@ const parseObjectInventory = (stdout) => String(stdout || "")
     return { objectId, type, size: Number(rawSize) };
   });
 
-const inspectTree = async ({ gitPath, rootPath, treeId, execFileCommand }) => {
+const isCodexMetadataDirectory = (name) => (
+  name === CODEX_CONFIG_DIRECTORY || name === CODEX_ATTACHMENT_DIRECTORY
+);
+
+const isAllowedCodexMetadataEntry = (relativePath, type) => {
+  if (relativePath === CODEX_CONFIG_DIRECTORY) return type === "tree";
+  if (relativePath === `${CODEX_CONFIG_DIRECTORY}/config.toml`) return type === "blob";
+
+  const [root, ...segments] = relativePath.split("/");
+  if (root !== CODEX_ATTACHMENT_DIRECTORY || relativePath.length > MAX_PATH_LENGTH) return false;
+  // Codex can retain nested image paths with user-supplied names. Restrict
+  // their namespace, file type and Windows path syntax without relying on
+  // the spelling, case or version of an attachment's generated ID.
+  if (segments.some((segment) => !segment || segment.startsWith(".") || /[. ]$/u.test(segment)
+    || /[\x00-\x1f\x7f\\:<>"|?*\ufffd]/u.test(segment))) return false;
+  return type === "tree" || (segments.length > 0
+    && CODEX_IMAGE_EXTENSIONS.has(path.posix.extname(segments.at(-1)).toLowerCase()));
+};
+
+const inspectTree = async ({ gitPath, rootPath, treeId, objectsById, reachable, execFileCommand }) => {
   const result = await runGit(
     gitPath,
-    ["ls-tree", "-rz", "--full-tree", treeId],
+    // Include directory entries, even empty ones. Checking only the leaves
+    // loses both the evidence for reachable trees and the paths of empty trees.
+    ["ls-tree", "-rtz", "--full-tree", treeId],
     rootPath,
     execFileCommand,
   );
-  if (!result.ok) {
+  if (!result.ok || (result.stdout && !result.stdout.endsWith("\0"))) {
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED",
       "Git tree inspection failed; onboarding stopped without changing the repository.",
     );
   }
-  const blobs = new Set();
-  const entries = Buffer.from(result.stdout, "utf8").toString("utf8").split("\0").filter(Boolean);
+  const entries = result.stdout.split("\0").slice(0, -1);
   for (const entry of entries) {
-    const match = entry.match(/^(?<mode>[0-9]{6}) (?<type>[^ ]+) (?<object>[0-9a-f]{40,64})\t(?<file>.+)$/u);
-    if (
-      !match?.groups
-      || match.groups.mode !== "100644"
-      || match.groups.type !== "blob"
-      || !ROOT_ALLOWED_FILES.has(match.groups.file)
-    ) {
+    const fields = entry.match(/^(?<mode>[0-9]{6}) (?<type>[^ ]+) (?<object>[0-9a-f]+)\t(?<file>.+)$/su)?.groups;
+    const regularBlob = fields?.mode === "100644" && fields.type === "blob";
+    const directory = fields?.mode === "040000" && fields.type === "tree";
+    const allowedPath = fields && (ROOT_ALLOWED_FILES.has(fields.file)
+      ? regularBlob
+      : isAllowedCodexMetadataEntry(fields.file, fields.type));
+    if (!(regularBlob || directory) || !allowedPath) {
       throw new FolderGitHistoryError(
         "unexpected_tree_entry",
         "A Codex turn-diff tree contains a path or object outside the onboarding allowlist.",
         "tree", treeId,
       );
     }
-    blobs.add(match.groups.object);
+    // ls-tree can report a blob entry whose object is missing. Require the
+    // same type in the complete inventory before treating that path as proof.
+    if (objectsById.get(fields.object) !== fields.type) {
+      throw new TrelioFolderOnboardingError(
+        "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED",
+        "A Codex turn-diff tree entry is missing from the complete Git object inventory or has a different type.",
+      );
+    }
+    reachable.add(fields.object);
   }
-  return blobs;
 };
 
 const inspectServiceGit = async ({
@@ -678,41 +708,66 @@ const inspectServiceGit = async ({
       type, objectId,
     );
   }
-  const objectIds = new Set(objects.map(({ objectId }) => objectId));
-  if ([...referencedTrees].some((treeId) => !objectIds.has(treeId))) {
+  const objectsById = new Map(objects.map(({ objectId, type }) => [objectId, type]));
+  if ([...referencedTrees].some((treeId) => objectsById.get(treeId) !== "tree")) {
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED",
       "A Codex turn-diff ref points outside the complete local object inventory.",
     );
   }
-  // A service repository has no ordinary history: every tree must be the exact
-  // value of an allowed Codex ref. Otherwise an unreferenced tree could retain
-  // an older instruction blob while still satisfying the root-path allowlist.
-  const orphanTree = objects.find(({ objectId, type }) => type === "tree" && !referencedTrees.has(objectId));
+  const reachable = new Set(referencedTrees);
+  for (const treeId of referencedTrees) {
+    // Validate each root's full paths even when two roots share a subtree.
+    // Reachability alone cannot authorize a subtree reused at another path.
+    await inspectTree({ gitPath, rootPath, treeId, objectsById, reachable, execFileCommand });
+  }
+  const orphanTree = objects.find(({ objectId, type }) => type === "tree" && !reachable.has(objectId));
   if (orphanTree) {
     throw new FolderGitHistoryError(
       "orphan_tree",
-      "The selected repository contains an orphan Git tree outside exact Codex turn-diff refs.",
+      "The selected repository contains a Git tree unreachable from the validated Codex turn-diff refs.",
       "tree", orphanTree.objectId,
     );
   }
-  const allowedBlobs = new Set();
-  for (const treeId of referencedTrees) {
-    const treeBlobs = await inspectTree({
-      gitPath,
-      rootPath,
-      treeId,
-      execFileCommand,
-    });
-    for (const blob of treeBlobs) allowedBlobs.add(blob);
-  }
-  const orphanBlob = objects.find(({ objectId, type }) => type === "blob" && !allowedBlobs.has(objectId));
+  const orphanBlob = objects.find(({ objectId, type }) => type === "blob" && !reachable.has(objectId));
   if (orphanBlob) {
     throw new FolderGitHistoryError(
       "orphan_blob",
-      "The selected repository contains an orphan Git blob without an allowed instruction path.",
+      "The selected repository contains a Git blob without a validated path in the Codex turn-diff refs.",
       "blob", orphanBlob.objectId,
     );
+  }
+};
+
+const inspectCodexMetadataDirectory = async (filesystem, rootPath, directory) => {
+  const pending = [directory];
+  while (pending.length > 0) {
+    const relativeDirectory = pending.pop();
+    const absoluteDirectory = path.join(rootPath, relativeDirectory);
+    const stat = await filesystem.lstat(absoluteDirectory);
+    // Recheck the complete directory path before descent in case a queued
+    // directory's parent was replaced by a link after its initial listing.
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+      || !sameLocalPath(await filesystem.realpath(absoluteDirectory), absoluteDirectory)) {
+      throw new TrelioFolderOnboardingError(
+        "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED",
+        "A Codex metadata directory is not an ordinary local directory.",
+      );
+    }
+    const entries = await filesystem.readdir(absoluteDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+      const relativePath = `${relativeDirectory}/${entry.name}`;
+      const type = entry.isDirectory() ? "tree" : entry.isFile() ? "blob" : null;
+      if (entry.isSymbolicLink() || !type || !isAllowedCodexMetadataEntry(relativePath, type)) {
+        throw new TrelioFolderOnboardingError(
+          "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED",
+          "A Codex metadata directory contains a path or file type outside the onboarding allowlist.",
+        );
+      }
+      // A Codex cache or config is opaque to Trelio. Inspect only directory
+      // entries, without reading, activating or copying their files.
+      if (type === "tree") pending.push(relativePath);
+    }
   }
 };
 
@@ -722,6 +777,10 @@ const inspectRootEntries = async ({ filesystem, rootPath, serviceGit }) => {
   let hasWorkspacesDirectory = false;
   for (const entry of entries) {
     if (entry.name === ".git" || ROOT_ALLOWED_FILES.has(entry.name)) continue;
+    if (isCodexMetadataDirectory(entry.name)) {
+      await inspectCodexMetadataDirectory(filesystem, rootPath, entry.name);
+      continue;
+    }
     if (entry.name === "workspaces" && entry.isDirectory() && !entry.isSymbolicLink()) {
       hasWorkspacesDirectory = true;
       continue;
@@ -742,7 +801,7 @@ const exactManagedBlockPresent = (text, startMarker, endMarker, expectedBlock = 
   return expectedBlock === null || managedText === expectedBlock;
 };
 
-const assertDedicatedDiagnosticFolder = async (filesystem, rootPath) => {
+const assertDedicatedDiagnosticFolder = async (filesystem, rootPath, serviceGit) => {
   // Classify names/types only. An unrelated work directory is not a Trelio
   // control-plane root, and diagnosing it must not inspect business files.
   const entries = await filesystem.readdir(rootPath, { withFileTypes: true });
@@ -751,6 +810,10 @@ const assertDedicatedDiagnosticFolder = async (filesystem, rootPath) => {
     if ((ROOT_ALLOWED_FILES.has(entry.name) || metadataNames.has(entry.name))
       && entry.isFile() && !entry.isSymbolicLink()) continue;
     if ([".git", "workspaces"].includes(entry.name)
+      && entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    // Service Git inspection has already verified these directories and their
+    // contents. Ordinary diagnostics still require a dedicated Trelio folder.
+    if (serviceGit && isCodexMetadataDirectory(entry.name)
       && entry.isDirectory() && !entry.isSymbolicLink()) continue;
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED",
@@ -1126,7 +1189,7 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
   const snapshot = await inspectOptionalRegularFile(filesystem, path.join(inspection.folder.path, instructionTarget));
   const binding = readManagedBinding(snapshot.text);
   if (!binding) {
-    await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path);
+    await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path, inspection.folder.serviceGitPreserved);
     return { status: "setup_required", folder: inspection.folder, instructionTarget,
       reasonCode: "TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED" };
   }

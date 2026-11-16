@@ -44,10 +44,10 @@ const runGitWithEnvironment = async (root, environment, ...argumentsList) => exe
 // Codex turn-diff refs intentionally point straight to trees. Building one
 // through an isolated temporary index lets the test exercise the real object
 // graph without creating a commit, HEAD or user-visible staging state.
-const writeTurnDiffTree = async (root) => {
+const writeTurnDiffTree = async (root, ...paths) => {
   const indexPath = path.join(root, ".git", "onboarding-test-index");
   const environment = { GIT_INDEX_FILE: indexPath };
-  await runGitWithEnvironment(root, environment, "add", "AGENTS.md");
+  await runGitWithEnvironment(root, environment, "add", "--", ...(paths.length ? paths : ["AGENTS.md"]));
   const { stdout } = await runGitWithEnvironment(root, environment, "write-tree");
   await fs.rm(indexPath, { force: true });
   return stdout.trim();
@@ -721,6 +721,30 @@ test("32-hex checkpoint names do not admit commit, tag or forbidden tree content
       (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
       objectKind,
     );
+    assert.deepEqual(await fs.readdir(root), [".git"]);
+  }
+});
+
+test("reachable snapshots and live Codex metadata still enforce their path allowlist", async () => {
+  const ref = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/head";
+  for (const file of ["workspaces/context/secret.txt", ".codex/other.toml", ".codex-remote-attachments/turn/data.txt"]) {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
+    await fs.writeFile(path.join(root, file), "synthetic forbidden content");
+    if (!file.startsWith("workspaces/")) {
+      // The check also covers cache files Codex has not snapshotted yet.
+      await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+        { code: "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED" });
+    }
+    const tree = await writeTurnDiffTree(root, file);
+    await runGit(root, "update-ref", ref, tree);
+    await fs.rm(path.join(root, file.split("/")[0]), { recursive: true });
+    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }), (error) => {
+      assert.deepEqual(projectFolderGitHistoryBlocker(error)?.details.gitBlocker,
+        { reason: "unexpected_tree_entry", object: { type: "tree", id: tree } });
+      return true;
+    });
     assert.deepEqual(await fs.readdir(root), [".git"]);
   }
 });

@@ -270,6 +270,69 @@ test("paired setup picks and registers a folder without a hook, and rejects an a
   assert.equal(fixture.puts, 1);
 });
 
+test("wizard registers a service Git folder with nested Codex snapshot metadata and preserves isolation", async t => {
+  const fixture = await wizardFixture(t, true);
+  const chosen = path.join(fixture.root, "Codex snapshots");
+  await fs.mkdir(chosen);
+  const git = (...args) => execFileAsync("git", args, { cwd: chosen, encoding: "utf8" });
+  await git("init", "--quiet");
+  const indexPath = path.join(chosen, ".git", "snapshot-test-index");
+  const snapshotGit = (...args) => execFileAsync("git", args, {
+    cwd: chosen, encoding: "utf8", env: { ...process.env, GIT_INDEX_FILE: indexPath },
+  });
+  const attachment = ".codex-remote-attachments/turn-id/attachment-id/1-Фото.JPG";
+  const config = ".codex/config.toml";
+  const image = Buffer.from("synthetic fixture, no real attachment");
+  for (const [file, content] of [[config, "# Local Codex config\n"], [attachment, image]]) {
+    await fs.mkdir(path.dirname(path.join(chosen, file)), { recursive: true });
+    await fs.writeFile(path.join(chosen, file), content);
+  }
+  // Like Codex turn-diff, stage the native Git status paths in a temporary
+  // index and point each capture ref directly at its immutable tree.
+  const snapshot = async (ref) => {
+    const { stdout } = await git("status", "--no-renames", "--porcelain=v1", "-z", "--untracked-files=normal");
+    const records = stdout.split("\0").slice(0, -1);
+    assert.ok(records.length > 0 && records.every(line => line.startsWith("?? ")));
+    await snapshotGit("add", "--", ...records.map(line => line.slice(3)));
+    const tree = (await snapshotGit("write-tree")).stdout.trim();
+    await fs.rm(indexPath);
+    await git("update-ref", ref, tree);
+    return tree;
+  };
+  const capture = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000";
+  const base = await snapshot(`${capture}/base`);
+  await fs.writeFile(path.join(chosen, "AGENTS.md"), "# Personal instructions\n");
+  const head = await snapshot(`${capture}/head`);
+  assert.notEqual(base, head);
+  const readRepository = async () => ({
+    refs: (await git("for-each-ref")).stdout,
+    objects: (await git("cat-file", "--batch-all-objects", "--batch-check")).stdout,
+    head: await fs.readFile(path.join(chosen, ".git", "HEAD")),
+    config: await fs.readFile(path.join(chosen, ".git", "config")),
+  });
+  const before = await readRepository();
+
+  await fixture.action("pick", undefined, { chooseFolder: async () => chosen });
+  const result = await fixture.action("connect");
+  assert.equal(result.structuredContent.verified, true, JSON.stringify(result.content));
+  assert.equal(fixture.puts, 1);
+  assert.deepEqual(await readRepository(), before);
+  assert.deepEqual(await fs.readFile(path.join(chosen, attachment)), image);
+  assert.equal(await fs.readFile(path.join(chosen, config), "utf8"), "# Local Codex config\n");
+
+  await fs.mkdir(path.join(chosen, "workspaces"));
+  await fs.writeFile(path.join(chosen, "workspaces", ".trelio-run.json"), "synthetic protected data");
+  const next = await snapshot(capture.replace("1720000000000", "1720000000001") + "/head");
+  const { stdout } = await git("ls-tree", "-r", "--name-only", "-z", next);
+  assert.deepEqual(new Set(stdout.split("\0").slice(0, -1)), new Set([
+    ".gitignore", "AGENTS.md", "CLAUDE.md", config, attachment,
+  ]));
+  assert.equal((await git("ls-files", "--stage", "-z")).stdout, "");
+  const reopened = await fixture.action("connect");
+  assert.equal(reopened.structuredContent.verified, true);
+  assert.equal(fixture.puts, 1);
+});
+
 test("wizard creates a chosen folder, preserves existing text, registers and reads back before ready", async t => {
   const fixture = await wizardFixture(t);
   const chosen = path.join(fixture.root, "Моя команда & проект");
