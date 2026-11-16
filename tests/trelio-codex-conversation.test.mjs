@@ -63,7 +63,11 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   if(req.url!=='/v1/responses'){res.writeHead(404,{'Content-Type':'application/json'});res.end('{"error":"synthetic_route"}');return;}
   modelRequests++;
   if(business){
-   const input=JSON.stringify(data);
+   // Only actual model-facing instructions establish delivery. Session
+   // settings and unrelated metadata can retain a document that never reaches
+   // the model, so serializing the entire request would produce false proof.
+   const input=[data.instructions??'',...(data.input??[]).filter(row=>row.role==='developer')
+     .map(row=>typeof row.content==='string'?row.content:(row.content??[]).map(part=>part.text??'').join('\n'))].join('\n');
    sawWorkflow ||= input.includes('Synthetic role from the admitted plugin')&&input.includes('Synthetic reference from the admitted plugin');
    sawDirectInstruction ||= input.includes('Call the exposed Trelio assistant MCP tools directly');
   }

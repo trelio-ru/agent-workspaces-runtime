@@ -10137,6 +10137,25 @@ export const resolveAgentSkillRuntimeWithDeviceConsent = async ({
   }
 };
 
+/** Recognise the ordinary guide command without changing its account binding.
+ * This is syntax only; the signed executor still owns every admission check. */
+export const assistantSkillGuideSelection = (args, part) => {
+  const invalid = () => { throw Object.assign(new Error("ASSISTANT_SKILL_GUIDE_INPUT_INVALID"), {
+    code: "ASSISTANT_SKILL_GUIDE_INPUT_INVALID",
+  }); };
+  if (part !== undefined && (!Number.isSafeInteger(part) || part < 0 || part > 63)) invalid();
+  // Account selection belongs to the existing host parser. Do not duplicate
+  // its grammar, remove a selector from the actual invocation, or choose a
+  // default account when resuming the next page. Signature/task/account
+  // admission still runs below before the provider command.
+  const { providerArguments } = splitAccountArguments(args);
+  const guides = providerArguments.length === 1 && providerArguments[0] === "guides";
+  if (part !== undefined && !guides) invalid();
+  // The ordinary guide command must be usable without a shell. Returning
+  // only local filenames strands an isolated assistant before its first read.
+  return guides ? part ?? 0 : undefined;
+};
+
 /** Resolve only a complete guide manifest from the signed command, then use
  * the already verified immutable package bytes. Provider stdout never
  * becomes authority to open a local path. One part is small enough to read
@@ -10181,9 +10200,11 @@ const skillCommand = async (
 ) => {
   const skillSubcommand = positional[0];
   if (assistantGuidePart !== undefined && (skillSubcommand !== "run"
-    || positional.length !== 2 || positional[1] !== "guides"
     || currentWorkspaceExecutionProfile()?.kind !== "digital_assistant")) {
     throw Object.assign(new Error("ASSISTANT_SKILL_GUIDE_INPUT_INVALID"), { code: "ASSISTANT_SKILL_GUIDE_INPUT_INVALID" });
+  }
+  if (skillSubcommand === "run" && currentWorkspaceExecutionProfile()?.kind === "digital_assistant") {
+    assistantGuidePart = assistantSkillGuideSelection(positional.slice(1), assistantGuidePart);
   }
 
   if (skillSubcommand === "pack") {

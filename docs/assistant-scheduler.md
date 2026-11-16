@@ -370,11 +370,20 @@ Link targets, protected controls, absolute
 paths and nontext bodies are refused. A local edit changes the draft only.
 Ordinary checkpoint/finish still performs durable submission and CAS.
 
-For an admitted signed `skill_run` command `arguments:["guides"]`, select
-`guidePart:0` then follow `nextGuidePart`. The host verifies the provider's
-manifest against the current signed package and delivers its exact text part.
-An absolute provider path cannot select a local read, and every part has fresh
-native admission. Accepted material continues to use exact accepted-file reads.
+An admitted signed `skill_run` command `guides` returns text part zero even
+without `guidePart`; an isolated assistant never receives only local filenames.
+The ordinary `--local-account` selector is parsed by the SAME account parser
+and preserved byte-for-byte in the invocation and every `nextCall`. Explicit
+`guidePart` selects 0–63 only for that exact provider command; extra provider
+arguments and malformed/duplicate selectors fail before private I/O. Backend
+schemas bound presentation metadata without copying the host's account grammar
+or inspecting encrypted argv. The host verifies the complete manifest against
+the current signed package, then returns its exact text part. The final child
+boundary verifies the closed page/digest and derives the next read from the
+admitted action, never provider-authored continuation metadata. Follow `nextCall`
+until null and read all parts before work. An absolute provider path cannot
+select a local read; every part retains fresh native/pass/account admission.
+Accepted material continues to use exact accepted-file reads.
 
 Owner-private first-chat handoff has a separate bounded readiness-verification
 boundary. A completed PREPARE does not establish readiness or diagnose a failure.

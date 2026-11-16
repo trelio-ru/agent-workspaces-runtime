@@ -1179,8 +1179,10 @@ publication tooling также остаются вне этого публичн
   reader reports `notLoaded`. Retain both empty READY markers, the one-use start
   and read-back. Role documents come from the exact running plugin. Opened
   Run UTF-8 files use the same native pass/recipient/lease and finish lock;
-  scoped local edits use expected SHA-256. Signed guides use verified package
-  bytes and bounded parts, never a provider path. See scheduler native invocation.
+  scoped local edits use expected SHA-256. Signed guides return part zero by
+  default and exact nextCall paging with the SAME account selector/parser.
+  Verified package bytes and closed bounded pages only, never provider paths
+  or provider-authored continuations. See scheduler native invocation.
   An owner-private tool-free handoff may earn ONE independent readiness verification
   in that SAME chat after complete, exact, sole PREPARE/READY history. Schema22
   preserves the original provision/start/event and adds a separate one-use marker.

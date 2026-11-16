@@ -1160,6 +1160,59 @@ test('assistant Workspace continuation uses fixed signed child and stdin; unknow
   }}),error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
 });
 
+test('signed guide delivery returns exact next calls without a shell or account substitution',async t=>{
+  const {runAssistantWorkspaceProcess,validateAssistantWorkspacePlan,createAssistantWorkspaceExecutor,createForwardingAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {assistantSkillGuidePage}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {createHash}=await import('node:crypto');
+  const plan=workspacePlan(),account=randomUUID();
+  plan.localAction={schemaVersion:1,operation:'skill_run',parameters:{companyId:plan.scope.companyId,
+    projectId:randomUUID(),skillId:'synthetic-guides',releaseId:randomUUID(),runtimeSessionId:randomUUID(),
+    arguments:['guides','--local-account',account]}};
+  const directory=path.resolve('synthetic-signed-guides');
+  const files=[0,1].map(index=>({path:`scripts/instruction-guides/part-0${index+1}.md`,bytes:Buffer.from(`Verified guide ${index}\n`)}));
+  const manifest={schemaVersion:1,requiredBeforeWork:'all_in_order',guides:files.map(file=>({
+    path:path.join(directory,file.path),sizeBytes:file.bytes.length,sha256:createHash('sha256').update(file.bytes).digest('hex')}))};
+  let launches=0;
+  const run=async(selected,corrupt)=>runAssistantWorkspaceProcess(selected,{resolveLoader:async()=>'/verified/loader.mjs',
+    runProcess:async(_executable,_argv,options)=>{
+      launches++;const dispatched=JSON.parse(options.input);
+      assert.deepEqual(dispatched.localAction.parameters.arguments,plan.localAction.parameters.arguments);
+      const page=assistantSkillGuidePage({stdout:JSON.stringify(manifest),runtimeDirectory:directory,parsedPackage:{files},
+        part:dispatched.localAction.parameters.guidePart??0});
+      if(corrupt)corrupt(page);
+      return {stdout:JSON.stringify({schemaVersion:1,operation:'skill_run',stdout:JSON.stringify(page),stderr:''})};
+    }});
+  // Exercise the actual coordinator/facade too: a correct child page is not
+  // useful if the MCP boundary drops its text or exact next call. All native
+  // authority here is synthetic; no account, Run or provider is contacted.
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-guide-facade-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+  const executor=await createAssistantWorkspaceExecutor({configDirectory:root,runPlan:raw=>run(raw)});
+  t.after(()=>executor.stop());
+  let selected=plan;
+  const facade=await createForwardingAssistantMcp({configurationDirectory:root,createWorkspace:async()=>executor,
+    request:async()=>({content:[],structuredContent:selected})});
+  const firstReply=await facade.callTool('continue_assistant_workspace_action',plan.localAction);
+  const first=firstReply.structuredContent;
+  assert.equal(firstReply.content[0].text,first.instruction);
+  assert.equal(JSON.parse(first.stdout).text,'Verified guide 0\n');
+  assert.match(first.instruction,/No local file reader or owner action/u);
+  assert.deepEqual(first.nextCall,{tool:'continue_assistant_workspace_action',arguments:{...plan.localAction,
+    parameters:{...plan.localAction.parameters,guidePart:1}}});
+  selected={...plan,localAction:first.nextCall.arguments};
+  const last=(await facade.callTool(first.nextCall.tool,first.nextCall.arguments)).structuredContent;
+  assert.equal(JSON.parse(last.stdout).text,'Verified guide 1\n');assert.equal(last.nextCall,null);
+  assert.equal(launches,2);
+  for(const corrupt of [p=>{p.text+='tamper';},p=>{p.nextGuidePart=7;},p=>{p.part=1;},p=>{p.path='../private.md';},
+    p=>{p.extra='untrusted';}])await assert.rejects(run(plan,corrupt),{code:'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'});
+  const before=launches;
+  await assert.rejects(validateAssistantWorkspacePlan({...plan,localAction:{...plan.localAction,
+    parameters:{...plan.localAction.parameters,arguments:['read'],guidePart:0}}}),{code:'ASSISTANT_SKILL_GUIDE_INPUT_INVALID'});
+  assert.equal(launches,before,'invalid commands never launch the isolated worker');
+});
+
 test('encrypted Workspace descriptors survive facade, coordinator, real child pipe and automatic heartbeat',async t=>{
   const {runAssistantWorkspaceProcess,createAssistantWorkspaceExecutor,createForwardingAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {spawnSync}=await import('node:child_process');

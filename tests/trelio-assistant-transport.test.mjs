@@ -59,6 +59,27 @@ test('assistant signed guide pages never use provider paths as file authority',a
  }
 });
 
+test('assistant guides default to inline part zero and retain canonical account selection',async()=>{
+ const {assistantSkillGuideSelection}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+ const account=randomUUID();
+ for(const args of [['guides'],['guides','--local-account',account],['--local-account',account,'guides']]){
+  assert.equal(assistantSkillGuideSelection(args),0);
+  assert.equal(assistantSkillGuideSelection(args,3),3);
+ }
+ assert.equal(assistantSkillGuideSelection(['account','list']),undefined);
+ assert.equal(assistantSkillGuideSelection(['read','--local-account',account]),undefined);
+ for(const args of [['read'],['guides','extra'],['guides','--file','/private/other']]){
+  assert.throws(()=>assistantSkillGuideSelection(args,0),{code:'ASSISTANT_SKILL_GUIDE_INPUT_INVALID'});
+ }
+ for(const part of [-1,64,0.5,'0',null]){
+  assert.throws(()=>assistantSkillGuideSelection(['guides'],part),{code:'ASSISTANT_SKILL_GUIDE_INPUT_INVALID'});
+ }
+ for(const args of [['guides','--local-account','bad'],['guides',`--local-account=${account}`],
+   ['guides','--local-account',account,'--local-account',account]]){
+  assert.throws(()=>assistantSkillGuideSelection(args),{code:'ACCOUNT_SELECTOR_INVALID'});
+ }
+});
+
 test('assistant file transport sends only structural Run admission and excludes intake execution',async()=>{
  const origin='https://files.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  const taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};

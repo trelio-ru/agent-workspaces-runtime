@@ -17,7 +17,7 @@ import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery, validateAssistantBackgroundRecoveryObservation } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
-import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError } from './trelio-workspace.mjs';
+import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
@@ -1410,6 +1410,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
       return {content:[{type:'text',text:executed?.state==='running'&&executed.operation==='open'?executed.instruction
         :executed?.operation==='open'&&executed.authorityReads
         ?'Read both pinned authority files in order using the exact structuredContent.authorityReads calls. If a response has nextOffset, repeat that read with command.offset set to nextOffset until null before proceeding to the next file.'
+        :executed?.operation==='skill_run'&&executed.instruction?executed.instruction
         :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
     }};
 };
@@ -3042,12 +3043,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
  * model. Parse it before private I/O; the child repeats live pass/Run admission
  * before accessing local files, including the nominally local status action. */
 const assistantSkillGuidePart = parameters => {
-  const part=parameters?.guidePart;
-  if(part===undefined)return undefined;
-  if(!Number.isSafeInteger(part)||part<0||part>63
-    ||parameters.arguments?.length!==1||parameters.arguments[0]!=='guides')
-    fail('ASSISTANT_SKILL_GUIDE_INPUT_INVALID');
-  return part;
+  return assistantSkillGuideSelection(parameters?.arguments,parameters?.guidePart);
 };
 const assistantSkillActionWithoutGuidePart = action => {
   if(action.operation!=='skill_run')return action;
@@ -3168,7 +3164,11 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
           recovery:{readOnly:true,nextCall:{tool:'get_assistant_operation_contract',arguments:{operation:'secret_browser_prepare'}}}}};
     }
   }
-  if(name==='continue_assistant_workspace_action'&&args.operation==='skill_run')
+  // Validate an explicit paging request here, but leave ordinary malformed
+  // input to the existing schema/encrypted-content boundary. Automatic guide
+  // recognition runs only on the admitted plan; it must not replace that
+  // boundary's refusal before a protected argv vector exists.
+  if(name==='continue_assistant_workspace_action'&&args.operation==='skill_run'&&args.parameters?.guidePart!==undefined)
     assistantSkillGuidePart(args.parameters);
   // Constant native schema metadata contains no company content or grant.
   // Do not require company keys or consume a task proof merely to inspect it.
@@ -4039,6 +4039,28 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
     const {validateVisualResult}=await import('./trelio-visual-result.mjs');
     validateVisualResult(value.visual);
   }else if(typeof value.stdout!=='string' || Buffer.byteLength(JSON.stringify(value))>768*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
+  // Only the admitted guide command can acquire paging metadata. Ordinary
+  // provider output, even guide-shaped JSON, cannot mint a continuation. The
+  // child already checked ALL manifest rows against the signed package; this
+  // boundary verifies the exact closed page frame before copying the SAME
+  // native-selected action. No pass, proof, local path or executable is added.
+  if(plan.localAction.operation==='skill_run'){
+    const part=assistantSkillGuidePart(plan.localAction.parameters);
+    if(part!==undefined){
+      let page;try{page=JSON.parse(value.stdout);}catch{fail('ASSISTANT_SKILL_GUIDE_RESULT_INVALID');}
+      if(!page||Object.keys(page).sort().join(',')!=='count,nextGuidePart,part,path,schemaVersion,sha256,text'
+        ||page.schemaVersion!==1||page.part!==part||!Number.isSafeInteger(page.count)||page.count<1||page.count>64
+        ||part>=page.count||page.nextGuidePart!==(part+1<page.count?part+1:null)
+        ||typeof page.path!=='string'||!/^(?:scripts\/instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]+\.md)$/u.test(page.path)
+        ||typeof page.text!=='string'||Buffer.byteLength(page.text)>24*1024
+        ||createHash('sha256').update(page.text).digest('hex')!==page.sha256)fail('ASSISTANT_SKILL_GUIDE_RESULT_INVALID');
+      return {...value,instruction:page.nextGuidePart===null
+        ?'The last signed guide part is in stdout.text. Read it before working; all earlier parts remain required. No local file reader is needed.'
+        :'Read this signed guide part in stdout.text, then execute nextCall for the next part before working. No local file reader or owner action is needed; each call receives fresh native admission.',
+        nextCall:page.nextGuidePart===null?null:{tool:'continue_assistant_workspace_action',arguments:{
+          ...plan.localAction,parameters:{...plan.localAction.parameters,guidePart:page.nextGuidePart}}}};
+    }
+  }
   return value;
 };
 
