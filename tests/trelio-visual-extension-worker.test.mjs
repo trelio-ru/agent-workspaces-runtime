@@ -20,7 +20,8 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[];
-  let windowCreated,windowRemoved,detached,connections=0;
+  const openTabs = new Set([1]);
+  let windowCreated, windowRemoved, tabCreated, headersReceived, detached, connections = 0, selectedTab = 1;
   let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
@@ -68,15 +69,15 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
           }
           return {};
         } },
-      webRequest: { onBeforeRequest: events, onHeadersReceived: events },
+      webRequest: { onBeforeRequest: events, onHeadersReceived: { addListener(fn) { headersReceived = fn; } } },
       cookies: { onChanged: events, async getAll() { return []; } },
       declarativeNetRequest: { async getSessionRules() { await policyRead?.(); return []; }, async updateSessionRules() {} },
       windows: { onCreated: {addListener(fn){windowCreated=fn;}}, onRemoved: {addListener(fn){windowRemoved=fn;}},
         async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);},
         async update(id, input) { windowUpdates.push({ id, input: JSON.parse(JSON.stringify(input)) }); } },
-      tabs: { onCreated: events, onRemoved: events,
-        async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
-        async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
+      tabs: { onCreated: { addListener(fn) { tabCreated = fn; } }, onRemoved: events,
+        async query() { return [...openTabs].map(id => ({ id, url: currentUrl, status: 'complete', active: id === selectedTab })); },
+        async get(id) { return { id, url: currentUrl, status: 'complete' }; },
         async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); tabUpdates.push(JSON.parse(JSON.stringify(input))); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
         async sendMessage(_id, message, target) {
           if (message.kind === 'authentication-guard') return { blocked: false };
@@ -103,9 +104,17 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
   };
   if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
   return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates,
-    frameEvent: (method, params) => nativeEvent({ tabId: 1 }, method, params),
-    async rejectDocument(frameId) {
-      nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', { frameId, requestId: frameId, resourceType: 'Document',
+    frameEvent: (method, params, tabId = 1) => nativeEvent({ tabId }, method, params),
+    selectTab(tabId) {
+      if (!openTabs.has(tabId)) {
+        openTabs.add(tabId);
+        tabCreated({ id: tabId });
+      }
+      selectedTab = tabId;
+    },
+    reportHttpError(statusCode) { headersReceived({ tabId: 1, url: currentUrl, statusCode }); },
+    async rejectDocument(frameId, tabId = 1) {
+      nativeEvent({ tabId }, 'Fetch.requestPaused', { frameId, requestId: frameId, resourceType: 'Document',
         responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html-invalid' }] });
       await tick();
     },
@@ -118,6 +127,54 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
 }
+
+for (const scenario of ['child changes anchor', 'other tab navigates', 'current root changes anchor']) {
+  test('in-flight observation when ' + scenario, async () => {
+    let change;
+    const worker = await dialogWorker({ textObservation: () => change?.() });
+    worker.selectTab(2);
+    assert.equal((await worker.dispatch('read-text')).state, 'ready');
+    worker.selectTab(1);
+    assert.equal((await worker.dispatch('read-text')).state, 'ready');
+    worker.frameEvent('Page.frameAttached', { frameId: 'child', parentFrameId: 'main' });
+    change = () => scenario === 'other tab navigates'
+      ? worker.frameEvent('Page.frameNavigated', { frame: { id: 'other-main' } }, 2)
+      : worker.frameEvent('Page.navigatedWithinDocument', { frameId: scenario === 'child changes anchor' ? 'child' : 'main' });
+    const result = await worker.dispatch('read-text');
+    // The negative control is a genuine transition of the observed root.
+    assert.equal(result.state, scenario === 'current root changes anchor' ? 'error' : 'ready', JSON.stringify(result));
+    if (scenario === 'current root changes anchor') assert.equal(result.reason, 'stale_frame');
+  });
+}
+
+test('a blocked document in another attached tab leaves the active frame usable', async () => {
+  const worker = await dialogWorker();
+  worker.selectTab(2);
+  assert.equal((await worker.dispatch('read-text')).state, 'ready');
+  worker.selectTab(1);
+  const observed = await worker.dispatch('read-text');
+  assert.equal(observed.state, 'ready');
+  await worker.rejectDocument('other-main', 2);
+  const result = await worker.dispatch('scroll', { frameId: observed.frameId, x: 20, y: 20, deltaY: 100 });
+  assert.equal(result.state, 'ready', JSON.stringify(result));
+  assert.equal(worker.nativeCommands.filter(value => value.method === 'Input.dispatchMouseEvent'
+    && value.args.type === 'mouseWheel').length, 1);
+  worker.selectTab(2);
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked' });
+});
+
+test('a confirmed main document 403 has the same diagnostic for text and screenshots', async () => {
+  const worker = await dialogWorker();
+  worker.reportHttpError(403);
+  await worker.rejectDocument('main');
+  const reads = worker.counts().reads;
+  for (const operation of ['read-text', 'screenshot']) {
+    const result = await worker.dispatch(operation);
+    assert.equal(result.reason, 'http_document_failure', JSON.stringify({ operation, result }));
+    assert.equal(result.httpStatus, 403);
+  }
+  assert.equal(worker.counts().reads, reads, 'diagnostics do not observe the blocked document');
+});
 
 test('a blocked child Document invalidates the old frame but allows fresh parent observation', async () => {
   const worker = await dialogWorker();

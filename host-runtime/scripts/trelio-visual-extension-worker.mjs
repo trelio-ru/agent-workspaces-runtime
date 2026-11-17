@@ -27,7 +27,14 @@ export function visualDocumentResponsePolicy(status, headers) {
 export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget, documentPolicy) {
   const requestPacing = createPacing();
   const tabBudget = createTabBudget();
-  let observedFrameId, navigationGeneration = 0;
+  let observedFrameId, nextNavigationGeneration = 0;
+  const navigationGenerations = new Map();
+  function navigationGeneration(tabId) {
+    // In-flight work pins the top document of one owned tab. Allocate a
+    // distinct generation after detach/reattach so old work cannot match it.
+    if (!navigationGenerations.has(tabId)) navigationGenerations.set(tabId, ++nextNavigationGeneration);
+    return navigationGenerations.get(tabId);
+  }
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
   let authenticating = false;
   let bootstrapState = 'pending', bootstrapStage = 'policy', stopping = false;
@@ -146,6 +153,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   });
   chrome.tabs.onRemoved.addListener((tabId, info) => {
     tabBudget.removed(tabId); httpFailures.delete(tabId); documentFailures.delete(tabId); childFrames.delete(tabId);
+    navigationGenerations.delete(tabId);
     if (info.isWindowClosing) windowClosing(info.windowId, true);
   });
   // Numeric main-document evidence only: no request/response headers or body,
@@ -168,7 +176,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       socket?.send(JSON.stringify({ kind: 'audio_fixture_stage', stage: message.stage })); return;
     }
     if (message?.kind === 'route_audio_source' && pendingAudio?.tabId === sender.tab.id && pendingAudio.nonce === message.nonce) {
-      if (pendingAudio.generation !== navigationGeneration || Date.now() >= pendingAudio.until) pendingAudio.reject(Error('stale_frame'));
+      if (pendingAudio.generation !== navigationGeneration(pendingAudio.tabId) || Date.now() >= pendingAudio.until) pendingAudio.reject(Error('stale_frame'));
       else if (message.reason) pendingAudio.reject(Object.assign(Error(['attachment_too_large', 'attachment_unsupported'].includes(message.reason) ? message.reason : 'attachment_link_required'),
         message.reason === 'attachment_unsupported' && message.audioDiagnostic ? { audioDiagnostic: message.audioDiagnostic } : {}));
       else pendingAudio.resolve(message.file ? { file: message.file } : { url: message.url });
@@ -186,6 +194,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   chrome.debugger.onDetach.addListener(source => {
     attached.delete(source.tabId); renderingTabs.delete(source.tabId); guardedTabs.delete(source.tabId);
     childFrames.delete(source.tabId);
+    navigationGenerations.delete(source.tabId);
     dialogs.delete(source.tabId); dialogGuards.delete(source.tabId); notifyDialogs();
     if (frame?.tabId === source.tabId) frame = undefined;
     if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
@@ -224,7 +233,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // callback URLs and arbitrary protocol fields never enter observation.
       dialogs.set(source.tabId, { id: crypto.randomUUID(), tabId: source.tabId,
         type: params.type, message: typeof params.message === 'string' && params.message.length <= 4000 ? params.message : null, url: params.url,
-        generation: navigationGeneration, consumed: false });
+        generation: navigationGeneration(source.tabId), consumed: false });
       notifyDialogs(); return;
     }
     if (method === 'Page.javascriptDialogClosed') {
@@ -248,7 +257,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         await credentialGuard(upload.tabId);
         const tree = await command(upload.tabId, 'Page.getFrameTree');
         if (pendingUpload !== upload || manual || authenticating || Date.now() >= upload.until
-          || Date.now() >= config.deadlineAt || upload.generation !== navigationGeneration
+          || Date.now() >= config.deadlineAt || upload.generation !== navigationGeneration(upload.tabId)
           || tree.frameTree.frame.id !== upload.mainFrameId
           || tree.frameTree.frame.loaderId !== upload.loaderId) throw Error('stale_frame');
         // Consume before dispatch: a lost native response never grants a
@@ -293,7 +302,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           // that new loader with the pre-click loader would reject every real
           // location-based download. A child-frame request cannot replace the
           // parent loader and retains the stronger unchanged-loader check.
-          const stale = Date.now() >= pending.until || pending.generation !== navigationGeneration
+          const stale = Date.now() >= pending.until || pending.generation !== navigationGeneration(pending.tabId)
             || !main && (tree.frameTree.frame.id !== pending.mainFrameId || tree.frameTree.frame.loaderId !== pending.loaderId)
             || manual || authenticating;
           if (stale || params.request?.method !== 'GET' || !allowed(params.request?.url)) {
@@ -340,7 +349,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         if (decision !== 'block') {
           await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
         } else {
-          frame = undefined;
+          // An embedded failure can change geometry in its own tab. A
+          // failure in another tab cannot revoke the observed frame.
+          if (frame?.tabId === source.tabId) frame = undefined;
           // Fetch pauses both top-level and embedded Documents on this native
           // target. Both are refused below; only a positively identified child
           // may leave the parent readable. Missing native frame evidence must
@@ -354,15 +365,18 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       })().catch(() => { guardFailed = true; frame = undefined; });
       return;
     }
-    // An allowed navigation still replaces the pictured document. Retire its
-    // token without reading/forwarding event URLs, frame trees or page data.
-    if ((method === 'Page.frameNavigated' && !params.frame?.parentId) || method === 'Page.navigatedWithinDocument') {
-      navigationGeneration++;
+    // An allowed main-frame navigation still replaces the observed document.
+    // Same-document events can also come from embedded frames; only a native
+    // child identity can exclude one from the parent generation. Unknown
+    // frames retain the existing conservative invalidation for this tab.
+    const topLevelNavigation = (method === 'Page.frameNavigated' && !params.frame?.parentId)
+      || (method === 'Page.navigatedWithinDocument' && !childFrames.get(source.tabId)?.has(params.frameId));
+    if (topLevelNavigation && !source.sessionId && attached.has(source.tabId)) {
+      navigationGenerations.set(source.tabId, ++nextNavigationGeneration);
       if (pendingUpload?.tabId === source.tabId && !pendingUpload.dispatched) pendingUpload.reject(Error('stale_frame'));
       if (pendingAudio?.tabId === source.tabId) pendingAudio.reject(Error('stale_frame'));
+      if (frame?.tabId === source.tabId) frame = undefined;
     }
-    if (source.tabId === frame?.tabId && ((method === 'Page.frameNavigated' && !params.frame?.parentId)
-      || (method === 'Page.navigatedWithinDocument' && params.frameId === frame.mainFrameId))) frame = undefined;
   });
   async function receiveAttachment(download, params) {
     // The only body-reading path belongs to one explicit coordinate-selected
@@ -453,7 +467,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     promise.catch(() => {});
     try {
       await credentialGuard(f.tabId);
-      if (navigationGeneration !== f.generation && f.generation !== undefined) throw Error('stale_frame');
+      if (navigationGeneration(f.tabId) !== f.generation && f.generation !== undefined) throw Error('stale_frame');
       guardUpdate = guardUpdate.then(() => installRules()); await guardUpdate;
       if (guardFailed || Date.now() >= until) throw Error('operation_failed');
       await chrome.tabs.update(f.tabId, { url: url.href });
@@ -518,7 +532,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   async function credentialGuard(tabId) {
     const value = await chrome.tabs.sendMessage(tabId, { kind: 'authentication-guard' }, { frameId: 0 });
     if (value?.blocked !== false) throw Error('manual_control_active');
-    dialogGuards.set(tabId, navigationGeneration);
+    dialogGuards.set(tabId, navigationGeneration(tabId));
   }
   function dialogText(dialog) {
     // A renderer blocked by a dialog cannot answer the credential guard. Only
@@ -527,7 +541,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // remain a bounded human handoff; they never become automatic consent.
     if (manual || authenticating || !['alert', 'confirm'].includes(dialog.type)
       || dialogGuards.get(dialog.tabId) !== dialog.generation
-      || dialog.generation !== navigationGeneration || !allowed(dialog.url)
+      || dialog.generation !== navigationGeneration(dialog.tabId) || !allowed(dialog.url)
       || typeof dialog.message !== 'string' || dialog.message.length > 4000
       || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(dialog.message)
       || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(dialog.message)) return null;
@@ -680,12 +694,14 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const until = Math.min(Date.now() + 8000, config.deadlineAt);
     while (tab.status === 'loading' && Date.now() < until) { await pause(100); tab = await chrome.tabs.get(tab.id); }
     allowedNavigation(tab.url);
+    // The numeric status describes the exact main response even when the
+    // MIME guard also refused it. Report it before any renderer observation.
+    if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
     // Capture the selected renderer without selecting its browser tab: on
     // macOS even tabs.update({active:true}) can activate the containing app.
     navigationStage?.('observe_attach');
     await attach(tab.id);
     if (documentFailures.has(tab.id)) throw Error('document_blocked');
-    if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
     navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
@@ -749,16 +765,16 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     navigationStage?.('layout');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
-    const generation = navigationGeneration;
+    const generation = navigationGeneration(tab.id);
     navigationStage?.('text_read');
     const observation = await chrome.tabs.sendMessage(tab.id, { kind: 'read_rendered_text', ...args }, { frameId: 0 });
     if (observation?.error) throw Error(['invalid_input', 'manual_control_active'].includes(observation.error) ? observation.error : 'operation_failed');
     // A navigation during extraction cannot mint a token for the old document.
     navigationStage?.('frame_recheck');
     const after = await command(tab.id, 'Page.getFrameTree');
-    if (generation !== navigationGeneration || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
+    if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
-    dialogGuards.set(tab.id, navigationGeneration);
+    dialogGuards.set(tab.id, generation);
     frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
     return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
       scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation };
@@ -818,13 +834,13 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (!config.manualCompletion || !manual || authenticating || Object.keys(args).length) throw Error('invalid_input');
       await guardUpdate;
       if (guardFailed) throw Error('document_blocked');
-      const tab = await selected(), generation = navigationGeneration;
+      const tab = await selected(), generation = navigationGeneration(tab.id);
       if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
       const evidence = await chrome.tabs.sendMessage(tab.id, { kind: op }, { frameId: 0 });
       // A stale top document or changed selected tab cannot close a new human
       // challenge. This private read never detaches guards or sends input.
       const after = await selected();
-      if (generation !== navigationGeneration || after.id !== tab.id || after.url !== tab.url
+      if (generation !== navigationGeneration(tab.id) || after.id !== tab.id || after.url !== tab.url
           || guardFailed || documentFailures.has(tab.id) || httpFailures.has(tab.id)) return { state: 'unknown' };
       return evidence?.state === 'success' && /^[a-f0-9-]{36}$/u.test(evidence.documentId || '')
         ? { state: 'success', documentId: evidence.documentId } : { state: 'unknown' };
@@ -951,11 +967,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const x = args.x * f.cssWidth / f.width, y = args.y * f.cssHeight / f.height;
     if (op === 'download-audio') {
       if (config.audioDownloads !== true || pendingAudio || pendingAttachment) throw Error('invalid_input');
-      const until = Math.min(Date.now() + 30_000, config.deadlineAt), generation = navigationGeneration;
+      const until = Math.min(Date.now() + 30_000, config.deadlineAt), generation = navigationGeneration(f.tabId);
       const current = () => {
         if (Date.now() >= config.deadlineAt) throw Error('lease_expired');
         if (manual || authenticating) throw Error('manual_control_active');
-        if (navigationGeneration !== generation) throw Error('stale_frame');
+        if (navigationGeneration(f.tabId) !== generation) throw Error('stale_frame');
         if (Date.now() >= until) throw Error('operation_failed');
       };
       let value = await chrome.tabs.sendMessage(f.tabId, { kind: 'resolve_audio_link', x, y }, { frameId: 0 });
@@ -1002,7 +1018,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       let timer;
       const selectedFiles = new Promise((resolve, reject) => {
         pendingUpload = { tabId: f.tabId, mainFrameId: f.mainFrameId, loaderId: f.loaderId,
-          generation: navigationGeneration, files: args.files, until, resolve, reject, claimed: false, dispatched: false };
+          generation: navigationGeneration(f.tabId), files: args.files, until, resolve, reject, claimed: false, dispatched: false };
         timer = setTimeout(() => reject(Error('upload_control_required')), Math.max(1, until - Date.now()));
       });
       selectedFiles.catch(() => {});
@@ -1020,7 +1036,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'download-attachment') {
       if (config.attachmentDownloads !== true || pendingAttachment) throw Error('invalid_input');
-      const generation = navigationGeneration;
+      const generation = navigationGeneration(f.tabId);
       const link = await chrome.tabs.sendMessage(f.tabId, { kind: 'resolve_attachment_link', x, y }, { frameId: 0 });
       let candidate = link?.url;
       if (!candidate) {
@@ -1032,7 +1048,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         const tree = await command(f.tabId, 'Page.getFrameTree');
         const destination = new Promise((resolve, reject) => {
           pendingFileLink = { tabId: f.tabId, mainFrameId: f.mainFrameId, loaderId: f.loaderId,
-            generation: navigationGeneration, nonce, resolve, reject, claimed: false,
+            generation, nonce, resolve, reject, claimed: false,
             until: Math.min(Date.now() + 5000, config.deadlineAt) };
           linkTimer = setTimeout(() => reject(Error('attachment_link_required')), 5000);
         });
