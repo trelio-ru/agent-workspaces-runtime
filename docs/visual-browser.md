@@ -252,10 +252,21 @@ single synthetic effect, rejects the spent frame and reads back that the window
 is still minimized. The old worker stalls at the same wheel phase on Windows;
 the corrected worker passes without input replay. The original three two-owner
 lifecycles remain required independently, as do native foreground assertions.
+The real Openbox/X11 minimized-window gate additionally exposed a Linux stall
+at the screenshot's `compositor_capture`, before any wheel was sent. The headed
+Linux launcher now selects the same pinned `CDPScreenshotNewSurface` path:
+`RenderWidgetHostImpl::GetSnapshotFromBrowser` requests a fresh surface instead
+of waiting for the legacy ForceRedraw callback before starting its copy.
+This selection is independent of renderer focus emulation. Windows' native
+occlusion flag stays Windows-only; hidden and macOS policy are unchanged.
+The original native minimized screenshot/one-wheel/no-restore gate must pass;
+a portable launch-policy assertion alone does not prove the native fix.
 The Chromium mechanisms are the pinned
 [InputHandler](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/devtools/protocol/input_handler.cc),
 [PageHandler](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/devtools/protocol/page_handler.cc)
 and [EmulationHandler](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/devtools/protocol/emulation_handler.cc).
+The surface-selection implementation is the same pinned
+[RenderWidgetHostImpl](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/renderer_host/render_widget_host_impl.cc).
 Parallel fixture shutdown preserves the first body/close assertion if later
 cleanup also fails, attempts each owned sibling independently and closes its
 synthetic listener on cancellation through the existing HTTP helper. Failure

@@ -799,6 +799,9 @@ publication tooling также остаются вне этого публичн
   failed request, without changing native execution, deadlines or replay rules.
   Owned headed Windows Chromium disables native compositor occlusion and
   selects the pinned Playwright fresh-surface capture path per process.
+  Headed Linux selects that SAME fresh-surface path after the real minimized
+  X11 gate exposed a legacy capture stall. Native occlusion remains Windows-only;
+  no window restore, capture/input retry, hidden-mode change or weaker gate.
   Owned work attachments also pin the renderer's capture/visibility handle
   through the SAME fixed focus-emulation method used by pinned Playwright.
   A successful screenshot has only a temporary capturer and does not prove the

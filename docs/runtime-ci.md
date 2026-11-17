@@ -231,6 +231,10 @@ it neither replaces the three two-owner lifecycles nor weakens their clocks.
 Materialized-worker tests additionally cover fixed renderer activation before
 navigation, manual detach/re-entry, native detach, fail-closed activation and
 production refusal of the fixture-only window controls.
+The Linux native minimized gate covers its own fresh-surface launch selection,
+separately from Windows native occlusion. A portable switch assertion is not
+native acceptance; the original screenshot, one wheel, actual scroll and
+unchanged minimized state must all pass on the real Openbox/X11 display.
 
 The dialog fixture uses the unique rendered text hit target on a shifted
 layout, rather than a guessed offset. Both text and image still make one

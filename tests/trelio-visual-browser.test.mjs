@@ -9,11 +9,15 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-test('only owned headed Windows Chromium uses the new screenshot surface and disables native occlusion', () => {
+test('owned headed Windows and Linux Chromium use a fresh screenshot surface; native occlusion stays Windows-only', () => {
   assert.deepEqual(visualNativeCompositorSwitches('win32', false), [
     '--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface',
   ]);
-  for (const [platform, headless] of [['win32', true], ['darwin', false], ['linux', false]]) {
+  // X11 minimized windows need the SAME fresh-surface path independently of
+  // Windows' native occlusion tracker. Do not copy its unrelated switch or
+  // change hidden/manual presentation to make a screenshot test pass.
+  assert.deepEqual(visualNativeCompositorSwitches('linux', false), ['--enable-features=CDPScreenshotNewSurface']);
+  for (const [platform, headless] of [['win32', true], ['linux', true], ['darwin', false], ['darwin', true], ['other', false]]) {
     assert.deepEqual(visualNativeCompositorSwitches(platform, headless), []);
   }
 });

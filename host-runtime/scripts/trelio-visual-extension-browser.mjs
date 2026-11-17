@@ -102,14 +102,21 @@ export function visualBrowserHeadless(presentation, manual) {
  * launch defaults select Chromium's CDPScreenshotNewSurface for that separate
  * failure mode: request a new surface instead of waiting for the legacy
  * ForceRedraw acknowledgement before copying it. We spawn Chromium directly,
- * so we must select that path ourselves. The same selected tab, fromSurface
- * capture, credential guards and deadline apply. Neither switch focuses the
- * window, changes system policy or gives a failed navigation a second attempt.
+ * so we must select that path ourselves. A real Openbox/X11 minimized window
+ * also stalls at compositor_capture with the legacy path: renderer focus
+ * emulation alone does not choose the new surface request. Select it for owned
+ * headed Linux too, without borrowing Windows' native-occlusion setting.
+ * The same selected tab, fromSurface capture, credential guards and deadline
+ * apply. Neither switch focuses the window, changes system policy or gives a
+ * failed navigation a second attempt. Hidden and macOS launch policy stays
+ * unchanged; a platform's successful fixture is not another platform's proof.
  */
-export const visualNativeCompositorSwitches = (platform, headless) =>
-  platform === 'win32' && headless === false
-    ? ['--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface']
-    : [];
+export function visualNativeCompositorSwitches(platform, headless) {
+  if (headless !== false) return [];
+  if (platform === 'win32') return ['--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface'];
+  if (platform === 'linux') return ['--enable-features=CDPScreenshotNewSurface'];
+  return [];
+}
 
 /** Fixture logging already has its private --log-file. Keep the SAME ignored
  * stdio as an ordinary browser: a diagnostic-only stderr pipe can be inherited
