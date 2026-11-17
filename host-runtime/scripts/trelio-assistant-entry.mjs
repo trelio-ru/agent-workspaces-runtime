@@ -17,7 +17,7 @@ import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery, validateAssistantBackgroundRecoveryObservation } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
-import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
+import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
@@ -3044,12 +3044,6 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
  * before accessing local files, including the nominally local status action. */
 const assistantSkillGuidePart = parameters => {
   return assistantSkillGuideSelection(parameters?.arguments,parameters?.guidePart);
-};
-const assistantSkillActionWithoutGuidePart = action => {
-  if(action.operation!=='skill_run')return action;
-  assistantSkillGuidePart(action.parameters);
-  const {guidePart:_part,...parameters}=action.parameters;
-  return {...action,parameters};
 };
 export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https://trelio.ru'}={}) => {
   if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection','encryptedLifecycle'].includes(key))

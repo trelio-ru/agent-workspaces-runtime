@@ -412,8 +412,14 @@ and preserved byte-for-byte in the invocation and every `nextCall`. Explicit
 `guidePart` selects 0–63 only for that exact provider command; extra provider
 arguments and malformed/duplicate selectors fail before private I/O. Backend
 schemas bound presentation metadata without copying the host's account grammar
-or inspecting encrypted argv. The host verifies the complete manifest against
-the current signed package, then returns its exact text part. The final child
+or inspecting encrypted argv. Before encryption and after native admission, the
+SAME assistant action projection validates the page selector and removes it only
+from the generic CLI parser's copy. The original `guidePart` remains in both
+signed preparation/publication bindings and the native echo; it never enters
+provider argv. Encrypted regression follows every actual returned `nextCall`
+through real HPKE/protection/hydration and the signed provider child. The host
+verifies the complete manifest against the current signed package, then returns
+its exact text part. The final child
 boundary verifies the closed page/digest and derives the next read from the
 admitted action, never provider-authored continuation metadata. Follow `nextCall`
 until null and read all parts before work. An absolute provider path cannot

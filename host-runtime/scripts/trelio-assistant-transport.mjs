@@ -894,7 +894,13 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
     // SAME pure continuation parser BEFORE the first preparation HTTP rather
     // than duplicating its closed skill parameter schema in a protector.
     const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
-    try{buildTrelioWorkspaceActionInvocation(business);}catch{fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');}
+    const {assistantSkillActionWithoutGuidePart}=await import('./trelio-workspace.mjs');
+    // Use the exact same assistant-to-CLI projection as admitted execution.
+    // guidePart is native-bound presentation metadata, not a provider option:
+    // validate it locally, omit it only from the generic parser's copy and
+    // retain it in the signed/encrypted request and subsequent native echo.
+    try{buildTrelioWorkspaceActionInvocation(assistantSkillActionWithoutGuidePart(business));}
+    catch{fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');}
     originalSkillArguments=structuredClone(business.parameters.arguments);
     business.parameters={...business.parameters,encryptedArguments:business.parameters.arguments,arguments:[]};
   }

@@ -10156,6 +10156,19 @@ export const assistantSkillGuideSelection = (args, part) => {
   return guides ? part ?? 0 : undefined;
 };
 
+/** Validate assistant-only paging, then project the ordinary CLI action.
+ * Both pre-encryption privacy checks and admitted execution must use this
+ * projection. The generic human CLI has no guidePart field. Keep the original
+ * action intact for its native signed binding/echo and nextCall; removing the
+ * selector there would silently return page zero again. This is syntax only:
+ * every page still needs fresh pass, package and account admission. */
+export const assistantSkillActionWithoutGuidePart = action => {
+  if (action.operation !== 'skill_run') return action;
+  assistantSkillGuideSelection(action.parameters?.arguments, action.parameters?.guidePart);
+  const { guidePart: _part, ...parameters } = action.parameters;
+  return { ...action, parameters };
+};
+
 /** Package-relative guide names, shared by the producer and final wire guard.
  * The package builder may take scripts/ itself as its source root. Repository
  * layout is not package identity: both reviewed layouts must work, but an

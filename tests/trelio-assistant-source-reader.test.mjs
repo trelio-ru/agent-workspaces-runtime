@@ -1067,7 +1067,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
       packageSignature:sign(null,outgoingBytes,privateKey).toString('base64')});
     const guidePlan=structuredClone(plan);
     Object.assign(guidePlan.localAction.parameters,{skillId:guideSkill,releaseId:guideRelease,
-      arguments:['--local-account',guideAccount,'guides']});
+      arguments:policyVersion===1?['--local-account',guideAccount,'guides']:['guides','--local-account',guideAccount]});
     const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
     const throughWire=raw=>runAssistantWorkspaceProcess(raw,{expectedOrigin:taskIdentity.origin,
       resolveLoader:async()=>'/synthetic/verified-loader.mjs',
@@ -1078,9 +1078,62 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
         try{return {stdout:JSON.stringify(await run(JSON.parse(input)))};}
         catch(error){throw Object.assign(error,{stderr:JSON.stringify({code:error.code})});}
       }});
+    // Exercise the encrypted carrier BEFORE the SAME signed provider path.
+    // Earlier coverage began with an already admitted plaintext plan, so it
+    // missed a continuation which failed while sealing guidePart=1. Only the
+    // native endpoints below are synthetic: P-256/HPKE, payload signatures,
+    // protection/hydration, account selection and the child are production code.
+    const {withAssistantManagedContentArguments}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+    const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+    const crypto=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
+    const cryptoSlots=new Map(),protectedStore={get:async slot=>slot.kind==='company_encryption'
+      ?cryptoSlots.get(slot.id)??null:taskStore.get(slot),put:async(slot,value)=>cryptoSlots.set(slot.id,value)};
+    const managed=await resolveAssistantCompanyEncryptionDevice({identity:taskIdentity,companyId:pass.companyId,store:protectedStore,
+      lockDirectory:path.join(directory,'guide-crypto'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+    const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+    const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+    const scopeId=randomUUID(),recipientDeviceId=randomUUID(),envelopeId=randomUUID();
+    const aad={suite:'trelio-e2ee-v1',companyId:pass.companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:recipientDeviceId};
+    const sealed=await crypto.hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+      plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+    const contentOrigin=taskIdentity.origin==='https://trelio.ru'?'https://e2ee.trelio.ru':taskIdentity.origin;
+    const encryptionRuntime={state:'encrypted',suite:'trelio-e2ee-v1',requestOrigin:contentOrigin,company:{id:pass.companyId,slug:'fixture',name:'Fixture'},
+      viewer:{userId:taskIdentity.assistantId},accessState:'ready',device:{id:recipientDeviceId,fingerprint:managed.fingerprint},
+      scope:{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk},envelope:{id:envelopeId,...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad}};
+    const providerFetch=globalThis.fetch,staged=new Map();let guidePreparations=0;
+    const target={kind:'task',pass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId}};
+    const verifyBinding=async(phase,wire,signature)=>assert.equal(await crypto.verifyCompanyEncryptionRecord(managed.publicSigningJwk,
+      {protocol:'assistant-managed-content/v1',phase,companyId:pass.companyId,target,nativeTool:'continue_assistant_workspace_action',arguments:wire},signature),true);
+    globalThis.fetch=async(url,options)=>{
+      const selected=new URL(url);assert.ok([taskIdentity.origin,contentOrigin].includes(selected.origin));
+      if(selected.pathname==='/api/digital-assistants/runtime/encryption/runtime')return Response.json(encryptionRuntime);
+      if(selected.pathname==='/api/digital-assistants/runtime/workspace/encryption/payloads'){
+        guidePreparations++;const body=JSON.parse(options.body),{signature,...preparation}=body.preparation;
+        assert.deepEqual(preparation.arguments.parameters.arguments,[]);
+        assert.ok(!options.body.includes(guideAccount),'account selector remains inside the protected vector');
+        await verifyBinding('preparation',preparation.arguments,signature);
+        for(const payload of body.payloads)staged.set(payload.entityId,payload);
+        return Response.json({stored:body.payloads.length});
+      }
+      return providerFetch(url,options);
+    };
+    const protectedInput={identity:taskIdentity,host:taskHost,store:protectedStore,lockDirectory:path.join(directory,'guide-crypto'),
+      client:{...client,companies:async()=>[{companyId:pass.companyId,companySlug:'fixture',encryptionState:'encrypted'}]}};
+    const throughEncryptedWire=async raw=>{
+      const reply=await withAssistantManagedContentArguments({...protectedInput,name:'continue_assistant_workspace_action',args:raw.localAction},async wire=>{
+        const {encryptedContent,...business}=wire;
+        await verifyBinding('publication',business,encryptedContent.signature);
+        assert.deepEqual(wire.parameters.arguments,[]);assert.ok(!JSON.stringify(wire).includes(guideAccount));
+        assert.equal(wire.parameters.guidePart,raw.localAction.parameters.guidePart);
+        return {content:[],structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId:pass.companyId,recipientDeviceId,
+          envelopeId,scopeId,scopeEpoch:1,context:{...raw,localAction:business},encryptedPayloads:[...staged.values()]}}};
+      });
+      assert.deepEqual(reply.structuredContent.localAction,raw.localAction,'hydration preserves the complete original action');
+      return throughWire(reply.structuredContent);
+    };
     let selected=guidePlan;
     for(let index=0;index<guidePaths.length;index++){
-      const page=await throughWire(selected),body=JSON.parse(page.stdout);
+      const page=await throughEncryptedWire(selected),body=JSON.parse(page.stdout);
       assert.equal(body.path,guidePaths[index]);assert.equal(body.text,texts[index]);
       assert.equal(body.sha256,createHash('sha256').update(texts[index]).digest('hex'));
       assert.equal(body.part,index);assert.equal(body.count,guidePaths.length);
@@ -1089,10 +1142,24 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
         selected={...guidePlan,localAction:page.nextCall.arguments};
       }else assert.equal(page.nextCall,null);
     }
+    assert.equal(guidePreparations,3,'each exact returned nextCall crosses fresh signed encryption preparation');
+    // An assistant-only page selector never widens the ordinary parameter
+    // grammar or permits a different provider command. Invalid input must fail
+    // before staging ciphertext, obtaining any new native plan or spawning.
+    for(const parameters of [
+      ...[-1,64,0.5,'1',null].map(guidePart=>({...guidePlan.localAction.parameters,guidePart})),
+      {...guidePlan.localAction.parameters,arguments:['read'],guidePart:1},
+      {...guidePlan.localAction.parameters,arguments:['guides','--unexpected'],guidePart:1},
+      {...guidePlan.localAction.parameters,arguments:['guides','--local-account',guideAccount,'--local-account',guideAccount],guidePart:1},
+      {...guidePlan.localAction.parameters,guidePart:1,unknownParameter:'PRIVATE_GUIDE_CANARY'},
+    ])await assert.rejects(throughEncryptedWire({...guidePlan,localAction:{...guidePlan.localAction,parameters}}),
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+    assert.equal(guidePreparations,3,'all invalid page/argv combinations refuse before private preparation HTTP');
     assert.equal(await fs.readFile(guideCalls,'utf8'),'ggg','one provider call per admitted page, no replay');
     live=false;
-    await assert.rejects(throughWire(guidePlan));
+    await assert.rejects(throughEncryptedWire(guidePlan));
     assert.equal(await fs.readFile(guideCalls,'utf8'),'ggg','closed native pass cannot read another cached page');
+    assert.equal(guidePreparations,3,'revoked pass cannot use earlier encrypted preparation');
     live=true;
     // The public executor's monitor boundary remains independent of task mode.
     await assert.rejects(engine.runMaterializedAgentSkill({captureOutput:true,captureMode:'assistant_task',runtimeArguments:['read']}),/MONITOR_INPUT_INVALID|private monitor/);

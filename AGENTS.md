@@ -1209,6 +1209,9 @@ publication tooling также остаются вне этого публичн
   Run UTF-8 files use the same native pass/recipient/lease and finish lock;
   scoped local edits use expected SHA-256. Signed guides return part zero by
   default and exact nextCall paging with the SAME account selector/parser.
+  Pre-encryption and admitted execution share the same paging-to-CLI projection;
+  keep guidePart in native signed bindings/echoes, never in provider argv.
+  Compose protected nextCall paging with the real signed provider child in tests.
   Package-relative guide names use one producer/wire predicate: both
   instruction-guides/ and scripts/instruction-guides/ are valid build roots.
   Verify the complete manifest against signed bytes before any page. Test the
