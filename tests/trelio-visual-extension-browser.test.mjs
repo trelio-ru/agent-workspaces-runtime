@@ -628,12 +628,13 @@ test('signed hidden presentation preserves auth and original lease through visib
   // launch a genuine headed browser on every native OS before returning to
   // hidden work; normal input and observations stay closed during human input.
   const browser = new ExtensionVisualBrowser({ dependencies, store, presentation: 'hidden', origins: [origin],
-    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), lease });
+    externalNavigation: true, profileAuthentication: true,
+    policy: createVisualOriginPolicy({ origins: [origin], externalNavigation: true, allowLoopback: true }), lease });
   const sessionId = browser.sessionId;
   try {
     const first = await browser.call('navigate', { url: origin });
     assert.equal(first.state, 'ready');
-    assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required');
+    assert.equal((await browser.call('setup', { url: `http://localhost:${server.address().port}/login` })).state, 'manual_input_required');
     assert.equal(writes, 1, 'the stopped hidden profile was persisted before visible setup');
     assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
     assert.equal((await browser.call('ready')).state, 'saved_unverified');
@@ -642,7 +643,7 @@ test('signed hidden presentation preserves auth and original lease through visib
       .find(file => file.path === 'Default/Preferences').data, 'base64'));
     assert.equal(savedPreferences.signin.allowed, false, 'native Chromium retained browser sign-in isolation');
     assert.equal(savedPreferences.signin.allowed_on_next_startup, false, 'the next-startup preference cannot re-enable sign-in');
-    const resumed = await browser.call('navigate', { url: `${origin}/after` });
+    const resumed = await browser.call('navigate', { url: `http://localhost:${server.address().port}/after` });
     assert.equal(resumed.state, 'ready');
     assert.equal(restored, true, 'the hidden resumed document receives the exact synthetic auth');
     assert.equal(persistentRestored, true, 'persistent auth also survives the visible-to-hidden restart');

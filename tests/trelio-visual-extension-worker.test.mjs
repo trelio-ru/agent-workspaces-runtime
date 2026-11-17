@@ -16,10 +16,10 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
-  const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[];
+  const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[], networkRules=[];
   const openTabs = new Set([1]);
   let windowCreated, windowRemoved, tabCreated, headersReceived, detached, connections = 0, selectedTab = 1;
   let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
@@ -74,7 +74,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         } },
       webRequest: { onBeforeRequest: events, onHeadersReceived: { addListener(fn) { headersReceived = fn; } } },
       cookies: { onChanged: events, async getAll() { return []; } },
-      declarativeNetRequest: { async getSessionRules() { await policyRead?.(); return []; }, async updateSessionRules() {} },
+      declarativeNetRequest: { async getSessionRules() { await policyRead?.(); return []; }, async updateSessionRules(value) { networkRules.push(JSON.parse(JSON.stringify(value))); } },
       windows: { onCreated: {addListener(fn){windowCreated=fn;}}, onRemoved: {addListener(fn){windowRemoved=fn;}},
         async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);},
         async update(id, input) { windowUpdates.push({ id, input: JSON.parse(JSON.stringify(input)) }); } },
@@ -97,7 +97,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     },
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
-    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, fixtureOnly,
+    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, profileAuthentication, externalNavigation: profileAuthentication, fixtureOnly,
     observationMode: image ? 'image' : 'text', ...(authenticationMessage?{authentication:true}:{}), ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
@@ -107,7 +107,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     throw Error('synthetic_command_timeout');
   };
   if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
-  return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates,
+  return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates, networkRules,
     frameEvent: (method, params, tabId = 1) => nativeEvent({ tabId }, method, params),
     selectTab(tabId) {
       if (!openTabs.has(tabId)) {
@@ -1032,4 +1032,15 @@ test('ordinary transport reconnect stays available, but its queued timer cannot 
   const stopped=await dialogWorker();stopped.disconnect();stopped.removeWindow(1);
   await new Promise(resolve=>setTimeout(resolve,20));
   assert.equal(stopped.connections(),1,'already scheduled reconnect is fenced at dispatch');
+});
+
+// No website-specific hostname list: the manual profile login can traverse
+// unfamiliar SSO and non-HTML responses without a renderer/MIME gate.
+test('manual profile authentication leaves website traffic to Chromium and restores work guards afterwards', async () => {
+  const worker = await dialogWorker({ manual: true, profileAuthentication: true });
+  assert.equal(worker.networkRules.at(-1).addRules.length, 0);
+  assert.equal(worker.nativeCommands.some(value => value.method === 'Fetch.enable'), false);
+  assert.equal((await worker.dispatch('screenshot')).reason, 'manual_control_active');
+  assert.equal((await worker.dispatch('ready')).state, 'saved_unverified');
+  assert.ok(worker.networkRules.at(-1).addRules.some(rule => rule.action.type === 'block'));
 });

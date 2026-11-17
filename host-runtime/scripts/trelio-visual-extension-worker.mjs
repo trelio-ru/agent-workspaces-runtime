@@ -498,8 +498,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // Enable the final-document guard BEFORE exempting this exact owned tab
     // from DNR's MIME-only rule. Unattached popups keep the strict default;
     // their mere creation never opens an unguarded download/navigation gap.
-    await command(tabId, 'Fetch.enable', { patterns: [{ resourceType: 'Document', requestStage: 'Response' }] });
-    guardedTabs.add(tabId);
+    if (!(manual && config.profileAuthentication === true)) {
+      await command(tabId, 'Fetch.enable', { patterns: [{ resourceType: 'Document', requestStage: 'Response' }] });
+      guardedTabs.add(tabId);
+    }
     guardUpdate = guardUpdate.then(() => installRules());
     try { await guardUpdate; } catch (error) { guardFailed = true; throw error; }
     await keepRendering(tabId);
@@ -912,6 +914,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'manual') {
       manual = true; frame = undefined;
+      if (config.profileAuthentication === true) await installRules();
       for (const tabId of attached) await chrome.debugger.detach({ tabId }).catch(() => {});
       attached.clear();
       renderingTabs.clear();
@@ -923,7 +926,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await chrome.windows.update(tab.windowId, { focused: true });
       return { state: 'manual_input_required' };
     }
-    if (op === 'ready') { manual = false; frame = undefined; return { state: 'saved_unverified' }; }
+    if (op === 'ready') { manual = false; frame = undefined; await installRules(); return { state: 'saved_unverified' }; }
     if (op === 'close-windows' || (op === 'fixture-close-windows' && config.fixtureOnly)) {
       stopping = true;
       windowDiagnostic('close_start');
@@ -1229,6 +1232,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // fallback stays strict for new/unattached tabs and subframes; an exact
       // tab is exempted only after its response-status-aware Fetch guard exists.
       // Otherwise a legitimate headerless redirect is mistaken for a file.
+      // During explicit human profile login no page response enters the model.
+      // Let Chromium complete ordinary redirects, empty SSO responses, popups
+      // and subframes without extension network filtering. The work phase
+      // reinstalls its document guards before any model observation or input.
+      if (manual && config.profileAuthentication === true) {
+        const previous = await chrome.declarativeNetRequest.getSessionRules();
+        await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: previous.map(rule => rule.id), addRules: [] });
+        return;
+      }
       const rules = [
         { id: 1, priority: 1, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'] } },
         { id: 2, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'], ...(pendingAttachment && guardedTabs.has(pendingAttachment.tabId) ? { excludedTabIds: [pendingAttachment.tabId] } : {}), responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
