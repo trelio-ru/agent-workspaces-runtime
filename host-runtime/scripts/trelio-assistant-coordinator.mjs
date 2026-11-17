@@ -2285,13 +2285,23 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           // Code maintenance after a positively classified interrupted save
           // still holds the coordinator and read-backs. It cannot renew the
           // pass, start Codex, settle the Run or clear a dispatch notice.
-          if(!intent?.started||!intent.taskReadParent||terminal.state!=='uncertain')return false;
+          if(!intent?.started||terminal.state!=='uncertain')return false;
           const saved=await client.readTaskPass({companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},signal);
           if(saved.state!=='review_required'||saved.bindingId!==pass.bindingId||saved.bindingRevision!==pass.bindingRevision
             ||saved.threadId!==pass.threadId||saved.deliveryId!==pass.deliveryId||!(Date.parse(saved.leaseExpiresAt)<=now()))return false;
           const witness=await native.readDelivery(pass.threadId,marker,{signal,
-            interruptedWorkspaceDraft:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,namedArchive:true}});
-          if(witness.state!=='interrupted_workspace_draft'||witness.turnId!==terminal.turnId||witness.workspaceDraft?.namedArchive!==true)return false;
+            interruptedWorkspaceDraft:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
+              ...(intent.taskReadParent?{namedArchive:true}:{})}});
+          // An ordinary continuation may have already saved its canonical
+          // result. It needs no read-only-parent marker, but must prove the
+          // full accepted history (not a draft or pending finish). This only
+          // admits immutable signed code maintenance; the following worker
+          // still acquires its own writer and settles the exact native pass.
+          const eligible=intent.taskReadParent?witness.workspaceDraft?.namedArchive===true
+            :typeof witness.workspaceDraft?.acceptedHead==='string'
+              &&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(witness.workspaceDraft.acceptedHead)
+              &&witness.workspaceDraft.finishPending!==true&&witness.workspaceDraft.namedArchive!==true;
+          if(witness.state!=='interrupted_workspace_draft'||witness.turnId!==terminal.turnId||!eligible)return false;
         }
         const unchanged=async()=>{
           lease();

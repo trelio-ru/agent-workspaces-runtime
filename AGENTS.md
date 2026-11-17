@@ -171,6 +171,12 @@ publication tooling также остаются вне этого публичн
   metadata reads and proven pre-I/O syntax refusals; require the same native
   pinned context and matching clean local/native accepted heads. No browser
   input, Secret fill, provider call or unknown effect gains recovery or replay.
+  Accepted settlement composes prior same-Workspace accepted reads, exact
+  negative operation lookups and a settled typed control receipt before save.
+  Test the whole native history through durable completion, disk reopen and
+  the next fixed daily cycle; isolated classifier tests are insufficient.
+  The same expired accepted witness permits signed maintenance under the
+  existing lease, without requiring a read-only-parent continuation.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

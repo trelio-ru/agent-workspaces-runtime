@@ -110,6 +110,11 @@ running or ambiguous intake still refuses; this never settles its outcome.
 Downloading preserves every pass/start/history
 bit and never clears business health; the next worker independently selects the
 verified package. No model invocation, Codex restart or owner question occurs.
+An expired ordinary task continuation also permits this maintenance boundary
+when its full latest history proves a clean, changed canonical accepted Run.
+It does not require a prior read-only continuation. A pending save, unconfirmed
+effect, mismatched native turn/head or unknown new-start remains fenced. The
+same coordinator lease and unchanged pass/journal/schedule snapshots apply.
 
 
 ### Native model-capacity recovery
@@ -668,6 +673,16 @@ JSON-text substitutes for a save receipt. Final acceptance requires BOTH clean
 local changed candidate and matching native accepted base/head. The same
 restricted outcome-only catalogue and signed argument checks are unchanged;
 this cannot reopen a Run, repeat the visit or perform the refused login.
+The complete accepted history may also contain a bounded native negative
+operation-receipt read (`not_recorded`, exact request UUID, optional task/context
+view), an earlier clean accepted status in the SAME Workspace, and one settled
+control update before finish. The old Run is context only: its head never
+substitutes for the newly edited and accepted candidate. The control must retain
+its typed native receipt, exact task/pass/control and original request UUID;
+JSON text cannot substitute for that mutation receipt. Neither action is exposed
+to the outcome-only continuation. Composed regressions cover this sequence,
+writer acquisition, restricted tools, signed maintenance, durable settlement,
+SQLite close/reopen, health recovery and exactly one next fixed daily cycle.
 
 If the final tool returned an in-progress finish and its exact native poll
 handle, treat that handle as evidence of the attempted save only. The same

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createAssistantInbox, readAssistantWorkspaceDraftRecovery } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={}) => {
   if(ownsDatabase)t.after(()=>database.close());
@@ -2313,6 +2314,105 @@ for(const kind of ['draft','accepted','finish_pending'])test(`interrupted Worksp
     assert.equal(f.database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(original.deliveryId).state,'complete');
     await f.coordinator.workOnce();assert.equal(f.counts().runs,2,'only one real recovery turn crossed the start fence');
   }finally{await f.coordinator.close();}
+});
+
+test('accepted control/save history survives signed maintenance, settlement and disk reopen into the next daily cycle',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-accepted-control-')),file=path.join(directory,'inbox.sqlite');
+  let database=new DatabaseSync(file),coordinator;
+  const f=fixture(t,{database,ownsDatabase:false});await f.coordinator.close();
+  const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
+  const marker=randomUUID(),turnId=randomUUID(),reviewId=randomUUID();
+  const run={workspaceId:randomUUID(),runId:randomUUID()},oldRun={...run,runId:randomUUID()},head='a'.repeat(40);
+  let history,confirmed=false,recoveries=0,updates=0,settlements=0;
+  Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});f.authority.workMode='task';
+  f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  f.options.client.readBusinessOutcome=async args=>confirmed?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
+  f.options.onBusinessConfirmed=async()=>{assert.equal(f.activePass(),null);recoveries++;};
+  f.options.native.readDelivery=async(_thread,id,options={})=>{
+    if(id!==marker)return f.deliveries.get(id)??{state:'uncertain'};
+    // Real history classification is composed with the durable coordinator,
+    // not a hard-coded "recoverable" result hiding an impossible live trace.
+    const witness=options.interruptedWorkspaceDraft&&assistantInterruptedAcceptedWorkspace(history,marker,options.interruptedWorkspaceDraft);
+    return witness?{state:'interrupted_workspace_draft',turnId,workspaceDraft:witness}:{state:'uncertain',turnId};
+  };
+  f.options.passHost.continuePass=async(args,expected)=>{
+    assert.deepEqual(expected,f.activePass());const pass=f.passes.get(expected.deliveryId);
+    assert.equal(args.terminalTurnId,turnId);
+    if(args.continuation==='resume')Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
+      leaseExpiresAt:new Date(f.options.now()+1_200_000).toISOString()});
+    const resumed=pass.leaseRevision>args.expectedLeaseRevision;
+    return {schemaVersion:2,state:resumed?'resumed':'approved',reviewId,invocationId:reviewId,
+      resumed:resumed?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+  };
+  f.options.native.run=async(input,options)=>{
+    if(options.workspaceDraftRecovery){
+      assert.equal(input.deliveryId,reviewId);assert.equal(updates,1);
+      assert.deepEqual(options.workspaceDraftRecovery.workspaceDraft,{...run,acceptedHead:head});
+      await options.beforeInvocation();confirmed=true;settlements++;
+    }
+    return ordinaryRun(input,options);
+  };
+  const reopen=async()=>{await coordinator.close();database.close();database=new DatabaseSync(file);
+    coordinator=createAssistantCoordinator({...f.options,database});};
+  coordinator=createAssistantCoordinator(f.options);
+  try{
+    f.events.push({id:randomUUID(),revision:'accepted-control',taskId:f.taskId,wake:true});
+    await coordinator.pollOnce();await coordinator.workOnce();await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    const active=f.activePass(),pass=f.passes.get(active.deliveryId),taskPass={companyId:f.companyId,taskId:f.taskId,passId:active.passId};
+    const item=(tool,args,result)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+      arguments:{taskPass,...args},result:{structuredContent:result}});
+    const action=(operation,parameters,result,identity=run)=>item('continue_assistant_workspace_action',
+      {schemaVersion:1,operation,parameters,runIdentity:identity},{schemaVersion:1,operation,...result});
+    const accepted=(identity,candidateHead,baseHead)=>({nativeRunStatus:{status:'accepted',candidateHead,baseHead},
+      stdout:JSON.stringify({...identity,terminalStatus:'accepted',dirty:false,candidateHead,baseHead})});
+    const operation=randomUUID(),controlId=randomUUID(),request=randomUUID(),text='Synthetic accepted work';
+    const receipt=item('get_assistant_status',{},null);receipt.arguments={operationReceipt:request,view:'task'};
+    receipt.result={content:[{type:'text',text:JSON.stringify({state:'not_recorded',clientRequestId:request,companies:[]})}]};
+    history={id:turnId,status:'interrupted',items:[
+      {type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(marker)+'\nExisting synthetic task'}]},receipt,
+      action('status',{},accepted(oldRun,'b'.repeat(40),'c'.repeat(40)),oldRun),
+      item('prepare_assistant_workspace_run',{workspaceId:run.workspaceId},{prepared:true,run:{id:run.runId},
+        workspace:{id:run.workspaceId,scopeType:'task',companyId:f.companyId,taskId:f.taskId}}),
+      action('open',run,{}),
+      ...['agent-instructions.md','user-profile.md'].map(path=>item('use_assistant_workspace_files',
+        {runIdentity:run,command:{action:'read',source:'authority',path}},{text:'Synthetic pinned authority'})),
+      item('use_assistant_workspace_files',{runIdentity:run,command:{action:'replace',path:'WORK.md',expectedSha256:null,text}},
+        {state:'draft_updated',sha256:createHash('sha256').update(text).digest('hex')}),
+      item('update_task_control',{clientRequestId:randomUUID(),controlId,visibility:'shared'},
+        {schemaVersion:1,operation:'update_task_control',taskId:f.taskId,resultId:controlId,receiptId:randomUUID()}),
+      action('checkpoint',{type:'draft'},{}),action('finish',{taskOutcome:'no_status_change'},{operationId:operation,state:'running'}),
+      action('status',{finishOperationId:operation},{operation:'finish',operationId:operation,state:'completed'}),
+      action('status',{},accepted(run,head,'b'.repeat(40))),
+    ]};
+    const inbox=createAssistantInbox({database,now:f.options.now});
+    const intent=inbox.preparePassContinuation(active.deliveryId,{passId:active.passId,expectedLeaseRevision:0,
+      terminalTurnId:randomUUID(),terminalMarkerId:active.deliveryId,prerequisiteKey:'a'.repeat(64)});
+    inbox.updatePassContinuation(active.deliveryId,intent.clientRequestId,{reviewId:marker,resumeAttempted:true,resumed:true,started:true});
+    f.advance(21*60_000);Object.assign(pass,{state:'review_required',leaseRevision:1});
+    await reopen();
+    const before=database.prepare('SELECT * FROM assistant_pass_continuations').all();
+    const intact=structuredClone(history);
+    for(const damage of ['missing_receipt','pending_finish','different_head']){
+      history=structuredClone(intact);
+      if(damage==='missing_receipt')delete history.items.find(i=>i.tool==='update_task_control').result.structuredContent.receiptId;
+      if(damage==='pending_finish')history.items.splice(-2);
+      if(damage==='different_head')history.items.at(-1).result.structuredContent.nativeRunStatus.candidateHead='e'.repeat(40);
+      assert.equal(await coordinator.updateRuntimeAtBoundary(async()=>{updates++;}),false,damage);
+    }
+    history=intact;assert.equal(updates,0,'uncertain effects never admit the maintenance boundary');
+    assert.equal(await coordinator.updateRuntimeAtBoundary(async()=>{updates++;assert.equal(await coordinator.workOnce(),null);}),true);
+    assert.deepEqual(database.prepare('SELECT * FROM assistant_pass_continuations').all(),before,'maintenance preserves every business bit');
+    assert.equal(recoveries,0);assert.equal(confirmed,false);assert.deepEqual(f.activePass(),active);
+    await coordinator.workOnce();assert.equal(settlements,1);assert.equal(recoveries,1);assert.equal(f.activePass(),null);
+    assert.equal(database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(active.deliveryId).state,'complete');
+    const next=coordinator.status()[0];assert.equal(next.nextRunAt,Date.parse('2026-01-01T17:00:00Z'));
+    await reopen();await coordinator.workOnce();assert.equal(f.counts().runs,2,'restart cannot replay control or saved work');
+    f.advance(next.nextRunAt-f.options.now());await coordinator.workOnce();
+    assert.equal(f.counts().runs,3);assert.equal(settlements,1);assert.equal(recoveries,2);
+    assert.equal(coordinator.status()[0].threadId,next.threadId);
+    assert.equal(coordinator.status()[0].nextRunAt,Date.parse('2026-01-02T17:00:00Z'));
+    await coordinator.workOnce();assert.equal(f.counts().runs,3);
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
 for(const nativeState of ['uncertain','running','failed'])test(`terminal review cannot be created from ${nativeState} native evidence`,async t=>{

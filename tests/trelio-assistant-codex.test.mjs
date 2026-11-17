@@ -623,6 +623,57 @@ test('accepted canonical material after a closed observation permits outcome-onl
   }
 });
 
+// One ordinary continuation can inspect the previous accepted Run, reconcile
+// an absent operation, update a control and then save a NEW accepted Run. The
+// composition matters: each action used to pass its own isolated test while
+// the complete native history was rejected and held every later task hostage.
+const acceptedControlHistory=()=>{
+  const f=acceptedObservationHistory(),{turn,taskPass,workspaceDraft}=f;
+  const prior=turn.items[2],oldRun={workspaceId:workspaceDraft.workspaceId,runId:randomUUID()};
+  prior.arguments.runIdentity=oldRun;
+  prior.result.structuredContent={schemaVersion:1,operation:'status',
+    nativeRunStatus:{status:'accepted',candidateHead:'b'.repeat(40),baseHead:'d'.repeat(40)},
+    stdout:JSON.stringify({...oldRun,terminalStatus:'accepted',dirty:false,candidateHead:'b'.repeat(40),baseHead:'d'.repeat(40)})};
+  const request=randomUUID(),controlId=randomUUID();
+  turn.items.splice(1,0,{type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_status',status:'completed',
+    arguments:{operationReceipt:request,view:'task'},result:{structuredContent:null,
+      content:[{type:'text',text:JSON.stringify({state:'not_recorded',clientRequestId:request,companies:[]})}]}});
+  turn.items.splice(-4,0,{type:'mcpToolCall',server:'trelio-assistant',tool:'update_task_control',status:'completed',
+    arguments:{taskPass,clientRequestId:randomUUID(),controlId,visibility:'shared'},
+    result:{structuredContent:{schemaVersion:1,operation:'update_task_control',taskId:taskPass.taskId,resultId:controlId,receiptId:randomUUID()}}});
+  return f;
+};
+
+test('accepted save with prior accepted read, absent operation and settled control only permits confirmation',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=acceptedControlHistory();
+  assert.deepEqual(assistantInterruptedAcceptedWorkspace(turn,terminalMarkerId,taskPass),workspaceDraft);
+  assert.equal(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),null);
+  const receipt=t=>t.items.find(i=>i.tool==='get_assistant_status');
+  const control=t=>t.items.find(i=>i.tool==='update_task_control');
+  const prior=t=>t.items.find(i=>i.arguments?.operation==='status'&&i.result?.structuredContent?.nativeRunStatus?.candidateHead==='b'.repeat(40));
+  for(const [index,mutate] of [
+    t=>{receipt(t).arguments.operationReceipt=randomUUID();},
+    t=>{receipt(t).arguments.view='unknown';},
+    t=>{receipt(t).result.content[0].text='{}';},
+    t=>{const i=receipt(t),v=JSON.parse(i.result.content[0].text);v.state='committed';i.result.content[0].text=JSON.stringify(v);},
+    t=>{receipt(t).result.isError=true;},
+    t=>{const i=prior(t),v=JSON.parse(i.result.structuredContent.stdout);v.dirty=true;i.result.structuredContent.stdout=JSON.stringify(v);},
+    t=>{prior(t).result.structuredContent.nativeRunStatus.candidateHead='c'.repeat(40);},
+    t=>{const i=prior(t);i.arguments.runIdentity.workspaceId=randomUUID();},
+    t=>{control(t).result.structuredContent.taskId=randomUUID();},
+    t=>{control(t).result.structuredContent.receiptId=null;},
+    t=>{control(t).arguments.ownerDecisionId=randomUUID();},
+    t=>{control(t).arguments.taskPass.passId=randomUUID();},
+    t=>{const i=control(t);i.result={content:[{type:'text',text:JSON.stringify(i.result.structuredContent)}]};},
+    t=>{t.items.splice(-4,0,structuredClone(control(t)));},
+    t=>{const i=control(t);t.items.splice(t.items.indexOf(i),1);t.items.push(i);},
+    t=>{t.items.splice(-3);}, // A prior accepted Run never substitutes for this save.
+  ].entries()){
+    const changed=structuredClone(turn);mutate(changed);
+    assert.equal(assistantInterruptedAcceptedWorkspace(changed,terminalMarkerId,taskPass),null,`refusal ${index}`);
+  }
+});
+
 const pendingFinishHistory=()=>{
   const {turn,workspaceDraft,...locators}=acceptedHistory();
   const {acceptedHead,...identity}=workspaceDraft;
@@ -858,10 +909,10 @@ for(const changed of [false,true])test(`native archive read and owned-writer rec
   }
 });
 
-for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending','accepted_observation','accepted_observation_busy','accepted_observation_changed','accepted_observation_unfiltered'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
-  const accepted=state==='accepted'||state.startsWith('accepted_observation');
-  const mode=state.startsWith('accepted_observation_')?state.slice('accepted_observation_'.length):state;
-  const {turn,...workspaceDraftRecovery}=state.startsWith('accepted_observation')?acceptedObservationHistory():state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
+for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending','accepted_observation','accepted_observation_busy','accepted_observation_changed','accepted_observation_unfiltered','accepted_control','accepted_control_busy','accepted_control_changed','accepted_control_unfiltered'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
+  const accepted=state==='accepted'||state.startsWith('accepted_observation')||state.startsWith('accepted_control');
+  const mode=state.replace(/^accepted_(?:observation|control)_/u,'');
+  const {turn,...workspaceDraftRecovery}=state.startsWith('accepted_control')?acceptedControlHistory():state.startsWith('accepted_observation')?acceptedObservationHistory():state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
   const pluginId='trelio-digital-assistant@trelio-digital-assistants';
   const tools=accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
@@ -900,7 +951,7 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish
       },
     }),
   });
-  if(['confirmed','accepted','finish_pending','accepted_observation'].includes(mode)){
+  if(['confirmed','accepted','finish_pending','accepted_observation','accepted_control'].includes(mode)){
     assert.equal((await operation()).state,'completed');
     assert.deepEqual(steps,['writer','draft','renew']);assert.equal(starts,1);
   }else{

@@ -1329,6 +1329,28 @@ export const assistantInterruptedWorkspaceDraft=(turn,deliveryId,taskPass)=>{
   return opened&&changed?run:null;
 };
 
+// A receipt lookup is an observation, never a mutation receipt or permission
+// to retry. Only the native negative shape qualifies here: a committed or
+// malformed result still needs its own operation-specific reconciliation.
+const absentOperationRead=(args,result)=>UUID.test(args.operationReceipt??'')
+  &&Object.keys(args).every(key=>['operationReceipt','view'].includes(key))
+  &&(args.view===undefined||['task','company_context'].includes(args.view))
+  &&result?.state==='not_recorded'&&result.clientRequestId===args.operationReceipt
+  &&Object.keys(result).sort().join(',')==='clientRequestId,companies,state'
+  &&Array.isArray(result.companies);
+// Use identical local/native acceptance proof for a prior read and the final
+// saved candidate. The caller decides whether this is only context or the NEW
+// result; inspecting an old accepted Run never marks the current work saved.
+const acceptedStatusHead=(result,run)=>{
+  if(result?.schemaVersion!==1||result.operation!=='status'||typeof result.stdout!=='string'
+    ||Buffer.byteLength(result.stdout)>65_536)return null;
+  let status;try{status=JSON.parse(result.stdout);}catch{return null;}
+  if(status?.workspaceId!==run?.workspaceId||status.runId!==run?.runId||status.terminalStatus!=='accepted'
+    ||status.dirty!==false||!acceptedWorkspaceHead(status.candidateHead)||!acceptedWorkspaceHead(status.baseHead)
+    ||result.nativeRunStatus?.status!=='accepted'||result.nativeRunStatus.candidateHead!==status.candidateHead
+    ||result.nativeRunStatus.baseHead!==status.baseHead)return null;
+  return {head:status.candidateHead,base:status.baseHead};
+};
 /** Recognize the canonical Run behind a native finish attempt, not its outcome.
  * The pending variant can reconcile that one Run only. A settled owner question
  * or control update is a prior effect, not a permission to repeat it.
@@ -1353,7 +1375,7 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
     // stand in for a mutation, Run preparation, or finish receipt.
     const content=item.result?.content;
     const browserRead=!allowPending&&item.tool==='use_assistant_browser';
-    if((draftReads.has(item.tool)||browserRead)&&result==null&&Array.isArray(content)
+    if((draftReads.has(item.tool)||browserRead||item.tool==='get_assistant_status')&&result==null&&Array.isArray(content)
       &&(content.length===1||browserRead&&content.length===2&&content[1]?.type==='image')
       &&content[0]?.type==='text'&&typeof content[0].text==='string'&&Buffer.byteLength(content[0].text)<=512*1024){
       try{
@@ -1366,6 +1388,7 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
     // tool. A subsequent status/error or unrelated call needs its own proof.
     if(allowPending&&operationId)return null;
     if(item.tool==='get_assistant_status'){
+      if(!allowPending&&success&&absentOperationRead(args,result))continue;
       if(!success||Object.keys(args).some(key=>key!=='view'))return null;
       continue;
     }
@@ -1440,8 +1463,11 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       if(!opened||questionId||!success||!UUID.test(args.clientRequestId??'')||!UUID.test(result.id??'')
         ||result.state!=='pending'||result.replayed!==false||Object.keys(result).sort().join(',')!=='id,path,replayed,state')return null;
       questionId=result.id;
-    }else if(allowPending&&item.tool==='update_task_control'){
-      if(!opened||controlReceiptId||!success||!['personal','shared'].includes(args.visibility)||args.ownerDecisionId!==undefined
+    }else if(item.tool==='update_task_control'){
+      // The same positive control receipt is settled before both pending and
+      // accepted saves. Acceptance narrows continuation to confirmation; it
+      // cannot make this already committed operation eligible for replay.
+      if(!opened||operationId||controlReceiptId||!success||!['personal','shared'].includes(args.visibility)||args.ownerDecisionId!==undefined
         ||!UUID.test(args.clientRequestId??'')||!UUID.test(args.controlId??'')
         ||result.schemaVersion!==1||result.operation!==item.tool||result.taskId!==taskPass.taskId
         ||result.resultId!==args.controlId||!UUID.test(result.receiptId??'')
@@ -1459,6 +1485,15 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       }else if(!['list','read'].includes(command.action))return null;
     }else if(item.tool==='continue_assistant_workspace_action'){
       if(!allowPending&&args.schemaVersion===1&&args.operation==='status'&&!run){
+        if(success&&Object.keys(args.parameters??{}).length===0&&sameDraftRun(args.runIdentity,args.runIdentity)
+          &&UUID.test(args.runIdentity?.workspaceId??'')&&UUID.test(args.runIdentity?.runId??'')
+          &&acceptedStatusHead(result,args.runIdentity)){
+          // An earlier accepted Run may be inspected before prepare allocates
+          // the next Run. Bind its Workspace, not its obsolete Run UUID, and
+          // still require the new edit, finish and clean accepted read-back.
+          if(inspectedRun||inspectedWorkspaceId&&inspectedWorkspaceId!==args.runIdentity.workspaceId)return null;
+          inspectedWorkspaceId=args.runIdentity.workspaceId;continue;
+        }
         // An initial read may report that the old checkout is unverified.
         // It is neither an opened Run nor acceptance; bind the later native
         // prepare to these exact locators and still require the full save.
@@ -1532,15 +1567,9 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
           ||result.operation!=='finish'||!['running','completed'].includes(result.state))return null;
         finished=result.state==='completed';
       }else if(args.operation==='status'&&Object.keys(args.parameters??{}).length===0){
-        if(!finished||result.operation!=='status'||typeof result.stdout!=='string'||result.stdout.length>65_536)return null;
-        let status;
-        try{status=JSON.parse(result.stdout);}catch{return null;}
-        if(status?.workspaceId!==run.workspaceId||status.runId!==run.runId||status.terminalStatus!=='accepted'
-          ||status.dirty!==false||!acceptedWorkspaceHead(status.candidateHead)||!acceptedWorkspaceHead(status.baseHead)
-          ||status.candidateHead===status.baseHead||acceptedHead&&acceptedHead!==status.candidateHead)return null;
-        const native=result.nativeRunStatus;
-        if(native?.status!=='accepted'||native.candidateHead!==status.candidateHead||native.baseHead!==status.baseHead)return null;
-        acceptedHead=status.candidateHead;
+        const accepted=acceptedStatusHead(result,run);
+        if(!finished||!accepted||accepted.head===accepted.base||acceptedHead&&acceptedHead!==accepted.head)return null;
+        acceptedHead=accepted.head;
       }else return null;
     }else return null;
   }
