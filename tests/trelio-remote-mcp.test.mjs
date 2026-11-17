@@ -50,6 +50,7 @@ import {
 import { diagnosePublicTrelioService } from "../host-runtime/scripts/trelio-public-service-diagnostic.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
+import { deliverLocalMcpResult } from "../host-runtime/scripts/trelio-mcp-results.mjs";
 // Ordinary diagnostic fixtures must never probe the real public service.
 const handleToolCall = (origin, name, args, options = {}) => handleToolCallProduction(origin, name, args, {
   publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }), ...options,
@@ -4584,11 +4585,7 @@ test("local proposal render returns a real MCP App result instead of JSON text o
   assert.equal(result.structuredContent.blocks[0].proposal.currentDraft.bodyText, "Готовый комментарий");
   assert.equal(result.structuredContent.blocks[0].proposal.authoringBasis, undefined);
   assert.equal(result.structuredContent.blocks[0].proposal.mentionableMembers, undefined);
-  assert.equal(
-    result._meta["trelio/taskProposalPayload"].blocks[0].proposal.authoringBasis
-      .publicCommentsSnapshot.comments[0].bodyText,
-    "Старый комментарий",
-  );
+  assert.equal(result._meta["trelio/taskProposalPayload"].blocks[0].proposal.authoringBasis, undefined);
   assert.equal(
     result._meta["trelio/taskProposalPayload"].blocks[0].proposal.mentionableMembers[0].username,
     "private-user",
@@ -4600,6 +4597,70 @@ test("local proposal render returns a real MCP App result instead of JSON text o
     new RegExp(result._meta["trelio/taskProposalApp"].capabilityToken, "u"),
   );
 
+});
+
+test("local proposal Codex history keeps two review cards below the event bound without authoring history", async (t) => {
+  const configDirectory = await createProposalCapabilityConfigDirectory(t);
+  const source = { provider: "local_company_context", proposalBundle: {
+    schemaVersion: 1, kind: "taskProposalBlocks", blocks: [0, 1].map(index => ({
+      type: "commentProposal", itemId: `comment-${index}`, status: "ready",
+      proposal: {
+        schemaVersion: 4,
+        company: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", slug: "demo" },
+        project: { slug: "project", name: "Проект" },
+        parentTask: { title: "Надзадача", url: "https://trelio.example/demo/project/tasks/1/" },
+        task: { number: index + 2, title: "Проверка карточки" },
+        stateRevision: 7,
+        // These fields grow with accepted work and used to be duplicated into
+        // hidden _meta. Synthetic Cyrillic also catches a chars-vs-bytes budget.
+        proposalAuthoring: { instructions: "AUTHORING_ONLY ".repeat(2_000) },
+        authoringBasis: {
+          publicCommentsSnapshot: { comments: [{ bodyText: "Прошлое обсуждение ".repeat(2_000) }] },
+          pendingHumanUpdateBasis: { acceptedRuns: [{ summary: "Результат прошлого Run ".repeat(2_000) }] },
+        },
+        publicCommentsSnapshot: { comments: [{ bodyText: "LEGACY_DISCUSSION ".repeat(2_000) }] },
+        pendingHumanUpdateBasis: { acceptedRuns: [{ summary: "LEGACY_EVIDENCE ".repeat(2_000) }] },
+        run: { handoff: { summary: "HANDOFF_EVIDENCE ".repeat(2_000) } },
+        reviewBaseline: { kind: "published", coverageThroughAt: "2026-11-17T10:00:00Z" },
+        mentionableMembers: [{ id: "member-1", username: "reviewer" }],
+        currentDraft: {
+          proposalId: index ? "dddddddd-dddd-4ddd-8ddd-dddddddddddd" : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          revision: 3, bodyFormat: "markdown", bodyText: `Полный текст ${index}: ` + "Черновик 💗 ".repeat(80),
+          contextRequest: { runId: index ? "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+          attachments: [{ id: "ffffffff-ffff-4fff-8fff-ffffffffffff", fileName: "Итог 💗.pdf",
+            sizeBytes: 123, sha256: "a".repeat(64), metadata: { authoringBasis: "USER_VALUE_RETAINED" } }],
+        }, lastPublished: null, lastDismissed: null,
+      },
+    })),
+  } };
+  const before = structuredClone(source);
+  const result = await buildLocalProposalRenderResult({ result: source, origin: "https://trelio.example",
+    companySlug: "demo", kind: "bundle", operation: "save", configDirectory,
+    clientCapabilities: { extensions: { "io.modelcontextprotocol/ui": {} } } });
+  // This is the complete transport envelope, including the text-compatible
+  // delivery and App-only metadata. Measuring structuredContent alone missed
+  // the actual Codex event/rollout truncation in the reported two-card case.
+  const wire = JSON.stringify(deliverLocalMcpResult(result, true));
+  assert.ok(Buffer.byteLength(wire) < 64 * 1024, "complete replay envelope must fit the Codex event bound");
+  const restored = JSON.parse(wire);
+  const cards = restored._meta["trelio/taskProposalPayload"].blocks;
+  assert.equal(cards.length, 2);
+  assert.equal(restored._meta["trelio/taskProposalApp"].capabilityToken,
+    result._meta["trelio/taskProposalApp"].capabilityToken);
+  for (const [index, block] of cards.entries()) {
+    assert.equal(block.status, "ready");
+    assert.equal(block.proposal.currentDraft.bodyText, source.proposalBundle.blocks[index].proposal.currentDraft.bodyText);
+    assert.deepEqual(block.proposal.currentDraft.attachments, source.proposalBundle.blocks[index].proposal.currentDraft.attachments);
+    assert.deepEqual(block.proposal.mentionableMembers, source.proposalBundle.blocks[index].proposal.mentionableMembers);
+    assert.deepEqual(block.proposal.parentTask, source.proposalBundle.blocks[index].proposal.parentTask);
+    assert.equal(block.proposal.stateRevision, 7);
+    assert.equal(block.proposal.currentDraft.revision, 3);
+    assert.equal(block.proposal.authoringBasis, undefined);
+    assert.equal(block.proposal.publicCommentsSnapshot, undefined);
+    assert.equal(block.proposal.proposalAuthoring, undefined);
+  }
+  assert.doesNotMatch(wire, /AUTHORING_ONLY|Прошлое обсуждение|Результат прошлого Run|LEGACY_DISCUSSION|LEGACY_EVIDENCE|HANDOFF_EVIDENCE/u);
+  assert.deepEqual(source, before, "presentation projection must not modify the authoring/CAS source");
 });
 
 test("local proposal render treats an empty elicitation capability as form support", async (t) => {
@@ -5032,6 +5093,7 @@ test("local proposal App capability binds refresh and one delayed final action t
           schemaVersion: 3,
           project: { slug: "mobile" },
           task: { number: 17, url: "https://trelio.example/acme/mobile/tasks/17/" },
+          authoringBasis: { publicCommentsSnapshot: { comments: [{ bodyText: "APP_READ_HISTORY_ONLY" }] } },
           mentionableMembers: [],
           currentDraft: published ? null : {
             proposalId,
@@ -5055,10 +5117,12 @@ test("local proposal App capability binds refresh and one delayed final action t
     }, { proposalOperation, proposalCapabilityConfigDirectory: configDirectory }),
     (error) => error?.code === "LOCAL_CONTEXT_PROPOSAL_CAPABILITY_INVALID",
   );
-  await handleToolCall(origin, "get_task_proposal_app_state", {
+  const refreshed = await handleToolCall(origin, "get_task_proposal_app_state", {
     capabilityToken,
     proposalId,
   }, { proposalOperation, proposalCapabilityConfigDirectory: configDirectory });
+  assert.equal(refreshed.structuredContent.authoringBasis, undefined);
+  assert.doesNotMatch(JSON.stringify(refreshed), /APP_READ_HISTORY_ONLY/u);
   await assert.rejects(
     handleToolCall(origin, "get_task_proposal_app_state", {
       capabilityToken,
@@ -6116,6 +6180,8 @@ test("headless proposal continuation copies the reviewed preparation reference w
   assert.deepEqual(result.structuredContent.nextCall.arguments.payload, { target, preparationRef });
   assert.match(result.structuredContent.nextCall.instruction, /omit expected\*/);
   assert.equal(result._meta, undefined);
+  assert.deepEqual(result.structuredContent.authoringBasis, { snapshotSha256: "a".repeat(64) },
+    "headless authoring must retain the basis excluded from App presentation");
 });
 
 

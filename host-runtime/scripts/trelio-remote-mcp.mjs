@@ -5054,6 +5054,31 @@ const maybeElicitLocalProposalReview = async ({
   };
 };
 
+/**
+ * A review card needs the saved draft and its live decision state, not the
+ * discussion/Run evidence used to author that draft. Codex bounds the WHOLE
+ * serialized CallToolResult, including hidden _meta, before recording its App
+ * event. Sending authoring history there can replace a valid result with a
+ * truncated JSON text preview, destroying both the payload and read grant.
+ *
+ * Remove only known top-level context fields. Never walk user-authored values
+ * or shorten the reviewed Markdown, attachment descriptors, mention catalogue,
+ * target, revision or capability. Authoring reads retain their complete basis.
+ */
+const projectLocalProposalForApp = (proposal) => {
+  if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) return proposal;
+  const {
+    authoringBasis: _basis,
+    publicCommentsSnapshot: _comments,
+    pendingHumanUpdateBasis: _runs,
+    proposalAuthoring: _instructions,
+    run: _run,
+    reviewBaseline: _baseline,
+    ...reviewState
+  } = proposal;
+  return reviewState;
+};
+
 const buildLocalProposalRenderPayload = ({ result, companySlug, kind, operation }) => {
   if (result?.provider === "native_trelio") return result;
 
@@ -5082,7 +5107,7 @@ const buildLocalProposalRenderPayload = ({ result, companySlug, kind, operation 
         return blockKind && block?.proposal
           ? {
               ...block,
-              proposal: localizeProposalPayload(block.proposal, companySlug, blockKind),
+              proposal: localizeProposalPayload(projectLocalProposalForApp(block.proposal), companySlug, blockKind),
             }
           : block;
       }),
@@ -5105,7 +5130,7 @@ const buildLocalProposalRenderPayload = ({ result, companySlug, kind, operation 
       type: blockType,
       itemId: "proposal-1",
       status: "ready",
-      proposal: localizeProposalPayload(result.proposal, companySlug, kind),
+      proposal: localizeProposalPayload(projectLocalProposalForApp(result.proposal), companySlug, kind),
     }],
   };
 };
@@ -5204,11 +5229,9 @@ export const buildLocalProposalRenderResult = async ({
     structuredContent,
     { configDirectory },
   );
-  // The App still needs the complete authoring snapshot for its independent
-  // optimistic actions. Codex does not: forwarding dozens of already-reviewed
-  // comments and accepted-run evidence back to the model only repeats context.
-  // Keep the full payload in root _meta, which the host reserves for Apps, and
-  // return a useful text-client receipt with draft text and exact decisions.
+  // Both the App and model receive review state, without authoring history.
+  // Keep mentions and protected App authority in _meta; the text-client receipt
+  // still contains the complete draft and exact independent human decisions.
   const modelReceipt = {
     ...buildLocalProposalModelReceipt(structuredContent),
     interactivePresentation: buildLocalProposalInteractivePresentation({
@@ -5243,6 +5266,7 @@ const buildLocalProposalChildResult = ({
   companySlug,
   kind,
   continuationTarget = null,
+  forApp = false,
 }) => {
   if (!result?.proposal) {
     throw new TrelioLocalContextError(
@@ -5251,7 +5275,8 @@ const buildLocalProposalChildResult = ({
     );
   }
   const structuredContent = {
-    ...localizeProposalPayload(result.proposal, companySlug, kind),
+    ...localizeProposalPayload(forApp ? projectLocalProposalForApp(result.proposal) : result.proposal,
+      companySlug, kind),
     ...(continuationTarget
       ? {
           nextCall: {
@@ -5447,6 +5472,7 @@ const handleGenericLocalProposalAppToolCall = async (
       result,
       companySlug: target.companySlug,
       kind: target.kind,
+      forApp: true,
     });
     if (normalizedAction) {
       const currentDraft = childResult.structuredContent?.currentDraft;
@@ -5570,6 +5596,7 @@ const handleGenericLocalProposalAppToolCall = async (
     result,
     companySlug: target.companySlug,
     kind: target.kind,
+    forApp: true,
   });
 };
 
@@ -5616,7 +5643,7 @@ const handleLocalProposalAppToolCall = async (
       operation: "context",
       payload: { target },
     }, { signal });
-    return buildLocalProposalChildResult({ result, companySlug, kind: route.kind });
+    return buildLocalProposalChildResult({ result, companySlug, kind: route.kind, forApp: true });
   }
 
   const proposalId = typeof rawArguments?.proposalId === "string"
@@ -5657,6 +5684,7 @@ const handleLocalProposalAppToolCall = async (
     result,
     companySlug: proposalRoute.companySlug,
     kind: route.kind,
+    forApp: true,
   });
 };
 

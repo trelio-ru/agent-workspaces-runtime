@@ -1505,6 +1505,10 @@ Exact legacy template bytes для распознавания при мигра�
 - Default selection context/worklog вложений, прямой пользовательский exception
   и E2EE local selection – [контракт proposals](docs/agent-workspace-runtime.md).
   Pure policy генерируется из backend, вручную не дублируется.
+- Local proposal render и App-only refresh передают только review state, без
+  authoring history; полный Codex event envelope проверяется вместе с hidden
+  metadata и text delivery. Headless authoring read сохраняет evidence/CAS:
+  [контракт](docs/agent-workspace-runtime.md#local-proposal-app-payload).
 - Metadata create/release: [единый draft и source reader](docs/agent-workspace-runtime.md#private-skill-metadata).
 - Основная инструкция новой публикации ограничена 16 КиБ UTF-8 до encryption.
   Полный `get_agent_skill` после hydration/projection и final text delivery

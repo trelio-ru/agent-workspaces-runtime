@@ -2169,6 +2169,30 @@ action и редактируемым input, включая Markdown и attachmen
 При возврате в чат она до исходного срока заново читает состояние с сервера и
 показывает завершённый результат; это работает и после завершения всех карточек
 одного bundle. Ответ не кешируется вместо проверки текущего доступа.
+
+<a id="local-proposal-app-payload"></a>
+
+Local render передаёт в App только review state: exact saved draft целиком,
+attachments, mentionable members, target, revision и published/dismissed state.
+Authoring rules, public-comments/accepted-Runs snapshots, Run handoff и review
+baseline остаются в headless authoring context и серверной CAS-проверке, без
+копии в hidden `trelio/taskProposalPayload`. Это относится к одиночным и
+смешанным bundle-карточкам, generic и legacy App-only refresh/action replies.
+Только известные top-level context fields исключаются из presentation;
+Markdown и вложенные пользовательские значения не обходятся и не обрезаются.
+Projection не меняет исходный context, signing, ACL/CAS либо срок grant.
+
+Codex [`truncate_mcp_tool_result`](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/utils/output-truncation/src/lib.rs#L64)
+ограничивает полный serialized result при
+создании MCP event/rollout. При превышении бюджета он заменяет envelope одной
+текстовой JSON-preview с middle-truncation и убирает structuredContent/_meta.
+Такую повреждённую строку App не может безопасно восстановить. Поэтому
+регрессия двух local comment cards с большим synthetic authoring context
+проверяет весь итоговый envelope в пределах наблюдённого event budget `64 KiB`, включая hidden metadata,
+capability и text-compatible delivery, затем lossless history replay. Нельзя
+парсить fragments повреждённого JSON или восстанавливать authority из preview.
+Новые plugin hooks, client config либо повышение limits/minimum не требуются.
+
 Полный successful payload передаётся один раз в `structuredContent`; совпадающая
 JSON-копия в text `content` заменяется коротким указателем. Errors, независимый
 текст, смешанный media и hidden `_meta` остаются без изменений. Данные и
