@@ -103,6 +103,13 @@ test('removed tests require surviving replacement coverage, not unrelated smoke'
   assert.deepEqual(plan([unit], before, replacement).tests, ['tests/replacement.test.mjs']);
 });
 
+test('native Codex owner input selects its actual conversation lifecycle fixture',()=>{
+ const native='tests/fixtures/windows-codex-process-owner.cpp';
+ const suite='tests/trelio-codex-conversation.test.mjs';
+ const files=snapshot({[native]:'// synthetic native owner',[suite]:'test("synthetic",()=>{});'});
+ assert.deepEqual(plan([native],files).tests,[suite]);
+});
+
 test('unknown executable/fixture and computed-only loads require a reviewed owner', () => {
   const files = snapshot({
     'host-runtime/scripts/dynamic.mjs': 'export const value = 1;',

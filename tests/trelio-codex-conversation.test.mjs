@@ -27,9 +27,47 @@ import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-as
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
 
+test('native Windows fixture owner closes descendants and preserves unrelated processes and exact argv',
+ {skip:process.platform!=='win32'||!process.env.TRELIO_TEST_CODEX_PROCESS_OWNER,timeout:15000},async()=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-owned tree-'));
+ const siblingRoot=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-unrelated-tree-'));
+ const sibling=spawn(process.execPath,['-e',"process.on('message',m=>{if(m==='probe')process.send('alive');if(m==='stop')process.exit(0);});process.send('ready');"],
+  {cwd:siblingRoot,windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});
+ const closed=new Promise(resolve=>sibling.once('close',resolve));
+ const ready=new Promise(resolve=>sibling.once('message',resolve));
+ try{
+  assert.equal(await ready,'ready');
+  const sentinel=path.join(root,'descendant ready.txt');
+  const values=['a "quoted" value','trailing\\','Проверка'];
+  const childCode="require('node:fs').writeFileSync(process.argv[1],'ready');setInterval(()=>{},1000);";
+  const parentCode=`const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(childCode)},process.argv[1]],{cwd:process.cwd(),stdio:'ignore',windowsHide:true}).unref();const wait=()=>{if(!fs.existsSync(process.argv[1]))return setTimeout(wait,5);process.stdout.write(JSON.stringify(process.argv.slice(2)));process.exit(23);};wait();`;
+  const outcome=await new Promise(resolve=>execFile(process.env.TRELIO_TEST_CODEX_PROCESS_OWNER,
+   [process.execPath,'-e',parentCode,sentinel,...values],{cwd:root,windowsHide:true,timeout:10000},
+   (error,stdout)=>resolve({code:error?.code??0,killed:error?.killed??false,stdout})));
+  assert.equal(outcome.killed,false);assert.equal(outcome.code,23);
+  assert.deepEqual(JSON.parse(outcome.stdout),values,'native argv is not interpreted by a shell');
+  // The descendant deliberately remains alive with this cwd after its parent
+  // exits. Successful removal therefore proves job quiescence, not just ACK.
+  await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+  const alive=new Promise(resolve=>sibling.once('message',resolve));sibling.send('probe');
+  assert.equal(await alive,'alive','the owner never selects an unrelated process');
+ }finally{
+  sibling.kill();await closed;
+  await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+  await fs.rm(siblingRoot,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+ }
+});
+
 test('actual Codex isolated assistant refuses alternate tools across process restart without changing user configuration',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const executable=process.env.TRELIO_TEST_CODEX_CLI,execute=promisify(execFile);
+ const processOwner=process.platform==='win32'?process.env.TRELIO_TEST_CODEX_PROCESS_OWNER:null;
+ if(process.platform==='win32')assert.ok(processOwner,'the native Windows fixture must own its complete child tree');
+ // Only the synthetic fixture uses this owner. The pinned actual Codex gets
+ // identical argv/environment and unmodified stdin/stdout. Production process
+ // termination and invocation budgets are not replaced or intercepted.
+ const nativeSpawn=(program,args,settings)=>spawn(processOwner??program,
+  processOwner?[program,...args]:args,{...settings,windowsHide:true});
  const fixtureDeadline=Date.now()+120000,ownedChildren=[];
  // A completed RPC is not a native process-close receipt. The production
  // reader deliberately returns its result after requesting termination; retain
@@ -209,7 +247,8 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  }
  await fs.writeFile(path.join(repository,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:
   ['trelio-digital-assistant','unrelated-fixture'].map(name=>({name,source:{source:'local',path:`./${name}`},policy:{installation:'AVAILABLE',authentication:'ON_USE'}}))}));
- const native=async args=>JSON.parse((await execute(executable,args,{cwd:root,env:environment,timeout:30000})).stdout);
+ const native=async args=>JSON.parse((await execute(processOwner??executable,
+  processOwner?[executable,...args]:args,{cwd:root,env:environment,timeout:30000,windowsHide:true})).stdout);
  await native(['plugin','marketplace','add',repository,'--json']);
  const installed=await native(['plugin','add',`trelio-digital-assistant@${marketplace}`,'--json']);
  await native(['plugin','add',`unrelated-fixture@${marketplace}`,'--json']);
@@ -222,7 +261,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const phases=[];
  const observedSpawn=(...args)=>{
   processPhase=args[1].includes('--disable')?'controlled':'metadata';
-  const child=ownChild(spawn(...args)).child;let pending='';
+  const child=ownChild(nativeSpawn(...args)).child;let pending='';
   child.stdout.on('data',chunk=>{
    pending+=chunk.toString();let at;
    while((at=pending.indexOf('\n'))>=0){const line=pending.slice(0,at);pending=pending.slice(at+1);
@@ -261,7 +300,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // there first, then try to start the assistant from a different process. A
  // local notLoaded report alone cannot authorize taking over the chat.
  const attach=async()=>{
-  const owned=ownChild(spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,stdio:['pipe','pipe','ignore']}));
+  const owned=ownChild(nativeSpawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,stdio:['pipe','pipe','ignore']}));
   const child=owned.child;
   const request=async(id,method,params)=>{
    const result=new Promise((resolve,reject)=>{

@@ -1241,6 +1241,9 @@ publication tooling также остаются вне этого публичн
   close event before removing its disposable root. Inspection clients receive
   EOF for native MCP cleanup; production termination remains unchanged. Unknown
   close preserves the root, with closed counts and the original test/rm bounds.
+  Windows contains each synthetic CLI invocation in a source-only private Job
+  Object; descendant quiescence precedes close. No PID scan, production wrapper
+  or wider deletion/retry budget. The existing Codex gate runs before slow groups.
   Verified package bytes and closed bounded pages only, never provider paths
   or provider-authored continuations. See scheduler native invocation.
   An owner-private tool-free handoff may earn ONE independent readiness verification

@@ -148,6 +148,16 @@ Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
 The pinned public Codex archive GET permits only two bounded transient retries;
 hash/member verification still precedes extraction and the real Windows MCP test.
+This existing Windows Codex gate runs before the slower Workspace groups. Its
+source-only owner creates each synthetic CLI suspended, assigns a private
+kill-on-close Job Object, then resumes it with identical argv/environment and
+raw RPC streams. Its close requires native descendant quiescence; killing that
+retained owner closes only its own job. No PID/tree discovery, installed user
+process, production termination path, test deadline or filesystem retry is
+changed. A native regression leaves a descendant holding the disposable cwd,
+checks exact quoted/Unicode argv and parent exit code, and verifies that an
+unrelated retained process stays alive. The fixture owner never enters a signed
+runtime artifact and does not establish production descendant-cleanup behavior.
 The positive instruction-retention fixture permits at most three separate real
 hooks against its unchanged synthetic transcript: every hook must produce a
 valid method-bound proof, and at least one must inject the exact verified hints.
