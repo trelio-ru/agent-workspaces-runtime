@@ -1557,8 +1557,9 @@ Exact legacy template bytes для распознавания при мигра�
   dependency tree; `node_modules` разных worktree не объединяются.
 - Package builder проверяй двумя сборками одной версии и byte comparison.
 - Search pacing parity executes the actual provider controllers from one immutable public revision; all CI lanes pin that same source, and controller names follow its declared API. Never skip parity or copy snippets after provider drift.
-- Cross-repository tests запускай с exact plugin root. Ошибка отсутствующего
-  plugin checkout – setup failure, а не повод копировать plugin source.
+- Cross-repository tests и `git:integrate` запускай с exact plugin root через
+  `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; worker наследует эту переменную. Missing
+  checkout – setup failure, не повод копировать plugin source.
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
   New host test files must enter both generic and applicable Windows direct CI lanes; the suite-inventory guard must remain strict.
   Journal schema bumps must check both inbox and scheduler legacy-upgrade fixtures, then the complete assistant direct-test intersection before enqueue.
