@@ -389,11 +389,15 @@ delivery and isolation, not autonomous business success with a live model.
 
 The native fixture tracks every actual App Server child, including metadata
 readers whose RPC result precedes their process close. Its ordinary inspection
-clients receive EOF so native MCP disposal finishes normally. Fixture cleanup
-joins all retained close events before removing its temporary root, within the
-original test deadline and without extending filesystem retries. A missing close
-retains the root and fails with closed child counts. Production termination and
-all model/tool/configuration assertions remain unchanged.
+clients receive EOF so native MCP disposal finishes normally. Cleanup joins all
+retained close events under the original test deadline. On hosted Windows the
+carrier stages the workspace inside its own fresh pinned CLI directory and
+removes that directory only after the entire test process exits successfully.
+Node child close alone can precede release of the native cwd handle. Keep the
+same bounded removal and fail the gate if it still refuses. The carrier keeps
+the tree after any fixture failure; diagnostics use closed counts/codes.
+Production termination and model/tool/configuration
+assertions remain unchanged.
 
 Read its fixed command schema with
 `get_trelio_tool_contract(name=use_assistant_workspace_files)` through the
