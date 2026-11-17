@@ -3411,8 +3411,14 @@ protected entry. Existing device/pairing/pass/runtime slot keys stay unchanged.
 
 The common private lock serializes first creation. OS write plus exact read-back
 precedes exposing the public fingerprint to registration, so a restart/lost
-response reuses the same identity. Corrupt, partial or unavailable state does
-not regenerate keys. The random wrapping input never enters a form, model,
+response reuses the same identity. An explicitly existing-only managed read
+opens the fresh atomic OS slot without the enrollment lock. It rechecks live
+device/company/pass before and after opening the same bound key and cannot
+create or replace one. The native recovery fixture holds the enrollment lock
+after the original search reaches its stalled body. Its one approved read
+resume still completes with the same key, unchanged deadline, ACL and cache
+invariants. Corrupt, partial or unavailable state does not regenerate keys.
+The random wrapping input never enters a form, model,
 environment, argv, file or HTTP request; the company scope private key is not
 persisted in this slot. No new vault, crypto implementation or content store
 is introduced. This is an identity prerequisite only: exact task reads need the

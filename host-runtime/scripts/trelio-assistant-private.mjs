@@ -126,10 +126,7 @@ export const resolveAssistantCompanyEncryptionDevice = async ({ identity, compan
   };
   try {
     await assertLive();
-    // Serialize first creation through the common private lock, not a second
-    // journal. Publish/verify before any registration can expose a fingerprint:
-    // a crash or lost response then resumes this SAME identity, never a new key.
-    return await lock(path.join(lockDirectory, `company-encryption-${key.key}.json`), async () => {
+    const resolve = async () => {
       await assertLive();
       let entry = await store.get(input);
       if (entry === null) {
@@ -161,7 +158,14 @@ export const resolveAssistantCompanyEncryptionDevice = async ({ identity, compan
       if (device.fingerprint !== entry.record.fingerprint) fail('ASSISTANT_PRIVATE_CORRUPT');
       await assertLive();
       return device;
-    });
+    };
+    // An enrolled reader opens one atomic OS-protected value and checks live
+    // authority before and after it. It cannot create a slot and must not
+    // wait for, recover or mutate a concurrent enrollment's lock.
+    if (!allowCreate) return await resolve();
+    // First creation still serializes publication and exact read-back before
+    // any native registration can see the fingerprint.
+    return await lock(path.join(lockDirectory, `company-encryption-${key.key}.json`), resolve);
   } catch (error) {
     if (error instanceof AssistantPrivateError) throw error;
     // Crypto/OS errors can contain key-shaped input, native paths or helper

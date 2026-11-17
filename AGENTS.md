@@ -1086,6 +1086,11 @@ publication tooling также остаются вне этого публичн
 - Managed encryption identities use the SAME crypto codecs and assistant OS store,
   isolated by device/company; no human remembered-key fallback. An identity is
   not an envelope grant or encrypted readiness. [Contract](docs/assistant-scheduler.md#managed-encryption-identity-ownership).
+  Explicit existing-only managed-key reads validate one fresh atomic OS slot
+  before/after live admission and do not acquire the enrollment lock. First
+  creation still serializes its original publication/read-back. The native
+  timed-out search fixture holds the enrollment lock across its allowed resume;
+  no slot recreation, lock cleanup, extra deadline or failed-write replay.
 - Assistant task skills use the SAME `skill_run`, signed loader/cache, account
   catalogue and process engine. Only native read admission/profile changes;
   no human cache/import/setup fallback. [Contract](docs/assistant-scheduler.md#shared-task-skill-execution).

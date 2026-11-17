@@ -107,11 +107,16 @@ for(const scenario of [
     import {openNativeCompanyScenario} from ${JSON.stringify(fixtureModule)};
     const scenario=await openNativeCompanyScenario(JSON.parse(await fs.readFile(${JSON.stringify(configFile)},'utf8')));
     try{await runAssistantEntry(['request'],{executeRequest:scenario.execute});}finally{scenario.close();}`);
-  let running;const children=new Set(),input=new PassThrough(),output=new PassThrough(),responses=[];let buffer='';
+  let running,releaseCreationLock=null,heldCreationLock=null;const children=new Set(),input=new PassThrough(),output=new PassThrough(),responses=[];let buffer='';
   try{
     await native.seed({credential,pass,runtime:{schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state}});
+    const {resolveWorkspaceBridgeConfigDirectory}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+    const {withRuntimeStateLock}=await import('../host-runtime/scripts/trelio-runtime-session.mjs');
+    const lockDirectory=path.join(native.host.configurationDirectory??resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime-locks');
+    let creationLock;
     const managed=await native.context(()=>resolveAssistantCompanyEncryptionDevice({identity,companyId:pass.companyId,
-      store:native.store,lockDirectory:path.join(root,'company-key-locks'),assertCurrent:()=>native.client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId})}));
+      store:native.store,lockDirectory,assertCurrent:()=>native.client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}),
+      lock:(file,action)=>{creationLock=file;return withRuntimeStateLock(file,action);}}));
     await backend.setManagedDevice(managed);
     const {resolveMirrorPaths}=await import('../host-runtime/scripts/trelio-local-context.mjs');
     const paths=await native.withProfile(async()=>resolveMirrorPaths({origin:identity.origin,companyId:pass.companyId}),
@@ -159,6 +164,19 @@ for(const scenario of [
           const cached=(await fs.readdir(path.join(paths.root,'search-files-v1'))).filter(name=>/^[a-f0-9]{64}\.json$/u.test(name));
           if(cached.length>=8)break;
           await new Promise(resolve=>setTimeout(resolve,25));
+        }
+        // Publish an occupied enrollment lock at the exact real locator
+        // after the first child opened its key and cached the expected prefix.
+        // The resumed child may read the atomically stored identity but cannot
+        // join or sweep another enrollment's lock.
+        if(scenario.name==='owned-timeout-resume'){
+          const acquired=Promise.withResolvers(),release=Promise.withResolvers();
+          releaseCreationLock=release.resolve;
+          heldCreationLock=native.context(()=>withRuntimeStateLock(creationLock,async()=>{
+            acquired.resolve();
+            await release.promise;
+          }));
+          await Promise.race([acquired.promise,heldCreationLock]);
         }
         fault.expired=true;injectedPreparationTimeouts++;
         clearTimeout(fault.timer);
@@ -279,6 +297,11 @@ for(const scenario of [
     assert.equal(backend.counts.builds,scenario.stallAttempts+1);
     assert.equal(injectedPreparationTimeouts,scenario.stallAttempts);
     assert.equal(backend.counts.stalledBuilds,scenario.stallAttempts);
+    if(heldCreationLock){
+      assert.equal((await fs.lstat(creationLock+'.lock')).isDirectory(),true,'the reader cannot remove the enrollment lock');
+      releaseCreationLock();
+      await heldCreationLock;
+    }
     for(let index=0;index<8;index++)assert.equal(backend.fileHits(index),1,'completed exact-head cache survives a bounded failed child');
     console.log(JSON.stringify({fixture:scenario.name,files:scenario.files,elapsedMs:Date.now()-coldStarted,ciphertextBytes:backend.counts.ciphertextBytes}));
     assert.match(JSON.stringify(search),/Synthetic weekend journey/);
@@ -367,6 +390,8 @@ for(const scenario of [
     assert.equal(backend.counts.mutations,0);assert.deepEqual(await native.host.readActivePass(),pass);
     console.log('NATIVE_OWNER_COMPANY_CHAIN_EXECUTED');
   }finally{
+    releaseCreationLock?.();
+    await heldCreationLock?.catch(()=>{ /* retain the original assertion on failure */ });
     input.end();if(running)await running;
     for(const child of children){const closed=new Promise(resolve=>child.once('close',resolve));child.kill();await closed;}
     native.close();
