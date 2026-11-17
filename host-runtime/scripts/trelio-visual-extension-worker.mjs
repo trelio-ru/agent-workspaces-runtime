@@ -352,6 +352,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           // An embedded failure can change geometry in its own tab. A
           // failure in another tab cannot revoke the observed frame.
           if (frame?.tabId === source.tabId) frame = undefined;
+          // Also revoke an observation whose asynchronous capture has not
+          // published its frame yet. Otherwise it could restore the token
+          // just invalidated here after the blocked response is aborted.
+          navigationGenerations.set(source.tabId, ++nextNavigationGeneration);
           // Fetch pauses both top-level and embedded Documents on this native
           // target. Both are refused below; only a positively identified child
           // may leave the parent readable. Missing native frame evidence must
@@ -470,6 +474,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (navigationGeneration(f.tabId) !== f.generation && f.generation !== undefined) throw Error('stale_frame');
       guardUpdate = guardUpdate.then(() => installRules()); await guardUpdate;
       if (guardFailed || Date.now() >= until) throw Error('operation_failed');
+      assertInputCurrent(f);
       await chrome.tabs.update(f.tabId, { url: url.href });
       const result = await promise;
       return result.viewer === true ? captureDefault() : result;
@@ -533,6 +538,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const value = await chrome.tabs.sendMessage(tabId, { kind: 'authentication-guard' }, { frameId: 0 });
     if (value?.blocked !== false) throw Error('manual_control_active');
     dialogGuards.set(tabId, navigationGeneration(tabId));
+  }
+  function assertInputCurrent(observation) {
+    // The token is consumed before input, but preparation still awaits native
+    // guards/routers. Pin the same tab generation across those awaits so no
+    // first click, key, wheel, file selection or navigation uses retired UI.
+    if (Date.now() >= config.deadlineAt) throw Error('lease_expired');
+    if (manual || authenticating) throw Error('manual_control_active');
+    if (guardFailed) throw Error('document_blocked');
+    if (observation.generation !== navigationGeneration(observation.tabId)) throw Error('stale_frame');
   }
   function dialogText(dialog) {
     // A renderer blocked by a dialog cannot answer the credential guard. Only
@@ -702,6 +716,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     navigationStage?.('observe_attach');
     await attach(tab.id);
     if (documentFailures.has(tab.id)) throw Error('document_blocked');
+    const generation = navigationGeneration(tab.id);
     navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
@@ -723,8 +738,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (width <= 1920 && height <= 1440) {
         navigationStage?.('credential_recheck');
         await credentialGuard(tab.id);
+        // Capture and the credential probe both yield to native events. The
+        // returned pixels may belong to an earlier document or layout even
+        // if the current page still has the same MIME type and URL.
+        const after = await command(tab.id, 'Page.getFrameTree');
+        if (guardFailed) throw Error('document_blocked');
+        if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.id !== tree.frameTree.frame.id
+          || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
         const frameId = crypto.randomUUID();
-        frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
+        frame = { frameId, tabId: tab.id, generation, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
         return { state: 'ready', frameId, width, height, scroll: { up: viewport.pageY > 1, down: viewport.pageY + viewport.clientHeight < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + viewport.clientWidth < content.x + content.width - 1 }, image: { mimeType: 'image/png', data: result.data } };
       }
       scale *= Math.min(1440 / width, 1000 / height);
@@ -758,6 +780,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     navigationStage?.('observe_attach');
     await attach(tab.id);
     if (documentFailures.has(tab.id)) throw Error('document_blocked');
+    const generation = navigationGeneration(tab.id);
     navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
@@ -765,17 +788,18 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     navigationStage?.('layout');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
-    const generation = navigationGeneration(tab.id);
     navigationStage?.('text_read');
     const observation = await chrome.tabs.sendMessage(tab.id, { kind: 'read_rendered_text', ...args }, { frameId: 0 });
     if (observation?.error) throw Error(['invalid_input', 'manual_control_active'].includes(observation.error) ? observation.error : 'operation_failed');
     // A navigation during extraction cannot mint a token for the old document.
     navigationStage?.('frame_recheck');
     const after = await command(tab.id, 'Page.getFrameTree');
-    if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
+    if (guardFailed) throw Error('document_blocked');
+    if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.id !== tree.frameTree.frame.id
+      || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
     dialogGuards.set(tab.id, generation);
-    frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
+    frame = { frameId, tabId: tab.id, generation, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
     return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
       scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation };
   }
@@ -961,6 +985,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const tab = await chrome.tabs.get(f.tabId); allowedNavigation(tab.url);
     navigationStage?.('input_credential_guard');
     await credentialGuard(tab.id);
+    // The guard is an asynchronous native message. Navigation, document
+    // refusal or detach can retire the frame while its reply is pending.
+    // Recheck before consuming the token or dispatching the first input.
+    if (frame !== f) throw Error('stale_frame');
+    assertInputCurrent(f);
     frame = undefined; // consume before any input, including an unknown outcome
     const integer = (v, low, high) => Number.isInteger(v) && v >= low && v <= high;
     if (['click', 'scroll', 'download-attachment', 'download-audio', 'upload-files'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
@@ -988,6 +1017,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           current();
           if (ack?.ready !== true) throw Error('attachment_link_required');
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+          current();
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
           value = await source;
@@ -1026,7 +1056,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         await command(f.tabId, 'Page.setInterceptFileChooserDialog', { enabled: true });
         // This is one normal trusted click, not selector lookup or a synthetic
         // change event. The native chooser supplies the exact input identity.
+        assertInputCurrent(f);
         await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+        assertInputCurrent(f);
         await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
         await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
         await selectedFiles;
@@ -1061,7 +1093,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
             { resourceType: 'Document', requestStage: 'Request' },
             { resourceType: 'Document', requestStage: 'Response' },
           ] });
+          assertInputCurrent(f);
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+          assertInputCurrent(f);
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
           await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
           candidate = await destination;
@@ -1080,18 +1114,27 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // privately supplies its destination for same-tab navigation. Ordinary
       // field/button clicks retain their unmodified browser semantics.
       await chrome.tabs.sendMessage(f.tabId, { kind: 'arm_link_click', x, y }, { frameId: 0 });
+      assertInputCurrent(f);
       let routed, routeFailure;
       pendingLink = { tabId: f.tabId, resolve: value => { routed = value; }, reject: error => { routeFailure = error; } };
-      await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-      await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-      await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-      await pause(100); pendingLink = undefined;
+      try {
+        await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+        assertInputCurrent(f);
+        await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+        await pause(100);
+      } finally {
+        // A refused preparation or unknown native input outcome must never
+        // leave a router that could accept a later unrelated site event.
+        pendingLink = undefined;
+      }
       if (routeFailure) throw routeFailure;
       if (routed) await chrome.tabs.update(f.tabId, { url: routed });
     } else if (op === 'scroll') {
       if (!integer(args.deltaY, -1600, 1600) || !integer(args.deltaX ?? 0, -1600, 1600)) throw Error('invalid_input');
       navigationStage?.('input_mouse_move');
       await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      assertInputCurrent(f);
       navigationStage?.('input_mouse_wheel');
       await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaY: args.deltaY, deltaX: args.deltaX ?? 0 });
     } else if (op === 'type-text') {

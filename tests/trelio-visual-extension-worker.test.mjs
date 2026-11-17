@@ -16,7 +16,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[];
@@ -43,7 +43,10 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
           nativeCommands.push({ method, args: JSON.parse(JSON.stringify(args)) });
           if (method === 'Emulation.setFocusEmulationEnabled') await focusEmulation?.();
           if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } }; }
-          if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
+          if (method === 'Page.getLayoutMetrics') {
+            await layout?.();
+            return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
+          }
           // Protocol-only native stub. Full PNG/MCP validation is independently
           // exercised by the real Chromium fixture, not this header stand-in.
           if (method === 'Page.captureScreenshot') {
@@ -80,7 +83,8 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         async get(id) { return { id, url: currentUrl, status: 'complete' }; },
         async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); tabUpdates.push(JSON.parse(JSON.stringify(input))); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
         async sendMessage(_id, message, target) {
-          if (message.kind === 'authentication-guard') return { blocked: false };
+          if (message.kind === 'authentication-guard') { await credentialCheck?.(); return { blocked: false }; }
+          if (message.kind === 'arm_link_click') await armLink?.();
           if (authenticationMessage && message.kind.startsWith('authentication-')) return authenticationMessage(message, target);
           if (message.kind === 'read_rendered_text') await textObservation?.();
           return { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false };
@@ -126,6 +130,57 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     humanClose() { nativeEvent({ tabId: 1 }, 'Page.javascriptDialogClosed', {}); release?.({}); },
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
+}
+
+for (const [operation, phase] of [
+  ['screenshot', 'layout'],
+  ['screenshot', 'screenshot'],
+  ['read-text', 'layout'],
+  ['read-text', 'textObservation'],
+]) {
+  test(operation + ' refuses a top-document change during ' + phase, async () => {
+    let worker, change;
+    worker = await dialogWorker({ [phase]: () => change?.() });
+    change = () => worker.frameEvent('Page.navigatedWithinDocument', { frameId: 'main' });
+    const result = await worker.dispatch(operation);
+    assert.deepEqual(result, { state: 'error', reason: 'stale_frame' });
+    assert.equal(result.image, undefined);
+    assert.equal(result.text, undefined);
+  });
+}
+
+test('input refuses an original frame invalidated while its credential guard is pending', async () => {
+  let worker, change;
+  worker = await dialogWorker({ credentialCheck: () => change?.() });
+  const before = await worker.dispatch('read-text');
+  assert.equal(before.state, 'ready');
+  change = () => worker.frameEvent('Page.navigatedWithinDocument', { frameId: 'main' });
+  const result = await worker.dispatch('scroll', { frameId: before.frameId, x: 20, y: 20, deltaY: 100 });
+  assert.deepEqual(result, { state: 'error', reason: 'stale_frame' });
+  assert.equal(worker.nativeCommands.filter(value => value.method.startsWith('Input.')).length, 0);
+});
+
+test('click refuses navigation during link arming before the first input', async () => {
+  let worker, change;
+  worker = await dialogWorker({ armLink: () => change?.() });
+  const before = await worker.dispatch('read-text');
+  change = () => worker.frameEvent('Page.navigatedWithinDocument', { frameId: 'main' });
+  const result = await worker.dispatch('click', { frameId: before.frameId, x: 20, y: 20 });
+  assert.deepEqual(result, { state: 'error', reason: 'stale_frame' });
+  assert.equal(worker.nativeCommands.filter(value => value.method.startsWith('Input.')).length, 0);
+});
+
+for (const operation of ['screenshot', 'read-text']) {
+  test(operation + ' cannot republish an observation revoked by a child document refusal', async () => {
+    let worker, refuse;
+    const observe = () => refuse?.();
+    worker = await dialogWorker({ screenshot: observe, textObservation: observe });
+    worker.frameEvent('Page.frameAttached', { frameId: 'child', parentFrameId: 'main' });
+    refuse = () => worker.rejectDocument('child');
+    assert.deepEqual(await worker.dispatch(operation), { state: 'error', reason: 'stale_frame' });
+    refuse = undefined;
+    assert.equal((await worker.dispatch(operation)).state, 'ready');
+  });
 }
 
 for (const scenario of ['child changes anchor', 'other tab navigates', 'current root changes anchor']) {
