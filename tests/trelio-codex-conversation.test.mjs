@@ -30,6 +30,37 @@ const snapshot = { conversationId: id, title: "Старое название", e
 test('actual Codex isolated assistant refuses alternate tools across process restart without changing user configuration',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const executable=process.env.TRELIO_TEST_CODEX_CLI,execute=promisify(execFile);
+ const fixtureDeadline=Date.now()+120000,ownedChildren=[];
+ // A completed RPC is not a native process-close receipt. The production
+ // reader deliberately returns its result after requesting termination; retain
+ // every actual fixture child independently so Windows never races rmdir with
+ // a still-owned cwd handle. Do not intercept production kill or alter its
+ // execution policy. Ordinary inspection clients get EOF first, allowing Codex
+ // to dispose their synthetic MCP children before the parent exits.
+ const ownChild=child=>{
+  let didClose=false,stopping;
+  const closed=new Promise(resolve=>child.once('close',()=>{didClose=true;resolve();}));
+  const stop=()=>stopping??=(async()=>{
+   if(didClose)return;
+   const remaining=Math.min(5000,fixtureDeadline-Date.now());
+   if(remaining<=0)throw Error('Native isolation fixture cleanup deadline');
+   let terminate,deadline;
+   try{
+    if(!child.killed){
+     // Both callbacks operate on the retained ChildProcess, never a discovered
+     // PID or a process-name/tree query. A lost close keeps the disposable root.
+     child.stdin.on('error',()=>{});
+     child.stdin.end();child.stdout.resume();
+     terminate=setTimeout(()=>{if(!didClose)child.kill('SIGKILL');},Math.min(2000,remaining));
+    }
+    await Promise.race([closed,new Promise((_,reject)=>{
+     deadline=setTimeout(()=>reject(Error('Native isolation fixture child did not close')),remaining);
+    })]);
+   }finally{clearTimeout(terminate);clearTimeout(deadline);}
+  })();
+  const owned={child,stop,get closed(){return didClose;}};
+  ownedChildren.push(owned);return owned;
+ };
  const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-native-isolation-')));
  const home=path.join(root,'home'),repository=path.join(root,'repository');
  for(const dir of [home,path.join(repository,'.agents/plugins')])await fs.mkdir(dir,{recursive:true});
@@ -133,7 +164,19 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   res.end();
  });
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
- t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
+ t.after(async()=>{
+  server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
+  // Settle all owners even if one fails; a failed/unknown close must not delete
+  // evidence or turn into a larger filesystem retry budget. Keep the original
+  // assertions and the existing overall test and rm bounds unchanged.
+  const settled=await Promise.allSettled(ownedChildren.map(owned=>owned.stop()));
+  const unclosed=ownedChildren.filter(owned=>!owned.closed).length;
+  t.diagnostic(JSON.stringify({stage:'native_fixture_cleanup',children:ownedChildren.length,unclosed}));
+  const failure=settled.find(result=>result.status==='rejected');
+  if(failure)throw failure.reason;
+  assert.equal(unclosed,0,'all owned native child close events precede directory removal');
+  await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+ });
  const origin=`http://127.0.0.1:${server.address().port}`;
  const foreignScript=path.join(root,'foreign.mjs'),foreignSentinel=path.join(root,'foreign-started');
  await fs.writeFile(foreignScript,"import fs from 'node:fs';fs.writeFileSync(process.argv[2],'forbidden');\n");
@@ -179,7 +222,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const phases=[];
  const observedSpawn=(...args)=>{
   processPhase=args[1].includes('--disable')?'controlled':'metadata';
-  const child=spawn(...args);let pending='';
+  const child=ownChild(spawn(...args)).child;let pending='';
   child.stdout.on('data',chunk=>{
    pending+=chunk.toString();let at;
    while((at=pending.indexOf('\n'))>=0){const line=pending.slice(0,at);pending=pending.slice(at+1);
@@ -218,8 +261,8 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // there first, then try to start the assistant from a different process. A
  // local notLoaded report alone cannot authorize taking over the chat.
  const attach=async()=>{
-  const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,stdio:['pipe','pipe','ignore']});
-  const closed=new Promise(resolve=>child.once('close',resolve));
+  const owned=ownChild(spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,stdio:['pipe','pipe','ignore']}));
+  const child=owned.child;
   const request=async(id,method,params)=>{
    const result=new Promise((resolve,reject)=>{
     let pending='';const timeout=setTimeout(()=>{child.stdout.off('data',receive);reject(new Error('native ownership probe timed out'));},5000);
@@ -235,7 +278,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    });
    child.stdin.write(`${JSON.stringify({id,method,params})}\n`);return result;
   };
-  const close=async()=>{child.kill();await closed;};
+  const close=owned.stop;
   try {
    await request(1,'initialize',{clientInfo:{name:'ownership-probe',version:'1'},capabilities:{experimentalApi:true}});
    child.stdin.write('{"method":"initialized"}\n');

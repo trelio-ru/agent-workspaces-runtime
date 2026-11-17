@@ -387,6 +387,14 @@ checks the actual model request for complete documents/current guidance and
 executes a direct MCP read without changing configuration. That fixture proves
 delivery and isolation, not autonomous business success with a live model.
 
+The native fixture tracks every actual App Server child, including metadata
+readers whose RPC result precedes their process close. Its ordinary inspection
+clients receive EOF so native MCP disposal finishes normally. Fixture cleanup
+joins all retained close events before removing its temporary root, within the
+original test deadline and without extending filesystem retries. A missing close
+retains the root and fails with closed child counts. Production termination and
+all model/tool/configuration assertions remain unchanged.
+
 Read its fixed command schema with
 `get_trelio_tool_contract(name=use_assistant_workspace_files)` through the
 native company discovery session. This lookup forwards only the exact tool
