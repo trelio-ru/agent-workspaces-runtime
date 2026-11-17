@@ -82,9 +82,9 @@ export function acknowledgeAdmission(value) {
   });
 }
 
-export function attachChatFollowUp(value, {canonical, statusScript, arm = armFollowUp} = {}) {
+export function attachChatFollowUp(value, {canonical, statusScript, statusEngine, arm = armFollowUp} = {}) {
   if (!canonical || !statusScript || !value.logFile) return value;
-  const chatFollowUp = arm({canonical, statusScript, cwd: value.cwd, branch: value.branch,
+  const chatFollowUp = arm({canonical, statusScript, statusEngine, cwd: value.cwd, branch: value.branch,
     sha: value.sourceSha ?? value.sha, logFile: value.logFile, queueDirectory: path.dirname(path.dirname(value.logPath))});
   return chatFollowUp ? {...value, chatFollowUp} : value;
 }

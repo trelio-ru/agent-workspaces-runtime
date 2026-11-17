@@ -524,14 +524,15 @@ export async function main(args = process.argv.slice(2)) {
     // survives an interruption of the caller. Foreground remains diagnostic.
     const canonical = git(cwd, 'config', '--get', policy(cwd).canonicalKey);
     const tag = args[1] ?? '';
-    // The entry point may be a repository-owned wrapper around this package.
-    // Resolve its canonical counterpart, never keep a deleted task dependency
-    // path as the service's status executable. Releases/waiters stay synchronous.
+    // The shared status reader is pinned outside the source. A canonical
+    // wrapper can still load an older installed dependency until its next
+    // bootstrap, including one that cannot read an exact retained receipt.
+    // Product's separate queue retains its own repository reader.
     let followUp;
     if (!tag && !wait && process.env.CODEX_THREAD_ID && process.env.CODEX_APP_RUNTIME_CLI_PATH) {
       const entryPath = path.relative(cwd, path.resolve(process.argv[1]));
       if (path.isAbsolute(entryPath) || entryPath.startsWith('..' + path.sep)) throw Error('Invalid integration entry point');
-      followUp = {canonical, statusScript: path.join(canonical, entryPath)};
+      followUp = {canonical, statusScript: path.join(canonical, entryPath), statusEngine: 'shared'};
     }
     const result = await background(cwd, canonical, tag, finishWorktree, followUp);
     if (wait) return waitForIntegration(result.id, id => status(canonical, id));

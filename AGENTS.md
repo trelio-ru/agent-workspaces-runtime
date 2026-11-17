@@ -1519,6 +1519,8 @@ Exact legacy template bytes для распознавания при мигра�
   Callback требует точного status/remote read-back и отдельного --ack получения;
   он не даёт нового push/release authority. Один чат может сопровождать несколько
   clone/ticket: записи и one-use send fences независимы. Не создавай model heartbeat.
+  Shared status reader закреплён вне source; stale canonical dependencies не
+  определяют его protocol. Product queue сохраняет собственный exact reader.
   Без native Codex context автоматического возврата нет; результат читают при
   следующем обращении. Worker проверяет/вливает ветку и убирает чистый worktree.
   При полном релизе жди один exact ticket

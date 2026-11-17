@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {registerFollowUp, drain, inspectEvent, acknowledgeEvent, cancelUnusedFollowUp, noteFollowUpProcess, serviceEnvironment, nativeContext, callbackText, nativeContains} from './git-follow-up.mjs';
+import {registerFollowUp, drain, inspectEvent, acknowledgeEvent, cancelUnusedFollowUp, noteFollowUpProcess, serviceEnvironment, nativeContext, callbackText, nativeContains, installStatusReader} from './git-follow-up.mjs';
 import {attachChatFollowUp} from './git-background.mjs';
 
 function fixture(t) {
@@ -30,11 +30,52 @@ test('launcher registers the queue root above logs, not the log directory', () =
   let options;
   const result = attachChatFollowUp({cwd: '/task', branch: 'codex/task', sha: 'a'.repeat(40),
     logFile: 'b'.repeat(32) + '.log', logPath: '/canonical/.git/queue/logs/' + 'b'.repeat(32) + '.log'},
-  {canonical: '/canonical', statusScript: '/canonical/scripts/git-integrate.mjs', arm: value => {
+  {canonical: '/canonical', statusScript: '/canonical/scripts/git-integrate.mjs', statusEngine: 'shared', arm: value => {
     options = value; return {eventId: 'c'.repeat(64), state: 'pending'};
   }});
   assert.equal(options.queueDirectory, '/canonical/.git/queue');
+  assert.equal(options.statusEngine, 'shared');
   assert.equal(result.chatFollowUp.eventId, 'c'.repeat(64));
+});
+
+test('pinned shared reader survives source cleanup and stale canonical dependencies, with complete byte validation', async t => {
+  const f = fixture(t), canonical = path.join(f.root, 'canonical'), source = path.join(f.root, 'source');
+  fs.mkdirSync(source);
+  for (const name of ['git-coordinator.mjs', 'git-background.mjs', 'git-follow-up.mjs', 'git-hosted-ci.mjs']) {
+    fs.copyFileSync(new URL(name, import.meta.url), path.join(source, name));
+  }
+  const readers = path.join(f.store, 'readers');
+  const reader = installStatusReader(readers, source);
+  assert.equal(installStatusReader(readers, source), reader);
+  const original = fs.readFileSync(reader);
+  fs.writeFileSync(reader, 'throw Error("corrupt copy");');
+  assert.throws(() => installStatusReader(readers, source), /copy differs/);
+  assert.match(fs.readFileSync(reader, 'utf8'), /corrupt copy/, 'damaged immutable code is never overwritten');
+  fs.writeFileSync(reader, original);
+  fs.rmSync(source, {recursive: true});
+
+  const initialized = spawnSync('git', ['init', '-q', canonical]);
+  assert.equal(initialized.status, 0);
+  fs.mkdirSync(path.join(canonical, 'scripts'));
+  const stale = path.join(canonical, 'scripts', 'git-integrate.mjs');
+  fs.writeFileSync(stale, 'process.exit(23);');
+  assert.equal(spawnSync(process.execPath, [stale, '--status', '000000000001']).status, 23);
+  const queueDirectory = path.join(canonical, '.git', 'trelio-git-coordination');
+  fs.mkdirSync(queueDirectory, {mode: 0o700});
+  fs.mkdirSync(path.join(queueDirectory, 'results'), {mode: 0o700});
+  const registration = f.register('one', 'a'.repeat(32), {canonical, queueDirectory, statusScript: reader});
+  const row = inspectEvent(f.store, registration.eventId);
+  fs.writeFileSync(path.join(queueDirectory, 'results', '000000000001.json'), JSON.stringify({
+    schemaVersion: 1, id: '000000000001', cwd: row.cwd, branch: row.branch, sha: row.sourceSha,
+    sourceSha: row.sourceSha, logFile: row.logFile, tag: '', state: 'succeeded', finishedAt: new Date().toISOString(),
+  }), {mode: 0o600});
+  let writes = 0;
+  await drain({root: f.store, send: result => {
+    assert.equal(result.observedState, 'succeeded');
+    writes++; return {queuedId: '22222222-2222-3333-4444-555555555555'};
+  }});
+  assert.equal(writes, 1);
+  assert.equal(inspectEvent(f.store, registration.eventId).ticketId, '000000000001');
 });
 
 test('one chat keeps equal ticket IDs in different repositories independent and sends each once', async t => {
@@ -117,12 +158,17 @@ test('private registrations reject another chat, unsafe modes and symlink state 
 
 test('callback carries exact clone/source and read-back instructions, never raw CI error or new authority', t => {
   const f = fixture(t), registration = f.register(), row = inspectEvent(f.store, registration.eventId);
-  const text = callbackText({...row, error: 'PRIVATE TEST LOG'});
+  const text = callbackText({...row, ticketId: '000000000001', error: 'PRIVATE TEST LOG'});
   assert.match(text, new RegExp('GIT_FOLLOW_UP:' + registration.eventId));
   assert.ok(text.includes(row.canonical));
   assert.match(text, /не разрешение на релиз/);
   assert.match(text, /origin\/main/);
   assert.match(text, /--ack/);
+  assert.ok(text.includes(JSON.stringify([row.node, row.statusScript, '--status', '000000000001'])));
+  const legacy = callbackText({...row, callbackVersion: undefined, ticketId: '000000000001'});
+  assert.doesNotMatch(legacy, /Exact status argv|Тикет ещё не установлен/);
+  assert.equal(legacy, callbackText({...row, callbackVersion: 1, ticketId: '000000000001'}),
+    'pre-upgrade attempts retain their exact native reconciliation text');
   assert.doesNotMatch(text, /PRIVATE TEST LOG/);
 });
 

@@ -124,8 +124,11 @@ or redirects another chat's integration. One chat can own many simultaneous
 integrations across repositories. Their records, attempts and acknowledgements
 remain independent, and native Codex queues their input in that same chat.
 
-The service delegates exact state reads to the canonical repository entry point
-with `--status TICKET`, so an active or dead-owner ticket still outranks a receipt.
+The shared coordinator's exact reader and four-file import closure are pinned
+outside the task source under the private service state. Canonical wrappers may
+retain an older installed dependency; they are not used as the shared reader.
+Trelio's separate product queue retains its canonical repository entry point.
+Both use `--status TICKET`, so an active or dead-owner ticket outranks a receipt.
 It never removes fences, kills integration children, rebases, retries CI or pushes.
 Waiting/running/verified states do not invoke a model. Terminal outcomes and
 observation failures produce bounded structural callbacks, without raw logs,
@@ -159,7 +162,8 @@ Record receipt with `--ack EVENT`; this does not attest integration success.
 An immutable acknowledgement wins a late sender update and is never a new wake.
 
 The worker may clean its exact clean worktree after guarded read-back. Service
-state and the status entry point use canonical paths, so source cleanup does not
+state and pinned/shared or product status readers survive source cleanup and use
+the explicit canonical cwd, so source cleanup does not
 lose the result. A continuation uses explicit existing task/canonical paths and
 never edits canonical main. Each later enqueue receives its own subscription.
 The FIFO slot is released independently of chat delivery. Release publication,

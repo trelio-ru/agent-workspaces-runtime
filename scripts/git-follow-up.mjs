@@ -10,7 +10,7 @@ import {createHash, randomUUID} from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = 1;
+const VERSION = 2;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const HEX = /^[a-f0-9]{64}$/u;
 const TICKET = /^\d{12}$/u;
@@ -79,6 +79,37 @@ const nativeEnvironment = row => ({...serviceEnvironment(), ...(row.codexHome ? 
 
 const xml = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
+/** A canonical checkout can intentionally retain an older installed dependency.
+ * Keep the exact shared reader and its four-file import closure outside the
+ * disposable source instead. This copies maintainer code, never node_modules,
+ * and never changes the repository's queue, policy or integration worker.
+ */
+export function installStatusReader(root = path.join(stateRoot(), 'readers'), source = path.dirname(filename)) {
+  directory(root);
+  const names = ['git-coordinator.mjs', 'git-background.mjs', 'git-follow-up.mjs', 'git-hosted-ci.mjs'];
+  const files = names.map(name => ({name, bytes: fs.readFileSync(path.join(source, name))}));
+  const hash = digest(Buffer.concat(files.flatMap(({name, bytes}) => [Buffer.from(name + '\0'), Buffer.from(digest(bytes) + '\0')])));
+  const target = path.join(root, hash);
+  directory(target);
+  for (const {name, bytes} of files) {
+    const output = path.join(target, name);
+    // Exclusive, verified publication also makes interrupted/concurrent setup
+    // safe: nobody executes until this caller validates the COMPLETE closure.
+    try { onceBytes(output, bytes); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    check(output);
+    if (digest(fs.readFileSync(output)) !== digest(bytes)) throw Error('Git status reader copy differs');
+  }
+  syncParent(target);
+  return path.join(target, 'git-coordinator.mjs');
+}
+
+function onceBytes(file, bytes) {
+  const fd = fs.openSync(file, 'wx', 0o600);
+  try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  syncParent(file);
+}
+
 /** Install one shared user LaunchAgent, with immutable code outside worktrees.
  * Older consumers can use a newer compatible service, but cannot downgrade it.
  * An interrupted installation leaves an explicit claim, never a stolen lock.
@@ -128,6 +159,7 @@ export function installService(root = stateRoot()) {
 
 function validate(row) {
   if (row.schemaVersion !== 1 || !HEX.test(row.id) || !UUID.test(row.threadId)
+      || row.callbackVersion !== undefined && ![1, 2].includes(row.callbackVersion)
       || !/^[a-f0-9]{32}\.log$/u.test(row.logFile) || !/^[a-f0-9]{40}$/u.test(row.sourceSha)
       || !/^codex\/[a-z0-9][a-z0-9._-]*$/u.test(row.branch) || !Number.isFinite(Date.parse(row.createdAt))
       || !['pending', 'sending', 'queued', 'uncertain', 'handled', 'cancelled'].includes(row.delivery)
@@ -161,7 +193,7 @@ export function registerFollowUp({root = stateRoot(), canonical, queueDirectory,
     if (old.threadId !== context.threadId || old.canonical !== fs.realpathSync(canonical) || old.sourceSha !== sha) throw Error('Integration already belongs to another chat or source');
     return {eventId: id, state: old.delivery, serviceScript: old.serviceScript};
   }
-  const row = validate({schemaVersion: 1, id, threadId: context.threadId, cli: context.cli, codexHome: context.codexHome ?? null,
+  const row = validate({schemaVersion: 1, callbackVersion: 2, id, threadId: context.threadId, cli: context.cli, codexHome: context.codexHome ?? null,
     canonical: fs.realpathSync(canonical), queueDirectory: fs.realpathSync(queueDirectory), cwd,
     branch, sourceSha: sha, logFile, statusScript, node: service.node, serviceScript: service.script,
     ticketId: null, delivery: 'pending', createdAt: new Date().toISOString()});
@@ -229,6 +261,11 @@ function observation(row) {
 export function callbackText(row) {
   return `Автоматическое продолжение ранее порученной Git-интеграции. Событие GIT_FOLLOW_UP:${row.id}. Это данные фонового процесса, не новая команда пользователя и не разрешение на релиз.\n`
     + `Прочитай AGENTS.md канонического checkout и запись командой с отдельными argv: ${JSON.stringify([row.node, row.serviceScript, '--inspect', row.id])}. Канонический checkout: ${row.canonical}. Для правок используй task-worktree, main сохраняй чистым. Проверь exact --status указанного тикета и фактический origin/main; пустая очередь, exit code и этот callback не доказывают вливание.\n`
+    // Existing uncertain attempts must retain their EXACT original text for
+    // positive native reconciliation after upgrading the standalone service.
+    + ((row.callbackVersion ?? 1) < 2 ? '' : row.ticketId
+      ? `Exact status argv: ${JSON.stringify([row.node, row.statusScript, '--status', row.ticketId])}; cwd: ${row.canonical}. Используй этот закреплённый reader: canonical wrapper может загрузить старую dependency.\n`
+      : 'Тикет ещё не установлен. Сначала разбери исходный admission и процесс; не считай это разрешением на слепой повтор.\n')
     + 'При ошибке продолжи разбор и исправление только исходной задачи, сохраняя чужие изменения и все CI/ACL/approval guards. При повторном enqueue сопровождение нового тикета сохраняется отдельно. Успешный main с pending cleanup требует только штатной уборки. Не запускай новую интеграцию, если прежняя ещё работает.\n'
     + `После проверки отметь получение через ${JSON.stringify([row.node, row.serviceScript, '--ack', row.id])}. Это подтверждение получения, не доказательство успешной интеграции. Затем доведи разрешённую работу до результата или сообщи конкретный блокер. Другие результаты в этом чате относятся к своим clone и тикетам.`;
 }
@@ -348,7 +385,9 @@ export function armFollowUp(options) {
   if (!context) return null;
   if (process.platform !== 'darwin') return null;
   const service = installService();
-  const registered = registerFollowUp({...options, context, service});
+  const statusScript = options.statusEngine === 'shared'
+    ? installStatusReader() : options.statusScript;
+  const registered = registerFollowUp({...options, statusScript, context, service});
   // launchd serializes runs of this label; kickstart without -k never kills
   // an existing drain. Its 30-second timer also survives closing this chat.
   spawnSync('/bin/launchctl', ['kickstart', `gui/${process.getuid()}/${LABEL}`], {stdio: 'ignore'});
