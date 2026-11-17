@@ -36,8 +36,8 @@ test('saved auth rejects extra fields, ambiguous duplicates, foreign domains and
 // crosses unrelated domains, including Google account consistency endpoints.
 test('profile authentication restores all isolated-profile SSO cookies without an origin catalogue', () => {
   const profile = visualCookieState({ origins: ['https://mail.google.com'], domains: [], profileAuthentication: true });
-  for (const domain of ['accounts.youtube.com', '.google.com', 'login.unlisted-sso.test', '.corporate-identity.test']) {
-    const value = { ...cookie, domain };
+  for (const domain of ['accounts.youtube.com', '.google.com', 'login.unlisted-sso.test', '.corporate-identity.test', '[::1]', 'intranet_mail']) {
+    const value = { ...cookie, domain, hostOnly: !domain.startsWith('.') };
     assert.deepEqual(profile.fromChrome({ ...value, session: true, storeId: '0' }), value);
     assert.deepEqual(profile.validate([value]), [value]);
     assert.equal(new URL(profile.forChrome(value).url).hostname, domain.replace(/^\./u, ''));

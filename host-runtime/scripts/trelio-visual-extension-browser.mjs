@@ -499,8 +499,9 @@ export class ExtensionVisualBrowser {
       });
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
-    // Content adapters follow the same signed navigation policy. Cookie restore
-    // and protected authentication deliberately keep their original origins.
+    // Content adapters follow the signed navigation policy. Cookie restore
+    // uses its separate signed profile/domain scope; protected credential
+    // delivery retains exact origins regardless of navigation.
     const matches = this.externalNavigation ? ['http://*/*', 'https://*/*'] : [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
     // Visible macOS startup deliberately has no initial window. Windows/Linux
     // already open one internal tab; hidden presentation has no desktop window.
