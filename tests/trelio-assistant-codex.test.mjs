@@ -2080,6 +2080,61 @@ for(const chatKind of ['source_triage','task'])test(`${chatKind} waits for the s
   assert.equal(children.length,2,'one owned writer plus the separate cosmetic naming client');
 });
 
+for(const kind of ['task','discussion','owner'])test(`resumed ${kind} waits for its own pending native connection before renewal and start`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),children=[];
+  const scope=kind==='owner'?{intakeContext:{assistantId:randomUUID(),companyId:randomUUID(),sourceId:randomUUID(),
+    sourceRevision:1,intakeId:randomUUID(),eventId:randomUUID()}}
+    :{taskContext:{...taskContext,...(kind==='discussion'?{workMode:'discussion'}:{scheduled:true})}};
+  let reads=0,renewals=0,starts=0,turns=0;
+  const result=await runAssistantCodexPass({threadId,deliveryId,cwd,execution,...scope},{
+    executable:process.execPath,environment:{},readExecutionAvailability:async()=>true,
+    readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),readMetadata:async()=>({threadId,cwd}),
+    beforeInvocation:async()=>{assert.equal(reads,4);renewals++;},
+    startInvocation:()=>{assert.equal(reads,4);assert.equal(renewals,1);starts++;},
+    spawnProcess:ownedRpc({threadId,cwd,children,onTurn:()=>{assert.equal(reads,4);turns++;},
+      executionPolicy:(request,reply)=>{
+        if(request.method==='mcpServerStatus/list'){
+          assert.equal(request.params.threadId,threadId);assert.equal(starts,0);assert.equal(renewals,0);
+          const server=reply.result.data[0];
+          server.runtimeStatus=[null,'notStarted','starting','connected'][reads++];
+          if(reads===1)server.tools={};
+        }
+        return reply;
+      }}),
+  });
+  assert.equal(result.state,'completed');assert.equal(starts,1);assert.equal(turns,1);
+  assert.equal(reads,4);assert.ok(children.every(child=>child.killed));
+});
+
+for(const refusal of ['foreign','error','incomplete','cancel','deadline'])test(`resumed pending connection preserves ${refusal} refusal without an invocation`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),children=[];
+  const controller=new AbortController();let reads=0;
+  const options={executable:process.execPath,environment:{},signal:controller.signal,
+    ...(refusal==='deadline'?{passTimeoutMs:100}:{}),
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    readMetadata:async()=>({threadId,cwd}),
+    beforeInvocation:()=>assert.fail('pending/refused tools cannot renew a retained pass'),
+    startInvocation:()=>assert.fail('pending/refused tools cannot spend the start bit'),
+    spawnProcess:ownedRpc({threadId,cwd,children,onTurn:()=>assert.fail('no model input'),
+      executionPolicy:(request,reply)=>{
+        if(request.method==='mcpServerStatus/list'){
+          reads++;const server=reply.result.data[0];
+          if(reads===1){
+            server.runtimeStatus='starting';server.tools={};
+            if(refusal==='cancel')queueMicrotask(()=>controller.abort());
+          }else if(refusal==='foreign')server.pluginId='foreign@market';
+          else if(refusal==='error')server.toolsError='SYNTHETIC PRIVATE ERROR';
+          else if(refusal==='incomplete')reply.result.nextCursor='unread';
+        }
+        return reply;
+      }}),
+  };
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},options),
+    {code:['cancel','deadline'].includes(refusal)?'ASSISTANT_CODEX_DELIVERY_UNCERTAIN':'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE'});
+  assert.equal(reads,['cancel','deadline'].includes(refusal)?1:2);
+  assert.ok(children.every(child=>child.killed),'cancel/deadline closes only its own reader');
+});
+
 test('task provision recovery sends one new technical marker and requires the complete tool-free READY history',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),children=[],inputs=[];
   let prepared=false,started=false,saved=false;

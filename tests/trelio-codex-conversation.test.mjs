@@ -40,6 +40,11 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const oldBlocker='Synthetic previous pass: platform files and signed guides cannot be read; wait for the owner to repair the environment.';
  let resumedAfterBlocker=false;
  const resumedRequests=[];
+ // A new owned App Server reconnects MCP even for an existing task chat.
+ // Delay only its synthetic catalogue. Some native versions wait inside the
+ // status RPC; others expose pending state. Both must connect before input,
+ // without changing production clocks or replacing the native RPC boundary.
+ let pendingResumeCatalogues=0,delayedCatalogueDelivered=false;
  // No account or OpenAI request participates: this loopback producer supplies
  // synthetic Responses events to the real native tool registry. Malicious
  // calls deliberately name tools absent from its advertised catalogue.
@@ -57,6 +62,10 @@ test('actual Codex isolated assistant refuses alternate tools across process res
     if(req.url==='/mcp/allowed')allowedClientNames.push(data.params?.clientInfo?.name);
     result={protocolVersion:data.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'synthetic',version:'1'}};
    }
+   if(data.method==='tools/list'&&req.url==='/mcp/allowed'&&resumedAfterBlocker&&!delayedCatalogueDelivered){
+    await new Promise(resolve=>setTimeout(resolve,1500));
+    delayedCatalogueDelivered=true;
+   }
    if(data.method==='tools/list')result={tools:[...ASSISTANT_WORKSPACE_DRAFT_TOOLS,'use_assistant_browser'].map(name=>({
     name,description:'Synthetic admitted tool',inputSchema:{type:'object',properties:{}},
     annotations:{readOnlyHint:true,destructiveHint:false,openWorldHint:false}}))};
@@ -65,6 +74,8 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   }
   if(req.url!=='/v1/responses'){res.writeHead(404,{'Content-Type':'application/json'});res.end('{"error":"synthetic_route"}');return;}
   modelRequests++;
+  if(resumedAfterBlocker)assert.ok(delayedCatalogueDelivered,
+   'the resumed model cannot run before the same native connection has delivered its catalogue');
   if(business){
    // Only actual model-facing instructions establish delivery. Session
    // settings and unrelated metadata can retain a document that never reaches
@@ -177,9 +188,15 @@ test('actual Codex isolated assistant refuses alternate tools across process res
      pluginCount:Object.keys(value.result.config.plugins??{}).length});
     if(value.result?.data?.some?.(row=>row?.name==='shell_tool'))phases.push({stage:'features',
      disabled:value.result.data.filter(row=>['shell_tool','apps','multi_agent','code_mode_host','code_mode_only','code_mode'].includes(row.name)).map(row=>row.enabled===false),more:value.result.nextCursor!==null});
-    if(value.result?.data?.some?.(row=>row?.name==='trelio-assistant'))phases.push({stage:'server',rows:value.result.data.map(row=>({
+    if(value.result?.data?.some?.(row=>row?.name==='trelio-assistant')){
+     const own=value.result.data.find(row=>row.name==='trelio-assistant');
+     if(resumedAfterBlocker&&[null,'notStarted','starting'].includes(own.runtimeStatus)){
+      pendingResumeCatalogues++;
+     }
+     phases.push({stage:'server',rows:value.result.data.map(row=>({
      own:row.name==='trelio-assistant',foreign:row.name==='foreign',ownPlugin:row.pluginId==='trelio-digital-assistant@trelio-digital-assistants',
      status:row.runtimeStatus,tools:Object.keys(row.tools??{}).length,error:row.toolsError!==null}))});
+    }
     if(value.error)phases.push({stage:'rpc_error',code:value.error.code});
     if(value.id!==undefined&&value.method)phases.push({stage:'native_request',kind:value.method});
     if(value.params?.item?.type==='mcpToolCall')phases.push({stage:'mcp_call',status:value.params.item.status,error:!!value.params.item.error});
@@ -267,9 +284,12 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // requiring a human to restore a shell. This proves delivery and isolation,
  // not how a real model will judge the business state.
  resumedAfterBlocker=true;attempt=4;
- const next=await runAssistantCodexPass({...passInput,deliveryId:randomUUID(),
-  taskContext:{...passInput.taskContext,scheduled:true}},options);
+ let next;
+ try{next=await runAssistantCodexPass({...passInput,deliveryId:randomUUID(),
+  taskContext:{...passInput.taskContext,scheduled:true}},options);}
+ catch(error){assert.fail(JSON.stringify({code:error.code,phases,pendingResumeCatalogues,delayedCatalogueDelivered}));}
  assert.equal(next.state,'completed');assert.equal(starts,3);
+ assert.ok(delayedCatalogueDelivered,'the original pending connection finished without a second writer');
  assert.equal(allowedCalls,2,'the new pass has one additional direct native read');
  assert.ok(resumedRequests.length>=2,'native MCP continuation reaches the model again');
  for(const observation of resumedRequests)assert.ok(Object.values(observation).every(Boolean),JSON.stringify(observation));

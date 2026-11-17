@@ -142,13 +142,16 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
   return true;
 };
 
-/** Fresh native threads can advertise the correct cached tool descriptions
- * while runtimeStatus is still null. That snapshot is not a live connection.
+/** Every owned process reconnects the admitted server, including when it
+ * resumes a permanent task/owner chat or performs a restricted continuation.
+ * The thread's existing history does not make this process's connection ready.
+ * Native status can expose cached tools while null/notStarted/starting; that
+ * snapshot is not a live connection and cannot spend the invocation start bit.
  * Re-read only this same complete catalogue in the same owned writer, within
  * the original signal/deadline. No other plugin, wrong tools, malformed page
  * or explicit connection error becomes acceptable or retryable. */
-const verifyAssistantExecutionServer = async(request,threadId,{workspaceDraftRecovery,waitForConnection,signal})=>{
-  const delays=waitForConnection?[250,500,1000,2000,4000,8000,8000,8000]:[];
+const verifyAssistantExecutionServer = async(request,threadId,{workspaceDraftRecovery,signal})=>{
+  const delays=[250,500,1000,2000,4000,8000,8000,8000];
   for(let attempt=0;;attempt++){
     if(await readAssistantExecutionServer(request,threadId,workspaceDraftRecovery))return;
     if(attempt===delays.length)fail('ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE');
@@ -2420,7 +2423,6 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     }
     await verifyAssistantExecutionServer(request,threadId,{
       workspaceDraftRecovery:workspaceRecoveryMode,signal,
-      waitForConnection:options.readinessProbe===true||workStateContext?.intakeKind==='route_existing',
     });
     if(options.workspaceDraftRecovery){
       const {terminalMarkerId,terminalTurnId,taskPass,workspaceDraft}=options.workspaceDraftRecovery;

@@ -1183,7 +1183,11 @@ publication tooling также остаются вне этого публичн
   in that process before a model turn. No GUI queue, alternate writer or config
   edits. Native resume must acquire the existing chat's writer even if the
   reader reports `notLoaded`. Retain both empty READY markers, the one-use start
-  and read-back. Role documents come from the exact running plugin. Opened
+  and read-back. Every owned process, including ordinary resumed tasks and
+  restricted continuations, waits for its SAME pending MCP connection under
+  the original clock. Cached descriptions never grant readiness; foreign,
+  incomplete or failed inventories still refuse before renewal/model input.
+  Role documents come from the exact running plugin. Opened
   Run UTF-8 files use the same native pass/recipient/lease and finish lock;
   scoped local edits use expected SHA-256. Signed guides return part zero by
   default and exact nextCall paging with the SAME account selector/parser.

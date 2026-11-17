@@ -315,12 +315,21 @@ Lost provision or attachment responses permit only exact read-back. The
 original business marker and events never change. Dispatch health can recover
 only after the resulting native turn, committed classification and pass release.
 
-Fresh technical provisions and source-triage turns can expose the correct cached catalogue before the
-native server reports a live connection. Re-read that same complete catalogue
-under the existing deadline while its native status is null, notStarted or
-starting. An empty pending catalogue grants no authority. A foreign tool,
-invalid inventory or explicit failure still refuses, and only connected status
-with the exact required tools permits a model turn. An older staging format
+Every newly owned process reconnects the admitted MCP server, including ordinary
+tasks, discussions, owner chats and restricted continuations of existing history.
+It can expose the correct cached catalogue before reporting a live connection.
+Re-read that same complete catalogue with the existing bounded backoff and
+original signal/deadline while native status is null, notStarted or starting.
+This wait precedes task renewal and model input; an empty pending catalogue
+grants no authority. A foreign tool, invalid inventory or explicit failure still
+refuses, and only connected status with the exact required tools permits a turn.
+Protocol regressions cover resumed kinds, late refusal, cancellation and expiry.
+The real native restart fixture delays its synthetic MCP catalogue and checks
+that no model request precedes delivery, preserving the same writer and clocks.
+Some native versions wait inside the status RPC instead of returning pending;
+neither behavior supplies evidence of a live business result.
+
+An older staging format
 can earn one distinct technical marker only after every abandoned thread
 returns the exact not-loaded response and native first-attachment eligibility
 still holds. Keep all older starts and markers. Lost corrected starts remain
