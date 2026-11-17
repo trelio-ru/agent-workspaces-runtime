@@ -31,3 +31,17 @@ test('saved auth rejects extra fields, ambiguous duplicates, foreign domains and
   assert.throws(() => state.validate(Array.from({ length: 200 }, (_, i) => ({ ...cookie, name: String(i), value: 'x'.repeat(8192) }))), { code: 'VISUAL_STORAGE_CORRUPT' });
   assert.deepEqual(state.validate([]), [], 'an explicit empty jar is a valid logout snapshot');
 });
+
+// These are synthetic values. The regression represents providers whose login
+// crosses unrelated domains, including Google account consistency endpoints.
+test('profile authentication restores all isolated-profile SSO cookies without an origin catalogue', () => {
+  const profile = visualCookieState({ origins: ['https://mail.google.com'], domains: [], profileAuthentication: true });
+  for (const domain of ['accounts.youtube.com', '.google.com', 'login.unlisted-sso.test', '.corporate-identity.test']) {
+    const value = { ...cookie, domain };
+    assert.deepEqual(profile.fromChrome({ ...value, session: true, storeId: '0' }), value);
+    assert.deepEqual(profile.validate([value]), [value]);
+    assert.equal(new URL(profile.forChrome(value).url).hostname, domain.replace(/^\./u, ''));
+  }
+  assert.equal(profile.fromChrome({ ...cookie, session: true, storeId: '1' }), null);
+  assert.deepEqual(profile.validate([]), []);
+});

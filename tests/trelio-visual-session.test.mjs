@@ -21,6 +21,10 @@ import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 
 test('presentation validation precedes identity/storage and an old worker cannot silently become hidden', async t => {
   const unreadable = new Proxy({}, { get() { throw Error('identity must not be accessed'); } });
+  for (const options of [{ profileAuthentication: 'true' }, { profileAuthentication: true, externalNavigation: false }]) {
+    assert.equal((await runVisualSession({ origins: ['https://example.test'], operation: 'status',
+      env: unreadable, ...options })).reason, 'invalid_input');
+  }
   const fieldPolicy = { origins: ['https://example.test'], labels: ['Start date'] };
   const fieldCheck = { id: 'date', label: 'Start date', match: 'equals', values: ['2030-05-12'] };
   for (const change of [{ args: { checks: [fieldCheck] } }, { fieldCheckPolicy: fieldPolicy, args: { checks: [{ ...fieldCheck, label: 'Password' }] } },
@@ -46,6 +50,9 @@ test('presentation validation precedes identity/storage and an old worker cannot
   const file = path.join(active, 'owner.json');
   const legacy = { schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash,
     token: 'a'.repeat(64), pid: process.pid, port: server.address().port, deadlineAt: binding.deadlineAt };
+  await writePrivateJsonFile(file, { ...legacy, externalNavigation: true, profileAuthentication: true });
+  assert.equal((await runVisualSession({ origins: [origin], externalNavigation: true,
+    operation: 'navigate', args: { url: origin }, env, fixture: { directory } })).reason, 'observation_mode_mismatch');
   await writePrivateJsonFile(file, legacy);
   const invoke = (operation, presentation) => runVisualSession({ origins: [origin], operation, presentation,
     args: operation === 'navigate' ? { url: origin } : {}, env, fixture: { directory } });

@@ -186,6 +186,9 @@ export async function closeVisualExecutionSessions({ companyId, runtimeSessionId
 export const VISUAL_AUDIO_DOWNLOAD_API = 'trelio.visual-audio-download/v1';
 // Signed provider opt-in; ordinary CLI/MCP arguments never select this policy.
 export const VISUAL_EXTERNAL_NAVIGATION_API = 'trelio.visual-external-navigation/v1';
+// Signed providers can retain the complete auth state of their own isolated
+// profile for webmail/SSO flows whose redirect domains are not known in advance.
+export const VISUAL_PROFILE_AUTH_API = 'trelio.visual-profile-auth/v1';
 // Signed providers select presentation in their implementation, never through
 // model argv or inherited environment. Legacy providers keep ordinary windows.
 export const VISUAL_PRESENTATION_API = 'trelio.visual-presentation/v1';
@@ -224,7 +227,8 @@ export function normalizeVisualManualCompletion(value, { origins, fixtureOnly = 
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], externalNavigation = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], externalNavigation = false, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, env = process.env, fixture }) {
+  if (typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation) return visualStatus('error', 'invalid_input');
   if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || !semanticControls && operation === 'read-text'
     && ['controlQuery', 'controlOffset'].some(key => Object.hasOwn(args || {}, key))) return visualStatus('error', 'invalid_input');
   // Validate the signed comparison policy before identity/storage/browser I/O.
@@ -298,7 +302,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
       // Upgrading a provider may reuse its saved auth but must not silently
       // reuse an older live worker with a different content-disclosure mode.
       // Cleanup/status remain available so the exact owner can finish it safely.
-      if (((owner.externalNavigation === true) !== externalNavigation || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      if (((owner.externalNavigation === true) !== externalNavigation || (owner.profileAuthentication === true) !== profileAuthentication || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       // Do not slide the original deadline when another CLI invocation arrives.
       if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
@@ -358,7 +362,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
         schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
         ...(binding.executionOwner ? { executionOwner: binding.executionOwner } : {}),
         pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-        origins, domains, externalNavigation, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint, manualCompletion,
+        origins, domains, externalNavigation, profileAuthentication, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint, manualCompletion,
         mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
         ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
       };

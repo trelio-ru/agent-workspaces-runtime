@@ -734,7 +734,9 @@ publication tooling также остаются вне этого публичн
 - Внешние HTTP(S)-ссылки могут быть разрешены signed `externalNavigation` по
   [visual contract](docs/visual-browser.md#внешние-ссылки). Host/worker/DNR/content
   adapters применяют один owner-pinned выбор; default прежних providers сохранён.
-  Cookie overlay и protected authentication сохраняют исходные exact scopes.
+  Cookie overlay по умолчанию сохраняет exact scopes. Signed profileAuthentication
+  вместе с externalNavigation сохраняет все auth cookies изолированного профиля
+  без списка SSO; protected credential delivery сохраняет exact scopes.
 - Входящие вложения – отдельный signed `attachmentDownloads` opt-in в
   [visual contract](docs/visual-browser.md#входящие-вложения). Только координаты
   fresh frame: локальный href/one-click popup router, browser-owned authenticated

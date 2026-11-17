@@ -516,7 +516,7 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
   : 'signed hidden Chromium clicks, types, scrolls and restores auth through the production presentation', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-fixture-')));
   const received = [], webdriverAtInput = [];
-  let cookieRestored = false, persistentRestored = false, storageRestored = false, detailSeen = false, snapshot;
+  let ssoRestored = false, cookieRestored = false, persistentRestored = false, storageRestored = false, detailSeen = false, snapshot;
   const server = http.createServer((request, response) => {
     const u = new URL(request.url, 'http://127.0.0.1');
     if (u.pathname === '/typed') { received.push(u.searchParams.get('value')); webdriverAtInput.push(u.searchParams.get('webdriver')); response.end(); return; }
@@ -524,6 +524,8 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
     if (u.pathname === '/detail') detailSeen = true;
     if (request.headers.cookie?.includes('fixture_session=SYNTHETIC_COOKIE')) cookieRestored = true;
     if (request.headers.cookie?.includes('fixture_persistent=SYNTHETIC_PERSISTENT')) persistentRestored = true;
+    if (request.headers.host.startsWith('localhost:') && request.headers.cookie?.includes('fixture_sso=SYNTHETIC_SSO')) ssoRestored = true;
+    if (u.pathname === '/sso-login') response.setHeader('Set-Cookie', 'fixture_sso=SYNTHETIC_SSO; HttpOnly; SameSite=Strict; Path=/');
     if (u.pathname === '/login') response.setHeader('Set-Cookie', ['fixture_session=SYNTHETIC_COOKIE; HttpOnly; SameSite=Strict; Path=/', 'fixture_persistent=SYNTHETIC_PERSISTENT; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600']);
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><body style="margin:0;background:#d6efde;font:24px sans-serif;${u.pathname === '/detail' ? '' : 'height:2400px'}"><input id="entry" style="position:absolute;left:40px;top:60px;width:360px;height:50px;font-size:24px"><button style="position:absolute;left:450px;top:60px;width:160px;height:55px" onclick="fetch('/typed?value='+encodeURIComponent(document.getElementById('entry').value)+'&webdriver='+navigator.webdriver)">Submit</button><a href="/detail" target="_blank" style="position:absolute;left:700px;top:60px">Detail</a><h1 style="position:absolute;top:180px">${u.pathname === '/detail' ? 'Detail fixture' : 'Input fixture'}</h1><script>${u.pathname === '/login' ? 'localStorage.setItem("fixture","SYNTHETIC_STORAGE");' : ''}fetch('/storage?value='+localStorage.getItem('fixture'))</script>`);
@@ -533,7 +535,7 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
   const diagnostics = [];
-  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], presentation, lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
+  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], externalNavigation: true, allowLoopback: true }), origins: [origin], externalNavigation: true, profileAuthentication: true, presentation, lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
   let browser = create();
   const originalCall = ExtensionVisualBrowser.prototype.call;
   // A native headed Mac run independently samples the OS foreground identity.
@@ -578,15 +580,19 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
     if (presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') assert.deepEqual(webdriverAtInput, ['false', 'false']);
     f = ready(await browser.call('click', { frameId: f.frameId, x: 730, y: 75 }));
     assert.equal(detailSeen, true); assert.equal(f.scroll.down, false);
+    ready(await browser.call('navigate', { url: `http://localhost:${server.address().port}/sso-login` }));
     await browser.close();
     assert.equal(snapshot.schemaVersion, 2);
+    assert.ok(snapshot.sessionCookies.some(cookie => cookie.domain === 'localhost'), 'an undeclared SSO domain remains in the private overlay');
     console.log(JSON.stringify({ fixture: 'visual-cookie-snapshot', sessionAuthCount: snapshot.sessionCookies.length, ...await fixtureCookieEvidence(snapshot, directory, 'fixture_session') }));
-    cookieRestored = false; persistentRestored = false; storageRestored = false;
+    ssoRestored = false; cookieRestored = false; persistentRestored = false; storageRestored = false;
     browser = create();
     ready(await browser.call('navigate', { url: origin }));
     assert.equal(cookieRestored, true, 'session cookie survives stopped-profile restore');
     assert.equal(persistentRestored, true, 'persistent cookie survives native Cookie database restore');
     assert.equal(storageRestored, true, 'local storage survives stopped-profile restore');
+    ready(await browser.call('navigate', { url: `http://localhost:${server.address().port}/sso-home` }));
+    assert.equal(ssoRestored, true, 'cross-domain session cookie survives actual Chromium stop and restore');
     if (focus()) assert.ok(focusChecks >= 10, 'native foreground checks covered the input sequence');
   } finally {
     ExtensionVisualBrowser.prototype.call = originalCall;
