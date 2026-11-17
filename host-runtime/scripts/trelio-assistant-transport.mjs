@@ -3399,6 +3399,40 @@ const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','run
  * the long-lived facade; it does not consume consent or authorize execution. */
 export const assistantSkillReadNeedsSetup=(execution,sections)=>execution?.runtimeConsent?.state==='owner_review_required'
   ||Array.isArray(sections)&&sections.includes('connection')&&Boolean(execution?.accountSetup);
+/** Small catalogues are presentation, not a sticky execution mode. A full
+ * skill read can include connection metadata while returning an ordinary
+ * skill_run plan. Route that ORIGINAL call to its existing native task view
+ * before schema lookup; never send it to setup's incompatible enum and retry.
+ *
+ * Only tools already admitted by the fixed task/discovery inventory can
+ * change views. Shared reads keep their view, and setup/Remote MCP effects use
+ * their separate native schemas even after ordinary work resumes. The chosen
+ * catalogue still validates the original arguments, fresh pass/proof and
+ * consent/one-attempt checks. Native company and intake selection takes
+ * precedence inside the transport.
+ * Use this in the fresh worker too: a loaded old facade may keep sending its
+ * earlier presentationProfile after a signed runtime update.
+ */
+export const assistantMcpCallProfile = (profile, name, args) => {
+  if (!['task', 'skill_setup', 'remote_mcp'].includes(profile)) return profile;
+  if (ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(name)) return 'task';
+  if (!ASSISTANT_TASK_MCP_TOOLS.includes(name)) return profile;
+  if (['connect_remote_agent_skill', 'doctor_remote_agent_skill', 'call_remote_agent_skill_tool'].includes(name)) {
+    return 'remote_mcp';
+  }
+  const operation = args?.operation;
+  if (name === 'request_assistant_action') {
+    if (['accept_skill_runtime', 'setup_skill_account'].includes(operation)) return 'skill_setup';
+    if (operation === 'call_remote_agent_skill_tool') return 'remote_mcp';
+  }
+  if (name === 'continue_assistant_workspace_action' && ['skill_consent', 'skill_account_setup'].includes(operation)) {
+    return 'skill_setup';
+  }
+  if (['get_assistant_status', 'get_task', 'get_task_instruction_page',
+    'ask_assistant_owner', 'get_assistant_owner_question'].includes(name)) return profile;
+  if (name === 'get_agent_skill' && profile === 'skill_setup') return profile;
+  return 'task';
+};
 const projectAssistantSkillReadPresentation=(result,sections)=>{
   const before=result?.structuredContent,execution=before?.assistantExecution;
   if(result?.isError===true||execution?.state!=='shared_runtime_setup'||assistantSkillReadNeedsSetup(execution,sections))return result;

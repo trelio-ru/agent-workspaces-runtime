@@ -3188,10 +3188,12 @@ business conflict retains the ordinary question/decision boundaries.
 
 Later actions and automatic heartbeat discover the actual root through the SAME
 Run registry codec and private metadata reader, restricted to this assistant,
-device, company, task and Workspace namespace. The exact Run wins over a retained
-older source; ambiguous copies remain blocked. Restart reuses that same registry,
-not a model directory, newest-file heuristic or new recovery database. Discovery
-never substitutes for fresh native authority in the isolated worker.
+device, company, task and Workspace namespace. Only the exact Run is a candidate.
+Without one, the computed canonical root passes through the normal open preflight,
+including its checks for unfinished or unsaved work and partial materialization.
+Old recovery roots stay untouched. Duplicate copies of the exact Run refuse
+even if one occupies the canonical path. Restart reuses the same registry.
+The isolated worker still checks fresh native authority and local metadata.
 
 ### Exact encrypted task reads
 
@@ -4278,6 +4280,16 @@ both complete native inventories and model projections keep the 65,536-byte
 bound. The `skill_setup` presentation seam follows the same narrowing for native
 setup/consent; missing native operations are not advertised. Input/output/HTTP
 bounds remain unchanged and schemas are never copied into the host.
+
+For each original call, the facade and current signed request worker select the
+applicable native catalogue before schema validation. Ordinary task/Workspace
+calls use their existing task definitions after a setup or Remote MCP read.
+Company discovery uses its normal native session. Explicit setup and Remote MCP
+operations keep their own validators and independent owner decisions even after
+ordinary work resumes. A loaded older facade may still pass its last presentation
+to the current worker, which makes the same selection. Calls keep their original
+arguments and native pass/proof. Real refusals and malformed input stop without
+retry. The source-intake allowlist still takes precedence over task presentation.
 
 Reads retain exact allowed tools and live provider read-only annotations.
 A write uses `request_assistant_action` for `call_remote_agent_skill_tool` with
