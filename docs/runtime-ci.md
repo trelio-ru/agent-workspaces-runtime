@@ -68,6 +68,18 @@ The native Linux browser lane probes the hosted Ubuntu suite over HTTPS before
 selecting the main archive or the Linux Kernel Archives mirror. The probe only checks reachability. APT
 still refreshes and validates signed indexes and packages before the unchanged
 desktop and Secret Service tests run.
+The same isolated Xvfb display owns Openbox for the entire native lane. Xvfb
+alone has no window manager to honor Chromium minimize requests. Before tests,
+the fixture verifies its live child and nonzero EWMH supporting-window property
+within five seconds; failure stops the lane. EXIT cleanup targets only that
+owned manager. All native minimized-window and focus assertions stay unchanged.
+After its single minimize request the test waits at most five seconds for native
+window metadata under the original test/lease clock, without repeating minimize
+or proceeding to screenshot/input before the actual minimized state is observed.
+The manual-completion fixture preserves the first failed setup response and
+closed startup/lifecycle diagnostics, closes its HTTP listener on cancellation
+and retains failed profile evidence. A successful isolated reproduction is not
+proof that an earlier hosted refusal was fixed.
 
 The owner-company composition suite is mandatory on macOS and Windows. Its
 serial stdio host launches actual request workers with the production factories,

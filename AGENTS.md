@@ -669,6 +669,12 @@ publication tooling также остаются вне этого публичн
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   Linux CI APT preparation использует bounded HTTPS mirror recovery, не skip
   native fixtures; [контракт](docs/visual-browser.md#проверки-и-текущие-границы).
+  Its isolated Xvfb display also owns a real Openbox window manager. Verify
+  live-child/EWMH readiness before the native suites and stop only that child;
+  an X server alone cannot prove minimize/restore behavior. No OS test is skipped.
+  Manual-completion fixtures preserve the original startup result and closed
+  lifecycle evidence, stop their owned HTTP listener on abort and keep failed
+  profiles; an isolated passing run never erases an unexplained hosted refusal.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
   crash не доказывает save/login. Native OS tests обязательны.
   macOS protected-session CLI/worker проверяет library-validation policy своего Node. При несовместимом

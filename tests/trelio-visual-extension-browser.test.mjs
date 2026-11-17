@@ -478,7 +478,17 @@ test('an owned minimized Chromium completes one wheel after screenshot without r
   const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
   try {
     ready(await browser.call('navigate', { url: origin }));
-    assert.deepEqual(await controller.minimize(), { state: 'fixture', count: 1, minimized: true });
+    let minimized = await controller.minimize();
+    // X11 sends the request to its window manager asynchronously. Read only
+    // native window metadata until that one request is observed; never repeat
+    // minimize, take a screenshot early or substitute a guessed hidden state.
+    // This fixed fixture wait stays inside the original test/lease deadline.
+    const minimizeUntil = Date.now() + 5000;
+    while (minimized.state === 'fixture' && minimized.count === 1 && !minimized.minimized && Date.now() < minimizeUntil) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      minimized = await controller.windowState();
+    }
+    assert.deepEqual(minimized, { state: 'fixture', count: 1, minimized: true });
     const before = ready(await browser.call('screenshot'));
     assert.equal(before.scroll.up, false);
     const after = ready(await browser.call('scroll', { frameId: before.frameId, x: 300, y: 300, deltaY: 600 }));
@@ -818,10 +828,11 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
 });
 
 
-test('signed manual completion closes only a stable authenticated document, saves once and resumes hidden without chat acknowledgement', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
+test('signed manual completion closes only a stable authenticated document, saves once and resumes hidden without chat acknowledgement', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-manual-complete-')));
-  let phase = 'password', snapshot, writes = 0, restored = false, window;
+  let phase = 'password', snapshot, writes = 0, restored = false, window, failure;
+  const diagnostics = [];
   const server = http.createServer((request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     if (request.url === '/after') {
@@ -834,7 +845,8 @@ test('signed manual completion closes only a stable authenticated document, save
     // The production observer sends no clicks, values, navigation or submit.
     response.end(`<!doctype html><body><nav id="account">Account</nav><main id="calendar">Calendar</main>${challenge}${phase === 'success' ? '' : '<script>setTimeout(()=>location.reload(),250)</script>'}</body>`);
   });
-  const controller = new AbortController(), owned = ownFixtureHttpServer(server, controller.signal);
+  const owned = ownFixtureHttpServer(server, t.signal);
+  t.after(() => owned.stop());
   await owned.listen();
   const origin = `http://127.0.0.1:${server.address().port}`;
   const lease = { deadlineAt: Date.now() + 150_000 }, deadline = lease.deadlineAt;
@@ -842,10 +854,12 @@ test('signed manual completion closes only a stable authenticated document, save
     policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
     manualCompletion: { success: [{ origin, pathPrefix: '/login', selectors: ['#account', '#calendar'], blocked: ['[role="dialog"]'] }] },
     store: { directory, async prepare() {}, async read() { return snapshot; }, async write(value) { snapshot = structuredClone(value); writes++; }, close() {} },
-    testWindowController: value => { window = value; } });
+    testWindowController: value => { window = value; }, testDiagnostics: value => diagnostics.push(value) });
+  t.signal.addEventListener('abort', () => browser.abort(), { once: true });
   const sessionId = browser.sessionId;
   try {
-    assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required');
+    const setup = await browser.call('setup', { url: `${origin}/login` });
+    assert.equal(setup.state, 'manual_input_required', JSON.stringify({ state: setup.state, reason: setup.reason, diagnostic: setup.diagnostic }));
     for (const next of ['password', 'challenge']) {
       phase = next; await new Promise(resolve => setTimeout(resolve, 3000));
       assert.equal((await browser.call('status')).state, 'manual_input_required');
@@ -862,8 +876,14 @@ test('signed manual completion closes only a stable authenticated document, save
     assert.equal((await browser.call('ready')).state, 'saved_unverified'); assert.equal(writes, 1);
     assert.equal((await browser.call('navigate', { url: `${origin}/after` })).state, 'ready');
     assert.equal(restored, true); assert.equal(browser.sessionId, sessionId); assert.equal(lease.deadlineAt, deadline);
-  } finally {
-    await browser.close().catch(() => browser.abort()); controller.abort(); await owned.stop();
-    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) { failure = error; }
+  finally {
+    // Observe only closed lifecycle stages from the original operation. Always
+    // release the owned listener independently of a stuck browser queue, keep
+    // the original assertion, and retain failed profiles for exact diagnosis.
+    await owned.stop();
+    try { await browser.close(); } catch (error) { failure ||= error; browser.abort(); }
+    if (!failure) await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+  if (failure) { failure.message += '; manual completion evidence: ' + JSON.stringify({ phase, writes, restored, diagnostics }); throw failure; }
 });

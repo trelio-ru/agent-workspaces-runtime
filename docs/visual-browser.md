@@ -1159,6 +1159,12 @@ Linux CI заменяет только Azure HTTP entry в mirror list hosted ru
 20-секундный network timeout и один retry; ошибка index refresh и общий
 10-минутный deadline подготовки завершают gate ошибкой, не пропускают fixtures.
 Проверка подписей APT и production OS policy не меняются.
+На собственном Xvfb display CI запускает Openbox и проверяет live child/EWMH
+до native tests: один X server не обслуживает запрос сворачивания окна.
+После единственного minimize fixture bounded читает только native window state;
+до подтверждённого minimized capture/input не начинаются. Исходный test/lease
+deadline и one-wheel/no-restore assertions сохраняются. Cleanup останавливает
+только собственный оконный менеджер этого disposable display.
 Detached session/authentication fixtures сохраняют исходный assertion при ошибке shutdown и всегда
 закрывают свой HTTP listener и keyring handle. Если claim не снят, private
 профиль не удаляется. Закрытые fixture stages различают ожидание input/manual,

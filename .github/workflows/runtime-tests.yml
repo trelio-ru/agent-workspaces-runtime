@@ -123,7 +123,7 @@ jobs:
           # fails this gate instead of silently continuing with stale indexes.
           printf '%s\n' 'Acquire::Retries "1";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99trelio-ci-network >/dev/null
           sudo apt-get update
-          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb apparmor
+          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb openbox x11-utils apparmor
           sudo node host-runtime/scripts/visual-browser-dependencies/node_modules/playwright-core/cli.js install-deps chromium
       - name: Cold managed Chromium bootstrap
         shell: bash
@@ -169,15 +169,37 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          dbus-run-session -- bash -euo pipefail -c '
+          # Xvfb alone is an X server, not a window manager: a native minimize
+          # request has nobody to handle it. Own one real desktop for this job,
+          # verify its EWMH readiness, and keep every original browser assertion.
+          # The display is private to xvfb-run; cleanup targets only this child.
+          xvfb-run -a dbus-run-session -- bash -euo pipefail -c '
+            openbox --sm-disable >/dev/null 2>&1 &
+            fixture_wm=$!
+            cleanup_fixture_wm() { kill "$fixture_wm" 2>/dev/null || true; wait "$fixture_wm" 2>/dev/null || true; }
+            trap cleanup_fixture_wm EXIT
+            wm_ready=false
+            wm_deadline=$((SECONDS + 5))
+            while (( SECONDS < wm_deadline )); do
+              kill -0 "$fixture_wm"
+              if wm_property=$(timeout 1s xprop -root _NET_SUPPORTING_WM_CHECK) && [[ "$wm_property" =~ window\ id\ \#\ 0x[0-9a-fA-F]*[1-9a-fA-F][0-9a-fA-F]* ]]; then
+                wm_ready=true
+                break
+              fi
+              sleep 0.1
+            done
+            if [[ "$wm_ready" != true ]]; then
+              echo "Native fixture window manager did not become ready" >&2
+              exit 1
+            fi
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             for file in native-store store transport profile cookie-state browser link-router extension-worker extension-browser session; do
-              xvfb-run -a node "tests/trelio-visual-${file}.test.mjs"
+              node "tests/trelio-visual-${file}.test.mjs"
             done
-            xvfb-run -a node tests/trelio-visual-auth.test.mjs
+            node tests/trelio-visual-auth.test.mjs
             node tests/trelio-browser-mail-auth.test.mjs
-            xvfb-run -a node tests/trelio-local-form.test.mjs
-            xvfb-run -a node tests/trelio-browser-text.test.mjs
+            node tests/trelio-local-form.test.mjs
+            node tests/trelio-browser-text.test.mjs
             node tests/trelio-browser-tab-budget.test.mjs
             node tests/trelio-browser-request-pacing.test.mjs
           '
