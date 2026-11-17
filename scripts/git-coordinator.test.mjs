@@ -29,7 +29,7 @@ function fixture(t, {remoteBranchCleanup = true} = {}) {
   command(main, 'config', 'user.name', 'Coordination fixture');
   command(main, 'config', 'user.email', 'fixture@example.invalid');
   fs.mkdirSync(path.join(main, 'scripts'));
-  for (const name of ['git-coordinator.mjs', 'git-background.mjs', 'assert-coordination.mjs']) fs.copyFileSync(path.join(source, name), path.join(main, 'scripts', name));
+  for (const name of ['git-coordinator.mjs', 'git-background.mjs', 'git-follow-up.mjs', 'assert-coordination.mjs']) fs.copyFileSync(path.join(source, name), path.join(main, 'scripts', name));
   fs.writeFileSync(path.join(main, 'git-coordination.json'), JSON.stringify({schemaVersion: 1, repository: 'fixture/runtime',
     canonicalKey: 'trelio.canonicalMainWorktree', mainMutex: 'main.lock', remoteBranchCleanup, verify: ['node', 'scripts/ci.mjs'], verifyLocal: ['node', 'scripts/ci.mjs'], transport: ['node', 'scripts/push.mjs']}));
   fs.writeFileSync(path.join(main, 'scripts/ci.mjs'), `import fs from 'node:fs'; import {execFileSync} from 'node:child_process';
@@ -61,7 +61,8 @@ execFileSync('git',['-C',${JSON.stringify(main)},'merge','--ff-only',sha],{stdio
     return cwd;
   };
   const launch = (cwd, ...args) => {
-    const child = spawn(process.execPath, [path.join(source, 'git-coordinator.mjs'), ...args], {cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
+    const env = {...process.env}; delete env.CODEX_THREAD_ID; delete env.CODEX_APP_RUNTIME_CLI_PATH;
+    const child = spawn(process.execPath, [path.join(source, 'git-coordinator.mjs'), ...args], {cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
     processes.push(child); let output = '';
     child.stdout.on('data', value => { output += value; }); child.stderr.on('data', value => { output += value; });
     const done = new Promise(resolve => child.on('close', code => resolve({code, output})));

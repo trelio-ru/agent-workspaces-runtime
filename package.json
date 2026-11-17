@@ -17,7 +17,7 @@
     "test:worktree-bootstrap": "bash scripts/bootstrap-worktree-dependencies.test.sh",
     "test:git-guard": "node --test scripts/git-finish-worktree.test.mjs && bash scripts/git-main-guard.test.sh && npm run test:git-coordination",
     "git:integrate": "node scripts/git-coordinator.mjs",
-    "test:git-coordination": "node --test scripts/git-coordinator.test.mjs"
+    "test:git-coordination": "node --test scripts/git-coordinator.test.mjs scripts/git-follow-up.test.mjs"
   },
   "devDependencies": {
     "tiktoken": "1.0.22"
@@ -25,12 +25,14 @@
   "files": [
     "scripts/git-coordinator.mjs",
     "scripts/git-hosted-ci.mjs",
-    "scripts/git-background.mjs"
+    "scripts/git-background.mjs",
+    "scripts/git-follow-up.mjs"
   ],
   "exports": {
     "./coordinator": "./scripts/git-coordinator.mjs",
     "./hosted-ci": "./scripts/git-hosted-ci.mjs",
-    "./background": "./scripts/git-background.mjs"
+    "./background": "./scripts/git-background.mjs",
+    "./follow-up": "./scripts/git-follow-up.mjs"
   },
   "version": "0.0.0"
 }

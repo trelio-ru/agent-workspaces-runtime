@@ -1,12 +1,13 @@
 /** Maintainer-only process transport, shared by both integration engines.
  * The repository still owns FIFO admission, CI evidence, results and recovery.
- * There is no scheduler, model invocation, shell text or Git policy here.
+ * Durable chat follow-up is a separate maintainer service, never a CI gate.
  */
 import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {armFollowUp, cancelUnusedFollowUp, noteFollowUpProcess} from './git-follow-up.mjs';
 
 const activeStates = new Set(['waiting', 'running', 'verified']);
 
@@ -40,8 +41,11 @@ export function integrationLaunchResult(observation, canonicalDirectory) {
     action: active ? 'end_turn_after_admission' : 'review_integration_result',
     canonicalDirectory,
     statusArgs: ['--status', observation.id],
+    ...(observation.chatFollowUp ? {chatFollowUp: observation.chatFollowUp} : {}),
     instruction: active
-      ? 'Report that this ticket was queued and end the turn. The worker continues independently. Read the exact result when the user returns. No automatic chat wake-up is registered.'
+      ? observation.chatFollowUp
+        ? 'Report that this ticket was queued with durable automatic follow-up, then end the turn. The maintainer service will queue the terminal result in the original Codex chat. Do not poll or create a model heartbeat.'
+        : 'Report that this ticket was queued and end the turn. The worker continues independently. No automatic chat wake-up is registered for this caller.'
       : 'Review this exact terminal outcome before any retry. Complete any recorded pending cleanup and remaining authorised release steps.',
   }};
 }
@@ -78,18 +82,29 @@ export function acknowledgeAdmission(value) {
   });
 }
 
-export async function launchBackground({cwd, script, branch, sha, tagArguments = [], logDirectory, observe}) {
+export function attachChatFollowUp(value, {canonical, statusScript, arm = armFollowUp} = {}) {
+  if (!canonical || !statusScript || !value.logFile) return value;
+  const chatFollowUp = arm({canonical, statusScript, cwd: value.cwd, branch: value.branch,
+    sha: value.sourceSha ?? value.sha, logFile: value.logFile, queueDirectory: path.dirname(path.dirname(value.logPath))});
+  return chatFollowUp ? {...value, chatFollowUp} : value;
+}
+
+export async function launchBackground({cwd, script, branch, sha, tagArguments = [], logDirectory, observe, followUp}) {
   privateDirectory(path.dirname(logDirectory));
   if (!fs.existsSync(logDirectory)) {
     try { fs.mkdirSync(logDirectory, {mode: 0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   }
   privateDirectory(logDirectory);
   const logFile = `${randomBytes(16).toString('hex')}.log`, logPath = path.join(logDirectory, logFile);
+  // Register BEFORE spawning: a lost launcher ACK or a very fast worker still
+  // joins its persisted log nonce to the same subscription. No model polls.
+  const prepared = attachChatFollowUp({cwd, branch, sha, logFile, logPath}, followUp);
   const fd = fs.openSync(logPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
   let child;
   try {
     child = spawn(process.execPath, [script, '--background-worker', logFile, sha, branch, ...tagArguments],
       {cwd, detached: true, stdio: ['ignore', fd, fd, 'ipc']});
+    if (prepared.chatFollowUp && child.pid) noteFollowUpProcess(prepared.chatFollowUp.eventId, child.pid);
   } finally { fs.closeSync(fd); }
   // Inherit neither the terminal nor a chat-owned output pipe. Grandchildren
   // stay in this observable group; there is no automatic restart after a crash.
@@ -106,7 +121,15 @@ export async function launchBackground({cwd, script, branch, sha, tagArguments =
       child.once('message', received); child.once('exit', exited); child.once('error', failed);
     });
     if (message?.error) throw Error(message.error);
-    return await observe(message);
+    const value = await observe(message);
+    if (prepared.chatFollowUp && value.logFile !== logFile) {
+      // Two launchers can race before either sees the durable FIFO entry.
+      // The winner's persisted nonce owns the only real ticket. Cancel the
+      // loser's still-unsent intent and attach to the original subscription.
+      cancelUnusedFollowUp(prepared.chatFollowUp.eventId);
+      return attachChatFollowUp(value, followUp);
+    }
+    return prepared.chatFollowUp ? {...value, chatFollowUp: prepared.chatFollowUp} : value;
   } catch (error) {
     throw Error(`${error.message}. Worker pid=${child.pid ?? 'unknown'}; log=${logPath}. Do not assume integration failed or enqueue blindly`);
   } finally {

@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
-import {acknowledgeAdmission, finishIntegratedWorktree, integrationLaunchResult, launchBackground, waitForIntegration} from './git-background.mjs';
+import {acknowledgeAdmission, attachChatFollowUp, finishIntegratedWorktree, integrationLaunchResult, launchBackground, waitForIntegration} from './git-background.mjs';
 
 const SHA = /^[a-f0-9]{40}$/u;
 const ID = /^\d{12}$/u;
@@ -470,16 +470,17 @@ function reusable(cwd, canonical, tag, identity, finishWorktree) {
   if (value.state === 'recovery_required') throw Error(`FIFO ${entry.id} needs recovery; no replacement was started`);
   return value;
 }
-async function background(cwd, canonical, tag, finishWorktree) {
+async function background(cwd, canonical, tag, finishWorktree, followUp) {
   // Reattachment precedes clean-tree checks: the worker may be rebasing now.
   const identity = {branch: git(cwd, 'symbolic-ref', '--short', 'HEAD'), sha: git(cwd, 'rev-parse', 'HEAD')};
   const existing = reusable(cwd, canonical, tag, identity, finishWorktree);
-  if (existing) return existing;
+  if (existing) return attachChatFollowUp(existing, followUp);
   candidate(cwd); policy(cwd);
   if (!fs.existsSync(root(cwd))) {
     try { fs.mkdirSync(root(cwd), {mode: 0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   }
   return launchBackground({cwd, script: fileURLToPath(import.meta.url), ...identity,
+    followUp,
     tagArguments: tag ? ['--tag', tag] : finishWorktree ? ['--finish-worktree'] : [], logDirectory: path.join(root(cwd), 'logs'),
     observe: message => {
       const value = message?.duplicate ? reusable(cwd, canonical, tag, identity, finishWorktree) : status(canonical, message?.id);
@@ -522,7 +523,17 @@ export async function main(args = process.argv.slice(2)) {
     // Even with a waiting caller, the same detached worker owns the FIFO and
     // survives an interruption of the caller. Foreground remains diagnostic.
     const canonical = git(cwd, 'config', '--get', policy(cwd).canonicalKey);
-    const result = await background(cwd, canonical, args[1] ?? '', finishWorktree);
+    const tag = args[1] ?? '';
+    // The entry point may be a repository-owned wrapper around this package.
+    // Resolve its canonical counterpart, never keep a deleted task dependency
+    // path as the service's status executable. Releases/waiters stay synchronous.
+    let followUp;
+    if (!tag && !wait && process.env.CODEX_THREAD_ID && process.env.CODEX_APP_RUNTIME_CLI_PATH) {
+      const entryPath = path.relative(cwd, path.resolve(process.argv[1]));
+      if (path.isAbsolute(entryPath) || entryPath.startsWith('..' + path.sep)) throw Error('Invalid integration entry point');
+      followUp = {canonical, statusScript: path.join(canonical, entryPath)};
+    }
+    const result = await background(cwd, canonical, tag, finishWorktree, followUp);
     if (wait) return waitForIntegration(result.id, id => status(canonical, id));
     return console.log(JSON.stringify(integrationLaunchResult(result, canonical)));
   }

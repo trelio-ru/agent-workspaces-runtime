@@ -61,10 +61,11 @@ live grandchildren safe to ignore. There is no timeout-based takeover or broad
 process/lock cleanup. Failed CI/rebase retains the source; ordinary settled
 failure frees the slot, while unknown/live children keep it fenced.
 
-`scripts/git-coordinator.mjs`, `scripts/git-hosted-ci.mjs` and
-`scripts/git-background.mjs` form a maintainer-only
+`scripts/git-coordinator.mjs`, `scripts/git-hosted-ci.mjs`,
+`scripts/git-background.mjs` and `scripts/git-follow-up.mjs` form a maintainer-only
 development package, consumed by related repositories at an exact immutable Git
-commit. Its package exports are `./coordinator`, `./hosted-ci` and `./background`. Only these three
+commit. Its exports are `./coordinator`, `./hosted-ci`, `./background` and
+`./follow-up`. Only these four
 files enter the npm package. They never enter signed host-runtime, stable plugin,
 provider packages or runtime/model instructions. Repository-specific policy,
 CI adapters, hooks and transport stay with each owner; implementations are not
@@ -98,45 +99,68 @@ unrecorded remote refs are not automatically pruned.
 
 ## Background integration and chat follow-up
 
-Use `npm run git:integrate -- --finish-worktree` for ordinary development
-in Codex. The launcher returns after durable admission. A chat reports the
-exact ticket as queued and ends its turn. The worker inherits no terminal
-or chat output pipe and runs the repository's own FIFO, CI and guarded
-transport while the computer is on. No scheduler or chat wake-up is
-registered. On a later request, read `--status TICKET` once from canonical main.
+Ordinary development in Codex uses `npm run git:integrate -- --finish-worktree`.
+On macOS, the launcher captures the exact `CODEX_THREAD_ID` and installed
+`CODEX_APP_RUNTIME_CLI_PATH`, registers durable follow-up BEFORE worker spawn,
+then returns the admitted ticket with `chatFollowUp`. End the turn after that
+confirmation. No model heartbeat or polling is required. Manual callers and
+other platforms retain background integration without claiming a chat wake-up.
+Explicit `--wait` and release tickets retain their synchronous completion flow.
 
-With `--finish-worktree`, guarded success triggers local cleanup inside
-the same worker. It checks fresh remote ancestry and the exact committed
-candidate again, removes only its clean registered worktree without force,
-and removes its branch by SHA compare-and-swap. A refusal is recorded as
-`localCleanupState=pending` without changing integration success. Use
-the repository's cleanup helper if a retry is safe. Failed integrations
-retain their worktrees. `--finish-worktree` is only available for detached
-ordinary tickets. Manual `git:integrate` and its `--background` alias leave
-local cleanup to their caller.
+One shared user LaunchAgent runs every thirty seconds and at login. Its immutable
+maintainer code and owner-only event journal live outside task worktrees, under
+`~/.local/state/trelio-git-follow-up/`; it never enters a signed runtime, plugin,
+provider package or production service. Registration verifies the installed
+service before starting a worker. Failed setup does not silently enqueue work
+without its promised follow-up. A newer compatible service is not downgraded by
+an older repository dependency.
 
-An explicit terminal wait uses `--wait TICKET` from canonical main. For an
-already authorized full release in Codex use `--wait --tag EXACT_TAG` so the same
-turn can continue mandatory publication/activation after verified integration.
-Wait in the same tool session without reading waiting logs or narrating CI.
-Report terminal failure or a decision that requires the user. `--foreground`
-remains diagnostic. Stopping a waiter does not stop the detached worker.
-The final JSON has the same schema as `--status TICKET`; only
-`succeeded` exits zero. Never infer release completion from that receipt.
+Each registration binds the real clone queue directory, persisted unique log
+nonce, original source SHA, branch, task/canonical paths and original chat UUID.
+The nonce joins both retained tickets and terminal receipts, including fast
+completion and a lost admission ACK. Equal numeric tickets in different clones
+cannot collide. Reattachment keeps the original chat; it never selects `--last`
+or redirects another chat's integration. One chat can own many simultaneous
+integrations across repositories. Their records, attempts and acknowledgements
+remain independent, and native Codex queues their input in that same chat.
 
-The launch JSON identifies the ticket, original/current SHA, branch,
-worktree and private log. `followUp.action=end_turn_after_admission`
-reports the active worker and includes the exact `statusArgs`. An already
-settled worker returns `review_integration_result`. Plain `--status`
-returns an observation.
+The service delegates exact state reads to the canonical repository entry point
+with `--status TICKET`, so an active or dead-owner ticket still outranks a receipt.
+It never removes fences, kills integration children, rebases, retries CI or pushes.
+Waiting/running/verified states do not invoke a model. Terminal outcomes and
+observation failures produce bounded structural callbacks, without raw logs,
+credentials, inherited app pipes, tool proofs or model/account environment.
 
-A repeat launch of the same live candidate returns its existing ticket,
-under the same admission mutex. Incompatible cleanup mode, a different
-candidate/tag or an unknown/dead owner require review. A lost acknowledgement
-is ambiguous: inspect the printed worker identity and admission before a retry.
+Delivery uses the installed native `codex queue --thread UUID --message TEXT`.
+This has been exercised with a busy and an idle original Desktop chat. A command
+exit code is not agent completion; `--resume` is not required for the observed
+running-Desktop queue consumer and can warn when no separate daemon exists.
+Application restart delivery is a required durable/native-queue property, but
+has not been established by the live Mac acceptance test. Do not claim offline
+or unloaded-Desktop delivery from those two successful cases alone.
 
-The worker records its terminal receipt under
-`trelio-git-coordination/results/` before releasing its ticket. Private
-logs live in `logs/`. A retained ticket takes precedence over a pre-crash
-receipt. Results keep the immutable source and rebased SHAs and never replace
-CI evidence or live push authorization.
+Before its single native write, the service durably creates an exclusive attempt
+marker. Concurrent drains, process restart and lost replies never repeat it.
+Ambiguous writes remain `uncertain`; only positive evidence from the public
+App Server queue/history reader can reconcile them as accepted. Bounded absence
+is never permission to send again. The reader never resumes the thread or starts
+a turn: a separate reader can report an active GUI turn as interrupted, so that
+status must not be used as ownership or completion evidence. A damaged individual
+registration produces a local diagnostic without starving other repositories.
+
+A callback is clearly labelled automatic data about previously authorized work,
+not a new human request or release authority. Read canonical AGENTS.md, inspect
+its exact event with the returned service script's `--inspect EVENT`, then review
+the repository's status and live origin/main before reporting success or retrying.
+Continue only the original authorized task. A successful integration with pending
+cleanup requires cleanup only, not another CI/main push. A failed/recovery outcome
+requires real diagnosis, preserving unrelated work and the existing guards.
+Record receipt with `--ack EVENT`; this does not attest integration success.
+An immutable acknowledgement wins a late sender update and is never a new wake.
+
+The worker may clean its exact clean worktree after guarded read-back. Service
+state and the status entry point use canonical paths, so source cleanup does not
+lose the result. A continuation uses explicit existing task/canonical paths and
+never edits canonical main. Each later enqueue receives its own subscription.
+The FIFO slot is released independently of chat delivery. Release publication,
+activation, human approvals and production verification retain their own gates.

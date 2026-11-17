@@ -10,7 +10,7 @@ const isText = file => /\.(?:mjs|js|cjs|json|sh|ps1)$/u.test(file);
 const maintainerDocument = file => /^(?:(?:AGENTS|README|SECURITY)\.md|docs\/.+\.md)$/u.test(file);
 const gitInputs = new Set(['git-coordination.json', '.gitattributes',
   '.githooks/pre-commit', '.githooks/pre-push', ...[
-    'git-coordinator.mjs', 'git-background.mjs', 'git-hosted-ci.mjs', 'git-finish-worktree.mjs',
+    'git-coordinator.mjs', 'git-background.mjs', 'git-follow-up.mjs', 'git-hosted-ci.mjs', 'git-finish-worktree.mjs',
     'git-main-guard.sh', 'assert-coordination.mjs', 'push-main.sh', 'assert-clean-worktree.sh',
     'configure-canonical-main.sh', 'create-task-worktree.sh',
   ].map(file => `scripts/${file}`)]);

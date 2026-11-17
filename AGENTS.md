@@ -1513,10 +1513,15 @@ Exact legacy template bytes для распознавания при мигра�
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
   В Codex обычная задача: `npm run git:integrate -- --finish-worktree`.
-  После durable admission укажи тикет и заверши ход. Worker сам проверяет и
-  вливает ветку, затем убирает чистый worktree. На следующем обращении
-  прочитай `--status <ticket>` из canonical main. Ожидание, heartbeat и сводки
-  очереди в обычном ходе не нужны. При полном релизе жди один exact ticket
+  В macOS Codex launcher до worker сохраняет сопровождение исходного чата через
+  общий maintainer LaunchAgent. После durable admission и chatFollowUp укажи
+  тикет и заверши ход; terminal result автоматически поступит в native-очередь.
+  Callback требует точного status/remote read-back и отдельного --ack получения;
+  он не даёт нового push/release authority. Один чат может сопровождать несколько
+  clone/ticket: записи и one-use send fences независимы. Не создавай model heartbeat.
+  Без native Codex context автоматического возврата нет; результат читают при
+  следующем обращении. Worker проверяет/вливает ветку и убирает чистый worktree.
+  При полном релизе жди один exact ticket
   через `--wait` без промежуточных отчётов о CI, затем продолжай выпуск.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требуют полной матрицы Windows, ARM64, macOS и browser jobs при релизе.
