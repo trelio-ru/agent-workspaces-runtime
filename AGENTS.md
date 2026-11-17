@@ -1247,9 +1247,11 @@ publication tooling также остаются вне этого публичн
   Test actual model input after a new owned process resumes stale history,
   preserving direct MCP, complete documents and no-replay/approval boundaries.
   The native isolation fixture retains every actual spawned child through its
-  close event before removing its disposable root. Inspection clients receive
-  EOF for native MCP cleanup; production termination remains unchanged. Unknown
-  close preserves the root, with closed counts and the original test/rm bounds.
+  close event. Hosted Windows disposes its own short pinned CLI/fixture root
+  only after the entire test process exits successfully, with the original
+  bounded removal. Inspection clients receive EOF for native MCP cleanup;
+  production termination remains unchanged. Unknown close or a failed hosted
+  fixture preserves its root and first failure, with closed counts/codes.
   Verified package bytes and closed bounded pages only, never provider paths
   or provider-authored continuations. See scheduler native invocation.
   An owner-private tool-free handoff may earn ONE independent readiness verification

@@ -61,7 +61,18 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   const owned={child,stop,get closed(){return didClose;}};
   ownedChildren.push(owned);return owned;
  };
- const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-native-isolation-')));
+ // The Windows carrier owns the pinned executable's disposable directory.
+ // Its cleanup happens after this test process exits, so native cwd handles
+ // do not race deletion here even when every observed child has closed.
+ const carrierParent=process.env.TRELIO_TEST_WINDOWS_ISOLATION_PARENT;
+ let fixtureParent=os.tmpdir();
+ if(carrierParent!==undefined){
+  assert.equal(process.platform,'win32');
+  assert.ok(path.isAbsolute(carrierParent));
+  fixtureParent=await fs.realpath(carrierParent);
+  assert.equal(fixtureParent,await fs.realpath(path.dirname(executable)));
+ }
+ const root=await fs.realpath(await fs.mkdtemp(path.join(fixtureParent,carrierParent===undefined?'trelio-native-isolation-':'isolation-')));
  const home=path.join(root,'home'),repository=path.join(root,'repository');
  for(const dir of [home,path.join(repository,'.agents/plugins')])await fs.mkdir(dir,{recursive:true});
  const environment=buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
@@ -167,15 +178,15 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  t.after(async()=>{
   server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
   // Settle all owners even if one fails; a failed/unknown close must not delete
-  // evidence or turn into a larger filesystem retry budget. Keep the original
-  // assertions and the existing overall test and rm bounds unchanged.
+  // evidence or turn into a larger filesystem retry budget. The carrier
+  // removes its directory only when the entire Node fixture exits successfully.
   const settled=await Promise.allSettled(ownedChildren.map(owned=>owned.stop()));
   const unclosed=ownedChildren.filter(owned=>!owned.closed).length;
   t.diagnostic(JSON.stringify({stage:'native_fixture_cleanup',children:ownedChildren.length,unclosed}));
   const failure=settled.find(result=>result.status==='rejected');
   if(failure)throw failure.reason;
   assert.equal(unclosed,0,'all owned native child close events precede directory removal');
-  await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+  if(carrierParent===undefined)await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
  });
  const origin=`http://127.0.0.1:${server.address().port}`;
  const foreignScript=path.join(root,'foreign.mjs'),foreignSentinel=path.join(root,'foreign-started');

@@ -4,6 +4,8 @@
 $ErrorActionPreference = 'Stop'
 $fixtureRoot = Join-Path $env:RUNNER_TEMP ('trelio-codex-mcp-' + [Guid]::NewGuid().ToString('N'))
 $previousCli = $env:TRELIO_TEST_CODEX_CLI
+$previousIsolationParent = $env:TRELIO_TEST_WINDOWS_ISOLATION_PARENT
+$fixturePassed = $false
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 try {
   $inputs = @(
@@ -30,9 +32,29 @@ try {
     Move-Item -LiteralPath (Join-Path $fixtureRoot $inputFile.Name) -Destination (Join-Path $fixtureRoot $inputFile.Target)
   }
   $env:TRELIO_TEST_CODEX_CLI = Join-Path $fixtureRoot 'codex.exe'
+  $env:TRELIO_TEST_WINDOWS_ISOLATION_PARENT = $fixtureRoot
   node (Join-Path $PSScriptRoot '..\..\tests\trelio-codex-conversation.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw "Windows Codex MCP fixture failed with exit $LASTEXITCODE" }
+  $fixturePassed = $true
 } finally {
   $env:TRELIO_TEST_CODEX_CLI = $previousCli
-  Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+  $env:TRELIO_TEST_WINDOWS_ISOLATION_PARENT = $previousIsolationParent
+  # Wait for the Node fixture's actual exit as well as its independent child
+  # close assertions. An unknown/failed fixture leaves its own tree intact
+  # and retains the original failure. The same bounded removal is mandatory
+  # on success, after native directory handles have had time to settle.
+  if ($fixturePassed) {
+    $removeFixture = @'
+const fs = require('node:fs');
+try {
+  fs.rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+} catch (error) {
+  const code = ['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'].includes(error.code) ? error.code : 'other';
+  console.error(JSON.stringify({ stage: 'native_fixture_cleanup', code }));
+  process.exitCode = 1;
+}
+'@
+    node -e $removeFixture -- $fixtureRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Windows Codex MCP fixture cleanup failed' }
+  }
 }
