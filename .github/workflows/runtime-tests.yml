@@ -487,6 +487,12 @@ jobs:
           ref: 620044d67eb3a74fafdc11a00bb023240c3e2259
           path: _contracts/agent-skills
 
+      - name: Run Windows Codex conversation metadata tests
+        # Keep the same pinned native acceptance gate, after its inputs and
+        # before the slower Workspace groups, so teardown failures surface early.
+        shell: pwsh
+        run: ./.github/scripts/run-windows-codex-mcp-fixture.ps1
+
       - name: Run Windows assistant transport and accepted inspection regressions
         run: node tests/trelio-assistant-transport.test.mjs
 
@@ -666,12 +672,6 @@ jobs:
 
       - name: Verify signed runtime hook through the complete Windows shell chain
         run: node tests/trelio-hook-signed-chain.test.mjs
-
-      - name: Run Windows Codex conversation metadata tests
-        # Includes actual pinned CLI → extensionless CMD MCP startup under the
-        # SAME sanitized public environment; no model/account/user config.
-        shell: pwsh
-        run: ./.github/scripts/run-windows-codex-mcp-fixture.ps1
 
       - name: Run Windows instruction delivery regressions
         run: |

@@ -35,7 +35,7 @@ const owners = new Map([
   ['.github/workflows/runtime-tests.yml', ['scripts/runtime-ci-plan.test.mjs', 'scripts/runtime-main-checks.test.mjs']],
   ['.github/scripts/run-windows-account-fixture.ps1', ['tests/trelio-skill-accounts.test.mjs']],
   ['.github/scripts/run-windows-acl-standard-user.ps1', ['tests/trelio-windows-native-private.test.mjs']],
-  ['.github/scripts/run-windows-codex-mcp-fixture.ps1', ['tests/trelio-codex-mcp.test.mjs']],
+  ['.github/scripts/run-windows-codex-mcp-fixture.ps1', ['tests/trelio-codex-mcp.test.mjs', 'tests/trelio-codex-conversation.test.mjs']],
   ['.github/scripts/run-windows-package-service-fixture.ps1', ['tests/trelio-windows-native-private.test.mjs']],
   ['scripts/bootstrap-worktree-dependencies.sh', ['scripts/bootstrap-worktree-dependencies.test.sh']],
   ['scripts/bootstrap-worktree-dependencies.test.sh', ['scripts/bootstrap-worktree-dependencies.test.sh']],

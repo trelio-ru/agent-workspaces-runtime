@@ -148,6 +148,12 @@ Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.
 The pinned public Codex archive GET permits only two bounded transient retries;
 hash/member verification still precedes extraction and the real Windows MCP test.
+This same native Codex gate runs after setup inputs and before slower Workspace
+groups, with its complete existing assertions. Hosted Windows stages the
+isolation workspace beneath the pinned CLI carrier. That carrier removes its
+own tree only after the complete Node fixture exits successfully, retaining the
+same bounded filesystem removal. A failed or unknown fixture preserves its
+tree; native child close assertions and production termination stay unchanged.
 The positive instruction-retention fixture permits at most three separate real
 hooks against its unchanged synthetic transcript: every hook must produce a
 valid method-bound proof, and at least one must inject the exact verified hints.

@@ -1257,6 +1257,8 @@ publication tooling также остаются вне этого публичн
   bounded removal. Inspection clients receive EOF for native MCP cleanup;
   production termination remains unchanged. Unknown close or a failed hosted
   fixture preserves its root and first failure, with closed counts/codes.
+  The same Windows Codex gate runs after its setup inputs and before slow
+  Workspace groups, without an extra native invocation or reduced assertions.
   Verified package bytes and closed bounded pages only, never provider paths
   or provider-authored continuations. See scheduler native invocation.
   An owner-private tool-free handoff may earn ONE independent readiness verification

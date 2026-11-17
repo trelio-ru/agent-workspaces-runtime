@@ -103,6 +103,13 @@ test('removed tests require surviving replacement coverage, not unrelated smoke'
   assert.deepEqual(plan([unit], before, replacement).tests, ['tests/replacement.test.mjs']);
 });
 
+test('native Codex carrier selects both source contracts and actual lifecycle coverage',()=>{
+ const carrier='.github/scripts/run-windows-codex-mcp-fixture.ps1';
+ const tests=['tests/trelio-codex-mcp.test.mjs','tests/trelio-codex-conversation.test.mjs'];
+ const files=snapshot({[carrier]:'# synthetic carrier',...Object.fromEntries(tests.map(name=>[name,'// synthetic suite']))});
+ assert.deepEqual(plan([carrier],files).tests,[...tests].sort());
+});
+
 test('unknown executable/fixture and computed-only loads require a reviewed owner', () => {
   const files = snapshot({
     'host-runtime/scripts/dynamic.mjs': 'export const value = 1;',
