@@ -1467,7 +1467,14 @@ test('assistant reuses the shared local recovery and keeps heartbeat/status on i
       origin:identity.origin,workspaceId:p.workspaceId,runId,workspaceDirectory:path.join(root,'workspace')});
   };
   await metadata(base,oldRun);await fs.writeFile(oldFile,'synthetic unsaved original\n',{mode:0o600});
-  await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[base]});
+  const earlier=workspaceRecoveryDirectory(base,p.workspaceId,randomUUID());
+  const otherEarlier=workspaceRecoveryDirectory(earlier,p.workspaceId,randomUUID());
+  await metadata(earlier,randomUUID());await metadata(otherEarlier,randomUUID());
+  // Production retained two old recovery roots while the canonical base was
+  // no longer registered. Neither old Run may strand a new exact native Run,
+  // nor may discovery adopt its files or clean up the original dirty base.
+  await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[earlier,otherEarlier]});
+  assert.equal(await resolveAssistantWorkspaceRoot(config,plan),base);
   const active={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
     companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
   let openCalls=0,allowed=true;const actions=[];
@@ -1520,6 +1527,10 @@ test('assistant reuses the shared local recovery and keeps heartbeat/status on i
   await metadata(duplicate,p.runId);
   await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[recovered,duplicate,'/synthetic/foreign/workspace']});
   await assert.rejects(resolveAssistantWorkspaceRoot(config,plan));
+  await metadata(base,p.runId);
+  await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[base,recovered]});
+  await assert.rejects(resolveAssistantWorkspaceRoot(config,plan),{code:'TRELIO_WORKSPACE_DIRECTORY_REQUIRED'},
+    'a computed base path is not human authority to choose among duplicate exact Runs');
   assert.equal(await fs.readFile(oldFile,'utf8'),'synthetic unsaved original\n');
 });
 
@@ -1733,6 +1744,111 @@ test('ordinary signed skill reads retain task and Workspace operations instead o
   assert.deepEqual(effects,['skill_run','get_task_sections','prepare_assistant_workspace_run','status','checkpoint','finish','status']);
   assert.deepEqual(views,['task','task','task','task','task','task','task','task','skill_setup','task']);
   assert.equal(messages.filter(message=>message.method==='notifications/tools/list_changed').length,2);
+});
+
+test('full skill discovery routes original task/setup calls through fresh worker and native schemas without a reset or replay',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-profile-flow-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  await fs.mkdir(path.join(root,'digital-assistants'));
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+  const identity={origin:'https://profile-flow.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const credential=`tda_${'q'.repeat(43)}`,pass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const proof={runtimeSessionId:randomUUID(),nonce:'synthetic-original-proof'};
+  let active={kind:'task'},revoked=false,httpCalls=0;
+  const wire=[],staged=[],executed=[],workerViews=[];
+  const definition=(name,properties={})=>({name,description:'Synthetic native profile contract',inputSchema:{type:'object',
+    properties:{...properties,taskPass:{type:'object'},runtimeSessionProof:{type:'object'}},additionalProperties:false}});
+  // A real native transport session supplies a DIFFERENT schema for each
+  // presentation. Its exact enum is validated before arguments staging. A
+  // facade-only mock would miss the old worker selecting setup's enum again.
+  const nativeTools=profile=>[definition('get_assistant_status'),
+    ...profile==='remote_mcp'?[]:[definition('get_agent_skill',{skillId:{type:'string'},sections:{type:'array',items:{type:'string'}}})],
+    definition('continue_assistant_workspace_action',{schemaVersion:{const:1},
+      operation:{enum:profile==='skill_setup'?['skill_consent','skill_account_setup']:['skill_run','status','finish']},parameters:{type:'object'}}),
+    ...profile==='company_context'?[definition('get_trelio_tool_contract',{name:{type:'string'}})]:[],
+    ...profile==='task'?[definition('get_task_sections',{sections:{type:'array',items:{type:'string'}}}),
+      definition('get_assistant_operation_contract',{operation:{type:'string'}}),
+      definition('prepare_assistant_workspace_run',{clientRequestId:{type:'string'}})]:[]];
+  const client={identity,reportHealth:async()=>assert.fail('presentation never changes health'),
+    readHealth:async()=>({code:'ready',revision:0,compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}})};
+  const dependencies={context:async action=>action(client,{},{}),
+    versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.33.20'}),
+    proxyFor:async({presentationProfile})=>{
+      workerViews.push(presentationProfile);
+      return createAssistantMcpClient({...identity,presentationProfile,readActivePass:async()=>active,
+        store:{get:async()=>({...identity,credential,expiresAt:1})},
+        withWorkspaceArguments:async(request,send)=>{staged.push(request);return send(request.args);},
+        httpRequest:async input=>{
+          httpCalls++;
+          const response=result=>({sessionId:'synthetic-native-profile',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+          if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+          if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+          const profile=input.config.headers['x-trelio-assistant-capability-profile']??'task';
+          if(input.payload.method==='tools/list')return response({tools:nativeTools(profile)});
+          assert.equal(input.payload.method,'tools/call');
+          const {name,arguments:args}=input.payload.params;
+          wire.push({name,args,profile});
+          assert.deepEqual(args.taskPass,pass);assert.deepEqual(args.runtimeSessionProof,proof);
+          if(revoked)return response({content:[],isError:true,structuredContent:{code:'ASSISTANT_ACCESS_DENIED'}});
+          if(name==='get_agent_skill')return response({content:[],structuredContent:args.skillId==='synthetic-remote'
+            ?{assistantExecution:{state:'shared_remote_mcp'},remoteMcpExecution:{localMcpServer:'trelio-assistant'}}
+            :{assistantExecution:{state:'shared_runtime_setup',accountSetup:{state:'owner_review_required',operation:'setup_skill_account'}}}});
+          if(args.operation==='skill_account_setup')return response({content:[],isError:true,structuredContent:{code:'ASSISTANT_OWNER_DECISION_REQUIRED'}});
+          return response({content:[],structuredContent:{schemaVersion:1,operation:args.operation??null}});
+        }});
+    }};
+  const args=value=>({...value,taskPass:pass,runtimeSessionProof:proof});
+  const skillRead=args({skillId:'synthetic-configured',sections:['instructions','execution','connection','publication']});
+  const skillRun=args({schemaVersion:1,operation:'skill_run',parameters:{arguments:['account','list']}});
+  const actions=[['get_agent_skill',skillRead],['continue_assistant_workspace_action',skillRun],
+    ['get_assistant_operation_contract',args({operation:'skill_run'})],
+    ['prepare_assistant_workspace_run',args({clientRequestId:randomUUID()})],
+    ['get_agent_skill',args({skillId:'synthetic-remote'})],['get_agent_skill',skillRead],
+    ['get_task_sections',args({sections:['controls']})],
+    // Returning to work does not invalidate an already returned setup call.
+    // It still meets the native owner-decision refusal, never task authority.
+    ['continue_assistant_workspace_action',args({schemaVersion:1,operation:'skill_account_setup',parameters:{}})],
+    ['continue_assistant_workspace_action',{...skillRun,unexpected:'must-not-reach-staging'}],
+    ['get_agent_skill',skillRead],['get_trelio_tool_contract',args({name:'get_task'})]];
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},...actions.map(([name,argumentsValue],index)=>({
+    jsonrpc:'2.0',id:index+2,method:'tools/call',params:{name,arguments:argumentsValue}}))];
+  const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
+  await runAssistantSetupMcp({input:Readable.from(frames.map(x=>JSON.stringify(x)+'\n')),output,
+    createSetup:async()=>assert.fail('no enrollment or new user input'),
+    createMcp:options=>createForwardingAssistantMcp({...options,configurationDirectory:root,
+      request:request=>executeAssistantRuntimeRequest(request,dependencies),
+      createWorkspace:async()=>({execute:async plan=>{executed.push(plan);return plan;},stop:()=>{}})})});
+  const responses=raw.trim().split('\n').map(JSON.parse),reply=id=>responses.find(x=>x.id===id)?.result;
+  for(let id=2;id<=8;id++)assert.equal(reply(id)?.isError,undefined,`original call ${id} must finish without status reset`);
+  assert.equal(reply(9).structuredContent.code,'ASSISTANT_OWNER_DECISION_REQUIRED');
+  assert.equal(reply(10).structuredContent.code,'ASSISTANT_MCP_INPUT_INVALID');
+  assert.equal(reply(12).isError,undefined);
+  assert.equal(wire.at(-1).profile,'company_context','discovery still uses its independent native session');
+  assert.deepEqual(workerViews,['task','task','task','task','task','task','task','skill_setup','task','task','task']);
+  assert.equal(wire.length,10);assert.equal(staged.length,10);assert.equal(executed.length,1);
+  assert.deepEqual(wire[1].args,skillRun,'original parameters, pass and proof cross all boundaries unchanged');
+  const viewChanges=responses.flatMap((frame,index)=>frame.method==='notifications/tools/list_changed'
+    ?[responses[index-1].id]:[]);
+  assert.deepEqual(viewChanges,[2,3,6,7,8,11,12],
+    'valid task/setup/discovery calls refresh presentation and both refusals preserve it');
+  assert.equal(raw.includes(credential),false);
+  // A loaded old facade has not received the new selector. Its original
+  // request still reaches the fresh signed worker with the obsolete view.
+  for(const presentationProfile of ['skill_setup','remote_mcp']){
+    const before=wire.length;
+    await executeAssistantRuntimeRequest({operation:'call',name:'continue_assistant_workspace_action',arguments:skillRun,presentationProfile},dependencies);
+    assert.equal(wire.length,before+1);assert.equal(wire.at(-1).profile,'task');
+  }
+  revoked=true;
+  const before=wire.length;
+  const denied=await executeAssistantRuntimeRequest({operation:'call',name:'continue_assistant_workspace_action',arguments:skillRun,presentationProfile:'skill_setup'},dependencies);
+  assert.equal(denied.structuredContent.code,'ASSISTANT_ACCESS_DENIED');assert.equal(wire.length,before+1,'native refusal is never retried');
+  // Presentation selection never bypasses the genuine source-intake filter.
+  active={kind:'source_intake'};
+  const beforeHttp=httpCalls;
+  await assert.rejects(executeAssistantRuntimeRequest({operation:'call',name:'continue_assistant_workspace_action',arguments:skillRun,presentationProfile:'skill_setup'},dependencies),
+    {code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  assert.equal(httpCalls,beforeHttp);
 });
 
 test('native pending runtime consent still selects setup even for instructions-only reads',async()=>{

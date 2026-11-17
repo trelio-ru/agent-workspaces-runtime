@@ -114,8 +114,12 @@ publication tooling также остаются вне этого публичн
   pending device consent only on an explicit connection-section read; ordinary
   instructions/execution reads retain task/Run tools. Native pending consent
   still selects setup independently, including encrypted skill reads.
-  Test task discovery → existing list change → exact
-  owner decision → advertised setup → task view; never add a hidden-call alias.
+  Stdio and the fresh worker select the original call's native schema before
+  dispatch. Reading connection metadata cannot strand ordinary skill/Run or
+  company discovery calls in the setup catalogue. Explicit setup/Remote MCP
+  actions retain their native schemas and fresh pass/consent checks, including
+  from an older facade. Test both views through the original call and keep every
+  allowlist, input bound and one-attempt fence. No aliases or retry.
 - Модель ассистента: один owner choice/company, fresh execution state перед
   create/queue; native model/list и exact Desktop pair, без fallback. Policy block
   пропускается без ack/roll-forward, не останавливает другие компании и не
@@ -1023,6 +1027,11 @@ publication tooling также остаются вне этого публичн
   SAME registry/metadata resolve later actions and heartbeat after restart;
   no model directory, blind retry, automatic transfer or material-outcome shortcut.
   Recovery uses a constant-length shared sibling locator and a verified same-Run registry handoff; source files remain intact, unrelated copies remain ambiguous.
+  Resolve registered roots by the exact native Run in its own task namespace.
+  If there is no current root, the deterministic base goes through the existing
+  guarded opener. Historical sibling roots stay untouched. Duplicate exact Runs
+  still refuse, including a duplicate in the deterministic base. Exercise the
+  real encrypted open-to-finish chain with several old recovery roots.
   The stdio host owns one lazy finish/heartbeat coordinator across fresh native
   proxies; every poll reauthorises before registry access. EOF stops its timers,
   not a writer or private state. Exercise real serial MCP frames, not one proxy.

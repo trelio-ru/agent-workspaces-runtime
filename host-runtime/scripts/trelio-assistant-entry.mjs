@@ -10,7 +10,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,completeAssistantSourceIntakeDelivery,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,assistantMcpCallProfile,completeAssistantSourceIntakeDelivery,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode,assistantSecretListMetadataArguments,normalizeAssistantPrivateBrowserArguments,isAssistantBrowserPlanInputError } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
@@ -1456,11 +1456,11 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     ?scheduleMaintenance(()=>{if(initialized)return tick();},300_000):null;
   timer?.unref();
   const reply = value => output.write(JSON.stringify(value) + '\n');
-  const withProxy = async (action,{interactiveSourceSetup=false}={}) => {
+  const withProxy = async (action,{interactiveSourceSetup=false,callProfile=presentationProfile}={}) => {
     const { withPrivateProcessSession, runtimeHookSignal } = await import('./trelio-hook-private-session.mjs');
     // One deadline covers journal/DPAPI, initialization, request, body and
     // cleanup. A long-lived stdio process never caches a private worker/token.
-    return withPrivateProcessSession(async () => action(await createMcp({presentationProfile,createWorkspace:sharedWorkspace}), runtimeHookSignal()),
+    return withPrivateProcessSession(async () => action(await createMcp({presentationProfile:callProfile,createWorkspace:sharedWorkspace}), runtimeHookSignal()),
       AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000));
   };
   const dispatch = async message => {
@@ -1519,15 +1519,15 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
           if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
             throw Object.assign(new Error(), { code: 'ASSISTANT_TASK_INPUT_INVALID' });
           }
+          const callProfile=assistantMcpCallProfile(presentationProfile,message.params.name,message.params.arguments);
           const result=await withProxy((proxy, signal) => {
             if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
             return proxy.callTool(message.params.name, message.params.arguments, signal);
-          },{interactiveSourceSetup:interactiveAssistantTool(message.params.name)});
-          // Reuse the existing catalogue-change notification. A native exact
-          // skill read selects a SMALL presentation only, never another pass,
-          // principal, scope, provider or retry policy. Returning status in the
-          // remote view restores ordinary task tools without touching domain.
-          let next=presentationProfile;
+          },{interactiveSourceSetup:interactiveAssistantTool(message.params.name),callProfile});
+          // Reflect the native view used by a successful call in discovery.
+          // A refusal or malformed input does not replace the prior catalogue.
+          // Exact skill/status reads can still request a narrower presentation.
+          let next=result?.isError===true?presentationProfile:callProfile;
           if(message.params.name==='get_agent_skill' && !result?.isError
             && result?.structuredContent?.assistantExecution?.state==='shared_remote_mcp'
             && result.structuredContent.remoteMcpExecution?.localMcpServer==='trelio-assistant') next='remote_mcp';
@@ -2956,7 +2956,13 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code:blocked});
       fail(blocked==='plugin_update_required'?'ASSISTANT_PLUGIN_UPDATE_REQUIRED':'ASSISTANT_RUNTIME_UPDATE_REQUIRED');
     }
-    const proxy=await proxyFor({presentationProfile:request.presentationProfile??'task',
+    // Old long-lived facades forward their current presentation verbatim.
+    // Select the original call's native view in this newly verified worker,
+    // before any business dispatch. No failed effect is retried and no cached
+    // schema is used as authority.
+    const requestedProfile=request.presentationProfile??'task';
+    const proxy=await proxyFor({presentationProfile:request.operation==='call'
+      ?assistantMcpCallProfile(requestedProfile,request.name,request.arguments):requestedProfile,
       ...(request.prepareCompanySearch?{prepareCompanySearch:request.prepareCompanySearch}:{})});
     if(!proxy)return request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED');
     try {
@@ -3526,8 +3532,15 @@ const isAssistantWorkspaceRoot=(candidate,base)=>{
 export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='https://trelio.ru')=>{
   const common=await import('./trelio-workspace.mjs'),context=await import('./trelio-local-context.mjs');
   const base=assistantWorkspaceRoot(config,plan,expectedOrigin);
+  // The assistant already owns a deterministic task/Workspace namespace. An
+  // older accepted recovery copy is not a candidate for a NEW Run: asking the
+  // model to choose among those copies is impossible (model directories are
+  // deliberately forbidden). Look up only this exact Run, otherwise let the
+  // common opener validate the canonical base and any retained local work.
+  // Use the parent as discovery cwd: the computed base is not an explicit
+  // human selection and must not break a tie between duplicate current Runs.
   const root=await common.resolveRegisteredWorkspaceRootDirectory({workspaceId:plan.runIdentity.workspaceId,
-    runId:plan.runIdentity.runId,origin:expectedOrigin,startDirectory:base},{readRegistry:async()=>
+    runId:plan.runIdentity.runId,origin:expectedOrigin,startDirectory:path.dirname(base),exactRunOnly:true},{readRegistry:async()=>
     (await common.readRunRegistry({configurationDirectory:config})).filter(candidate=>isAssistantWorkspaceRoot(candidate,base))});
   if(!root)return base;
   if(!isAssistantWorkspaceRoot(root,base))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');

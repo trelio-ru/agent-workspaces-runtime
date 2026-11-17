@@ -3364,6 +3364,25 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     };
     const writerPlan={prepared:true,scope:plan.scope,encryptedLifecycle:descriptor,localAction:{schemaVersion:1,operation:'open',
       parameters:{...runIdentity,runtimeSessionId:f.runtime.state.runtimeSessionId}}};
+    // Real production topology: several accepted OLD recovery roots survive
+    // in the shared registry, but the new Run has no local metadata yet.
+    // Compose that discovery with the actual encrypted opener/related Git
+    // chain below, including its empty/partial-base recovery and later save.
+    // No old directory is selected merely because its mtime/fence is newer.
+    const canonicalRoot=path.join(assistantTaskStorageDirectory(common.resolveWorkspaceBridgeConfigDirectory(),{
+      origin:f.identity.origin,assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
+      companyId:f.pass.companyId,taskId:f.pass.taskId}),'workspaces',descriptor.workspaceId);
+    const {workspaceRecoveryDirectory:oldRecoveryRoot}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+    const oldRoots=[];
+    for(let index=0;index<2;index++){
+      const oldRunId=randomUUID(),oldRoot=oldRecoveryRoot(canonicalRoot,descriptor.workspaceId,oldRunId);
+      await common.ensurePrivateDirectory(path.join(oldRoot,'workspace'));
+      await common.writePrivateJsonFile(path.join(oldRoot,'.trelio-run.json'),{schemaVersion:3,origin:f.identity.origin,
+        workspaceId:descriptor.workspaceId,runId:oldRunId,workspaceDirectory:path.join(oldRoot,'workspace'),terminalStatus:'accepted'});
+      await fs.writeFile(path.join(oldRoot,'workspace','retained.md'),'SYNTHETIC_RETAINED_SOURCE');oldRoots.push(oldRoot);
+    }
+    await common.writePrivateJsonFile(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'runs.json'),{
+      roots:[...await common.readRunRegistry(),...oldRoots]});
     stage('open');
     const open=()=>common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
@@ -3423,6 +3442,8 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     assert.equal(await fs.readFile(path.join(path.dirname(writable),'context','agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
     assert.equal(opened.operation,'open');
+    for(const oldRoot of oldRoots)assert.equal(await fs.readFile(path.join(oldRoot,'workspace','retained.md'),'utf8'),
+      'SYNTHETIC_RETAINED_SOURCE','exact new-Run discovery never moves, adopts or cleans old recovery work');
     assert.equal(relatedReads,named?1:3,'one original related GET per explicit open, never a transport retry');
     assert.equal(relatedOrdinaryBudgets,0,'related local Git must not inherit the ordinary transport minute');
     const relatedDirectory=path.join(path.dirname(writable),'context','related',relatedId);
