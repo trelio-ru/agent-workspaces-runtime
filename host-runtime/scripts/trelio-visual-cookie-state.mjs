@@ -8,12 +8,18 @@ export function visualCookieState(config) {
   const allowedDomain = domain => {
     if (typeof domain !== 'string') return false;
     const host = domain.replace(/^\./u, '').toLowerCase();
-    if (!host || host.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(host)) return false;
+    if (!host || host.length > 253) return false;
     // The profile belongs to one signed skill/account and is encrypted as a
     // whole. An explicit profile-auth provider must keep session cookies from
     // every login/SSO host, just like the native persistent Cookie DB. This
     // never reads the user's Chrome profile or grants credential delivery.
-    if (config.profileAuthentication === true) return true;
+    if (config.profileAuthentication === true) {
+      // Match Chromium's host representation, including IPv6 and intranet
+      // names. This is structural URL validation, not a provider/domain list.
+      try { const url = new URL(`https://${host}`); return url.hostname === host && url.origin === `https://${host}`; }
+      catch { return false; }
+    }
+    if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(host)) return false;
     return config.origins.some(origin => new URL(origin).hostname === host)
       || config.domains.some(name => host === name || host.endsWith('.' + name));
   };
