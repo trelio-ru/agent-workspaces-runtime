@@ -7,7 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {randomUUID,generateKeyPairSync,sign,createHash,webcrypto} from 'node:crypto';
 
-const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-source-reader-'));
+// Node canonicalizes import.meta.url in the real provider child. Use the same
+// native temporary root for the fixture cache, including macOS /var aliases;
+// a lexical fixture alias must not masquerade as a foreign package path.
+const directory=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-source-reader-')));
 for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCALAPPDATA','CODEX_HOME','TRELIO_CONFIG_HOME']){
   process.env[key]=path.join(directory,key.toLowerCase());
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
@@ -856,7 +859,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
   let observedStarts=0,observedCompletions=0;
   const tickets=new WeakSet();
   const sourceReads={prepare:async input=>{
-    if(input.artifact.skillId==='telegram-mtproto')return null;
+    if(['telegram-mtproto','task-guide-fixture'].includes(input.artifact.skillId))return null;
     observedStarts++;assert.equal(input.artifact.skillId,'task-runtime-fixture');
     assert.ok(input.artifact.parsedPackage.files.length);assert.equal(input.executionContext.codexThreadId,pass.threadId);
     const ticket={};tickets.add(ticket);return ticket;
@@ -1024,6 +1027,73 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
       assert.equal(await fs.readFile(calls,'utf8'),'111ss','one native invocation per explicitly submitted call; metadata never retries send');
       assert.doesNotMatch(JSON.stringify(unbound),/PRIVATE_SOURCE_OUTAGE/);
     }
+    // Compose signed package -> materializer -> provider child -> common
+    // guide projection -> Workspace wire -> parent validator. Providers pack
+    // from different roots; the installed package may omit "scripts/".
+    // A handwritten page fixture cannot detect this layout mismatch.
+    const guideSkill='task-guide-fixture',guideAccount=randomUUID(),guideRelease=randomUUID();
+    const guideCatalogue=createAccountCatalogue({directory:catalogue,scope:accountScope({
+      origin:taskIdentity.origin,skillId:guideSkill,companyId:pass.companyId,memberId:taskMemberId,connectionId:null}),io});
+    await guideCatalogue.change({operation:'create',id:guideAccount,name:'Guide fixture',expectedRevision:0});
+    const guideDirectory=path.join(directory,'guide-package-'+policyVersion);
+    await fs.mkdir(guideDirectory);
+    const guidePaths=['instruction-guides/part-01.md','scripts/instruction-guides/part-02.md','references/work-state.md'];
+    const texts=['\uFEFF# Инструкция\r\nПервая часть\r\n','# Second guide\n','Reference\n'];
+    for(let index=0;index<guidePaths.length;index++){
+      const file=path.join(guideDirectory,guidePaths[index]);await fs.mkdir(path.dirname(file),{recursive:true});
+      await fs.writeFile(file,texts[index]);
+    }
+    await fs.writeFile(path.join(guideDirectory,'trelio-assistant-execution.json'),
+      JSON.stringify({schemaVersion:1,taskCommands:[['guides']]}));
+    const guideCalls=path.join(directory,'guide-calls-'+policyVersion);
+    await fs.writeFile(path.join(guideDirectory,'main.mjs'),`import assert from 'node:assert/strict';
+      import fs from 'node:fs';import {fileURLToPath} from 'node:url';import {createHash} from 'node:crypto';
+      assert.deepEqual(process.argv.slice(2),['guides']);
+      assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(guideAccount)});
+      assert.equal(process.env.TRELIO_MCP_ACCESS_TOKEN,undefined);
+      fs.appendFileSync(${JSON.stringify(guideCalls)},'g');
+      const guides=${JSON.stringify(guidePaths)}.map(relative=>{
+        const file=fileURLToPath(new URL(relative,import.meta.url)),bytes=fs.readFileSync(file);
+        return {path:file,sizeBytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};});
+      process.stdout.write(JSON.stringify({schemaVersion:1,requiredBeforeWork:'all_in_order',guides}));`);
+    outgoingBytes=await engine.buildAgentSkillPackage({skillId:guideSkill,runtimeVersion:'1.0.0',
+      sourceDirectory:guideDirectory,entrypointPath:'main.mjs',interpreter:'node',
+      capabilities:['local-session','local-accounts-v1']});
+    outgoingDto=dto();outgoingDto.releaseId=guideRelease;outgoingDto.localIdentity.skillId=guideSkill;
+    outgoingDto.packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({
+      companyId:pass.companyId,skillId:guideSkill,expectedReleaseId:guideRelease,artifactId:currentArtifact});
+    Object.assign(outgoingDto.artifact,{skillId:guideSkill,
+      packageSha256:createHash('sha256').update(outgoingBytes).digest('hex'),packageSizeBytes:outgoingBytes.length,
+      packageSignature:sign(null,outgoingBytes,privateKey).toString('base64')});
+    const guidePlan=structuredClone(plan);
+    Object.assign(guidePlan.localAction.parameters,{skillId:guideSkill,releaseId:guideRelease,
+      arguments:['--local-account',guideAccount,'guides']});
+    const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    const throughWire=raw=>runAssistantWorkspaceProcess(raw,{expectedOrigin:taskIdentity.origin,
+      resolveLoader:async()=>'/synthetic/verified-loader.mjs',
+      // Exercise the real signed provider child and both production guards.
+      // The Workspace launch seam transports the actual worker result as JSON
+      // in-process; this fixture does not claim a second native worker pipe.
+      runProcess:async(_executable,_argv,{input})=>{
+        try{return {stdout:JSON.stringify(await run(JSON.parse(input)))};}
+        catch(error){throw Object.assign(error,{stderr:JSON.stringify({code:error.code})});}
+      }});
+    let selected=guidePlan;
+    for(let index=0;index<guidePaths.length;index++){
+      const page=await throughWire(selected),body=JSON.parse(page.stdout);
+      assert.equal(body.path,guidePaths[index]);assert.equal(body.text,texts[index]);
+      assert.equal(body.sha256,createHash('sha256').update(texts[index]).digest('hex'));
+      assert.equal(body.part,index);assert.equal(body.count,guidePaths.length);
+      if(index+1<guidePaths.length){
+        assert.deepEqual(page.nextCall.arguments.parameters.arguments,guidePlan.localAction.parameters.arguments);
+        selected={...guidePlan,localAction:page.nextCall.arguments};
+      }else assert.equal(page.nextCall,null);
+    }
+    assert.equal(await fs.readFile(guideCalls,'utf8'),'ggg','one provider call per admitted page, no replay');
+    live=false;
+    await assert.rejects(throughWire(guidePlan));
+    assert.equal(await fs.readFile(guideCalls,'utf8'),'ggg','closed native pass cannot read another cached page');
+    live=true;
     // The public executor's monitor boundary remains independent of task mode.
     await assert.rejects(engine.runMaterializedAgentSkill({captureOutput:true,captureMode:'assistant_task',runtimeArguments:['read']}),/MONITOR_INPUT_INVALID|private monitor/);
   }finally{globalThis.fetch=savedFetch;}

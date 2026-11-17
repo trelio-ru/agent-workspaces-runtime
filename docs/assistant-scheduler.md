@@ -418,6 +418,15 @@ boundary verifies the closed page/digest and derives the next read from the
 admitted action, never provider-authored continuation metadata. Follow `nextCall`
 until null and read all parts before work. An absolute provider path cannot
 select a local read; every part retains fresh native/pass/account admission.
+The same pure path predicate serves the producer and final wire guard.
+Packages built from `scripts/` contain `instruction-guides/part-NN.md` at their
+root; packages built from a parent retain `scripts/instruction-guides/part-NN.md`.
+Both and the existing flat `references/*.md` contract are accepted only when
+every manifest row matches the verified package bytes, length and digest.
+Repository layout is never inferred from a provider's installed directory.
+Regression coverage builds/signs/materializes the package, runs its actual
+provider child, then checks parent delivery, all pages and unchanged account
+selection. A later native pass refusal still blocks cached guide reads.
 Accepted material continues to use exact accepted-file reads.
 
 Owner-private first-chat handoff has a separate bounded readiness-verification

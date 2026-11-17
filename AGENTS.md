@@ -1191,6 +1191,10 @@ publication tooling также остаются вне этого публичн
   Run UTF-8 files use the same native pass/recipient/lease and finish lock;
   scoped local edits use expected SHA-256. Signed guides return part zero by
   default and exact nextCall paging with the SAME account selector/parser.
+  Package-relative guide names use one producer/wire predicate: both
+  instruction-guides/ and scripts/instruction-guides/ are valid build roots.
+  Verify the complete manifest against signed bytes before any page. Test the
+  real signed provider child and account-bound paging, not handwritten pages.
   Label both complete platform documents after the current execution adapter;
   disabled Code Mode is intentional, never a missing-environment diagnosis.
   Ordinary full-task continuation rechecks historical technical blockers through

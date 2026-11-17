@@ -10156,6 +10156,14 @@ export const assistantSkillGuideSelection = (args, part) => {
   return guides ? part ?? 0 : undefined;
 };
 
+/** Package-relative guide names, shared by the producer and final wire guard.
+ * The package builder may take scripts/ itself as its source root. Repository
+ * layout is not package identity: both reviewed layouts must work, but an
+ * arbitrary signed file still cannot become a guide. This predicate grants
+ * no filesystem read; the producer also verifies ALL manifest rows/digests. */
+export const isAssistantSkillGuidePath = value => typeof value === "string"
+  && /^(?:(?:scripts\/)?instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]+\.md)$/u.test(value);
+
 /** Resolve only a complete guide manifest from the signed command, then use
  * the already verified immutable package bytes. Provider stdout never
  * becomes authority to open a local path. One part is small enough to read
@@ -10176,7 +10184,7 @@ export const assistantSkillGuidePage = ({ stdout, runtimeDirectory, parsedPackag
   const guides = report.guides.map(row => {
     if (typeof row?.path !== "string" || !path.isAbsolute(row.path)) invalid();
     const relative = path.relative(runtimeDirectory, row.path).split(path.sep).join("/");
-    if (!/^(?:scripts\/instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]+\.md)$/u.test(relative)
+    if (!isAssistantSkillGuidePath(relative)
       || seen.has(relative) || !sameLocalPath(row.path, path.join(runtimeDirectory, relative))) invalid();
     seen.add(relative);
     const bytes = packageFiles.get(relative)?.bytes;

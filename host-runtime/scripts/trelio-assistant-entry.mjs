@@ -17,7 +17,7 @@ import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery, validateAssistantBackgroundRecoveryObservation } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
-import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection } from './trelio-workspace.mjs';
+import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
@@ -4051,7 +4051,7 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
       if(!page||Object.keys(page).sort().join(',')!=='count,nextGuidePart,part,path,schemaVersion,sha256,text'
         ||page.schemaVersion!==1||page.part!==part||!Number.isSafeInteger(page.count)||page.count<1||page.count>64
         ||part>=page.count||page.nextGuidePart!==(part+1<page.count?part+1:null)
-        ||typeof page.path!=='string'||!/^(?:scripts\/instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]+\.md)$/u.test(page.path)
+        ||!isAssistantSkillGuidePath(page.path)
         ||typeof page.text!=='string'||Buffer.byteLength(page.text)>24*1024
         ||createHash('sha256').update(page.text).digest('hex')!==page.sha256)fail('ASSISTANT_SKILL_GUIDE_RESULT_INVALID');
       return {...value,instruction:page.nextGuidePart===null

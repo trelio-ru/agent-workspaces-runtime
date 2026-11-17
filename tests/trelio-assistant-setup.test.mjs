@@ -1213,6 +1213,35 @@ test('signed guide delivery returns exact next calls without a shell or account 
   assert.equal(launches,before,'invalid commands never launch the isolated worker');
 });
 
+test('guide package layouts retain complete-manifest integrity and strict relative paths',async()=>{
+  const {assistantSkillGuidePage,isAssistantSkillGuidePath}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {createHash}=await import('node:crypto');
+  const root=path.resolve('signed-layout-fixture');
+  const paths=['instruction-guides/part-01.md','scripts/instruction-guides/part-02.md','references/work-state.md'];
+  const files=paths.map(name=>({path:name,bytes:Buffer.from('Подписанная инструкция\n')}));
+  const report={schemaVersion:1,requiredBeforeWork:'all_in_order',guides:files.map(file=>({
+    path:path.join(root,file.path),sizeBytes:file.bytes.length,sha256:createHash('sha256').update(file.bytes).digest('hex')}))};
+  const page=(value=report,parsed=files)=>assistantSkillGuidePage({stdout:JSON.stringify(value),
+    runtimeDirectory:root,parsedPackage:{files:parsed},part:0});
+  assert.equal(page().path,paths[0]);
+  for(const name of ['../instruction-guides/part-01.md','instruction-guides/../part-01.md',
+    '/instruction-guides/part-01.md','instruction-guides\\part-01.md','other/part-01.md',
+    'instruction-guides/part-001.md','references/subdir/private.md','main.mjs',null]){
+    assert.equal(isAssistantSkillGuidePath(name),false);
+  }
+  // A valid requested first page never hides a corrupted later page. No
+  // provider-supplied path is opened: only exact parsed package bytes count.
+  for(const corrupt of [r=>{r.guides[2].sha256='0'.repeat(64);},
+    r=>{r.guides[2].sizeBytes++;},r=>{r.guides[2].path=r.guides[0].path;},
+    r=>{r.guides[2].path=path.join(root,'../instruction-guides/part-03.md');},
+    r=>{r.guides[2].path=path.join(root,'instruction-guides/part-03.md');}]){
+    const altered=structuredClone(report);corrupt(altered);
+    assert.throws(()=>page(altered),{code:'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'});
+  }
+  assert.throws(()=>page(report,files.map((file,index)=>index===2
+    ?{...file,bytes:Buffer.from('tampered')}:file)),{code:'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'});
+});
+
 test('encrypted Workspace descriptors survive facade, coordinator, real child pipe and automatic heartbeat',async t=>{
   const {runAssistantWorkspaceProcess,createAssistantWorkspaceExecutor,createForwardingAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {spawnSync}=await import('node:child_process');
