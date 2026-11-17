@@ -5423,7 +5423,7 @@ const sha256LocalInstruction = (value) => crypto.createHash("sha256")
   .update(String(value), "utf8")
   .digest("hex");
 
-const buildLocalInstructionLayer = ({ kind, scope, revision, markdown }) => {
+const buildLocalInstructionLayer = ({ kind, scope, revision, markdown, skillConnections }) => {
   const normalizedMarkdown = String(markdown || "").trim();
   const content = normalizedMarkdown ? `${normalizedMarkdown}\n` : "";
   const markdownSha256 = sha256LocalInstruction(content);
@@ -5433,12 +5433,14 @@ const buildLocalInstructionLayer = ({ kind, scope, revision, markdown }) => {
       scope,
       revision,
       markdownSha256,
+      ...(skillConnections ? { skillConnections } : {}),
     }))}`,
     kind,
     scope,
     revision,
     sha256: markdownSha256,
     markdown: content,
+    ...(skillConnections ? { skillConnections } : {}),
   };
 };
 
@@ -5491,6 +5493,7 @@ const buildLocalTaskInstructionSnapshot = (mirror, record) => {
           ?? 0,
       },
       markdown: workingRules.compiledMarkdown,
+      ...(workingRules.skillConnections ? { skillConnections: workingRules.skillConnections } : {}),
     }));
   }
   if (personalProfile?.profile && personalProfile.compiledMarkdown) {
@@ -11592,6 +11595,7 @@ const executeTrelioWorkspaceActionOperation = async (
   const heartbeatManager = runHeartbeatManager
     ?? (runBridge === runWorkspaceBridge ? workspaceRunHeartbeatManager : null);
   let activeHeartbeatEntry = null;
+  let skillConnections;
   let workingDirectory = invocation.workingDirectory;
   try {
     workingDirectory = await resolveWorkspaceActionWorkingDirectory(
@@ -11679,10 +11683,15 @@ const executeTrelioWorkspaceActionOperation = async (
         invocation.actionParameters ?? rawInput.parameters,
       );
     }
+    if (invocation.operation === "open" && runBridge === runWorkspaceBridge) {
+      const opened = await resolveOpenedWorkspaceDirectory(result.stdout);
+      skillConnections = (await readOpenedWorkspaceRunIdentity(opened, origin)).skillConnections;
+    }
     const visual = invocation.operation === "skill_run" ? parseVisualSkillOutput(result.stdout) : null;
     return {
       schemaVersion: TRELIO_WORKSPACE_ACTION_SCHEMA_VERSION,
       operation: invocation.operation,
+      ...(skillConnections ? { skillConnections } : {}),
       ...(visual ? { visual } : {
         stdout: truncateWorkspaceActionOutput(result.stdout),
         ...(result.stderr ? { stderr: truncateWorkspaceActionOutput(result.stderr) } : {}),
@@ -12608,6 +12617,7 @@ export const readOpenedWorkspaceRunIdentity = async (workspaceDirectory, expecte
   return {
     workspaceId: metadata.workspaceId,
     runId: metadata.runId,
+    ...(metadata.agentInstructionsSnapshot?.skillConnections ? { skillConnections: metadata.agentInstructionsSnapshot.skillConnections } : {}),
     ...(["accepted", "cancelled"].includes(metadata.terminalStatus)
       ? { terminalStatus: metadata.terminalStatus } : {}),
   };

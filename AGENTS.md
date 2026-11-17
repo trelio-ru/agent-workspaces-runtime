@@ -988,6 +988,7 @@ publication tooling также остаются вне этого публичн
   Проверяй `--check`, scope parity и раздельные limits. Legacy guidance tool
   сохраняется, а searched block не требует второго catalog call.
   Company skill awareness приходит с effective rules: без повторного inventory.
+  Account hints читают только существующий каталог; saved ≠ authenticated, pinned authority неизменна.
   `routingSummary` обязателен для create/release, валидируется общей generated
   policy до encryption и защищается как `routing_summary`; keywords не меняются.
   Exact slug queries разрешаются после scope ACL общим matcher, original intent

@@ -21,7 +21,7 @@ import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareN
 import { recoverSelectedContinuation, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import { withPrivateProcessSession, TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, withTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
-import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
+import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION, appendSkillConnectionHints } from "./trelio-skill-accounts.mjs";
 import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import { LOCAL_PROPOSAL_FILES } from "./trelio-proposal-local-files.mjs";
 import { visualMcpResult } from './trelio-visual-result.mjs';
@@ -79,6 +79,7 @@ import {
   ensurePrivateDirectory,
   hydrateAgentCompanyEncryptedJson,
   normalizeOrigin,
+  observeSkillAccount,
   loadToken,
   openBrowser,
   parseAndValidateAgentSkillPackage,
@@ -5724,7 +5725,7 @@ export const readLocalProposalAppResource = async (
   }
 };
 
-export const handleToolCall = async (
+const handleToolCallWithoutSkillHints = async (
   origin,
   name,
   rawArguments,
@@ -6199,6 +6200,15 @@ export const handleToolCall = async (
   }
   return executeRemoteMcpTool(origin, name, rawArguments, { signal });
 };
+
+/** Hydration must finish before inspecting native-selected account hints. The
+ * result supplement never changes native authority or replays the operation. */
+export const handleToolCall = async (origin, name, input, options = {}) =>
+  appendSkillConnectionHints(await handleToolCallWithoutSkillHints(origin, name, input, options), {
+    origin, signal: options.signal, observe: options.observeSkillAccount ?? observeSkillAccount,
+    nativeTool: name === TRELIO_LOCAL_ACTION_TOOL.name ? input?.parameters?.nativeTool
+      : name === TRELIO_WORKSPACE_ACTION_TOOL.name ? input?.operation : name,
+  });
 
 /** Shared operation boundary for human and managed callers. Authentication,
  * namespace, pass and exact owner decisions belong to the selected profile;
@@ -7439,6 +7449,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
   const createHarnessConnection = ({
     httpRequest = remoteMcpHttpRequest, httpJson = oauthHttpJson,
     connectOAuth = connectRemoteMcpOAuth, vault, nativeClient = "deepseek-harness", clientCapabilities = {},
+    observeAccounts = observeSkillAccount,
   } = {}) => {
     if (!["deepseek-harness", "kimi-work", "multitool", "codex"].includes(nativeClient)) {
       throw fail("TRELIO_NATIVE_CLIENT_INVALID", "Неизвестный native OAuth client.");
@@ -7633,7 +7644,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         return tools;
       },
       async call(method, args, signal) {
-        return (await rpc("tools/call", { name: method, arguments: args }, signal)).result;
+        const result = (await rpc("tools/call", { name: method, arguments: args }, signal)).result;
+        return appendSkillConnectionHints(result, { origin: ORIGIN, nativeTool: method, observe: observeAccounts, signal });
       },
       async readResource(uri, signal) {
         return (await rpc("resources/read", { uri }, signal)).result;

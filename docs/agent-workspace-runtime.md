@@ -3927,11 +3927,29 @@ require the signed runtime/backend rollout and independent app read-back.
 ## Company skill awareness
 
 Backend передаёт publisher-owned `slug: routingSummary` вместе с effective
-company/project rules. Это discovery, не executable authority или connection
-readiness. Current member/assignment ACL и project-only ограничения сохраняются;
+company/project rules. Это discovery; company configuration и локальная запись
+не являются executable authority или подтверждением authentication. Current
+member/assignment ACL и project-only ограничения сохраняются;
 список не запрашивается перед каждой операцией. Direct exact reads/Run не требуют
 дополнительного catalog search. Selected skill требует обычных полных instruction
 и execution reads. Explicit user choice и published fallback/approval остаются.
+
+Company setup отмечается в backend Markdown. Native-selected `skillConnections`
+в exact rules/layer/paged manifest или pinned Run содержит exact company/member
+и `id/slug/connectionId` только для `local-accounts-v1`. После native read/local
+hydration и успешного Run open host добавляет bounded отдельное наблюдение
+существующего каталога: `account_saved`, `selection_required`, `account_required`
+либо `not_checked` с причиной `catalogue_not_observed`, `scope_not_observed` или
+`catalogue_read_failed`; неподдерживаемая проверка даёт `local_check_unavailable`.
+Отсутствующий каталог не создаётся, legacy import и
+provider не запускаются; ошибки ACL/I/O не означают logout. Общий account scope,
+private reader и managed namespace совпадают с исполнением. Labels, comments,
+account IDs, providerRef, storage paths и credentials не выдаются. Наблюдение
+не меняет pinned Markdown/hashes/retention keys и не подтверждает authentication.
+При неназванном сервисе сначала выбирается подходящий сохранённый вариант;
+explicit choice/default/published routing и live login check остаются обязательны.
+После изменения аккаунтов требуется новое наблюдение. Старые backend без
+selectors сохраняют честное отсутствие локальной проверки, без guessed probes.
 
 Private authoring create/release требуют `routingSummary` в JSON schema и common
 input, проверяют portable policy до credential/network/encryption/plan и включают

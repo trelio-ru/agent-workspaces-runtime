@@ -347,6 +347,29 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
     requireThat(item, 'ACCOUNT_NOT_FOUND'); return item;
   };
   return {
+    /** Startup discovery must be genuinely read-only: list() creates/hardens a
+     * directory and importOnce() can spawn a provider. Inspect only an already
+     * validated catalogue and this exact company/member binding. An absent or
+     * not-yet-imported catalogue says nothing about legacy login state. */
+    async observe() {
+      try {
+        await io.checkDirectory(directory);
+        await io.checkDirectory(root);
+        await fs.lstat(file);
+      } catch (error) {
+        if (error.code === 'ENOENT') return { state: 'not_checked', reason: 'catalogue_not_observed' };
+        throw error;
+      }
+      const state = await read(), current = binding(state);
+      const count = current.accountIds.length;
+      if (!count) {
+        const observed = Object.hasOwn(state.bindings, scope.company)
+          || Object.hasOwn(state.imports, hash([scope.importScope, 'completed']));
+        return observed ? { state: 'account_required' } : { state: 'not_checked', reason: 'scope_not_observed' };
+      }
+      return { state: current.defaultAccountId || count === 1 ? 'account_saved' : 'selection_required',
+        accountCount: count, selection: current.defaultAccountId ? 'default' : count === 1 ? 'single' : 'required' };
+    },
     async list() {
       await io.ensureDirectory(root);
       const state = await read(), current = binding(state);
@@ -508,4 +531,67 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
       });
     },
   };
+}
+
+/** Add a device-local observation beside native authority, never rewrite its
+ * Markdown, hashes, retention keys or pinned Run snapshot. Only native-selected
+ * structural hints in known authority containers may select catalogue reads;
+ * task prose, provider output and arbitrary nested JSON are never traversed. */
+const SKILL_HINT_READS = new Set(['get_agent_instructions', 'get_task', 'get_tasks', 'get_project_meta',
+  'get_task_create_meta', 'get_workspace', 'fetch', 'prepare_agent_workspace_run', 'prepare_agent_workspace_read', 'open']);
+
+export async function appendSkillConnectionHints(result, { origin, nativeTool, observe, signal, now = () => new Date() }) {
+  if (!SKILL_HINT_READS.has(nativeTool) || !result || result.isError || typeof observe !== 'function') return result;
+  const containers = ['effectiveInstructions', 'workingRules', 'effective', 'run', 'agentRun',
+    'agentInstructionsSnapshot', 'agentInstructionsSnapshotJson', 'agentInstructions', 'settings',
+    'context', 'snapshot', 'layers', 'delivery', 'layerManifest'];
+  const scopes = [], seen = new Set();
+  let visited = 0;
+  function visit(value, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 8 || ++visited > 256) return;
+    if (Array.isArray(value)) { for (const entry of value) visit(entry, depth + 1); return; }
+    const hints = value.skillConnections;
+    if (hints && UUID.test(hints.companyId) && UUID.test(hints.memberId)
+      && Array.isArray(hints.skills) && hints.skills.length <= 128) {
+      for (const skill of hints.skills) {
+        if (!object(skill) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skill.id)
+          || !/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(skill.slug)
+          || skill.connectionId !== null && !UUID.test(skill.connectionId)) continue;
+        const key = JSON.stringify([hints.companyId, hints.memberId, skill.id, skill.connectionId]);
+        if (!seen.has(key) && scopes.length < 128) {
+          seen.add(key); scopes.push({ ...skill, companyId: hints.companyId, memberId: hints.memberId });
+        }
+      }
+    }
+    for (const key of containers) visit(value[key], depth + 1);
+  }
+  visit(result.structuredContent);
+  if (!scopes.length) return result;
+  const rows = [];
+  for (const scope of scopes) {
+    signal?.throwIfAborted();
+    let observation;
+    try { observation = await observe({ origin, skillId: scope.id, companyId: scope.companyId,
+      memberId: scope.memberId, connectionId: scope.connectionId }); }
+    catch { observation = { state: 'not_checked', reason: 'catalogue_read_failed' }; } // I/O/ACL failures never prove logout or absence.
+    signal?.throwIfAborted();
+    const state = ['account_saved', 'selection_required', 'account_required'].includes(observation?.state)
+      ? observation.state : 'not_checked';
+    const reasonCode = ['catalogue_not_observed', 'scope_not_observed', 'catalogue_read_failed'].includes(observation?.reason)
+      ? observation.reason : 'local_check_unavailable';
+    const reason = state === 'not_checked' ? `, reason=${reasonCode}` : '';
+    const details = ['default', 'single', 'required'].includes(observation?.selection)
+      ? `, selection=${observation.selection}` : '';
+    // Company/member coordinates disambiguate multi-company exact reads; no
+    // account ID, name, comment, providerRef, credential or path is delivered.
+    rows.push(`${scope.slug} (${scope.companyId}/${scope.memberId}): ${state}${details}${reason}`);
+  }
+  const prefix = `Device-local skill accounts observed ${now().toISOString()}. Authentication: not_checked.\n`
+    + 'Saved accounts may still need login. Unperformed or failed checks never mean disconnected. Prefer a suitable saved account for an unspecified service; honor explicit service/account choices, defaults and published routing. Verify login before use; refresh after setup or account changes.\n';
+  let count = rows.length, text;
+  do {
+    text = prefix + rows.slice(0, count).join('\n')
+      + (count < rows.length ? `\n${rows.length - count} additional account states not listed; check the selected skill.` : '');
+  } while (Buffer.byteLength(text) > 4096 && --count > 0);
+  return { ...result, content: [...(result.content ?? []), { type: 'text', text }] };
 }

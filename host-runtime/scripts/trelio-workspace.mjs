@@ -10653,6 +10653,22 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   return { handled: false, account, runtimeArguments: parsed.providerArguments };
 };
 
+/** Discovery shares account identity, namespace and protected I/O with actual
+ * execution, but never imports/migrates, changes bindings or reads credentials.
+ * Managed profiles must retain their own catalogue instead of borrowing the
+ * interactive OS user's account state. */
+export const observeSkillAccount = async (identity) => {
+  const profile = currentWorkspaceExecutionProfile();
+  let directory = CONFIG_DIRECTORY;
+  if (profile) {
+    if (typeof profile.resolveSkillCatalogueDirectory !== 'function') return { state: 'not_checked' };
+    directory = await profile.resolveSkillCatalogueDirectory(directory);
+  }
+  return createAccountCatalogue({ directory, scope: accountScope(identity), io: {
+    checkDirectory: value => assertPrivatePathKind(value, 'directory'), read: readPrivateJsonFile,
+  } }).observe();
+};
+
 const getCachedObjectPath = (sha256) => {
   if (!SHA256_PATTERN.test(String(sha256 || ""))) {
     throw new Error("Некорректный SHA-256 для локального cache.");

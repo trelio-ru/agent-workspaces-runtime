@@ -756,3 +756,99 @@ test('the signed SDK resource queues actual provider children before native disp
   const results = await Promise.all([f.run(), f.run()]);
   assert.deepEqual(results, [{ stdout: 'completed' }, { stdout: 'completed' }]);
 });
+
+test('startup account observations are read-only, scope-bound and never authentication evidence', async t => {
+  const {directory,make} = await fixture(t), catalogue = make();
+  assert.deepEqual(await catalogue.observe(), {state:'not_checked',reason:'catalogue_not_observed'});
+  assert.deepEqual(await fs.readdir(directory), [], 'discovery creates neither catalogue nor lock');
+  await catalogue.importOnce(async () => []);
+  assert.deepEqual(await catalogue.observe(), {state:'account_required'});
+  const first = crypto.randomUUID();
+  await catalogue.change({operation:'create',id:first,name:'Private label',comment:'Private comment',expectedRevision:1});
+  assert.deepEqual(await catalogue.observe(), {state:'account_saved',accountCount:1,selection:'default'});
+  const foreign = make({companyId:crypto.randomUUID()});
+  assert.deepEqual(await foreign.observe(), {state:'not_checked',reason:'scope_not_observed'});
+  const before = await fs.readFile(path.join(directory,'skill-accounts',`${accountScope(identity).catalogue}.json`));
+  assert.deepEqual(await catalogue.observe(), {state:'account_saved',accountCount:1,selection:'default'});
+  assert.deepEqual(await fs.readFile(path.join(directory,'skill-accounts',`${accountScope(identity).catalogue}.json`)), before);
+  await catalogue.change({operation:'create',id:crypto.randomUUID(),name:'Second',expectedRevision:2});
+  await catalogue.change({operation:'unbind',id:first,expectedRevision:3});
+  assert.deepEqual(await catalogue.observe(), {state:'account_saved',accountCount:1,selection:'single'});
+  await catalogue.change({operation:'create',id:crypto.randomUUID(),name:'Third',expectedRevision:4});
+  assert.deepEqual(await catalogue.observe(), {state:'selection_required',accountCount:2,selection:'required'});
+});
+
+test('native and encrypted continuation deliver local status beside unchanged authority, with explicit read failures', async t => {
+  const {appendSkillConnectionHints} = await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
+  const {handleToolCall} = await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const {make} = await fixture(t), catalogue = make();
+  await catalogue.change({operation:'create',id:crypto.randomUUID(),name:'Must stay private',expectedRevision:0});
+  const hints = {companyId:company,memberId:member,skills:[{id:identity.skillId,slug:identity.skillId,connectionId:connection}]};
+  const native = {content:[{type:'text',text:'Native authority'}], structuredContent:{effective:{compiledMarkdown:'Pinned rules',skillConnections:hints}}};
+  const original = structuredClone(native);
+  let calls = 0;
+  const observed = await appendSkillConnectionHints(native, {origin:identity.origin,nativeTool:'get_task',observe:async input => {
+    calls++; assert.deepEqual(input, identity); return catalogue.observe();
+  }});
+  assert.equal(calls,1); assert.deepEqual(native,original);
+  assert.equal(observed.structuredContent,native.structuredContent);
+  assert.match(observed.content.at(-1).text,/account_saved, selection=default/u);
+  assert.match(observed.content.at(-1).text,/Authentication: not_checked/u);
+  assert.ok(!JSON.stringify(observed).includes('Must stay private'));
+  const routed = await handleToolCall(identity.origin,'continue_trelio_local_action',{
+    schemaVersion:1,route:'context',parameters:{operation:'native_read',companySlug:'example',nativeTool:'get_agent_instructions',arguments:{companySlug:'example'}},
+  },{localActionOperation:async()=>native,observeSkillAccount:()=>catalogue.observe()});
+  assert.match(routed.content.at(-1).text,/account_saved/u);
+  assert.deepEqual(routed.structuredContent,native.structuredContent);
+  const failed = await appendSkillConnectionHints(native,{origin:identity.origin,nativeTool:'get_task',observe:async()=>{throw Error('private path and credential');}});
+  assert.match(failed.content.at(-1).text,/not_checked, reason=catalogue_read_failed/u);
+  assert.ok(!JSON.stringify(failed).includes('private path'));
+  const refused = {...native,isError:true};
+  assert.equal(await appendSkillConnectionHints(refused,{origin:identity.origin,nativeTool:'get_task',observe:()=>assert.fail()}),refused);
+  assert.equal(await appendSkillConnectionHints(native,{origin:identity.origin,nativeTool:'call_remote_agent_skill_tool',observe:()=>assert.fail()}),native);
+  const untrusted = {content:[],structuredContent:{task:{description:{skillConnections:hints}}}};
+  assert.equal(await appendSkillConnectionHints(untrusted,{origin:identity.origin,nativeTool:'get_task',observe:()=>assert.fail()}),untrusted);
+});
+
+test('fixed native OAuth transport delivers local observations without modifying SDK authority or repeating calls', async () => {
+  const {createHarnessConnection} = await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const hints = {companyId:company,memberId:member,skills:[{id:identity.skillId,slug:identity.skillId,connectionId:connection}]};
+  const layer = {kind:'skill_hints',key:'native-key',sha256:'native-hash',markdown:'Native rules',skillConnections:hints};
+  const native = {content:[{type:'text',text:'Native summary'}],structuredContent:{effectiveInstructions:{layers:[layer]}}};
+  let business = 0, observations = 0;
+  const client = createHarnessConnection({nativeClient:'codex',
+    vault:{read:async()=>({accessToken:'synthetic',expiresAt:Date.now()+60000})},
+    httpJson:async()=>({body:{issuer:'https://trelio.ru',scopes_supported:['mcp:read']}}),
+    httpRequest:async({payload})=>{
+      if(payload.method==='notifications/initialized')return {};
+      if(payload.method==='tools/call')business++;
+      return {message:{jsonrpc:'2.0',id:payload.id,result:payload.method==='initialize'
+        ?{protocolVersion:'2025-03-26'}:native}};
+    },
+    observeAccounts:async scope=>{observations++;assert.equal(scope.origin,'https://trelio.ru');
+      assert.equal(scope.memberId,member);return {state:'account_saved',selection:'single'};},
+  });
+  const result = await client.call('get_task',{});
+  assert.equal(business,1);assert.equal(observations,1);
+  assert.deepEqual(result.structuredContent,native.structuredContent);
+  assert.match(result.content.at(-1).text,/account_saved, selection=single/u);
+  assert.equal(native.content.length,1);
+  await client.close();
+});
+
+test('hydrated company authority retains account selectors and invalidates only their exact local layer', async () => {
+  const {buildLocalScopedEffectiveInstructions} = await import('../host-runtime/scripts/trelio-local-context.mjs');
+  const hints = {companyId:company,memberId:member,skills:[{id:identity.skillId,slug:identity.skillId,connectionId:connection}]};
+  const mirror = {company:{id:company,slug:'example',name:'Example'},viewer:{memberId:member},
+    instructions:{company:{compiledMarkdown:'Hydrated rules',skillConnections:hints}}};
+  const cold = buildLocalScopedEffectiveInstructions(mirror,null);
+  assert.deepEqual(cold.layers[0].skillConnections,hints);
+  const key = cold.layers[0].key;
+  assert.deepEqual(buildLocalScopedEffectiveInstructions(mirror,null,[key]).layers,[]);
+  const changed = structuredClone(mirror);
+  changed.instructions.company.skillConnections.skills[0].connectionId = crypto.randomUUID();
+  const fresh = buildLocalScopedEffectiveInstructions(changed,null,[key]);
+  assert.notEqual(fresh.layers[0].key,key);
+  assert.equal(fresh.layers[0].sha256,cold.layers[0].sha256,'original authority text remains unchanged');
+  assert.deepEqual(fresh.reusedLayerKeys,[]);
+});
