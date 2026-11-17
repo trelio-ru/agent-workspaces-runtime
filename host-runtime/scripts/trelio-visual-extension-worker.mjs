@@ -37,7 +37,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   let windowInventoryReady = false;
   const attached = new Set();
   const renderingTabs = new Set();
-  const guardedTabs = new Set(), documentFailures = new Set();
+  const guardedTabs = new Set(), documentFailures = new Set(), childFrames = new Map();
   let guardUpdate = Promise.resolve(), guardFailed = false;
   let pendingAttachment, pendingFileLink, pendingAudio, pendingUpload;
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
@@ -144,7 +144,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (windowInventoryReady) ownedWindows.add(window.id); else windowChanges.push({ id: window.id, removed: false });
     windowDiagnostic('created');
   });
-  chrome.tabs.onRemoved.addListener((_tabId, info) => { tabBudget.removed(_tabId); httpFailures.delete(_tabId); if (info.isWindowClosing) windowClosing(info.windowId, true); });
+  chrome.tabs.onRemoved.addListener((tabId, info) => {
+    tabBudget.removed(tabId); httpFailures.delete(tabId); documentFailures.delete(tabId); childFrames.delete(tabId);
+    if (info.isWindowClosing) windowClosing(info.windowId, true);
+  });
   // Numeric main-document evidence only: no request/response headers or body,
   // and no URL path/query leaves this adapter. Transport errors have no status.
   chrome.webRequest.onBeforeRequest.addListener(details => { httpFailures.delete(details.tabId); documentFailures.delete(details.tabId); }, { urls: config.matches, types: ['main_frame'] });
@@ -182,6 +185,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const command = (tabId, method, args = {}) => chrome.debugger.sendCommand({ tabId }, method, args);
   chrome.debugger.onDetach.addListener(source => {
     attached.delete(source.tabId); renderingTabs.delete(source.tabId); guardedTabs.delete(source.tabId);
+    childFrames.delete(source.tabId);
     dialogs.delete(source.tabId); dialogGuards.delete(source.tabId); notifyDialogs();
     if (frame?.tabId === source.tabId) frame = undefined;
     if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
@@ -192,6 +196,27 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
+    // Classify only native frame identities from this exact attached tab.
+    // Querying Page.getFrameTree while a Document is paused can wait for the
+    // navigation that Fetch itself has stopped, so never query here. An
+    // unobserved/detached frame retains the existing fail-closed treatment.
+    if (attached.has(source.tabId) && !source.sessionId) {
+      if (method === 'Page.frameAttached' || method === 'Page.frameNavigated' && params.frame?.parentId) {
+        const id = method === 'Page.frameAttached' ? params.frameId : params.frame.id;
+        const parent = method === 'Page.frameAttached' ? params.parentFrameId : params.frame.parentId;
+        if (typeof id === 'string' && id && typeof parent === 'string' && parent && id !== parent) {
+          const known = childFrames.get(source.tabId) ?? new Set();
+          // Keep this inventory bounded even if the page creates many frames.
+          // An ID beyond the bound is unknown and remains fail-closed.
+          if (known.size < 2048) known.add(id);
+          childFrames.set(source.tabId, known);
+        }
+      } else if (method === 'Page.frameNavigated') {
+        childFrames.delete(source.tabId);
+      } else if (method === 'Page.frameDetached') {
+        childFrames.get(source.tabId)?.delete(params.frameId);
+      }
+    }
     if (method === 'Page.javascriptDialogOpening') {
       if (!attached.has(source.tabId)) return;
       frame = undefined; observedFrameId = undefined;
@@ -315,7 +340,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         if (decision !== 'block') {
           await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
         } else {
-          frame = undefined; documentFailures.add(source.tabId);
+          frame = undefined;
+          // Fetch pauses both top-level and embedded Documents on this native
+          // target. Both are refused below; only a positively identified child
+          // may leave the parent readable. Missing native frame evidence must
+          // still fence the tab (e.g. a rejected navigation may leave the old
+          // HTML visually intact rather than commit a Chromium error page).
+          const child = params.resourceType === 'Document' && !source.sessionId
+            && childFrames.get(source.tabId)?.has(params.frameId);
+          if (!child) documentFailures.add(source.tabId);
           await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' });
         }
       })().catch(() => { guardFailed = true; frame = undefined; });

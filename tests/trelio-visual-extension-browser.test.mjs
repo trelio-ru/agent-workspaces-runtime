@@ -736,8 +736,9 @@ test('manual window close and ready save once before unlocking images; crash pre
   }
 });
 
-test('document guard follows headerless redirects and blocks final files including deceptive Location', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 120_000 }, async () => {
+test('document guard follows headerless redirects, blocks final files and isolates rejected subframes', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 120_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-redirect-')));
+  let childRequests = 0;
   const server = http.createServer((request, response) => {
     if (request.url === '/short' || request.url === '/chain') {
       response.writeHead(request.url === '/short' ? 301 : 302, { Location: request.url === '/short' ? '/detail' : '/short' }); response.end(); return;
@@ -746,6 +747,19 @@ test('document guard follows headerless redirects and blocks final files includi
     if (request.url === '/binary-location') { response.writeHead(200, { 'Content-Type': 'application/octet-stream', Location: '/detail' }); response.end('SYNTHETIC_NOT_A_REDIRECT'); return; }
     if (request.url === '/attachment') { response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Disposition': 'attachment; filename=synthetic.html' }); response.end('SYNTHETIC_ATTACHMENT'); return; }
     if (request.url === '/missing-type') { response.end('SYNTHETIC_WITHOUT_CONTENT_TYPE'); return; }
+    if (request.url === '/parent') {
+      response.setHeader('Content-Type', 'text/html');
+      response.end('<!doctype html><body>Readable parent document<iframe hidden src="/blocked-child"></iframe></body>');
+      return;
+    }
+    if (request.url === '/blocked-child') {
+      childRequests++;
+      // Match the native DNR MIME prefix, but fail the exact Fetch guard so
+      // real Chromium delivers a rejected child Document to the extension.
+      response.setHeader('Content-Type', 'text/html-invalid');
+      response.end('SYNTHETIC_UNSUPPORTED_CHILD');
+      return;
+    }
     response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body>Completed synthetic redirect</body>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -759,7 +773,14 @@ test('document guard follows headerless redirects and blocks final files includi
       assert.equal(result.state, 'ready', JSON.stringify({ state: result.state, reason: result.reason }));
       assert.match(result.text, /Completed synthetic redirect/);
     }
-    for (const suffix of ['/json', '/binary-location', '/attachment', '/missing-type']) {
+    const parent = await browser.call('navigate', { url: origin + '/parent' });
+    assert.equal(childRequests, 1, 'Chromium requested the embedded document');
+    assert.equal(parent.state, 'ready', JSON.stringify({ state: parent.state, reason: parent.reason }));
+    assert.match(parent.text, /Readable parent document/u);
+    const read = await browser.call('read-text');
+    assert.equal(read.state, 'ready');
+    assert.match(read.text, /Readable parent document/u);
+    for (const suffix of ['/json', '/binary-location', '/attachment', '/missing-type', '/blocked-child']) {
       const result = await browser.call('navigate', { url: origin + suffix });
       assert.equal(result.state, 'error');
       assert.equal(result.reason, 'document_blocked');

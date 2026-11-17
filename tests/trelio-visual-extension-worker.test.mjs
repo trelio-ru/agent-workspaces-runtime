@@ -103,6 +103,12 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
   };
   if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
   return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates,
+    frameEvent: (method, params) => nativeEvent({ tabId: 1 }, method, params),
+    async rejectDocument(frameId) {
+      nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', { frameId, requestId: frameId, resourceType: 'Document',
+        responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html-invalid' }] });
+      await tick();
+    },
     detach: () => detached({ tabId: 1 }),
     addWindow:id=>windowCreated({id,type:'normal'}), removeWindow:id=>windowRemoved(id),
     disconnect:()=>socket.close(), connections:()=>connections,
@@ -112,6 +118,48 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
 }
+
+test('a blocked child Document invalidates the old frame but allows fresh parent observation', async () => {
+  const worker = await dialogWorker();
+  const before = await worker.dispatch('read-text');
+  assert.equal(before.state, 'ready');
+  worker.frameEvent('Page.frameAttached', { frameId: 'child', parentFrameId: 'main' });
+  const reads = worker.counts().reads;
+  await worker.rejectDocument('child');
+  assert.equal(worker.counts().reads, reads, 'no frame query can stall the refusal of a paused response');
+  assert.deepEqual(worker.nativeCommands.filter(value => value.method.startsWith('Fetch.') && value.method !== 'Fetch.enable'),
+    [{ method: 'Fetch.failRequest', args: { requestId: 'child', errorReason: 'BlockedByClient' } }]);
+  assert.deepEqual(await worker.dispatch('click', { frameId: before.frameId, x: 20, y: 20 }),
+    { state: 'error', reason: 'stale_frame' });
+  for (const operation of ['read-text', 'screenshot']) {
+    const after = await worker.dispatch(operation);
+    assert.equal(after.state, 'ready');
+    assert.notEqual(after.frameId, before.frameId);
+  }
+  assert.equal(worker.counts().clicks, 0);
+});
+
+test('the document guard still fences a blocked root or an unknown frame', async () => {
+  for (const frameId of ['main', 'unknown', 'detached-child', 'previous-document-child']) {
+    const worker = await dialogWorker();
+    assert.equal((await worker.dispatch('read-text')).state, 'ready');
+    if (frameId === 'detached-child') {
+      worker.frameEvent('Page.frameAttached', { frameId, parentFrameId: 'main' });
+      worker.frameEvent('Page.frameDetached', { frameId, reason: 'remove' });
+    }
+    if (frameId === 'previous-document-child') {
+      worker.frameEvent('Page.frameAttached', { frameId, parentFrameId: 'main' });
+      worker.frameEvent('Page.frameNavigated', { frame: { id: 'main' } });
+    }
+    await worker.rejectDocument(frameId);
+    worker.frameEvent('Page.frameAttached', { frameId: 'current-child', parentFrameId: 'main' });
+    await worker.rejectDocument('current-child');
+    for (const operation of ['read-text', 'screenshot'])
+      assert.deepEqual(await worker.dispatch(operation), { state: 'error', reason: 'document_blocked' });
+    assert.deepEqual(worker.nativeCommands.filter(value => value.method === 'Fetch.failRequest'),
+      [frameId, 'current-child'].map(requestId => ({ method: 'Fetch.failRequest', args: { requestId, errorReason: 'BlockedByClient' } })));
+  }
+});
 
 test('owned renderer activation precedes provider navigation and is not repeated by observations or input', async () => {
   let activate, calls = 0;

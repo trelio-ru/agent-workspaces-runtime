@@ -696,7 +696,10 @@ publication tooling также остаются вне этого публичн
   без чтения body/headers в MCP. Headerless HTTP redirects разрешаются по status;
   конечный main document требует HTML и не может стать download. MIME exception
   DNR даётся exact tab только после включения Fetch; новые popups и subframes
-  сохраняют строгий DNR default. Служебная new-tab Windows/Linux переводится в
+  сохраняют строгий DNR default. Отказ подтверждённого дочернего фрейма закрывает
+  его ответ и отзывает прежний токен, но не блокирует свежее чтение родителя;
+  основной и неопознанный фреймы закрыты по [контракту](docs/visual-browser.md).
+  Служебная new-tab Windows/Linux переводится в
   about:blank до attach; bounded native metadata wait не делает HTTP.
   Detach отзывает exception и блокирует input
   до завершения policy write. Cookie API отдельно
