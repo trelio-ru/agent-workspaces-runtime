@@ -118,7 +118,7 @@ test('native discussion prompt uses only task/comment locators and never a mater
   assert.match(input,/restricted native discussion pass/u);assert.match(input,/replyCommentId/u);
   assert.match(input,/Do not create\/read a Workspace or WORK\.md/u);
   assert.doesNotMatch(input,/Use the assistant-task-worker skill|workStatePath|Save confirmed progress/u);
-  assert.doesNotMatch(input,/use_assistant_browser/u);
+  assert.doesNotMatch(input,/use_assistant_browser|Before carrying a technical blocker forward/u);
 });
 const nativeRpc = (handler, executionPolicy=()=>null) => (_executable, args, options) => {
   const controlled=args.includes('--disable');
@@ -408,6 +408,11 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
   assert.ok(input.includes('get_assistant_owner_question'));
   assert.match(input,/This is a scheduled task pass/);
+  assert.match(input,/Apply the complete assistant-task-worker skill and work-state reference supplied in this turn's developer instructions/);
+  assert.match(input,/Before carrying a technical blocker forward/);
+  assert.match(input,/current relevant read-only tool/);
+  assert.match(input,/Unknown external mutations remain read-back-only/);
+  assert.doesNotMatch(input,/Use the assistant-task-worker skill and its work-state reference/);
   assert.match(input,/unchanged blocker.*noChange.*without a new Run\/worklog/);
   assert.match(input,/only the exact recovery references needed for safe continuation/);
   assert.match(input,/use_assistant_browser/u);

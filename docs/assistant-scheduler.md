@@ -224,6 +224,17 @@ decisions, changed blockers and deliverables remain substantive saves. Save with
 ordinary company task data, not AGENTS, a local transcript or new authority. The
 coordinator does not read/cache the Markdown or store goal text in SQLite.
 
+An ordinary full-task pass rechecks a retained technical blocker through the
+current relevant read-only route before carrying it forward as waiting/noChange.
+A previous question or WORK.md claim is historical evidence, not current tool
+availability. A successful guide/file read resumes the first unfinished authorized
+step; an actual access, login, setup or owner-decision blocker remains intact.
+Unknown external effects still require read-back, never replay. The host selects
+this instruction from the native task profile, not from source prose. It cannot
+deterministically interpret a natural-language blocker or choose its provider
+operation, so that semantic assessment stays with the model. Restricted save,
+intake, discussion and readiness modes do not receive this ordinary-work step.
+
 Waiting finishes a pass, not the goal. The task worker keeps a recurring check,
 returns to the same chat on permitted events, and verifies real send/read/schedule
 outcomes before progressing. Fulfilment or authorized cancellation stops only
@@ -354,8 +365,18 @@ of a started pass. Its original uncertain outcome retains the no-replay fence.
 The owning process must see both `use_assistant_browser` and
 `use_assistant_workspace_files` in the native assistant catalogue. The full
 assistant role and work-state reference are loaded from the exact running plugin
-and passed as private turn instructions. They do not change the installed skill
-or other chats.
+and passed as private turn instructions, each labelled with its exact relative
+platform-document name. The current execution adapter precedes both unchanged
+complete documents and explains that their platform-file read is already
+satisfied by this delivery. Fresh company and pinned Run authority remain
+independent. Disabled Code Mode is the intentional isolation policy, not evidence
+that direct MCP or signed guides are unavailable. Ordinary task prompts apply
+these delivered documents instead of asking to open them again. They do not
+change the installed skill or other chats. The native regression resumes the
+same persisted chat containing a synthetic stale blocker in a new owned process,
+checks the actual model request for complete documents/current guidance and
+executes a direct MCP read without changing configuration. That fixture proves
+delivery and isolation, not autonomous business success with a live model.
 
 Read its fixed command schema with
 `get_trelio_tool_contract(name=use_assistant_workspace_files)` through the

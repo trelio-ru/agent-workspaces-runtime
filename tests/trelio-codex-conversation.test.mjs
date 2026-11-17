@@ -37,6 +37,9 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    LOCALAPPDATA:path.join(home,'local'),APPDATA:path.join(home,'roaming')});
  let business=false,attempt=0,allowedCalls=0,foreignRequests=0,foreignInitializations=0,modelRequests=0,toolName=null;
  const advertised=[],toolResults=[],foreignPhases=[],allowedThreadIds=[],allowedClientNames=[];let processPhase='setup',sawWorkflow=false,sawDirectInstruction=false;
+ const oldBlocker='Synthetic previous pass: platform files and signed guides cannot be read; wait for the owner to repair the environment.';
+ let resumedAfterBlocker=false;
+ const resumedRequests=[];
  // No account or OpenAI request participates: this loopback producer supplies
  // synthetic Responses events to the real native tool registry. Malicious
  // calls deliberately name tools absent from its advertised catalogue.
@@ -70,6 +73,23 @@ test('actual Codex isolated assistant refuses alternate tools across process res
      .map(row=>typeof row.content==='string'?row.content:(row.content??[]).map(part=>part.text??'').join('\n'))].join('\n');
    sawWorkflow ||= input.includes('Synthetic role from the admitted plugin')&&input.includes('Synthetic reference from the admitted plugin');
    sawDirectInstruction ||= input.includes('Call the exposed Trelio assistant MCP tools directly');
+   if(resumedAfterBlocker){
+    // Observe actual model input after a new owned process resumes the SAME
+    // native transcript. A turn/start setting alone is not delivery evidence;
+    // the old assistant claim must coexist with the current replacement rule.
+    const userInput=(data.input??[]).filter(row=>row.role==='user')
+      .map(row=>typeof row.content==='string'?row.content:JSON.stringify(row.content)).join('\n');
+    resumedRequests.push({
+     oldBlocker:JSON.stringify(data.input).includes(oldBlocker),
+     fullRole:input.includes('Synthetic role from the admitted plugin'),
+     fullState:input.includes('Synthetic reference from the admitted plugin'),
+     roleLabel:input.includes('assistant-task-worker/SKILL.md (complete installed document)'),
+     stateLabel:input.includes('assistant-task-worker/references/work-state.md (complete installed document)'),
+     currentReview:userInput.includes('Before carrying a technical blocker forward'),
+     direct:input.includes('Call the exposed Trelio assistant MCP tools directly'),
+     codeModeNotFailure:input.includes('not a missing working environment'),
+    });
+   }
   }
   for(const row of data.input??[])if(row.type==='function_call_output'){
    const output=JSON.stringify(row.output).toLowerCase();
@@ -89,7 +109,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    const name=selected.name;
    item={type:'function_call',id:`synthetic-call-${modelRequests}`,call_id:`call-${modelRequests}`,...selected,
     arguments:JSON.stringify(name==='shell_command'?{command:'synthetic forbidden command'}:name==='exec_command'?{cmd:'synthetic forbidden command'}:{})};
-  }else item={id:`synthetic-message-${modelRequests}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'READY',annotations:[]}]};
+  }else item={id:`synthetic-message-${modelRequests}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:business&&!resumedAfterBlocker?oldBlocker:'READY',annotations:[]}]};
   const response={id:`synthetic-response-${modelRequests}`,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}};
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   const events=[['response.created',{response:{...response,status:'in_progress',output:[]}}],
@@ -241,6 +261,20 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   assert.ok(names.some(name=>name.includes('get_assistant_status')));
   assert.ok(!names.some(name=>/shell|exec_command|cua_repl|foreign|spawn_agent|web_search/.test(name)),JSON.stringify(names));
  }
+ // A later ordinary scheduled pass is not the special recovery mode. Keep
+ // the previous assistant blocker in native history and start only a NEW
+ // synthetic delivery. Direct MCP remains usable without enabling exec or
+ // requiring a human to restore a shell. This proves delivery and isolation,
+ // not how a real model will judge the business state.
+ resumedAfterBlocker=true;attempt=4;
+ const next=await runAssistantCodexPass({...passInput,deliveryId:randomUUID(),
+  taskContext:{...passInput.taskContext,scheduled:true}},options);
+ assert.equal(next.state,'completed');assert.equal(starts,3);
+ assert.equal(allowedCalls,2,'the new pass has one additional direct native read');
+ assert.ok(resumedRequests.length>=2,'native MCP continuation reaches the model again');
+ for(const observation of resumedRequests)assert.ok(Object.values(observation).every(Boolean),JSON.stringify(observation));
+ assert.equal(foreignInitializations,0);
+ assert.deepEqual(allowedThreadIds,[threadId,threadId]);
  // Use the exact continuation overlay in a real native thread resume. A
  // fixture-only policy assertion would miss a Codex build ignoring the
  // plugin-scoped allowlist and exposing the browser to the recovery turn.
