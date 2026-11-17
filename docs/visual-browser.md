@@ -281,7 +281,7 @@ assertions remain unchanged.
 | `owner_read`, `owner_prepare`, `owner_publish`, `control_server`, `control_listen`, `worker_spawn` | `startup_failed`: отказ private descriptor/worker; нет оснований менять ACL или удалять claim |
 | `worker_node` | `node_unavailable`: не найден совместимый Node под прежней signing policy |
 | `worker_request` | `worker_unavailable`: не получен корректный ответ; не доказывает, что worker или браузер не запускался |
-| `dependencies`, `dependency_install`, `dependency_load` | `startup_failed`, `dependency_install_failed`, `dependency_load_failed`: общая подготовка, установка либо загрузка native modules |
+| `dependencies`, `dependency_install`, `dependency_load` | `startup_failed`, `npm_unavailable`, `dependency_install_failed`, `dependency_load_failed`: общая подготовка, отсутствие доступного npm entrypoint, установка либо загрузка native modules |
 | `storage_read`, `storage_prepare` | `storage_unavailable`, `storage_corrupt`: недоступное либо повреждённое protected state |
 | `profile_restore`, `profile_prepare`, `extension_prepare` | `startup_failed`, `storage_unavailable`, `storage_corrupt`: восстановление/подготовка; прежний snapshot не перезаписывается |
 | `browser_install` | `browser_install_failed`: отказ подготовки managed Chromium |
@@ -297,6 +297,14 @@ ETIMEDOUT|ECONNREFUSED|ECONNRESET|ERR_DLOPEN_FAILED|ABORT_ERR`. `exitCode` – �
 `SIGKILL|SIGTERM|SIGTRAP|SIGABRT|SIGSEGV`. Неподдержанный code/message не
 разбирается: остаётся известный этап без придуманной причины. Вложенный этап
 сохраняется только у host-owned typed error, не у похожего arbitrary объекта.
+
+`dependency_install/npm_unavailable` означает точный отказ общего npm resolver
+до запуска installer child. Его выдаёт только настоящий host-owned
+`BrowserSessionError(BROWSER_SESSION_NPM_REQUIRED)`; похожий arbitrary code,
+stderr и текст исключения не классифицируются. Legacy `bootstrap_failed`
+сохраняется. Ненулевой npm exit по-прежнему возвращает
+`dependency_install_failed` с observed exit/signal, без raw output. Ни одна из
+этих причин не разрешает автоматический повтор setup или credential reset.
 
 Первый startup отказ остаётся в том же worker и возвращается последующими
 `status`/`wait` и content-вызовами. Они не перезапускают browser/install/input,
@@ -412,6 +420,12 @@ lease, frame TTL, manual gate и origin. Ordinary read, ввод и открыт
 Exact Playwright distribution manager загружает managed Chromium. OS keyring и
 WebSocket transport также закреплены отдельным npm lockfile; lifecycle scripts
 не исполняются. Versioned candidate cache атомарно повышается после read-back.
+Worker и installer сохраняют общий fixed-root PATH signed skill через
+`buildAgentSkillRuntimePath`: отдельный desktop Node без npm не скрывает
+установленный Homebrew/local npm. Windows сохраняет case-insensitive
+`ProgramW6432`/`ProgramFiles`/`ProgramFiles(x86)`, включая другие диски.
+Это прежние доверенные OS locations, без ambient PATH/config/credential
+inheritance, shell wrappers или сканирования произвольных каталогов.
 Обновление browser pin проходит OS tests и signed host release; администратору
 компании не требуется обслуживать собственный browser binary. Системные
 Opera/Chrome и пользовательские профили автоматически не импортируются.

@@ -6,9 +6,11 @@ import { crc32, deflateSync } from 'node:zlib';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { visualFrame, parseVisualSkillOutput, visualStatus, validateVisualResult, normalizeBrowserVisualResult,
-  visualStartupDiagnostic, visualStartupPhase } from '../host-runtime/scripts/trelio-visual-result.mjs';
+  visualStartupDiagnostic, visualStartupPhase, visualStartupReason } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { visualSessionBinding, createVisualControlServer, runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { prepareVisualPrivateDirectory, runVisualChild, visualChildEnvironment, loadVisualDependencies,
   VISUAL_PLAYWRIGHT_VERSION, VISUAL_KEYRING_VERSION, VISUAL_WS_VERSION } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
@@ -16,14 +18,16 @@ import { writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.m
 import { handleToolCall } from '../host-runtime/scripts/trelio-remote-mcp.mjs';
 import { handleTrelioWorkspaceActionOperation } from '../host-runtime/scripts/trelio-local-context.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
+import { BrowserSessionError, resolveNpmInvocation } from '../host-runtime/scripts/trelio-browser-session.mjs';
+import { nodeChildEnvironment } from '../host-runtime/scripts/trelio-local-path.mjs';
 
 test('closed startup diagnostics cross actual worker HTTP and typed MCP unchanged without raw output fallback', async () => {
-  const diagnostic = { stage: 'browser_spawn', code: 'browser_exited', exitCode: 1, signal: 'SIGTERM' };
+  let diagnostic = { stage: 'browser_spawn', code: 'browser_exited', exitCode: 1, signal: 'SIGTERM' };
   const server = createVisualControlServer({ token: 'a'.repeat(64), dispatch: async () => visualStatus('error', 'bootstrap_failed', { diagnostic }) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const input = { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: randomUUID(), skillId: 'synthetic-visual-fixture', releaseId: randomUUID(), arguments: ['status'] } };
-    const result = await handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
+    const read = () => handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
       workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, {
         runBridge: async () => {
           const response = await fetch(`http://127.0.0.1:${server.address().port}/command`, { method: 'POST',
@@ -33,9 +37,13 @@ test('closed startup diagnostics cross actual worker HTTP and typed MCP unchange
         },
       }),
     });
-    assert.equal(result.isError, true);
-    assert.deepEqual(JSON.parse(result.content[0].text).diagnostic, diagnostic);
-    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_STDERR|stdout|Bearer/);
+    for (const value of [diagnostic, { stage: 'dependency_install', code: 'npm_unavailable' }]) {
+      diagnostic = value;
+      const result = await read();
+      assert.equal(result.isError, true);
+      assert.deepEqual(JSON.parse(result.content[0].text).diagnostic, diagnostic);
+      assert.doesNotMatch(JSON.stringify(result), /PRIVATE_STDERR|stdout|Bearer/);
+    }
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
 
@@ -115,6 +123,107 @@ test('headed child retains the X11 authorization-file path while dropping loader
     const env = visualChildEnvironment();
     assert.equal(env.XAUTHORITY, '/synthetic/Xauthority'); assert.equal(env.NODE_OPTIONS, undefined); assert.equal(env.TRELIO_SYNTHETIC_TOKEN, undefined);
   } finally { for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+});
+
+test('visual worker keeps standalone npm discoverable under the common trusted PATH policy', { skip: process.platform === 'win32' }, () => {
+  // The desktop's Node has no adjacent npm. Resolving a synthetic installation
+  // through the actual worker environment reproduces the second sanitization
+  // boundary, which formerly removed Homebrew/local roots after skill admission.
+  const env = visualChildEnvironment();
+  const hostNode = '/synthetic/desktop-host/node';
+  for (const bin of ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin']) {
+    const link = path.posix.join(bin, 'npm');
+    const npmCli = '/synthetic/standalone/lib/node_modules/npm/bin/npm-cli.js';
+    assert.deepEqual(resolveNpmInvocation({ platform: 'darwin', nodeExecutable: hostNode,
+      environment: env, exists: candidate => candidate === link,
+      realpath: () => npmCli }), { executable: hostNode, npmCliPath: npmCli });
+  }
+});
+
+test('real isolated visual worker installs once and atomically reuses the exact synthetic dependencies', { timeout: 30_000 }, async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-npm-')));
+  const hostNode = path.join(directory, 'Desktop Host', process.platform === 'win32' ? 'node.exe' : 'node');
+  const programFiles = path.join(directory, 'Program Files');
+  const npmCli = path.join(process.platform === 'win32' ? path.join(programFiles, 'nodejs') : path.dirname(hostNode),
+    'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const root = path.join(directory, 'Browser Dependencies'), journal = path.join(directory, 'installs');
+  try {
+    await fs.mkdir(path.dirname(hostNode), { recursive: true });
+    await fs.copyFile(process.execPath, hostNode); await fs.chmod(hostNode, 0o700);
+    await fs.mkdir(path.dirname(npmCli), { recursive: true });
+    // No network, native vault or browser: the real npm child checks its argv
+    // and emits only the exact synthetic modules required by the loader. This
+    // covers worker sanitization -> resolver -> spawn -> version read-back ->
+    // atomic candidate promotion, rather than merely asserting a PATH string.
+    await fs.writeFile(npmCli, `const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+      const argv=process.argv.slice(2);assert.equal(argv[0],'ci');
+      for(const flag of ['--ignore-scripts','--no-audit','--no-fund'])assert.ok(argv.includes(flag));
+      assert.equal(process.env.NODE_OPTIONS,undefined);assert.equal(process.env.TRELIO_SYNTHETIC_TOKEN,undefined);
+      const root=argv[argv.indexOf('--prefix')+1],pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json')));
+      assert.ok(fs.existsSync(path.join(root,'package-lock.json')));
+      fs.appendFileSync(${JSON.stringify(journal)},'install\\n');
+      for(const [name,version] of Object.entries(pkg.dependencies)){
+        const target=path.join(root,'node_modules',name);fs.mkdirSync(target,{recursive:true});
+        fs.writeFileSync(path.join(target,'package.json'),JSON.stringify({version}));
+        fs.writeFileSync(path.join(target,'index.js'),'module.exports={chromium:{fixture:true},AsyncEntry:class{},WebSocketServer:class{}};');
+      }`);
+    const bootstrap = pathToFileURL(path.resolve('host-runtime/scripts/trelio-visual-bootstrap.mjs')).href;
+    const entry = path.join(directory, 'worker.mjs');
+    await fs.writeFile(entry, `import assert from 'node:assert/strict';import fs from 'node:fs/promises';import path from 'node:path';
+      import {visualChildEnvironment,loadVisualDependencies} from ${JSON.stringify(bootstrap)};
+      process.env.NODE_OPTIONS='PRIVATE_LOADER_CANARY';process.env.TRELIO_SYNTHETIC_TOKEN='PRIVATE_FIXTURE';
+      const env=visualChildEnvironment();for(const key of Object.keys(process.env))delete process.env[key];Object.assign(process.env,env);
+      const root=${JSON.stringify(root)};
+      for(let i=0;i<2;i++){const deps=await loadVisualDependencies({root});
+        assert.equal(deps.chromium.fixture,true);assert.equal(typeof deps.AsyncEntry,'function');assert.equal(typeof deps.WebSocketServer,'function');}
+      assert.equal(await fs.readFile(${JSON.stringify(journal)},'utf8'),'install\\n');
+      assert.deepEqual((await fs.readdir(path.dirname(root))).filter(name=>name.startsWith(path.basename(root)+'.candidate-')),[]);
+      console.log(JSON.stringify({loaded:true,installs:1}));`);
+    const env = { ...visualChildEnvironment(), PATH: path.dirname(hostNode), HOME: directory, USERPROFILE: directory,
+      APPDATA: directory, LOCALAPPDATA: directory, PROGRAMW6432: programFiles, PROGRAMFILES: programFiles, 'PROGRAMFILES(X86)': programFiles };
+    const result = await promisify(execFile)(hostNode, [entry], { env: nodeChildEnvironment(env, hostNode),
+      cwd: directory, encoding: 'utf8', shell: false, windowsHide: true, timeout: 25_000, maxBuffer: 64 * 1024 });
+    assert.deepEqual(JSON.parse(result.stdout), { loaded: true, installs: 1 });
+    assert.equal(result.stderr, '');
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('visual worker preserves Windows npm installation roots without broad environment inheritance', () => {
+  const names = ['PROGRAMW6432', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PATH', 'NODE_OPTIONS', 'TRELIO_SYNTHETIC_TOKEN'];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    Object.assign(process.env, { PROGRAMW6432: 'D:\\Program Files', PROGRAMFILES: 'E:\\Program Files',
+      'PROGRAMFILES(X86)': 'F:\\Program Files (x86)', PATH: 'PRIVATE_UNTRUSTED_PATH',
+      NODE_OPTIONS: '--synthetic-loader', TRELIO_SYNTHETIC_TOKEN: 'PRIVATE_FIXTURE' });
+    const env = visualChildEnvironment();
+    for (const name of names.slice(0, 3)) {
+      const npmCli = path.win32.join(process.env[name], 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+      assert.equal(env[name], process.env[name]);
+      assert.deepEqual(resolveNpmInvocation({ platform: 'win32', nodeExecutable: 'C:\\Desktop Host\\node.exe',
+        environment: env, exists: candidate => candidate === npmCli,
+        realpath: candidate => candidate }), { executable: 'C:\\Desktop Host\\node.exe', npmCliPath: npmCli });
+    }
+    assert.doesNotMatch(env.PATH, /PRIVATE_UNTRUSTED_PATH/);
+    assert.equal(env.NODE_OPTIONS, undefined); assert.equal(env.TRELIO_SYNTHETIC_TOKEN, undefined);
+  } finally { for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+});
+
+test('only a genuine missing-npm refusal gains the closed startup cause', async () => {
+  let error;
+  try { resolveNpmInvocation({ exists: () => false }); } catch (value) { error = value; }
+  assert.ok(error instanceof BrowserSessionError);
+  error.message = 'PRIVATE_INSTALL_PATH';
+  const diagnostic = { stage: 'dependency_install', code: 'npm_unavailable' };
+  let failure;
+  try { await visualStartupPhase('dependency_install', () => { throw error; }, 'dependency_install_failed'); }
+  catch (value) { failure = value; }
+  assert.deepEqual(visualStartupDiagnostic('dependencies', undefined, failure), diagnostic);
+  assert.equal(visualStartupReason(diagnostic), 'bootstrap_failed');
+  assert.deepEqual(parseVisualSkillOutput(JSON.stringify(visualStatus('error', 'bootstrap_failed', { diagnostic }))).diagnostic, diagnostic);
+  assert.doesNotMatch(failure.message, /PRIVATE_INSTALL_PATH/);
+  assert.deepEqual(visualStartupDiagnostic('dependency_install', 'dependency_install_failed',
+    Object.assign(new Error('PRIVATE'), { code: 'BROWSER_SESSION_NPM_REQUIRED' })),
+  { stage: 'dependency_install', code: 'dependency_install_failed' });
 });
 
 test('full visual payload crosses the real typed action handler as an image, not truncated stdout', async () => {

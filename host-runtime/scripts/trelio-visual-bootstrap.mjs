@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { readFile, copyFile, lstat, mkdtemp, rename, rm, access, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { browserCacheHome, resolveNpmInvocation } from './trelio-browser-session.mjs';
-import { ensurePrivateDirectory } from './trelio-workspace.mjs';
+import { buildAgentSkillRuntimePath, ensurePrivateDirectory } from './trelio-workspace.mjs';
 import { visualStartupDiagnostic, visualStartupFault, visualStartupPhase } from './trelio-visual-result.mjs';
 import { nodeChildEnvironment } from './trelio-local-path.mjs';
 
@@ -20,9 +20,19 @@ export function visualChildEnvironment(extra = {}) {
   // XAUTHORITY is the desktop's cookie-file path, not the cookie value. Xvfb
   // and X11 desktops require it alongside DISPLAY; dropping it makes an
   // otherwise sandboxed headed Chromium fail before extension bootstrap.
-  const names = ['HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'SystemRoot', 'SYSTEMROOT', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
-  const env = Object.fromEntries(names.filter(name => process.env[name]).map(name => [name, process.env[name]]));
-  env.PATH = [path.dirname(process.execPath), ...(process.platform === 'win32' ? [path.join(env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows', 'System32')] : ['/usr/bin', '/bin', '/usr/sbin', '/sbin'])].join(path.delimiter);
+  const names = new Set(['HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'SYSTEMROOT', 'PROGRAMW6432', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS']);
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const name = process.platform === 'win32' ? key.toUpperCase() : key;
+    if (names.has(name) && value) env[name] = value;
+  }
+  // A detached worker sanitizes the environment AGAIN after ordinary skill
+  // admission. Reuse the same fixed executable roots: rebuilding a shorter
+  // PATH here hid standalone Homebrew/local npm from a desktop's npm-less Node.
+  // Windows npm discovery also needs the original installation-root metadata,
+  // including non-C: drives and native/x86 layouts. These are locations only;
+  // no ambient PATH, npm config, loader hooks or credentials are inherited.
+  env.PATH = buildAgentSkillRuntimePath(env);
   return { ...env, ...extra };
 }
 

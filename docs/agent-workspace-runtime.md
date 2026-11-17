@@ -1160,6 +1160,14 @@ macOS in-memory AX fixture компилирует production walk/resolver/readi
 npm, а окружение подписанного навыка сохраняет очищенный PATH. Наличие
 standalone Node/npm не требует добавления его каталога в PATH навыка.
 
+Detached visual worker и его installer используют тот же
+`buildAgentSkillRuntimePath`, что исходный signed skill: fixed Homebrew/local/OS
+roots остаются доступными и при отдельном desktop Node без npm. Второй
+sanitization boundary не заменяет их урезанным PATH. `ProgramW6432`,
+`ProgramFiles` и `ProgramFiles(x86)` передаются как OS location metadata с
+нормализацией регистра на Windows; non-default drives сохраняются. Ambient
+PATH, npm config, loader hooks и credentials при этом не наследуются.
+
 Поиск проверяет npm рядом с текущим Node, допустимые absolute PATH layouts и
 на Unix фиксированную realpath-ссылку `~/.local/bin/npm`. Windows дополнительно
 проверяет `nodejs\node_modules\npm\bin\npm-cli.js` под absolute installation
@@ -1181,6 +1189,11 @@ synthetic `npm-cli.js` в каталоге с пробелами: проверя
 и готовность установленного synthetic Playwright без сети и provider login.
 Generic исправление совместимо с прежним browser-session ABI и не требует
 новой версии provider либо plugin; доставка происходит signed runtime release.
+Visual transport suite дополнительно проходит настоящий изолированный worker и
+synthetic npm child: exact lockfile/argv, загрузка всех трёх модулей, atomic
+promotion, cleanup и повторное использование без второй установки. Сети,
+аккаунта, vault и browser login в этом fixture нет. Unix fixed-root discovery и
+Windows installation metadata проверяются отдельно от native OS acceptance.
 
 <a id="caller-browser-controller"></a>
 

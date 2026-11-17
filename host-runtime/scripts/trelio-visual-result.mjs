@@ -2,7 +2,7 @@ import { validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import path from 'node:path';
-import { BROWSER_MAIL_REQUEST_KIND, parseBrowserMailHandle } from './trelio-browser-session.mjs';
+import { BROWSER_MAIL_REQUEST_KIND, BrowserSessionError, parseBrowserMailHandle } from './trelio-browser-session.mjs';
 import { ProcessDiagnosticError, PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 // Keep path-only validation at the pure MCP boundary; file IO belongs to the
 // existing private browser attachment lifecycle, never a model projection.
@@ -61,7 +61,7 @@ const startupStages = new Set(['owner_read', 'owner_prepare', 'owner_publish', '
   'worker_request', 'dependencies', 'dependency_install', 'dependency_load', 'storage_read', 'storage_prepare',
   'profile_restore', 'profile_prepare', 'extension_prepare', 'browser_install', 'browser_spawn',
   'extension_connect', 'extension_policy', 'extension_auth', 'extension_window']);
-const startupCodes = new Set(['startup_failed', 'node_unavailable', 'dependency_install_failed', 'dependency_load_failed',
+const startupCodes = new Set(['startup_failed', 'node_unavailable', 'npm_unavailable', 'dependency_install_failed', 'dependency_load_failed',
   'storage_unavailable', 'storage_corrupt', 'browser_install_failed', 'browser_spawn_failed', 'browser_exited',
   'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed', 'worker_unavailable']);
 const startupCauses = new Set(['EACCES', 'EPERM', 'ENOENT', 'EIO', 'EBUSY', 'ENOSPC', 'ENOTDIR', 'EEXIST',
@@ -87,7 +87,11 @@ export function visualStartupDiagnostic(stage, code = startupStageCodes[stage] |
   // worker phase. Only errors created by this module can carry that provenance;
   // an arbitrary object with a `diagnostic` property is never trusted.
   if (error instanceof VisualStartupError) return validateVisualStartupDiagnostic(error.diagnostic);
-  if (error?.code === 'VISUAL_STORAGE_CORRUPT') code = 'storage_corrupt';
+  // Discovery can fail before an installer child exists, so an absent exitCode
+  // is not an npm install failure. Preserve this genuine host-owned refusal as
+  // a closed cause; never infer it from stderr, exception prose or a lookalike.
+  if (stage === 'dependency_install' && error instanceof BrowserSessionError && error.code === 'BROWSER_SESSION_NPM_REQUIRED') code = 'npm_unavailable';
+  else if (error?.code === 'VISUAL_STORAGE_CORRUPT') code = 'storage_corrupt';
   else if (['VISUAL_STORAGE_UNAVAILABLE', 'VISUAL_STORAGE_UNSAFE'].includes(error?.code)) code = 'storage_unavailable';
   return validateVisualStartupDiagnostic({ stage, code,
     ...(startupCauses.has(error?.code) ? { causeCode: error.code } : {}),
@@ -104,7 +108,7 @@ class VisualStartupError extends Error {
 
 export const visualStartupFault = diagnostic => new VisualStartupError(diagnostic);
 export const visualStartupReason = diagnostic => ['storage_corrupt', 'storage_unavailable'].includes(diagnostic.code) ? 'storage_unavailable'
-    : ['node_unavailable', 'dependency_install_failed', 'dependency_load_failed', 'browser_install_failed',
+    : ['node_unavailable', 'npm_unavailable', 'dependency_install_failed', 'dependency_load_failed', 'browser_install_failed',
       'browser_spawn_failed', 'browser_exited', 'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed'].includes(diagnostic.code)
       ? 'bootstrap_failed' : 'operation_failed';
 
