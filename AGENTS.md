@@ -682,7 +682,8 @@ publication tooling также остаются вне этого публичн
   Его отдельная input copy живёт до native settle, чтобы caller cleanup не менял
   ещё выполняющуюся запись OS. Secret delivery идёт только после выбора Node.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
-  Debugger adapter имеет только fixed Page/Input и response-only Fetch guard;
+  Debugger adapter имеет fixed Page/Input, единственный постоянный
+  Emulation.setFocusEmulationEnabled(true) для owned work target и response-only Fetch guard;
   отдельный reviewed file-button click временно маршрутизирует native Document
   GET на Request stage по [контракту вложений](docs/visual-browser.md#входящие-вложения),
   без чтения request headers/body, XHR или POST replay. В остальном guard остаётся response-only,
@@ -792,6 +793,14 @@ publication tooling также остаются вне этого публичн
   failed request, without changing native execution, deadlines or replay rules.
   Owned headed Windows Chromium disables native compositor occlusion and
   selects the pinned Playwright fresh-surface capture path per process.
+  Owned work attachments also pin the renderer's capture/visibility handle
+  through the SAME fixed focus-emulation method used by pinned Playwright.
+  A successful screenshot has only a temporary capturer and does not prove the
+  next wheel can receive its visual-state commit. Never focus/restore OS windows,
+  toggle per input, replay a wheel or extend its clock. Manual startup omits
+  emulation; native detach releases it, and activation refusal fences work.
+  The headed native regression must retain one wheel, an actual scroll, stale
+  frame refusal and an unchanged minimized own window on every supported OS.
   Keep selected-tab, credential, focus, sandbox, presentation and no-replay
   guards; the same three real native two-owner lifecycles gate this change.
   Protected-store init/DACL hardening shares that account transaction; Windows private-path validation is a write and must not race another owner's publication.

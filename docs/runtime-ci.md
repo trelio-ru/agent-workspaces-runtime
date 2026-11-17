@@ -210,6 +210,15 @@ and restart without replay. Native input/success assertions remain unchanged.
 The parallel native fixture retains the original post-sibling scroll response
 and closed pending phase, distinguishing wheel ACK from capture without extra
 input, observation or retries. Passing another lifecycle never erases a failure.
+The headed extension suite also forces one fresh owned window into minimized
+state. Its screenshot must succeed, one wheel must actually scroll the document,
+the synthetic receiver must observe exactly one wheel, the spent frame must
+refuse, and the native window must remain minimized. This deterministic case
+covers the compositor visual-state wait independently of hosted focus timing;
+it neither replaces the three two-owner lifecycles nor weakens their clocks.
+Materialized-worker tests additionally cover fixed renderer activation before
+navigation, manual detach/re-entry, native detach, fail-closed activation and
+production refusal of the fixture-only window controls.
 
 The dialog fixture uses the unique rendered text hit target on a shifted
 layout, rather than a guessed offset. Both text and image still make one

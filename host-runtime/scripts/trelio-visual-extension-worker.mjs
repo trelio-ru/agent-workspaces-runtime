@@ -36,6 +36,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const ownedWindows = new Set(), windowChanges = [];
   let windowInventoryReady = false;
   const attached = new Set();
+  const renderingTabs = new Set();
   const guardedTabs = new Set(), documentFailures = new Set();
   let guardUpdate = Promise.resolve(), guardFailed = false;
   let pendingAttachment, pendingFileLink, pendingAudio, pendingUpload;
@@ -180,7 +181,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   });
   const command = (tabId, method, args = {}) => chrome.debugger.sendCommand({ tabId }, method, args);
   chrome.debugger.onDetach.addListener(source => {
-    attached.delete(source.tabId); guardedTabs.delete(source.tabId);
+    attached.delete(source.tabId); renderingTabs.delete(source.tabId); guardedTabs.delete(source.tabId);
     dialogs.delete(source.tabId); dialogGuards.delete(source.tabId); notifyDialogs();
     if (frame?.tabId === source.tabId) frame = undefined;
     if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
@@ -432,7 +433,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
   }
   async function attach(tabId) {
-    if (attached.has(tabId)) return;
+    if (attached.has(tabId)) { await keepRendering(tabId); return; }
     await chrome.debugger.attach({ tabId }, '1.3');
     attached.add(tabId);
     // Do not enable Runtime/Debugger/Network or inspect a page's source. The
@@ -449,6 +450,22 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     guardedTabs.add(tabId);
     guardUpdate = guardUpdate.then(() => installRules());
     try { await guardUpdate; } catch (error) { guardFailed = true; throw error; }
+    await keepRendering(tabId);
+  }
+  async function keepRendering(tabId) {
+    if (manual || renderingTabs.has(tabId)) return;
+    // A screenshot temporarily increments Chromium's capturer count, so its
+    // success does not establish that the next wheel can obtain the compositor
+    // visual-state acknowledgement. Keep this owned target rendering for the
+    // lifetime of its debugger attachment, as the pinned Playwright does.
+    // This is renderer focus/visibility emulation, NOT native window/tab focus:
+    // no app activation, bringToFront, restore or per-input toggle is allowed.
+    // It neither reads page code nor changes sandbox/credential/input guards.
+    // Manual handoff detaches the debugger, which releases Chromium's capture
+    // handle; failed activation permanently fences this worker's observations.
+    try { await command(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }); }
+    catch { guardFailed = true; throw Error('document_blocked'); }
+    renderingTabs.add(tabId);
   }
   // Input belongs to the browser's already-selected tab. Merely choosing the
   // newest background popup can capture its pixels but lose keyboard input;
@@ -737,6 +754,21 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         activeStartup(); authRestored = true; await refreshAuth(); activeStartup(); authReady.resolve(); return { state: 'saved_unverified' };
       } catch (error) { authReady.reject(error); throw error; }
     }
+    if (['fixture-minimize-windows', 'fixture-window-state'].includes(op) && config.fixtureOnly === true) {
+      // Deterministically withdraw compositor visibility in the native fixture.
+      // This private test controller knows only this worker's owned windows;
+      // production call()/MCP has no alias, window ID or arbitrary CDP surface.
+      // No page input, foreground restoration or second wheel is performed.
+      activeStartup();
+      const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      for (const window of windows) {
+        if (!ownedWindows.has(window.id)) throw Error('session_closed');
+        if (op === 'fixture-minimize-windows') await chrome.windows.update(window.id, { state: 'minimized' });
+      }
+      const after = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      return { state: 'fixture', count: after.length,
+        minimized: after.length > 0 && after.every(window => window.state === 'minimized') };
+    }
     if (op === 'fixture-tab-budget' && config.fixtureOnly) {
       // Only the localhost native fixture may deliberately bypass host creation
       // preflight to exercise real Chromium onCreated overflow/cleanup events.
@@ -809,6 +841,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       manual = true; frame = undefined;
       for (const tabId of attached) await chrome.debugger.detach({ tabId }).catch(() => {});
       attached.clear();
+      renderingTabs.clear();
       // Human authentication may use an owned popup. Counting/showing these
       // surfaces does not enable model-facing popup/DOM extraction.
       const tab = (await chrome.tabs.query({})).filter(tab => allowed(tab.url)).at(-1);

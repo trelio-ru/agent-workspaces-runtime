@@ -576,7 +576,13 @@ export class ExtensionVisualBrowser {
     if (!this.#extensionReady || this.#terminal) {
       this.#startupDiagnostic ||= visualStartupDiagnostic('extension_connect', this.#socket ? 'extension_not_ready' : 'extension_not_connected');
       await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', ...this.#nativeStartup }); throw fault('bootstrap_failed'); }
-    this.testWindowController?.({ tabs: () => this.#send('fixture-tab-budget'), running: () => Boolean(this.#child && this.#child.exitCode === null && this.#child.signalCode === null), close: () => this.#send('fixture-close-windows'), crash: () => this.#child?.kill('SIGKILL') });
+    this.testWindowController?.({
+      tabs: () => this.#send('fixture-tab-budget'),
+      minimize: () => this.#send('fixture-minimize-windows'),
+      windowState: () => this.#send('fixture-window-state'),
+      running: () => Boolean(this.#child && this.#child.exitCode === null && this.#child.signalCode === null),
+      close: () => this.#send('fixture-close-windows'), crash: () => this.#child?.kill('SIGKILL'),
+    });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#startupStage = undefined;
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';

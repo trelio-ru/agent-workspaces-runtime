@@ -16,10 +16,11 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel, policyRead, deferAuthentication = false } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
-  const navigation=[], transport=[]; let windowCreated,windowRemoved,connections=0;
+  const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[];
+  let windowCreated,windowRemoved,detached,connections=0;
   let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
@@ -36,8 +37,10 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
         async set(value) { policy.push(JSON.parse(JSON.stringify(value))); if (policyFailure === 'write') throw Error('PRIVATE_NOTIFICATION_ERROR'); },
         async get() { return { setting: policyFailure === 'read' ? 'ask' : 'block' }; },
       } },
-      debugger: { async detach() {}, onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
+      debugger: { async detach(source) { detached(source); }, onDetach: { addListener(fn) { detached = fn; } }, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
         async sendCommand(_source, method, args) {
+          nativeCommands.push({ method, args: JSON.parse(JSON.stringify(args)) });
+          if (method === 'Emulation.setFocusEmulationEnabled') await focusEmulation?.();
           if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } }; }
           if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
           // Protocol-only native stub. Full PNG/MCP validation is independently
@@ -69,11 +72,12 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
       cookies: { onChanged: events, async getAll() { return []; } },
       declarativeNetRequest: { async getSessionRules() { await policyRead?.(); return []; }, async updateSessionRules() {} },
       windows: { onCreated: {addListener(fn){windowCreated=fn;}}, onRemoved: {addListener(fn){windowRemoved=fn;}},
-        async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);} },
+        async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);},
+        async update(id, input) { windowUpdates.push({ id, input: JSON.parse(JSON.stringify(input)) }); } },
       tabs: { onCreated: events, onRemoved: events,
         async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
         async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
-        async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
+        async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); tabUpdates.push(JSON.parse(JSON.stringify(input))); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
         async sendMessage(_id, message, target) {
           if (message.kind === 'authentication-guard') return { blocked: false };
           if (authenticationMessage && message.kind.startsWith('authentication-')) return authenticationMessage(message, target);
@@ -98,7 +102,8 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     throw Error('synthetic_command_timeout');
   };
   if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
-  return { dispatch, open, sent, answers, policy, raster, navigation, transport,
+  return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates,
+    detach: () => detached({ tabId: 1 }),
     addWindow:id=>windowCreated({id,type:'normal'}), removeWindow:id=>windowRemoved(id),
     disconnect:()=>socket.close(), connections:()=>connections,
     counts: () => ({ clicks, keys, keyUps, reads }),
@@ -107,6 +112,78 @@ async function dialogWorker({ image = false, policyFailure, manual = false, imme
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
 }
+
+test('owned renderer activation precedes provider navigation and is not repeated by observations or input', async () => {
+  let activate, calls = 0;
+  const pending = new Promise(resolve => { activate = resolve; });
+  const worker = await dialogWorker({ image: true, focusEmulation: async () => { calls++; await pending; } });
+  assert.equal(calls, 1);
+  assert.deepEqual(worker.navigation, [], 'no provider URL before the renderer and document guards are ready');
+  assert.equal(worker.sent.some(value => value.kind === 'hello'), false);
+  activate(); await new Promise(resolve => setImmediate(resolve));
+  const before = await worker.dispatch('screenshot'); assert.equal(before.state, 'ready');
+  assert.equal((await worker.dispatch('scroll', { frameId: before.frameId, x: 20, y: 20, deltaY: 100 })).state, 'ready');
+  assert.equal((await worker.dispatch('screenshot')).state, 'ready');
+  assert.deepEqual(worker.nativeCommands.filter(value => value.method.startsWith('Emulation.')),
+    [{ method: 'Emulation.setFocusEmulationEnabled', args: { enabled: true } }]);
+  assert.deepEqual(worker.windowUpdates, [], 'renderer focus never focuses/restores a native window');
+  assert.ok(worker.tabUpdates.every(value => value.active === undefined), 'no native tab activation');
+  assert.equal(worker.nativeCommands.filter(value => value.method === 'Input.dispatchMouseEvent' && value.args.type === 'mouseWheel').length, 1);
+});
+
+test('manual phases release renderer emulation and a new owned attachment enables it once', async () => {
+  const worker = await dialogWorker({ manual: true });
+  const activations = () => worker.nativeCommands.filter(value => value.method === 'Emulation.setFocusEmulationEnabled').length;
+  assert.equal(activations(), 0, 'initial human login keeps native focus behaviour');
+  assert.equal((await worker.dispatch('ready')).state, 'saved_unverified');
+  assert.equal((await worker.dispatch('read-text')).state, 'ready');
+  assert.equal(activations(), 1, 'an already attached manual tab acquires the work-phase renderer handle');
+  assert.equal((await worker.dispatch('manual')).state, 'manual_input_required');
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'manual_control_active' });
+  assert.equal(activations(), 1);
+  await worker.dispatch('ready');
+  assert.equal((await worker.dispatch('read-text')).state, 'ready');
+  assert.equal(activations(), 2, 'the previous native detach released its handle');
+  worker.detach();
+  assert.equal((await worker.dispatch('read-text')).state, 'ready');
+  assert.equal(activations(), 3, 'unexpected native detach cannot leave a stale activated-tab cache');
+});
+
+test('renderer activation refusal fences later work without input, retry or native error disclosure', async () => {
+  let refuse = false, calls = 0;
+  const worker = await dialogWorker({ focusEmulation() { calls++; if (refuse) throw Error('PRIVATE_NATIVE_FOCUS_ERROR'); } });
+  const before = await worker.dispatch('read-text'); assert.equal(before.state, 'ready');
+  refuse = true; worker.detach();
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked' });
+  assert.deepEqual(await worker.dispatch('scroll', { frameId: before.frameId, x: 20, y: 20, deltaY: 100 }), { state: 'error', reason: 'document_blocked' });
+  assert.deepEqual(await worker.dispatch('navigate', { url: 'https://example.test/other' }), { state: 'error', reason: 'document_blocked' });
+  assert.equal(calls, 2, 'the failed activation is not retried by another command');
+  assert.equal(worker.nativeCommands.filter(value => value.method.startsWith('Input.')).length, 0);
+  assert.deepEqual(worker.navigation, ['https://example.test/']);
+  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_NATIVE_FOCUS_ERROR/u);
+});
+
+test('fixture window controls cannot be enabled by ordinary transport arguments', async () => {
+  const worker = await dialogWorker();
+  for (const operation of ['fixture-minimize-windows', 'fixture-window-state']) {
+    const before = await worker.dispatch('read-text');
+    assert.deepEqual(await worker.dispatch(operation, { frameId: before.frameId, fixtureOnly: true, x: 20, y: 20 }),
+      { state: 'error', reason: 'invalid_input' });
+  }
+  assert.deepEqual(worker.windowUpdates, []);
+  assert.equal(worker.nativeCommands.filter(value => value.method.startsWith('Input.')).length, 0);
+});
+
+test('a failed initial renderer activation cannot publish readiness or navigate the provider', async () => {
+  let calls = 0;
+  const worker = await dialogWorker({ focusEmulation() { calls++; throw Error('PRIVATE_STARTUP_FOCUS_ERROR'); } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  assert.deepEqual(worker.navigation, []);
+  assert.equal(worker.sent.some(value => value.kind === 'hello'), false);
+  assert.equal(worker.sent.filter(value => value.kind === 'bootstrap_failed').length, 1);
+  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_STARTUP_FOCUS_ERROR/u);
+});
 
 test('materialized startup emits closed fixture phases and ordinary startup emits none', async () => {
   for (const fixtureOnly of [false, true]) {

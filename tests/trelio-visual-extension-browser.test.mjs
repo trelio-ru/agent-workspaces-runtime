@@ -451,6 +451,53 @@ async function fixtureCookieEvidence(snapshot, directory, name) {
   return result;
 }
 
+test('an owned minimized Chromium completes one wheel after screenshot without restoring its window', {
+  skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1' || process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', timeout: 180_000,
+}, async t => {
+  // Screenshot has its own temporary Chromium capturer handle. It can succeed
+  // for a hidden renderer whose subsequent wheel waits forever for a visual
+  // state commit. Force that state instead of relying on hosted-window timing.
+  // The fixture manipulates only its own fresh window and synthetic loopback
+  // page; it never activates another application or replays an input.
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-minimized-wheel-')));
+  let browser, controller, wheels = 0, snapshot, failure;
+  const diagnostics = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === '/wheel') { wheels++; response.end(); return; }
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end('<!doctype html><body style="margin:0;height:3000px;background:linear-gradient(#55cc99,#112233)"><h1>Synthetic wheel</h1><script>addEventListener("wheel",()=>navigator.sendBeacon("/wheel"),{passive:true});</script>');
+  });
+  const listener = ownFixtureHttpServer(server, t.signal); t.after(() => listener.stop()); await listener.listen();
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
+  browser = new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+    origins: [origin], lease: { deadlineAt: Date.now() + 150_000 },
+    testWindowController(value) { controller = value; }, testDiagnostics: value => diagnostics.push(value) });
+  t.signal.addEventListener('abort', () => browser.abort(), { once: true });
+  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
+  try {
+    ready(await browser.call('navigate', { url: origin }));
+    assert.deepEqual(await controller.minimize(), { state: 'fixture', count: 1, minimized: true });
+    const before = ready(await browser.call('screenshot'));
+    assert.equal(before.scroll.up, false);
+    const after = ready(await browser.call('scroll', { frameId: before.frameId, x: 300, y: 300, deltaY: 600 }));
+    assert.equal(after.scroll.up, true, 'the original wheel moved the actual document');
+    assert.equal(wheels, 1, 'one native wheel, never a retry after an unknown acknowledgement');
+    assert.equal((await browser.call('scroll', { frameId: before.frameId, x: 300, y: 300, deltaY: 600 })).reason, 'stale_frame');
+    assert.equal(wheels, 1);
+    assert.deepEqual(await controller.windowState(), { state: 'fixture', count: 1, minimized: true }, 'input/capture never restore the native window');
+  } catch (error) { failure = error; }
+  finally {
+    // Always close the owned listener, even if Chromium cannot finish shutdown.
+    // Keep the first failed native assertion and its closed transport evidence.
+    await listener.stop();
+    try { await browser.close(); } catch (error) { failure ||= error; browser.abort(); }
+    if (!failure) await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+  if (failure) { failure.message += '; minimized wheel evidence: ' + JSON.stringify({ wheels, diagnostics }); throw failure; }
+});
+
 // Execute the same real native browser assertions through both the unchanged
 // headed/fixture path and the signed production hidden presentation. A fixture
 // override alone cannot establish that a provider's ordinary path works.

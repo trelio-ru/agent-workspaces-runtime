@@ -228,7 +228,34 @@ phases distinguish frame/tab/credential checks, mouse move/wheel acknowledgement
 settlement and capture. Preserve that original response before cleanup; never
 repeat the wheel or screenshot, extend its deadline or infer a fix from a trace.
 No Error text/path, owner descriptor, extra native observation, input/save retry
-or extended deadline is allowed. This diagnoses a refusal; it does not fix it.
+or extended deadline is allowed. This evidence diagnoses a refusal; it is not
+itself a fix.
+The later Windows ARM failure reached `input_mouse_wheel`: the original native
+wheel never acknowledged after a successful capture. In pinned Chromium 156,
+`Input.dispatchMouseEvent` waits for a compositor visual-state commit before
+dispatching a wheel, while screenshot capture temporarily increments its own
+capturer count. The host now enables the fixed
+`Emulation.setFocusEmulationEnabled({enabled:true})` once per owned work-phase
+debugger attachment, matching pinned Playwright 1.64.1. Chromium keeps that
+target rendering through a debugger-owned capturer handle even when its window
+is minimized/occluded; it does not activate or restore the native window.
+This is a fixed internal lifecycle operation, not an arbitrary Emulation/CDP
+API, page evaluation, model-selected option or extra per-input command.
+Manual startup omits it. A human handoff's native debugger detach releases it;
+the next work attachment enables it afresh. Failure permanently fences that
+worker before observation/input. Document/credential, frame, sandbox and lease
+guards remain independent. The original hosted failure did not record window
+state, so its exact visibility transition is not inferred from timing alone.
+A fresh synthetic headed regression deliberately minimizes only its owned
+window, captures it, sends ONE wheel, verifies actual document scroll and the
+single synthetic effect, rejects the spent frame and reads back that the window
+is still minimized. The old worker stalls at the same wheel phase on Windows;
+the corrected worker passes without input replay. The original three two-owner
+lifecycles remain required independently, as do native foreground assertions.
+The Chromium mechanisms are the pinned
+[InputHandler](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/devtools/protocol/input_handler.cc),
+[PageHandler](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/devtools/protocol/page_handler.cc)
+and [EmulationHandler](https://chromium.googlesource.com/chromium/src/+/156.0.8078.4/content/browser/devtools/protocol/emulation_handler.cc).
 Parallel fixture shutdown preserves the first body/close assertion if later
 cleanup also fails, attempts each owned sibling independently and closes its
 synthetic listener on cancellation through the existing HTTP helper. Failure
@@ -565,6 +592,9 @@ Native fixture проверяет target=_blank на другой origin, HTTP r
 другую программу для маскировки перехвата. Scheduling flags поддерживают
 compositor/input в перекрытом окне. Один startup focus допустим только в
 согласованном visible workflow; ручной `show-login` явно показывает своё окно.
+Fixed renderer focus emulation retains visual-state commits independently of
+OS visibility during the owned work phase. It never calls bringToFront,
+activates a tab, restores a minimized window or changes another application.
 
 Chromium может активировать приложение при создании новой вкладки даже от
 background mouse click. Поэтому фиксированный isolated-world content adapter
