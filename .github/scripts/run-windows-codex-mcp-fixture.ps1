@@ -4,22 +4,8 @@
 $ErrorActionPreference = 'Stop'
 $fixtureRoot = Join-Path $env:RUNNER_TEMP ('trelio-codex-mcp-' + [Guid]::NewGuid().ToString('N'))
 $previousCli = $env:TRELIO_TEST_CODEX_CLI
-$previousOwner = $env:TRELIO_TEST_CODEX_PROCESS_OWNER
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 try {
-  # A source-only owner contains this fixture's native descendants. It never
-  # enumerates/kills unrelated processes and is absent from release packages.
-  $source = Join-Path $PSScriptRoot '../../tests/fixtures/windows-codex-process-owner.cpp'
-  $owner = Join-Path $fixtureRoot 'fixture-process-owner.exe'
-  $object = Join-Path $fixtureRoot 'fixture-process-owner.obj'
-  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-  $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-  if ($LASTEXITCODE -ne 0 -or !$installation) { throw 'Fixture MSVC unavailable.' }
-  $vcvars = Join-Path $installation 'VC/Auxiliary/Build/vcvarsall.bat'
-  $command = "`"$vcvars`" x64 >nul && cl.exe /nologo /utf-8 /std:c++17 /O2 /MT /EHsc /W4 /WX /guard:cf /Brepro /DUNICODE /D_UNICODE `"$source`" /Fo`"$object`" /Fe`"$owner`" /link /DYNAMICBASE /NXCOMPAT /Brepro"
-  & $env:ComSpec /d /s /c $command
-  if ($LASTEXITCODE -ne 0) { throw 'Native fixture owner compilation failed.' }
-  $env:TRELIO_TEST_CODEX_PROCESS_OWNER = $owner
   $inputs = @(
     @{ Name = 'codex-x86_64-pc-windows-msvc.exe'; Target = 'codex.exe'; Sha = '90cf31818ddd8b29f956ad1df5f99af86c19296186be9a117d07b02b2c9bf0e8' },
     @{ Name = 'codex-code-mode-host-x86_64-pc-windows-msvc.exe'; Target = 'codex-code-mode-host.exe'; Sha = 'a17825919d06970ca739cdfd5e9c8040b1b0d33896e79db3980f96545ea1774e' }
@@ -48,6 +34,5 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Windows Codex MCP fixture failed with exit $LASTEXITCODE" }
 } finally {
   $env:TRELIO_TEST_CODEX_CLI = $previousCli
-  $env:TRELIO_TEST_CODEX_PROCESS_OWNER = $previousOwner
   Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
 }

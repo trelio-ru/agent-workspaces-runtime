@@ -465,12 +465,6 @@ jobs:
       - name: Install exact Windows test dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Run Windows Codex conversation metadata tests
-        # Run the existing native lifecycle gate before the slower Workspace
-        # groups. This still executes the pinned actual CLI and every assertion.
-        shell: pwsh
-        run: ./.github/scripts/run-windows-codex-mcp-fixture.ps1
-
       - name: Verify packaged service access and normal stop as a standard user
         shell: pwsh
         run: ./.github/scripts/run-windows-package-service-fixture.ps1
@@ -672,6 +666,12 @@ jobs:
 
       - name: Verify signed runtime hook through the complete Windows shell chain
         run: node tests/trelio-hook-signed-chain.test.mjs
+
+      - name: Run Windows Codex conversation metadata tests
+        # Includes actual pinned CLI → extensionless CMD MCP startup under the
+        # SAME sanitized public environment; no model/account/user config.
+        shell: pwsh
+        run: ./.github/scripts/run-windows-codex-mcp-fixture.ps1
 
       - name: Run Windows instruction delivery regressions
         run: |
