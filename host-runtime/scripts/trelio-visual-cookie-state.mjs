@@ -9,6 +9,11 @@ export function visualCookieState(config) {
     if (typeof domain !== 'string') return false;
     const host = domain.replace(/^\./u, '').toLowerCase();
     if (!host || host.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(host)) return false;
+    // The profile belongs to one signed skill/account and is encrypted as a
+    // whole. An explicit profile-auth provider must keep session cookies from
+    // every login/SSO host, just like the native persistent Cookie DB. This
+    // never reads the user's Chrome profile or grants credential delivery.
+    if (config.profileAuthentication === true) return true;
     return config.origins.some(origin => new URL(origin).hostname === host)
       || config.domains.some(name => host === name || host.endsWith('.' + name));
   };
@@ -36,8 +41,8 @@ export function visualCookieState(config) {
     return result;
   }
   function fromChrome(cookie) {
-    // Transport permission is not auth authority: discard localhost/other
-    // cookies unless the signed navigation scope itself includes that host.
+    // Legacy providers retain their declared auth scope; profile-auth providers
+    // retain all session cookies in this dedicated non-incognito store.
     if (!cookie.session || !allowedDomain(cookie.domain) || (cookie.storeId && cookie.storeId !== '0')) return null;
     const result = {};
     for (const name of ['name', 'value', 'domain', 'path', 'hostOnly', 'httpOnly', 'secure', 'sameSite', 'partitionKey']) if (cookie[name] !== undefined) result[name] = cookie[name];

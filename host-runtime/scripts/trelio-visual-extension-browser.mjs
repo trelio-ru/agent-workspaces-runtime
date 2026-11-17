@@ -334,14 +334,14 @@ export class ExtensionVisualBrowser {
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic; #headless = false;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
     visualBrowserHeadless(presentation, false);
-    if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
+    if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); } catch { throw fault('invalid_input'); }
     if (fieldCheckPolicy && (!semanticControls || observationMode !== 'text')) throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, lease, presentation, semanticControls, fieldCheckPolicy, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
+    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.manualCompletion = normalizeVisualManualCompletion(manualCompletion, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
@@ -386,7 +386,7 @@ export class ExtensionVisualBrowser {
     this.#startupStage = 'storage_prepare';
     await this.store.prepare?.(); this.#saved = Boolean(snapshot);
     this.#startupStage = 'profile_restore';
-    this.#cookies = visualCookieState({ origins: this.origins, domains: this.domains });
+    this.#cookies = visualCookieState({ origins: this.origins, domains: this.domains, profileAuthentication: this.profileAuthentication });
     this.#sessionCookies = this.#cookies.validate(snapshot?.sessionCookies ?? []);
     this.#replaceSessionCookies = Object.hasOwn(snapshot || {}, 'sessionCookies');
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
@@ -516,7 +516,7 @@ export class ExtensionVisualBrowser {
     }
     // Only the ephemeral transport token is materialized here. Cookie values
     // stay in host/extension RAM and the AEAD snapshot, never in worker source.
-    await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, { mode: 0o600 });
+    await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains, profileAuthentication: this.profileAuthentication })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
     // Only the value-free signed recipe is materialized; credentials never
     // enter extension resources, process environment or command-line arguments.

@@ -601,9 +601,20 @@ CLI/MCP arguments и по умолчанию остаётся false для пр�
 Выбор закреплён в private owner вместе с observation/download mode. Живой worker
 с другим значением не переиспользуется для чтения или input; обычный close
 сохраняет авторизацию. Это не требует удаления snapshot или повторного setup.
-Explicit origins/domains по-прежнему ограничивают private session-cookie overlay;
+По умолчанию explicit origins/domains ограничивают private session-cookie overlay;
 только exact origins signed recipe разрешают protected credential delivery.
 Внешний сайт не получает Dodo/другие provider credentials из-за одного перехода.
+
+`VISUAL_PROFILE_AUTH_API = trelio.visual-profile-auth/v1` добавляет signed
+`profileAuthentication: true` вместе с `externalNavigation: true`. В этом
+режиме session-cookie overlay сохраняет все домены собственного изолированного
+профиля, включая неизвестные заранее SSO/родительские/CHIPS cookies. Постоянные
+cookies и остальные auth stores по-прежнему сохраняются native archive.
+Пользователь не перечисляет сайты входа. Флаг закреплён в owner; смена режима
+требует обычного close/save и продолжения того же account snapshot. Старые
+снимки читаются без сброса входа. Default прежних providers сохраняется.
+Profile scope не открывает чужие профили, model-visible cookies или доставку
+защищённых credentials на новый origin.
 
 Общий document guard сохраняет отдельный путь получения originals через
 `attachmentDownloads`. Навигация не выполняет бинарные файлы и не выдаёт их за
