@@ -4,16 +4,101 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import https from 'node:https';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID, X509Certificate } from 'node:crypto';
 import { ExtensionVisualBrowser, visualLifecycleFailureEvidence, visualExtensionBootstrapPage, createVisualStartupFixtureTrace } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
+import { createVisualControlServer } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 import { syntheticDocx } from './fixtures/visual-docx.mjs';
 import vm from 'node:vm';
+
+test('native managed Secret binds the original HTTPS tab, masks credentials and permits exactly one reviewed click',
+  { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
+    const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-native-secret-')));
+    const keyFile = path.join(directory, 'fixture.key'), certFile = path.join(directory, 'fixture.pem');
+    let browser, listener, controlListener;
+    t.signal.addEventListener('abort', () => browser?.abort(), { once: true });
+    const value = 'fixture-value-' + randomUUID(), received = [];
+    try {
+      // A fresh loopback leaf per fixture, never a shared certificate,
+      // trust-store mutation, public TLS exception or real credential.
+      execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+        '-subj', '/CN=127.0.0.1', '-keyout', keyFile, '-out', certFile], { stdio: 'ignore', windowsHide: true, timeout: 30_000 });
+      const [key, cert] = await Promise.all([fs.readFile(keyFile), fs.readFile(certFile)]);
+      const spki = new X509Certificate(cert).publicKey.export({ type: 'spki', format: 'der' });
+      const server = https.createServer({ key, cert }, (request, response) => {
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        if (request.url === '/check' && request.method === 'POST') {
+          let body = '';
+          request.on('data', part => { body += part; });
+          request.on('end', () => {
+            received.push(new URLSearchParams(body).get('account') === value);
+            response.end('<!doctype html><title>Fixture</title><p>VERIFIED ORIGINAL SUBMISSION</p>');
+          });
+          return;
+        }
+        response.end(`<!doctype html><title>Fixture</title>
+          <form action="/check" method="post">
+            <label>Account <input name="account" type="text" required></label>
+            <button style="position:absolute;left:30px;top:100px;width:170px;height:50px">Continue</button>
+          </form>`);
+      });
+      listener = ownFixtureHttpServer(server, t.signal); await listener.listen();
+      const origin = `https://127.0.0.1:${server.address().port}`, targetUrl = origin + '/login';
+      const dependencies = await loadVisualDependencies({
+        root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+      const store = { directory, async read() {}, async prepare() {}, async write() {}, close() {} };
+      browser = new ExtensionVisualBrowser({ dependencies, store, origins: [origin], observationMode: 'text',
+        presentation: 'hidden', externalNavigation: true,
+        policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+        lease: { deadlineAt: Date.now() + 100_000 },
+        testTlsSpki: createHash('sha256').update(spki).digest('base64') });
+      browser.enableAssistantBrowserSecrets();
+      const token = randomUUID();
+      const control = createVisualControlServer({ token, dispatch: (...args) => browser.call(...args),
+        secretDispatch: message => browser.secretBrowserCall(message) });
+      controlListener = ownFixtureHttpServer(control, t.signal); await controlListener.listen();
+      const request = (body, headers = {}) => fetch(`http://127.0.0.1:${control.address().port}/secret-browser`, {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+      });
+      const view = await browser.call('navigate', { url: targetUrl });
+      assert.equal(view.state, 'ready', view.reason);
+      assert.equal(await browser.call('secret-browser-bind', { targetUrl }).then(result => result.reason), 'invalid_input');
+      const [{ x, y }] = view.controls.filter(control => control.role === 'button' && control.label === 'Continue');
+      const targetUrlSha256 = createHash('sha256').update(targetUrl).digest('hex');
+      const context = { deliveryMode: 'browser', executable: 'trelio-workspace', fieldKeys: ['login'],
+        targetOrigin: origin, targetUrlSha256, browserSteps: [{ targetOrigin: origin, targetUrlSha256,
+          fields: [{ fieldKey: 'login', accessibleName: 'Account' }] }] };
+      const plan = { operation: 'prepare', context, targetUrl };
+      assert.equal((await request(plan, { origin })).status, 403, 'an ordinary web origin cannot open the private lane');
+      assert.equal((await request(plan, { authorization: 'Bearer wrong' })).status, 403, 'only the original worker owner has the capability');
+      const prepared = await request(plan).then(response => response.json());
+      assert.equal(prepared.state, 'ready', prepared.reasonCode);
+      const { handle } = prepared;
+      const fill = { operation: 'fill', handle, secretValues: { login: value } };
+      assert.deepEqual(await request(fill).then(response => response.json()), { outcome: 'succeeded' });
+      assert.equal((await request(fill).then(response => response.json())).outcome, 'failed');
+      await request({ operation: 'release', handle }).then(response => response.json());
+      assert.equal((await browser.call('read-text')).reason, 'manual_control_active');
+      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+      assert.deepEqual(received, []);
+      const input = { frameId: view.frameId, x, y };
+      const clicked = await browser.call('click', input);
+      assert.equal(clicked.state, 'ready', clicked.reason);
+      assert.match(clicked.text, /VERIFIED ORIGINAL SUBMISSION/u);
+      assert.equal((await browser.call('click', input)).reason, 'stale_frame');
+      assert.deepEqual(received, [true]);
+    } finally {
+      await controlListener?.stop(); await listener?.stop(); await browser?.close().catch(() => browser.abort());
+      await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  });
 
 test('startup fixture trace retains a bounded closed history without lending identity or mutable state', () => {
   let time = 100;

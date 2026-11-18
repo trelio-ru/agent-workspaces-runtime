@@ -364,8 +364,16 @@ const prepareSecretBrowserSessionInternal = async ({
   profileDirectory, platform = process.platform, buildHelper = buildNativeSecretBrowserHelper,
   openChannel = openNativeSecretBrowserChannel,
   prepareChrome = prepareSecretBrowserFill,
+  prepareManaged,
 }) => {
   mode = normalizeSecretBrowserMode(mode);
+  if (prepareManaged && mode === "auto") {
+    // A known owned browser must pass its own exact-document preflight. Its
+    // refusal propagates. Only absence of a managed worker uses the legacy
+    // native selection for an independently opened browser.
+    const managed = await prepareManaged({ context, targetUrl });
+    if (managed) return managed;
+  }
   let channel = null;
   // New grants never change surface. In particular, missing native metadata is
   // not permission to put a frame-bound credential in a fresh Chrome profile.

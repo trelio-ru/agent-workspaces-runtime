@@ -37,6 +37,19 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   }
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
   let authenticating = false;
+  let protectedSecretTab, followingSecretClick;
+  const secretDocumentMasks = new Map();
+  function maskSecretDocument(tabId, loaderId) {
+    const mask = secretDocumentMasks.get(tabId) ?? { loaders: new Set(), closed: false };
+    if (!loaderId || mask.loaders.size >= 32 && !mask.loaders.has(loaderId)) mask.closed = true;
+    else if (!mask.closed) mask.loaders.add(loaderId);
+    secretDocumentMasks.set(tabId, mask);
+    dialogGuards.delete(tabId);
+  }
+  function isSecretDocumentMasked(tabId, loaderId) {
+    const mask = secretDocumentMasks.get(tabId);
+    return !!mask && (mask.closed || !loaderId || mask.loaders.has(loaderId));
+  }
   let bootstrapState = 'pending', bootstrapStage = 'policy', stopping = false;
   let authReady, authStarted = false, authRestored = false, authInitialising = false, authFrozen = false, authTimer;
   const authJar = new Map(), authChanges = [];
@@ -154,6 +167,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   chrome.tabs.onRemoved.addListener((tabId, info) => {
     tabBudget.removed(tabId); httpFailures.delete(tabId); documentFailures.delete(tabId); childFrames.delete(tabId);
     navigationGenerations.delete(tabId);
+    secretDocumentMasks.delete(tabId);
+    if (protectedSecretTab?.tabId === tabId) protectedSecretTab = undefined;
+    if (followingSecretClick?.tabId === tabId) followingSecretClick = undefined;
     if (info.isWindowClosing) windowClosing(info.windowId, true);
   });
   // Numeric main-document evidence only: no request/response headers or body,
@@ -222,6 +238,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         }
       } else if (method === 'Page.frameNavigated') {
         childFrames.delete(source.tabId);
+        // Back/forward may restore a credential-bearing renderer even if a
+        // different loader was observed in between. Keep former loader masks
+        // until tab close. On BFCache restore, mask the returned identity too.
+        if (params.type === 'BackForwardCacheRestore' && secretDocumentMasks.has(source.tabId))
+          maskSecretDocument(source.tabId, params.frame?.loaderId);
       } else if (method === 'Page.frameDetached') {
         childFrames.get(source.tabId)?.delete(params.frameId);
       }
@@ -536,7 +557,19 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     allowedNavigation(tab.url);
     return tab;
   }
+  async function assertSecretDocumentUnmasked(tabId, loaderId) {
+    // A field-only delivery may leave a value in an ordinary text box. Keep
+    // it out of subsequent observations and generic input until navigation.
+    if (secretDocumentMasks.has(tabId)) {
+      const currentLoader = loaderId ?? (await command(tabId, 'Page.getFrameTree')).frameTree?.frame?.loaderId;
+      // Same-document navigation can change URL and generation without
+      // discarding the credential-bearing element. Require a new document.
+      if (isSecretDocumentMasked(tabId, currentLoader))
+        throw Error('manual_control_active');
+    }
+  }
   async function credentialGuard(tabId) {
+    await assertSecretDocumentUnmasked(tabId);
     const value = await chrome.tabs.sendMessage(tabId, { kind: 'authentication-guard' }, { frameId: 0 });
     if (value?.blocked !== false) throw Error('manual_control_active');
     dialogGuards.set(tabId, navigationGeneration(tabId));
@@ -663,7 +696,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     return execution.value;
   }
   async function executeWithDialogs(op, args, navigationStage) {
-    if (['heartbeat', 'close-windows', 'restore-session-auth', 'snapshot-session-auth', 'manual'].includes(op)) return execute(op, args);
+    if (['heartbeat', 'close-windows', 'restore-session-auth', 'snapshot-session-auth', 'manual',
+      'secret-browser-bind', 'secret-browser-native', 'secret-browser-release'].includes(op)) {
+      if (op !== 'secret-browser-release' && op.startsWith('secret-browser-') && pendingExecution && !pendingExecution.settled)
+        throw Error('stale_frame');
+      return execute(op, args);
+    }
     if (currentDialog()) {
       if (['screenshot', 'read-text'].includes(op)) return captureDialog();
       if (!['key', 'click'].includes(op)) throw Error('stale_frame');
@@ -787,6 +825,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
     if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    await assertSecretDocumentUnmasked(tab.id, tree.frameTree.frame.loaderId);
     navigationStage?.('layout');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
@@ -808,7 +847,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   async function execute(op, args, navigationStage) {
     // Cleanup remains available after the lease; it can only close this owned
     // profile's windows, never send new input or navigate an external page.
-    if (Date.now() >= config.deadlineAt && !['close-windows', 'snapshot-session-auth'].includes(op)) throw Error('lease_expired');
+    if (Date.now() >= config.deadlineAt && !['close-windows', 'snapshot-session-auth', 'secret-browser-release'].includes(op)) throw Error('lease_expired');
     if (op === 'restore-session-auth') {
       if (!authReady || authStarted || bootstrapStage !== 'auth' || typeof args.replace !== 'boolean') throw Error('invalid_input');
       authStarted = true;
@@ -856,6 +895,69 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
+    if (['secret-browser-bind', 'secret-browser-native', 'secret-browser-release'].includes(op)) {
+      // This lane is reached only from the signed worker's private Secret
+      // admission. None of these operations is in visual MCP's command API.
+      if (config.assistantBrowserSecrets !== true
+        || !/^[0-9a-f-]{36}$/u.test(args.handle ?? '')) throw Error('invalid_input');
+      if (op === 'secret-browser-release') {
+        if (Object.keys(args).sort().join(',') !== 'allowFollowingClick,handle'
+          || typeof args.allowFollowingClick !== 'boolean' || protectedSecretTab?.handle !== args.handle)
+          throw Error('invalid_input');
+        if (args.allowFollowingClick && protectedSecretTab.fieldOnlySucceeded && Date.now() < protectedSecretTab.expiry
+          && !manual && !authenticating && !currentDialog() && Date.now() < config.deadlineAt)
+          followingSecretClick = protectedSecretTab;
+        protectedSecretTab = undefined;
+        return { state: 'released' };
+      }
+      if (manual || authenticating || currentDialog()) throw Error('manual_control_active');
+      const tab = await selected();
+      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
+      const generation = navigationGeneration(tab.id);
+      const { frameTree } = await command(tab.id, 'Page.getFrameTree');
+      const main = frameTree?.frame;
+      if (!main?.id || !main.loaderId || generation !== navigationGeneration(tab.id)
+        || new URL(tab.url).href !== new URL(main.url).href) throw Error('stale_frame');
+      if (op === 'secret-browser-bind') {
+        if (protectedSecretTab || Object.keys(args).sort().join(',') !== 'expiry,handle,targetUrl'
+          || !Number.isSafeInteger(args.expiry) || args.expiry <= Date.now()
+          || args.expiry > Math.min(Date.now() + 38_000, config.deadlineAt)
+          || !frame || observedFrameId !== frame.frameId || frame.tabId !== tab.id || frame.generation !== generation
+          || Date.now() - frame.at > 60_000 || isSecretDocumentMasked(tab.id, main.loaderId)
+          || frame.mainFrameId !== main.id || frame.loaderId !== main.loaderId
+          || args.targetUrl !== new URL(main.url).href) throw Error('stale_frame');
+        protectedSecretTab = { handle: args.handle, tabId: tab.id, generation, frameId: main.id,
+          loaderId: main.loaderId, url: args.targetUrl, observation: frame, expiry: args.expiry };
+        return { state: 'bound' };
+      }
+      const binding = protectedSecretTab;
+      if (!binding || Object.keys(args).sort().join(',') !== 'handle,method,params'
+        || binding.handle !== args.handle || binding.tabId !== tab.id || binding.generation !== generation || Date.now() >= binding.expiry
+        || binding.frameId !== main.id || binding.loaderId !== main.loaderId || binding.url !== new URL(main.url).href)
+        throw Error('stale_frame');
+      if (args.method === 'Target.getTargetInfo' && args.params?.targetId === 'managed-tab')
+        return { state: 'accepted', result: { targetInfo: { url: binding.url } } };
+      if (!['Page.getFrameTree', 'Page.createIsolatedWorld', 'DOM.getDocument', 'Accessibility.queryAXTree',
+        'DOM.resolveNode', 'Runtime.callFunctionOn', 'Runtime.evaluate', 'Input.dispatchMouseEvent'].includes(args.method))
+        throw Error('invalid_input');
+      if (args.method === 'Page.createIsolatedWorld' && (args.params?.frameId !== binding.frameId
+        || args.params?.grantUniveralAccess !== false)) throw Error('invalid_input');
+      const applying = args.method === 'Runtime.evaluate'
+        && /^globalThis\.__trelioSecretBrowserApply\(/u.test(args.params?.expression ?? '');
+      if (applying) {
+        // Install the mask before the setter. A lost renderer response can
+        // still mean that a value reached the page, so release retains it.
+        if (binding.fieldAttempted) throw Error('invalid_input');
+        maskSecretDocument(tab.id, binding.loaderId);
+        binding.fieldAttempted = true;
+        binding.contextId = args.params.contextId;
+      }
+      if (args.method === 'Page.getFrameTree')
+        return { state: 'accepted', result: { frameTree } };
+      const result = await command(tab.id, args.method, args.params);
+      if (applying && result?.result?.value?.outcome === 'succeeded') binding.fieldOnlySucceeded = true;
+      return { state: 'accepted', result };
+    }
     if (op === 'manual-completion-probe') {
       if (!config.manualCompletion || !manual || authenticating || Object.keys(args).length) throw Error('invalid_input');
       await guardUpdate;
@@ -964,6 +1066,34 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       return captureDefault(navigationStage);
     }
     if (op === 'screenshot') return capture(navigationStage);
+    if (op === 'click' && followingSecretClick?.observation.frameId === args.frameId) {
+      const binding = followingSecretClick, original = binding.observation;
+      // Spend before inspecting the hit or dispatching anything. A lost
+      // response, changed button or stale frame cannot authorize another click.
+      followingSecretClick = undefined;
+      const tab = await selected();
+      const { frameTree } = await command(tab.id, 'Page.getFrameTree');
+      assertInputCurrent(original);
+      if (tab.id !== original.tabId || Date.now() - original.at > 60_000
+        || documentFailures.has(tab.id) || httpFailures.has(tab.id) || currentDialog()
+        || frameTree?.frame?.id !== binding.frameId || frameTree?.frame?.loaderId !== binding.loaderId
+        || new URL(frameTree.frame.url).href !== binding.url || !isSecretDocumentMasked(tab.id, binding.loaderId)
+        || !Number.isInteger(args.x) || args.x < 0 || args.x >= original.width
+        || !Number.isInteger(args.y) || args.y < 0 || args.y >= original.height) throw Error('stale_frame');
+      const x = args.x * original.cssWidth / original.width, y = args.y * original.cssHeight / original.height;
+      const hit = await command(tab.id, 'Runtime.evaluate', {
+        contextId: binding.contextId, returnByValue: true,
+        expression: `globalThis.__trelioSecretBrowserCheckFollowingClick?.(${x},${y})`,
+      });
+      assertInputCurrent(original);
+      if (hit?.result?.value !== true || currentDialog()) throw Error('stale_frame');
+      frame = undefined; observedFrameId = undefined;
+      await command(tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+      assertInputCurrent(original);
+      await command(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+      await pause(500);
+      return captureDefault(navigationStage);
+    }
     if (['read-text', 'submit', 'request-ready'].includes(op) && config.observationMode !== 'text') throw Error('invalid_input');
     if (op === 'read-text') return captureText(args, navigationStage);
     if (op === 'request-ready') {
@@ -1203,7 +1333,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     };
     // Reconnect only the transport. Never resend a previous action or infer
     // its outcome from a missing reply after worker/browser disconnect.
-    socket.onclose = () => { frame = undefined; if (!stopping) setTimeout(connect, 1000); };
+    socket.onclose = () => {
+      frame = undefined; followingSecretClick = undefined; protectedSecretTab = undefined;
+      if (!stopping) setTimeout(connect, 1000);
+    };
   }
   chrome.windows.onRemoved.addListener(windowId => {
     if (!windowInventoryReady) { windowChanges.push({ id: windowId, removed: true }); return; }

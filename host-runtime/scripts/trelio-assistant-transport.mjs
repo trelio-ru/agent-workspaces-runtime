@@ -1944,6 +1944,26 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await assertIdentity();
       return assistantSkillCatalogueDirectory(host.configurationDirectory??configDirectory,identity);
     },
+    async describeTelegramTaskAccount({companyId,projectId,accounts}){
+      if(companyId!==pass.companyId || projectId!==null&&!uuid.test(projectId??'')
+        || !Array.isArray(accounts) || accounts.length>128 || typeof client.sourceAccounts!=='function') return null;
+      // Account display names are not identity. Correlate the current native
+      // source with the existing bound LOCAL catalogue only for this task.
+      // This hint does not select an account for an input call or authorize a send.
+      const signal=invocationSignal
+        ?AbortSignal.any([invocationSignal,AbortSignal.timeout(3000)]):AbortSignal.timeout(3000);
+      await assertLivePass(signal);
+      const sources=await client.sourceAccounts(companyId,signal);
+      const current=sources.filter(row=>row.state==='active' && row.skillId==='telegram-mtproto'
+        && row.deviceId===identity.deviceId && row.companyId===pass.companyId
+        && (row.projectId===null || row.projectId===projectId));
+      const [source]=current;
+      if(current.length!==1 || accounts.filter(account=>account.id===source.localAccountId&&account.bound===true).length!==1)
+        return null;
+      await assertLivePass(signal);
+      return {sourceId:source.id,localAccountId:source.localAccountId,sourceRevision:source.revision,
+        basis:'current_native_telegram_source',sessionVerified:false,providerWriteAuthorized:false};
+    },
     async selectCompanySecretContext(context){
       if(!newCreation||!privateGeneration||!object(context)||context.completed!==false
         ||!uuid.test(context.secretId??'')||context.runId!==privateGeneration.runId
@@ -1982,7 +2002,32 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       // Reuse the SAME native/owned browser implementation, but never borrow
       // its ordinary human fallback profile or another assistant/task's state.
       const root=path.join(assistantTaskStorageDirectory(configDirectory,{...identity,companyId:pass.companyId,taskId:pass.taskId}),'secret-browser');
-      return {directory:path.join(root,'native'),profileDirectory:path.join(root,'profile')};
+      const prepareManaged=async ({context,targetUrl})=>{
+        await assertLivePass();
+        const runtimeSlot={origin:identity.origin,kind:'runtime',id:pass.passId};
+        const readRuntime=async()=>{
+          const record=await store.get(runtimeSlot);
+          if(!record || record.pending || record.ended || record.threadId!==pass.threadId
+            || !uuid.test(record.state?.runtimeSessionId??'') || !(Date.parse(record.state.expiresAt)>now()))
+            fail('ASSISTANT_RUNTIME_SESSION_INVALID');
+          return record.state.runtimeSessionId;
+        };
+        const runtimeSessionId=await readRuntime();
+        const {prepareAssistantManagedVisualSecret}=await import('./trelio-visual-session.mjs');
+        const prepared=await prepareAssistantManagedVisualSecret({
+          identity:{...identity,companyId:pass.companyId},runtimeSessionId,context,targetUrl,
+          signal:invocationSignal,directory:configDirectory,
+        });
+        try {
+          await assertLivePass();
+          if(await readRuntime()!==runtimeSessionId)fail('ASSISTANT_RUNTIME_SESSION_INVALID');
+          return prepared;
+        } catch(error) {
+          await prepared?.close();
+          throw error;
+        }
+      };
+      return {directory:path.join(root,'native'),profileDirectory:path.join(root,'profile'),prepareManaged};
     },
     async resolveInspectionDirectory(configDirectory){
       configDirectory=host.configurationDirectory??configDirectory;

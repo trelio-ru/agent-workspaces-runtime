@@ -1086,6 +1086,14 @@ id-only top-document grants сохраняют прежний ABI. Без `frame
 Новый frame binding задаётся только после проверки пустой формы.
 Обычный bounded readiness grace основной формы и закрытые причины отказов сохранены.
 
+Уже наблюдаемая вкладка управляемого браузера цифрового ассистента использует
+свой исходный Chromium через отдельный защищённый канал. Тот же контроллер
+закрепляет exact top document и объект поля по accessible name. После
+передачи значения снимки, текст и диалоги страницы скрыты до смены документа.
+При положительном результате field-only допустим один явный клик по ранее
+показанной закреплённой кнопке в той же вкладке. См. [контракт цифрового
+ассистента](assistant-scheduler.md#private-secret-browser-use).
+
 macOS discovery обходит native shell до границ HTTP(S) WebArea и не читает их
 потомков до выбора exact target. Non-HTTP Electron shell остаётся проходимым
 для вложенной browser view. Application, `AXWindows`, main и focused roots

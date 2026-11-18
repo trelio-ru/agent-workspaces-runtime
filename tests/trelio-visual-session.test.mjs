@@ -4,11 +4,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 import { runVisualSession, withVisualOwnerFileLock, readVisualOwner,
   publishVisualWorkerOwner, visualSessionBinding, createVisualIdleSupervisor,
-  VISUAL_IDLE_TIMEOUT_MS, closeVisualExecutionSessions } from '../host-runtime/scripts/trelio-visual-session.mjs';
+  VISUAL_IDLE_TIMEOUT_MS, closeVisualExecutionSessions, assistantVisualBrowserAccountId,
+  createVisualControlServer, prepareAssistantManagedVisualSecret } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { browserExecutionDirectory } from '../host-runtime/scripts/trelio-browser-session.mjs';
 import { visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
@@ -18,6 +19,62 @@ import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnosti
   processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
+
+test('protected browser selection keeps the original assistant, device, company and observed execution', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-secret-owner-')));
+  const identity = { origin: 'https://trelio.test', assistantId: randomUUID(), deviceId: randomUUID(), companyId: randomUUID() };
+  const runtimeSessionId = randomUUID(), memberId = randomUUID(), handle = randomUUID(), token = 'a'.repeat(64);
+  const operations = [];
+  const control = createVisualControlServer({ token, dispatch: async () => assert.fail('public dispatch'), secretDispatch(message) {
+    operations.push(message.operation);
+    if (message.operation === 'prepare') return { state: 'ready', handle };
+    assert.equal(message.handle, handle);
+    return message.operation === 'fill' ? { outcome: 'succeeded' } : { state: 'released' };
+  } });
+  const listener = ownFixtureHttpServer(control, t.signal);
+  t.after(async () => { await listener.stop(); await fs.rm(directory, { recursive: true, force: true }); });
+  await listener.listen();
+  const installOwner = async (origin, bound = true) => {
+    const now = Date.now();
+    const env = { TRELIO_ORIGIN: identity.origin, TRELIO_SKILL_ID: 'assistant-browser',
+      TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: assistantVisualBrowserAccountId(identity, origin) }),
+      TRELIO_SKILL_COMPANY_ID: identity.companyId, TRELIO_SKILL_MEMBER_ID: memberId,
+      TRELIO_SKILL_RUNTIME_SESSION_ID: runtimeSessionId,
+      TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({ apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 120000 }),
+      TRELIO_BROWSER_SESSION_STARTED_AT: String(now), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(now + 120000) };
+    const binding = visualSessionBinding(env);
+    const active = path.join(browserExecutionDirectory(path.join(directory, 'visual-browser', binding.scope), env), 'active');
+    await fs.mkdir(active, { recursive: true, mode: 0o700 });
+    await writePrivateJsonFile(path.join(active, 'owner.json'), { schemaVersion: 1,
+      token, pid: process.pid, scope: binding.scope, bindingHash: binding.bindingHash, port: control.address().port,
+      deadlineAt: binding.deadlineAt, executionOwner: binding.executionOwner, origins: [origin], presentation: 'hidden',
+      externalNavigation: true, assistantBrowserSecrets: bound,
+      mailIdentity: { origin: identity.origin, companyId: identity.companyId, memberId } });
+  };
+  const targetOrigin = 'https://form.test', targetUrl = targetOrigin + '/login';
+  const targetUrlSha256 = createHash('sha256').update(targetUrl).digest('hex');
+  const input = { identity, runtimeSessionId, targetUrl, directory, context: {
+    deliveryMode: 'browser', executable: 'trelio-workspace', fieldKeys: ['login'],
+    targetOrigin, targetUrlSha256, browserSteps: [{ targetOrigin, targetUrlSha256,
+      fields: [{ fieldKey: 'login', accessibleName: 'Account' }] }],
+  } };
+  assert.equal(await prepareAssistantManagedVisualSecret(input), null);
+  await installOwner(targetOrigin, false);
+  await assert.rejects(prepareAssistantManagedVisualSecret(input), { reasonCode: 'browser_unavailable' });
+  assert.deepEqual(operations, [], 'an old owned worker must refuse before checkout');
+  await installOwner(targetOrigin);
+  assert.equal(await prepareAssistantManagedVisualSecret({ ...input, runtimeSessionId: randomUUID() }), null);
+  for (const key of ['assistantId', 'deviceId', 'companyId'])
+    assert.equal(await prepareAssistantManagedVisualSecret({ ...input, identity: { ...identity, [key]: randomUUID() } }), null);
+  const selected = await prepareAssistantManagedVisualSecret(input);
+  assert.deepEqual(await selected.fill({ secretValues: { login: 'test value' } }), { outcome: 'succeeded' });
+  await assert.rejects(selected.fill({ secretValues: { login: 'test value' } }));
+  await selected.close();
+  assert.deepEqual(operations, ['prepare', 'fill', 'release']);
+  await installOwner('https://other.form.test');
+  await assert.rejects(prepareAssistantManagedVisualSecret(input), { reasonCode: 'browser_unavailable' });
+  assert.deepEqual(operations, ['prepare', 'fill', 'release'], 'ambiguous ownership cannot try several browsers');
+});
 
 test('presentation validation precedes identity/storage and an old worker cannot silently become hidden', async t => {
   const unreadable = new Proxy({}, { get() { throw Error('identity must not be accessed'); } });

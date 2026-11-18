@@ -25,6 +25,8 @@ const SAFE_REASON_CODES = new Set([
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+export const isSecretBrowserFillReason = (reason) => SAFE_REASON_CODES.has(reason);
+
 export class SecretBrowserFillError extends Error {
   constructor(message, reasonCode = "adapter_error", options = undefined) {
     super(message, options);
@@ -410,6 +412,7 @@ const installSecretBrowserController = (
   activationSelector,
   submitSelector,
   expectedUrl,
+  allowFollowingClick = false,
 ) => {
   // A later step can reuse the same URL/document/isolated world (SPA login).
   // Replace the completed controller rather than retaining its old targets.
@@ -423,6 +426,7 @@ const installSecretBrowserController = (
     activationPerformed: false,
     targets: null,
     submitTarget: null,
+    followingButtons: null,
   };
 
   const isSupportedField = (element) => {
@@ -534,9 +538,10 @@ const installSecretBrowserController = (
 
     const targets = [];
     for (const mapping of fieldMappings) {
-      const target = resolveUnique(mapping.selector);
+      const target = mapping.nativeTarget ?? resolveUnique(mapping.selector);
       if (target === undefined || target === null) return;
-      if (!isSupportedField(target) || !isVisible(target)) return;
+      if (mapping.nativeTarget && target.ownerDocument !== document
+        || !isSupportedField(target) || !isVisible(target)) return;
       if (targets.some((mapping) => mapping.target === target)) {
         state.status = "failed";
         state.reasonCode = "field_ambiguous";
@@ -563,6 +568,12 @@ const installSecretBrowserController = (
     };
   };
 
+  const matchBoundField = ({ selector, nativeTarget }) => nativeTarget
+    // A browser-selected accessibility node has no model-authored CSS
+    // fallback. Once bound, replacement cannot inherit the checkout.
+    ? nativeTarget.ownerDocument === document && nativeTarget.isConnected ? [nativeTarget] : []
+    : document.querySelectorAll(selector);
+
   globalThis.__trelioSecretBrowserApply = (rawValues) => {
     try {
       if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl) || state.status !== "ready") {
@@ -576,10 +587,11 @@ const installSecretBrowserController = (
       // Сначала повторно проверяем все поля. Только после общего preflight
       // начинаем native-setter записи, чтобы отсутствие второго поля не
       // оставило форму частично заполненной.
-      for (const { fieldKey, selector, target } of state.targets) {
+      for (const mapping of state.targets) {
+        const { fieldKey, target } = mapping;
         let matches;
         try {
-          matches = document.querySelectorAll(selector);
+          matches = matchBoundField(mapping);
         } catch {
           throw new Error("selector_changed");
         }
@@ -596,17 +608,18 @@ const installSecretBrowserController = (
       }
 
       for (let index = 0; index < state.targets.length; index += 1) {
-        const { fieldKey, selector } = state.targets[index];
+        const mapping = state.targets[index];
+        const { fieldKey } = mapping;
         // A synchronous input/change listener may navigate or replace another
-        // control after the previous setter. The grant binds the exact selector,
-        // so a unique replacement on the same exact URL is safe to reacquire.
-        const current = document.querySelectorAll(selector);
+        // control after the previous setter. DOM selector plans may reacquire
+        // a unique replacement. An accessibility object remains strictly pinned.
+        const current = matchBoundField(mapping);
         if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)
           || current.length !== 1 || !isSupportedField(current[0]) || !isVisible(current[0])) {
           throw new Error("target_changed");
         }
         const target = current[0];
-        state.targets[index] = { fieldKey, selector, target };
+        state.targets[index] = { ...mapping, target };
         const prototype = target instanceof HTMLTextAreaElement
           ? HTMLTextAreaElement.prototype
           : HTMLInputElement.prototype;
@@ -621,15 +634,16 @@ const installSecretBrowserController = (
           data: null,
         }));
         target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        const retained = document.querySelectorAll(selector);
+        const retained = matchBoundField(mapping);
         if (retained.length !== 1 || !isSupportedField(retained[0]) || !isVisible(retained[0])
           || !valuesEquivalent(retained[0], value)) throw new Error("value_not_retained");
-        state.targets[index] = { fieldKey, selector, target: retained[0] };
+        state.targets[index] = { ...mapping, target: retained[0] };
       }
       // A later field listener may re-render an earlier field. Validate the
       // complete exact mapping once more before the optional submit click.
-      for (const { fieldKey, selector } of state.targets) {
-        const retained = document.querySelectorAll(selector);
+      for (const mapping of state.targets) {
+        const { fieldKey } = mapping;
+        const retained = matchBoundField(mapping);
         if (retained.length !== 1 || !isSupportedField(retained[0]) || !isVisible(retained[0])
           || !valuesEquivalent(retained[0], values[fieldKey])) throw new Error("value_lost");
       }
@@ -655,6 +669,33 @@ const installSecretBrowserController = (
       return { outcome: "failed", reasonCode: state.reasonCode };
     }
   };
+
+  // An explicit field-only plan may be followed by one click on an already
+  // observed button. Pin actual button objects before the first setter. The
+  // renderer returns a boolean, never a fresh picture, label or field value.
+  if (allowFollowingClick && !submitSelector) {
+    const originalResolve = globalThis.__trelioSecretBrowserController;
+    globalThis.__trelioSecretBrowserController = () => {
+      const result = originalResolve();
+      if (result.status !== "ready") return result;
+      const form = state.targets[0]?.target.form;
+      if (!state.targets.every(({ target }) => target.form === form)) return result;
+      const buttons = document.querySelectorAll('button,input[type="submit"],input[type="button"]');
+      if (buttons.length <= 64) state.followingButtons = [...buttons].filter(
+        button => button.form === form && isSupportedSubmit(button) && !button.disabled && isVisible(button));
+      return result;
+    };
+    globalThis.__trelioSecretBrowserCheckFollowingClick = (x, y) => {
+      if (state.status !== "succeeded" || location.origin !== expectedOrigin || location.href !== expectedUrl)
+        return false;
+      const hit = document.elementFromPoint(x, y);
+      if (!hit) return false;
+      return state.followingButtons?.some(button => button.contains(hit)
+        && button.isConnected && isVisible(button) && !button.disabled && isSupportedSubmit(button)
+        && (!button.form || new URL(button.getAttribute("formaction") || button.form.action, location.href).origin === expectedOrigin
+          && (!button.formTarget && !button.form.target || (button.formTarget || button.form.target) === "_self"))) === true;
+    };
+  }
 
   globalThis.__trelioSecretBrowserSubmitPoint = () => {
     if (!submitSelector || state.status !== "submit_ready"
@@ -708,8 +749,9 @@ export const createSecretBrowserControllerExpression = (
   submitSelector,
   targetUrl,
   activationSelector,
+  allowFollowingClick = false,
 ) => (
-  `(${installSecretBrowserController.toString()})(${JSON.stringify(targetOrigin)},${JSON.stringify(fieldMappings)},${JSON.stringify(activationSelector)},${JSON.stringify(submitSelector)},${JSON.stringify(targetUrl)})`
+  `(${installSecretBrowserController.toString()})(${JSON.stringify(targetOrigin)},${JSON.stringify(fieldMappings)},${JSON.stringify(activationSelector)},${JSON.stringify(submitSelector)},${JSON.stringify(targetUrl)},${allowFollowingClick})`
 );
 
 const targetOriginFromUrl = (rawUrl) => {
@@ -782,6 +824,34 @@ const readBoundDocumentState = async ({ client, sessionId, step, previousStep })
   throw new SecretBrowserFillError("Browser document ушёл с exact URL одноразового grant.", "target_url_changed");
 };
 
+const exactAccessibilityNodes = async (client, sessionId, fieldMappings, frameId) => {
+  const named = fieldMappings.filter(field => field.accessibleName !== undefined);
+  if (named.length === 0) return [];
+  const { root } = await client.request("DOM.getDocument", { depth: 0, pierce: false }, sessionId);
+  if (!Number.isSafeInteger(root?.backendNodeId) || root.backendNodeId <= 0) {
+    throw new SecretBrowserFillError("Не удалось подтвердить документ browser form.");
+  }
+  const selected = [];
+  for (const field of named) {
+    // The browser computes the name and returns its own DOM identities. Do not
+    // substitute placeholders, fuzzy names, CSS or any AX value for this proof.
+    const { nodes } = await client.request("Accessibility.queryAXTree", {
+      backendNodeId: root.backendNodeId,
+      accessibleName: field.accessibleName,
+    }, sessionId);
+    if (!Array.isArray(nodes) || nodes.length > 64)
+      throw new SecretBrowserFillError("Не удалось проверить уникальность поля.", "field_ambiguous");
+    const matches = nodes.filter(node => node?.ignored === false && node.name?.value === field.accessibleName
+      && ["textbox", "searchbox", "combobox"].includes(node.role?.value)
+      && (node.frameId === undefined || node.frameId === frameId)
+      && Number.isSafeInteger(node.backendDOMNodeId) && node.backendDOMNodeId > 0);
+    if (matches.length !== 1) throw new SecretBrowserFillError("Не найдено одно точное поле.",
+      matches.length ? "field_ambiguous" : "field_not_found");
+    selected.push(matches[0].backendDOMNodeId);
+  }
+  return selected;
+};
+
 const createControllerWorld = async ({
   client,
   sessionId,
@@ -790,6 +860,7 @@ const createControllerWorld = async ({
   activationSelector,
   submitSelector,
   targetUrl,
+  allowAccessibilityObjects = false,
 }) => {
   const { frameTree } = await client.request("Page.getFrameTree", {}, sessionId);
   const frameId = frameTree?.frame?.id;
@@ -804,6 +875,32 @@ const createControllerWorld = async ({
   if (!Number.isInteger(executionContextId)) {
     throw new SecretBrowserFillError("Не удалось создать изолированный browser context.");
   }
+  const namedNodes = allowAccessibilityObjects ? await exactAccessibilityNodes(client, sessionId, fieldMappings, frameId) : [];
+  if (namedNodes.length) {
+    const argumentsList = [{ value: fieldMappings }, { value: targetOrigin }, { value: activationSelector ?? null },
+      { value: submitSelector ?? null }, { value: targetUrl }, { value: allowAccessibilityObjects }];
+    for (const backendNodeId of namedNodes) {
+      const { object } = await client.request("DOM.resolveNode", { backendNodeId, executionContextId }, sessionId);
+      if (object?.subtype !== "node" || typeof object.objectId !== "string")
+        throw new SecretBrowserFillError("Точное поле исчезло.", "field_not_found");
+      argumentsList.push({ objectId: object.objectId });
+    }
+    // The script is fixed, signed runtime code. The renderer receives only
+    // field mappings and pinned object references in the isolated top world.
+    const response = await client.request("Runtime.callFunctionOn", {
+      executionContextId,
+      functionDeclaration: `function (fields, origin, activation, submit, url, followClick, ...nodes) {
+        let index = 0;
+        const mappings = fields.map(field => field.accessibleName === undefined
+          ? field : {fieldKey: field.fieldKey, nativeTarget: nodes[index++]});
+        (${installSecretBrowserController.toString()})(origin, mappings, activation, submit, url, followClick);
+      }`,
+      arguments: argumentsList,
+      returnByValue: true,
+    }, sessionId);
+    if (response.exceptionDetails) throw new SecretBrowserFillError("Проверка browser form прервана.");
+    return { executionContextId, namedNodes, frameId };
+  }
   await client.request("Runtime.evaluate", {
     contextId: executionContextId,
     expression: createSecretBrowserControllerExpression(
@@ -812,10 +909,11 @@ const createControllerWorld = async ({
       submitSelector,
       targetUrl,
       activationSelector,
+      allowAccessibilityObjects,
     ),
     returnByValue: true,
   }, sessionId);
-  return executionContextId;
+  return { executionContextId, namedNodes, frameId };
 };
 
 const evaluateController = async ({ client, sessionId, executionContextId, expression }) => {
@@ -947,10 +1045,28 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
   }
   await client.request("Page.enable", {}, sessionId);
   await client.request("Runtime.enable", {}, sessionId);
+  return prepareBoundSecretBrowserController({
+    client, targetId, sessionId, targetUrl, steps, fillTimeoutMs, observePostSubmit,
+  });
+};
 
+/**
+ * Bind an existing worker-selected tab without opening, activating or attaching
+ * another browser. The private adapter owns the tab, target and deadline.
+ */
+export const prepareSecretBrowserControllerForExistingTab = ({
+  client, targetId, sessionId, targetUrl, steps, fillTimeoutMs,
+}) => prepareBoundSecretBrowserController({
+  client, targetId, sessionId, targetUrl, steps, fillTimeoutMs,
+  observePostSubmit: observeSecretBrowserPostSubmit, existingTab: true,
+});
+
+const prepareBoundSecretBrowserController = async ({
+  client, targetId, sessionId, targetUrl, steps, fillTimeoutMs, observePostSubmit, existingTab = false,
+}) => {
   const prepareStep = async (stepIndex, deadline) => {
     const step = steps[stepIndex];
-    let executionContextId = null;
+    let controller = null;
     let stepReached = false;
     let currentTargetInfo = null;
     let activationCompleted = false;
@@ -991,14 +1107,15 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
       }
       stepReached = true;
 
-      if (!executionContextId) {
-        executionContextId = await createControllerWorld({
+      if (!controller) {
+        controller = await createControllerWorld({
           client,
           sessionId,
           targetOrigin: step.targetOrigin,
           fieldMappings: step.fields,
           activationSelector: activationCompleted ? undefined : step.activationSelector,
           submitSelector: step.submitSelector,
+          allowAccessibilityObjects: existingTab,
           // TargetInfo may preserve a different textual URL spelling than
           // location.href. Its normalized form was already checked against
           // the grant hash above, so compare the controller to that form.
@@ -1010,11 +1127,12 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
         state = await evaluateController({
           client,
           sessionId,
-          executionContextId,
+          executionContextId: controller.executionContextId,
           expression: "globalThis.__trelioSecretBrowserController?.()",
         });
-      } catch {
-        executionContextId = null;
+      } catch (error) {
+        if (existingTab) throw error; // A bound document never receives a replacement controller after a failed probe.
+        controller = null;
         await wait(100);
         continue;
       }
@@ -1022,7 +1140,7 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
       if (state?.activationPerformed) activationCompleted = true;
 
       if (state?.status === "ready") {
-        return { executionContextId, step };
+        return { ...controller, step };
       }
       if (state?.status === "failed") {
         const reasonCode = SAFE_REASON_CODES.has(state.reasonCode)
@@ -1071,6 +1189,11 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
         const prepared = stepIndex === 0
           ? firstPrepared
           : await prepareStep(stepIndex, deadline);
+        if (prepared.namedNodes.length) {
+          const current = await exactAccessibilityNodes(client, sessionId, prepared.step.fields, prepared.frameId);
+          if (current.some((node, index) => node !== prepared.namedNodes[index]))
+            return { outcome: "failed", reasonCode: "field_write_failed" };
+        }
         const stepValues = Object.fromEntries(
           prepared.step.fields.map(({ fieldKey }) => [fieldKey, values[fieldKey]]),
         );

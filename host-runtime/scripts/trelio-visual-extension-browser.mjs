@@ -330,16 +330,25 @@ export class ExtensionVisualBrowser {
   #windowsClosed = false;
   #credentialSetup; #setupReason;
   #authenticationTask; #mailAttempt;
+  #assistantBrowserSecrets = false; #secretReservation; #protectedInputDispatched = false; #fixtureTlsSpki;
   #manualCompletionTimer; #manualCompletionPending = false; #manualCompletionEvidence;
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic; #headless = false;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
     visualBrowserHeadless(presentation, false);
     if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); } catch { throw fault('invalid_input'); }
     if (fieldCheckPolicy && (!semanticControls || observationMode !== 'text')) throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
+    // Native HTTPS fixtures pin a disposable loopback leaf key. The
+    // production worker cannot supply this option or relax browser TLS.
+    if (testTlsSpki !== undefined) {
+      if (!policy.fixtureOnly || origins.length !== 1 || domains.length
+        || !origins[0].startsWith('https://127.0.0.1:')
+        || typeof testTlsSpki !== 'string' || !/^[A-Za-z0-9+/]{43}=$/u.test(testTlsSpki)) throw fault('invalid_input');
+      this.#fixtureTlsSpki = testTlsSpki;
+    }
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
     Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
@@ -358,6 +367,92 @@ export class ExtensionVisualBrowser {
     if (this.#mailAttempt && !this.#terminal && !this.#closed) return validateVisualResult(this.#mailAttempt.publicStatus());
     return visualStatus(this.#state, this.#terminal || this.#setupReason || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved,
       ...(this.#state === 'error' && this.#startupDiagnostic ? { diagnostic: this.#startupDiagnostic } : {}) });
+  }
+  enableAssistantBrowserSecrets() {
+    if (this.#child || this.presentation !== 'hidden' || !this.externalNavigation || this.authentication)
+      throw fault('invalid_input');
+    this.#assistantBrowserSecrets = true;
+  }
+  async #releaseSecretReservation(reservation, allowFollowingClick) {
+    // Only release local binding state. An expired or broken runner never
+    // enables a follow-up input, and the extension retains any value mask.
+    if (this.#secretReservation !== reservation) return;
+    this.#secretReservation = undefined;
+    await this.#send('secret-browser-release', { handle: reservation.handle, allowFollowingClick }).catch(() => {});
+  }
+  /** Only the owner-checked private worker endpoint uses this lane. Fence a
+   * prepared handle before input and serialize it with ordinary browser work.
+   */
+  async secretBrowserCall(message) {
+    const { SecretBrowserFillError, prepareSecretBrowserControllerForExistingTab } =
+      await import('./trelio-secret-browser.mjs');
+    const { browserFillBinding } = await import('./trelio-secret-browser-native.mjs');
+    const task = this.#tail.then(async () => {
+      const keys = message && typeof message === 'object' ? Object.keys(message).sort().join(',') : '';
+      const reservation = this.#secretReservation;
+      if (message?.operation === 'release' && keys === 'handle,operation' && reservation && message.handle === reservation.handle) {
+        await this.#releaseSecretReservation(reservation,
+          reservation.fieldOnlySucceeded === true && Date.now() < reservation.expiry);
+        return { state: 'released' };
+      }
+      if (!this.#assistantBrowserSecrets || this.#manual || this.#closed || !this.#extensionReady
+        || this.#terminal || this.lease.deadlineAt <= Date.now() || !message || typeof message !== 'object')
+        return { state: 'refused', reasonCode: 'browser_unavailable' };
+      if (message.operation === 'prepare' && keys === 'context,operation,targetUrl') {
+        if (reservation?.expiry <= Date.now()) await this.#releaseSecretReservation(reservation, false);
+        if (this.#secretReservation) return { state: 'refused', reasonCode: 'browser_unavailable' };
+        const binding = browserFillBinding(message.context);
+        // Managed fields currently bind the original top document. Frames and
+        // preflight activation need a separate document-owned transition proof.
+        if (binding.browserSteps.length !== 1 || binding.browserSteps[0].frames?.length
+          || binding.browserSteps[0].activationSelector)
+          return { state: 'refused', reasonCode: 'field_selector_invalid' };
+        const { normalizeSecretBrowserTarget } = await import('./trelio-secret-browser.mjs');
+        const targetUrl = normalizeSecretBrowserTarget(message.targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+        const handle = crypto.randomUUID();
+        const expiry = Math.min(Date.now() + 38_000, this.lease.deadlineAt);
+        const bound = await this.#send('secret-browser-bind', { handle, targetUrl, expiry });
+        if (bound?.state !== 'bound') return { state: 'refused', reasonCode: 'target_url_changed' };
+        const current = { handle, expiry, used: false, fieldOnly: !binding.browserSteps[0].submitSelector };
+        this.#secretReservation = current;
+        try {
+          const client = { request: async (method, params) => {
+            if (this.#closed || this.#terminal || Date.now() >= expiry)
+              throw new SecretBrowserFillError('Managed browser binding ended.', 'browser_unavailable');
+            if (method === 'Runtime.evaluate' && params?.expression?.startsWith('globalThis.__trelioSecretBrowserApply('))
+              this.#protectedInputDispatched = true;
+            const reply = await this.#send('secret-browser-native', { handle, method, params });
+            if (reply?.state !== 'accepted') throw new SecretBrowserFillError('Managed document changed.', 'target_url_changed');
+            return reply.result;
+          } };
+          current.controller = await prepareSecretBrowserControllerForExistingTab({
+            client, targetId: 'managed-tab', sessionId: 'managed-tab', targetUrl, steps: binding.browserSteps,
+            fillTimeoutMs: Math.max(1, expiry - Date.now()),
+          });
+          return { state: 'ready', handle };
+        } catch (error) {
+          await this.#releaseSecretReservation(current, false);
+          return { state: 'refused', reasonCode: error instanceof SecretBrowserFillError ? error.reasonCode : 'adapter_error' };
+        }
+      }
+      if (!reservation || message.handle !== reservation.handle) return { state: 'refused', reasonCode: 'browser_unavailable' };
+      if (message.operation !== 'fill' || keys !== 'handle,operation,secretValues'
+        || reservation.used || Date.now() >= reservation.expiry)
+        return { outcome: 'failed', reasonCode: 'timeout' };
+      reservation.used = true;
+      try {
+        const result = await reservation.controller.fill({ secretValues: message.secretValues });
+        reservation.fieldOnlySucceeded = reservation.fieldOnly && result.outcome === 'succeeded';
+        return result.outcome === 'succeeded' ? { outcome: 'succeeded' } : { outcome: 'failed', reasonCode: result.reasonCode };
+      } catch (error) {
+        return { outcome: 'failed', reasonCode: error instanceof SecretBrowserFillError ? error.reasonCode : 'adapter_error' };
+      } finally {
+        if (message.secretValues && typeof message.secretValues === 'object')
+          for (const field of Object.keys(message.secretValues)) message.secretValues[field] = '';
+      }
+    });
+    this.#tail = task.catch(() => {});
+    return task;
   }
   /** Called only by the separately authenticated host-private mail endpoint.
    * It cannot start an attempt, select a mailbox or submit arbitrary inputs.
@@ -489,7 +584,15 @@ export class ExtensionVisualBrowser {
         });
         ws.on('close', () => {
           startupTrace?.mark('transport_closed');
-          if (this.#socket === ws) this.#socket = undefined;
+          if (this.#socket === ws) {
+            this.#socket = undefined;
+            // A new extension service worker cannot prove it remembers its
+            // credential-bearing documents. Preserve the previous protected
+            // snapshot and refuse further model observation in this browser.
+            if (this.#protectedInputDispatched && !this.#closed) {
+              this.#terminal ||= 'browser_process_lost'; this.#state = 'error';
+            }
+          }
           for (const [id, pending] of this.#pending) {
             pending.reportNavigation?.('socket_closed');
             clearTimeout(pending.timer); pending.reject(fault('operation_failed')); this.#pending.delete(id);
@@ -508,7 +611,7 @@ export class ExtensionVisualBrowser {
     // Give those launches a deterministic extension event instead of relying
     // on the timing of Chrome's new-tab page versus lazy worker installation.
     const bootstrap = process.platform !== 'darwin' || this.#headless ? visualExtensionBootstrapPage() : null;
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), fixtureOnly: this.policy.fixtureOnly };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     if (bootstrap) {
@@ -551,7 +654,9 @@ export class ExtensionVisualBrowser {
     // on platforms where closing the last window ends the browser session.
     this.#startupStage = 'browser_spawn';
     startupTrace?.mark('browser_spawn');
-    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativeCompositorSwitches(process.platform, this.#headless), '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment());
+    const fixtureTlsFlags = this.#fixtureTlsSpki
+      ? [`--ignore-certificate-errors-spki-list=${this.#fixtureTlsSpki}`] : [];
+    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativeCompositorSwitches(process.platform, this.#headless), '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...fixtureTlsFlags, ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment());
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
     // Reduce only the existing bounded private log, without adding a native
@@ -790,6 +895,9 @@ export class ExtensionVisualBrowser {
     if (operation === 'status') return Promise.resolve(this.#status());
     const result = this.#tail.then(async () => {
       if (this.#closed || Date.now() >= this.lease.deadlineAt) return visualStatus('error', 'lease_expired');
+      if (this.#secretReservation?.expiry <= Date.now())
+        await this.#releaseSecretReservation(this.#secretReservation, false);
+      if (this.#secretReservation) return this.#status('manual_control_active');
       if (this.#authenticationTask) return this.#status();
       if (this.#terminal) return this.#status();
       if (['credentials-setup', 'credentials-status', 'credentials-forget', 'authenticate'].includes(operation) && !this.authentication) return visualStatus('error', 'invalid_input');

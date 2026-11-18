@@ -16,13 +16,13 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[], networkRules=[];
   const openTabs = new Set([1]);
   let windowCreated, windowRemoved, tabCreated, headersReceived, detached, connections = 0, selectedTab = 1;
-  let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
+  let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', loaderId = 'original', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
   const context = { URL, Date, TextEncoder, Uint8Array, DataView, performance, atob, btoa, crypto: { randomUUID },
@@ -42,7 +42,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
         async sendCommand(_source, method, args) {
           nativeCommands.push({ method, args: JSON.parse(JSON.stringify(args)) });
           if (method === 'Emulation.setFocusEmulationEnabled') await focusEmulation?.();
-          if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } }; }
+          if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId, mimeType: 'text/html', url: currentUrl } } }; }
           if (method === 'Page.getLayoutMetrics') {
             await layout?.();
             return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
@@ -54,8 +54,17 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
             return { data: pngHeader.toString('base64') };
           }
           if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseWheel') await mouseWheel?.();
+          if (assistantBrowserSecrets && method === 'Runtime.evaluate') {
+            if (args.expression.startsWith('globalThis.__trelioSecretBrowserApply(')) return { result: { value: { outcome: 'succeeded' } } };
+            if (args.expression.startsWith('globalThis.__trelioSecretBrowserCheckFollowingClick')) return { result: { value: secretHit } };
+          }
           if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
             clicks++;
+            if (assistantBrowserSecrets) {
+              loaderId = 'new-document';
+              nativeEvent({ tabId: 1 }, 'Page.frameNavigated', { frame: { id: 'main', loaderId, url: currentUrl } });
+              return {};
+            }
             if (immediateAck) { queueMicrotask(() => open()); return {}; }
             return new Promise((resolve, reject) => { release = resolve; rejectInput = reject; queueMicrotask(() => open()); });
           }
@@ -98,7 +107,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, profileAuthentication, externalNavigation: profileAuthentication, fixtureOnly,
-    observationMode: image ? 'image' : 'text', ...(authenticationMessage?{authentication:true}:{}), ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
+    observationMode: image ? 'image' : 'text', assistantBrowserSecrets, ...(authenticationMessage?{authentication:true}:{}), ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -109,6 +118,10 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
   if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
   return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates, networkRules,
     frameEvent: (method, params, tabId = 1) => nativeEvent({ tabId }, method, params),
+    restoreDocument(id) {
+      loaderId = id;
+      nativeEvent({ tabId: 1 }, 'Page.frameNavigated', { type: 'BackForwardCacheRestore', frame: { id: 'main', loaderId, url: currentUrl } });
+    },
     selectTab(tabId) {
       if (!openTabs.has(tabId)) {
         openTabs.add(tabId);
@@ -130,6 +143,37 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
     humanClose() { nativeEvent({ tabId: 1 }, 'Page.javascriptDialogClosed', {}); release?.({}); },
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
+}
+
+for (const mode of ['confirmed', 'changed-button', 'same-document-navigation', 'release-only']) {
+  test('managed field-only fill masks the page and admits one original submit click only when proven: ' + mode, async () => {
+    const worker = await dialogWorker({ assistantBrowserSecrets: true, secretHit: mode !== 'changed-button' });
+    const original = await worker.dispatch('read-text');
+    const handle = randomUUID(), targetUrl = 'https://example.test/';
+    assert.equal((await worker.dispatch('secret-browser-bind', { handle, targetUrl, expiry: Date.now() + 9000 })).state, 'bound');
+    const apply = { handle, method: 'Runtime.evaluate',
+      params: { contextId: 9, returnByValue: true, expression: 'globalThis.__trelioSecretBrowserApply({"login":"fixture-value"})' } };
+    assert.equal((await worker.dispatch('secret-browser-native', apply)).state, 'accepted');
+    assert.equal((await worker.dispatch('secret-browser-native', apply)).reason, 'invalid_input');
+    assert.equal((await worker.dispatch('secret-browser-release', { handle, allowFollowingClick: mode !== 'release-only' })).state, 'released');
+    assert.equal((await worker.dispatch('read-text')).reason, 'manual_control_active');
+    assert.equal((await worker.dispatch('screenshot')).reason, 'manual_control_active');
+    worker.open('alert', 'fixture-value');
+    assert.equal((await worker.dispatch('read-text')).state, 'manual_input_required');
+    worker.humanClose();
+    if (mode === 'same-document-navigation') worker.frameEvent('Page.navigatedWithinDocument', { frameId: 'main' });
+    const input = { frameId: original.frameId, x: 20, y: 20 };
+    const click = await worker.dispatch('click', input);
+    assert.equal(click.state, mode === 'confirmed' ? 'ready' : 'error');
+    if (mode === 'confirmed') {
+      assert.equal(click.text, 'Original site result');
+      worker.restoreDocument('restored-document');
+      assert.equal((await worker.dispatch('read-text')).reason, 'manual_control_active', 'back/forward restore cannot expose a credential');
+    }
+    assert.equal((await worker.dispatch('click', input)).reason, 'stale_frame');
+    assert.equal(worker.counts().clicks, mode === 'confirmed' ? 1 : 0);
+    assert.equal(worker.sent.some(item => JSON.stringify(item).includes('fixture-value')), false);
+  });
 }
 
 for (const [operation, phase] of [

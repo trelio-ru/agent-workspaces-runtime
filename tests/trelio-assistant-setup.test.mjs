@@ -1006,6 +1006,54 @@ test('a source failure during native work is retained after settlement without r
 const workspacePlan=()=>({prepared:true,scope:{assistantUserId:randomUUID(),deviceId:randomUUID(),companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},
   localAction:{schemaVersion:1,operation:'open',parameters:{workspaceId:randomUUID(),runId:randomUUID(),runtimeSessionId:randomUUID()}}});
 
+test('assistant browser preflight refusal survives the Workspace process and MCP facade', async t => {
+  const { runAssistantWorkspaceProcess } = await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const { runWorkspaceFinishProcess } = await import('../host-runtime/scripts/trelio-workspace-finish-progress.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'assistant-browser-preflight-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'digital-assistants'));
+  await fs.writeFile(path.join(root, 'digital-assistants', 'identity.json'), '{}');
+  const plan = workspacePlan();
+  const { workspaceId, runId } = plan.localAction.parameters;
+  plan.localAction = { schemaVersion: 1, operation: 'secret_browser_fill',
+    runIdentity: { workspaceId, runId }, parameters: { grantId: randomUUID(), targetUrl: 'https://example.com/signin' } };
+  const entry = new URL('../host-runtime/scripts/trelio-assistant-entry.mjs', import.meta.url).href;
+  const browser = new URL('../host-runtime/scripts/trelio-secret-browser.mjs', import.meta.url).href;
+  // One actual child invocation per case, with only a synthetic typed failure.
+  // The negative cases model a post-consume or untyped lookalike error.
+  let failureKind = 'preflight';
+  let launches = 0;
+  const executor = await createAssistantWorkspaceExecutor({ configDirectory: root, runPlan: (raw, options) =>
+    runAssistantWorkspaceProcess(raw, { ...options, resolveLoader: async () => '/verified/loader.mjs',
+      runProcess: (executable, _args, processOptions) => {
+        launches++;
+        const child = `import {runAssistantWorkspaceWorker} from ${JSON.stringify(entry)};
+          import {SecretBrowserFillError} from ${JSON.stringify(browser)};
+          await runAssistantWorkspaceWorker({executePlan:async () => {
+            const kind = ${JSON.stringify(failureKind)};
+            const error = kind === 'foreign' ? new Error('PRIVATE_CANARY')
+              : new SecretBrowserFillError('PRIVATE_CANARY', 'field_not_found');
+            throw Object.assign(error, {preflight: kind !== 'after-consume', reasonCode:'field_not_found'});
+          }});`;
+        return runWorkspaceFinishProcess(executable, ['--input-type=module', '-e', child], processOptions);
+      } }) });
+  t.after(() => executor.stop());
+  const facade = await createForwardingAssistantMcp({ configurationDirectory: root,
+    createWorkspace: async () => executor, request: async () => ({ content: [], structuredContent: plan }) });
+  const invoke = () => facade.callTool('continue_assistant_workspace_action', plan.localAction);
+  const refused = await invoke();
+  assert.equal(refused.isError, true);
+  assert.deepEqual(refused.structuredContent, { code: 'SECRET_BROWSER_PREFLIGHT_FAILED', stage: 'preflight',
+    reasonCode: 'field_not_found', secretRequested: false, grantConsumedByAttempt: false });
+  assert.doesNotMatch(JSON.stringify(refused), /PRIVATE_CANARY|example\.com|grantId/u);
+
+  for (const kind of ['after-consume', 'foreign']) {
+    failureKind = kind;
+    await assert.rejects(invoke(), { code: 'ASSISTANT_WORKSPACE_EXECUTION_FAILED' });
+  }
+  assert.equal(launches, 3);
+});
+
 test('stdio retains the same finish registry across fresh per-call native proxies',async t=>{
   const {createForwardingAssistantMcp,createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-stdio-finish-'));
@@ -1044,6 +1092,8 @@ test('stdio retains the same finish registry across fresh per-call native proxie
   const started=await send(2,'tools/call',{name:'continue_assistant_workspace_action',arguments:{operation:'finish',runIdentity,
     parameters:{summary:'Synthetic result',evidence:['Synthetic evidence'],nextAction:'Synthetic next step',taskOutcome:'no_status_change'}}});
   assert.equal(started.result.structuredContent.state,'running');
+  assert.equal(started.result.content[0].text,started.result.structuredContent.instruction);
+  assert.match(started.result.content[0].text,/nextCall/u,'the original finish must be polled before ending the turn');
   deny=true;
   const refused=await send(3,'tools/call',{name:'continue_assistant_workspace_action',arguments:started.result.structuredContent.nextCall.arguments});
   assert.equal(refused.result.structuredContent.code,'ASSISTANT_ACCESS_DENIED');

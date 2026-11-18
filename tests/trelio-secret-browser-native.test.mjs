@@ -16,7 +16,7 @@ import {
 } from "../host-runtime/scripts/trelio-secret-browser-native.mjs";
 import {
   createSecretBrowserControllerExpression, observeSecretBrowserPostSubmit,
-  prepareSecretBrowserControllerViaDevTools,
+  prepareSecretBrowserControllerForExistingTab, prepareSecretBrowserControllerViaDevTools,
   SecretBrowserFillError,
 } from "../host-runtime/scripts/trelio-secret-browser.mjs";
 
@@ -299,6 +299,57 @@ test("background Chrome preflight never activates a window or sends a secret", a
     { url: targetUrl, newWindow: false });
   assert.equal(requests.some(({ method }) => method === "Target.activateTarget"), false);
   assert.doesNotMatch(JSON.stringify(requests), /CANARY/u);
+});
+
+test("existing-tab preflight binds the exact accessible field and refuses its replacement", async () => {
+  const requests = [];
+  let nodeId = 42;
+  const field = { fieldKey: "username", accessibleName: "Email" };
+  const client = {
+    async request(method, params, sessionId) {
+      requests.push({ method, params, sessionId });
+      assert.equal(sessionId, method === "Target.getTargetInfo" ? undefined : "existing-session");
+      if (method === "Target.getTargetInfo") {
+        assert.equal(params.targetId, "selected-tab");
+        return { targetInfo: { url: targetUrl } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top", url: targetUrl } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 5 };
+      if (method === "DOM.getDocument") return { root: { backendNodeId: 1 } };
+      if (method === "Accessibility.queryAXTree") {
+        assert.deepEqual(params, { backendNodeId: 1, accessibleName: "Email" });
+        return { nodes: [
+          { ignored: true, name: { value: "Email" }, role: { value: "textbox" }, backendDOMNodeId: 11 },
+          { ignored: false, name: { value: "Email" }, role: { value: "textbox" }, backendDOMNodeId: 12, frameId: "other" },
+          { ignored: false, name: { value: "Email" }, role: { value: "textbox" }, backendDOMNodeId: nodeId, frameId: "top" },
+        ] };
+      }
+      if (method === "DOM.resolveNode") {
+        assert.deepEqual(params, { backendNodeId: 42, executionContextId: 5 });
+        return { object: { subtype: "node", objectId: "bound-input" } };
+      }
+      if (method === "Runtime.callFunctionOn") {
+        assert.equal(params.executionContextId, 5);
+        assert.deepEqual(params.arguments.at(-1), { objectId: "bound-input" });
+        return {};
+      }
+      if (method === "Runtime.evaluate") {
+        assert.equal(params.expression, "globalThis.__trelioSecretBrowserController?.()");
+        return { result: { value: { status: "ready" } } };
+      }
+      assert.fail(`Unexpected browser command: ${method}`);
+    },
+  };
+  const controller = await prepareSecretBrowserControllerForExistingTab({ client, targetId: "selected-tab",
+    sessionId: "existing-session", targetUrl, fillTimeoutMs: 1_000,
+    steps: [{ targetOrigin: context.targetOrigin, targetUrlSha256: context.targetUrlSha256, fields: [field] }] });
+  assert.equal(controller.targetId, "selected-tab");
+  assert.equal(requests.filter(({ method }) => /^Target\.(create|attach|activate)/u.test(method)).length, 0);
+  nodeId = 71;
+  assert.deepEqual(await controller.fill({ secretValues: { username: "PRIVATE_CANARY" } }),
+    { outcome: "failed", reasonCode: "field_write_failed" });
+  await assert.rejects(controller.fill({ secretValues: { username: "PRIVATE_CANARY" } }), SecretBrowserFillError);
+  assert.doesNotMatch(JSON.stringify(requests), /PRIVATE_CANARY/u);
 });
 
 test("post-submit observation reports only bound form state, never credential values", async () => {

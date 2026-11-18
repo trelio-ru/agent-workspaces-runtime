@@ -104,6 +104,10 @@ publication tooling также остаются вне этого публичн
   Ordinary account syntax/setup/selection refusals retain the common parser's
   static help through the request worker and facade. Only genuine host account
   errors qualify; provider/lookalike details stay private, with no write replay.
+  A task's Telegram account list may show a single current native source
+  matched to its own bound local account and project scope. Names are never
+  identity. Source configuration alone verifies neither login nor send
+  authority and never changes the selected account or polling state.
   See [ordinary skills](docs/assistant-scheduler.md#ordinary-owner-chat-skills).
   `set_background` uses that SAME observed taskless intent and signed bound
   account selection for Telegram/email/MAX desired polling. Native source CAS
@@ -1682,6 +1686,17 @@ Exact legacy template bytes для распознавания при мигра�
   context/consume retain genuine ABI/recipient/pass/Run checks. Unknown root or
   step fields fail before HTTP. The SAME pure browser-plan parser rejects syntax
   before private I/O and points only to the native on-demand preparation schema.
+  For a task's already-owned managed browser, bind the observed runtime
+  owner and exact top document before native consume. The private endpoint
+  reuses the installed extension, isolated world and common field controller.
+  Its original one-use handle never moves to another tab or a general CDP
+  method. Mask both text/images and dialogs before the setter, including
+  lost outcomes and same-document navigation. A successful field-only fill
+  may use one explicit click from the old frame on a bound native button.
+  Real pre-consume refusals keep a closed reason through the signed request
+  worker. Test real Chromium HTTPS and keep provider sign-in verification
+  independent. Running Workspace finish presents its existing poll instruction
+  and exact nextCall, without a second writer.
   Real ACL/key/unknown-fill failures never become argument repair or replay. NEW encrypted private cards admit only native
   neutral metadata and sealed owner policy; task prose stays company ciphertext,
   values use SAME private writer/receipt. No company credential adoption/export.

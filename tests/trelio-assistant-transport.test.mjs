@@ -1948,6 +1948,34 @@ const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=f
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
 };
 
+test('Telegram account inventory identifies a unique native source without choosing or authorizing a send', async () => {
+  const f=await workspaceProfileFixture();
+  const projectId=randomUUID(), ownAccount=randomUUID(), otherAccount=randomUUID();
+  const source={id:randomUUID(),companyId:f.pass.companyId,deviceId:f.identity.deviceId,
+    projectId:null,localAccountId:ownAccount,skillId:'telegram-mtproto',state:'active',revision:1};
+  const other={...source,id:randomUUID(),localAccountId:otherAccount,state:'available'};
+  let rows=[source,other], reads=0;
+  f.client.sourceAccounts=async (companyId,signal)=>{
+    assert.equal(companyId,f.pass.companyId);assert.ok(signal);reads++;return rows;
+  };
+  const accounts=[{id:ownAccount,bound:true,label:'telegram-mtproto'},
+    {id:otherAccount,bound:true,label:'telegram-mtproto'}];
+  const request={companyId:f.pass.companyId,projectId,accounts};
+  assert.deepEqual(await f.profile.describeTelegramTaskAccount(request),{sourceId:source.id,
+    localAccountId:ownAccount,sourceRevision:1,basis:'current_native_telegram_source',
+    sessionVerified:false,providerWriteAuthorized:false});
+  assert.equal(await f.profile.describeTelegramTaskAccount({...request,companyId:randomUUID()}),null);
+  assert.equal(reads,1,'a foreign scope must refuse before inventory');
+  assert.equal(await f.profile.describeTelegramTaskAccount({...request,accounts:[accounts[1]]}),null);
+  rows=[source,{...other,state:'active',projectId:randomUUID()}];
+  assert.equal((await f.profile.describeTelegramTaskAccount(request)).localAccountId,ownAccount);
+  rows=[source,{...other,state:'active',projectId}];
+  assert.equal(await f.profile.describeTelegramTaskAccount(request),null);
+  rows=[source];
+  f.client.sourceAccounts=async ()=>{f.close();return rows;};
+  await assert.rejects(f.profile.describeTelegramTaskAccount(request));
+});
+
 test('Workspace proof lock covers only its coherent runtime snapshot, with native/private late fences outside',async()=>{
   let locked=false,runtimeReads=0,replaceIdentity=false;
   const f=await workspaceProfileFixture({lock:async(_file,action)=>{

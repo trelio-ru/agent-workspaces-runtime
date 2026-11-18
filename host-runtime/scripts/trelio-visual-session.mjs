@@ -24,6 +24,14 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const busy = () => visualStatus('error', 'session_busy');
 
+/** The same account locator is used at managed-browser launch and when a
+ * protected grant looks for that browser. It never identifies a user profile.
+ */
+export function assistantVisualBrowserAccountId({ origin, assistantId, deviceId, companyId }, siteOrigin) {
+  const digest = hash(['assistant-browser/v1', origin, assistantId, deviceId, companyId, siteOrigin]);
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
 export const VISUAL_IDLE_TIMEOUT_MS = 10 * 60_000;
 
 /** A host-owned idle clock, independent of the signed absolute browser lease.
@@ -149,6 +157,90 @@ async function request(owner, operation, args, signal) {
   return validateVisualResult(JSON.parse(text));
 }
 
+async function requestVisualSecret(owner, body, signal) {
+  const response = await fetch(`http://127.0.0.1:${owner.port}/secret-browser`, {
+    method: 'POST', headers: { authorization: `Bearer ${owner.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body), signal, redirect: 'error',
+  });
+  if (response.status !== 200 || Number(response.headers.get('content-length') || 0) > 1024)
+    throw new Error('VISUAL_WORKER_UNAVAILABLE');
+  const result = await response.text();
+  if (Buffer.byteLength(result) > 1024) throw new Error('VISUAL_RESULT_INVALID');
+  return JSON.parse(result);
+}
+
+/** Locate only the original managed browser of the observed task execution.
+ * A provider worker, another session or a human browser is never eligible.
+ * These paths hold the existing loopback capability. The grant and values
+ * remain in memory and are neither passed to a child nor written to the owner file.
+ */
+export async function prepareAssistantManagedVisualSecret({ identity, runtimeSessionId, context, targetUrl,
+  signal, directory = resolveWorkspaceBridgeConfigDirectory() }) {
+  const { SecretBrowserFillError, isSecretBrowserFillReason } = await import('./trelio-secret-browser.mjs');
+  const { browserFillBinding } = await import('./trelio-secret-browser-native.mjs');
+  const unavailable = () => new SecretBrowserFillError('Не удалось подтвердить исходную managed-вкладку.', 'browser_unavailable');
+  const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(40_000)]) : AbortSignal.timeout(40_000);
+  if (!uuid.test(runtimeSessionId ?? '') || !uuid.test(identity?.companyId ?? '')) throw unavailable();
+  const executionOwner = browserExecutionOwner({ TRELIO_SKILL_RUNTIME_SESSION_ID: runtimeSessionId });
+  const root = path.join(directory, 'visual-browser');
+  try { await assertPrivatePathKind(root, 'directory'); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw unavailable();
+  }
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  if (entries.length > 1024) throw unavailable();
+  let selected = null;
+  for (const entry of entries) {
+    deadline.throwIfAborted();
+    if (!entry.isDirectory() || !/^[a-f0-9]{64}$/u.test(entry.name)) continue;
+    const account = path.join(root, entry.name);
+    const session = path.join(account, 'sessions', executionOwner);
+    try {
+      for (const value of [account, path.join(account, 'sessions'), session, path.join(session, 'active')])
+        await assertPrivatePathKind(value, 'directory');
+      const owner = await readVisualOwner(path.join(session, 'active', 'owner.json'));
+      const siteOrigin = owner.origins?.length === 1 ? owner.origins[0] : null;
+      if (typeof siteOrigin !== 'string' || owner.mailIdentity?.origin !== identity.origin
+        || owner.mailIdentity.companyId !== identity.companyId || owner.executionOwner !== executionOwner
+        || owner.presentation !== 'hidden' || owner.externalNavigation !== true
+        || visualStorageScope({ origin: identity.origin, skillId: 'assistant-browser',
+          accountId: assistantVisualBrowserAccountId(identity, siteOrigin) }) !== entry.name) continue;
+      const browserBinding = { origin: identity.origin, skillId: 'assistant-browser',
+        accountId: assistantVisualBrowserAccountId(identity, siteOrigin), companyId: identity.companyId,
+        memberId: owner.mailIdentity.memberId, executionOwner };
+      if (selected || !validOwner(owner, { scope: entry.name }) || owner.deadlineAt <= Date.now() || owner.assistantBrowserSecrets !== true
+        || !uuid.test(browserBinding.memberId ?? '') || owner.bindingHash !== hash(browserBinding)
+        || !Number.isInteger(owner.port) || owner.port < 1 || owner.port > 65535) throw unavailable();
+      selected = owner;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw unavailable();
+    }
+  }
+  if (!selected) return null;
+  const binding = browserFillBinding(context);
+  const prepared = await requestVisualSecret(selected, { operation: 'prepare', context: binding, targetUrl }, deadline)
+    .catch(() => { throw unavailable(); });
+  if (prepared?.state !== 'ready' || !uuid.test(prepared.handle ?? '')
+    || Object.keys(prepared).sort().join(',') !== 'handle,state')
+    throw new SecretBrowserFillError('Проверка managed-формы завершилась отказом.',
+      isSecretBrowserFillReason(prepared?.reasonCode) ? prepared.reasonCode : 'adapter_error');
+  let used = false;
+  return {
+    surface: 'managed',
+    async fill({ secretValues }) {
+      if (used) throw new SecretBrowserFillError('Повторная передача секрета запрещена.');
+      used = true;
+      const result = await requestVisualSecret(selected, { operation: 'fill', handle: prepared.handle, secretValues }, deadline);
+      return result?.outcome === 'succeeded' && Object.keys(result).join(',') === 'outcome'
+        ? { outcome: 'succeeded' }
+        : { outcome: 'failed', reasonCode: isSecretBrowserFillReason(result?.reasonCode) ? result.reasonCode : 'adapter_error' };
+    },
+    // Even if the original action was cancelled, discard this handle with
+    // a bounded release-only request. Failed or expired fills cannot submit.
+    close: () => requestVisualSecret(selected, { operation: 'release', handle: prepared.handle }, AbortSignal.timeout(2000)).catch(() => {}),
+  };
+}
+
 /** Cleanup needs no business authority: it can only stop this exact observed
  * execution's windows, never erase auth or input into a page. Inspect private
  * structural claims without following symlinks; request their authenticated
@@ -227,7 +319,7 @@ export function normalizeVisualManualCompletion(value, { origins, fixtureOnly = 
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], externalNavigation = false, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], externalNavigation = false, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture }) {
   if (typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation) return visualStatus('error', 'invalid_input');
   if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || !semanticControls && operation === 'read-text'
     && ['controlQuery', 'controlOffset'].some(key => Object.hasOwn(args || {}, key))) return visualStatus('error', 'invalid_input');
@@ -242,6 +334,10 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
   if (typeof externalNavigation !== 'boolean' || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads) || (operation === 'download-audio' && !audioDownloads) || (operation === 'upload-files' && !fileUploads)) return visualStatus('error', 'invalid_input');
   if (['wait', 'close', 'disconnect'].includes(operation) ? !args || Object.keys(args).length : !validVisualArguments(operation, args)) return visualStatus('error', 'invalid_input');
   const binding = visualSessionBinding(env);
+  if (typeof assistantBrowserSecrets !== 'boolean'
+    || assistantBrowserSecrets && (binding.skillId !== 'assistant-browser' || !binding.executionOwner
+    || presentation !== 'hidden' || !externalNavigation || authentication))
+    return visualStatus('error', 'invalid_input');
   const policy = createVisualOriginPolicy({ origins, domains, externalNavigation, allowLoopback: Boolean(fixture) });
   authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
   const authenticationFingerprint = authentication ? visualAuthenticationFingerprint(authentication) : null;
@@ -364,6 +460,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
         pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
         origins, domains, externalNavigation, profileAuthentication, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, attachmentDownloads, audioDownloads, fileUploads, authentication, authenticationFingerprint, manualCompletion,
         mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
+        ...(assistantBrowserSecrets === true ? { assistantBrowserSecrets: true } : {}),
         ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
       };
       startupStage = 'owner_publish';
@@ -403,13 +500,14 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
 }
 
 /** Authenticated loopback transport; web pages cannot call it or read tokens. */
-export function createVisualControlServer({ token, dispatch, mailDispatch }) {
+export function createVisualControlServer({ token, dispatch, mailDispatch, secretDispatch }) {
   const expectedAuthorization = Buffer.from(`Bearer ${token}`);
   return http.createServer(async (req, res) => {
     const deny = () => { res.writeHead(403, { 'content-length': '0' }); res.end(); };
     const authorization = Buffer.from(typeof req.headers.authorization === 'string' ? req.headers.authorization : '');
     const privateMail = req.url === '/authentication-mail' && typeof mailDispatch === 'function';
-    if (req.method !== 'POST' || req.url !== '/command' && !privateMail || req.headers.origin !== undefined
+    const privateSecret = req.url === '/secret-browser' && typeof secretDispatch === 'function';
+    if (req.method !== 'POST' || req.url !== '/command' && !privateMail && !privateSecret || req.headers.origin !== undefined
       || req.headers['content-type'] !== 'application/json' || authorization.length !== expectedAuthorization.length
       || !crypto.timingSafeEqual(authorization, expectedAuthorization)
       || !/^127\.0\.0\.1:\d+$/u.test(req.headers.host || '')) return deny();
@@ -417,6 +515,11 @@ export function createVisualControlServer({ token, dispatch, mailDispatch }) {
     try {
       for await (const bytes of req) { count += bytes.length; if (count > 32_768) throw new Error('invalid_input'); chunks.push(bytes); }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (privateSecret) {
+        const body = JSON.stringify(await secretDispatch(value));
+        if (Buffer.byteLength(body) > 1024) throw Error('invalid_input');
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body); return;
+      }
       if (privateMail) {
         // A separate private pipe endpoint; these matcher/receipt messages
         // must never pass through ordinary visual result/MCP projection.
@@ -430,7 +533,8 @@ export function createVisualControlServer({ token, dispatch, mailDispatch }) {
       const body = JSON.stringify(result);
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body);
     } catch (error) {
-      const body = JSON.stringify(privateMail ? { ok: false, code: 'authentication_mail_unavailable' }
+      const body = JSON.stringify(privateSecret ? { state: 'refused', reasonCode: 'adapter_error' }
+        : privateMail ? { ok: false, code: 'authentication_mail_unavailable' }
         : visualStatus('error', 'operation_failed', { diagnostic: visualStartupDiagnostic('worker_request', undefined, error) }));
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }); res.end(body);
     }

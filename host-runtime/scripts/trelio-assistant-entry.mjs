@@ -26,6 +26,11 @@ import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from
 import { parseVisualSkillOutput, visualMcpResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from './trelio-skill-secret-setup.mjs';
 import { browserControllerEnabled, parseBrowserControllerArguments, runBrowserControllerCommand } from './trelio-browser-session.mjs';
+import { isSecretBrowserFillReason, SecretBrowserFillError } from './trelio-secret-browser.mjs';
+
+const isSecretBrowserPreflightRefusal = (error) => error instanceof SecretBrowserFillError
+  && error.preflight === true && isSecretBrowserFillReason(error.reasonCode);
+const secretBrowserPreflightFailure = 'SECRET_BROWSER_PREFLIGHT_FAILED';
 
 /** Ordinary owner-chat skill admission belongs to this SAME signed entry.
  * Keep its implementation inside the existing module: one extra payload file
@@ -960,7 +965,7 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
 export const materializeAssistantBrowser = async ({identity,host,store,result,arguments:args,signal,
   admissionStartedAt,run,now=Date.now,monotonic=()=>performance.now()}) => {
   const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
-  const {runVisualSession}=await import('./trelio-visual-session.mjs');
+  const {assistantVisualBrowserAccountId,runVisualSession}=await import('./trelio-visual-session.mjs');
   const {DEFAULT_LEASE_MS}=await import('./trelio-browser-session.mjs');
   const pass=validateAssistantActivePass(await host.readActivePass(),identity),grant=result.structuredContent;
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -997,8 +1002,7 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
   // This fixed namespace is an internal browser storage realm, NOT a fake
   // enabled Agent Skill or a borrowed provider account. Per-company/site UUID
   // separates credentials; the observed execution owner separates live windows.
-  const hex=createHash('sha256').update(JSON.stringify(['assistant-browser/v1',identity.origin,identity.assistantId,identity.deviceId,pass.companyId,site.origin])).digest('hex');
-  const accountId=`${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-a${hex.slice(17,20)}-${hex.slice(20,32)}`;
+  const accountId=assistantVisualBrowserAccountId({...identity,companyId:pass.companyId},site.origin);
   const startedAt=now(),deadlineAt=Math.min(startedAt+DEFAULT_LEASE_MS,Date.parse(saved.state.expiresAt));
   if(deadlineAt-startedAt<60_000)failBrowser();
   const environment={TRELIO_ORIGIN:identity.origin,TRELIO_SKILL_ID:'assistant-browser',
@@ -1013,7 +1017,7 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
   // without raising a window over the person's desktop. This is fixed host
   // policy, never a model flag or a fallback from another live presentation.
   const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,presentation:'hidden',
-    operation,args:input,env:environment});
+    ...(grant.readOnly?{}:{assistantBrowserSecrets:true}),operation,args:input,env:environment});
   return visualMcpResult(visual);
 };
 
@@ -1386,6 +1390,13 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {
+        if(args?.operation==='secret_browser_fill' && isSecretBrowserPreflightRefusal(error)){
+          // This is evidence about this attempt only. The grant may have
+          // expired or been spent elsewhere. Keep recovery observational.
+          return {isError:true,content:[{type:'text',text:'Browser form preflight stopped before requesting the Secret. Inspect the exact current page and fields before deciding how to continue.'}],
+            structuredContent:{code:secretBrowserPreflightFailure,stage:'preflight',reasonCode:error.reasonCode,
+              secretRequested:false,grantConsumedByAttempt:false}};
+        }
         await reportAssistantMaintenanceFailure(error).catch(()=>undefined);
         if(error?.code==='TRELIO_WORKSPACE_FINISH_UNKNOWN'){
           // The native request has already authorised this exact status plan.
@@ -1407,7 +1418,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
         const {visualMcpResult}=await import('./trelio-visual-result.mjs');
         return visualMcpResult(executed.visual);
       }
-      return {content:[{type:'text',text:executed?.state==='running'&&executed.operation==='open'?executed.instruction
+      return {content:[{type:'text',text:executed?.state==='running'&&['open','finish'].includes(executed.operation)?executed.instruction
         :executed?.operation==='open'&&executed.authorityReads
         ?'Read both pinned authority files in order using the exact structuredContent.authorityReads calls. If a response has nextOffset, repeat that read with command.offset set to nextOffset until null before proceeding to the next file.'
         :executed?.operation==='skill_run'&&executed.instruction?executed.instruction
@@ -4029,6 +4040,11 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
     // child prose/cause or retry the command. A killed/ambiguous writer remains
     // an explicit review condition, not proof that acceptance did not happen.
     let frame;try{if(typeof error?.stderr==='string' && error.stderr.length<1024)frame=JSON.parse(error.stderr);}catch{}
+    if(plan.localAction.operation==='secret_browser_fill' && error?.code===1 && !error.signal && !error.killed
+      && !error.stdout && frame?.code===secretBrowserPreflightFailure
+      && Object.keys(frame).sort().join(',')==='code,reasonCode' && isSecretBrowserFillReason(frame.reasonCode)){
+      throw Object.assign(new SecretBrowserFillError(secretBrowserPreflightFailure,frame.reasonCode),{preflight:true});
+    }
     const code=assistantHealthFailure(frame) || /^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(frame?.code??'')?frame.code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED';
     throw Object.assign(new Error(code),{code,
       ...(code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(frame?.reason)?{reason:frame.reason}:{})});
@@ -4210,7 +4226,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // authoritative; this translation grants no task/status permission.
       return {...plan.localAction,parameters};
     })();
-    let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight;
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
       resolveRunRootDirectory:async()=>root,
@@ -4285,6 +4301,11 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           return {stdout,stderr:''};
         }
         catch(error) {
+          if(plan.localAction.operation==='secret_browser_fill' && isSecretBrowserPreflightRefusal(error)){
+            // Carry the typed common refusal past the ordinary action wrapper.
+            // Never recover this provenance from stderr or a provider result.
+            nativeBrowserPreflight=error;
+          }
           if(materialization?.aborted&&(error===materialization.reason||error?.cause===materialization.reason))
             nativeCommandPolicyCause='ASSISTANT_WORKSPACE_OPEN_TIMED_OUT';
           // Reuse the ordinary in-process -> CLI error projection so common
@@ -4312,6 +4333,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     } catch(error) {
       if(materialization?.aborted && (error===materialization.reason || error?.cause===materialization.reason))
         fail('ASSISTANT_WORKSPACE_OPEN_TIMED_OUT');
+      if(nativeBrowserPreflight)throw nativeBrowserPreflight;
       const diagnostic=error?.details?.http?.failureCode;
       if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;
       if(nativeHealthCause)error.code=nativeHealthCause;
@@ -4331,11 +4353,20 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
 export const runAssistantWorkspaceWorker = async ({input=process.stdin,output=process.stdout,executePlan=executeAssistantWorkspacePlan}={}) => {
   let bytes=0;const chunks=[];
   for await(const chunk of input){const part=Buffer.from(chunk);bytes+=part.length;if(bytes>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');chunks.push(part);}
-  try {output.write(JSON.stringify(await executePlan(JSON.parse(Buffer.concat(chunks).toString('utf8'))))+'\n');}
+  let plan;
+  try {
+    plan=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    output.write(JSON.stringify(await executePlan(plan))+'\n');
+  }
   catch(error) {
     // The ordinary dispatcher has already projected typed HTTP/recovery errors.
     // Never return a native exception/cause/stack, arbitrary stderr or a private
     // store failure. Preserve just its closed code for explicit recovery.
+    if(plan?.localAction?.operation==='secret_browser_fill' && isSecretBrowserPreflightRefusal(error)){
+      process.stderr.write(JSON.stringify({code:secretBrowserPreflightFailure,reasonCode:error.reasonCode})+'\n');
+      process.exitCode=1;
+      return;
+    }
     const {bridgeHttpDiagnosticCode}=await import('./trelio-bridge-http-diagnostics.mjs');
     const code=assistantHealthFailure(error)?error.code:Number.isInteger(error?.statusCode)?bridgeHttpDiagnosticCode(error.statusCode,error.code)
       : /^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code??'')?error.code:'ASSISTANT_WORKSPACE_EXECUTION_FAILED';

@@ -155,6 +155,10 @@ try {
   }
   startupPhase = 'control_server';
   server = createVisualControlServer({ token: owner.token, dispatch,
+    ...(owner.assistantBrowserSecrets === true ? { secretDispatch: message => {
+      if (!engine || startupFailed || stopping) return { state: 'refused', reasonCode: 'browser_unavailable' };
+      return engine.secretBrowserCall(message);
+    } } : {}),
     mailDispatch: message => {
       if (!engine) throw Error('authentication_mail_unavailable');
       return engine.mailCall(message);
@@ -177,6 +181,7 @@ try {
   // closed process/extension events do not require native log-file switches.
   startupPhase = 'browser';
   engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, externalNavigation: owner.externalNavigation === true, profileAuthentication: owner.profileAuthentication === true, authentication: owner.authentication || null, manualCompletion: owner.manualCompletion || null, mailIdentity: owner.mailIdentity || null, observationMode: owner.observationMode || 'image', presentation: owner.presentation || 'windowed', semanticControls: owner.semanticControls === true, fieldCheckPolicy: owner.fieldCheckPolicy || null, attachmentDownloads: owner.attachmentDownloads === true, audioDownloads: owner.audioDownloads === true, fileUploads: owner.fileUploads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
+  if (owner.assistantBrowserSecrets === true) engine.enableAssistantBrowserSecrets();
   current = await idle.run(owner.operation, owner.args, () => engine.call(owner.operation, owner.args));
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed', startupPhase, error, failureCode:error.diagnosticCode,

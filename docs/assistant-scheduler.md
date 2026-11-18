@@ -3857,6 +3857,40 @@ body field or other Secret route can forward the device credential. Values
 remain in the protected browser/provider process. Its owned fallback profile is isolated
 by assistant/device/task; it never opens the ordinary human fallback profile.
 
+When the task observes an already-owned managed browser, the host first
+binds the current runtime session, assistant/device/company/site ownership and
+the last observed top document. Its authenticated loopback endpoint uses the
+same hidden browser, exact URL/hash, native frame/loader and isolated field
+controller. One top-document step with exact selectors or a unique native
+accessible name is supported. An incompatible worker, stale frame, iframe or
+activation request fails before consume. The private endpoint has no visual
+command alias. It returns only a short-lived handle or a closed refusal.
+
+The worker masks the document before any setter can receive values. A lost
+response and same-document navigation retain that mask for text, image and
+native dialog observations. With a positive field-only result, a single
+explicit click may use the previous frame and the originally observed live
+native button. The worker checks the original tab, document and button again
+and spends this continuation before input. It returns the next independently
+guarded observation when the browser navigates. A successful fill or click
+still needs an independent authentication read-back. Password/OTP screens
+continue to use their separate observation guard.
+
+Genuine pre-consume adapter refusals retain a closed reason through the
+assistant Workspace process and facade. This receipt only classifies that
+attempt. It does not grant consume/fill replay or imply that another worker
+or provider accepted the operation. When Workspace finish returns a running
+operation, expose the original wait instruction with its exact poll call.
+The poll uses fresh native admission and waits on the original writer.
+
+An ordinary task's Telegram `account list` includes a
+`configuredTelegramSource` hint only when its fresh native company/device
+inventory has one active source in scope and the same ID occurs once in the
+task's existing bound local account catalogue. Identical display names are
+never selectors. The result explicitly preserves independent session and
+send verification. It does not select an account for later calls, start
+provider I/O or modify source configuration.
+
 Before any private profile/key or HTTP access, browser preparation validates the
 model's complete plan using the SAME pure parser used by the encrypted signer.
 Malformed input returns `ASSISTANT_MCP_INPUT_INVALID` with a static read-only

@@ -10629,7 +10629,17 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   await catalogue.importOnce(assistant ? async () => [] : () => discover({ artifact, runtimeDirectory, executionContext }));
   if (command?.operation === 'list') {
     const listed = await catalogue.list();
-    output({ ok: true, ...listed, ...(assistant ? {accounts:listed.accounts.filter(account=>account.bound)} : {}) }); return { handled: true };
+    const accounts = assistant ? listed.accounts.filter(account => account.bound) : listed.accounts;
+    // A scoped native Telegram source can identify an account even when the
+    // locally installed entries share a display name. Keep the real list
+    // intact. Failure to read current native configuration gives no hint.
+    const configuredTelegramSource = assistant && artifact.skillId === 'telegram-mtproto'
+      && typeof profile.describeTelegramTaskAccount === 'function'
+      ? await profile.describeTelegramTaskAccount({ companyId: executionContext.companyId,
+        projectId: executionContext.projectId ?? null, accounts }).catch(() => null)
+      : null;
+    output({ ok: true, ...listed, accounts, ...(configuredTelegramSource ? { configuredTelegramSource } : {}) });
+    return { handled: true };
   }
   if (command) {
     const result = command.operation === 'remove'
@@ -19546,6 +19556,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     mode: browserMode,
     directory: browserStorage.directory,
     profileDirectory: browserStorage.profileDirectory,
+    prepareManaged: browserStorage.prepareManaged,
     ensurePrivateDirectory,
   });
   try {
