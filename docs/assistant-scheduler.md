@@ -699,6 +699,21 @@ turn. No new marker is permitted after this bounded recovery. Only the ordinary
 native completion and backend business receipt can advance the schedule or
 clear dispatch review.
 
+An original event-free scheduled invocation has no completed parent. Its
+latest full native turn must contain the exact signed scheduler prompt for
+that delivery and only the supported same-task reads above. When authority
+was paginated, the history must reach the final authority page. An unclassified
+connector command, missing or pending result, changed prompt, Workspace
+operation, routed original or owner answer keeps the original uncertainty.
+
+The journal stores this distinct witness in the existing indexed continuation
+row. Keep the expired pass, original delivery and native-start bit. The same
+App Server must acquire the writer and repeat the full native read before the
+ordinary renewal CAS. A lost renewal is read back under its original key. An
+interrupted recovery cannot start another turn or borrow archive settlement.
+Only ordinary task evidence and completion advance the next scheduled slot.
+Older workers reject the new witness and retain the original uncertainty.
+
 ### Interrupted Workspace draft settlement
 
 A stored `interrupted` is still uncertainty. The one narrow exception is a

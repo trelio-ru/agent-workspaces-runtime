@@ -53,7 +53,13 @@ export const ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS=Object.freeze(
 export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract','complete_assistant_pass',
 ]);
-const taskReadParent=value=>{
+const taskReadWitness=value=>{
+  // A root witness never substitutes for a completed parent. Older workers
+  // refuse this distinct shape and keep the original native-start fence.
+  if(value?.initialScheduled===true){
+    object(value,['initialScheduled']);
+    return {initialScheduled:true};
+  }
   const fields=['parentMarkerId','parentTurnId'];
   object(value,fields);
   if(Object.keys(value).length!==fields.length)inputError();
@@ -75,7 +81,7 @@ const continuationIntent = value => {
     expectedLeaseRevision:integer(value.expectedLeaseRevision,0,2_147_483_646),reviewId:value.reviewId===null?null:uuid(value.reviewId),
     resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started,...(value.capacity===true?{capacity:true}:{}),
     ...(value.workspaceDraft===undefined?{}:{workspaceDraft:workspaceDraftIdentity(value.workspaceDraft)}),
-    ...(value.taskReadParent===undefined?{}:{taskReadParent:taskReadParent(value.taskReadParent)}),
+    ...(value.taskReadParent===undefined?{}:{taskReadParent:taskReadWitness(value.taskReadParent)}),
     ...(value.namedArchiveSettled===undefined?{}:{namedArchiveSettled:namedArchiveAcceptedIdentity(value.namedArchiveSettled)})};
 };
 /** A read-only dispatch guard for the current signed MCP worker. Once a draft
@@ -2100,7 +2106,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       }
       if(parentRead!==undefined){
         if(capacity||workspaceDraft!==undefined||prerequisiteKey===null||passId===null)inputError();
-        parentRead=taskReadParent(parentRead);
+        parentRead=taskReadWitness(parentRead);
       }
       if(namedArchiveSettled!==undefined){
         if(capacity||workspaceDraft!==undefined||parentRead!==undefined||prerequisiteKey===null||passId===null)inputError();
@@ -2129,13 +2135,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // original turn, release a pass, process an event or clear health.
         // The read-only recovery is one shot across all versions and hook
         // definitions. The previous attempt stays in the indexed journal.
-        if(parentRead!==undefined&&(!latest||!last.started||last.capacity||last.workspaceDraft||last.taskReadParent
+        if(parentRead?.initialScheduled){
+          // No routed input or owner answer may be consumed by a root recovery,
+          // even when its original body has since disappeared at the provider.
+          if(last||!row.scheduled||terminalMarkerId!==id||deliveryEvents(id).length)fail('ASSISTANT_INBOX_CONFLICT');
+        }else if(parentRead!==undefined&&(!latest||!last.started||last.capacity||last.workspaceDraft||last.taskReadParent
           ||last.terminalMarkerId!==parentRead.parentMarkerId||last.terminalTurnId!==parentRead.parentTurnId
           ||last.passId!==passId||last.reviewId!==terminalMarkerId||terminalTurnId===parentRead.parentTurnId
           ||terminalMarkerId===parentRead.parentMarkerId))fail('ASSISTANT_INBOX_CONFLICT');
         // A read-only continuation that reached one exact started archive
         // finish can settle that save once. Never grant another ordinary turn.
-        if(workspaceDraft?.namedArchive&&(!last?.taskReadParent||!last.started||last.passId!==passId))fail('ASSISTANT_INBOX_CONFLICT');
+        if(workspaceDraft?.namedArchive&&(!last?.taskReadParent?.parentMarkerId||!last.started||last.passId!==passId))
+          fail('ASSISTANT_INBOX_CONFLICT');
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
           fail('ASSISTANT_INBOX_CONFLICT');

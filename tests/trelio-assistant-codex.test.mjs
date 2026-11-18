@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -2270,3 +2270,53 @@ for(const variant of ['exact','busy','changed-parent','newer-turn','pending'])te
     assert.equal(starts,0);assert.ok(!steps.includes('renew'));
   }
 });
+
+for(const variant of ['exact','inline-authority','cached-authority','newer-turn','incomplete-authority','provider-command','owner-input','changed-prompt','busy'])
+  test('scheduled original is checked under its own writer before the one renewal ('+variant+')',async()=>{
+    const {turn,taskPass,terminalMarkerId,terminalTurnId}=interruptedTaskReadHistory();
+    const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+    const scheduledContext={...taskContext,scheduled:true};
+    const witness={taskPass,initialScheduled:true,assistantId:taskContext.assistantId};
+    const scope=assistantWorkStateContext(variant==='owner-input'?{...scheduledContext,ownerQuestionIds:[randomUUID()]}:scheduledContext);
+    turn.items[0].content[0].text=assistantNativePrompt(terminalMarkerId,scope,{});
+    if(variant==='changed-prompt')turn.items[0].content[0].text+='extra instructions';
+    if(variant==='incomplete-authority')turn.items.splice(3,1);
+    if(variant==='inline-authority'||variant==='cached-authority'){
+      const payload=JSON.parse(turn.items[2].result.content[0].text);
+      payload.effectiveInstructions={schemaVersion:3,status:'loaded',
+        layers:[{key:'layer',markdown:'Pinned rules fixture'}],
+        reusedLayerKeys:variant==='cached-authority'?['another-layer']:[]};
+      payload.tasks[0].instructionScope={status:'loaded',orderedLayerKeys:['layer']};
+      turn.items[2].result.content[0].text=JSON.stringify(payload);
+      turn.items.splice(3,1);
+    }
+    if(variant==='provider-command')turn.items[5].tool='continue_assistant_workspace_action';
+    const changed=['cached-authority','incomplete-authority','provider-command','owner-input','changed-prompt'].includes(variant);
+    assert.equal(assistantInterruptedTaskRead(turn,terminalMarkerId,witness),!changed);
+    const priorTurn=variant==='newer-turn'?[{id:randomUUID(),status:'completed',items:[]}]:[turn];
+    const steps=[];
+    let reads=0,starts=0;
+    const attempt=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext:scheduledContext,execution},{
+      executable:process.execPath,environment:{},requireAbsentMarker:true,
+      taskReadRecovery:{taskPass,initialScheduled:true,terminalMarkerId,terminalTurnId},
+      continuationReview:{priorTurnId:terminalTurnId,reviewId:deliveryId},
+      readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+      readExecutionAvailability:async()=>true,beforeInvocation:async()=>{steps.push('renew');},
+      startInvocation:()=>{starts++;},
+      readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
+      spawnProcess:ownedRpc({threadId,cwd,priorTurn,
+        resumeError:variant==='busy'?{code:-32600,message:'thread '+threadId+' already has an active writer'}:undefined,
+        onRequest:req=>{
+          if(req.method==='thread/resume')steps.push('writer');
+          if(req.method==='thread/turns/list'&&req.params.limit===1)steps.push('readlatest');
+        },
+      }),
+    });
+    if(variant==='exact'||variant==='inline-authority'){
+      assert.equal((await attempt()).state,'completed');
+      assert.deepEqual(steps,['writer','readlatest','renew']);assert.equal(starts,1);
+    }else{
+      await assert.rejects(attempt(),{code:variant==='busy'?'ASSISTANT_CODEX_THREAD_BUSY':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+      assert.equal(starts,0);assert.ok(!steps.includes('renew'));
+    }
+  });

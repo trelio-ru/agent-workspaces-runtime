@@ -1626,6 +1626,11 @@ Exact legacy template bytes для распознавания при мигра�
   expires only from exact full native read-only history and its completed parent.
   The same native writer rereads both before renewing the original pass; no
   provider/source/owner-answer inputs or unknown effects qualify.
+  The first event-free scheduled invocation uses its exact signed input
+  instead of a completed parent. Require all selected authority pages, the
+  newest full native turn and the same writer before renewing once. Persist
+  this distinct witness in the existing continuation row; older workers fail
+  closed. Provider commands and Workspace operations still prevent recovery.
   [Contract](docs/assistant-scheduler.md#interrupted-read-only-task-continuation).
   A later exact named-archive finish may settle through its separate restricted
   tool set and retained native handoff. Only accepted native/clean Git evidence

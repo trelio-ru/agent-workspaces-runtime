@@ -1213,12 +1213,14 @@ const sameWorkspaceRecovery=(value,expected)=>value&&expected
 const exactDraftPass=(value,expected)=>value&&Object.getPrototypeOf(value)===Object.prototype
   &&Object.keys(value).sort().join(',')==='companyId,passId,taskId'
   &&['companyId','passId','taskId'].every(key=>UUID.test(expected?.[key]??'')&&value[key]===expected[key]);
-/** Identifies an interrupted *continuation* whose complete native history
- * contains only completed reads of this same task. This is not a terminal
- * business receipt. The owning App Server must see the same evidence again
- * after acquiring the native writer and before any pass renewal. */
-export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId,parentTurnId}={})=>{
-  if(![deliveryId,turn?.id,assistantId,parentTurnId].every(value=>UUID.test(value??''))
+/** Identifies an interrupted continuation or scheduled root from settled same-task
+ * reads. A root must match the signed scheduler prompt, with no parent to vouch
+ * for its invocation. The owning App Server repeats the full native read
+ * before renewal. Neither witness is a business receipt. */
+export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId,parentTurnId,initialScheduled}={})=>{
+  if(![deliveryId,turn?.id,assistantId].every(value=>UUID.test(value??''))
+    ||(initialScheduled===true?parentTurnId!==undefined
+      :initialScheduled!==undefined||!UUID.test(parentTurnId??''))
     ||!exactDraftPass(taskPass,taskPass)||turn.status!=='interrupted'||turn.error!=null
     ||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>64)return false;
   const [original,...items]=turn.items;
@@ -1226,8 +1228,11 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
   if(original?.type!=='userMessage'||!Array.isArray(input)||input.length!==1||input[0]?.type!=='text'
     ||typeof input[0].text!=='string'||Buffer.byteLength(input[0].text)>32_768)return false;
   const [marker,scopeLine,continuationLine]=input[0].text.split('\n',3);
-  if(marker!==assistantDeliveryMarker(deliveryId)||!scopeLine?.startsWith('TRELIO_ASSISTANT_SCOPE ')
-    ||!continuationLine?.startsWith(`This is ONE automatic recovery continuation after terminal turn ${parentTurnId}, with invocation marker ${deliveryId}. `))
+  if(marker!==assistantDeliveryMarker(deliveryId)||!scopeLine?.startsWith('TRELIO_ASSISTANT_SCOPE '))return false;
+  if(initialScheduled===true){
+    const context=assistantWorkStateContext({assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true});
+    if(input[0].text!==assistantNativePrompt(deliveryId,context,{}))return false;
+  }else if(!continuationLine?.startsWith(`This is ONE automatic recovery continuation after terminal turn ${parentTurnId}, with invocation marker ${deliveryId}. `))
     return false;
   let scope;
   try{scope=JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length));}catch{return false;}
@@ -1265,6 +1270,14 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
       if(authority.status==='incomplete'){
         catalogue=authority.delivery?.catalogRevisionKey;
         if(!/^[a-f0-9]{64}$/u.test(catalogue??''))return false;
+      }else if(initialScheduled===true){
+        // The native v3 inline catalogue uses 'loaded'. A cache hint or a
+        // missing layer is not full delivery of this task's authority.
+        const keys=result.tasks[0].instructionScope?.orderedLayerKeys;
+        if(authority.status!=='loaded'||!Array.isArray(keys)||!Array.isArray(authority.layers)
+          ||!Array.isArray(authority.reusedLayerKeys)||authority.reusedLayerKeys.length
+          ||keys.length!==authority.layers.length||new Set(keys).size!==keys.length
+          ||authority.layers.some((layer,index)=>layer?.key!==keys[index]||typeof layer.markdown!=='string'))return false;
       }else if(authority.status!=='complete')return false;
     }else if(item.tool==='get_task_instruction_page'){
       if(taskReads!==1||++pages>20||keys!=='expectedCatalogRevisionKey,pageIndex,pageSize,runtimeSessionProof,taskPass'
@@ -1280,7 +1293,7 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
         ||Object.getPrototypeOf(result.operations)!==Object.prototype)return false;
     }else return false;
   }
-  return taskReads===1;
+  return taskReads===1&&(initialScheduled!==true||catalogue===null||nextPage===null);
 };
 
 const draftReads=new Set(['get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract']);
@@ -1808,6 +1821,14 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   return workspaceDraft?{state:'interrupted_workspace_draft',turnId:turn.id,workspaceDraft}:{state:'uncertain'};
 };
 const readInterruptedTaskReadTurn=async(request,threadId,deliveryId,witness)=>{
+  if(witness?.initialScheduled===true){
+    // Only the newest full turn can prove an original scheduled invocation.
+    // Prior completed cycles are independent and do not certify this delivery.
+    const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
+    const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
+    return assistantInterruptedTaskRead(turn,deliveryId,witness)
+      ?{state:'interrupted_task_read',turnId:turn.id}:{state:'uncertain'};
+  }
   // Fetch the two latest full turns together. An intervening turn or a
   // replaced parent makes the pending pass unsafe to recover automatically.
   const response=await request('thread/turns/list',{threadId,limit:2,sortDirection:'desc',itemsView:'full'});
@@ -2225,11 +2246,17 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   }
   if(options.taskReadRecovery!==undefined){
     const recovery=options.taskReadRecovery;
+    const initial=recovery?.initialScheduled===true;
     if(!recovery||Object.getPrototypeOf(recovery)!==Object.prototype
-      ||Object.keys(recovery).sort().join(',')!=='parentMarkerId,parentTurnId,taskPass,terminalMarkerId,terminalTurnId'
-      ||![recovery.parentMarkerId,recovery.parentTurnId,recovery.terminalMarkerId,recovery.terminalTurnId].every(value=>UUID.test(value??''))
-      ||new Set([deliveryId,recovery.parentMarkerId,recovery.terminalMarkerId]).size!==3
-      ||recovery.parentTurnId===recovery.terminalTurnId||options.continuationReview?.priorTurnId!==recovery.terminalTurnId
+      ||Object.keys(recovery).sort().join(',')!==(initial
+        ?'initialScheduled,taskPass,terminalMarkerId,terminalTurnId':'parentMarkerId,parentTurnId,taskPass,terminalMarkerId,terminalTurnId')
+      ||![recovery.terminalMarkerId,recovery.terminalTurnId].every(value=>UUID.test(value??''))
+      ||deliveryId===recovery.terminalMarkerId
+      ||(initial?workStateContext.scheduled!==true
+        :![recovery.parentMarkerId,recovery.parentTurnId].every(value=>UUID.test(value??''))
+          ||new Set([deliveryId,recovery.parentMarkerId,recovery.terminalMarkerId]).size!==3
+          ||recovery.parentTurnId===recovery.terminalTurnId)
+      ||options.continuationReview?.priorTurnId!==recovery.terminalTurnId
       ||options.workspaceDraftRecovery!==undefined||intakeContext!==undefined||workStateContext.workMode==='discussion'
       ||workStateContext.sourceReferences!==undefined||workStateContext.ownerQuestionIds!==undefined
       ||!exactDraftPass(recovery.taskPass,recovery.taskPass)||recovery.taskPass.companyId!==workStateContext.companyId
@@ -2437,11 +2464,11 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     }
     if(options.taskReadRecovery){
       // A reader's notLoaded snapshot alone cannot authorize renewal. The
-      // successful resume above owns the same native thread; verify the exact
-      // previously completed marker and the read-only interrupted tail here.
-      const {terminalMarkerId,terminalTurnId,taskPass,parentMarkerId,parentTurnId}=options.taskReadRecovery;
+      // successful resume above owns the same thread. Verify the interrupted
+      // witness again, including its completed parent when this is a continuation.
+      const {terminalMarkerId,terminalTurnId,...witness}=options.taskReadRecovery;
       const current=await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{
-        taskPass,parentMarkerId,parentTurnId,assistantId:workStateContext.assistantUserId});
+        ...witness,assistantId:workStateContext.assistantUserId});
       if(current.state!=='interrupted_task_read'||current.turnId!==terminalTurnId)
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
@@ -2483,7 +2510,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
   return threadId;
 };
 
-const assistantNativePrompt = (deliveryId,workStateContext,options) => {
+export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       if(options.workspaceDraftRecovery){
         const {workspaceDraft}=options.workspaceDraftRecovery;
         if(workspaceDraft.acceptedHead!==undefined)
@@ -2510,7 +2537,7 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       const namedArchiveResume=options.namedArchiveResume
         ? 'The previous recovery turn finished the already retained archive save only. Reuse that accepted archive revision. Continue the original task from the first unfinished step, with current task authority, provider access, original receipts and deduplication. The previous save is not a task result. Do not repeat the old control or owner question.\n':'';
       const readRecovery=options.taskReadRecovery
-        ? 'The interrupted continuation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';
+        ? 'The interrupted invocation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';
       const recovery=options.continuationReview
         ? `This is ONE automatic recovery continuation after terminal turn ${options.continuationReview.priorTurnId}, with invocation marker ${options.continuationReview.reviewId}. The original task authorization remains in force. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Re-read current status even if an earlier message or pending technical question says host recovery is required; the earlier error is not a current result. A lost finish operation handle requires ordinary status without that handle and an exact native Run read. When acceptance is absent, recover the same own Run through its native prepare/open and returned local recovery actions; technical reopening needs no new owner approval. Preserve the source files and reconcile their selected delta before saving. Decide what remains to be done and continue the task. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. Technical recovery does not approve sensitive actions or prove completion.\n`:'';
   // Selecting an ordinary full-task pass is structural and belongs here.

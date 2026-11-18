@@ -3161,6 +3161,131 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
 });
 
 
+
+for(const ending of ['completed','interrupted','unproven','lost-renewal'])
+  test('event-free scheduled original uses the same pass across restart ('+ending+')',async t=>{
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-scheduled-recovery-'));
+    const filename=path.join(directory,'queue.sqlite');
+    let database=new DatabaseSync(filename);
+    const f=fixture(t,{database,ownsDatabase:false});
+    let coordinator=f.coordinator,successfulBasis=true,owned=false,original=null;
+    const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
+    const originalTurn=randomUUID(),retryMarker=randomUUID();
+    let provisionedNotice=0,rootStarts=0,reviews=0,renewals=0,recoveryStarts=0;
+    f.authority.workMode='task';
+    Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
+    f.options.onBusinessConfirmed=async()=>{
+      assert.equal(f.activePass(),null);
+      provisionedNotice++;
+    };
+    f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+    f.options.client.readBusinessOutcome=async args=>successfulBasis?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
+    f.options.native.readDelivery=async(_thread,marker,options={})=>{
+      if(marker===original?.deliveryId){
+        if(options.interruptedTaskRead){
+          assert.equal(options.interruptedTaskRead.initialScheduled,true);
+          assert.equal(options.interruptedTaskRead.parentTurnId,undefined);
+          assert.deepEqual(options.interruptedTaskRead.taskPass,
+            {companyId:original.companyId,taskId:original.taskId,passId:original.passId});
+          if(ending!=='unproven')return {state:'interrupted_task_read',turnId:originalTurn};
+        }
+        return {state:'uncertain',turnId:originalTurn};
+      }
+      if(marker===retryMarker&&ending==='interrupted')return {state:'uncertain',turnId:randomUUID()};
+      return f.deliveries.get(marker)??{state:'uncertain'};
+    };
+    f.options.passHost.continuePass=async(args,expected)=>{
+      const pass=f.passes.get(expected.deliveryId);
+      assert.deepEqual(expected,original);
+      assert.equal(args.terminalTurnId,originalTurn);
+      if(args.continuation==='review')reviews++;
+      if(args.continuation==='resume'){
+        assert.ok(owned);
+        assert.equal(renewals++,0);
+        Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
+          leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+        if(ending==='lost-renewal')throw Object.assign(new Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+      }
+      return {schemaVersion:2,state:renewals?'resumed':'approved',reviewId:retryMarker,invocationId:retryMarker,
+        resumed:renewals?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+    };
+    f.options.native.run=async(input,options)=>{
+      if(options.taskReadRecovery){
+        assert.equal(input.deliveryId,retryMarker);
+        assert.equal(input.threadId,original.threadId);
+        assert.equal(options.taskReadRecovery.initialScheduled,true);
+        assert.equal(options.taskReadRecovery.terminalMarkerId,original.deliveryId);
+        if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+        await options.beforeInvocation();
+        recoveryStarts++;
+        if(ending==='interrupted'){options.startInvocation();return {state:'uncertain'};}
+      }else if(!successfulBasis&&!original){
+        assert.equal(input.taskContext.scheduled,true);
+        original=f.activePass();
+        rootStarts++;
+        options.startInvocation();
+        return {state:'uncertain'};
+      }
+      successfulBasis=true;
+      return ordinaryRun(input,options.taskReadRecovery?{...options,beforeInvocation:undefined}:options);
+    };
+    try{
+      await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+      await coordinator.pollOnce();await coordinator.workOnce();
+      f.events.push({id:randomUUID(),revision:'first',taskId:f.taskId,wake:true});
+      f.advance(300001);await coordinator.pollOnce();await coordinator.workOnce();
+      assert.equal(provisionedNotice,1);
+      const schedule=coordinator.status()[0];
+      f.advance(schedule.nextRunAt-f.options.now());
+      successfulBasis=false;
+      await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+      assert.equal(rootStarts,1);
+      assert.equal((await coordinator.workOnce()).state,'blocked');
+      assert.equal(reviews,0,'the original live lease cannot be renewed as recovery');
+      const pass=f.passes.get(original.deliveryId);
+      f.advance(21*60_000);pass.state='review_required';
+      if(ending==='unproven'){
+        assert.equal((await coordinator.workOnce()).state,'blocked');
+        assert.equal(reviews,0);assert.equal(renewals,0);assert.equal(recoveryStarts,0);
+        assert.equal(provisionedNotice,1);
+        return;
+      }
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      const readIntent=()=>createAssistantInbox({database,now:f.options.now}).readPassContinuation(original.deliveryId);
+      assert.equal(renewals,0);assert.equal(readIntent().started,false);
+      await coordinator.close();database.close();
+      database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
+      assert.deepEqual(readIntent().taskReadParent,{initialScheduled:true});
+      owned=true;
+      if(ending==='interrupted'){
+        await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+        f.advance(21*60_000);pass.state='review_required';
+        assert.equal((await coordinator.workOnce()).state,'blocked');
+        assert.equal(provisionedNotice,1);
+        assert.equal(f.activePass().deliveryId,original.deliveryId);
+      }else{
+        if(ending==='lost-renewal'){
+          await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+          assert.equal(readIntent().resumeAttempted,true);
+          assert.equal(readIntent().started,false);
+        }
+        await coordinator.workOnce();
+        assert.equal(provisionedNotice,2);
+        assert.equal(f.activePass(),null);
+        const settled=coordinator.status()[0];
+        assert.equal(settled.nextRunAt,schedule.nextRunAt+86400000);
+        await coordinator.workOnce();
+        assert.equal(provisionedNotice,2);
+        f.advance(settled.nextRunAt-f.options.now());await coordinator.workOnce();
+        assert.equal(provisionedNotice,3);
+        assert.equal(coordinator.status()[0].threadId,original.threadId);
+      }
+      assert.equal(readIntent().started,true);
+      assert.equal(rootStarts,1);assert.equal(reviews,1);assert.equal(renewals,1);assert.equal(recoveryStarts,1);
+    }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+  });
+
+
 for(const repaired of [false,true])test(`retained named archive settles once, then requires a separate native task outcome (repair=${repaired})`,async t=>{
   const f=fixture(t),ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
   const originalTurn=randomUUID(),readMarker=randomUUID(),interruptedRead=randomUUID();

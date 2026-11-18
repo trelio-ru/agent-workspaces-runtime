@@ -1635,16 +1635,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const retained=inbox.readPassContinuation(job.deliveryId);
     const postArchive=Boolean(retained?.namedArchiveSettled&&retained.started&&result.state==='completed'&&!ownedHistory);
     // An interrupted snapshot alone is never a terminal receipt. Wait for the
-    // exact prior lease to expire, and only consider a known task continuation
-    // without routed provider inputs. A pending recovery keeps its own CAS.
+    // exact prior lease to expire. An event-free scheduled root requires its
+    // own complete native read witness and cannot borrow another turn as parent.
     if(workspaceDraft&&(!retained||retained.workspaceDraft&&retained.started||live.workMode!=='task'
       ||job.events.some(event=>event.conversation_key)
       ||!retained.workspaceDraft&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
-    if(parentRead&&(!retained||retained.capacity||retained.workspaceDraft||live.workMode!=='task'
-      ||job.events.some(event=>event.conversation_key||event.owner_question_id)
+    if(parentRead&&((parentRead.initialScheduled
+      ?job.events.length>0||!inbox.readDelivery(job.deliveryId).scheduled||terminalMarkerId!==job.deliveryId
+      :!retained||job.events.some(event=>event.conversation_key||event.owner_question_id))
+      ||retained?.capacity||retained?.workspaceDraft||live.workMode!=='task'
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'
-      ||retained.taskReadParent&&retained.started
-      ||!retained.taskReadParent&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
+      ||retained?.taskReadParent&&retained.started
+      ||!retained?.taskReadParent&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
     const assertPendingOutcome=async ownedSignal=>{
       const pending=await client.readBusinessOutcome({assistantId:saved.assistantId,deviceId:saved.deviceId,
         companyId:saved.companyId,taskId:saved.taskId,bindingId:saved.bindingId,bindingRevision:saved.bindingRevision,
@@ -1876,18 +1878,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       notices.clear();
       return false;
     }
-    const namedArchive=Boolean(continued?.taskReadParent||continued?.workspaceDraft?.namedArchive);
-    if(saved&&job.kind==='task'&&continued&&!continued.namedArchiveSettled&&!(continued.workspaceDraft&&continued.started)&&result.state==='uncertain'&&uuid.test(result.turnId??'')
+    const namedArchive=Boolean(continued?.taskReadParent?.parentMarkerId||continued?.workspaceDraft?.namedArchive);
+    if(saved&&job.kind==='task'&&continued&&!continued.taskReadParent?.initialScheduled&&!continued.namedArchiveSettled&&!(continued.workspaceDraft&&continued.started)&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&!job.events.some(event=>event.conversation_key||namedArchive&&event.owner_question_id)){
       const interruptedWorkspaceDraft={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,
         ...(namedArchive?{namedArchive:true}:{})};
       const candidate=await native.readDelivery(threadId,marker,{signal,interruptedWorkspaceDraft});lease();
       if(candidate.state==='interrupted_workspace_draft'&&candidate.turnId===result.turnId)return continueTerminalPass(job,candidate,signal,marker);
     }
-    if(saved&&job.kind==='task'&&continued&&!continued.workspaceDraft&&!continued.namedArchiveSettled&&!continued.capacity
-      &&(!continued.taskReadParent||!continued.started)&&result.state==='uncertain'&&uuid.test(result.turnId??'')
+    const scheduledRoot=!continued&&job.events.length===0&&inbox.readDelivery(job.deliveryId).scheduled;
+    if(saved&&job.kind==='task'&&(continued||scheduledRoot)&&!continued?.workspaceDraft&&!continued?.namedArchiveSettled&&!continued?.capacity
+      &&(!continued?.taskReadParent||!continued.started)&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&!job.events.some(event=>event.conversation_key||event.owner_question_id)){
-      const taskReadParent=continued.taskReadParent??{parentMarkerId:continued.terminalMarkerId,parentTurnId:continued.terminalTurnId};
+      const taskReadParent=continued
+        ?continued.taskReadParent??{parentMarkerId:continued.terminalMarkerId,parentTurnId:continued.terminalTurnId}
+        :{initialScheduled:true};
       const interruptedTaskRead={...taskReadParent,assistantId:identity.assistantId,
         taskPass:{companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId}};
       const candidate=await native.readDelivery(threadId,marker,{signal,interruptedTaskRead});lease();
