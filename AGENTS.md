@@ -1443,7 +1443,8 @@ Exact legacy template bytes для распознавания при мигра�
   [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Сетевой отказ Codex tools/list сохраняет host-owned recovery и закрытый код
   причины; повторяет только чтение каталога, без OAuth и replay рабочих действий.
-  Только native Codex tools/list запрашивает gzip, wire/decoded size ограничены.
+  Фиксированные native connections Trelio запрашивают gzip для tools/list,
+  wire/decoded size ограничены.
   Первый list имеет 25 с, обновление 45 с. Тайм-аут сохраняет закрытый этап.
   Receipt подтверждает только count, наличие фиксированных read tools и отправку
   list_changed. Codex отдельно подтверждает выдачу инструмента и safe read.
@@ -1839,8 +1840,8 @@ installs. Preserve all previously handed-off paths and legacy digest bundles.
 Kimi branding belongs to the generated manifest. Use the canonical public icon
 and the native plugin's own version for updates through Kimi Work.
 The initial tool list includes exact discovery and invocation alongside OAuth.
-Keep the live native catalogue and the same invocation guards for both routes,
-so a chat retaining its first list can complete its request after login.
+Check live exact tool definitions and retain the same invocation guards for
+both routes, so a chat retaining its first list can complete its request after login.
 The shared folder template keeps Kimi's MCP discovery/invocation and separate
 local continuation guidance across chats. Refresh existing blocks through the
 same folder plan, without dropping other clients' instructions.

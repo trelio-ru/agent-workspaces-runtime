@@ -1509,8 +1509,9 @@ Codex main MCP даёт первому `tools/list` 25 секунд внутри
 credential store, MCP handshake и все страницы. Чтение каталога перед
 отправкой рабочего вызова по-прежнему укладывается в лимит этого вызова.
 
-На фиксированном соединении Codex → Trelio только `tools/list` запрашивает
-gzip. Сервер сжимает конечный JSON/SSE-ответ после свежего ACL snapshot.
+На фиксированных соединениях Codex, Kimi Work, Мультитула и DeepSeek Harness
+с Trelio только `tools/list` запрашивает gzip. Сервер сжимает конечный
+JSON/SSE-ответ после свежего ACL snapshot.
 Runtime ограничивает и полученные, и распакованные байты 4 МиБ, затем
 проверяет обычный JSON-RPC и страницы. Identity используется с совместимым
 сервером. Content/tool calls, auth errors и интерактивные SSE идут прежним
@@ -3972,11 +3973,16 @@ After connect the actual remote catalogue is read before
 the same chat and in new chats after login. Either chat can run its request
 with the current grant using the tools available from that first listing.
 `trelio_find_tools` and `trelio_call_tool` are available from the first
-listing, alongside `trelio_connect`. The former uses native compact search
-and returns one exact schema on an exact name. The latter checks the live
-Kimi-filtered catalogue on every call and shares the direct invocation path,
-native authorization, argument handling and guarded decisions. A missing
-grant still requires browser OAuth. Protected read and saving remain
+listing, alongside `trelio_connect`. Direct and fallback invocations check
+the live definition of the selected tool through
+`tools/list` with `params._meta["trelio/toolNames"]`. Exact lookup requests
+only that definition and the compact search tool. Ranked search verifies
+the returned names against up to five live definitions to retain App visibility.
+Older servers may return a complete list, which the client intersects locally.
+MultiTool preserves the same authenticated gate for its local tool names.
+Both invocation paths share native authorization, argument handling and
+guarded decisions. A missing grant still requires browser OAuth.
+Protected read and saving remain
 `not_checked` until their independent evidence. Complete structuredContent and
 native media remain native MCP values; hidden App grants are never flattened
 into text. App-only methods and secret browser-fill are unavailable, including

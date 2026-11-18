@@ -7620,7 +7620,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     // catalogue reads and session recovery still consume the original budget.
     const requestTrelioMcp = (request, signal, onCatalogPhase) =>
       httpRequest(request, { signal, timeoutMs: TRELIO_CALL_BUDGET_MS,
-        ...(isCodex && request.payload.method === "tools/list" ? { acceptCatalogGzip: true, onCatalogPhase } : {}) });
+        ...(request.payload.method === "tools/list" ? { acceptCatalogGzip: true, onCatalogPhase } : {}) });
     const rpcOnce = async (method, params, signal, token, targetSession = session, onStage) => {
       throwIfAborted(signal);
       const accessToken = token ?? await credential(signal, onStage);
@@ -7747,12 +7747,17 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         if (row.outcome.error) throw row.outcome.error;
         return row.outcome.value;
       },
-      async listTools(signal, { onStage } = {}) {
+      async listTools(signal, { onStage, toolNames } = {}) {
         await initialize(signal, onStage);
         const tools = [], cursors = new Set();
+        // Older servers ignore the optional selector. Check their complete
+        // response with the same bounds and intersect before exposing it.
+        const selection = toolNames && { "trelio/toolNames": toolNames };
         let cursor;
         do {
-          const { result } = await rpc("tools/list", cursor ? { cursor } : {}, signal, onStage);
+          const { result } = await rpc("tools/list", {
+            ...(cursor === undefined ? {} : { cursor }), ...(selection ? { _meta: selection } : {}),
+          }, signal, onStage);
           onStage?.("catalog_validation");
           if (!Array.isArray(result?.tools) || tools.length + result.tools.length > MAX_TOOLS) {
             throw fail("TRELIO_HARNESS_CATALOG_INVALID", "MCP-каталог превышает допустимый размер.");
@@ -7767,7 +7772,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         if (new Set(tools.map(tool => tool.name)).size !== tools.length) {
           throw fail("TRELIO_HARNESS_CATALOG_INVALID", "MCP-каталог содержит повторные имена.");
         }
-        return tools;
+        return toolNames ? tools.filter(tool => toolNames.includes(tool.name)) : tools;
       },
       async call(method, args, signal) {
         const result = (await rpc("tools/call", { name: method, arguments: args }, signal)).result;
@@ -7961,7 +7966,10 @@ export const createKimiMcpHandler = ({
     delete result._meta;
     return result;
   };
-  const nativeCatalogue = async signal => (await connection.listTools(signal)).filter(tool => !denied(tool));
+  const isToolName = name => typeof name === "string" && /^[a-z][a-z0-9_]{0,119}$/u.test(name);
+  const searchName = "search_trelio_tools";
+  const nativeCatalogue = async (signal, toolNames) => (await connection.listTools(signal, { toolNames }))
+    .filter(tool => !denied(tool) && (!toolNames || toolNames.includes(tool.name)));
   const textResult = (text, structuredContent) => ({ content: [{ type: "text", text }], structuredContent });
   // Direct and stable invocation share this exact catalogue gate and the
   // existing authenticated transport. The outer Kimi tool grants no access
@@ -7976,21 +7984,25 @@ export const createKimiMcpHandler = ({
     return { content: result.content, ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
       ...(result.isError === true ? { isError: true } : {}) };
   };
-  const findNative = async (tools, query, signal) => {
+  const findNative = async (query, signal) => {
+    const names = isToolName(query) && query !== searchName ? [query, searchName] : [searchName];
+    const tools = await nativeCatalogue(signal, names);
     const exact = tools.find(tool => tool.name === query);
     if (exact) {
       const value = { tool: publicTool(exact) };
       return textResult(multiTool ? JSON.stringify(value) : `Native schema for ${exact.name} is in structuredContent.`, value);
     }
-    // Use the backend's ranked compact search and intersect with this Kimi
-    // session's live catalogue before returning any matches.
-    const result = await invokeNative(tools, "search_trelio_tools", { query, limit: 5 }, signal);
+    // The ranked search lacks App visibility metadata. Verify only its
+    // bounded set of candidates against fresh definitions before exposing it.
+    const result = await invokeNative(tools, searchName, { query, limit: 5 }, signal);
     if (result.isError) return result;
     const matches = result.structuredContent?.tools;
     if (!Array.isArray(matches) || matches.length > 5) {
       throw Object.assign(new Error(), { code: "TRELIO_HARNESS_CATALOG_INVALID" });
     }
-    const available = new Set(tools.map(tool => tool.name));
+    const candidates = [...new Set(matches.map(tool => tool?.name).filter(isToolName))];
+    const visible = candidates.length ? await nativeCatalogue(signal, candidates) : [];
+    const available = new Set(visible.map(tool => tool.name));
     const value = { tools: matches.filter(tool => available.has(tool?.name)) };
     return textResult(multiTool ? JSON.stringify(value) : "Use an exact result name with trelio_find_tools to read its schema.", value);
   };
@@ -8035,13 +8047,14 @@ export const createKimiMcpHandler = ({
       const query = isFind && typeof input.query === "string" ? input.query.trim() : "";
       if (isFind && (Object.keys(input).length !== 1 || query.length < 2 || query.length > 160)) throw invalidInput();
       if (method === callTool.name) {
-        if (Object.keys(input).length !== 2 || typeof input.name !== "string" || !/^[a-z][a-z0-9_]{0,119}$/u.test(input.name)
+        if (Object.keys(input).length !== 2 || !isToolName(input.name)
           || !isArgumentObject(input.arguments)) throw invalidInput();
         ({ name, arguments: args } = input);
       }
       const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(async () => {
-        const tools = await nativeCatalogue(callSignal);
-        return isFind ? await findNative(tools, query, callSignal) : await invokeNative(tools, name, args, callSignal);
+        if (isFind) return findNative(query, callSignal);
+        if (!isToolName(name)) throw unavailable();
+        return invokeNative(await nativeCatalogue(callSignal, [name]), name, args, callSignal);
       }, callSignal), { signal });
       return reply(result);
     } catch (error) {
@@ -8263,9 +8276,12 @@ export const createMultiToolConnection = ({
 
   return {
     ...native,
-    listTools: async signal => [
-      ...operationTools, ...localTools, ...(await native.listTools(signal)).filter(tool => !localNames.has(tool.name)),
-    ],
+    async listTools(signal, { toolNames } = {}) {
+      // Even for local names, keep the existing live OAuth/session gate.
+      const remote = await native.listTools(signal, { toolNames });
+      return [...operationTools, ...localTools, ...remote.filter(tool => !localNames.has(tool.name))]
+        .filter(tool => !toolNames || toolNames.includes(tool.name));
+    },
     async call(name, args, signal) {
       const operation = Object.keys(multiToolRoutes).find(key => multiToolRoutes[key].name === name);
       if (operation) {

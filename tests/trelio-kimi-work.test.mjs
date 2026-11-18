@@ -8,6 +8,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import { buildKimiWorkBundle, installKimiWorkBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, remoteMcpHttpRequest, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { connectRemoteMcpOAuth } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
@@ -22,6 +23,23 @@ const signal = () => new AbortController().signal;
 const call = (name, args = {}, id = 1) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
 const output = value => ({ content: [{ type: "text", text: "routing summary" }], structuredContent: value,
   _meta: { privateAppGrant: "must-never-be-serialized" } });
+
+test("all fixed native profiles negotiate gzip only for catalog reads", async () => {
+  for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness"]) {
+    const methods = [];
+    const connection = createHarnessConnection({ nativeClient, httpJson: async () => ({ body: metadata }),
+      vault: { read: async () => ({ accessToken: "synthetic", expiresAt: Date.now() + 120_000 }) },
+      httpRequest: async ({ payload }, options) => {
+        methods.push([payload.method, options.acceptCatalogGzip === true]);
+        return { message: { jsonrpc: "2.0", id: payload.id, result: payload.method === "initialize"
+          ? { protocolVersion: "2025-03-26" } : payload.method === "tools/list" ? { tools: [] } : output({}) } };
+      } });
+    await connection.listTools();
+    await connection.call("get_agent_instructions", {});
+    assert.deepEqual(methods, [["initialize", false], ["notifications/initialized", false],
+      ["tools/list", true], ["tools/call", false]], nativeClient);
+  }
+});
 
 test("Kimi installer prepares a fresh signed launch after Plugin Builder updates the previous manifest", async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-kimi-install-"));
@@ -336,7 +354,7 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
 });
 
 test("Kimi native HTTP calls survive the provider deadline and share one 60-second call budget", { timeout: 10_000 }, async t => {
-  const requests = [];
+  const requests = [], selections = [];
   const server = http.createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -352,9 +370,15 @@ test("Kimi native HTTP calls survive the provider deadline and share one 60-seco
       case "notifications/initialized":
         response.writeHead(202).end();
         break;
-      case "tools/list":
-        send({ tools: [{ name: "search" }, { name: "get_task" }, { name: "update_task_title" }] });
+      case "tools/list": {
+        const names = payload.params?._meta?.["trelio/toolNames"];
+        selections.push({ encoding: request.headers["accept-encoding"], names });
+        const tools = ["search", "get_task", "update_task_title"].filter(name => names?.includes(name)).map(name => ({ name }));
+        response.setHeader("content-type", "application/json");
+        response.setHeader("content-encoding", "gzip");
+        response.end(gzipSync(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { tools } })));
         break;
+      }
       case "tools/call":
         requests.push(payload.params.name);
         pending.resolve({ send, closed: new Promise(resolve => response.once("close", resolve)) });
@@ -411,6 +435,38 @@ test("Kimi native HTTP calls survive the provider deadline and share one 60-seco
   assert.equal((await timedOut).result.structuredContent.code, "TRELIO_CALL_TIMEOUT");
   await closed;
   assert.deepEqual(requests, ["search", "get_task", "update_task_title"]);
+  assert.deepEqual(selections, requests.map(name => ({ encoding: "gzip", names: [name] })));
+});
+
+test("MultiTool checks exact live schemas and filters ranked App-only and revoked matches", async () => {
+  const { createMultiToolConnection } = await import("../host-runtime/scripts/trelio-remote-mcp.mjs");
+  const appOnly = { name: "app_only", _meta: { ui: { visibility: ["app"] } } };
+  const definitions = [{ name: "search_trelio_tools" }, { name: "get_task" }, appOnly];
+  const selections = [], calls = [];
+  let revoked = false;
+  const native = { instructions: () => "",
+    listTools: async (_signal, { toolNames }) => {
+      selections.push(toolNames);
+      return definitions.filter(tool => toolNames.includes(tool.name) && !(revoked && tool.name === "get_task"));
+    },
+    call: async (name) => {
+      calls.push(name);
+      return name === "search_trelio_tools" ? output({ tools: [...definitions.slice(1), { name: "bad name" }].map(tool => ({ name: tool.name })) })
+        : output({ name });
+    } };
+  const handler = createKimiMcpHandler({ multiTool: true, connection: createMultiToolConnection({ native,
+    local: async ({ params }) => ({ result: output({ name: params.name }) }),
+  }) });
+  const invoke = async (name, args) => (await handler(call(name, args))).result.structuredContent;
+  assert.deepEqual((await invoke("trelio_find_tools", { query: "task search" })).tools, [{ name: "get_task" }]);
+  assert.equal((await invoke("trelio_find_tools", { query: "get_task" })).tool.name, "get_task");
+  await invoke("get_task");
+  assert.equal((await invoke("continue_trelio_local_action")).name, "continue_trelio_local_action");
+  revoked = true;
+  assert.equal((await invoke("trelio_call_tool", { name: "get_task", arguments: {} })).code, "TRELIO_MULTITOOL_TOOL_UNAVAILABLE");
+  assert.deepEqual(selections, [["search_trelio_tools"], ["get_task", "app_only"], ["get_task", "search_trelio_tools"],
+    ["get_task"], ["continue_trelio_local_action"], ["get_task"]]);
+  assert.deepEqual(calls, ["search_trelio_tools", "get_task"]);
 });
 
 test("Kimi never replays an ambiguous mutation and exposes only a closed failure", async () => {
