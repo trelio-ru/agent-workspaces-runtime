@@ -844,7 +844,7 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
       executable:process.execPath,environment:{},interruptedWorkspaceDraft:{...taskPass,intermediateDraft:{workStateContext,checkpoint}},
       spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[originalTurn],nextCursor:null}})),
     });
-    assert.deepEqual(observed,{state:'interrupted_task_checkpoint',turnId:turn.id});
+    assert.deepEqual(observed,{state:'interrupted_task_checkpoint',turnId:turn.id,checkpoint});
     for(const mutate of [
       value=>{value.items.at(-1).status='inProgress';},
       value=>{value.items.at(-1).result.structuredContent.stdout+='x';},
@@ -893,6 +893,54 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
         assert.ok(!steps.includes('renew'));
       }
     }
+  }
+});
+
+
+test('pre-receipt recovery classifies an exact signed legacy release and keeps all other effects fenced',async()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=draftHistory();
+  turn.items.splice(3,1);
+  const [original,,open]=turn.items;
+  open.arguments.schemaVersion=1;
+  const context=assistantWorkStateContext({assistantId:taskContext.assistantId,companyId:taskPass.companyId,
+    taskId:taskPass.taskId,ownerQuestionIds:[randomUUID()]});
+  original.content[0].text=assistantNativePrompt(terminalMarkerId,context,{});
+  const checkpoint={...workspaceDraft,checkpointId:randomUUID(),draftHead:'b'.repeat(40)};
+  const historyCall=(operation,parameters,identity={})=>({type:'mcpToolCall',server:'trelio-assistant',
+    tool:'continue_assistant_workspace_action',status:'completed',arguments:{schemaVersion:1,operation,parameters,taskPass,...identity},
+    result:{structuredContent:{schemaVersion:1,operation,stdout:'Synthetic old process result'}}});
+  turn.items.push(historyCall('checkpoint',{type:'draft'},{runIdentity:workspaceDraft}));
+  const release={skillId:'telegram-mtproto',releaseId:'8f0e4a2a-c63d-4aa2-958c-1fb2701c5c76',
+    packageSha256:'ef85be194ef9a52c8ac20b497cd726a5487553884afd511f882be06901f8eaf0'};
+  const common={companyId:taskPass.companyId,projectId:randomUUID(),skillId:release.skillId,
+    releaseId:release.releaseId,runtimeSessionId:randomUUID()};
+  const account=['--local-account',randomUUID()];
+  turn.items.push(historyCall('skill_run',{...common,arguments:['account','list']}),
+    historyCall('skill_run',{...common,arguments:['guides',...account],guidePart:3}),
+    historyCall('skill_run',{...common,arguments:['read','--link','https://t.me/c/12345/67','--context','2',...account]}));
+  const threadId=randomUUID();
+  const read=items=>readAssistantCodexDelivery(threadId,terminalMarkerId,{
+    executable:process.execPath,environment:{},interruptedWorkspaceDraft:{...taskPass,
+      intermediateDraft:{workStateContext:context,checkpoint}},
+    spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}
+      :{data:[{...turn,items}],nextCursor:null}})),
+  });
+  const proof=await read(turn.items);
+  assert.deepEqual(proof,{state:'interrupted_task_checkpoint',turnId:turn.id,checkpoint:{...checkpoint,
+    retainedLocalCheckpoint:true,historicalSkillReleases:[release]}});
+  assert.doesNotMatch(JSON.stringify(proof),/Synthetic|t\.me/);
+  for(const change of [
+    items=>{items.at(-1).arguments.parameters.releaseId=randomUUID();},
+    items=>{items.at(-1).arguments.parameters.skillId='another-skill';},
+    items=>{items.at(-1).arguments.parameters.arguments.push('--confirm');},
+    items=>{items.at(-1).arguments.parameters.arguments[2]='https://example.test/something';},
+    items=>{items.at(-1).arguments.parameters.arguments[0]='send';},
+    items=>{items.at(-1).result.structuredContent.taskSkillRead={};},
+    items=>{items.at(-4).result.structuredContent.taskDraftCheckpoint={};},
+    items=>{items.at(-2).arguments.parameters.guidePart=64;},
+  ]){
+    const edited=structuredClone(turn.items);change(edited);
+    assert.deepEqual(await read(edited),{state:'uncertain'});
   }
 });
 

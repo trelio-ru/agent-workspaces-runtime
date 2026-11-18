@@ -40,6 +40,28 @@ export const validateAssistantWorkspaceCheckpoint=value=>{
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),checkpointId:uuid(value.checkpointId),draftHead:value.draftHead};
 };
 export const validateAssistantPortableFinish=validateAssistantWorkspaceCheckpoint;
+// Project an already validated intermediate witness onto the native locator.
+export const assistantWorkspaceCheckpointLocator=({workspaceId,runId,checkpointId,draftHead})=>
+  ({workspaceId,runId,checkpointId,draftHead});
+// Historical facts are content-free and sealed with the same one-use intent.
+// No provider arguments, paths, stdout or unverified checkpoint replacements
+// enter this journal. A portable modern receipt has no legacy fields.
+export const validateAssistantIntermediateDraft=value=>{
+  object(value,['workspaceId','runId','checkpointId','draftHead','retainedLocalCheckpoint','historicalSkillReleases']);
+  const {retainedLocalCheckpoint,historicalSkillReleases,...checkpoint}=value;
+  if(retainedLocalCheckpoint!==undefined&&retainedLocalCheckpoint!==true)inputError();
+  if(historicalSkillReleases!==undefined&&(!Array.isArray(historicalSkillReleases)
+    ||historicalSkillReleases.length<1||historicalSkillReleases.length>8))inputError();
+  const releases=historicalSkillReleases?.map(row=>{
+    object(row,['skillId','releaseId','packageSha256']);
+    if(typeof row.skillId!=='string'||!/^[a-z0-9][a-z0-9-]{0,63}$/u.test(row.skillId)||typeof row.packageSha256!=='string'
+      ||!/^[a-f0-9]{64}$/u.test(row.packageSha256))inputError();
+    return {skillId:row.skillId,releaseId:uuid(row.releaseId),packageSha256:row.packageSha256};
+  });
+  if(releases?.some((row,index)=>index>0&&row.releaseId<=releases[index-1].releaseId))inputError();
+  return {...validateAssistantWorkspaceCheckpoint(checkpoint),
+    ...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),...(releases?{historicalSkillReleases:releases}:{})};
+};
 // The same closed task read surface is used for the native executor
 // catalogue and for checking retained history. It does not classify a
 // provider command or grant any of these tools outside a live native pass.
@@ -120,7 +142,7 @@ const taskReadWitness=value=>{
   // refuse this distinct shape and keep the original native-start fence.
   if(value?.intermediateDraft!==undefined){
     object(value,['intermediateDraft']);
-    return {intermediateDraft:validateAssistantWorkspaceCheckpoint(value.intermediateDraft)};
+    return {intermediateDraft:validateAssistantIntermediateDraft(value.intermediateDraft)};
   }
   if(value?.initialScheduled===true){
     object(value,['initialScheduled','technicalPrelude']);

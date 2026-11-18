@@ -1,7 +1,8 @@
 /** Model-free coordinator. Provider authority and native execution stay behind
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
 import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
-  assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff } from './trelio-assistant-inbox.mjs';
+  assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff,
+  assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -64,7 +65,8 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 };
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, verifyOwnerReply = null,
+  passHost = null, verifyRetainedLocalCheckpoint = null, workspaceForIntake = null, readSourceMonitor = null,
+  acknowledgeSource = null, verifyOwnerReply = null,
   deliverPreparedOwnerReply = null, verifyPreparedOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
@@ -1731,6 +1733,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Re-read under the same native writer. The server also checks this
       // absence in the existing renewal CAS; neither check replays work.
       if(parentRead||saveWithIndependentOutcomeCheck||archive||postArchive)await assertPendingOutcome(ownedSignal);
+      // A generic pre-receipt checkpoint success never identifies its bytes
+      // by itself. The same local Git witness must still hold under the writer.
+      if(parentRead?.intermediateDraft?.retainedLocalCheckpoint
+        &&await verifyRetainedLocalCheckpoint?.(saved,parentRead.intermediateDraft,ownedSignal)!==true)
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       if(review.state==='approved'&&!intent.resumeAttempted){
         // Persist before HTTP. A lost response is resolved ONLY by the read
         // branch; it cannot repeat the renewal or native model invocation.
@@ -1979,10 +1986,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(checkpoint){
         const workStateContext=assistantWorkStateContext(taskContextForJob(job,live.workMode));
         const candidate=await native.readDelivery(threadId,marker,{signal,
-          interruptedWorkspaceDraft:{...pass,intermediateDraft:{checkpoint,workStateContext}}});lease();
-        if(candidate.state==='interrupted_task_checkpoint'&&candidate.turnId===result.turnId)
+          interruptedWorkspaceDraft:{...pass,intermediateDraft:{
+            checkpoint:assistantWorkspaceCheckpointLocator(checkpoint),workStateContext}}});lease();
+        if(candidate.state==='interrupted_task_checkpoint'&&candidate.turnId===result.turnId){
+          const witness=validateAssistantIntermediateDraft(candidate.checkpoint);
+          if(JSON.stringify(assistantWorkspaceCheckpointLocator(witness))!==JSON.stringify(assistantWorkspaceCheckpointLocator(checkpoint))
+            ||continued&&JSON.stringify(witness)!==JSON.stringify(checkpoint))return true;
+          if(witness.retainedLocalCheckpoint&&await verifyRetainedLocalCheckpoint?.(saved,witness,signal)!==true)return true;
           return continueTerminalPass(job,{state:'interrupted_task_read',turnId:result.turnId,
-            taskReadParent:{intermediateDraft:checkpoint}},signal,marker);
+            taskReadParent:{intermediateDraft:witness}},signal,marker);
+        }
         // A pending reservation for this exact checkpoint cannot switch to
         // another proof after the original native history changes.
         if(continued)return true;

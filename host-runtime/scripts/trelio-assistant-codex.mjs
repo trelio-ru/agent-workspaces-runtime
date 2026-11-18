@@ -10,11 +10,11 @@ import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, ASSISTANT_TASK_MCP_READ_TOOLS,
   assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude,
-  validateAssistantWorkspaceCheckpoint } from './trelio-assistant-inbox.mjs';
+  validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, assistantWorkspaceCheckpointLocator } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
-import { matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
+import { matchesAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from './trelio-skill-secret-setup.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -1856,13 +1856,31 @@ const completedTaskContextCompaction=item=>item?.type==='contextCompaction'
   &&Number.isSafeInteger(item.startedAtMs)&&item.startedAtMs>0
   &&Number.isSafeInteger(item.completedAtMs)&&item.completedAtMs>=item.startedAtMs;
 
+const historicalTaskSkillRead=(parameters,value,taskPass)=>{
+  if(Object.getPrototypeOf(parameters)!==Object.prototype||parameters.companyId!==taskPass.companyId
+    ||Object.keys(parameters).some(key=>!['companyId','projectId','releaseId','skillId','arguments','runtimeSessionId','guidePart'].includes(key))
+    ||parameters.projectId!==undefined&&parameters.projectId!==null&&!UUID.test(parameters.projectId)
+    ||parameters.runtimeSessionId!==undefined&&!UUID.test(parameters.runtimeSessionId)
+    ||value.schemaVersion!==1||!['operation,schemaVersion,stdout','nextCall,operation,schemaVersion,stdout'].includes(Object.keys(value).sort().join(','))
+    ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65_536||!value.stdout.trim()
+    ||!Array.isArray(parameters.arguments)||parameters.arguments.length>16
+    ||parameters.arguments.some(token=>typeof token!=='string'||token.length>512))return null;
+  let parsed;
+  try{
+    parsed=splitAccountArguments(parameters.arguments);
+    const page=assistantSkillGuideSelection(parameters.arguments,parameters.guidePart);
+    if(value.nextCall!==undefined&&page===undefined)return null;
+  }catch{return null;}
+  return reviewedAssistantHistoricalSkillRead(parameters,parsed);
+};
+
 /** Prove an intermediate restart from the whole original native turn. The
  * native pass reader selected the exact current checkpoint independently.
  * Only settled reads and writes already covered by that draft are admitted.
  * The same proof is repeated under the native writer before lease renewal.
  * In particular, a completed provider call says nothing about its effects
  * until the signed execution policy has independently classified it. */
-export const assistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workStateContext,checkpoint}={})=>{
+const inspectAssistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workStateContext,checkpoint}={})=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
     ||!exactDraftPass(taskPass,taskPass)||!Array.isArray(turn.items)||turn.items.length>128
     ||workStateContext?.workMode==='discussion'||workStateContext?.sourceReferences!==undefined
@@ -1872,7 +1890,8 @@ export const assistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
   if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
     ||original.content[0].text!==assistantNativePrompt(deliveryId,workStateContext,{}))return false;
   const run={workspaceId:selected.workspaceId,runId:selected.runId};
-  let prepared=false,openHandle=null,opened=false,dirty=false,lastCheckpoint=null;
+  let prepared=false,openHandle=null,opened=false,dirty=false,lastCheckpoint=null,retainedLocalCheckpoint=false;
+  const historicalSkillReleases=new Map();
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
     const args=item?.arguments,value=item?.result?.structuredContent;
@@ -1909,8 +1928,14 @@ export const assistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
     }
     if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return false;
     if(args.operation==='skill_run'){
-      if(!args.parameters||value.operation!=='skill_run'||!matchesAssistantTaskSkillRead(value.taskSkillRead,{
-        scope:taskPass,parameters:args.parameters,stdout:value.stdout}))return false;
+      if(!args.parameters||value.operation!=='skill_run')return false;
+      if(Object.hasOwn(value,'taskSkillRead')){
+        if(!matchesAssistantTaskSkillRead(value.taskSkillRead,{scope:taskPass,parameters:args.parameters,stdout:value.stdout}))return false;
+      }else{
+        const release=historicalTaskSkillRead(args.parameters,value,taskPass);
+        if(!release)return false;
+        historicalSkillReleases.set(release.releaseId,release);
+      }
       continue;
     }
     if(!prepared)return false;
@@ -1931,18 +1956,32 @@ export const assistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
       const handle=args.parameters?.finishOperationId;
       if(handle!==undefined){
         if(opened||handle!==openHandle)return false;
-        if(completesOpen)opened=true;
+        if(completesOpen&&value.operationId===handle&&value.state==='completed')opened=true;
         else if(value.operationId!==handle||!exactWorkspacePoll(value,'open',run))return false;
       }else if(value.operation!=='status')return false;
       continue;
     }
     if(args.operation!=='checkpoint'||args.parameters?.type!=='draft'||!opened||!dirty||value.operation!=='checkpoint')return false;
-    try{lastCheckpoint=validateAssistantWorkspaceCheckpoint(value.taskDraftCheckpoint);}catch{return false;}
-    if(!sameDraftRun({workspaceId:lastCheckpoint.workspaceId,runId:lastCheckpoint.runId},run))return false;
+    retainedLocalCheckpoint=!Object.hasOwn(value,'taskDraftCheckpoint');
+    if(retainedLocalCheckpoint){
+      // The prior host returned only generic success after saving. It cannot
+      // name the saved bytes. The caller must separately match the exact
+      // native checkpoint to durable, clean local Git under the writer.
+      if(Object.keys(value).sort().join(',')!=='operation,schemaVersion,stdout'
+        ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65_536)return false;
+      lastCheckpoint=selected;
+    }else{
+      try{lastCheckpoint=validateAssistantWorkspaceCheckpoint(value.taskDraftCheckpoint);}catch{return false;}
+      if(!sameDraftRun({workspaceId:lastCheckpoint.workspaceId,runId:lastCheckpoint.runId},run))return false;
+    }
     dirty=false;
   }
-  return !dirty&&lastCheckpoint?.checkpointId===selected.checkpointId&&lastCheckpoint.draftHead===selected.draftHead;
+  if(dirty||lastCheckpoint?.checkpointId!==selected.checkpointId||lastCheckpoint.draftHead!==selected.draftHead)return false;
+  return validateAssistantIntermediateDraft({...selected,...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),
+    ...(historicalSkillReleases.size?{historicalSkillReleases:[...historicalSkillReleases.values()]
+      .sort((left,right)=>left.releaseId.localeCompare(right.releaseId))}:{})});
 };
+export const assistantInterruptedTaskCheckpoint=(...args)=>Boolean(inspectAssistantInterruptedTaskCheckpoint(...args));
 /** A named archive has an independent accepted revision. Its save can be
  * recovered without claiming the enclosing task is complete. This closed
  * trace admits only one Run, one file delta, a positive portable checkpoint
@@ -2151,9 +2190,9 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
   const {namedArchive,retainedHandoff,portableFinish,intermediateDraft,...pass}=taskPass??{};
   if(intermediateDraft!==undefined){
-    return intermediateDraft&&!namedArchive&&!retainedHandoff&&portableFinish===undefined
-      &&assistantInterruptedTaskCheckpoint(turn,deliveryId,{...intermediateDraft,taskPass:pass})
-      ?{state:'interrupted_task_checkpoint',turnId:turn.id}:{state:'uncertain'};
+    const checkpoint=intermediateDraft&&!namedArchive&&!retainedHandoff&&portableFinish===undefined
+      &&inspectAssistantInterruptedTaskCheckpoint(turn,deliveryId,{...intermediateDraft,taskPass:pass});
+    return checkpoint?{state:'interrupted_task_checkpoint',turnId:turn.id,checkpoint}:{state:'uncertain'};
   }
   if(portableFinish!==undefined){
     return matchesAssistantPortableFinishTurn(turn,deliveryId,pass,portableFinish)
@@ -2669,7 +2708,7 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
       catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
     }
     if(checkpoint){
-      try{validateAssistantWorkspaceCheckpoint(recovery.intermediateDraft);}
+      try{validateAssistantIntermediateDraft(recovery.intermediateDraft);}
       catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
     }
   }
@@ -2888,9 +2927,10 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       const checkpoint=witness.intermediateDraft;
       const current=checkpoint
         ?await readInterruptedDraftTurn(request,threadId,terminalMarkerId,{...witness.taskPass,
-          intermediateDraft:{checkpoint,workStateContext}})
+          intermediateDraft:{checkpoint:assistantWorkspaceCheckpointLocator(checkpoint),workStateContext}})
         :await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{...witness,assistantId:workStateContext.assistantUserId});
       if(current.state!==(checkpoint?'interrupted_task_checkpoint':'interrupted_task_read')||current.turnId!==terminalTurnId
+        ||checkpoint&&JSON.stringify(current.checkpoint)!==JSON.stringify(checkpoint)
         ||JSON.stringify(current.technicalPrelude??null)!==JSON.stringify(witness.technicalPrelude??null))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }

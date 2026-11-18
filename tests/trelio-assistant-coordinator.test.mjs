@@ -7,9 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { createAssistantInbox, readAssistantWorkspaceDraftRecovery } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
-import { createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { assistantTaskStorageDirectory, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { createAssistantRuntimeHost } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { ensurePrivateDirectory, runGit, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 
 const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={}) => {
   if(ownsDatabase)t.after(()=>database.close());
@@ -3347,7 +3348,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
   });
 
 
-test('intermediate checkpoint resumes the original owner-answer pass once across a coordinator restart',async t=>{
+for(const retained of [false,true])test(`intermediate checkpoint resumes the original owner-answer pass across restart (${retained?'retained':'portable'})`,async t=>{
   const f=fixture(t),questionId=randomUUID(),originalTurn=randomUUID(),marker=randomUUID();
   f.authority.workMode='task';
   await f.coordinator.close();
@@ -3355,6 +3356,32 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
   const filename=path.join(directory,'journal.sqlite');
   const native=f.options.native,client=f.options.client,readOutcome=client.readBusinessOutcome;
   const checkpoint={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  let witness=checkpoint,untrackedFile;
+  if(retained){
+    // Create the same protected task namespace and actual private Git state.
+    // The production factory must perform its own check before reservation
+    // and under the final writer, even if the native history mock accepts.
+    const root=path.join(assistantTaskStorageDirectory(directory,{...f.identity,companyId:f.companyId,taskId:f.taskId}),'workspaces',checkpoint.workspaceId);
+    const workspaceDirectory=path.join(root,'workspace');
+    await ensurePrivateDirectory(workspaceDirectory);
+    const options={cwd:workspaceDirectory};
+    await runGit(['init','--quiet'],options);
+    const commit=message=>runGit(['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--quiet','-m',message],options);
+    await runGit(['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--allow-empty','--quiet','-m','base'],options);
+    const head=async()=>(await runGit(['rev-parse','HEAD'],options)).stdout.trim();
+    const baseHead=await head();
+    await fs.writeFile(path.join(workspaceDirectory,'WORK.md'),'fixture draft');
+    await runGit(['add','WORK.md'],options);
+    await commit('draft');
+    checkpoint.draftHead=await head();
+    witness={...checkpoint,retainedLocalCheckpoint:true};
+    await writePrivateJsonFile(path.join(root,'.trelio-run.json'),{
+      schemaVersion:3,origin:f.identity.origin,scopeType:'task',company:{id:f.companyId},
+      runId:checkpoint.runId,workspaceId:checkpoint.workspaceId,workspaceDirectory,baseHead,
+      draftHead:checkpoint.draftHead,latestDraftCheckpointId:checkpoint.checkpointId,leaseId:randomUUID(),fencingToken:2,
+    });
+    untrackedFile=path.join(workspaceDirectory,'unsaved.txt');
+  }
   let original,database,host,writerReady=false,qualified=false,businessComplete=false,reviews=0,renewals=0,starts=0,clears=0;
   // Enter via the production factory. A disconnected host-only device
   // method would let isolated coordinator and HTTP fixtures pass separately.
@@ -3384,13 +3411,13 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
     if(interruptedWorkspaceDraft?.intermediateDraft){
       assert.deepEqual(interruptedWorkspaceDraft.intermediateDraft.checkpoint,checkpoint);
       assert.deepEqual(interruptedWorkspaceDraft.intermediateDraft.workStateContext.ownerQuestionIds,[questionId]);
-      if(qualified)return {state:'interrupted_task_checkpoint',turnId:originalTurn};
+      if(qualified)return {state:'interrupted_task_checkpoint',turnId:originalTurn,checkpoint:witness};
     }
     return {state:'uncertain',turnId:originalTurn};
   };
   client.continueTaskPass=async args=>{
     assert.deepEqual(f.activePass(),original);
-    assert.deepEqual(args.intermediateDraft,checkpoint);
+    assert.deepEqual(args.intermediateDraft,witness);
     assert.equal(args.terminalTurnId,originalTurn);
     const live=f.passes.get(original.deliveryId);
     if(args.continuation==='review')reviews++;
@@ -3401,7 +3428,7 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
     return {schemaVersion:6,state:renewals?'resumed':'approved',reviewId:marker,invocationId:marker,
       resumed:renewals?{leaseRevision:1,leaseExpiresAt:live.leaseExpiresAt}:null,pass:{...live}};
   };
-  native.run=async(input,options)=>{
+  const run=native.run=async(input,options)=>{
     assert.deepEqual(input.taskContext.ownerQuestionIds,[questionId]);
     if(!original){
       original=f.activePass();
@@ -3409,7 +3436,7 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
       return {state:'uncertain'};
     }
     assert.equal(input.deliveryId,marker);
-    assert.deepEqual(options.taskReadRecovery.intermediateDraft,checkpoint);
+    assert.deepEqual(options.taskReadRecovery.intermediateDraft,witness);
     if(!writerReady)throw Object.assign(new Error('busy'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
     await options.beforeInvocation();
     options.startInvocation();starts++;businessComplete=true;
@@ -3426,13 +3453,29 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.deepEqual([reviews,renewals,starts],[0,0,0]);
     qualified=true;
+    if(retained){
+      await fs.writeFile(untrackedFile,'dirty before reservation');
+      assert.equal((await coordinator.workOnce()).state,'blocked');
+      assert.deepEqual([reviews,renewals,starts],[0,0,0]);
+      await fs.unlink(untrackedFile);
+    }
     await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
     assert.deepEqual([reviews,renewals,starts],[1,0,0]);
     await host.close();
     host=await openHost();coordinator=host.coordinator;
     const inbox=createAssistantInbox({database,now:f.options.now});
-    assert.deepEqual(inbox.readPassContinuation(original.deliveryId).taskReadParent,{intermediateDraft:checkpoint});
+    assert.deepEqual(inbox.readPassContinuation(original.deliveryId).taskReadParent,{intermediateDraft:witness});
     writerReady=true;
+    if(retained){
+      native.run=async(...args)=>{
+        await fs.writeFile(untrackedFile,'changed after observation and writer acquisition');
+        return run(...args);
+      };
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+      assert.deepEqual([reviews,renewals,starts],[1,0,0]);
+      native.run=run;
+      await fs.unlink(untrackedFile);
+    }
     await coordinator.workOnce();
     assert.deepEqual([reviews,renewals,starts],[1,1,1]);
     assert.equal(clears,1);

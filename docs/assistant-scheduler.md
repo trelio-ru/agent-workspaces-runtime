@@ -777,6 +777,19 @@ App Server rereads the full latest turn before renewal. A busy writer or
 changed turn blocks renewal. Recovery uses the original chat, workspace and
 Run and starts once. Normal task authorities and native outcome checks still
 govern work after the checkpoint.
+For pre-receipt saves the same intermediate stage also matches the protected
+local Run metadata and clean Git tree to the independently selected native
+checkpoint. It checks that evidence twice, including under the native writer;
+success prose or a different local tree cannot stand in for a receipt.
+A historical platform skill qualifies only through an audited command policy
+bound to the original release and immutable signed artifact digest. The signed
+host reclassifies the exact retained arguments, then the device continuation
+rechecks platform ownership, verification, revocation and pre-pass publication
+at reservation and renewal. Scope and command arguments stay in the native
+history. Only the closed release locator is added to the durable reservation.
+The normal signed task read descriptor covers future skills through the same
+classifier without policy entries by website or task. No historical profile
+authorizes a live call or a repeat of external work.
 The real protected host factory forwards both stage-specific device reads.
 A completed native context-compaction item is inert and does not skip any
 surrounding tool evidence in that full turn.

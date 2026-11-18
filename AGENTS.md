@@ -179,6 +179,10 @@ publication tooling также остаются вне этого публичн
   later edits and routed source slots retain their original fences. Existing
   owner-question locators remain in that same delivery. See the scheduler
   contract for one-use reservation and the separate final-save stage.
+  Pre-receipt drafts require exact private metadata and clean Git twice.
+  Historical skill evidence binds the reviewed release and package digest
+  to the same v6 reservation and native recheck. Keep this compatibility
+  policy outside the scheduler. See the interrupted draft contract.
   Both native draft evidence reads enter through the real protected host
   factory. A closed native context-compaction item has no task effect;
   keep checking the full original tool history after it.

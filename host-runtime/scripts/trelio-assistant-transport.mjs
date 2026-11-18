@@ -12,7 +12,7 @@ import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistan
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata,
-  validateAssistantWorkspaceCheckpoint, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
+  validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
   ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -3148,7 +3148,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       }
       const checkpointKey=input.intermediateDraft!==undefined?'intermediateDraft':'portableFinish';
       if(input[checkpointKey]!==undefined){
-        try{checkpoint=validateAssistantWorkspaceCheckpoint(input[checkpointKey]);}
+        try{checkpoint=(checkpointKey==='intermediateDraft'?validateAssistantIntermediateDraft
+          :validateAssistantWorkspaceCheckpoint)(input[checkpointKey]);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,

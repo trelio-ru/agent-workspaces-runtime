@@ -34,6 +34,30 @@ export const matchesAssistantTaskSkillRead = (value, { scope, parameters, stdout
   && matchesTaskSkillReadOutput(value, parameters.releaseId, stdout)
   && value.requestSha256 === assistantTaskSkillReadRequestDigest(scope,parameters);
 
+// A historical package has no typed effect receipt. The signed host can
+// classify an exact reviewed old command vector, then native renewal checks
+// the same immutable release, verified bytes and publication time. The
+// catalog is only for retained turns. Live calls use the signed effect policy.
+const historicalTaskSkillReads=[{
+  skillId:'telegram-mtproto',releaseId:'8f0e4a2a-c63d-4aa2-958c-1fb2701c5c76',
+  packageSha256:'ef85be194ef9a52c8ac20b497cd726a5487553884afd511f882be06901f8eaf0',
+  // Public artifact source 0d4ec551f821ef1cfa205015a7d08ad8a7e34d6f.
+  // Account list is host-owned. Signed guides fetch local resources; exact
+  // read and context use get_messages without read ACK, views or reply.
+  accepts(arguments_,accountId){
+    if(arguments_.length===2&&arguments_[0]==='account'&&arguments_[1]==='list')return accountId===null;
+    if(arguments_.length===1&&arguments_[0]==='guides')return true;
+    return accountId!==null&&arguments_.length===5&&arguments_[0]==='read'
+      &&arguments_[1]==='--link'&&/^https:\/\/t\.me\/(?:c\/\d+|[a-zA-Z0-9_]{1,64})\/\d+(?:\/\d+)?$/u.test(arguments_[2])
+      &&arguments_[3]==='--context'&&/^(?:[0-9]|10)$/u.test(arguments_[4]);
+  },
+}];
+export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{providerArguments,accountId})=>{
+  const policy=historicalTaskSkillReads.find(row=>row.skillId===skillId&&row.releaseId===releaseId);
+  if(!policy?.accepts(providerArguments,accountId))return null;
+  return {skillId,releaseId,packageSha256:policy.packageSha256};
+};
+
 /** The provider owns CLI classification in the SAME signed file inventory.
  * Absence is not legacy permission: a package that has not reviewed its task
  * surface cannot run with assistant credentials. This is a restriction only;

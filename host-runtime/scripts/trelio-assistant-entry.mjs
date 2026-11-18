@@ -20,7 +20,7 @@ import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindow
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { bindAssistantTaskSkillRead, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
-import { validateAssistantWorkspaceCheckpoint } from './trelio-assistant-inbox.mjs';
+import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft } from './trelio-assistant-inbox.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
@@ -2077,6 +2077,18 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return result;
     },true);
 
+    const verifyRetainedLocalCheckpoint=(expected,witness,signal)=>invoke(async(_live,host)=>{
+      const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+      const checkPass=async()=>{
+        const current=validateAssistantActivePass(await host.readActivePass(),stableIdentity);
+        return Object.keys(current).length===Object.keys(expected).length
+          &&Object.keys(expected).every(key=>current[key]===expected[key]);
+      };
+      if(!await checkPass())return false;
+      return await verifyAssistantRetainedLocalCheckpoint({
+        config:host.configurationDirectory??configDirectory,identity:stableIdentity,pass:expected,witness,signal})&&await checkPass();
+    });
+
     // Source calls re-enter the same protected private invocation and signed
     // account/provider reader. No long-lived credential/worker or provider code
     // is copied into this coordinator. The narrower private deadline propagates
@@ -2121,7 +2133,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     });
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
-      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,acknowledgeSource,verifyOwnerReply,
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,
+      readSourceMonitor,acknowledgeSource,verifyOwnerReply,
       deliverPreparedOwnerReply:dependencies.deliverPreparedOwnerReply??preparedReplyAction(false),
       verifyPreparedOwnerReply:dependencies.verifyPreparedOwnerReply??preparedReplyAction(true),
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
@@ -3563,6 +3576,46 @@ export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='htt
   const identity=await context.readOpenedWorkspaceRunIdentity(path.join(root,'workspace'),expectedOrigin);
   return identity.workspaceId===plan.runIdentity.workspaceId&&identity.runId===plan.runIdentity.runId?root:base;
 };
+/** Pre-receipt saves require a current independent local snapshot. A settled
+ * operation, clean status or matching Run ID alone is insufficient. Use the
+ * ordinary assistant namespace, protected metadata and read-only Git, and
+ * recheck the exact projection after the Git operations. */
+const verifyAssistantRetainedLocalCheckpoint=async({config,identity,pass,witness,signal})=>{
+  const selected=validateAssistantIntermediateDraft(witness);
+  if(selected.retainedLocalCheckpoint!==true||identity.assistantId!==pass.assistantId||identity.deviceId!==pass.deviceId)return false;
+  try{
+    signal?.throwIfAborted();
+    const common=await import('./trelio-workspace.mjs');
+    const runIdentity={workspaceId:selected.workspaceId,runId:selected.runId};
+    const scope={assistantUserId:pass.assistantId,deviceId:pass.deviceId,companyId:pass.companyId,taskId:pass.taskId};
+    const root=await resolveAssistantWorkspaceRoot(config,{scope,runIdentity},identity.origin);
+    const directory=path.join(root,'workspace');
+    await common.assertPrivatePathKind(root,'directory');
+    await common.assertPrivatePathKind(directory,'directory');
+    const read=async()=>{
+      const metadata=await common.readAssistantWorkspaceRunMetadata(root);
+      if(metadata.schemaVersion!==3||metadata.origin!==identity.origin||metadata.scopeType!=='task'
+        ||metadata.company?.id!==pass.companyId||metadata.runId!==selected.runId||metadata.workspaceId!==selected.workspaceId
+        ||metadata.latestDraftCheckpointId!==selected.checkpointId||metadata.draftHead!==selected.draftHead
+        ||!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(metadata.baseHead??'')||metadata.baseHead===selected.draftHead
+        ||!new RegExp(UUID,'u').test(metadata.leaseId??'')||!Number.isSafeInteger(metadata.fencingToken)||metadata.fencingToken<1
+        ||metadata.terminalStatus||metadata.finishRecovery||!sameLocalPath(metadata.workspaceDirectory??'',directory))return null;
+      return [metadata.baseHead,metadata.leaseId,metadata.fencingToken,metadata.workspaceDirectory];
+    };
+    const first=await read();
+    if(!first)return false;
+    const options={cwd:directory,signal,timeout:10_000,env:{GIT_OPTIONAL_LOCKS:'0'}};
+    const status=await common.runGit(['status','--porcelain=v1','--untracked-files=all'],options);
+    if(status.stdout.length)return false;
+    const head=await common.runGit(['rev-parse','--verify','HEAD'],options);
+    signal?.throwIfAborted();
+    return head.stdout.trim()===selected.draftHead&&JSON.stringify(first)===JSON.stringify(await read());
+  }catch{
+    // Preserve the original fence without returning metadata or local paths.
+    return false;
+  }
+};
+
 /** No silent move/reset of prototype writable folders or permanent chat cwd.
  * Presence requires explicit outcome recovery. This exact lstat reads no files;
  * access errors are not mistaken for absence. Inspection caches are rebuildable. */
