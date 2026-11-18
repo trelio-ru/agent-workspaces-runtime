@@ -3288,6 +3288,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       workspaceRun:runIdentity,lockDirectory:path.join(os.tmpdir(),'synthetic-writer-locks'),lock:(_file,action)=>action()});
     const readFetch=globalThis.fetch,uploads=new Map(),storedPayloads=[payload];
     let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null,handoffTargetMode='valid';
+    let publishedFinalDraft=null,promotedFinalDrafts=0,stagedProjectionId=null;
     let nativeHandoffs=0;
     let claims=0,workspaceBundleReads=0;
     globalThis.fetch=async(url,options)=>{
@@ -3327,7 +3328,12 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         if(named)assert.equal(Object.hasOwn(input,'taskOutcome'),false);
         else assert.equal(input.taskOutcome,'no_status_change');
         assert.equal(input.summary.includes('SYNTHETIC_FINISH_PRIVATE_SUMMARY'),false);
-        latestCheckpoint={...input,id:randomUUID(),createdAt:new Date().toISOString()};return json(latestCheckpoint);
+        if(input.draftHead!==undefined){
+          assert.equal(input.draftHead,nativeRun.draftHead);
+          assert.equal(input.draftHead,publishedFinalDraft?.revision.head);
+        }
+        latestCheckpoint={...input,id:randomUUID(),runId,candidateHead:nativeRun.draftHead,createdAt:new Date().toISOString()};
+        return json(latestCheckpoint);
       }
       const storage=`${base}/runs/${runId}/encrypted-storage`;
       if(parsed.pathname===storage)return json({protocolVersion:2,workspaceId:descriptor.workspaceId,baseHead:head,
@@ -3359,11 +3365,44 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
         const input=JSON.parse(options.body);assert.ok(uploads.get(input.manifestFileId)?.state==='ready');
         reusedFileCount=input.files.filter(file=>baseFiles.some(original=>original.id===file.id)).length;
         assert.ok(input.files.some(file=>file.id===baseFiles[0].id),'unchanged result.md reuses its exact prior random ID');
+        stagedProjectionId=input.projectionId;
         return json({projectionId:input.projectionId,workspaceHead:input.workspaceHead,fileCount:input.files.length-1,state:'staging'});
       }
       if(parsed.pathname===`${base}/runs/${runId}/encrypted-derived-artifacts`){
         const input=JSON.parse(options.body);return json({workspaceHead:input.workspaceHead,artifacts:input.artifacts,
           derivedArtifactsSha256:common.buildEncryptedDerivedArtifactsDigest(input.artifacts)});
+      }
+      if(parsed.pathname===storage+'/draft'){
+        const input=JSON.parse(options.body),upload=uploads.get(input.uploadId);
+        assert.equal(upload.state,'ready');
+        assert.equal(input.baseHead,head);
+        assert.equal(input.leaseId,nativeRun.leaseId);
+        assert.equal(input.fencingToken,nativeRun.fencingToken);
+        const ciphertext=Buffer.concat(upload.bytes);
+        assert.equal(input.ciphertextSha256,digest(ciphertext));
+        const revision={revisionId:randomUUID(),head:input.workspaceHead,baseHead:input.baseHead,scopeId,
+          scopeEpoch:1,writerDeviceId:cryptoDeviceId,ciphertextSha256:input.ciphertextSha256,ciphertextSizeBytes:ciphertext.length,
+          bundleFormat:input.bundleFormat,parentRevisionId:input.parentRevisionId};
+        assert.equal(publishedFinalDraft,null,'the current assistant finish publishes one portable final draft');
+        publishedFinalDraft={revision,ciphertext};
+        nativeRun={...nativeRun,draftHead:input.workspaceHead,draftUpdatedAt:new Date().toISOString()};
+        return json({run:nativeRun,draft:revision});
+      }
+      if(parsed.pathname===`${base}/runs/${runId}/encrypted-candidate-from-draft`){
+        const input=JSON.parse(options.body),{revision,ciphertext}=publishedFinalDraft;
+        assert.equal(latestCheckpoint.checkpointType,'handoff');
+        assert.equal(latestCheckpoint.runId,runId);
+        assert.equal(latestCheckpoint.candidateHead,input.workspaceHead);
+        assert.equal(nativeRun.draftHead,input.workspaceHead);
+        assert.equal(revision.revisionId,input.sourceDraftRevisionId);
+        assert.equal(revision.ciphertextSha256,input.ciphertextSha256);
+        assert.equal(revision.ciphertextSizeBytes,input.ciphertextSizeBytes);
+        assert.equal(input.leaseId,nativeRun.leaseId);
+        assert.equal(input.fencingToken,nativeRun.fencingToken);
+        assert.equal(input.browserProjectionId,stagedProjectionId);
+        acceptedRevisionBytes=ciphertext;acceptedPublications++;promotedFinalDrafts++;
+        nativeRun={...nativeRun,candidateHead:input.workspaceHead,status:'accepted',acceptedAt:new Date().toISOString()};
+        return json({run:nativeRun});
       }
       if(parsed.pathname===storage+'/candidate'){
         const input=JSON.parse(options.body),upload=uploads.get(input.uploadId);assert.equal(upload.state,'ready');
@@ -3700,6 +3739,12 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
 
     assert.equal(finished.operation,'finish');assert.equal(nativeRun.status,'accepted');assert.equal(acceptedPublications,1);
     if(named)assert.equal(nativeHandoffs,handoffsBeforeFinish,'an accepted retained archive must not write another handoff');
+    else {
+      assert.equal(promotedFinalDrafts,1,'encryption promotes the same durable finish bytes');
+      assert.equal(nativeRun.candidateHead,publishedFinalDraft.revision.head);
+      assert.match((await common.runGit(['ls-tree','-r','--name-only',nativeRun.candidateHead,'--','worklog'],{cwd:writable})).stdout,
+        new RegExp(`-run-${runId}\\.md`,'u'));
+    }
     assert.equal(baseManifestReads,1,'a second save reads the native selected encrypted base manifest once');
     assert.ok(reusedFileCount>=1);
     await common.withWorkspaceExecutionProfile(writerProfile,async()=>{
