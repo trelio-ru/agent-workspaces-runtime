@@ -1263,8 +1263,10 @@ publication tooling также остаются вне этого публичн
   again, preserving the intentionally live competing writer and no RPC replay.
   Hosted Windows disposes its own short pinned CLI/fixture root
   only after the entire test process exits successfully, with the original
-  bounded removal. Inspection clients receive EOF for native MCP cleanup;
-  production termination remains unchanged. Unknown close or a failed hosted
+  bounded removal. Inspection clients receive EOF for native MCP cleanup.
+  After positive process exit, fixture cleanup releases only its own pipe ends
+  and still requires close. The carrier checks its own directory separately.
+  Production termination remains unchanged. Unknown close or a failed hosted
   fixture preserves its root and first failure, with closed counts/codes.
   The same Windows Codex gate runs after its setup inputs and before slow
   Workspace groups, without an extra native invocation or reduced assertions.

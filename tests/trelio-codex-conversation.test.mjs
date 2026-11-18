@@ -61,15 +61,27 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // execution policy. Ordinary inspection clients get EOF first, allowing Codex
  // to dispose their synthetic MCP children before the parent exits.
  const ownChild=child=>{
-  let didClose=false,stopping;
+  let didClose=false,didExit=false,stopping;
   const closed=new Promise(resolve=>child.once('close',()=>{didClose=true;resolve();}));
+  child.once('exit',()=>{didExit=true;});
   const stop=()=>stopping??=(async()=>{
    if(didClose)return;
    const remaining=Math.min(5000,fixtureDeadline-Date.now());
    if(remaining<=0)throw Error('Native isolation fixture cleanup deadline');
    let terminate,deadline;
+   // A descendant can retain the pipe endpoint after the original App
+   // Server has exited. At this point the fixture has ended its RPC reads:
+   // release only our own ends after the original process' real exit.
+   // The carrier still checks that its private directory is removable.
+   const releasePipes=()=>{
+    child.stdin?.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+   };
    try{
-    if(!child.killed){
+    if(didExit)releasePipes();
+    else child.once('exit',releasePipes);
+    if(!didExit&&!child.killed){
      // Both callbacks operate on the retained ChildProcess, never a discovered
      // PID or a process-name/tree query. A lost close keeps the disposable root.
      child.stdin.on('error',()=>{});
@@ -77,9 +89,9 @@ test('actual Codex isolated assistant refuses alternate tools across process res
      terminate=setTimeout(()=>{if(!didClose)child.kill('SIGKILL');},Math.min(2000,remaining));
     }
     await Promise.race([closed,new Promise((_,reject)=>{
-     deadline=setTimeout(()=>reject(Error('Native isolation fixture child did not close')),remaining);
+     deadline=setTimeout(()=>reject(Error(didExit?'Native isolation fixture pipe close missing':'Native isolation fixture process exit missing')),remaining);
     })]);
-   }finally{clearTimeout(terminate);clearTimeout(deadline);}
+   }finally{child.off('exit',releasePipes);clearTimeout(terminate);clearTimeout(deadline);}
   })();
   const owned={child,stop,closedEvent:closed,get closed(){return didClose;}};
   ownedChildren.push(owned);return owned;

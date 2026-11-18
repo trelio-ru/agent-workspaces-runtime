@@ -166,7 +166,9 @@ groups, with its complete existing assertions. Hosted Windows stages every
 native Codex scenario beneath the pinned CLI carrier. That carrier removes its
 own tree only after the complete Node fixture exits successfully, retaining the
 same bounded filesystem removal. A failed or unknown fixture preserves its
-tree; native child close assertions and production termination stay unchanged.
+tree. The isolation fixture releases its own pipe ends only after the retained
+child's real exit and still requires close. The carrier independently verifies
+directory removal under the original bound. Production termination is unchanged.
 The positive instruction-retention fixture permits at most three separate real
 hooks against its unchanged synthetic transcript: every hook must produce a
 valid method-bound proof, and at least one must inject the exact verified hints.

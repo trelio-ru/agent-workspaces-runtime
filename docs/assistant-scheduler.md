@@ -393,7 +393,11 @@ clients receive EOF so native MCP disposal finishes normally. Restart phases
 join the exact preceding App Server close events before opening native history
 from a new process. The deliberately competing writer stays live for its busy
 assertion. This wait neither signals a child again nor retries an RPC or turn.
-Cleanup joins all retained close events under the original test deadline. On hosted Windows the
+Cleanup joins all retained close events under the original test deadline. Once
+an inspection client has finished its RPCs and actually exited, the fixture can
+close its own pipe ends even if another native process still holds an endpoint.
+The fixture distinguishes a missing process exit from a pending pipe close.
+On hosted Windows the
 carrier stages the workspace inside its own fresh pinned CLI directory and
 removes that directory only after the entire test process exits successfully.
 Node child close alone can precede release of the native cwd handle. Keep the
