@@ -1304,6 +1304,8 @@ publication tooling также остаются вне этого публичн
   SAME narrowed child environment preserves Windows ComSpec/PATHEXT with canonical
   case for native MCP CMD discovery; no broad env/shell/auth fallback. Native CI
   uses pinned public CLI + isolated synthetic MCP, never an account/model turn.
+  All native Windows scenarios stage directories under the pinned CLI carrier
+  for cleanup after Node exits. Keep the CMD fixture's space in its path.
 - Background composition keeps one native pass per signed worker and private
   invocations per call. Supervisor updates only between cycles; full backend
   readiness gates business work. Task folders use compact full-identity hashes; prototype writable roots require review. OS installation and Windows E2E remain explicit

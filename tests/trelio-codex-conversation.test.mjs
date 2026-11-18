@@ -28,6 +28,28 @@ import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-as
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
 
+async function createNativeCodexFixtureDirectory(executable, prefix, maxRetries) {
+ // On hosted Windows the pinned CLI carrier owns every native fixture root.
+ // Codex can close its stdio while a native descendant still holds a cwd
+ // handle. Keep all these directories for the carrier to remove after Node
+ // exits successfully, including the CMD scenario with a space in its path.
+ const carrierParent = process.env.TRELIO_TEST_WINDOWS_ISOLATION_PARENT;
+ let parent = os.tmpdir();
+ if (carrierParent !== undefined) {
+  assert.equal(process.platform, 'win32');
+  assert.ok(path.isAbsolute(carrierParent));
+  parent = await fs.realpath(carrierParent);
+  assert.equal(parent, await fs.realpath(path.dirname(executable)));
+ }
+ const root = await fs.realpath(await fs.mkdtemp(path.join(parent, prefix)));
+ return {
+  root,
+  async remove() {
+   if (carrierParent === undefined) await fs.rm(root, {recursive: true, force: true, maxRetries, retryDelay: 100});
+  },
+ };
+}
+
 test('actual Codex isolated assistant refuses alternate tools across process restart without changing user configuration',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const executable=process.env.TRELIO_TEST_CODEX_CLI,execute=promisify(execFile);
@@ -79,18 +101,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    })]);
   } finally {clearTimeout(deadline);}
  };
- // The Windows carrier owns the pinned executable's disposable directory.
- // Its cleanup happens after this test process exits, so native cwd handles
- // do not race deletion here even when every observed child has closed.
- const carrierParent=process.env.TRELIO_TEST_WINDOWS_ISOLATION_PARENT;
- let fixtureParent=os.tmpdir();
- if(carrierParent!==undefined){
-  assert.equal(process.platform,'win32');
-  assert.ok(path.isAbsolute(carrierParent));
-  fixtureParent=await fs.realpath(carrierParent);
-  assert.equal(fixtureParent,await fs.realpath(path.dirname(executable)));
- }
- const root=await fs.realpath(await fs.mkdtemp(path.join(fixtureParent,carrierParent===undefined?'trelio-native-isolation-':'isolation-')));
+ const {root,remove}=await createNativeCodexFixtureDirectory(executable,'isolation-',10);
  const home=path.join(root,'home'),repository=path.join(root,'repository');
  for(const dir of [home,path.join(repository,'.agents/plugins')])await fs.mkdir(dir,{recursive:true});
  const environment=buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
@@ -204,7 +215,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   const failure=settled.find(result=>result.status==='rejected');
   if(failure)throw failure.reason;
   assert.equal(unclosed,0,'all owned native child close events precede directory removal');
-  if(carrierParent===undefined)await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+  await remove();
  });
  const origin=`http://127.0.0.1:${server.address().port}`;
  const foreignScript=path.join(root,'foreign.mjs'),foreignSentinel=path.join(root,'foreign-started');
@@ -399,9 +410,9 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
  :'actual Codex assistant rollback keeps the newer candidate archived instead of reinstalling it from retention',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const execute=promisify(execFile),executable=process.env.TRELIO_TEST_CODEX_CLI;
- const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-native-rollback-')));
+ const {root,remove}=await createNativeCodexFixtureDirectory(executable,'rollback-',10);
  let preservation=null;const preservationErrors=[];
- t.after(async()=>{await preservation?.close();await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
+ t.after(async()=>{await preservation?.close();await remove();});
  const home=path.join(root,'home'),repository=path.join(root,'repository'),retentionDirectory=path.join(root,'retention');
  const official='https://github.com/trelio-ru/digital-assistants.git',marketplace='trelio-digital-assistants';
  const plugin='trelio-digital-assistant@trelio-digital-assistants';
@@ -616,8 +627,8 @@ for(const liveFailedParent of [false,true])test(liveFailedParent
 test('actual Codex migrates an existing combined main to independent hooks without a manual companion install or trust write',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const execute=promisify(execFile),executable=process.env.TRELIO_TEST_CODEX_CLI;
- const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-hook-migration-')));
- t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
+ const {root,remove}=await createNativeCodexFixtureDirectory(executable,'hook-migration-',10);
+ t.after(remove);
  const home=path.join(root,'home'),repository=path.join(root,'repository'),main=path.join(repository,'plugins/trelio-agent-workspaces');
  const component=path.join(repository,'plugin'),official='https://github.com/trelio-ru/agent-workspaces.git';
  for(const dir of [home,path.join(repository,'.agents/plugins'),path.join(main,'.codex-plugin'),path.join(main,'hooks'),
@@ -735,8 +746,8 @@ test('actual Codex initial MCP inventory includes company discovery and accepts 
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:60000},async t=>{
  const executable=process.env.TRELIO_TEST_CODEX_CLI;
  assert.ok(path.isAbsolute(executable));
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-initial-discovery-'));
- t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100}));
+ const {root,remove}=await createNativeCodexFixtureDirectory(executable,'initial-discovery-',5);
+ t.after(remove);
  const server=path.join(root,'server.mjs');
  const transport=pathToFileURL(path.resolve('host-runtime/scripts/trelio-assistant-transport.mjs')).href;
  const entry=pathToFileURL(path.resolve('host-runtime/scripts/trelio-assistant-entry.mjs')).href;
@@ -811,8 +822,8 @@ test('actual Windows Codex discovers a synthetic CMD MCP server only with the pu
   {skip:process.platform!=='win32',timeout:90000},async t=>{
   const executable=process.env.TRELIO_TEST_CODEX_CLI;
   assert.ok(executable&&path.isAbsolute(executable),'the native CI wrapper supplies its pinned public Codex binary');
-  const root=await fs.mkdtemp(path.join(os.tmpdir(),'trelio cmd mcp '));
-  t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100}));
+  const {root,remove}=await createNativeCodexFixtureDirectory(executable,'cmd mcp ',5);
+  t.after(remove);
   const launcher=path.join(root,'synthetic-mcp'),server=path.join(root,'server.mjs');
   await fs.writeFile(launcher,'#!/bin/sh\nexit 99\n');
   await fs.writeFile(launcher+'.cmd',`@echo off\r\n"${process.execPath}" "${server}"\r\n`);
