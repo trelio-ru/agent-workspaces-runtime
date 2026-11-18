@@ -330,6 +330,8 @@ publication tooling также остаются вне этого публичн
   not_checked до client response; request target не меняет folder scope.
   Public availability/recovery измеряется bounded anonymous probes; doctor
   не считается reconnect. Restart/new chat требует отдельного evidence.
+  MCP doctor ограничивает независимые этапы внутри общего deadline, сохраняет
+  законченные проверки и отмечает тайм-ауты без вывода о готовности или repair.
   CLI bootstrap возвращает тот же read/recovery plan, без clientKind из env.
   Наблюдаемое отсутствие direct schema даже при ready или stale/failed MCP:
   предложи переключить сам плагин либо полностью выйти из приложения;
@@ -1434,6 +1436,8 @@ Exact legacy template bytes для распознавания при мигра�
   [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Сетевой отказ Codex tools/list сохраняет host-owned recovery и закрытый код
   причины; повторяет только чтение каталога, без OAuth и replay рабочих действий.
+  Receipt подтверждает только count, наличие фиксированных read tools и отправку
+  list_changed. Codex отдельно подтверждает выдачу инструмента и safe read.
   [Контракт](docs/agent-workspace-runtime.md#codex-catalog-recovery).
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.

@@ -88,7 +88,7 @@ export const normalizeDiagnosticReadTarget = (value) => {
   };
 };
 
-const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime }) => {
+const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime, prerequisitesChecked = true }) => {
   const target = normalizeDiagnosticReadTarget(readTarget ?? workingFolder?.scope);
   const nextCall = target
     ? { toolName: target.taskNumber !== undefined ? "get_task" : "get_agent_instructions", arguments: target }
@@ -98,6 +98,7 @@ const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder
   // before a protected read; this plan never bypasses that existing boundary.
   const blockers = requiredActions.filter((action) => action.code !== "INSTALL_STANDALONE_GIT").map(({ code }) => code);
   const state = blockers.length ? "prerequisite_action_required"
+    : !prerequisitesChecked ? "prerequisites_not_checked"
     : ["available", "recovered"].includes(publicService?.state) ? "client_read_required" : "public_service_not_confirmed";
   return {
     state,
@@ -354,7 +355,7 @@ const buildLocalSummary = (local, clientKind) => ({
     code: local.git?.code ?? null,
     version: local.git?.version ?? null,
     minimumVersion: local.git?.minimumVersion ?? "2.28.0",
-    processPathReady: local.git?.processPathReady === true,
+    processPathReady: local.git?.status === "not_checked" ? null : local.git?.processPathReady === true,
   },
   plugin: {
     status: local.plugin?.status ?? "unknown",
@@ -482,6 +483,7 @@ export const buildTrelioInstallationDiagnostic = ({
   workingFolder = null,
   publicService = null,
   readTarget = null,
+  diagnosticTimeouts = [],
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
@@ -492,23 +494,27 @@ export const buildTrelioInstallationDiagnostic = ({
     );
   }
   const legacyCodex = clientKind === "codex" && !codexMcpRuntime;
-  if (legacyCodex && (!codexRouting || typeof codexRouting !== "object")) {
+  const timedOutStages = new Set(diagnosticTimeouts.map(({ stage }) => stage));
+  const localChecked = !timedOutStages.has("local_components");
+  const routingChecked = !timedOutStages.has("codex_hook_routing");
+  if (legacyCodex && routingChecked && (!codexRouting || typeof codexRouting !== "object")) {
     throw new TrelioInstallationDiagnosticError(
       "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_RESULT",
       "Проверка Codex direct routing не вернула structured object.",
     );
   }
 
-  const requiredActions = buildLocalRequiredActions(local);
+  // Unknown state after a deadline must never generate a repair plan.
+  const requiredActions = localChecked ? buildLocalRequiredActions(local) : [];
   const startupBlocked = local.hookStartup?.status === "attention";
   if (clientKind === "codex" && codexLegacyMcpMigration?.status === "removed") {
     requiredActions.push(buildRemovedLegacyMcpRestartAction());
   } else if (clientKind === "codex" && codexLegacyMcpMigration?.status === "blocked") {
     requiredActions.push(buildBlockedLegacyMcpRemovalAction(codexLegacyMcpMigration));
   }
-  if (legacyCodex && codexRouting.status === "action_required") {
+  if (legacyCodex && routingChecked && codexRouting.status === "action_required") {
     requiredActions.push(buildCodexRoutingAction(codexRouting));
-  } else if (legacyCodex && codexRouting.status !== "ready") {
+  } else if (legacyCodex && routingChecked && codexRouting.status !== "ready") {
     requiredActions.push(buildBlockedCodexRoutingAction(codexRouting));
   }
   if (intent === "onboarding" && local.connection?.status !== "ready" && local.connection?.status !== "not_checked") {
@@ -550,7 +556,7 @@ export const buildTrelioInstallationDiagnostic = ({
       effect: "does_not_prove_hook_or_oauth_failure",
     });
   }
-  if (intent === "diagnostics" && local.connection?.status !== "ready" && local.connection?.status !== "not_checked") {
+  if (intent === "diagnostics" && localChecked && local.connection?.status !== "ready" && local.connection?.status !== "not_checked") {
     warnings.push({
       code: "BRIDGE_CONNECTION_NOT_READY",
       status: local.connection?.status ?? "unknown",
@@ -564,15 +570,23 @@ export const buildTrelioInstallationDiagnostic = ({
     state: publicService.state,
     effect: "public_reachability_only_no_auth_or_client_repair",
   });
-  const folder = workingFolder ?? { status: "not_checked", reasonCode: "CLIENT_WORKING_FOLDER_REQUIRED" };
+  const folder = workingFolder ?? { status: "not_checked",
+    reasonCode: timedOutStages.has("working_folder") ? "TRELIO_INSTALLATION_DIAGNOSTIC_STAGE_TIMEOUT" : "CLIENT_WORKING_FOLDER_REQUIRED" };
+  const localEvidence = localChecked ? local : {
+    ...local, status: "not_checked",
+    node: { status: "not_checked" }, git: { status: "not_checked" }, plugin: { status: "not_checked" },
+    runtimeSessions: { status: "not_checked" }, connection: { status: "not_checked" },
+  };
   return {
     schemaVersion: 1,
     clientKind,
     intent,
-    status: requiredActions.length > 0 || publicServiceBlocked || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
+    ...(diagnosticTimeouts.length ? { diagnosticTimeouts } : {}),
+    status: diagnosticTimeouts.length ? "partial"
+      : requiredActions.length > 0 || publicServiceBlocked || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
       ? "action_required"
       : "ready_for_live_verification",
-    local: buildLocalSummary(local, clientKind),
+    local: buildLocalSummary(localEvidence, clientKind),
     ...(publicService ? { publicService } : {}),
     codexRouting: clientKind === "codex" ? codexRouting : null,
     codexHookSettings: legacyCodex
@@ -597,8 +611,9 @@ export const buildTrelioInstallationDiagnostic = ({
         state: "not_confirmed",
         checks: {
           workingFolder: folder.status,
-          localComponents: requiredActions.length > 0 ? "action_required" : local.status ?? "unknown",
-          ...(publicService ? { publicService: publicService.state } : {}),
+          localComponents: requiredActions.length > 0 ? "action_required" : localEvidence.status ?? "unknown",
+          ...(publicService || timedOutStages.has("public_service")
+            ? { publicService: publicService?.state ?? "not_checked" } : {}),
           oauth: "not_checked", protectedContext: "not_checked", workspaceRead: "not_checked",
           skills: "not_checked", savingResults: "not_checked",
           ...(clientKind === "codex" ? { toolExposure: "not_checked" } : {}),
@@ -609,7 +624,8 @@ export const buildTrelioInstallationDiagnostic = ({
     } : {}),
     liveVerification: {
       ...(intent === "diagnostics" ? {
-        read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime }),
+        read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime,
+          prerequisitesChecked: localChecked && routingChecked }),
         connectionRecovery: {
           ...buildTrelioConnectionRecovery(publicService, requiredActions, codexMcpRuntime),
           ...(clientKind === "codex" ? { clientInspection: "clientInspection.mcpRecovery" } : {}),

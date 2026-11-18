@@ -467,6 +467,30 @@ const runWithAbortDeadline = async ({
   }
 };
 
+// Run independent read-only checks concurrently, leaving at least 15s of the
+// 60s MCP budget for dispatch and delivery. The public probe's own retries
+// can take up to 34s. A stalled OS read must not erase completed checks.
+const INSTALLATION_DIAGNOSTIC_STAGE_BUDGET_MS = {
+  local_components: 45_000,
+  codex_hook_routing: 20_000,
+  working_folder: 30_000,
+  public_service: 40_000,
+};
+
+const runInstallationDiagnosticStage = async (stage, signal, operation) => {
+  const timeoutMs = INSTALLATION_DIAGNOSTIC_STAGE_BUDGET_MS[stage];
+  const deadlineError = new Error("Installation diagnostic stage deadline.");
+  try {
+    return { value: await runWithAbortDeadline({ signal, timeoutMs, timeoutError: () => deadlineError, operation }) };
+  } catch (error) {
+    // Caller cancellation is terminal. Only this stage's own deadline gets
+    // a partial result. Keep other errors on their existing paths.
+    throwIfAborted(signal);
+    if (error !== deadlineError) throw error;
+    return { timeout: { stage, timeoutMs } };
+  }
+};
+
 const resolveTrelioConfigHome = ({
   platform = process.platform,
   environment = process.env,
@@ -6126,18 +6150,19 @@ const handleToolCallWithoutSkillHints = async (
       });
       return buildTextResult(prepared);
     }
-    const local = await localPrerequisiteDiagnosis({
+    const diagnostics = rawArguments.intent === "diagnostics";
+    const inspectLocal = (stageSignal) => localPrerequisiteDiagnosis({
       origin,
       clientKind: rawArguments.clientKind,
-      includeHookStartup: rawArguments.intent === "diagnostics"
+      includeHookStartup: diagnostics
         && !codexMcpRuntime
         && !["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind),
-      signal,
+      signal: stageSignal,
     });
-    let codexRouting = null;
-    let codexHookSettings = null;
-    if (rawArguments.clientKind === "codex" && !codexMcpRuntime) {
-      codexHookSettings = await codexHookSettingsRead();
+    const inspectLegacyCodex = async (stageSignal) => {
+      const codexHookSettings = await codexHookSettingsRead();
+      throwIfAborted(stageSignal);
+      let codexRouting;
       try {
         codexRouting = await codexRoutingPlan();
       } catch (error) {
@@ -6155,16 +6180,16 @@ const handleToolCallWithoutSkillHints = async (
           },
         };
       }
-    }
-    let workingFolder = null;
-    if (rawArguments.intent === "diagnostics") {
+      return { codexRouting, codexHookSettings };
+    };
+    const inspectWorkingFolder = async () => {
       try {
-        workingFolder = await folderDiagnosticPrepare(rawArguments.folderOnboarding, rawArguments.clientKind);
+        return await folderDiagnosticPrepare(rawArguments.folderOnboarding, rawArguments.clientKind);
       } catch (error) {
         // Folder failure must not erase the independent component/OAuth plan.
         // Never expose arbitrary filesystem messages or instruction-file bytes.
         const gitBlocker = projectFolderGitHistoryBlocker(error);
-        workingFolder = {
+        return {
           status: "blocked",
           reasonCode: error instanceof TrelioFolderOnboardingError
             ? error.code : ["EACCES", "EPERM", "ENOENT"].includes(error?.code)
@@ -6172,21 +6197,32 @@ const handleToolCallWithoutSkillHints = async (
           ...(gitBlocker ? { message: gitBlocker.message, details: gitBlocker.details } : {}),
         };
       }
-    }
-    // Public reachability is independent of local prerequisites and folder ACL.
-    // It cannot load client tools or replay the failed business operation.
-    const publicService = rawArguments.intent === "diagnostics"
-      ? await publicServiceDiagnosis(origin, { signal }) : null;
+    };
+    const legacyCodex = rawArguments.clientKind === "codex" && !codexMcpRuntime;
+    const [local, legacy, folder, publicService] = diagnostics
+      ? await Promise.all([
+          runInstallationDiagnosticStage("local_components", signal, inspectLocal),
+          legacyCodex ? runInstallationDiagnosticStage("codex_hook_routing", signal, inspectLegacyCodex) : {},
+          runInstallationDiagnosticStage("working_folder", signal, inspectWorkingFolder),
+          runInstallationDiagnosticStage("public_service", signal, stageSignal => publicServiceDiagnosis(origin, { signal: stageSignal })),
+        ])
+      : [
+          { value: await inspectLocal(signal) },
+          legacyCodex ? { value: await inspectLegacyCodex(signal) } : {},
+          {},
+          {},
+        ];
+    const diagnosticTimeouts = [local, legacy, folder, publicService].flatMap(stage => stage.timeout ? [stage.timeout] : []);
     return buildTextResult(buildTrelioInstallationDiagnostic({
       clientKind: rawArguments.clientKind,
       intent: rawArguments.intent,
-      local,
-      codexRouting,
-      codexHookSettings,
+      local: local.timeout ? { platform: process.platform, hostRuntime: { loadedVersion: HOST_RUNTIME_VERSION } } : local.value,
+      ...legacy.value,
       codexLegacyMcpMigration,
       codexMcpRuntime,
-      workingFolder,
-      publicService,
+      workingFolder: folder.value,
+      publicService: publicService.value,
+      diagnosticTimeouts,
       readTarget,
     }));
   }
@@ -8210,6 +8246,9 @@ const CODEX_RETRY_CATALOG_TOOL = {
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
 };
+const CODEX_CATALOG_DIAGNOSTIC_READ_TOOLS = [
+  "list_companies", "get_agent_instructions", "get_task", "list_my_tasks", "list_project_tasks",
+];
 
 /** Only reviewed transport failures qualify for a recoverable bootstrap list.
  * In particular, a malformed catalogue, blocked endpoint, vault failure or
@@ -8402,10 +8441,21 @@ export const createCodexMcpHandler = ({
         if (Object.keys(raw).length) throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Повтор чтения каталога не принимает параметры.");
         // One explicit read reuses the same fixed-origin OAuth transport.
         // There is no login, proof fabrication or replay of the failed action.
-        await catalog(signal);
+        const tools = await catalog(signal);
+        // Compare the just-read upstream catalogue with the client's own
+        // tool inventory using only fixed names. A written notification is
+        // not an acknowledgement from Codex or evidence of a completed read.
+        const nativeNames = new Set(tools.map(tool => tool.name));
+        nativeNames.delete(CODEX_CONNECT_TOOL.name);
         await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         return reply(buildTextResult({ catalogStatus: "ready", automaticRetry: false,
-          instruction: "Каталог Trelio загружен. Продолжите исходный запрос через обычные инструменты; рабочие действия не повторялись." }));
+          catalogEvidence: {
+            nativeToolCount: nativeNames.size,
+            readTools: Object.fromEntries(CODEX_CATALOG_DIAGNOSTIC_READ_TOOLS.map(tool => [tool, nativeNames.has(tool)])),
+            listChangedNotification: notifyClient ? "sent" : "not_sent",
+            clientToolExposure: "not_checked",
+          },
+          instruction: "Сверьте наличие нужного инструмента в readTools и на доступных маршрутах текущего хода. Если он доступен, проверьте обычным чтением. Если каталог содержит инструмент, а Codex ещё его не показывает, повторите запрос одним новым сообщением в этом же чате. При повторном сбое сохраните catalogEvidence и результат проверки инструментов в отчёте. Рабочие действия не повторялись." }));
       }
       if (name === CODEX_CONNECT_TOOL.name) {
         if (Object.keys(raw).some(key => key !== "reauthorize") || (raw.reauthorize !== undefined && typeof raw.reauthorize !== "boolean")) {
