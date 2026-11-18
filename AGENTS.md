@@ -774,6 +774,12 @@ publication tooling также остаются вне этого публичн
   браузеру либо отдельному навыку сервиса, без чужих recipes в provider/host.
   Generic ARIA menuitem получает
   прежний button DTO, без расширения mutation authority. Empty 204 не кешируется.
+  Signed attachment CDN redirects use a temporary exact top-frame GET rule,
+  revoked before other navigation. Zero-byte CSV needs explicit empty identity
+  attachment metadata. Signed document references project the top-frame ID and
+  approved tab selector only. See the same visual contract.
+  Embedded upload requires a signed direct same-origin picker pathname and
+  pinned top editor reference, on the original native target and fresh frame.
   Native office-viewer fixture retains only fixed action phases, closed result
   state/reason, control/request counts and frame/title booleans from the original
   responses. No extra observation, input retry, readiness wait or weaker menu/

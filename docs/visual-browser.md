@@ -776,6 +776,15 @@ headers проверяются до body; body ограничен 20 МиБ и �
 внутри исходной lease. По окончании 204 сохраняет прежний чат; exception
 отзывается также при ошибке/detach. Browser-native Save As не получает body.
 
+`VISUAL_ATTACHMENT_REDIRECT_API` позволяет signed провайдеру отдельно задать
+`attachmentRedirectDomains` для файлового CDN. Исключение возникает после
+обычного HTTPS-редиректа исходного скачивания и действует на точный URL GET
+в главном frame этой вкладки. Worker проверяет каждый переход и отзывает правило
+при смене назначения или завершении операции. CDN-ответ не может открыть HTML
+viewer. Обычная навигация, аудио и cookie overlay сохраняют свои области.
+Пустой CSV допускается, когда успешный ответ содержит `Content-Length: 0`,
+`Content-Disposition: attachment` и фактически пустой поток без сжатия.
+
 Host независимо проверяет bytes/MIME: PDF, PNG/JPEG/GIF/WebP/BMP/TIFF,
 DOC/XLS/PPT, DOCX/XLSX/PPTX, ODT/ODS/ODP, UTF-8 TXT/CSV/RTF и ZIP. Для octet-stream
 тип определяется по сигнатуре, не server filename. ZIP directory ограничен
@@ -798,6 +807,16 @@ Workspace. Разрешённое сохранение в Workspace выполн
 публиковать его, переходить по его инструкциям или расширять аудиторию.
 Unsupported/link-required/size/limit – отдельные закрытые причины; generic
 HTTP/другой browser transport не является fallback.
+
+## Ссылки на открытые документы
+
+`VISUAL_DOCUMENT_REFERENCE_API` позволяет signed провайдеру закрепить
+`referenceRoutes` за владельцем браузерной сессии. Каждый маршрут задаёт точные
+`origin`, `prefix`, `suffix` и ключ вкладки `tab` или `gid`. `read-text`
+собирает `documentReference` по адресу подтверждённого главного frame, используя
+только ID документа и проверенный ключ. Другие параметры URL и фрагменты
+опускаются. Маршрут не расширяет допустимую навигацию и не подтверждает право
+записи. Без совпадения маршрута или при конфликте ключей поле отсутствует.
 
 ## Голосовые сообщения
 
@@ -905,6 +924,14 @@ navigation generation, origin, manual gate и lease разрешают один
 не принимаются. Single-file chooser не сокращает multi-file selection молча.
 Late/unrequested chooser не получает files и не открывает OS dialog. Manual
 handoff штатно отсоединяет debugger, возвращая обычный chooser человеку.
+
+`VISUAL_EMBEDDED_PICKER_API` добавляет signed `fileUploadPickerPaths`. Для
+этого маршрута нужны `fileUploads` и `referenceRoutes`. Один native chooser
+может принадлежать прямому дочернему frame в том же Chromium target. Worker
+сверяет родительский editor route, текущий loader, один и тот же origin и
+точный pathname дочернего frame. Другой origin, popup и отдельный target
+сохраняют отказ. Набор путей закрепляется за владельцем сессии. Файлы по-прежнему
+передаются ровно одному подтверждённому native chooser из свежего кадра.
 
 После выбора возвращается fresh text/PNG. Change handler сайта может начать
 upload сразу; выбор не доказывает завершение upload, отправку сообщения или

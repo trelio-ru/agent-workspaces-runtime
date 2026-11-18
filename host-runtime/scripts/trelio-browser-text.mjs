@@ -1,5 +1,24 @@
 import { createUtf16TextPolicy } from "./trelio-context-search-matching.mjs";
 
+/** A signed route projects an opaque file ID from a verified top frame.
+ * The caller cannot request arbitrary URL components or credential keys. */
+export function normalizeVisualReferenceRoutes(value, origins, observationMode) {
+  if (!Array.isArray(value) || value.length > 8 || value.length && observationMode !== 'text') throw Error('VISUAL_REFERENCE_POLICY_INVALID');
+  const keys = new Set();
+  return value.map(route => {
+    if (!route || typeof route !== 'object' || Array.isArray(route)
+      || Object.keys(route).sort().join() !== 'origin,prefix,selector,suffix'
+      || !origins.includes(route.origin) || typeof route.prefix !== 'string' || route.prefix.length > 64
+      || !/^\/(?:[a-zA-Z0-9_-]{1,28}\/){1,4}$/u.test(route.prefix) || typeof route.suffix !== 'string'
+      || !/^(?:\/[a-zA-Z0-9_-]{1,28})?$/u.test(route.suffix)
+      || !['none', 'tab', 'gid'].includes(route.selector)) throw Error('VISUAL_REFERENCE_POLICY_INVALID');
+    const key = JSON.stringify([route.origin, route.prefix, route.suffix]);
+    if (keys.has(key)) throw Error('VISUAL_REFERENCE_POLICY_INVALID');
+    keys.add(key);
+    return { origin: route.origin, prefix: route.prefix, suffix: route.suffix, selector: route.selector };
+  });
+}
+
 /** Signed business-field verification policy. It permits comparison only,
  * never field-value delivery. Labels/origins are source policy, not model CLI
  * options; authentication/manual gates and visible-control checks still apply.
@@ -270,7 +289,10 @@ export function validateTextResult(v) {
     ...(Object.hasOwn(v || {}, 'nextControlsOffset') ? ['nextControlsOffset'] : []),
     ...(Object.hasOwn(v || {}, 'controlStats') ? ['controlStats'] : []),
     ...(Object.hasOwn(v || {}, 'fieldChecks') ? ['fieldChecks'] : []),
-    ...(Object.hasOwn(v || {}, 'linkTargetsLimited') ? ['linkTargetsLimited'] : [])]) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
+    ...(Object.hasOwn(v || {}, 'linkTargetsLimited') ? ['linkTargetsLimited'] : []),
+    ...(Object.hasOwn(v || {}, 'documentReference') ? ['documentReference'] : [])]) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
+  if (Object.hasOwn(v, 'documentReference') && (typeof v.documentReference !== 'string'
+    || v.documentReference.length > 512 || readableLinkUrl(v.documentReference) !== v.documentReference)) fail();
   if (Object.hasOwn(v, 'linkTargetsLimited') && v.linkTargetsLimited !== true) fail();
   const semantic = Object.hasOwn(v, 'nextControlsOffset');
   if (semantic && v.nextControlsOffset !== null && (!Number.isInteger(v.nextControlsOffset) || v.nextControlsOffset < 1 || v.nextControlsOffset > 1200)) fail();

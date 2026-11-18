@@ -35,6 +35,31 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (!navigationGenerations.has(tabId)) navigationGenerations.set(tabId, ++nextNavigationGeneration);
     return navigationGenerations.get(tabId);
   }
+  function documentReference(raw) {
+    if (!config.referenceRoutes?.length) return undefined;
+    const url = new URL(raw);
+    if (url.username || url.password) return undefined;
+    for (const route of config.referenceRoutes) {
+      if (url.origin !== route.origin || !url.pathname.startsWith(route.prefix) || !url.pathname.endsWith(route.suffix)) continue;
+      const id = url.pathname.slice(route.prefix.length, url.pathname.length - route.suffix.length);
+      if (!/^[A-Za-z0-9_-]{12,180}$/u.test(id)) continue;
+      // Rebuild the approved link without copying other query/fragment data
+      // from the browser address or disclosing the identity of the profile.
+      const reference = new URL(route.origin + route.prefix + id + route.suffix);
+      if (route.selector === 'tab') {
+        const tabs = url.searchParams.getAll('tab');
+        if (tabs.length > 1 || (tabs.length && !/^t\.[A-Za-z0-9_-]{1,80}$/u.test(tabs[0]))) return undefined;
+        if (tabs.length) reference.searchParams.set('tab', tabs[0]);
+      } else if (route.selector === 'gid') {
+        const selected = /^#gid=(\d{1,14})$/u.exec(url.hash)?.[1];
+        const query = url.searchParams.getAll('gid');
+        if (query.length > 1 || (query.length && !/^\d{1,14}$/u.test(query[0])) || (selected && query.length && selected !== query[0])) return undefined;
+        if (selected || query.length) reference.hash = 'gid=' + (selected || query[0]);
+      }
+      return reference.href.length <= 512 ? reference.href : undefined;
+    }
+    return undefined;
+  }
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
   let authenticating = false;
   let protectedSecretTab, followingSecretClick;
@@ -60,6 +85,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const guardedTabs = new Set(), documentFailures = new Set(), childFrames = new Map();
   let guardUpdate = Promise.resolve(), guardFailed = false;
   let pendingAttachment, pendingFileLink, pendingAudio, pendingUpload;
+  const escapeRule = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
   // Native dialogs stop the page renderer, including the acknowledgement of
   // the very input which opened them. Their observation/answer must therefore
@@ -271,9 +297,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (!upload || upload.claimed || source.tabId !== upload.tabId) return;
       upload.claimed = true;
       void (async () => {
-        if (params.frameId !== upload.mainFrameId || !Number.isInteger(params.backendNodeId)
+        if (source.sessionId || !Number.isInteger(params.backendNodeId)
           || params.backendNodeId <= 0 || !['selectSingle', 'selectMultiple'].includes(params.mode)
           || params.mode === 'selectSingle' && upload.files.length !== 1) throw Error('upload_control_required');
+        if (params.frameId !== upload.mainFrameId && !config.fileUploadPickerPaths?.length) throw Error('upload_control_required');
         const tab = await chrome.tabs.get(upload.tabId); allowedNavigation(tab.url);
         await credentialGuard(upload.tabId);
         const tree = await command(upload.tabId, 'Page.getFrameTree');
@@ -281,6 +308,17 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           || Date.now() >= config.deadlineAt || upload.generation !== navigationGeneration(upload.tabId)
           || tree.frameTree.frame.id !== upload.mainFrameId
           || tree.frameTree.frame.loaderId !== upload.loaderId) throw Error('stale_frame');
+        if (params.frameId !== upload.mainFrameId) {
+          // Allow only a native same-target, direct child picker from this
+          // verified editor. A lookalike pathname, foreign frame or popup
+          // cannot inherit upload authority from a reviewed coordinate.
+          const { frame: top, childFrames } = tree.frameTree;
+          const picker = childFrames?.find(child => child.frame.id === params.frameId)?.frame;
+          if (!picker || picker.parentId !== top.id || !picker.loaderId || !documentReference(top.url)) throw Error('upload_control_required');
+          const address = new URL(picker.url);
+          if (address.origin !== new URL(top.url).origin || address.username || address.password
+            || !config.fileUploadPickerPaths.includes(address.pathname)) throw Error('upload_control_required');
+        }
         // Consume before dispatch: a lost native response never grants a
         // second selection/change event or a fresh browser upload attempt.
         upload.dispatched = true;
@@ -344,24 +382,34 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // DNR still bounds every main-frame destination and blocks attachments.
       void (async () => {
         const download = pendingAttachment;
-        if (download && source.tabId === download.tabId && params.frameId === download.mainFrameId && params.resourceType === 'Document') {
+        if (download && source.tabId === download.tabId && !source.sessionId
+            && params.frameId === download.mainFrameId && params.resourceType === 'Document') {
           try {
-            if (!allowed(params.request?.url)) throw Error('navigation_blocked');
-            if (documentPolicy(params.responseStatusCode, params.responseHeaders) === 'redirect') {
+            const url = new URL(params.request?.url);
+            url.hash = '';
+            const redirectOnly = download.redirectUrl === url.href;
+            if (url.href !== download.expectedUrl || (!allowed(url.href) && !redirectOnly)) throw Error('navigation_blocked');
+            const decision = documentPolicy(params.responseStatusCode, params.responseHeaders);
+            if (decision === 'redirect') {
+              await prepareAttachmentRedirect(download, params, url);
               await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId }); return;
             }
             // A file link can lead to an HTML viewer. Let the browser render
             // it normally and return a fresh observation, never HTML bytes or
             // a counterfeit file receipt. Signed providers own any subsequent
             // read-only download-menu workflow in that viewer.
-            if (!download.audioOnly && params.responseStatusCode === 200
-              && documentPolicy(params.responseStatusCode, params.responseHeaders) === 'html') {
+            if (!download.audioOnly && !redirectOnly && params.responseStatusCode === 200 && decision === 'html') {
               await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
               download.resolve({ viewer: true }); return;
             }
             await receiveAttachment(download, params);
           } catch (error) {
-            await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }).catch(() => {});
+            // An attachment refusal belongs to the pending download, not the
+            // editor's document. Cancel the provisional navigation locally so
+            // Chrome can keep the existing tab and the user can still work.
+            await command(source.tabId, 'Fetch.fulfillRequest', { requestId: params.requestId, responseCode: 204,
+              responseHeaders: [{ name: 'Cache-Control', value: 'no-store' }], body: '' })
+              .catch(() => command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }).catch(() => {}));
             download.reject(error);
           }
           return;
@@ -403,6 +451,38 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (frame?.tabId === source.tabId) frame = undefined;
     }
   });
+  async function prepareAttachmentRedirect(download, params, sourceUrl) {
+    const locations = params.responseHeaders.filter(header => header.name.toLowerCase() === 'location');
+    if (locations.length !== 1 || typeof locations[0].value !== 'string' || !locations[0].value.trim()) throw Error('navigation_blocked');
+    const target = new URL(locations[0].value, sourceUrl);
+    target.hash = '';
+    if (target.username || target.password) throw Error('navigation_blocked');
+    let redirectUrl = null;
+    if (!allowed(target.href)) {
+      // Trust only an actual browser redirect from the exact pending GET.
+      // Other document types, normal navigation and the cookie overlay never
+      // receive this permission. Limit the URL/chain before touching DNR.
+      if (download.audioOnly || params.request?.method !== 'GET' || target.protocol !== 'https:' || target.port
+        || target.href.length > 1536 || ++download.redirectCount > 4
+        || !(config.attachmentRedirectDomains || []).some(domain => target.hostname === domain
+          || target.hostname.endsWith('.' + domain))) throw Error('navigation_blocked');
+      const supported = await chrome.declarativeNetRequest.isRegexSupported({
+        regex: '^' + escapeRule(target.href) + '$', isCaseSensitive: true,
+      });
+      if (!supported?.isSupported) throw Error('navigation_blocked');
+      redirectUrl = target.href;
+    }
+    if (pendingAttachment !== download || manual || authenticating || guardFailed || Date.now() >= download.until) throw Error('operation_failed');
+    download.expectedUrl = target.href;
+    if (download.redirectUrl !== redirectUrl) {
+      download.redirectUrl = redirectUrl;
+      // Publish (or revoke) the exact rule before Chromium can follow the
+      // native redirect. No second GET or network client is used.
+      guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+      await guardUpdate;
+      if (pendingAttachment !== download || guardFailed || Date.now() >= download.until) throw Error('operation_failed');
+    }
+  }
   async function receiveAttachment(download, params) {
     // The only body-reading path belongs to one explicit coordinate-selected
     // incoming attachment. It cannot read an HTML page/source, take a URL from
@@ -454,7 +534,13 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // Content-Length may describe the encoded transfer; IO reads decoded
       // bytes. Enforce the hard decoded budget independently, and compare the
       // declared size only for an identity/no-encoding response.
-      if (!total || (length !== undefined && (!headers.get('content-encoding') || headers.get('content-encoding') === 'identity') && Number(length) !== total)) throw refuse('invalid_body');
+      // A blank sheet may legitimately export a zero-byte CSV. Require an
+      // explicit successful empty *attachment* with an identity transfer.
+      // An empty/truncated stream with any other metadata still fails closed.
+      const identity = !headers.get('content-encoding') || headers.get('content-encoding') === 'identity';
+      const emptyCsv = mimeType === 'text/csv' && length === '0' && identity
+        && /^attachment(?:\s*;|$)/iu.test(headers.get('content-disposition') || '');
+      if ((!total && !emptyCsv) || (identity && length !== undefined && Number(length) !== total)) throw refuse('invalid_body');
       const bytes = new Uint8Array(total); let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; chunk.fill(0); }
       let dataBase64 = '';
@@ -486,7 +572,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // Source discovery, blob reading and network transfer share ONE deadline.
     let timer;
     const promise = new Promise((resolve, reject) => {
-      pendingAttachment = { tabId: f.tabId, mainFrameId: f.mainFrameId, audioOnly, until, resolve, reject };
+      // Network request URLs omit fragments even if the viewer link had one.
+      url.hash = '';
+      pendingAttachment = { tabId: f.tabId, mainFrameId: f.mainFrameId, audioOnly, until, resolve, reject,
+        expectedUrl: url.href, redirectUrl: null, redirectCount: 0 };
       timer = setTimeout(() => reject(Error('operation_failed')), Math.max(1, until - Date.now()));
     });
     promise.catch(() => {});
@@ -841,8 +930,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
     dialogGuards.set(tab.id, generation);
     frame = { frameId, tabId: tab.id, generation, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
+    const reference = documentReference(after.frameTree.frame.url);
     return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
-      scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation };
+      scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation,
+      ...(reference ? { documentReference: reference } : {}) };
   }
   async function execute(op, args, navigationStage) {
     // Cleanup remains available after the lease; it can only close this owned
@@ -1360,7 +1451,6 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   // Reconnection only repeats readiness, never the initial navigation.
   connect();
   async function installRules() {
-      const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       // Attachment rules always outrank origin allow rules. The MIME-only
       // fallback stays strict for new/unattached tabs and subframes; an exact
       // tab is exempted only after its response-status-aware Fetch guard exists.
@@ -1386,8 +1476,14 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // including redirects and target=_blank links routed into this same tab.
       // Higher-priority MIME/attachment rules still own document delivery.
       if (config.externalNavigation === true) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https?://[^/?#@]+(?:[/?#]|$)', resourceTypes: ['main_frame'] } });
-      for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
-      for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
+      for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escapeRule(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
+      for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escapeRule(domain) + '/', resourceTypes: ['main_frame'] } });
+      if (pendingAttachment?.redirectUrl && guardedTabs.has(pendingAttachment.tabId)) {
+        rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: {
+          regexFilter: '^' + escapeRule(pendingAttachment.redirectUrl) + '$', isUrlFilterCaseSensitive: true,
+          tabIds: [pendingAttachment.tabId], resourceTypes: ['main_frame'], requestMethods: ['get'],
+        } });
+      }
       // This profile and its signed navigation policy live for one browser
       // process only. Session rules have that exact lifetime and avoid an
       // unnecessary persistent ruleset write before the first provider URL.

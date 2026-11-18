@@ -1,5 +1,5 @@
 import { createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
-import { buildTextObserverScript, validateTextResult, TEXT_KIND, normalizeBusinessFieldPolicy, validBusinessFieldChecks } from './trelio-browser-text.mjs';
+import { buildTextObserverScript, validateTextResult, TEXT_KIND, normalizeBusinessFieldPolicy, normalizeVisualReferenceRoutes, validBusinessFieldChecks } from './trelio-browser-text.mjs';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -14,7 +14,7 @@ import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, normalizeVisualManualCompletion, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
 import { visualStartupDiagnostic, visualStartupReason, validateVisualAudioDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
-import { visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
+import { visualAttachmentFormat, visualAudioFormat, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
@@ -335,7 +335,7 @@ export class ExtensionVisualBrowser {
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic; #headless = false;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, attachmentDownloads = false, audioDownloads = false, fileUploads = false, authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
     visualBrowserHeadless(presentation, false);
     if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); } catch { throw fault('invalid_input'); }
@@ -350,7 +350,10 @@ export class ExtensionVisualBrowser {
       this.#fixtureTlsSpki = testTlsSpki;
     }
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, audioDownloads, fileUploads, mailIdentity });
+    referenceRoutes = normalizeVisualReferenceRoutes(referenceRoutes, origins, observationMode);
+    attachmentRedirectDomains = normalizeVisualAttachmentRedirectDomains(attachmentRedirectDomains, attachmentDownloads);
+    fileUploadPickerPaths = normalizeVisualPickerPaths(fileUploadPickerPaths, fileUploads, referenceRoutes);
+    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, attachmentRedirectDomains, audioDownloads, fileUploads, fileUploadPickerPaths, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.manualCompletion = normalizeVisualManualCompletion(manualCompletion, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
@@ -611,7 +614,7 @@ export class ExtensionVisualBrowser {
     // Give those launches a deterministic extension event instead of relying
     // on the timing of Chrome's new-tab page versus lazy worker installation.
     const bootstrap = process.platform !== 'darwin' || this.#headless ? visualExtensionBootstrapPage() : null;
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, referenceRoutes: this.referenceRoutes, attachmentDownloads: this.attachmentDownloads, attachmentRedirectDomains: this.attachmentRedirectDomains, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, fileUploadPickerPaths: this.fileUploadPickerPaths, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     if (bootstrap) {

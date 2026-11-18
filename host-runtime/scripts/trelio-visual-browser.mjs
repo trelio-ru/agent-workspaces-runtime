@@ -154,7 +154,7 @@ export function visualAudioFormat(bytes, mimeType) {
  * Original bytes remain intact; the model receives a local file receipt only.
  */
 export function visualAttachmentFormat(bytes, mimeType) {
-  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_ATTACHMENT_BYTES) throw fault('attachment_too_large');
+  if (!Buffer.isBuffer(bytes) || bytes.length > MAX_ATTACHMENT_BYTES || (!bytes.length && mimeType !== 'text/csv')) throw fault('attachment_too_large');
   const starts = hex => bytes.subarray(0, hex.length / 2).toString('hex') === hex;
   const generic = mimeType === 'application/octet-stream';
   const accept = (mime, extension) => {
@@ -214,6 +214,26 @@ export function visualAttachmentFormat(bytes, mimeType) {
     return { mimeType, extension: mimeType === 'text/csv' ? 'csv' : mimeType.endsWith('rtf') ? 'rtf' : 'txt' };
   }
   throw fault('attachment_unsupported');
+}
+
+/** A redirect-only suffix never enters the content or session-cookie scope.
+ * Accept a small canonical set of DNS names so live owner comparisons and
+ * native rules cannot depend on request order or malformed pattern syntax. */
+export function normalizeVisualAttachmentRedirectDomains(value, attachmentDownloads) {
+  if (!Array.isArray(value) || value.length > 8 || (!attachmentDownloads && value.length)
+      || new Set(value).size !== value.length
+      || value.some(domain => typeof domain !== 'string' || domain.length > 253
+        || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$/u.test(domain))) throw fault('invalid_input');
+  return [...value].sort();
+}
+
+// Embedded upload is restricted to a signed pathname on the exact editor
+// origin. A pinned editor reference route is required independently below.
+export function normalizeVisualPickerPaths(value, fileUploads, referenceRoutes) {
+  if (!Array.isArray(value) || value.length > 4 || (value.length && (!fileUploads || !referenceRoutes.length))
+      || value.some(item => typeof item !== 'string' || !/^\/[A-Za-z0-9_-]{1,32}(?:\/[A-Za-z0-9_-]{1,32}){0,3}$/u.test(item))
+      || new Set(value).size !== value.length) throw fault('invalid_input');
+  return [...value].sort();
 }
 
 export function createVisualOriginPolicy({ origins, domains = [], externalNavigation = false, allowLoopback = false }) {

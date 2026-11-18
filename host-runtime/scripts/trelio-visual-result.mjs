@@ -198,7 +198,8 @@ export function validateVisualResult(value) {
   if (value?.kind === BROWSER_FILE_KIND) {
     if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'filePath', 'sizeBytes', 'sha256', 'mimeType', 'expiresAt']) || value.state !== 'ready' || value.reason !== 'none' || !uuid.test(value.sessionId)
       || typeof value.filePath !== 'string' || value.filePath.length > 4096 || !path.isAbsolute(value.filePath) || /[\x00-\x1f]/u.test(value.filePath)
-      || !Number.isInteger(value.sizeBytes) || value.sizeBytes < 1 || value.sizeBytes > 20 * 1024 * 1024 || !/^[0-9a-f]{64}$/u.test(value.sha256)
+      || !Number.isInteger(value.sizeBytes) || value.sizeBytes < 0 || (value.sizeBytes === 0 && value.mimeType !== 'text/csv')
+      || value.sizeBytes > 20 * 1024 * 1024 || !/^[0-9a-f]{64}$/u.test(value.sha256)
       || typeof value.mimeType !== 'string' || value.mimeType.length > 128 || !/^(?:audio\/(?:wav|mpeg|ogg|mp4|aac|flac)|image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:pdf|rtf|zip|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u.test(value.mimeType)
       || !Number.isSafeInteger(value.expiresAt)) fail();
     return value;

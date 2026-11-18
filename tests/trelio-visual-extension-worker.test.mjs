@@ -16,7 +16,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true, referenceRoutes = [], uploadChooser, fileUploadPickerPaths = [] } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[], networkRules=[];
@@ -42,7 +42,11 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
         async sendCommand(_source, method, args) {
           nativeCommands.push({ method, args: JSON.parse(JSON.stringify(args)) });
           if (method === 'Emulation.setFocusEmulationEnabled') await focusEmulation?.();
-          if (method === 'Page.getFrameTree') { reads++; return { frameTree: { frame: { id: 'main', loaderId, mimeType: 'text/html', url: currentUrl } } }; }
+          if (method === 'Page.getFrameTree') {
+            reads++;
+            return { frameTree: { frame: { id: 'main', loaderId, mimeType: 'text/html', url: currentUrl },
+              ...(uploadChooser?.url ? { childFrames: [{ frame: { id: 'picker', parentId: 'main', loaderId: 'picker-loader', url: uploadChooser.url } }] } : {}) } };
+          }
           if (method === 'Page.getLayoutMetrics') {
             await layout?.();
             return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
@@ -60,6 +64,11 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
           }
           if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
             clicks++;
+            if (uploadChooser) {
+              nativeEvent({ tabId: 1, ...(uploadChooser.outOfProcess ? { sessionId: 'foreign' } : {}) }, 'Page.fileChooserOpened',
+                { frameId: 'picker', backendNodeId: 3, mode: 'selectSingle' });
+              return {};
+            }
             if (assistantBrowserSecrets) {
               loaderId = 'new-document';
               nativeEvent({ tabId: 1 }, 'Page.frameNavigated', { frame: { id: 'main', loaderId, url: currentUrl } });
@@ -107,7 +116,8 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
   };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', manual, profileAuthentication, externalNavigation: profileAuthentication, fixtureOnly,
-    observationMode: image ? 'image' : 'text', assistantBrowserSecrets, ...(authenticationMessage?{authentication:true}:{}), ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
+    observationMode: image ? 'image' : 'text', assistantBrowserSecrets, referenceRoutes, fileUploads: !!uploadChooser, fileUploadPickerPaths,
+    ...(authenticationMessage?{authentication:true}:{}), ...(bootstrapUrl?{bootstrapUrl}:{}), deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -144,6 +154,50 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
     failInput() { rejectInput?.(Error('PRIVATE_INPUT_FAILURE')); },
   };
 }
+
+test('a signed editor route projects only the top document ID and its valid selected tab', async () => {
+  const worker = await dialogWorker({ referenceRoutes: [
+    { origin: 'https://example.test', prefix: '/docs/d/', suffix: '/edit', selector: 'tab' },
+    { origin: 'https://example.test', prefix: '/sheets/d/', suffix: '/edit', selector: 'gid' },
+  ] });
+  for (const [input, expected] of [
+    ['/docs/d/document_1234/edit?state=PRIVATE&tab=t.2#PRIVATE', '/docs/d/document_1234/edit?tab=t.2'],
+    ['/sheets/d/document_1234/edit?gid=3&private=PRIVATE#gid=3', '/sheets/d/document_1234/edit#gid=3'],
+    ['/docs/d/document_1234/edit?tab=t.1&tab=t.2', undefined],
+    ['/sheets/d/document_1234/edit?gid=2#gid=3', undefined],
+    ['/docs/d/document_1234/export?private=PRIVATE', undefined],
+  ]) {
+    assert.equal((await worker.dispatch('navigate', { url: 'https://example.test' + input })).state, 'ready');
+    const result = await worker.dispatch('read-text');
+    assert.equal(result.state, 'ready');
+    assert.equal(result.documentReference, expected && 'https://example.test' + expected);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE/u);
+  }
+});
+
+test('only a signed same-origin child picker on the exact top editor can receive a staged file', async () => {
+  const editor = 'https://example.test/sheets/d/synthetic_document/edit';
+  for (const [top, url, fileUploadPickerPaths, outOfProcess, admitted] of [
+    [editor, 'https://example.test/picker?private=1', ['/picker'], false, true],
+    [editor, 'https://example.test/picker', [], false, false],
+    [editor, 'https://example.test/picker', ['/picker'], true, false],
+    [editor, 'https://example.test/picker/login', ['/picker'], false, false],
+    [editor, 'https://other.test/picker', ['/picker'], false, false],
+    ['https://example.test/', 'https://example.test/picker', ['/picker'], false, false],
+  ]) {
+    const worker = await dialogWorker({ fileUploadPickerPaths, uploadChooser: { url, outOfProcess }, referenceRoutes: [
+      { origin: 'https://example.test', prefix: '/sheets/d/', suffix: '/edit', selector: 'gid' },
+    ] });
+    assert.equal((await worker.dispatch('navigate', { url: top })).state, 'ready');
+    const frame = await worker.dispatch('read-text');
+    const args = { frameId: frame.frameId, x: 30, y: 20, files: ['/fixture/staged.csv'] };
+    const result = await worker.dispatch('upload-files', args);
+    assert.equal(result.state, admitted ? 'ready' : 'error');
+    assert.equal(worker.nativeCommands.filter(command => command.method === 'DOM.setFileInputFiles').length, admitted ? 1 : 0);
+    assert.equal((await worker.dispatch('upload-files', args)).reason, 'stale_frame');
+    assert.doesNotMatch(JSON.stringify(result), /staged\.csv|private=1/u);
+  }
+});
 
 for (const mode of ['confirmed', 'changed-button', 'same-document-navigation', 'release-only']) {
   test('managed field-only fill masks the page and admits one original submit click only when proven: ' + mode, async () => {
@@ -746,6 +800,8 @@ test('lost file-selection acknowledgement consumes the original frame and never 
 test('one file-menu click routes only a fresh native GET and never queries a paused main frame', async () => {
   const events = { addListener() {} }, sent = [], routed = [], stages = [];
   let socket, nativeEvent, currentUrl = 'about:blank', mode = 'main', paused = false, clicks = 0, reads = 0;
+  let rules = [], continuations = 0;
+  const cdn = 'https://files.download.test/export?sig=PRIVATE_REDIRECT_ID';
   const context = { URL, Date, TextEncoder, Uint8Array, performance, atob, btoa, setTimeout, clearTimeout,
     crypto: { randomUUID }, chrome: {
       runtime: { id: 'fixture', onMessage: events },
@@ -776,10 +832,29 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
           }
           if (method === 'Fetch.takeResponseBodyAsStream') { reads++; return { stream: 'synthetic' }; }
           if (method === 'IO.read') return { data: 'AQID', base64Encoded: true, eof: true };
+          if (method === 'Fetch.continueRequest' && args.requestId === 'network-redirect') {
+            const exemptions = rules.filter(rule => rule.condition.tabIds);
+            assert.equal(exemptions.length, 1);
+            const condition = exemptions[0].condition;
+            assert.deepEqual(JSON.parse(JSON.stringify(condition.tabIds)), [1]);
+            assert.deepEqual(JSON.parse(JSON.stringify(condition.requestMethods)), ['get']);
+            assert.equal(condition.isUrlFilterCaseSensitive, true);
+            assert.match(cdn, new RegExp(condition.regexFilter));
+            assert.doesNotMatch(cdn + '&unreviewed=1', new RegExp(condition.regexFilter));
+            continuations++;
+            queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
+              requestId: 'redirect-body', frameId: 'main', resourceType: 'Document', request: { url: cdn, method: 'GET' },
+              responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: mode === 'cdn-html' ? 'text/html' : 'text/csv' }],
+            }));
+          }
           return {};
         } },
       webRequest: { onBeforeRequest: events, onHeadersReceived: events }, cookies: { onChanged: events, async getAll() { return []; } },
-      declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
+      declarativeNetRequest: {
+        async getSessionRules() { return rules; },
+        async updateSessionRules(update) { rules = update.addRules; },
+        async isRegexSupported() { return { isSupported: true }; },
+      },
       windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
       tabs: { onCreated: events, onRemoved: events,
         async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
@@ -788,10 +863,12 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
           currentUrl = input.url || currentUrl;
           if (currentUrl === 'https://example.test/original') {
             routed.push(currentUrl);
+            const redirect = mode.startsWith('cdn');
             queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
-              requestId: 'guarded-original', frameId: 'main', resourceType: 'Document',
-              request: { url: currentUrl, method: 'GET' }, responseStatusCode: 200,
-              responseHeaders: [{ name: 'Content-Type', value: 'application/octet-stream' }],
+              requestId: redirect ? 'network-redirect' : 'guarded-original', frameId: 'main', resourceType: 'Document',
+              request: { url: currentUrl, method: 'GET' }, responseStatusCode: redirect ? 307 : 200,
+              responseHeaders: redirect ? [{ name: 'Location', value: mode === 'cdn-foreign' ? cdn.replace('download.test', 'download.test.other') : cdn }]
+                : [{ name: 'Content-Type', value: 'application/octet-stream' }],
             }));
           }
           return { id: 1, url: currentUrl, status: 'complete' };
@@ -805,7 +882,7 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
     }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text',
-    attachmentDownloads: true, deadlineAt: Date.now() + 10_000 }, context);
+    attachmentDownloads: true, attachmentRedirectDomains: ['download.test'], deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -815,7 +892,8 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
   };
   await dispatch('restore-session-auth', { cookies: [], replace: false });
   for (const [next, reason] of [['main', null], ['iframe', null], ['post', 'attachment_link_required'],
-    ['foreign', 'attachment_link_required'], ['navigate', 'stale_frame']]) {
+    ['foreign', 'attachment_link_required'], ['navigate', 'stale_frame'], ['cdn', null],
+    ['cdn-html', 'attachment_unsupported'], ['cdn-foreign', 'navigation_blocked']]) {
     mode = next;
     const frame = await dispatch('read-text'), args = { frameId: frame.frameId, x: 10, y: 20 };
     assert.equal(frame.state, 'ready', JSON.stringify({ mode, reason: frame.reason }));
@@ -823,9 +901,12 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
     if (reason) { assert.equal(result.reason, reason); assert.equal(result.file, undefined); }
     else { assert.equal(result.state, 'ready', JSON.stringify({ mode, reason: result.reason, clicks, reads, routedCount: routed.length, stages })); assert.equal(result.file.dataBase64, 'AQID'); }
     assert.equal(stages.at(-1), 'Response', 'request-stage routing is revoked after every result/refusal');
+    assert.equal(rules.some(rule => rule.condition.tabIds), false, 'transient destination authority is revoked after the request');
     assert.equal((await dispatch('download-attachment', args)).reason, 'stale_frame', 'the original click token cannot replay');
   }
-  assert.equal(clicks, 5); assert.equal(reads, 2); assert.equal(routed.length, 2, 'POST/foreign/stale requests never reach the receiver');
+  assert.equal(clicks, 8); assert.equal(reads, 3); assert.equal(routed.length, 5, 'POST/foreign/stale clicks never reach the receiver');
+  assert.equal(continuations, 2);
+  assert.equal((await dispatch('navigate', { url: cdn })).reason, 'navigation_blocked');
   assert.doesNotMatch(JSON.stringify(sent), /foreign\.test|original-click|PRIVATE/);
 });
 
