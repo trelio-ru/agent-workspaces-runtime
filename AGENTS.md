@@ -330,8 +330,9 @@ publication tooling также остаются вне этого публичн
   not_checked до client response; request target не меняет folder scope.
   Public availability/recovery измеряется bounded anonymous probes; doctor
   не считается reconnect. Restart/new chat требует отдельного evidence.
-  MCP doctor ограничивает независимые этапы внутри общего deadline, сохраняет
-  законченные проверки и отмечает тайм-ауты без вывода о готовности или repair.
+  MCP doctor с intent=diagnostics использует отдельные 180 с и лимиты этапов,
+  сохраняет законченные проверки и отмечает тайм-ауты без вывода о готовности
+  или repair. Onboarding и обычные вызовы сохраняют свой лимит.
   CLI bootstrap возвращает тот же read/recovery plan, без clientKind из env.
   Наблюдаемое отсутствие direct schema даже при ready или stale/failed MCP:
   предложи переключить сам плагин либо полностью выйти из приложения;

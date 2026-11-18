@@ -2730,14 +2730,18 @@ exceptions не выходят из probe. Этот алгоритм работ�
 blocker и не выполняется в чистом onboarding/folder plan.
 
 MCP-вызов с `intent=diagnostics` запускает независимые проверки параллельно.
-Лимиты этапов — 45 с для локальных компонентов, 20 с для legacy Codex
-hook/routing, 30 с для рабочей папки и 40 с для публичного сервиса. В пределах
-общих 60 с он возвращает завершившиеся проверки и при тайм-ауте
-`status=partial` с `diagnosticTimeouts[{stage, timeoutMs}]`. Неизвестное
+Медленные локальные проверки могут занять больше минуты, поэтому этот
+read-only intent получает общий лимит 180 с. Лимиты этапов — 150 с для
+локальных компонентов, 60 с для legacy Codex hook/routing, 120 с для рабочей
+папки и 40 с для публичного сервиса. Он возвращает завершившиеся проверки,
+а при тайм-ауте этапа выставляет `status=partial` с
+`diagnosticTimeouts[{stage, timeoutMs}]`. Неизвестное
 состояние после тайм-аута не порождает repair action. При непроверенных
 локальных предпосылках `liveVerification.read.state=prerequisites_not_checked`
 и `nextCall=null`. Тайм-аут рабочей папки сохраняет план независимого
 чтения, если остальные предпосылки проверены. Отмена клиента прерывает вызов.
+На общей границе возвращается `TRELIO_INSTALLATION_DIAGNOSTIC_TIMEOUT`
+с `timeoutMs=180000`. Onboarding и обычные MCP-вызовы сохраняют 60 с.
 
 CLI bootstrap с прежним `bridge doctor --json` также возвращает
 `readVerification` и `clientRecoveryByKind`. Они строятся теми же pure builders,

@@ -467,13 +467,16 @@ const runWithAbortDeadline = async ({
   }
 };
 
-// Run independent read-only checks concurrently, leaving at least 15s of the
-// 60s MCP budget for dispatch and delivery. The public probe's own retries
-// can take up to 34s. A stalled OS read must not erase completed checks.
+// Explicit diagnostics get their own bounded lifetime. Slow Windows startup
+// and a folder's filesystem/Git checks can legitimately outlast a business
+// call. Run these independently and leave 30s for dispatch and delivery.
+// The anonymous public probe still has a maximum 34s retry schedule.
+const INSTALLATION_DIAGNOSTIC_BUDGET_MS = 180_000;
+const INSTALLATION_DIAGNOSTIC_TIMEOUT_CODE = "TRELIO_INSTALLATION_DIAGNOSTIC_TIMEOUT";
 const INSTALLATION_DIAGNOSTIC_STAGE_BUDGET_MS = {
-  local_components: 45_000,
-  codex_hook_routing: 20_000,
-  working_folder: 30_000,
+  local_components: 150_000,
+  codex_hook_routing: 60_000,
+  working_folder: 120_000,
   public_service: 40_000,
 };
 
@@ -6908,8 +6911,17 @@ export const handleLocalMcpMessage = async (
       const ownsLifetime = (name === CODEX_CONNECTION_ACTION && args?.action === "connect")
         || ["connect_remote_agent_skill", "call_remote_agent_skill_tool", TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name].includes(name)
         || workspace && ["login", "encryption_setup", "skill_run", "secret_skill_run", "secret_exec"].includes(workspace.operation);
+      // Only the exact read-only intent receives this allowance. Onboarding,
+      // folder planning and ordinary MCP handlers keep their previous clock.
+      const diagnostic = name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME && args?.intent === "diagnostics";
+      const budget = diagnostic ? {
+        timeoutMs: INSTALLATION_DIAGNOSTIC_BUDGET_MS,
+        timeoutError: () => new RemoteMcpHostError(INSTALLATION_DIAGNOSTIC_TIMEOUT_CODE,
+          "Диагностика установки Trelio не вернула отчёт за 180 секунд.",
+          { timeoutMs: INSTALLATION_DIAGNOSTIC_BUDGET_MS, automaticRetry: false }),
+      } : { timeoutMs: toolCallBudgetMs };
       const value = await (ownsLifetime ? execute(signal)
-        : withTrelioCallBudget(execute, { signal, timeoutMs: toolCallBudgetMs }));
+        : withTrelioCallBudget(execute, { signal, ...budget }));
       if (delegated) return null;
       const result = deliverLocalMcpResult(value, textCompatibility, message.params?.name === "continue_trelio_local_action"
         ? message.params?.arguments?.parameters?.nativeTool ?? ""
@@ -6928,7 +6940,9 @@ export const handleLocalMcpMessage = async (
       let diagnosticCode = errorPayload.code;
       // Reuse the published Trelio deadline bucket without widening the
       // backend-owned telemetry vocabulary or degrading this result to UNKNOWN.
-      if (effectiveError instanceof TrelioCallTimeoutError) diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
+      if (effectiveError instanceof TrelioCallTimeoutError || diagnosticCode === INSTALLATION_DIAGNOSTIC_TIMEOUT_CODE) {
+        diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
+      }
       // Folder Git evidence stays in the local result. Retain the existing
       // host-error bucket in the backend-owned diagnostics vocabulary.
       else if (effectiveError instanceof TrelioFolderOnboardingError) diagnosticCode = "REMOTE_MCP_HOST_ERROR";

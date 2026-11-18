@@ -484,7 +484,7 @@ test("new Codex diagnostics route the read to stdio without checking or changing
   assert.deepEqual(report.requiredActions, []);
 });
 
-test("a stalled Codex component check returns completed diagnostics within the ordinary MCP budget", async t => {
+test("a stalled Codex component check returns partial diagnostics before the total deadline", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const started = Promise.withResolvers();
   const checks = [];
@@ -515,12 +515,14 @@ test("a stalled Codex component check returns completed diagnostics within the o
   assert.deepEqual(checks.sort(), ["public_service", "working_folder"], "independent probes start even while local inspection is blocked");
   // Let the two already resolved check promises clear their fake timers.
   await new Promise(resolve => setImmediate(resolve));
-  t.mock.timers.tick(45_000);
+  t.mock.timers.tick(60_000);
+  assert.equal(localSignal.aborted, false, "business tool deadline must not cancel installation diagnostics");
+  t.mock.timers.tick(90_000);
   const response = await reply;
   const report = readResult(response);
   assert.equal(response.result.isError, undefined);
   assert.equal(report.status, "partial");
-  assert.deepEqual(report.diagnosticTimeouts, [{ stage: "local_components", timeoutMs: 45_000 }]);
+  assert.deepEqual(report.diagnosticTimeouts, [{ stage: "local_components", timeoutMs: 150_000 }]);
   assert.equal(localSignal.aborted, true);
   assert.equal(report.local.status, "not_checked");
   assert.equal(report.local.connection.deviceSessionConfigured, null);
@@ -551,10 +553,10 @@ test("a stalled folder check preserves the exact ordinary read plan while caller
   const rejected = assert.rejects(cancelled, error => error === reason);
   controller.abort(reason);
   await rejected;
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(120_000);
   const report = readResult({ result: await reply });
   assert.equal(report.status, "partial");
-  assert.deepEqual(report.diagnosticTimeouts, [{ stage: "working_folder", timeoutMs: 30_000 }]);
+  assert.deepEqual(report.diagnosticTimeouts, [{ stage: "working_folder", timeoutMs: 120_000 }]);
   assert.equal(report.workingFolder.status, "not_checked");
   assert.deepEqual(report.liveVerification.read.nextCall, { toolName: "get_agent_instructions", arguments: input.readTarget });
   assert.equal(report.liveVerification.read.readResult, "not_checked");
@@ -577,11 +579,11 @@ test("legacy routing and public service deadlines preserve confirmed local diagn
     publicServiceDiagnosis: () => new Promise(() => {}),
   });
   await new Promise(resolve => setImmediate(resolve));
-  t.mock.timers.tick(40_000);
+  t.mock.timers.tick(60_000);
   const report = readResult({ result: await reply });
   assert.equal(report.status, "partial");
   assert.deepEqual(report.diagnosticTimeouts, [
-    { stage: "codex_hook_routing", timeoutMs: 20_000 },
+    { stage: "codex_hook_routing", timeoutMs: 60_000 },
     { stage: "public_service", timeoutMs: 40_000 },
   ]);
   assert.deepEqual(report.requiredActions.map(({ code }) => code), ["INSTALL_STANDALONE_GIT"]);
@@ -590,6 +592,33 @@ test("legacy routing and public service deadlines preserve confirmed local diagn
   waitingHookConfig.resolve({ status: "ready" });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(routingPlans, 0, "an expired hook inspection must not start a routing plan");
+});
+
+test("only explicit installation diagnostics can finish after 60 seconds and have a read-only timeout at 180", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const completed = Promise.withResolvers();
+  const calls = (intent, callTool) => handleLocalMcpMessage(frame("tools/call", {
+    name: "diagnose_trelio_installation", arguments: { clientKind: "codex", intent },
+  }), { codexMcpRuntime: true, clientInfo, callTool });
+  const answer = { content: [{ type: "text", text: "Diagnostic report" }] };
+  const slow = calls("diagnostics", () => completed.promise);
+  const stalled = calls("diagnostics", () => new Promise(() => {}));
+  const onboarding = calls("onboarding", () => new Promise(() => {}));
+  await new Promise(resolve => setImmediate(resolve));
+
+  t.mock.timers.tick(60_000);
+  assert.equal(readResult(await onboarding).code, "TRELIO_CALL_TIMEOUT");
+  t.mock.timers.tick(15_000);
+  completed.resolve(answer);
+  assert.deepEqual((await slow).result, answer);
+
+  t.mock.timers.tick(105_000);
+  const timeout = await stalled;
+  assert.equal(timeout.result.isError, true);
+  const error = readResult(timeout);
+  assert.equal(error.code, "TRELIO_INSTALLATION_DIAGNOSTIC_TIMEOUT");
+  assert.deepEqual(error.details, { timeoutMs: 180_000, automaticRetry: false });
+  assert.doesNotMatch(error.message, /запис/u);
 });
 
 test("bootstrap recovery keeps the hook-free Codex route when local tools are unavailable", () => {

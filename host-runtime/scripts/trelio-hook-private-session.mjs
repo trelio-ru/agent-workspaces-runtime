@@ -435,12 +435,14 @@ export const trelioCallSignal = (signal) => {
  * Its late continuation retains the ABORTED scope, so it cannot dispatch HTTP
  * or a child after the caller has already received the timeout.
  */
-export const withTrelioCallBudget = async (operation, { signal, timeoutMs = TRELIO_CALL_BUDGET_MS } = {}) => {
+export const withTrelioCallBudget = async (operation, {
+  signal, timeoutMs = TRELIO_CALL_BUDGET_MS, timeoutError = () => new TrelioCallTimeoutError(),
+} = {}) => {
   const parent = trelioCallSignal(signal);
   parent?.throwIfAborted();
   const controller = new AbortController();
   const scope = { signal: controller.signal, deadline: performance.now() + timeoutMs, active: true,
-    expire: () => controller.abort(new TrelioCallTimeoutError()) };
+    expire: () => controller.abort(timeoutError()) };
   const forward = () => controller.abort(parent.reason);
   parent?.addEventListener("abort", forward, { once: true });
   const timer = setTimeout(scope.expire, timeoutMs);
