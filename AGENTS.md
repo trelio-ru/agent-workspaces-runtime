@@ -167,6 +167,11 @@ publication tooling также остаются вне этого публичн
   renewal. Keep only Workspace/Run UUIDs in the existing continuation intent,
   plus the exact head for a positively accepted Run. An already accepted Run
   only permits outcome confirmation on that head, without Workspace writes.
+  The intermediate draft writer exposes a structural receipt only after the
+  native checkpoint matches the exact portable draft and local metadata is
+  saved. The signed pipe checks its Run and draft action independently. The
+  locator codec is shared with final drafts; a draft receipt has no final-save
+  or business-outcome authority.
   A final in-progress finish with its exact native poll handle may preserve
   the same local candidate after native expiry. This path verifies the
   private finish marker, intact Git tree and existing process lock before

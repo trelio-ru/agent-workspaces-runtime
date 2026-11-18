@@ -20,6 +20,7 @@ import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindow
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { bindAssistantTaskSkillRead, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
+import { validateAssistantWorkspaceCheckpoint } from './trelio-assistant-inbox.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
@@ -4021,6 +4022,16 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
   }
 };
 
+// The signed worker and its parent both use the admitted action's Run.
+// Provider output and other lifecycle actions cannot supply this receipt.
+const assistantTaskDraftCheckpoint=(value,action)=>{
+  if(action.operation!=='checkpoint'||action.parameters?.type!=='draft')return null;
+  let checkpoint;
+  try{checkpoint=validateAssistantWorkspaceCheckpoint(value);}catch{return null;}
+  return checkpoint.workspaceId===action.runIdentity?.workspaceId&&checkpoint.runId===action.runIdentity?.runId
+    ?checkpoint:null;
+};
+
 /** This runner selects the installed verifier, not an arbitrary source path or
  * executable. Payload is bounded stdin; stdout is the common action result,
  * and only ordinary fixed progress frames are observed before completion. */
@@ -4054,7 +4065,8 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   }
   let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
   if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation
-    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState','taskSkillRead'].includes(key))
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState','taskSkillRead','taskDraftCheckpoint'].includes(key))
+    || value.taskDraftCheckpoint!==undefined&&!assistantTaskDraftCheckpoint(value.taskDraftCheckpoint,plan.localAction)
     || value.taskSkillRead!==undefined&&(value.operation!=='skill_run'||value.visual!==undefined
       ||!matchesAssistantTaskSkillRead(value.taskSkillRead,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:value.stdout}))
     || value.localWorkspaceState!==undefined&&(value.operation!=='status'||value.localWorkspaceState!=='unverified'
@@ -4238,7 +4250,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // authoritative; this translation grants no task/status permission.
       return {...plan.localAction,parameters};
     })();
-    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight,taskSkillRead;
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight,taskSkillRead,taskDraftCheckpoint;
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
       resolveRunRootDirectory:async()=>root,
@@ -4330,6 +4342,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
                 }}:{}),
             });
             if(skill)taskSkillRead=commandResult?.taskSkillRead;
+            if(commandResult?.taskDraftCheckpoint!==undefined)
+              taskDraftCheckpoint=assistantTaskDraftCheckpoint(commandResult.taskDraftCheckpoint,action);
           }
           return {stdout,stderr:''};
         }
@@ -4364,7 +4378,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       const skillRead=skill&&bindAssistantTaskSkillRead(taskSkillRead,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:result.stdout});
       return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}
         :nativeRunStatus?{...result,nativeRunStatus}
-        :skillRead?{...result,taskSkillRead:skillRead}:result;
+        :skillRead?{...result,taskSkillRead:skillRead}
+        :taskDraftCheckpoint?{...result,taskDraftCheckpoint}:result;
     } catch(error) {
       if(materialization?.aborted && (error===materialization.reason || error?.cause===materialization.reason))
         fail('ASSISTANT_WORKSPACE_OPEN_TIMED_OUT');

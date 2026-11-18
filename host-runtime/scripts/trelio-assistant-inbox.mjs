@@ -31,11 +31,15 @@ const integer = (value, min, max) => {
   return value;
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const validateAssistantPortableFinish=value=>{
+// Intermediate drafts and final handoffs use the same immutable locator.
+// Their consumers still verify the checkpoint type and independent authority.
+export const validateAssistantWorkspaceCheckpoint=value=>{
   object(value,['workspaceId','runId','checkpointId','draftHead']);
-  if(Object.keys(value).length!==4||!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value.draftHead??''))inputError();
+  if(Object.keys(value).length!==4||typeof value.draftHead!=='string'
+    ||!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value.draftHead))inputError();
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),checkpointId:uuid(value.checkpointId),draftHead:value.draftHead};
 };
+export const validateAssistantPortableFinish=validateAssistantWorkspaceCheckpoint;
 const workspaceDraftIdentity = value => {
   object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();

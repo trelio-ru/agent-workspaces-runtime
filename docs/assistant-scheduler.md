@@ -750,6 +750,15 @@ literal pre-dispatch input refusals qualify. Unknown or unfinished actions,
 external source inputs, browser use, published comments and submitted material
 retain the original review fence for draft preservation.
 
+An ordinary task draft checkpoint returns `taskDraftCheckpoint` after its
+portable Git upload, native checkpoint and local metadata save. The signed
+worker takes the Run, checkpoint UUID and complete draft head from the native
+result. Its parent binds that receipt to the original draft action and Run
+before forwarding it. Earlier hosts still return their existing acknowledgement.
+The receipt is structural evidence of that intermediate save. A later recovery
+must independently verify the latest native revision, the effects of the
+interrupted turn and ownership of the writer.
+
 If the latest interrupted turn finished the Run, verify its exact finish
 operation and the same Run's clean accepted status with a new candidate head.
 One accepted-material continuation may use the ordinary outcome tool on that

@@ -4540,7 +4540,8 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
 
 for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles", "before_acceptance", "after_acceptance",
   "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied",
-  "assistant_lost_checkpoint", "assistant_conflicting_checkpoint", "assistant_concurrent_edit"]) test(
+  "assistant_lost_checkpoint", "assistant_conflicting_checkpoint", "assistant_concurrent_edit",
+  "assistant_intermediate_draft", "assistant_intermediate_draft_wrong_head"]) test(
   `bridge finish recovers saved handoff: ${recovery}`, {
   timeout: 30_000,
 }, async () => {
@@ -4554,6 +4555,7 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
     TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" };
   let baseHead, draftHead, originalDraftHead, latestCheckpoint = null;
   const assistantFinish = recovery.startsWith("assistant_");
+  const intermediateDraft = recovery.startsWith("assistant_intermediate_draft");
   const outdated = ["outdated", "outdated_task"].includes(recovery);
   const interrupted = !["clean", "outdated", "outdated_task", "lingering_handles"].includes(recovery);
   let serverAccepted = false, serverCandidateHead = null, denyRecoveryRead = recovery === "read_denied";
@@ -4601,6 +4603,19 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
       }
 
       if (request.url?.endsWith("/checkpoints")) {
+        if (intermediateDraft) {
+          const payload = JSON.parse(body.toString("utf8"));
+          assert.equal(payload.checkpointType, "draft");
+          assert.equal(payload.draftHead, draftHead);
+          assert.equal(payload.assistantFinalDraft, undefined);
+          latestCheckpoint = {
+            id: "88888888-8888-4888-8888-888888888888", runId, checkpointType: "draft",
+            candidateHead: recovery.endsWith("_wrong_head") ? originalDraftHead : draftHead,
+          };
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify(latestCheckpoint));
+          return;
+        }
         if (outdated && JSON.parse(body.toString("utf8")).checkpointType === "draft") {
           response.setHeader("content-type", "application/json");
           response.end(JSON.stringify({ id: "88888888-8888-4888-8888-888888888888", createdAt: new Date().toISOString() }));
@@ -4800,6 +4815,31 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
       "Завершён уже сохранённый переносимый draft без искусственной правки.", "--evidence",
       "Проверен полный candidate delta относительно pinned base.", "--next-action",
       "Используйте принятый итоговый материал."];
+    if (intermediateDraft) {
+      await writeFile(path.join(workspaceDirectory, "artifacts", "result.md"), "# Новый промежуточный результат\n", "utf8");
+      // Run the production draft upload and native checkpoint in the same
+      // disposable profile used by the final-save checks below.
+      const script = `import * as common from ${JSON.stringify(pathToFileURL(bridgePath).href)};
+        const result = await common.withWorkspaceExecutionProfile({
+          kind: "digital_assistant",
+          requireToken: async () => "integration-token",
+          prepareRequest: async ({origin, pathname, options, buildHeaders}) => ({
+            url: new URL(pathname, origin), headers: buildHeaders("integration-token", options.headers || {}), options: {},
+          }),
+        }, () => common.runWorkspaceCommand(["checkpoint", "--type", "draft", "--summary", "Промежуточный результат"]));
+        console.log(JSON.stringify(result ?? null));`;
+      const saved = await execFileAsync(process.execPath, ["--input-type=module", "-e", script],
+        { cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: fixtureEnv });
+      const result = JSON.parse(saved.stdout.trimEnd().split("\n").at(-1));
+      assert.notEqual(draftHead, originalDraftHead);
+      assert.deepEqual(result, recovery.endsWith("_wrong_head") ? null : { taskDraftCheckpoint: {
+        workspaceId: baseMetadata.workspaceId, runId, checkpointId: latestCheckpoint.id, draftHead,
+      } });
+      assert.equal(draftAttempts, 1);
+      assert.equal(candidateAttempts, 0);
+      assert.ifError(serverError);
+      return;
+    }
     if (assistantFinish) {
       // Only the test HTTP profile replaces native auth. The disposable
       // child still runs the common lock, draft upload, handoff and submit.

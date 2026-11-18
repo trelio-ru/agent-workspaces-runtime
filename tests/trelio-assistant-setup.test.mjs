@@ -1333,6 +1333,8 @@ test('encrypted Workspace descriptors survive facade, coordinator, real child pi
     await runAssistantWorkspaceWorker({executePlan:async raw=>{
       const plan=await validateAssistantWorkspacePlan(raw);
       return {schemaVersion:1,operation:plan.localAction.operation,
+        ...(plan.localAction.operation==='checkpoint'?{taskDraftCheckpoint:{...plan.runIdentity,
+          checkpointId:'b661238a-3765-4a95-87ee-84c52275be1b',draftHead:'a'.repeat(40)}}:{}),
         stdout:JSON.stringify({descriptor:raw.encryptedInspection??raw.encryptedLifecycle,sentinel:'validated-real-child'})};
     }});`;
   let launches=0;const observed=[];
@@ -1375,6 +1377,14 @@ test('encrypted Workspace descriptors survive facade, coordinator, real child pi
       assert.deepEqual(JSON.parse(result.structuredContent.stdout),{descriptor,sentinel:'validated-real-child'});
       assert.equal(result.structuredContent.authorityReads,undefined);
       if(operation==='checkpoint'){
+        assert.deepEqual(result.structuredContent.taskDraftCheckpoint,{...identity,
+          checkpointId:'b661238a-3765-4a95-87ee-84c52275be1b',draftHead:'a'.repeat(40)});
+        for(const changed of [{runId:randomUUID()},{draftHead:['a'.repeat(40)]}]){
+          const badRunProcess=async()=>({stdout:JSON.stringify({schemaVersion:1,operation:'checkpoint',stdout:'',
+            taskDraftCheckpoint:{...result.structuredContent.taskDraftCheckpoint,...changed}})});
+          await assert.rejects(runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess:badRunProcess}),
+            {code:'ASSISTANT_WORKSPACE_RESULT_INVALID'});
+        }
         await scheduled();
         assert.equal(observed.at(-1).localAction.operation,'heartbeat');
         assert.deepEqual(observed.at(-1).encryptedLifecycle,descriptor,'automatic renewal retains the native routing too');

@@ -16875,7 +16875,23 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
   }
   process.stdout.write(`Checkpoint сохранён: ${checkpointPayload.id}.\n`);
   await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
-  return finalAssistantDraftHead;
+  if (finalAssistantDraftHead) return finalAssistantDraftHead;
+  // This witness comes from the native checkpoint response after the portable
+  // draft and local metadata are both saved. A printed acknowledgement or
+  // the success of the preceding Git upload alone cannot produce it.
+  if (checkpointType === "draft" && draftSnapshot && metadata.scopeType === "task"
+    && currentWorkspaceExecutionProfile()?.kind === "digital_assistant"
+    && UUID_PATTERN.test(String(checkpointPayload.id || ""))
+    && checkpointPayload.runId === metadata.runId
+    && checkpointPayload.checkpointType === "draft"
+    && checkpointPayload.candidateHead === draftSnapshot.draftHead) {
+    return {
+      workspaceId: metadata.workspaceId,
+      runId: metadata.runId,
+      checkpointId: checkpointPayload.id,
+      draftHead: draftSnapshot.draftHead,
+    };
+  }
 }, nativeInput ? { validateMetadata: metadata => assertNativeCheckpointBinding(nativeInput, metadata) } : {});
 
 const inspectBenignWorkspaceMetadataFile = async (workspaceDirectory, filePath) => {
@@ -21483,7 +21499,8 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
       dryRun: options["dry-run"] === true,
     });
   } else if (command === "checkpoint") {
-    await checkpoint(options, options["native-input"] === true ? await readNativeCheckpointInput(process.stdin) : null);
+    const draft = await checkpoint(options, options["native-input"] === true ? await readNativeCheckpointInput(process.stdin) : null);
+    if (draft && typeof draft === "object") return { taskDraftCheckpoint: draft };
   } else if (command === "pause") {
     await pause(options);
   } else if (command === "finish") {
