@@ -1349,6 +1349,44 @@ test('fresh company execution state is projected without accepting local default
   await assert.rejects(client.task(companyId,taskId),/INVALID_RESPONSE/);
 });
 
+test('checkpoint evidence uses one fixed native read and keeps intermediate and final stages independent',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});
+  const pass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const checkpoint={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  let selector='intermediateDraftEvidence',value,status=200,calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;
+    assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/read');
+    assert.equal(options.method,'POST');
+    assert.deepEqual(JSON.parse(options.body),{...pass,[selector]:{expectedLeaseRevision:2}});
+    return Response.json(value,{status});
+  }})});
+  const input={...pass,expectedLeaseRevision:2};
+  const projected={passId:pass.passId,leaseRevision:2,state:'review_required',workMode:'task',businessReady:false};
+  value={...projected,[selector]:checkpoint};
+  assert.deepEqual(await client.readTaskIntermediateDraftEvidence(input),checkpoint);
+  for(const malformed of [
+    {...projected,portableFinishEvidence:checkpoint},
+    {...value,leaseRevision:1},
+    {...value,workMode:'discussion'},
+    {...value,[selector]:{...checkpoint,draftHead:[checkpoint.draftHead]}},
+  ]) {
+    const original=value;value=malformed;
+    await assert.rejects(client.readTaskIntermediateDraftEvidence(input),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+    value=original;
+  }
+  value={...projected,[selector]:null};
+  assert.equal(await client.readTaskIntermediateDraftEvidence(input),null);
+  status=400;value={};
+  assert.equal(await client.readTaskIntermediateDraftEvidence(input),null,'an older strict server supplies no proof');
+  status=403;
+  await assert.rejects(client.readTaskIntermediateDraftEvidence(input),error=>error.status===403);
+  status=200;selector='portableFinishEvidence';value={...projected,[selector]:checkpoint};
+  assert.deepEqual(await client.readTaskPortableFinishEvidence(input),checkpoint);
+  assert.equal(calls,9,'neither selector retries or falls back to the other stage');
+});
+
 test('business outcome read is fixed, exact and strict; pending never implies failure or permits a retry',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});

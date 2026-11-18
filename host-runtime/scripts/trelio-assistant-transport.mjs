@@ -12,7 +12,7 @@ import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistan
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata,
-  validateAssistantPortableFinish, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
+  validateAssistantWorkspaceCheckpoint, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -2864,6 +2864,27 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
   const call = async (operation, body, signal) => http(operation, body,
     await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store }), signal);
 
+  // Both stage-specific selectors carry the same structural checkpoint.
+  // A server without the strict additive selector gives no evidence. An
+  // access denial or a partial success must never look like an empty draft.
+  const readTaskCheckpointEvidence=async(key,input,signal)=>{
+    const expectedLeaseRevision=revision(input.expectedLeaseRevision);
+    const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
+      [key]:{expectedLeaseRevision}};
+    let value;
+    try{value=await call('passRead',body,signal);}
+    catch(error){
+      if(error instanceof AssistantTransportError&&error.status===400&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
+      throw error;
+    }
+    if(value.passId!==body.passId||!Object.hasOwn(value,key))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    if(value[key]===null)return null;
+    if(value.state!=='review_required'||value.leaseRevision!==expectedLeaseRevision||value.businessReady!==false
+      ||key==='intermediateDraftEvidence'&&value.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    try{return Object.freeze(validateAssistantWorkspaceCheckpoint(value[key]));}
+    catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+  };
+
   const registerObservedRuntime=async(input,signal,intake=false)=>{
       if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
         || input.observation.source!=='codex_hook' || input.observation.evidenceLevel!=='local_observed'
@@ -3093,22 +3114,10 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
     },
     async readTaskPortableFinishEvidence(input,signal){
-      const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
-        portableFinishEvidence:{expectedLeaseRevision:revision(input.expectedLeaseRevision)}};
-      let value;
-      try{value=await call('passRead',body,signal);}
-      catch(error){
-        // Older strict servers reject the additive read selector. This gives
-        // no evidence and does not touch the independent legacy witness.
-        if(error instanceof AssistantTransportError&&error.status===400&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
-        throw error;
-      }
-      if(value.passId!==body.passId||!Object.hasOwn(value,'portableFinishEvidence'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      if(value.portableFinishEvidence===null)return null;
-      if(value.state!=='review_required'||value.leaseRevision!==input.expectedLeaseRevision||value.businessReady!==false)
-        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      try{return Object.freeze(validateAssistantPortableFinish(value.portableFinishEvidence));}
-      catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+      return readTaskCheckpointEvidence('portableFinishEvidence',input,signal);
+    },
+    async readTaskIntermediateDraftEvidence(input,signal){
+      return readTaskCheckpointEvidence('intermediateDraftEvidence',input,signal);
     },
     async renewTaskPass(input,signal) {
       if(input.preNativeRecovery!==undefined&&input.preNativeRecovery!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
@@ -3136,7 +3145,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
       if(input.portableFinish!==undefined){
-        try{portableFinish=validateAssistantPortableFinish(input.portableFinish);}
+        try{portableFinish=validateAssistantWorkspaceCheckpoint(input.portableFinish);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,

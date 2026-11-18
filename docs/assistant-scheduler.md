@@ -758,6 +758,10 @@ before forwarding it. Earlier hosts still return their existing acknowledgement.
 The receipt is structural evidence of that intermediate save. A later recovery
 must independently verify the latest native revision, the effects of the
 interrupted turn and ownership of the writer.
+The device client uses the same bounded pass-read codec for intermediate
+draft and final handoff evidence. Each stage names its own selector. An older
+server that rejects the new selector supplies no evidence, and authorization
+refusals remain errors.
 
 If the latest interrupted turn finished the Run, verify its exact finish
 operation and the same Run's clean accepted status with a new candidate head.
