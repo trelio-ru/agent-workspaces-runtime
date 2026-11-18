@@ -98,9 +98,10 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
-          # The hosted image's Azure HTTP mirror can stall before falling back
-          # to the working official HTTPS archive. Change only that exact CI
-          # mirror entry; keep normal signed APT metadata/package verification.
+          # Hosted Ubuntu sets an Azure or regional EC2 archive in this
+          # mirrorlist. Both HTTP routes can consume the install deadline
+          # before APT reaches a healthy upstream. Preserve mirror qualifiers,
+          # security sources and the image's signed APT verification.
           if test -f /etc/apt/apt-mirrors.txt; then
             . /etc/os-release
             archive=https://archive.ubuntu.com/ubuntu
@@ -116,7 +117,7 @@ jobs:
               probe_archive "$alternate_archive"
               archive=$alternate_archive
             fi
-            sudo sed -Ei "s#^https?://(azure\\.)?archive\\.ubuntu\\.com/ubuntu([/[:space:]]|$)#$archive\\2#" /etc/apt/apt-mirrors.txt
+            sudo sed -Ei "s#^https?://((azure|[a-z0-9-]+\\.ec2)\\.)?archive\\.ubuntu\\.com/ubuntu([/[:space:]]|$)#$archive\\3#" /etc/apt/apt-mirrors.txt
           fi
           # Playwright's install-deps invokes APT again, so the same bounded
           # network policy must cover both installers. A failed index refresh
@@ -124,6 +125,12 @@ jobs:
           printf '%s\n' 'Acquire::Retries "1";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99trelio-ci-network >/dev/null
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb openbox x11-utils apparmor
+      - name: Install Linux Chromium dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          # This installer reruns the signed index refresh and adds browser
+          # dependencies. Give it its own bound after native desktop setup.
           sudo node host-runtime/scripts/visual-browser-dependencies/node_modules/playwright-core/cli.js install-deps chromium
       - name: Cold managed Chromium bootstrap
         shell: bash

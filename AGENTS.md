@@ -1582,9 +1582,10 @@ Exact legacy template bytes для распознавания при мигра�
   Maintainer Markdown проверяет полный Git diff без запуска runtime.
   Полный набор из `.github/workflows/runtime-tests.yml` выполняет release.
   Tag проверяет plan, SHA, run/attempt и все обязательные результаты.
-- The Linux native browser gate probes Ubuntu's primary HTTPS archive, then
-  the Linux Kernel Archives HTTPS mirror for the same suite if needed. Keep APT signatures,
-  mandatory index refresh, and the full native fixture lane.
+- The Linux native browser gate normalizes official main/Azure/EC2 mirrorlist
+  URLs to Ubuntu's primary HTTPS archive or the probed Linux Kernel Archives
+  mirror for the same suite. Desktop and Chromium installs have separate
+  bounds. Keep signed APT refresh and the full native fixture lane.
 - Перед локальным gate `npm run check:dependencies` должен подтвердить exact
   root dependency tree. Отдельные npm-пакеты связывай с их suites в
   `lockedTestPackages`. Local gate ставит каждый выбранный пакет из lock

@@ -76,9 +76,11 @@ shell rollout, so the bundled instruction checks also accept equivalent
 wording from the installed shell and the new candidate.
 
 The native Linux browser lane probes the hosted Ubuntu suite over HTTPS before
-selecting the main archive or the Linux Kernel Archives mirror. The probe only checks reachability. APT
-still refreshes and validates signed indexes and packages before the unchanged
-desktop and Secret Service tests run.
+selecting the main archive or the Linux Kernel Archives mirror. It replaces
+official main/Azure/regional EC2 mirrorlist URLs and preserves their qualifiers,
+other sources and the image keyring. The probe only checks reachability. Native
+desktop and Chromium dependency installs each have their own bound and refresh
+the signed indexes before the unchanged desktop and Secret Service tests run.
 The same isolated Xvfb display owns Openbox for the entire native lane. Xvfb
 alone has no window manager to honor Chromium minimize requests. Before tests,
 the fixture verifies its live child and nonzero EWMH supporting-window property
