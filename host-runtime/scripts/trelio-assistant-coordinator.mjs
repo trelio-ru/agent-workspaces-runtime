@@ -1,6 +1,7 @@
 /** Model-free coordinator. Provider authority and native execution stay behind
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
-import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata, assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen } from './trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
+  assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -1661,7 +1662,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
     if(postArchive&&(live.workMode!=='task'||job.events.some(event=>event.conversation_key||event.owner_question_id)
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
-    if(parentRead||workspaceDraft?.namedArchive||archive||postArchive)await assertPendingOutcome(signal);
+    if(parentRead||workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||archive||postArchive)await assertPendingOutcome(signal);
     // Do not consume another continuation intent/lease while the actual native
     // client has no usable hooks. Production reads its current task folder;
     // this is a budget/preflight witness only, not backend or observed proof.
@@ -1689,7 +1690,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||JSON.stringify(intent.namedArchiveSettled??null)!==JSON.stringify(archive))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const request={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,expectedLeaseRevision:intent.expectedLeaseRevision,
       clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId,
-      ...(intent.taskReadParent?.technicalPrelude?{technicalPrelude:intent.taskReadParent.technicalPrelude}:{})};
+      ...(intent.taskReadParent?.technicalPrelude?{technicalPrelude:intent.taskReadParent.technicalPrelude}:{}),
+      ...(intent.workspaceDraft?.retainedHandoff?{retainedFinish:intent.workspaceDraft.retainedHandoff.locators}:{})};
     let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
     // A former runtime may have left a purely technical owner question. Ask
@@ -1705,7 +1707,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const resume=async ownedSignal=>{
       // Re-read under the same native writer. The server also checks this
       // absence in the existing renewal CAS; neither check replays work.
-      if(parentRead||workspaceDraft?.namedArchive||archive||postArchive)await assertPendingOutcome(ownedSignal);
+      if(parentRead||workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||archive||postArchive)await assertPendingOutcome(ownedSignal);
       if(review.state==='approved'&&!intent.resumeAttempted){
         // Persist before HTTP. A lost response is resolved ONLY by the read
         // branch; it cannot repeat the renewal or native model invocation.
@@ -1880,6 +1882,36 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return false;
     }
     const namedArchive=Boolean(continued?.taskReadParent?.parentMarkerId||continued?.workspaceDraft?.namedArchive);
+    if(saved&&job.kind==='task'&&continued&&result.state==='uncertain'&&uuid.test(result.turnId??'')
+      &&!job.events.length&&inbox.readDelivery(job.deliveryId).scheduled
+      &&(continued.started&&continued.taskReadParent?.initialScheduled&&continued.taskReadParent.technicalPrelude
+        ||!continued.started&&continued.workspaceDraft?.retainedHandoff)){
+      const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
+      const candidate=await native.readDelivery(threadId,marker,{signal,
+        interruptedWorkspaceDraft:{...pass,retainedHandoff:true}});lease();
+      if(candidate.state!=='interrupted_retained_handoff'||candidate.turnId!==result.turnId)return true;
+      const observed=validateAssistantRetainedHandoff(candidate.proof,{selected:false});
+      const existing=continued.workspaceDraft?.retainedHandoff;
+      const live=await client.readTaskPass(pass,signal);lease();
+      if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
+        ||live.deliveryId!==saved.deliveryId||live.state==='closed')return true;
+      if(!existing&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now()))return true;
+      // Before any new marker, require independent native grant/checkpoint
+      // evidence. An already reserved continuation keeps its own read-back
+      // route after an ambiguous renewal, without requesting a second one.
+      if(existing){
+        const {checkpointId,draftHead,...previous}=existing.locators;
+        if(JSON.stringify(previous)!==JSON.stringify(observed.locators))return true;
+      }
+      const locators=existing?.locators??await client.readTaskRetainedFinishEvidence({
+        ...pass,expectedLeaseRevision:live.leaseRevision,locators:observed.locators},signal);
+      lease();
+      if(!locators)return true;
+      const proof=validateAssistantRetainedHandoff({...observed,locators});
+      if(existing&&JSON.stringify(existing)!==JSON.stringify(proof))return true;
+      return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
+        workspaceDraft:{workspaceId:locators.workspaceId,runId:locators.runId,finishPending:true,retainedHandoff:proof}},signal,marker);
+    }
     if(saved&&job.kind==='task'&&continued&&!continued.taskReadParent?.initialScheduled&&!continued.namedArchiveSettled&&!(continued.workspaceDraft&&continued.started)&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&!job.events.some(event=>event.conversation_key||namedArchive&&event.owner_question_id)){
       const interruptedWorkspaceDraft={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,

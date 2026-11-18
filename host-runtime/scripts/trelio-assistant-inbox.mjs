@@ -32,14 +32,17 @@ const integer = (value, min, max) => {
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive']);
+  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
   if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined)
-    ||value.namedArchive!==undefined&&(value.namedArchive!==true||value.finishPending!==true))inputError();
+    ||value.namedArchive!==undefined&&(value.namedArchive!==true||value.finishPending!==true)
+    ||value.retainedHandoff!==undefined&&(value.namedArchive!==undefined||value.finishPending!==true))inputError();
+  const retainedHandoff=value.retainedHandoff===undefined?undefined:validateAssistantRetainedHandoff(value.retainedHandoff);
+  if(retainedHandoff&&(retainedHandoff.locators.workspaceId!==value.workspaceId||retainedHandoff.locators.runId!==value.runId))inputError();
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
     ...(value.finishPending===true?{finishPending:true}:{}),
-    ...(value.namedArchive===true?{namedArchive:true}:{})};
+    ...(value.namedArchive===true?{namedArchive:true}:{}),...(retainedHandoff?{retainedHandoff}:{})};
 };
 export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',
@@ -60,6 +63,37 @@ export const validateAssistantTechnicalPrelude=value=>{
     inputError();
   return {kind:value.kind,workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     skillId:value.skillId,releaseId:uuid(value.releaseId),projectId:uuid(value.projectId)};
+};
+const retainedFinishLocatorFields=Object.freeze([
+  'workspaceId','runId','releaseId','browserGrantId','questionId','questionRequestId','controlReceiptId','controlId','controlRequestId',
+]);
+// Exact structural locators are the only historic handoff facts that may cross
+// into the pass ledger. Original tool text, URLs and local file paths are not
+// accepted even from the trusted host.
+export const validateAssistantRetainedFinishLocators=(value,{selected=false}={})=>{
+  const fields=selected?[...retainedFinishLocatorFields,'checkpointId','draftHead']:retainedFinishLocatorFields;
+  object(value,fields);
+  if(Object.keys(value).length!==fields.length)inputError();
+  const locators=Object.fromEntries(retainedFinishLocatorFields.map(key=>[key,uuid(value[key])]));
+  if(!selected)return locators;
+  if(!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.draftHead??''))inputError();
+  return {...locators,checkpointId:uuid(value.checkpointId),draftHead:value.draftHead};
+};
+export const validateAssistantRetainedHandoff=(value,{selected=true}={})=>{
+  object(value,['locators','handoffSha256','automaticFiles','replacements']);
+  const sha256=hash=>{
+    if(typeof hash!=='string'||!/^[a-f0-9]{64}$/u.test(hash))inputError();
+    return hash;
+  };
+  if(typeof value.automaticFiles!=='boolean'||!Array.isArray(value.replacements)
+    ||!value.replacements.length||value.replacements.length>64)inputError();
+  const replacements=value.replacements.map(row=>{
+    object(row,['pathSha256','contentSha256']);
+    return {pathSha256:sha256(row.pathSha256),contentSha256:sha256(row.contentSha256)};
+  });
+  if(new Set(replacements.map(row=>row.pathSha256)).size!==replacements.length)inputError();
+  return {locators:validateAssistantRetainedFinishLocators(value.locators,{selected}),
+    handoffSha256:sha256(value.handoffSha256),automaticFiles:value.automaticFiles,replacements};
 };
 const taskReadWitness=value=>{
   // A root witness never substitutes for a completed parent. Older workers
@@ -2155,6 +2189,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // finish can settle that save once. Never grant another ordinary turn.
         if(workspaceDraft?.namedArchive&&(!last?.taskReadParent?.parentMarkerId||!last.started||last.passId!==passId))
           fail('ASSISTANT_INBOX_CONFLICT');
+        if(workspaceDraft?.retainedHandoff){
+          // Only the original verified scheduled prelude may end in this
+          // one-time save. No routed input or owner answer is replayed.
+          const prelude=last?.taskReadParent?.technicalPrelude;
+          const {workspaceId,runId,releaseId}=workspaceDraft.retainedHandoff.locators;
+          if(!last?.taskReadParent?.initialScheduled||!last.started||last.passId!==passId||!row.scheduled
+            ||deliveryEvents(id).length||prelude?.workspaceId!==workspaceId||prelude.runId!==runId||prelude.releaseId!==releaseId)
+            fail('ASSISTANT_INBOX_CONFLICT');
+        }
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
           fail('ASSISTANT_INBOX_CONFLICT');
@@ -2165,7 +2208,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const postArchive=last?.namedArchiveSettled;
         if(postArchive&&(last.passId!==passId||capacity||workspaceDraft||parentRead||namedArchiveSettled
           ||prerequisiteKey===null||!latest||prerequisiteKey===latest.prerequisite_key))fail('ASSISTANT_INBOX_CONFLICT');
-        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled||last.taskReadParent&&!workspaceDraft?.namedArchive)
+        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled
+          ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff)
           ||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');

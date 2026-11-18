@@ -8,7 +8,8 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
-import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, assistantConversationKeyMatches, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
+import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS,
+  assistantConversationKeyMatches, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
@@ -1510,7 +1511,7 @@ const acceptedStatusHead=(result,run)=>{
  * or control update is a prior effect, not a permission to repeat it.
  * Those narrow native receipts are allowed only before the final finish call;
  * a provider operation or any unconfirmed effect still fences the whole turn. */
-const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending)=>{
+const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending,retained=false)=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
     ||!Array.isArray(turn.items)||turn.items.length<6||turn.items.length>128)return null;
   const [original,...items]=turn.items;
@@ -1519,6 +1520,11 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
   let run=null,inspectedWorkspaceId=null,opened=false,changed=false,operationId=null,finished=false,acceptedHead;
   let inspectedRun=null,openHandle=null,browserOrigin=null,browserPending=false,browserClosed=true;
   let questionId=null,controlReceiptId=null;
+  let questionRequestId=null,controlRequestId=null,controlId=null,releaseId=null,grantId=null,fillObserved=false;
+  let handoffSha256=null,automaticFiles=false;
+  const replacements=new Map();
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  const canPollOpen=!allowPending||retained;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!item.arguments||Object.getPrototypeOf(item.arguments)!==Object.prototype)return null;
@@ -1528,7 +1534,7 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
     // compatibility is for known reads only; no prose or JSON-in-text can
     // stand in for a mutation, Run preparation, or finish receipt.
     const content=item.result?.content;
-    const browserRead=!allowPending&&item.tool==='use_assistant_browser';
+    const browserRead=canPollOpen&&item.tool==='use_assistant_browser';
     if((draftReads.has(item.tool)||browserRead||item.tool==='get_assistant_status')&&result==null&&Array.isArray(content)
       &&(content.length===1||browserRead&&content.length===2&&content[1]?.type==='image')
       &&content[0]?.type==='text'&&typeof content[0].text==='string'&&Buffer.byteLength(content[0].text)<=512*1024){
@@ -1552,6 +1558,13 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       if(args.companyId!==taskPass.companyId||!localDraftRefusal(item,'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'))return null;
       continue;
     }
+    if(retained&&item.tool==='get_assistant_operation_contract'){
+      // Static schema discovery can precede attachment of a task-pass proof.
+      if(!success||!['secret_browser_prepare','secret_browser_fill'].includes(args.operation)
+        ||result.operation!==args.operation||args.taskPass!==undefined&&!exactDraftPass(args.taskPass,taskPass)
+        ||Object.keys(args).some(key=>!['operation','taskPass','runtimeSessionProof'].includes(key)))return null;
+      continue;
+    }
     if(!exactDraftPass(args.taskPass,taskPass))return null;
     // A positively accepted canonical candidate can settle its outcome after
     // a completed value-free browser visit. This is NOT draft/unknown-finish
@@ -1567,6 +1580,7 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       if(origin.protocol!=='https:'||origin.origin!==args.siteOrigin||origin.username||origin.password
         ||browserOrigin!==null&&browserOrigin!==args.siteOrigin)return null;
       browserOrigin=args.siteOrigin;
+      if(retained&&browserOrigin!=='https://mail.google.com')return null;
       const command=args.command,keys=Object.keys(command.args).sort().join(',');
       if(command.operation==='navigate'){
         if(!browserClosed||keys!=='url'||!['preparing','ready'].includes(result.state))return null;
@@ -1586,6 +1600,10 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
     }
     if(draftReads.has(item.tool)){
       if(!success&&!(item.tool==='get_trelio_tool_contract'&&localDraftRefusal(item,'ASSISTANT_MCP_INPUT_INVALID')))return null;
+    }else if(retained&&item.tool==='get_agent_procedure'){
+      // Historical encrypted procedures can have a text-only native result.
+      // This exact native read has no producer mutation or execution surface.
+      if(item.status!=='completed'||item.error!=null||item.result?.isError===true)return null;
     }else if(item.tool==='get_agent_skill'){
       if(!localDraftRefusal(item,'ASSISTANT_SOURCE_INVALID_RESPONSE'))return null;
     }else if(item.tool==='prepare_assistant_workspace_read'){
@@ -1595,10 +1613,14 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
         inspectedWorkspaceId=args.workspaceId;
       }else if(!acceptedHead||!success||args.workspaceId!==run.workspaceId||result.workspace?.id!==run.workspaceId)return null;
     }else if(item.tool==='prepare_assistant_workspace_run'){
-      if(run||!success||result.prepared!==true||!UUID.test(args.workspaceId??'')||!UUID.test(result.run?.id??'')
+      // Older native preparation could select the canonical Workspace from
+      // the pass when the model supplied only the existing Run UUID.
+      const workspaceId=retained&&args.workspaceId===undefined&&args.runId===result?.run?.id
+        ?result?.workspace?.id:args.workspaceId;
+      if(run||!success||result.prepared!==true||!UUID.test(workspaceId??'')||!UUID.test(result.run?.id??'')
         ||args.runId!==undefined&&args.runId!==result.run.id||allowPending&&args.relatedWorkspaceIds!==undefined
-        ||inspectedWorkspaceId!==null&&inspectedWorkspaceId!==args.workspaceId
-        ||result.workspace?.id!==args.workspaceId||result.workspace.scopeType!=='task'
+        ||inspectedWorkspaceId!==null&&inspectedWorkspaceId!==workspaceId
+        ||result.workspace?.id!==workspaceId||result.workspace.scopeType!=='task'
         ||result.workspace.taskId!==taskPass.taskId||result.workspace.companyId!==taskPass.companyId)return null;
       if(args.relatedWorkspaceIds!==undefined){
         // Pinned related material is read-only context, not a second writable
@@ -1611,12 +1633,13 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
           ||new Set(heads.map(row=>row?.workspaceId)).size!==heads.length
           ||ids.some(id=>!heads.some(row=>row?.workspaceId===id&&acceptedWorkspaceHead(row.head))))return null;
       }
-      run={workspaceId:args.workspaceId,runId:result.run.id};
+      run={workspaceId,runId:result.run.id};
       if(inspectedRun&&!sameDraftRun(inspectedRun,run))return null;
     }else if(allowPending&&item.tool==='ask_assistant_owner'){
       if(!opened||questionId||!success||!UUID.test(args.clientRequestId??'')||!UUID.test(result.id??'')
         ||result.state!=='pending'||result.replayed!==false||Object.keys(result).sort().join(',')!=='id,path,replayed,state')return null;
       questionId=result.id;
+      questionRequestId=args.clientRequestId;
     }else if(item.tool==='update_task_control'){
       // The same positive control receipt is settled before both pending and
       // accepted saves. Acceptance narrows continuation to confirmation; it
@@ -1627,6 +1650,8 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
         ||result.resultId!==args.controlId||!UUID.test(result.receiptId??'')
         ||Object.keys(result).sort().join(',')!=='operation,receiptId,resultId,schemaVersion,taskId')return null;
       controlReceiptId=result.receiptId;
+      controlRequestId=args.clientRequestId;
+      controlId=args.controlId;
     }else if(item.tool==='use_assistant_workspace_files'){
       if(!opened||operationId||!sameDraftRun(args.runIdentity,run))return null;
       if(localDraftRefusal(item,'ASSISTANT_WORKSPACE_FILE_INPUT_INVALID'))continue;
@@ -1635,10 +1660,11 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       try{command=parseAssistantRunFileCommand(args.command);}catch{return null;}
       if(command.action==='replace'){
         if(result.state!=='draft_updated'||result.sha256!==createHash('sha256').update(command.text,'utf8').digest('hex'))return null;
+        if(retained)replacements.set(digest(command.path),result.sha256);
         changed=true;
       }else if(!['list','read'].includes(command.action))return null;
     }else if(item.tool==='continue_assistant_workspace_action'){
-      if(!allowPending&&args.schemaVersion===1&&args.operation==='status'&&!run){
+      if(canPollOpen&&args.schemaVersion===1&&args.operation==='status'&&!run){
         if(success&&Object.keys(args.parameters??{}).length===0&&sameDraftRun(args.runIdentity,args.runIdentity)
           &&UUID.test(args.runIdentity?.workspaceId??'')&&UUID.test(args.runIdentity?.runId??'')
           &&acceptedStatusHead(result,args.runIdentity)){
@@ -1654,10 +1680,10 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
         if(inspectedRun||!success||result.schemaVersion!==1||result.operation!=='status'
           ||Object.keys(args.parameters??{}).length||!sameDraftRun(args.runIdentity,args.runIdentity)
           ||!UUID.test(args.runIdentity?.workspaceId??'')||!UUID.test(args.runIdentity?.runId??'')
-          ||result.localWorkspaceState!=='unverified')return null;
+          ||result.localWorkspaceState!=='unverified'&&!(retained&&result.nativeRunStatus?.status==='expired'))return null;
         inspectedRun={workspaceId:args.runIdentity.workspaceId,runId:args.runIdentity.runId};continue;
       }
-      if(!allowPending&&opened&&!operationId&&args.schemaVersion===1&&args.operation==='secret_list'){
+      if(canPollOpen&&opened&&!operationId&&args.schemaVersion===1&&args.operation==='secret_list'){
         // Metadata has no checkout/fill effect. The historical forbidden Run
         // selector was rejected by the native input inventory before dispatch.
         if(args.parameters?.holder!=='company'||!UUID.test(args.parameters.sourceTaskId??'')
@@ -1665,6 +1691,49 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
         if(args.runIdentity!==undefined){
           if(!sameDraftRun(args.runIdentity,run)||!localDraftRefusal(item,'ASSISTANT_MCP_INPUT_INVALID'))return null;
         }else if(!success||Object.hasOwn(result,'code'))return null;
+        continue;
+      }
+      if(retained&&opened&&args.schemaVersion===1&&args.operation==='skill_run'){
+        // This is a read-only classification for one server-verified package.
+        // Unreviewed argv, a different release or a write can never qualify.
+        const p=args.parameters;
+        if(p?.skillId!=='telegram-mtproto'||!UUID.test(p.releaseId??'')||releaseId&&releaseId!==p.releaseId
+          ||!Array.isArray(p.arguments)||p.arguments.some(arg=>typeof arg!=='string'))return null;
+        try{
+          const account=parseAccountCommand(p.arguments);
+          if(account?.operation==='list'){
+            if(!success||result.operation!=='skill_run'||typeof result.stdout!=='string'||Buffer.byteLength(result.stdout)>65_536)return null;
+            const listing=JSON.parse(result.stdout);
+            if(listing?.ok!==true||!Array.isArray(listing.accounts))return null;
+          }else{
+            const {accountId,providerArguments}=splitAccountArguments(p.arguments);
+            // The closed host policy refusal occurs before the provider
+            // process exists. Its argv never gets another attempt.
+            if(!UUID.test(accountId??''))return null;
+            if(localDraftRefusal(item,'ASSISTANT_SKILL_COMMAND_DENIED')){
+              releaseId=p.releaseId;continue;
+            }
+            if(providerArguments.length!==3||providerArguments[0]!=='chat-info'
+              ||providerArguments[1]!=='--chat'||!providerArguments[2]||providerArguments[2].startsWith('-')
+              ||!localDraftRefusal(item,'TRELIO_WORKSPACE_ACTION_FAILED'))return null;
+          }
+        }catch{return null;}
+        releaseId=p.releaseId;continue;
+      }
+      if(retained&&opened&&args.schemaVersion===1&&['secret_browser_prepare','secret_browser_fill'].includes(args.operation)){
+        if(args.operation==='secret_browser_prepare'){
+          const grant=result?.grant,selected=result?.bridge?.action?.arguments;
+          if(!success||result.prepared!==true||grantId||!UUID.test(grant?.id??'')||grant.runId!==run.runId
+            ||grant.workspaceId!==run.workspaceId||args.parameters?.runId!==run.runId||!sameDraftRun(selected?.runIdentity,run)
+            ||selected?.operation!=='secret_browser_fill'||selected.parameters?.grantId!==grant.id)return null;
+          grantId=grant.id;
+        }else{
+          // The error alone proves nothing. Preserve the exact grant ID so
+          // the native pass proof can independently establish never consumed.
+          if(!grantId||fillObserved||!sameDraftRun(args.runIdentity,run)||args.parameters?.grantId!==grantId
+            ||!localDraftRefusal(item,'TRELIO_WORKSPACE_ACTION_FAILED'))return null;
+          fillObserved=true;
+        }
         continue;
       }
       if(!allowPending&&opened&&!operationId&&args.schemaVersion===1&&args.operation==='secret_browser_prepare'){
@@ -1676,13 +1745,20 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
           ||!['ASSISTANT_ENCRYPTED_CONTENT_REQUIRED','ASSISTANT_MCP_INPUT_INVALID'].some(code=>localDraftRefusal(item,code)))return null;
         continue;
       }
-      if(!allowPending&&run&&openHandle&&!operationId&&args.schemaVersion===1&&args.operation==='status'
+      if(canPollOpen&&run&&openHandle&&!operationId&&args.schemaVersion===1&&args.operation==='status'
         &&sameDraftRun(args.runIdentity,run)){
         const handle=args.parameters?.finishOperationId;
         if(handle!==undefined){
           if(opened||Object.keys(args.parameters).join(',')!=='finishOperationId'||handle!==openHandle)return null;
           if(!success){if(!localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED'))return null;}
-          else if(result.operationId!==openHandle||!exactWorkspacePoll(result,'open',run))return null;
+          else if(retained&&result.operation==='open'&&result.state==='completed'
+            &&Array.isArray(result.authorityReads)&&result.authorityReads.length===ASSISTANT_PINNED_AUTHORITY_FILES.length
+            &&result.authorityReads.every((call,index)=>call?.tool==='use_assistant_workspace_files'
+              &&sameDraftRun(call.arguments?.runIdentity,run)&&call.arguments?.command?.action==='read'
+              &&call.arguments.command.source==='authority'&&call.arguments.command.path===ASSISTANT_PINNED_AUTHORITY_FILES[index])){
+            opened=true;
+          }else if((result.operationId??(retained?result.nextCall?.arguments?.parameters?.finishOperationId:null))!==openHandle
+            ||!exactWorkspacePoll({...result,operationId:openHandle},'open',run))return null;
           continue;
         }
         if(!opened){
@@ -1697,24 +1773,42 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       if(!run||!success||args.schemaVersion!==1||result.schemaVersion!==1)return null;
       if(args.operation==='open'){
         if(opened||result.operation!=='open'||!sameDraftRun(args.parameters,run))return null;
-        if(!allowPending&&result.state==='running'){
-          if(openHandle||!exactWorkspacePoll(result,'open',run))return null;
-          openHandle=result.operationId;
+        if(canPollOpen&&result.state==='running'){
+          const handle=result.operationId??(retained?result.nextCall?.arguments?.parameters?.finishOperationId:null);
+          if(openHandle||!exactWorkspacePoll({...result,operationId:handle},'open',run))return null;
+          openHandle=handle;
         }else opened=true;
       }else if(!opened||!sameDraftRun(args.runIdentity,run))return null;
       else if(args.operation==='checkpoint'){
         if(operationId||args.parameters?.type!=='draft'||result.operation!=='checkpoint')return null;
+      }else if(retained&&args.operation==='heartbeat'){
+        // This settled same-Run lease heartbeat carried no task or provider
+        // change. It gives no authority to repeat the original invocation.
+        if(Object.keys(args.parameters??{}).length||result.operation!=='heartbeat')return null;
       }else if(args.operation==='finish'){
+        const handle=result.operationId??(retained?result.nextCall?.arguments?.parameters?.finishOperationId:null);
         if(!changed||operationId||!browserClosed||browserPending||args.parameters?.taskOutcome!=='no_status_change'||result.operation!=='finish'
-          ||!UUID.test(result.operationId??'')||!['running','completed'].includes(result.state))return null;
+          ||!UUID.test(handle??'')||!['running','completed'].includes(result.state))return null;
         if(allowPending){
           const next=result.nextCall;
           if(result.state!=='running'||next?.tool!==item.tool||next.arguments?.schemaVersion!==1
             ||next.arguments.operation!=='status'||!sameDraftRun(next.arguments.runIdentity,run)
             ||Object.keys(next.arguments.parameters??{}).join(',')!=='finishOperationId'
-            ||next.arguments.parameters.finishOperationId!==result.operationId)return null;
+            ||next.arguments.parameters.finishOperationId!==handle)return null;
         }
-        operationId=result.operationId;
+        if(retained){
+          const p=args.parameters;
+          const normalize=(values,limit)=>Array.isArray(values??[])&&(values??[]).length<=limit
+            &&(values??[]).every(value=>typeof value==='string'&&value.trim()&&value.length<=24_000)
+            ?(values??[]).map(value=>value.trim()):null;
+          const evidence=normalize(p.evidence,50),files=normalize(p.filePaths,1000),questions=normalize(p.questions,50);
+          if(typeof p.summary!=='string'||p.summary.trim().length<20||p.summary.length>24000||!evidence?.length
+            ||!files||!questions||typeof p.nextAction!=='string'||!p.nextAction.trim()||p.nextAction.length>24000
+            ||Object.keys(p).some(key=>!['summary','evidence','filePaths','questions','nextAction','taskOutcome'].includes(key)))return null;
+          automaticFiles=files.length===0;
+          handoffSha256=digest(JSON.stringify([p.summary.trim(),evidence,automaticFiles?null:files,questions,p.nextAction.trim(),p.taskOutcome]));
+        }
+        operationId=handle;
         finished=result.state==='completed';
       }else if(args.operation==='status'&&args.parameters?.finishOperationId!==undefined){
         if(!operationId||finished||args.parameters.finishOperationId!==operationId||result.operationId!==operationId
@@ -1727,6 +1821,11 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
       }else return null;
     }else return null;
   }
+  if(retained){
+    if(!operationId||!fillObserved||!releaseId||!questionId||!controlReceiptId||!handoffSha256||!replacements.size)return null;
+    return {locators:{...run,releaseId,browserGrantId:grantId,questionId,questionRequestId,controlReceiptId,controlId,controlRequestId},
+      handoffSha256,automaticFiles,replacements:[...replacements].map(([pathSha256,contentSha256])=>({pathSha256,contentSha256}))};
+  }
   if(allowPending)return operationId?{...run,finishPending:true}:null;
   return acceptedHead?{...run,acceptedHead}:null;
 };
@@ -1734,6 +1833,8 @@ export const assistantInterruptedAcceptedWorkspace=(turn,deliveryId,taskPass)=>
   assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,false);
 export const assistantInterruptedPendingWorkspaceFinish=(turn,deliveryId,taskPass)=>
   assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,true);
+export const assistantInterruptedRetainedHandoff=(turn,deliveryId,taskPass)=>
+  assistantInterruptedWorkspaceFinish(turn,deliveryId,taskPass,true,true);
 // A poll belongs to the one native operation and Run returned by the host.
 // Keep this proof identical when recovering a pending archive and when reading
 // its subsequently accepted history; a model-supplied handle is never evidence.
@@ -1943,7 +2044,11 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   // action leaves the original uncertainty intact. No transcript leaves RAM.
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
-  const {namedArchive, ...pass}=taskPass??{};
+  const {namedArchive,retainedHandoff,...pass}=taskPass??{};
+  if(retainedHandoff===true){
+    const proof=assistantInterruptedRetainedHandoff(turn,deliveryId,pass);
+    return proof?{state:'interrupted_retained_handoff',turnId:turn.id,proof}:{state:'uncertain'};
+  }
   const workspaceDraft=namedArchive===true?assistantInterruptedNamedWorkspaceFinish(turn,deliveryId,pass)
     :assistantInterruptedAcceptedWorkspace(turn,deliveryId,taskPass)
     ??assistantInterruptedPendingWorkspaceFinish(turn,deliveryId,taskPass)
@@ -2363,6 +2468,14 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
       ||terminalMarkerId===deliveryId||options.continuationReview?.priorTurnId!==terminalTurnId
       ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
+    if(workspaceDraft.retainedHandoff){
+      try{
+        const proof=validateAssistantRetainedHandoff(workspaceDraft.retainedHandoff);
+        if(workspaceDraft.finishPending!==true||workspaceDraft.namedArchive!==undefined||workStateContext.scheduled!==true
+          ||workStateContext.ownerQuestionIds!==undefined||proof.locators.workspaceId!==workspaceDraft.workspaceId
+          ||proof.locators.runId!==workspaceDraft.runId)fail('ASSISTANT_CODEX_INVALID_INPUT');
+      }catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
+    }
   }
   if(options.namedArchiveResume!==undefined){
     const witness=options.namedArchiveResume;
@@ -2595,9 +2708,16 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // another live writer. thread/resume above acquired Codex's exclusive
       // writer without starting any turn. Inspect again from that SAME server
       // before calling the host's protected pass renewal and one-use start.
+      const bound=workspaceDraft.retainedHandoff;
       const current=await readInterruptedDraftTurn(request,threadId,terminalMarkerId,
-        workspaceDraft.namedArchive===true?{...taskPass,namedArchive:true}:taskPass);
-      if(current.turnId!==terminalTurnId||!sameWorkspaceRecovery(current.workspaceDraft,workspaceDraft))
+        bound?{...taskPass,retainedHandoff:true}:workspaceDraft.namedArchive===true?{...taskPass,namedArchive:true}:taskPass);
+      const {checkpointId,draftHead,...nativeLocators}=bound?.locators??{};
+      const matches=bound
+        ?current.state==='interrupted_retained_handoff'
+          &&JSON.stringify(validateAssistantRetainedHandoff(current.proof,{selected:false}))
+            ===JSON.stringify(validateAssistantRetainedHandoff({...bound,locators:nativeLocators},{selected:false}))
+        :sameWorkspaceRecovery(current.workspaceDraft,workspaceDraft);
+      if(current.turnId!==terminalTurnId||!matches)
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
     if(options.taskReadRecovery){
@@ -2656,6 +2776,8 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly confirm the result already accepted in the immediately preceding interrupted turn. Use its saved WORK.md content and the live task to determine the actual goal state, cadence and timezone. Use complete_assistant_pass with workspaceId=${workspaceDraft.workspaceId}, acceptedRunId=${workspaceDraft.runId}, workspaceHead=${workspaceDraft.acceptedHead}, noChange=false and no processed source references. This closes the pass, so keep an unfinished goal active, waiting or blocked as recorded in the accepted material. If the result or its accepted state cannot be verified, leave the pass unresolved.\n`;
         if(workspaceDraft.namedArchive===true)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nRecover only the existing named Workspace save. Read exact status for workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}, without the old poll handle. If the server already accepted it, verify the clean exact candidate and stop. Otherwise prepare and open this same expired Run and read both returned pinned authority files in full. Use finish with taskOutcome=no_status_change and a brief technical summary, evidence and next action; the host uses the previously committed handoff without changing it. Observe the new exact poll until native acceptance. No file edits, additional Run, controls, question, provider or task-completion tool. The archive's accepted state alone does not complete the assignment. If native acceptance cannot be verified, leave the original outcome unresolved.\n`;
+        if(workspaceDraft.retainedHandoff)
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nSettle only the already recorded handoff of workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}. Read exact native status without its old poll handle. If expired, prepare and open the same Run. Read both pinned authority files in full and existing WORK.md. Invoke finish once with taskOutcome=no_status_change, a short technical summary, evidence and next action. The host verifies the original files and reuses the native handoff. Follow the new exact poll, verify native acceptance, then complete_assistant_pass with the accepted head, noChange=false, no processed source references and the true unfinished goal state. Do not edit files, start a Run, contact a provider, repeat a question or change a control. If the exact save cannot be verified, keep the original pass unresolved.\n`;
         if(workspaceDraft.finishPending===true)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nSettle only the interrupted save in this SAME pass. First call continue_assistant_workspace_action (schemaVersion=1, operation=status, parameters={}, runIdentity={workspaceId:${workspaceDraft.workspaceId},runId:${workspaceDraft.runId}}). Do not poll the old handle. Inspect nativeRunStatus. If the server already accepted this Run, verify its accepted head and clean local tree; do not reopen or submit. Only if the server shows expired, the exact local candidate is intact, and the original save has ended, prepare/open this same Run; read both pinned authority files and existing WORK.md, then preserve the original material with the ordinary finish (taskOutcome=no_status_change). Follow only the new finish nextCall until terminal and verify exact native acceptance. Read the existing owner question and controls as needed; do not repeat any question, control change, provider read or write, or edit draft files. Only after verified acceptance, complete_assistant_pass with the actual goal state and cadence, same accepted Run/head, noChange=false and no processed source references. Waiting for an existing answer does not complete the goal. If save state, material, or business result is ambiguous, stop with the original fence intact.\n`;
         return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nContinue this SAME pass only to preserve its interrupted Workspace draft. Read the live task and original results. Prepare the exact existing Workspace Run with workspaceId=${workspaceDraft.workspaceId} and runId=${workspaceDraft.runId}. Use its returned open, read both pinned authority files, and inspect the recovered files. Keep the result already obtained. Save and verify acceptance through the ordinary finish with taskOutcome=no_status_change, then use complete_assistant_pass with this accepted Run/head and no processedSourceReferences only when the original result is confirmed. Do not repeat the browser check, publish another comment, send a message, create a Run or make any other task or provider change. If exact draft or outcome evidence is missing, preserve the draft and report the blocker.\n`;

@@ -1932,7 +1932,7 @@ const productionContext = async (action, options = {}) => {
 // here: a transport/coordinator implementation alone is unreachable from the
 // production factory. This does not add it to the model-visible MCP catalogue.
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
-  'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
+  'beginTaskPass','readTaskPass','readTaskRetainedFinishEvidence','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
   'beginSourceIntake','reconcileAnsweredSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
   'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery','readRejectedTriageIgnore','reconcileRejectedTriageIgnore'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
@@ -2838,6 +2838,7 @@ const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
         &&['active','waiting_external','waiting_owner','blocked','completed'].includes(args.goalState)
       :args.goalState==='completed')
     &&args.noChange===false&&args.replyCommentId===undefined&&args.ownerDecisionId===undefined
+    &&(!draft.retainedHandoff||args.goalState!=='completed')
     &&(args.processedSourceReferences===undefined||Array.isArray(args.processedSourceReferences)&&args.processedSourceReferences.length===0);
   if(!permitted)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
 };
@@ -4123,7 +4124,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const encryption=runLifecycle||['secret_skill_run','secret_browser_fill','secret_generate','secret_company_create','secret_input'].includes(plan.localAction.operation)?await prepareWorkspaceRun():null;
     if(plan.encryptedLifecycle && (!encryption || encryption.requestOrigin!==plan.encryptedLifecycle.requestOrigin
       || encryption.runtime.company.id!==plan.encryptedLifecycle.companyId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-    let nativeRunStatus;
+    let nativeRunStatus, nativeRunSnapshot;
     if(!skill && !(inspecting && plan.encryptedInspection)){
       const response=await common.request(encryption?.requestOrigin??identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
       const snapshot=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
@@ -4132,6 +4133,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
         : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       if(plan.localAction.operation==='status')nativeRunStatus=assistantNativeRunStatus(snapshot.run);
+      if(plan.localAction.operation==='open')nativeRunSnapshot=snapshot;
     }
     if(plan.localAction.operation==='open' || skill || plan.localAction.operation==='secret_skill_run') {
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
@@ -4147,6 +4149,10 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     let directory=path.join(root,'workspace');
     const pending=runLifecycle?await readDraftRecovery(identity,host):null;
     const interruptedFinish=pending?.finishPending===true;
+    const retained=pending?.retainedHandoff;
+    const retainedTaskHandoff=retained?{...retained.locators,handoffSha256:retained.handoffSha256,
+      automaticFiles:retained.automaticFiles,replacements:retained.replacements}:undefined;
+    if(retainedTaskHandoff&&!encryption)fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
     if(interruptedFinish&&(pending.workspaceId!==plan.runIdentity.workspaceId||pending.runId!==plan.runIdentity.runId))
       fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     // The common opener claims a new root itself. Precreating that final
@@ -4276,16 +4282,25 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
                 ||!hasFinishRecoveryMarker(metadata)
                 ||metadata.candidateHead!==head||metadata.materializedHead!==head||metadata.baseHead===head
                 ||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)
-                ||await common.getGitStatus(directory,metadata.objects??[]))
+                ||(!retainedTaskHandoff&&await common.getGitStatus(directory,metadata.objects??[])))
                 fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+              if(retainedTaskHandoff){
+                if(nativeRunSnapshot?.run?.status!=='expired'||nativeRunSnapshot.run.baseHead!==metadata.baseHead
+                  ||nativeRunSnapshot.run.draftHead!==retainedTaskHandoff.draftHead||nativeRunSnapshot.run.candidateHead
+                  ||nativeRunSnapshot.latestCheckpoint?.id!==retainedTaskHandoff.checkpointId)
+                  fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+                // The common opener loads and decrypts the exact checkpoint
+                // before its claim. This outer read contains only locators.
+              }
               let draftHead;
               try{draftHead=await common.retainedAssistantFinishDraftHead(metadata,head);}
               catch{fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');}
               await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
-                baseHead:metadata.baseHead,candidateHead:head,draftHead}});
+                baseHead:metadata.baseHead,candidateHead:head,draftHead,retainedTaskHandoff}});
             });
           }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart,assistantMaterializationSignal:materialization,
             retainedAssistantHandoff:pending?.namedArchive===true&&plan.localAction.operation==='finish',
+            ...(plan.localAction.operation==='finish'&&retainedTaskHandoff?{retainedTaskHandoff}:{}),
             ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
               ?{assertAssistantMaterializationCurrent:async claimed=>{
                 materialization.throwIfAborted();

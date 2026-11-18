@@ -3162,7 +3162,7 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
 
 
 
-for(const ending of ['completed','interrupted','unproven','lost-renewal','technical-prelude'])
+for(const ending of ['completed','interrupted','unproven','lost-renewal','technical-prelude','retained-handoff'])
   test('event-free scheduled original uses the same pass across restart ('+ending+')',async t=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-scheduled-recovery-'));
     const filename=path.join(directory,'queue.sqlite');
@@ -3171,8 +3171,16 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
     let coordinator=f.coordinator,successfulBasis=true,owned=false,original=null;
     const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
     const originalTurn=randomUUID(),retryMarker=randomUUID();
-    const technicalPrelude=ending==='technical-prelude'?{kind:'local_skill_diagnostics_v1',
+    const retained=ending==='retained-handoff';
+    const technicalPrelude=retained||ending==='technical-prelude'?{kind:'local_skill_diagnostics_v1',
       workspaceId:randomUUID(),runId:randomUUID(),skillId:'telegram-mtproto',releaseId:randomUUID(),projectId:randomUUID()}:undefined;
+    const interruptedTurn=randomUUID(),finishMarker=randomUUID();
+    const oldProof=retained?{locators:{workspaceId:technicalPrelude.workspaceId,runId:technicalPrelude.runId,releaseId:technicalPrelude.releaseId,
+      browserGrantId:randomUUID(),questionId:randomUUID(),questionRequestId:randomUUID(),
+      controlReceiptId:randomUUID(),controlId:randomUUID(),controlRequestId:randomUUID()},
+      automaticFiles:true,handoffSha256:'b'.repeat(64),replacements:[{pathSha256:'c'.repeat(64),contentSha256:'d'.repeat(64)}]}:null;
+    const finishLocators=retained?{...oldProof.locators,checkpointId:randomUUID(),draftHead:'a'.repeat(40)}:null;
+    let nativeEvidence=false,finishReviews=0,finishRenewals=0,finishStarts=0;
     let provisionedNotice=0,rootStarts=0,reviews=0,renewals=0,recoveryStarts=0;
     f.authority.workMode='task';
     Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
@@ -3182,6 +3190,11 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
     };
     f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
     f.options.client.readBusinessOutcome=async args=>successfulBasis?ordinaryOutcome(args):{schemaVersion:1,state:'pending'};
+    if(retained)f.options.client.readTaskRetainedFinishEvidence=async ({locators,expectedLeaseRevision})=>{
+      assert.deepEqual(locators,oldProof.locators);
+      assert.equal(expectedLeaseRevision,1);
+      return nativeEvidence?finishLocators:null;
+    };
     f.options.native.readDelivery=async(_thread,marker,options={})=>{
       if(marker===original?.deliveryId){
         if(options.interruptedTaskRead){
@@ -3194,11 +3207,26 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         return {state:'uncertain',turnId:originalTurn};
       }
       if(marker===retryMarker&&ending==='interrupted')return {state:'uncertain',turnId:randomUUID()};
+      if(marker===retryMarker&&retained)return options.interruptedWorkspaceDraft?.retainedHandoff===true
+        ?{state:'interrupted_retained_handoff',turnId:interruptedTurn,proof:oldProof}:{state:'uncertain',turnId:interruptedTurn};
       return f.deliveries.get(marker)??{state:'uncertain'};
     };
     f.options.passHost.continuePass=async(args,expected)=>{
       const pass=f.passes.get(expected.deliveryId);
       assert.deepEqual(expected,original);
+      if(args.retainedFinish){
+        assert.deepEqual(args.retainedFinish,finishLocators);
+        assert.equal(args.terminalTurnId,interruptedTurn);
+        assert.equal(args.expectedLeaseRevision,1);
+        if(args.continuation==='review')finishReviews++;
+        if(args.continuation==='resume'){
+          assert.ok(owned);assert.equal(finishRenewals++,0);
+          Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
+            leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+        }
+        return {schemaVersion:4,state:finishRenewals?'resumed':'approved',reviewId:finishMarker,invocationId:finishMarker,
+          resumed:finishRenewals?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+      }
       assert.equal(args.terminalTurnId,originalTurn);
       assert.deepEqual(args.technicalPrelude,technicalPrelude);
       if(args.continuation==='review')reviews++;
@@ -3213,7 +3241,17 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         resumed:renewals?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
     };
     f.options.native.run=async(input,options)=>{
-      if(options.taskReadRecovery){
+      if(retained&&options.workspaceDraftRecovery){
+        assert.equal(input.deliveryId,finishMarker);
+        assert.equal(input.threadId,original.threadId);
+        assert.equal(input.taskContext.scheduled,true);
+        const expected={workspaceId:finishLocators.workspaceId,runId:finishLocators.runId,finishPending:true,
+          retainedHandoff:{...oldProof,locators:finishLocators}};
+        assert.deepEqual(options.workspaceDraftRecovery.workspaceDraft,expected);
+        assert.deepEqual(readAssistantWorkspaceDraftRecovery(database,original),expected);
+        if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+        await options.beforeInvocation();finishStarts++;
+      }else if(options.taskReadRecovery){
         assert.equal(input.deliveryId,retryMarker);
         assert.equal(input.threadId,original.threadId);
         assert.equal(options.taskReadRecovery.initialScheduled,true);
@@ -3221,7 +3259,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
         await options.beforeInvocation();
         recoveryStarts++;
-        if(ending==='interrupted'){options.startInvocation();return {state:'uncertain'};}
+        if(ending==='interrupted'||retained){options.startInvocation();return {state:'uncertain'};}
       }else if(!successfulBasis&&!original){
         assert.equal(input.taskContext.scheduled,true);
         original=f.activePass();
@@ -3260,7 +3298,26 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
       database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
       assert.deepEqual(readIntent().taskReadParent,{initialScheduled:true,...(technicalPrelude?{technicalPrelude}:{})});
       owned=true;
-      if(ending==='interrupted'){
+      if(retained){
+        await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+        f.advance(21*60_000);pass.state='review_required';
+        assert.equal((await coordinator.workOnce()).state,'blocked');
+        assert.equal(finishReviews,0,'no server handoff proof means no continuation');
+        nativeEvidence=true;owned=false;
+        await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+        assert.equal(finishReviews,1);assert.equal(finishRenewals,0);
+        await coordinator.close();database.close();
+        database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
+        owned=true;
+        await coordinator.workOnce();
+        assert.equal(finishReviews,1);assert.equal(finishRenewals,1);assert.equal(finishStarts,1);
+        assert.equal(f.activePass(),null);assert.equal(provisionedNotice,2);
+        const settled=coordinator.status()[0];
+        assert.equal(settled.nextRunAt,schedule.nextRunAt+86400000);
+        f.advance(settled.nextRunAt-f.options.now());
+        await coordinator.workOnce();
+        assert.equal(provisionedNotice,3);
+      }else if(ending==='interrupted'){
         await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
         f.advance(21*60_000);pass.state='review_required';
         assert.equal((await coordinator.workOnce()).state,'blocked');

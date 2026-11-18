@@ -792,6 +792,26 @@ text block in retained history; write receipts must be structured. Browser and p
 unconfirmed effect, a different Run, or a tool call after the pending finish
 still refuse this path.
 
+A historical interrupted task handoff may contain a portable draft plus newer
+local bytes from before the portable-finish fix. The scheduled technical
+prelude can enter one separate v4 continuation. Match its own original native
+turn, reviewed signed read-only provider release, closed value-free visit,
+exact browser grant, question and control receipts. The backend must confirm
+the expired grant was never consumed or reported and the handoff still binds
+the same expired Run and draft. A generic provider failure cannot supply this
+proof. Recheck native history under the exclusive App Server writer before
+renewal and keep only bounded original locators and digests in the same inbox.
+
+The signed encrypted Workspace opener checks the decrypted native handoff,
+the pinned draft and every changed byte before claiming that Run. Match the
+original file replacement receipts and the same worklog renderer. Finish uses
+the already recorded handoff, stages only verified files, then compares the
+immutable Git delta and blobs before encrypted upload. An unrelated file,
+changed head, stale receipt or existing lease leaves the fence intact. The
+retained pass exposes no browser, provider, edit, new Run or completed-goal
+action. Its ordinary native material receipt can close the original pass and
+retain the unfinished goal for the regular next cycle.
+
 The recovery first reads the exact server Run lifecycle alongside local Git
 status. An accepted candidate is read back without reopening it. For an
 expired Run, the existing cross-process finish lock, private finish marker,

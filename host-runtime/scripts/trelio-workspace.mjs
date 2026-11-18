@@ -14328,6 +14328,15 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     )) {
       throw new Error("Исходный Run изменился перед восстановлением незавершённого сохранения.");
     }
+    const retainedTaskHandoff = retainedAssistantFinish?.retainedTaskHandoff;
+    if (retainedTaskHandoff) {
+      // The common opener rereads the native Run before claiming it. Compare
+      // the previously verified handoff again under the same local lock.
+      const local = await readOptionalRunMetadata(rootDirectory);
+      if (!local) throw new Error("The retained task checkout is missing.");
+      await verifyRetainedAssistantHandoff({ metadata: local,
+        checkpoint: exactRuns.get(requestedRunId)?.latestCheckpoint, proof: retainedTaskHandoff });
+    }
     const pinnedAgentRules = existingRun.agentInstructionsSnapshotJson?.platform;
 
     if (pinnedAgentRules) {
@@ -14523,8 +14532,12 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       || existingMetadata.candidateHead !== retainedAssistantFinish.candidateHead
       || localHead !== retainedAssistantFinish.candidateHead
       || existingMetadata.baseHead !== agentRun.baseHead
-      || await getGitStatus(workspaceDirectory, existingMetadata.objects || []))) {
+      || (!retainedAssistantFinish.retainedTaskHandoff && await getGitStatus(workspaceDirectory, existingMetadata.objects || [])))) {
       throw new Error("Локальный кандидат изменился; незавершённое сохранение не восстановлено.");
+    }
+    if (retainedAssistantFinish?.retainedTaskHandoff) {
+      await verifyRetainedAssistantHandoff({ metadata: existingMetadata,
+        checkpoint: exactRuns.get(runId)?.latestCheckpoint, proof: retainedAssistantFinish.retainedTaskHandoff });
     }
     if (localHead !== materializedHead && !retainedAssistantFinish) {
       const syncDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-draft-sync-"));
@@ -16105,6 +16118,153 @@ const resolveAgentWorkspaceRunAuthor = async ({
   return selectAgentWorkspaceRunAuthor(currentRun, storedAuthor);
 };
 
+const renderAutomaticRunWorklog = ({
+  metadata,
+  summary,
+  evidence,
+  candidatePaths,
+  openQuestions,
+  nextActionInstruction,
+  automaticWorklogPath,
+}) => {
+  const durableMaterials = candidatePaths.filter(
+    (filePath) => (
+      !isWorklogEntryPath(filePath)
+      && !isGeneratedWorkspaceContractPath(filePath, automaticWorklogPath)
+      && !isProtectedWorkspaceControlPath(filePath)
+    ),
+  );
+  return [
+    "# Результат Run",
+    "",
+    `Автор: ${renderAgentWorkspaceRunAuthor(metadata.runAuthor)}`,
+    "",
+    "## Итог",
+    "",
+    summary,
+    "",
+    "## Подтверждения",
+    "",
+    renderWorklogList(evidence),
+    "",
+    "## Материалы",
+    "",
+    renderWorklogList(durableMaterials),
+    "",
+    "## Открытые вопросы",
+    "",
+    renderWorklogList(openQuestions),
+    "",
+    "## Следующий шаг",
+    "",
+    nextActionInstruction,
+    "",
+  ].join("\n");
+};
+
+/** The old finish persisted the handoff against the previous draft. Read back
+ * the authenticated checkpoint and compare every later local byte with the
+ * original native replace receipts or the same deterministic worklog writer.
+ * The caller holds the existing finish lock for this check and the save.
+ * Nothing here edits, hides or stages a file on a failed observation.
+ */
+export const verifyRetainedAssistantHandoff = async ({ metadata, checkpoint, proof }) => {
+  const refuse = stage => {
+    const error = new Error(`The retained task handoff or local files changed (${stage}).`);
+    error.code = "ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED";
+    throw error;
+  };
+  if (metadata.scopeType !== "task" || !hasFinishRecoveryMarker(metadata)
+    || metadata.terminalStatus || metadata.runId !== checkpoint?.runId
+    || metadata.workspaceId !== proof.workspaceId || metadata.runId !== proof.runId
+    || checkpoint.id !== proof.checkpointId || checkpoint.checkpointType !== "handoff"
+    || checkpoint.candidateHead !== proof.draftHead || metadata.draftHead !== proof.draftHead
+    || metadata.candidateHead !== proof.draftHead || metadata.materializedHead !== proof.draftHead
+    || metadata.baseHead === proof.draftHead || checkpoint.nextActionJson?.taskOutcome !== "no_status_change"
+    || !normalizeAgentWorkspaceRunAuthor(metadata.runAuthor)) refuse("identity");
+
+  const digest = value => crypto.createHash("sha256").update(value).digest("hex");
+  const fields = [checkpoint.summary, checkpoint.evidenceJson ?? [], checkpoint.filesChangedJson ?? [],
+    checkpoint.openQuestionsJson ?? [], checkpoint.nextActionJson.instruction, "no_status_change"];
+  const boundFields = proof.automaticFiles ? [fields[0], fields[1], null, ...fields.slice(3)] : fields;
+  if (digest(JSON.stringify(boundFields)) !== proof.handoffSha256
+    || typeof fields[0] !== "string" || typeof fields[4] !== "string"
+    || !fields.slice(1, 4).every(list => Array.isArray(list) && list.every(item => typeof item === "string"))
+    || !Array.isArray(proof.replacements) || !proof.replacements.length || proof.replacements.length > 64
+    || !proof.replacements.every(row => /^[a-f0-9]{64}$/u.test(row?.pathSha256 ?? "")
+      && /^[a-f0-9]{64}$/u.test(row?.contentSha256 ?? ""))) refuse("handoff");
+  const replacements = new Map(proof.replacements.map(row => [row.pathSha256, row.contentSha256]));
+  if (replacements.size !== proof.replacements.length) refuse("receipts");
+
+  const directory = metadata.workspaceDirectory;
+  const worklogPath = metadata.automaticWorklogPath;
+  if (!/^worklog\/\d{4}-\d{2}-\d{2}-run-[0-9a-f-]{36}\.md$/u.test(worklogPath ?? "")
+    || !worklogPath.endsWith(`-run-${metadata.runId}.md`)) refuse("worklog_path");
+  const gitOptions = { cwd: directory, env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" } };
+  const [head, index] = await Promise.all([
+    runGit(["rev-parse", "HEAD"], gitOptions),
+    runGit(["ls-files", "-v", "-z"], gitOptions),
+  ]);
+  if (head.stdout.trim() !== proof.draftHead) refuse("head");
+  await runGit(["diff", "--cached", "--quiet", "--no-ext-diff", proof.draftHead, "--"], gitOptions);
+  // Only the ordinary hydrated object files may be skip-worktree. Compare
+  // their private content through getGitStatusEntries, as for normal finish.
+  const hydrated = new Set((metadata.objects ?? []).map(object => object.filePath));
+  if (index.stdout.split("\0").filter(Boolean).some(entry => !entry.startsWith("H ")
+    && !(entry.startsWith("S ") && hydrated.has(entry.slice(2))))) refuse("index");
+
+  const changes = await getGitStatusEntries(directory, metadata.objects ?? []);
+  if (!changes.some(entry => entry.filePath === worklogPath) || changes.length < 2 || changes.length > 65) refuse("changes");
+  const candidatePaths = await getCandidateChangedPaths(metadata);
+  if (proof.automaticFiles) {
+    // When the original finish omitted an explicit file list, the ordinary
+    // checkpoint derives it from these same candidate paths. A native record
+    // with a different list cannot inherit that original finish.
+    const materialPaths = candidatePaths.filter(filePath => !isWorklogEntryPath(filePath)
+      && !isGeneratedWorkspaceContractPath(filePath, worklogPath));
+    if (JSON.stringify(materialPaths) !== JSON.stringify(fields[2])) refuse("materials");
+  }
+  const expectedWorklog = renderAutomaticRunWorklog({ metadata, summary: fields[0], evidence: fields[1],
+    candidatePaths, openQuestions: fields[3],
+    nextActionInstruction: fields[4], automaticWorklogPath: worklogPath });
+  const expectedFiles = new Map();
+  for (const { status, filePath } of changes) {
+    const expected = filePath === worklogPath ? digest(expectedWorklog) : replacements.get(digest(filePath));
+    if (!expected || ![" M", "??"].includes(status)
+      || filePath !== worklogPath && (isProtectedWorkspaceControlPath(filePath) || hydrated.has(filePath))) refuse("file_receipt");
+    // Walk the exact Git path without following a symlink/junction or reading
+    // an alternate data stream. Bound both replace receipts and the worklog.
+    let fullPath = directory;
+    const segments = filePath.split("/");
+    if (!segments.every(part => part && part !== "." && part !== ".." && !/[\\:\x00-\x1f]/u.test(part))) refuse("file_path");
+    for (const segment of segments) {
+      fullPath = path.join(fullPath, segment);
+      if ((await fs.lstat(fullPath)).isSymbolicLink()) refuse("file_link");
+    }
+    const stage = filePath === worklogPath ? "worklog_bytes" : "file_bytes";
+    const stat = await fs.lstat(fullPath);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64 * 1024) refuse(stage);
+    const handle = await fs.open(fullPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.nlink !== 1
+        || opened.size !== stat.size) refuse(stage);
+      // Read at most the observed size plus one byte. Growth or substitution
+      // while opening must not create an unbounded read of workspace content.
+      const bytes = Buffer.alloc(stat.size + 1);
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+      if (bytesRead !== stat.size || digest(bytes.subarray(0, bytesRead)) !== expected) refuse(stage);
+    } finally {
+      await handle.close();
+    }
+    expectedFiles.set(filePath, expected);
+  }
+  // Keep the original payload in the private caller. The finish adapter can
+  // reuse these parameters from the server without trusting model prose.
+  return { options: { summary: fields[0], evidence: fields[1], file: fields[2], question: fields[3],
+    "next-action": fields[4], "task-outcome": fields[5] }, expectedFiles };
+};
+
 export const ensureAutomaticRunWorklog = async ({
   metadata,
   metadataPath,
@@ -16217,39 +16377,10 @@ export const ensureAutomaticRunWorklog = async ({
     }
   }
 
-  const durableMaterials = candidatePaths.filter(
-    (filePath) => (
-      !isWorklogEntryPath(filePath)
-      && !isGeneratedWorkspaceContractPath(filePath, existingAutomaticPath)
-      && !isProtectedWorkspaceControlPath(filePath)
-    ),
-  );
-  const content = [
-    "# Результат Run",
-    "",
-    `Автор: ${renderAgentWorkspaceRunAuthor(metadata.runAuthor)}`,
-    "",
-    "## Итог",
-    "",
-    summary,
-    "",
-    "## Подтверждения",
-    "",
-    renderWorklogList(evidence),
-    "",
-    "## Материалы",
-    "",
-    renderWorklogList(durableMaterials),
-    "",
-    "## Открытые вопросы",
-    "",
-    renderWorklogList(openQuestions),
-    "",
-    "## Следующий шаг",
-    "",
-    nextActionInstruction,
-    "",
-  ].join("\n");
+  const content = renderAutomaticRunWorklog({
+    metadata, summary, evidence, candidatePaths, openQuestions, nextActionInstruction,
+    automaticWorklogPath: existingAutomaticPath,
+  });
 
   // Persist the deterministic path before publishing bytes. A process crash
   // can then retry the same path instead of creating a second journal entry.
@@ -16443,7 +16574,7 @@ export const protectAgentWorkspaceCheckpoint = async ({
   };
 };
 
-const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, finishing = false } = {}) => withRun(async ({
+const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, finishing = false, mustReuseHandoff = false } = {}) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -16544,6 +16675,7 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
       }
       return undefined;
     }
+    if (mustReuseHandoff) throw new Error("The original task handoff could not be reused.");
   }
 
   if (checkpointType === "handoff") {
@@ -17113,7 +17245,7 @@ const mergeWorkspaceRun = async options => {
   return withWorkspaceFinishLock(requireUuid(metadata.runId, "run"), () => mergeWorkspaceRunUnlocked(options));
 };
 
-const finish = async (options, { retainedAssistantHandoff = false } = {}) => {
+const finish = async (options, { retainedAssistantHandoff = false, retainedTaskHandoff } = {}) => {
   const { metadata } = await findRunMetadata();
   const runId = requireUuid(metadata.runId, "run");
   // The MCP registry prevents repeats within one host. This private process
@@ -17199,6 +17331,16 @@ const finish = async (options, { retainedAssistantHandoff = false } = {}) => {
       }
       await retainedAssistantFinishDraftHead(current, current.candidateHead);
     }
+    let checkpointOptions = options;
+    if (retainedTaskHandoff) {
+      const run = finishSnapshot?.run;
+      if (run?.status !== "running" || run.leaseId !== current.leaseId || run.fencingToken !== current.fencingToken
+        || run.baseHead !== current.baseHead || run.draftHead !== retainedTaskHandoff.draftHead || run.candidateHead) {
+        throw new Error("The retained task Run changed after opening.");
+      }
+      checkpointOptions = (await verifyRetainedAssistantHandoff({ metadata: current,
+        checkpoint: finishSnapshot.latestCheckpoint, proof: retainedTaskHandoff })).options;
+    }
     finishProgressStage = "validating";
     try {
       reportFinishProgress("validating");
@@ -17207,9 +17349,10 @@ const finish = async (options, { retainedAssistantHandoff = false } = {}) => {
       await heartbeat();
       reportFinishProgress("checkpoint");
       const checkpointHead = retainedAssistantHandoff ? current.candidateHead
-        : await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
+        : await checkpoint({ ...checkpointOptions, type: "handoff" }, null,
+          { finishing: true, finishSnapshot, mustReuseHandoff: Boolean(retainedTaskHandoff) });
       reportFinishProgress("preparing");
-      await submitWithMergeRecovery(options, checkpointHead);
+      await submitWithMergeRecovery(retainedTaskHandoff ? checkpointOptions : options, checkpointHead, retainedTaskHandoff);
       reportFinishProgress("cleanup");
       // Cleanup cannot turn confirmed acceptance into a failed save.
       await runAutomaticLocalCleanupForCurrentRun().catch(() => undefined);
@@ -17319,6 +17462,7 @@ const prepareCandidateIndex = async ({
   origin,
   token,
   companyEncryption,
+  retainedFiles,
 }) => {
   const workspaceDirectory = metadata.workspaceDirectory;
   const knownObjectPaths = (metadata.objects || []).map((object) => object.filePath);
@@ -17326,9 +17470,16 @@ const prepareCandidateIndex = async ({
   // create a new revision. Once a Run already has a meaningful delta, remove
   // only byte-identical generated scaffold so the same candidate converges to
   // the compact current contract.
-  await normalizeLegacyWorkspaceScaffold(workspaceDirectory);
-  await setSkipWorktree(workspaceDirectory, knownObjectPaths, false);
-  await runGit(["add", "--all"], { cwd: workspaceDirectory });
+  if (retainedFiles) {
+    if (!companyEncryption || knownObjectPaths.length) throw new Error("The retained task tree requires an encrypted file-only draft.");
+    // The historical save covers only positively verified original files.
+    // Do not stage extra paths or rewrite old scaffolding in this mode.
+    await runGit(["add", "--", ...retainedFiles.keys()], { cwd: workspaceDirectory });
+  } else {
+    await normalizeLegacyWorkspaceScaffold(workspaceDirectory);
+    await setSkipWorktree(workspaceDirectory, knownObjectPaths, false);
+    await runGit(["add", "--all"], { cwd: workspaceDirectory });
+  }
 
   if (companyEncryption) {
     // Paths, pointer manifests and plaintext digests are protected content.
@@ -17503,6 +17654,7 @@ const prepareLocalCandidateSnapshot = async ({
   token,
   companyEncryption,
   message,
+  retainedFiles,
 }) => {
   const workspaceDirectory = metadata.workspaceDirectory;
   const gitStatus = await getGitStatus(workspaceDirectory, metadata.objects || []);
@@ -17520,6 +17672,7 @@ const prepareLocalCandidateSnapshot = async ({
       origin,
       token,
       companyEncryption,
+      retainedFiles,
     });
 
     if (await hasStagedChanges(workspaceDirectory)) {
@@ -18411,7 +18564,34 @@ const saveRunDraftSnapshot = async ({
   return { draftHead: prepared.head, metadata: draftMetadata };
 };
 
-const submit = async (options, checkpointHead) => withRun(async ({
+const assertRetainedCandidateBytes = async (workspaceDirectory, previousHead, head, expectedFiles) => {
+  const delta = (await runGit(["diff", "--no-renames", "--name-only", "-z", previousHead, head, "--"],
+    { cwd: workspaceDirectory })).stdout.split("\0").filter(Boolean);
+  if (delta.length !== expectedFiles.size || delta.some(filePath => !expectedFiles.has(filePath))) {
+    throw new Error("The final Git tree differs from the retained task files.");
+  }
+  for (const filePath of delta) {
+    const entry = await readGitTreeEntry(workspaceDirectory, head, filePath);
+    if (entry?.objectType !== "blob" || entry.mode !== "100644") {
+      throw new Error("The retained task candidate contains an unexpected Git entry.");
+    }
+    const actual = await readAcceptedWorkspaceBlob({ workspaceDirectory, blobId: entry.objectId }, async stream => {
+      const digest = crypto.createHash("sha256");
+      let bytes = 0;
+      for await (const chunk of stream) {
+        bytes += chunk.length;
+        if (bytes > 64 * 1024) throw new Error("The retained task candidate exceeded the read bound.");
+        digest.update(chunk);
+      }
+      return digest.digest("hex");
+    });
+    if (actual !== expectedFiles.get(filePath)) {
+      throw new Error("The final Git tree differs from the retained task files.");
+    }
+  }
+};
+
+const submit = async (options, checkpointHead, retainedTaskHandoff) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -18420,6 +18600,22 @@ const submit = async (options, checkpointHead) => withRun(async ({
   companyEncryption,
 }) => {
   await heartbeat();
+  let expectedRetainedFiles;
+  if (retainedTaskHandoff) {
+    // The historical save exists only on the managed encrypted route. Until
+    // the immutable Git result has been checked, this path may read storage
+    // limits but must not upload objects, a browser projection or a revision.
+    if (!companyEncryption) throw new Error("Retained task handoff requires the original encrypted route.");
+    const snapshot = await loadExactWorkspaceRun({ origin: workspaceOrigin, token, workspaceId: metadata.workspaceId,
+      runId: metadata.runId, companyEncryption });
+    if (snapshot.run.status !== "running" || snapshot.run.leaseId !== metadata.leaseId
+      || snapshot.run.fencingToken !== metadata.fencingToken || snapshot.run.baseHead !== metadata.baseHead
+      || snapshot.run.draftHead !== retainedTaskHandoff.draftHead || snapshot.run.candidateHead) {
+      throw new Error("The retained task Run changed before submission.");
+    }
+    expectedRetainedFiles = (await verifyRetainedAssistantHandoff({ metadata, checkpoint: snapshot.latestCheckpoint,
+      proof: retainedTaskHandoff })).expectedFiles;
+  }
   const prepared = await prepareLocalCandidateSnapshot({
     metadata,
     metadataPath,
@@ -18427,8 +18623,12 @@ const submit = async (options, checkpointHead) => withRun(async ({
     token,
     companyEncryption,
     message: String(options.message || "Подготовить результат Agent Run"),
+    retainedFiles: expectedRetainedFiles,
   });
   const head = prepared.head;
+  if (expectedRetainedFiles) {
+    await assertRetainedCandidateBytes(metadata.workspaceDirectory, retainedTaskHandoff.draftHead, head, expectedRetainedFiles);
+  }
 
   if (checkpointHead && head !== checkpointHead) {
     // A changed file still belongs to the working copy. Do not publish a
@@ -18678,11 +18878,11 @@ const submit = async (options, checkpointHead) => withRun(async ({
   );
 });
 
-const submitWithMergeRecovery = async (options, checkpointHead) => {
-  try { return await submit(options, checkpointHead); } catch (error) {
+const submitWithMergeRecovery = async (options, checkpointHead, retainedTaskHandoff) => {
+  try { return await submit(options, checkpointHead, retainedTaskHandoff); } catch (error) {
     // Only an explicit native CAS refusal establishes non-publication. A
     // timeout/lost response may already be accepted and stays read-back-only.
-    if (error instanceof TrelioApiError && error.statusCode === 409 && error.code === "WORKSPACE_OUTDATED") {
+    if (!retainedTaskHandoff && error instanceof TrelioApiError && error.statusCode === 409 && error.code === "WORKSPACE_OUTDATED") {
       await preserveOutdatedWorkspaceRun(options);
     }
     throw error;
@@ -21161,7 +21361,8 @@ export const recoverBridgePluginUpgrade = async (
   }
 };
 
-export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, retainedAssistantHandoff, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
+export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, retainedAssistantHandoff,
+  retainedTaskHandoff, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -21221,7 +21422,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
   } else if (command === "pause") {
     await pause(options);
   } else if (command === "finish") {
-    await finish(options, { retainedAssistantHandoff });
+    await finish(options, { retainedAssistantHandoff, retainedTaskHandoff });
   } else if (command === "submit") {
     await submitWithMergeRecovery(options);
   } else if (command === "merge") {

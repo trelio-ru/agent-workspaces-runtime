@@ -134,6 +134,7 @@ import {
   resolveWorkspaceContextFileName,
   recoverBridgeHostRuntimeUpgrade,
   ensureAutomaticRunWorklog,
+  verifyRetainedAssistantHandoff,
   findTrelioWorkingFolderRoot,
   formatBridgeCommandError,
   ensureBridgeCompatibility,
@@ -12161,6 +12162,69 @@ test("bridge creates one deterministic worklog entry from handoff", async () => 
     );
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
+  }
+});
+
+test("retained task handoff verifies the original checkpoint and every dirty byte", async () => {
+  const workspaceDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-retained-handoff-"));
+  const metadataPath = path.join(workspaceDirectory, ".fixture-metadata");
+  const runId = "11111111-1111-4111-8111-111111111111";
+  const workspaceId = "22222222-2222-4222-8222-222222222222";
+  const checkpointId = "33333333-3333-4333-8333-333333333333";
+  const write = (name, content) => writeFile(path.join(workspaceDirectory, name), content);
+  const commit = async message => {
+    await runGit(workspaceDirectory, ["add", "WORK.md"]);
+    await runGit(workspaceDirectory, ["commit", "-m", message]);
+    return (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+  };
+  const digest = text => createHash("sha256").update(text).digest("hex");
+  try {
+    await runGit(workspaceDirectory, ["init", "--initial-branch=main"]);
+    await runGit(workspaceDirectory, ["config", "user.name", "Trelio Test"]);
+    await runGit(workspaceDirectory, ["config", "user.email", "trelio@example.test"]);
+    await write("WORK.md", "Base");
+    const baseHead = await commit("Base");
+    await write("WORK.md", "Stored portable draft");
+    const draftHead = await commit("Draft");
+    const metadata = {
+      runId, workspaceId, workspaceDirectory, baseHead, draftHead, materializedHead: draftHead, candidateHead: draftHead,
+      scopeType: "task", runAuthor: testRunAuthor, finishRecovery: { schemaVersion: 1, workspaceId, runId },
+    };
+    const summary = "Synthetic native handoff already committed.";
+    const evidence = ["Verified native operation"], questions = ["Synthetic outstanding issue"];
+    const nextActionInstruction = "Continue the original task after recovery.";
+    const contents = "Latest original replacement";
+    await write("WORK.md", contents);
+    metadata.automaticWorklogPath = await ensureAutomaticRunWorklog({
+      metadata, metadataPath, summary, evidence, candidatePaths: ["WORK.md"], openQuestions: questions, nextActionInstruction,
+    });
+    await rm(metadataPath);
+    const checkpoint = { id: checkpointId, runId, checkpointType: "handoff", candidateHead: draftHead, summary,
+      evidenceJson: evidence, filesChangedJson: ["WORK.md"], openQuestionsJson: questions,
+      nextActionJson: { instruction: nextActionInstruction, taskOutcome: "no_status_change" } };
+    const proof = { workspaceId, runId, checkpointId, draftHead,
+      handoffSha256: digest(JSON.stringify([summary, evidence, ["WORK.md"], questions, nextActionInstruction, "no_status_change"])),
+      replacements: [{ pathSha256: digest("WORK.md"), contentSha256: digest(contents) }] };
+    const verify = (current = checkpoint) => verifyRetainedAssistantHandoff({ metadata, checkpoint: current, proof });
+    assert.equal((await verify()).options.summary, summary);
+    await assert.rejects(verify({ ...checkpoint, summary: "Changed after the original save" }), /retained task handoff/u);
+    await write("WORK.md", "New unrelated draft");
+    await assert.rejects(verify(), /retained task handoff/u);
+    await runGit(workspaceDirectory, ["update-index", "--assume-unchanged", "WORK.md"]);
+    await assert.rejects(verify(), /retained task handoff/u);
+    await runGit(workspaceDirectory, ["update-index", "--no-assume-unchanged", "WORK.md"]);
+    await write("WORK.md", contents);
+    await runGit(workspaceDirectory, ["add", "WORK.md"]);
+    await assert.rejects(verify(), /Git command failed|exit code|non-zero|git/u);
+    await runGit(workspaceDirectory, ["restore", "--staged", "WORK.md"]);
+    await write("unrelated.md", "Do not save this file");
+    await assert.rejects(verify(), /retained task handoff/u);
+    await rm(path.join(workspaceDirectory, "unrelated.md"));
+    await write(metadata.automaticWorklogPath, "The original worklog was replaced");
+    await assert.rejects(verify(), /retained task handoff/u);
+    assert.equal(await readFile(path.join(workspaceDirectory, "WORK.md"), "utf8"), contents);
+  } finally {
+    await rm(workspaceDirectory, { recursive: true, force: true });
   }
 });
 

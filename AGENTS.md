@@ -188,6 +188,13 @@ publication tooling также остаются вне этого публичн
   the next fixed daily cycle; isolated classifier tests are insufficient.
   The same expired accepted witness permits signed maintenance under the
   existing lease, without requiring a read-only-parent continuation.
+  Legacy task handoff v4 attaches only to the original scheduled technical
+  prelude. Keep exact native grant/checkpoint/effect locators and file digests.
+  Repeat the native history under the owned writer and the server facts under
+  its original pass lock. Decrypt the existing handoff before claim, compare
+  the worklog, replacements and immutable final Git bytes before publication.
+  No new handoff, external actions, task completion or dirty-tree acceptance
+  from unexplained edits. Test the full encrypted save and subsequent cycle.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -725,6 +725,63 @@ test('a started finish is recoverable without treating its pending handle or ear
   ]){
     const edited=structuredClone(turn);change(edited);
     assert.equal(assistantInterruptedPendingWorkspaceFinish(edited,terminalMarkerId,taskPass),null);
+  }
+});
+
+test('retained handoff projects exact native history without exporting text, paths or browser parameters',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
+  const {workspaceId,runId}=workspaceDraft, runIdentity={workspaceId,runId};
+  const prepare=turn.items.find(item=>item.tool==='prepare_assistant_workspace_run').arguments;
+  delete prepare.workspaceId;
+  prepare.runId=runId;
+  const releaseId=randomUUID(), grantId=randomUUID(), accountId=randomUUID();
+  const action=(operation,parameters,result,failed=false)=>({
+    type:'mcpToolCall',server:'trelio-assistant',tool:'continue_assistant_workspace_action',
+    status:failed?'failed':'completed',arguments:{schemaVersion:1,operation,parameters,runIdentity,taskPass},
+    result:{structuredContent:result,...(failed?{isError:true}:{})},
+  });
+  const browser=(operation,args,state)=>({
+    type:'mcpToolCall',server:'trelio-assistant',tool:'use_assistant_browser',status:'completed',
+    arguments:{taskPass,siteOrigin:'https://mail.google.com',command:{operation,args}},
+    result:{structuredContent:{state,reason:'none'}},
+  });
+  const finish=turn.items.at(-1);
+  finish.arguments.parameters={taskOutcome:'no_status_change',summary:'Synthetic exact preserved handoff',
+    evidence:['Private evidence canary'],filePaths:['WORK.md'],nextAction:'Continue the original task'};
+  delete finish.result.structuredContent.operationId;
+  turn.items.splice(-1,0,
+    action('skill_run',{skillId:'telegram-mtproto',releaseId,arguments:['account','list']},
+      {operation:'skill_run',stdout:JSON.stringify({ok:true,accounts:[],revision:1})}),
+    action('skill_run',{skillId:'telegram-mtproto',releaseId,arguments:['chat-info','--chat','PRIVATE_PEER','--local-account',accountId]},
+      {code:'TRELIO_WORKSPACE_ACTION_FAILED'},true),
+    browser('navigate',{url:'https://mail.google.com/mail/'},'preparing'),
+    browser('status',{},'ready'),
+    action('secret_browser_prepare',{runId}, {prepared:true,grant:{id:grantId,workspaceId,runId},bridge:{action:{arguments:{
+      operation:'secret_browser_fill',runIdentity,parameters:{grantId},
+    }}}}),
+    action('secret_browser_fill',{grantId,targetUrl:'https://accounts.google.com/?private=CANARY'},
+      {code:'TRELIO_WORKSPACE_ACTION_FAILED'},true),
+    browser('close',{},'closed'),
+  );
+  const classify=value=>assistantInterruptedRetainedHandoff(value,terminalMarkerId,taskPass);
+  const witness=classify(turn);
+  assert.equal(witness?.locators.runId,runId);
+  assert.equal(witness?.locators.browserGrantId,grantId);
+  assert.equal(witness?.locators.releaseId,releaseId);
+  assert.equal(witness?.automaticFiles,false);
+  assert.ok(witness?.replacements.length>0);
+  assert.doesNotMatch(JSON.stringify(witness),/CANARY|PRIVATE_PEER|WORK\.md|Synthetic/u);
+  assert.equal(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),null);
+
+  for(const change of [
+    value=>{value.items.at(-7).arguments.parameters.arguments[0]='send';},
+    value=>{value.items.at(-3).arguments.parameters.grantId=randomUUID();},
+    value=>{value.items.at(-2).arguments.command.operation='type-text';},
+    value=>{value.items.at(-1).arguments.parameters.summary='';},
+    value=>{value.items.push(structuredClone(value.items.at(-3)));},
+  ]){
+    const edited=structuredClone(turn);change(edited);
+    assert.equal(classify(edited),null);
   }
 });
 

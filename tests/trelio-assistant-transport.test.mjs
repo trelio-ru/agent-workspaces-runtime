@@ -3076,7 +3076,8 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
   }
 });
 
-for(const named of [false,true])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${named?'named':'task'})`,{timeout:150000},async()=>{
+for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
+  const named=fixture==='named',retainedTask=fixture==='retained-task';
   // An actual isolated child is necessary: the common module captures its
   // private config root at import time. Never write synthetic authority/cache
   // into the developer's real HOME or share a human remembered-key profile.
@@ -3104,7 +3105,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     // Give the complete synthetic child four bounded 30s phase allowances,
     // plus 30s for this outer fixture's setup/cleanup. No production request,
     // native command, proof/session lease or operation deadline is changed.
-    try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern',`encrypted Workspace inspect open finish.*\\(${named?'named':'task'}\\)$`,fileURLToPath(import.meta.url)],{
+    try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern',`encrypted Workspace inspect open finish.*\\(${fixture}\\)$`,fileURLToPath(import.meta.url)],{
       env:childEnv,timeout:4*30000,maxBuffer:1024*1024});
       assert.match(result.stdout,/ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED/u);
     }catch(error){
@@ -3310,7 +3311,8 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       if(parsed.pathname===`${base}/runs/${runId}/claim`){
         claims++;
         const input=JSON.parse(options.body);assert.equal(input.expectedFencingToken,nativeRun.fencingToken);
-        nativeRun={...nativeRun,status:'running',fencingToken:nativeRun.fencingToken+1,leaseId:randomUUID()};return scoped(nativeRun);
+        nativeRun={...nativeRun,status:'running',fencingToken:nativeRun.fencingToken+1,leaseId:randomUUID(),
+          leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};return scoped(nativeRun);
       }
       if(parsed.pathname===`${base}/encryption/payloads`){
         const body=JSON.parse(options.body);assert.equal(body.writerDeviceId,cryptoDeviceId);
@@ -3332,7 +3334,9 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
           assert.equal(input.draftHead,nativeRun.draftHead);
           assert.equal(input.draftHead,publishedFinalDraft?.revision.head);
         }
-        latestCheckpoint={...input,id:randomUUID(),runId,candidateHead:nativeRun.draftHead,createdAt:new Date().toISOString()};
+        latestCheckpoint={...input,id:randomUUID(),runId,candidateHead:nativeRun.draftHead,createdAt:new Date().toISOString(),
+          ...(retainedTask?{evidenceJson:input.evidence,filesChangedJson:input.filesChanged,
+            openQuestionsJson:input.openQuestions,nextActionJson:input.nextAction}:{})};
         return json(latestCheckpoint);
       }
       const storage=`${base}/runs/${runId}/encrypted-storage`;
@@ -3710,16 +3714,48 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     handoffTargetMode='valid';
     const handoffPlan={...finishPlan,localAction:{...finishPlan.localAction,operation:'checkpoint',
       parameters:{...finishPlan.localAction.parameters,type:'handoff'}}};
+    const metadataPath=path.join(path.dirname(writable),'.trelio-run.json');
+    if(retainedTask){
+      const runAuthor={memberId:randomUUID(),displayName:'Synthetic original assistant'};
+      nativeRun={...nativeRun,initiatedByMemberId:runAuthor.memberId,initiatedByDisplayName:runAuthor.displayName};
+      const metadata=JSON.parse(await fs.readFile(metadataPath,'utf8'));
+      await fs.writeFile(metadataPath,JSON.stringify({...metadata,runAuthor,candidateHead:draftHead}));
+    }
     stage('handoff');
     const handedOff=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(handoffPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
     assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
     assert.equal(Object.hasOwn(latestCheckpoint,'taskOutcome'),!named);
     let readDraftRecovery;
-    if(named){
+    if(retainedTask){
+      const {createFinishRecoveryMarker}=await import('../host-runtime/scripts/trelio-workspace-finish-recovery.mjs');
+      const metadata=JSON.parse(await fs.readFile(metadataPath,'utf8'));
+      await fs.writeFile(metadataPath,JSON.stringify({...metadata,finishRecovery:createFinishRecoveryMarker(metadata)}));
+      nativeRun={...nativeRun,status:'expired',leaseExpiresAt:new Date(Date.now()-1000).toISOString()};
+      const relativePaths=['local-only.md',`assistants/${f.identity.assistantId}/WORK.md`,'new-result.md'];
+      const replacements=await Promise.all(relativePaths.map(async filePath=>({pathSha256:digest(Buffer.from(filePath)),
+        contentSha256:digest(await fs.readFile(path.join(writable,filePath)))})));
+      const locators={...runIdentity,checkpointId:latestCheckpoint.id,draftHead};
+      const p=finishPlan.localAction.parameters;
+      const retainedHandoff={locators,automaticFiles:true,replacements,
+        handoffSha256:digest(Buffer.from(JSON.stringify([p.summary,p.evidence,null,[],p.nextAction,p.taskOutcome])))};
+      readDraftRecovery=async()=>({...runIdentity,finishPending:true,retainedHandoff});
+      const savedContents=await fs.readFile(path.join(writable,'new-result.md'));
+      const openRetained=()=>common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
+        withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),readDraftRecovery,
+      }));
+      const beforeClaims=claims;
+      await fs.writeFile(path.join(writable,'new-result.md'),'Synthetic unverified concurrent edit');
+      await assert.rejects(openRetained(),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+      assert.equal(claims,beforeClaims);
+      await fs.writeFile(path.join(writable,'new-result.md'),savedContents);
+      await openRetained();
+      assert.equal(claims,beforeClaims+1);
+      assert.equal(nativeRun.id,runId);
+      assert.equal(nativeRun.status,'running');
+    }else if(named){
       // The accepted named revision recovers the already committed handoff
       // under its own Run. No synthetic new checkpoint or task outcome.
-      const metadataPath=path.join(path.dirname(writable),'.trelio-run.json');
       const metadata=JSON.parse(await fs.readFile(metadataPath,'utf8'));
       await common.runGit(['add','--all'],{cwd:writable});
       await common.runGit(['commit','-m','Retained named archive handoff'],{cwd:writable});
@@ -3738,7 +3774,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     catch(error){throw new Error((deniedFixtureRoute??'fixture-native')+' '+error.code);}
 
     assert.equal(finished.operation,'finish');assert.equal(nativeRun.status,'accepted');assert.equal(acceptedPublications,1);
-    if(named)assert.equal(nativeHandoffs,handoffsBeforeFinish,'an accepted retained archive must not write another handoff');
+    if(named||retainedTask)assert.equal(nativeHandoffs,handoffsBeforeFinish,'a retained save must not write another handoff');
     else {
       assert.equal(promotedFinalDrafts,1,'encryption promotes the same durable finish bytes');
       assert.equal(nativeRun.candidateHead,publishedFinalDraft.revision.head);
@@ -5185,8 +5221,11 @@ test('device-only terminal continuation uses SAME renew route, exact owner recei
   const companyId=randomUUID(),taskId=randomUUID(),passId=randomUUID(),bindingId=randomUUID(),deliveryId=randomUUID(),threadId=randomUUID(),reviewId=randomUUID();
   const base={companyId,taskId,passId,expectedLeaseRevision:3,terminalTurnId:randomUUID(),clientRequestId:randomUUID()};
   let state='waiting_owner',corrupt=null;const calls=[];
+  let evidence=null;
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,input)=>{
-    calls.push({...input});assert.equal(operation,'passRenew');
+    calls.push({...input});
+    if(operation==='passRead')return {passId,state:'review_required',leaseRevision:3,businessReady:false,retainedFinishEvidence:evidence};
+    assert.equal(operation,'passRenew');
     const value={schemaVersion:1,state,reviewId,invocationId:reviewId,terminalTurnId:base.terminalTurnId,expectedLeaseRevision:3,
       questionPath:'/test/agent-work/',resumed:state==='resumed'?{leaseRevision:4,leaseExpiresAt:new Date(Date.now()+1200000).toISOString()}:null,
       pass:{passId,bindingId,bindingRevision:2,deliveryId,threadId,state:state==='resumed'?'leased':'review_required',leaseRevision:state==='resumed'?4:3,
@@ -5222,6 +5261,26 @@ test('device-only terminal continuation uses SAME renew route, exact owner recei
   assert.equal((await client.continueTaskPass(technical)).schemaVersion,3);
   assert.deepEqual(calls.at(-1).technicalPrelude,technicalPrelude);
   await assert.rejects(client.continueTaskPass({...technical,technicalPrelude:{...technicalPrelude,accountId:randomUUID()}}),/INVALID_INPUT/);
+
+  const locators={workspaceId:randomUUID(),runId:randomUUID(),releaseId:randomUUID(),browserGrantId:randomUUID(),
+    questionId:randomUUID(),questionRequestId:randomUUID(),controlReceiptId:randomUUID(),controlId:randomUUID(),controlRequestId:randomUUID()};
+  const observation={companyId,taskId,passId,expectedLeaseRevision:3,locators};
+  assert.equal(await client.readTaskRetainedFinishEvidence(observation),null);
+  assert.deepEqual(calls.at(-1),{companyId,taskId,passId,retainedFinishEvidence:{...locators,expectedLeaseRevision:3}});
+  evidence={checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  const retainedFinish=await client.readTaskRetainedFinishEvidence(observation);
+  assert.deepEqual(retainedFinish,{...locators,...evidence});
+  evidence={...evidence,checkpointText:'PRIVATE_CANARY'};
+  await assert.rejects(client.readTaskRetainedFinishEvidence(observation),/INVALID_RESPONSE/);
+  const recovery={...base,reviewId,continuation:'read',automatic:true,retainedFinish};
+  await assert.rejects(client.continueTaskPass(recovery),/INVALID_RESPONSE/,'a v3 response cannot substitute for the handoff receipt');
+  corrupt=v=>({...v,schemaVersion:4,questionPath:null});
+  assert.equal((await client.continueTaskPass(recovery)).schemaVersion,4);
+  assert.deepEqual(calls.at(-1).retainedFinish,retainedFinish);
+  const beforeRefusal=calls.length;
+  await assert.rejects(client.continueTaskPass({...recovery,technicalPrelude}),/INVALID_INPUT/);
+  await assert.rejects(client.continueTaskPass({...recovery,retainedFinish:{...retainedFinish,localFilePath:'PRIVATE'}}),/INVALID_INPUT/);
+  assert.equal(calls.length,beforeRefusal);
 });
 
 test('multi-task intake read-back preserves an exact original partition and rejects mixed or incomplete receipts',async()=>{
