@@ -1443,6 +1443,8 @@ Exact legacy template bytes для распознавания при мигра�
   [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Сетевой отказ Codex tools/list сохраняет host-owned recovery и закрытый код
   причины; повторяет только чтение каталога, без OAuth и replay рабочих действий.
+  Только native Codex tools/list запрашивает gzip, wire/decoded size ограничены.
+  Первый list имеет 25 с, обновление 45 с. Тайм-аут сохраняет закрытый этап.
   Receipt подтверждает только count, наличие фиксированных read tools и отправку
   list_changed. Codex отдельно подтверждает выдачу инструмента и safe read.
   [Контракт](docs/agent-workspace-runtime.md#codex-catalog-recovery).

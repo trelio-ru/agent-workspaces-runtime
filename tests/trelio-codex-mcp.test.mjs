@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
 import { PassThrough } from "node:stream";
+import { gzipSync } from "node:zlib";
 import { createCodexMcpHandler, createHarnessConnection, handleLocalMcpMessage, handleToolCall, remoteMcpHttpRequest,
   RemoteMcpHostError, runCodexMcpStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
@@ -91,10 +92,11 @@ test("catalogue startup is bounded and late readers cannot restore stale dispatc
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let release, observedSignal, reads = 0;
   const started = Promise.withResolvers();
-  const handler = createCodexMcpHandler({ connect: () => ({ listTools: async signal => {
+  const handler = createCodexMcpHandler({ connect: () => ({ listTools: async (signal, { onStage }) => {
     reads++;
     if (reads === 1) {
       observedSignal = signal;
+      onStage("catalog_body");
       started.resolve();
       return await new Promise(resolve => { release = resolve; });
     }
@@ -104,8 +106,13 @@ test("catalogue startup is bounded and late readers cannot restore stale dispatc
   const listing = handler(frame("tools/list"));
   await started.promise;
   t.mock.timers.tick(10_000);
+  assert.equal(observedSignal.aborted, false, "the old cutoff must not abort a viable transfer");
+  t.mock.timers.tick(15_000);
   const failed = await listing;
   assert.equal(failed.result._meta["trelio/catalogReason"], "TRELIO_CODEX_CATALOG_TIMEOUT");
+  assert.equal(failed.result._meta["trelio/catalogTiming"].stage, "catalog_body");
+  assert.equal(failed.result._meta["trelio/catalogTiming"].timeoutMs, 25_000);
+  assert.match(failed.result.tools[0].description, /catalog_body/u);
   assert.equal(observedSignal.aborted, true);
   const notifications = [];
   const recovered = await handler(frame("tools/call", { name: "trelio_retry_catalog", arguments: {} }),
@@ -117,6 +124,39 @@ test("catalogue startup is bounded and late readers cannot restore stale dispatc
   const stale = await handler(frame("tools/call", { name: "stale_tool", arguments: {} }));
   assert.equal(readResult(stale).code, "TRELIO_CODEX_TOOL_UNAVAILABLE");
   assert.equal(reads, 2);
+});
+
+test("explicit catalogue recovery and its subsequent live list both have time beyond startup", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const phases = [Promise.withResolvers(), Promise.withResolvers()];
+  let reads = 0, observedSignal;
+  const handler = createCodexMcpHandler({ connect: () => ({
+    listTools: async (signal, { onStage }) => {
+      if (reads++ === 0) throw new RemoteMcpHostError("REMOTE_MCP_HTTP_ERROR", "fixture");
+      observedSignal = signal;
+      onStage("catalog_headers");
+      return await phases[reads - 2].promise;
+    },
+  }) });
+  await handler(frame("initialize"), { clientInfo });
+  await handler(frame("tools/list"));
+  const retry = handler(frame("tools/call", { name: "trelio_retry_catalog", arguments: {} }));
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(30_000);
+  assert.equal(observedSignal.aborted, false);
+  phases[0].resolve([{ name: "get_task" }]);
+  const result = readResult(await retry);
+  assert.equal(result.catalogTiming.stage, "catalog_headers");
+  assert.equal(result.catalogTiming.timeoutMs, 45_000);
+  assert.equal(result.catalogEvidence.readTools.get_task, true);
+
+  const relist = handler(frame("tools/list"));
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(30_000);
+  assert.equal(observedSignal.aborted, false);
+  phases[1].resolve([{ name: "list_companies" }]);
+  assert.deepEqual((await relist).result.tools.map(tool => tool.name), ["list_companies", "trelio_connect"]);
+  assert.equal(reads, 3, "the following list receives fresh server ACL metadata");
 });
 
 test("an older concurrent catalogue result cannot replace or clear the latest dispatch map", async () => {
@@ -184,8 +224,15 @@ test("real Codex stdio survives HTTP 503 catalogue failure and reloads without O
     const payload = JSON.parse(Buffer.concat(chunks));
     if (payload.method === "tools/list") {
       catalogReads++;
+      assert.equal(request.headers["accept-encoding"], "gzip");
       if (unavailable) { response.writeHead(503); response.end("private backend diagnostic"); return; }
+      const tool = { name: "list_companies", inputSchema: { type: "object", properties: {} } };
+      const data = JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { tools: [tool] } });
+      response.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip", "mcp-session-id": "fixture-session" });
+      response.end(gzipSync(`event: message\ndata: ${data}\n\n`));
+      return;
     }
+    assert.equal(request.headers["accept-encoding"], undefined, "encoding opt-in covers only the finite catalogue");
     if (payload.method === "tools/call") businessCalls++;
     response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "fixture-session" });
     response.end(JSON.stringify({ jsonrpc: "2.0", id: payload.id ?? null,
@@ -231,6 +278,7 @@ test("real Codex stdio survives HTTP 503 catalogue failure and reloads without O
     unavailable = false;
     const recovered = readResult(await retry());
     assert.equal(recovered.catalogStatus, "ready");
+    assert.equal(recovered.catalogTiming.stage, "catalog_validation");
     assert.deepEqual(recovered.catalogEvidence, {
       nativeToolCount: 1,
       readTools: { list_companies: true, get_agent_instructions: false, get_task: false, list_my_tasks: false, list_project_tasks: false },
@@ -247,6 +295,53 @@ test("real Codex stdio survives HTTP 503 catalogue failure and reloads without O
   } finally {
     input.end();
     await running;
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("catalogue gzip preserves JSON responses and enforces the decoded byte limit", async () => {
+  const diagnosticTool = { name: "list_companies", inputSchema: { type: "object", properties: {} } };
+  const valid = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 7, result: { tools: [diagnosticTool] } }));
+  const oversized = gzipSync(Buffer.alloc(4 * 1024 * 1024 + 1));
+  let responseBody = valid, encoding = "identity";
+  const encodings = [];
+  const server = http.createServer((request, response) => {
+    encodings.push(request.headers["accept-encoding"]);
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json", "content-encoding": encoding });
+    response.end(responseBody);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const phases = [];
+  const read = (method = "tools/list") => remoteMcpHttpRequest({
+    config: { endpoint: "https://trelio.ru/mcp", protocolVersion: "2025-03-26", authentication: { type: "oauth2_pkce" } },
+    credential: "synthetic-token", payload: { jsonrpc: "2.0", id: 7, method },
+  }, {
+    acceptCatalogGzip: true, onCatalogPhase: phase => phases.push(phase),
+    resolveEndpoint: async () => ({ endpoint: new URL(`http://mcp.test:${server.address().port}/mcp`),
+      address: "127.0.0.1", family: 4 }),
+  });
+  try {
+    const plain = await read();
+    assert.deepEqual(plain.message.result.tools, [diagnosticTool]);
+    assert.deepEqual(phases, ["catalog_first_byte", "catalog_body", "catalog_decode"]);
+
+    encoding = "gzip";
+    responseBody = gzipSync(valid);
+    assert.deepEqual(await read(), plain);
+    responseBody = oversized;
+    await assert.rejects(read(), { code: "REMOTE_MCP_RESPONSE_TOO_LARGE" });
+    responseBody = gzipSync(valid).subarray(0, -4);
+    await assert.rejects(read(), { code: "REMOTE_MCP_INVALID_RESPONSE" });
+    encoding = "br";
+    await assert.rejects(read(), { code: "REMOTE_MCP_INVALID_RESPONSE" });
+
+    encoding = "identity";
+    responseBody = valid;
+    await read("tools/call");
+    assert.deepEqual(encodings, ["gzip", "gzip", "gzip", "gzip", "gzip", undefined]);
+  } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }

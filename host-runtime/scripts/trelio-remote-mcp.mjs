@@ -43,6 +43,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { StringDecoder } from "node:string_decoder";
+import { gunzipSync } from "node:zlib";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload, deliverLocalMcpResult, resolveLocalMcpTextCompatibility } from "./trelio-mcp-results.mjs";
 import {
@@ -1425,6 +1426,19 @@ export const buildRemoteMcpRequestHeaders = ({
     : {}),
 });
 
+const decodeRemoteMcpCatalogGzip = (bytes) => {
+  try {
+    // Bound inflated bytes as well as wire bytes. A small compressed stream
+    // must never bypass the existing JSON-RPC response limit.
+    return gunzipSync(bytes, { maxOutputLength: MAX_REMOTE_RESPONSE_BYTES });
+  } catch (error) {
+    if (error?.code === "ERR_BUFFER_TOO_LARGE") {
+      throw new RemoteMcpHostError("REMOTE_MCP_RESPONSE_TOO_LARGE", "Remote MCP ответ превысил безопасный лимит.");
+    }
+    throw new RemoteMcpHostError("REMOTE_MCP_INVALID_RESPONSE", "Remote MCP вернул повреждённый сжатый каталог.");
+  }
+};
+
 export const remoteMcpHttpRequest = ({
   config,
   credential,
@@ -1435,6 +1449,8 @@ export const remoteMcpHttpRequest = ({
   resolveEndpoint = resolveSafeRemoteMcpEndpoint,
   timeoutMs = REMOTE_REQUEST_TIMEOUT_MS,
   signal,
+  acceptCatalogGzip = false,
+  onCatalogPhase,
 } = {}) => {
   const body = payload === null ? null : Buffer.from(JSON.stringify(payload), "utf8");
   const headers = buildRemoteMcpRequestHeaders({
@@ -1443,6 +1459,11 @@ export const remoteMcpHttpRequest = ({
     body,
     sessionId,
   });
+  // The fixed Trelio host opts in only to finite schema metadata. Keep
+  // all tool results, authentication errors and interactive streams on their
+  // existing transport. A caller cannot opt a tools/call result into gzip.
+  const catalogRequest = acceptCatalogGzip && method === "POST" && payload?.method === "tools/list";
+  if (catalogRequest) headers["accept-encoding"] = "gzip";
   const expectedId = payload && Object.hasOwn(payload, "id")
     ? payload.id
     : null;
@@ -1576,6 +1597,13 @@ export const remoteMcpHttpRequest = ({
           return;
         }
 
+        const encoding = catalogRequest ? String(incoming.headers["content-encoding"] ?? "identity").trim().toLowerCase() : "identity";
+        if (encoding !== "identity" && encoding !== "gzip") {
+          fail(new RemoteMcpHostError("REMOTE_MCP_INVALID_RESPONSE", "Remote MCP вернул неподдерживаемую кодировку каталога."));
+          return;
+        }
+        const compressed = encoding === "gzip";
+        if (catalogRequest) onCatalogPhase?.("catalog_first_byte");
         const completeSseEvent = (eventText) => {
           const message = parseSseEventJson(eventText);
           if (
@@ -1615,6 +1643,7 @@ export const remoteMcpHttpRequest = ({
           if (settled) {
             return;
           }
+          if (catalogRequest && receivedBytes === 0) onCatalogPhase?.("catalog_body");
           receivedBytes += chunk.byteLength;
           if (receivedBytes > MAX_REMOTE_RESPONSE_BYTES) {
             fail(new RemoteMcpHostError(
@@ -1623,7 +1652,7 @@ export const remoteMcpHttpRequest = ({
             ));
             return;
           }
-          if (!isEventStream) {
+          if (!isEventStream || compressed) {
             chunks.push(chunk);
             return;
           }
@@ -1648,7 +1677,8 @@ export const remoteMcpHttpRequest = ({
             return;
           }
           try {
-            if (isEventStream) {
+            if (catalogRequest) onCatalogPhase?.("catalog_decode");
+            if (isEventStream && !compressed) {
               sseBuffer += decoder.end();
               if (consumeCompleteSseEvents({ flush: true })) {
                 return;
@@ -1666,12 +1696,15 @@ export const remoteMcpHttpRequest = ({
               });
               return;
             }
+            // Trelio only gzip-compresses finite tools/list replies. Validate
+            // the complete gzip member, then use the same JSON/SSE RPC parser.
+            const bytes = Buffer.concat(chunks, receivedBytes);
             succeed({
               statusCode,
               sessionId: responseSessionId,
               message: parseRemoteJsonRpcResponse(
                 contentType,
-                Buffer.concat(chunks),
+                compressed ? decodeRemoteMcpCatalogGzip(bytes) : bytes,
                 expectedId,
               ),
             });
@@ -7568,9 +7601,15 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     const store = vault ?? createRemoteMcpOAuthVault({ nativeClient,
       namespace: `native-trelio-${nativeClient}-v1`, credentialFile:
         path.join(resolveWorkspaceBridgeConfigDirectory(), "native-clients", nativeClient, "credential.json") });
-    const credential = async signal => {
-      if (!identity) await readMetadata(signal);
+    const credential = async (signal, onStage) => {
+      if (!identity) {
+        onStage?.("oauth_metadata");
+        await readMetadata(signal);
+      }
+      throwIfAborted(signal);
+      onStage?.("credential_store");
       const current = await store.read(ORIGIN, identity);
+      throwIfAborted(signal);
       if (!current || current.expiresAt <= Date.now()) throw fail(publicProfile?.authRequired ?? "TRELIO_HARNESS_AUTH_REQUIRED",
         "Подключите Trelio инструментом trelio_connect. Вход выполняется только в браузере.");
       return current.accessToken;
@@ -7579,20 +7618,23 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     // transport defaults to a shorter limit, which would cut off native calls
     // before their Trelio budget expires. Forward the enclosing signal so
     // catalogue reads and session recovery still consume the original budget.
-    const requestTrelioMcp = (request, signal) =>
-      httpRequest(request, { signal, timeoutMs: TRELIO_CALL_BUDGET_MS });
-    const rpcOnce = async (method, params, signal, token, targetSession = session) => {
+    const requestTrelioMcp = (request, signal, onCatalogPhase) =>
+      httpRequest(request, { signal, timeoutMs: TRELIO_CALL_BUDGET_MS,
+        ...(isCodex && request.payload.method === "tools/list" ? { acceptCatalogGzip: true, onCatalogPhase } : {}) });
+    const rpcOnce = async (method, params, signal, token, targetSession = session, onStage) => {
       throwIfAborted(signal);
-      const response = await requestTrelioMcp({ config: config(), credential: token ?? await credential(signal),
-        sessionId: targetSession?.sessionId, payload: { jsonrpc: "2.0", id: ++sequence, method, ...(params ? { params } : {}) } }, signal);
+      const accessToken = token ?? await credential(signal, onStage);
+      if (method === "tools/list") onStage?.("catalog_headers");
+      const response = await requestTrelioMcp({ config: config(), credential: accessToken,
+        sessionId: targetSession?.sessionId, payload: { jsonrpc: "2.0", id: ++sequence, method, ...(params ? { params } : {}) } }, signal, onStage);
       return { response, result: assertJsonRpcResult(response, method) };
     };
     const sessionMissing = error => error instanceof RemoteMcpHostError && error.code === "REMOTE_MCP_SESSION_NOT_FOUND";
-    const rpc = async (method, params, signal) => {
+    const rpc = async (method, params, signal, onStage) => {
       // Join a recovery already started between call()/catalogue setup and
       // dispatch instead of emitting a headerless request during that window.
-      const rejectedSession = await initialize(signal);
-      try { return await rpcOnce(method, params, signal, undefined, rejectedSession); }
+      const rejectedSession = await initialize(signal, onStage);
+      try { return await rpcOnce(method, params, signal, undefined, rejectedSession, onStage); }
       catch (error) {
         if (!rejectedSession?.sessionId || !sessionMissing(error)) throw error;
         // Parallel requests may report the old rejection after another request
@@ -7600,8 +7642,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         // coalesces concurrent recovery and never reuses the retired header.
         if (session === rejectedSession) session = null;
         throwIfAborted(signal);
-        const recoveredSession = await initialize(signal);
-        try { return await rpcOnce(method, params, signal, undefined, recoveredSession); }
+        const recoveredSession = await initialize(signal, onStage);
+        try { return await rpcOnce(method, params, signal, undefined, recoveredSession, onStage); }
         catch (retryError) {
           // One recovery per invocation. A second explicit rejection leaves the
           // next invocation free to negotiate, without looping or changing OAuth.
@@ -7610,15 +7652,20 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         }
       }
     };
-    const initialize = async signal => {
+    const initialize = async (signal, onStage) => {
       if (session) return session;
-      if (initializing) return initializing;
+      if (initializing) {
+        onStage?.("session_init_wait");
+        return initializing;
+      }
       initializing = (async () => {
-        const token = await credential(signal);
+        const token = await credential(signal, onStage);
+        onStage?.("mcp_initialize");
         const { response, result } = await rpcOnce("initialize", { protocolVersion: PROTOCOL, capabilities: clientCapabilities,
           clientInfo: { name: `trelio-${nativeClient}`, version: getHostRuntimeVersion() } }, signal, token, null);
         if (result?.protocolVersion !== PROTOCOL) throw fail("TRELIO_HARNESS_PROTOCOL_INVALID", "Trelio не согласовал MCP protocol.");
         const next = { sessionId: response.sessionId ?? null, instructions: result.instructions ?? "" };
+        onStage?.("mcp_initialized");
         await requestTrelioMcp({ config: config(), credential: token, sessionId: next.sessionId,
           payload: { jsonrpc: "2.0", method: "notifications/initialized" } }, signal);
         session = next;
@@ -7700,12 +7747,13 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         if (row.outcome.error) throw row.outcome.error;
         return row.outcome.value;
       },
-      async listTools(signal) {
-        await initialize(signal);
+      async listTools(signal, { onStage } = {}) {
+        await initialize(signal, onStage);
         const tools = [], cursors = new Set();
         let cursor;
         do {
-          const { result } = await rpc("tools/list", cursor ? { cursor } : {}, signal);
+          const { result } = await rpc("tools/list", cursor ? { cursor } : {}, signal, onStage);
+          onStage?.("catalog_validation");
           if (!Array.isArray(result?.tools) || tools.length + result.tools.length > MAX_TOOLS) {
             throw fail("TRELIO_HARNESS_CATALOG_INVALID", "MCP-каталог превышает допустимый размер.");
           }
@@ -8250,10 +8298,12 @@ const CODEX_CONNECT_TOOL = {
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
 };
 
-// Discovery must produce recovery tools before the native 60-second business
-// request budget expires. One deadline covers metadata, credentials and every
-// catalogue page; slow dependencies cannot extend it or publish late schemas.
-const CODEX_CATALOG_TIMEOUT_MS = 10_000;
+// The plugin gives Codex 60s for MCP startup. Allow for the loader's 25s
+// and the 3s initialize bootstrap before the first list. Subsequent lists
+// and explicit recovery get more time without changing the business limit.
+// Both deadlines cover metadata, credentials, negotiation and every page.
+const CODEX_CATALOG_STARTUP_TIMEOUT_MS = 25_000;
+const CODEX_CATALOG_RECOVERY_TIMEOUT_MS = 45_000;
 const CODEX_RETRY_CATALOG_TOOL = {
   name: "trelio_retry_catalog",
   description: "Retry only the Trelio tool catalogue read. Does not open OAuth, change credentials or replay a business action.",
@@ -8310,9 +8360,10 @@ const codexCatalogTransportFailure = error => {
 };
 
 class CodexCatalogUnavailableError extends RemoteMcpHostError {
-  constructor(failure) {
+  constructor(failure, catalogTiming) {
     super("TRELIO_CODEX_CATALOG_UNAVAILABLE", failure.message);
     this.failure = failure;
+    this.catalogTiming = catalogTiming;
   }
 }
 
@@ -8320,6 +8371,7 @@ const codexCatalogFailureResult = error => ({
   code: error.code,
   ...error.failure,
   catalogStatus: "unavailable",
+  catalogTiming: error.catalogTiming,
   automaticRetry: false,
   nextCall: { toolName: CODEX_RETRY_CATALOG_TOOL.name, arguments: {} },
   instruction: "Повторите только чтение каталога через trelio_retry_catalog. Сетевой сбой не требует нового входа или переустановки. Исходное рабочее действие автоматически не повторяется.",
@@ -8347,13 +8399,27 @@ export const createCodexMcpHandler = ({
   const authFailure = error => ["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(error?.code);
   let toolsByName = null;
   let catalogGeneration = 0;
-  const catalog = async signal => {
+  let catalogListed = false;
+  const catalog = async (signal, timeoutMs = CODEX_CATALOG_STARTUP_TIMEOUT_MS) => {
     const generation = ++catalogGeneration;
+    const startedAt = performance.now();
+    let stageStartedAt = startedAt;
+    let stage = "connection";
+    // The stage names come from the fixed native connection only. A
+    // timeout reports the last observed boundary, with no URLs or payload.
+    const onStage = name => {
+      stage = name;
+      stageStartedAt = performance.now();
+    };
+    const timing = () => {
+      const now = performance.now();
+      return { stage, elapsedMs: Math.round(now - startedAt), stageElapsedMs: Math.round(now - stageStartedAt), timeoutMs };
+    };
     try {
-      return await runWithAbortDeadline({ signal, timeoutMs: CODEX_CATALOG_TIMEOUT_MS,
+      const tools = await runWithAbortDeadline({ signal, timeoutMs,
         timeoutError: () => new RemoteMcpHostError("TRELIO_CODEX_CATALOG_TIMEOUT", "Catalog read deadline."),
         operation: async catalogSignal => {
-          const tools = await connection.listTools(catalogSignal);
+          const tools = await connection.listTools(catalogSignal, { onStage });
           // Even an uncooperative late reader cannot resurrect cached tools
           // after timeout. Each failed refresh discards the old dispatch map;
           // an older concurrent read cannot overwrite a newer observation.
@@ -8371,13 +8437,14 @@ export const createCodexMcpHandler = ({
               "The Codex runtime supplies proof automatically; never supply it.") };
           }), CODEX_CONNECT_TOOL];
         } });
+      return { tools, catalogTiming: timing() };
     } catch (error) {
       if (generation === catalogGeneration) toolsByName = null;
       // Cancellation belongs to the caller, even when its reason resembles
       // a transport error. Only our own deadline earns the bootstrap fallback.
       if (signal?.aborted) throw normalizeAbortReason(signal);
       const failure = codexCatalogTransportFailure(error);
-      if (failure) throw new CodexCatalogUnavailableError(failure);
+      if (failure) throw new CodexCatalogUnavailableError(failure, timing());
       throw error;
     }
   };
@@ -8409,6 +8476,7 @@ export const createCodexMcpHandler = ({
         // the remote session that this request transport cannot relay.
         toolsByName = null;
         catalogGeneration++;
+        catalogListed = false;
         await connection?.close?.();
         connection = connect({ ...(clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]
           ? { extensions: { [MCP_APP_CLIENT_EXTENSION]: clientCapabilities.extensions[MCP_APP_CLIENT_EXTENSION] } } : {}) });
@@ -8424,7 +8492,11 @@ export const createCodexMcpHandler = ({
       if (message.method === "ping") return reply({});
       if (!connection) throw new RemoteMcpHostError("TRELIO_CODEX_CLIENT_REQUIRED", "Не согласован маршрут Codex MCP.");
       if (message.method === "tools/list") {
-        try { return reply({ tools: await catalog(signal) }); }
+        const listedConnection = connection;
+        try {
+          const { tools } = await catalog(signal, catalogListed ? CODEX_CATALOG_RECOVERY_TIMEOUT_MS : CODEX_CATALOG_STARTUP_TIMEOUT_MS);
+          return reply({ tools });
+        }
         catch (error) {
           if (authFailure(error)) return reply({ tools: [CODEX_CONNECT_TOOL] });
           if (!(error instanceof CodexCatalogUnavailableError)) throw error;
@@ -8433,9 +8505,13 @@ export const createCodexMcpHandler = ({
           // The reason also goes in the visible tool description: _meta alone
           // is not guaranteed to reach the model in every Codex route.
           return reply({ tools: [{ ...CODEX_RETRY_CATALOG_TOOL,
-            description: `${error.failure.reason}: ${error.message} ${CODEX_RETRY_CATALOG_TOOL.description}`,
+            description: `${error.failure.reason}: ${error.message} Этап: ${error.catalogTiming.stage}. ${CODEX_RETRY_CATALOG_TOOL.description}`,
           }, CODEX_CONNECT_TOOL], _meta: { "trelio/catalogStatus": "unavailable",
-            "trelio/catalogCode": error.code, "trelio/catalogReason": error.failure.reason } });
+            "trelio/catalogCode": error.code, "trelio/catalogReason": error.failure.reason, "trelio/catalogTiming": error.catalogTiming } });
+        } finally {
+          // Codex re-lists after list_changed. Fetch a live snapshot again
+          // with the recovery budget rather than returning cached ACL data.
+          if (listedConnection === connection) catalogListed = true;
         }
       }
       if (message.method === "resources/list") {
@@ -8455,14 +8531,14 @@ export const createCodexMcpHandler = ({
         if (Object.keys(raw).length) throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Повтор чтения каталога не принимает параметры.");
         // One explicit read reuses the same fixed-origin OAuth transport.
         // There is no login, proof fabrication or replay of the failed action.
-        const tools = await catalog(signal);
+        const { tools, catalogTiming } = await catalog(signal, CODEX_CATALOG_RECOVERY_TIMEOUT_MS);
         // Compare the just-read upstream catalogue with the client's own
         // tool inventory using only fixed names. A written notification is
         // not an acknowledgement from Codex or evidence of a completed read.
         const nativeNames = new Set(tools.map(tool => tool.name));
         nativeNames.delete(CODEX_CONNECT_TOOL.name);
         await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
-        return reply(buildTextResult({ catalogStatus: "ready", automaticRetry: false,
+        return reply(buildTextResult({ catalogStatus: "ready", automaticRetry: false, catalogTiming,
           catalogEvidence: {
             nativeToolCount: nativeNames.size,
             readTools: Object.fromEntries(CODEX_CATALOG_DIAGNOSTIC_READ_TOOLS.map(tool => [tool, nativeNames.has(tool)])),
@@ -8477,7 +8553,7 @@ export const createCodexMcpHandler = ({
         }
         const connected = await connection.connect(signal, raw.reauthorize === true);
         if (connected?.connected === false) return reply(buildTextResult(connected));
-        await catalog(signal);
+        await catalog(signal, CODEX_CATALOG_RECOVERY_TIMEOUT_MS);
         await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         return reply(buildTextResult({ connected: true, instructions: codexInstructions(connection.instructions?.() ?? "") }));
       }
