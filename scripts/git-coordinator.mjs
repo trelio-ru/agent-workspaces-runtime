@@ -76,20 +76,37 @@ export function policy(cwd) {
   }
   return value;
 }
+function ticketFile(cwd, id, deferredRelease = false) {
+  return path.join(root(cwd), deferredRelease ? id + '.release.json' : id + '.json');
+}
+
 export function queue(cwd, attempt = 0) {
   if (!fs.existsSync(root(cwd))) return [];
   privatePath(root(cwd), true);
-  try { return fs.readdirSync(root(cwd)).filter(name => ID.test(name.slice(0, -5)) && name.endsWith('.json')).sort().map(name => {
-    const filename = path.join(root(cwd), name); privatePath(filename);
-    const row = JSON.parse(fs.readFileSync(filename, 'utf8'));
-    if (row.schemaVersion !== 1 || row.id + '.json' !== name || !Number.isSafeInteger(row.pid) || row.pid < 1
-      || row.pgid !== row.pid || typeof row.host !== 'string' || typeof row.cwd !== 'string'
-      || !TASK_BRANCH.test(row.branch ?? '') || !SHA.test(row.sha ?? '')
-      || (row.finishWorktree !== undefined && (row.finishWorktree !== true || row.tag))
-      || (row.remoteCleanupSha !== undefined && !SHA.test(row.remoteCleanupSha))
-      || !['waiting', 'running', 'verified'].includes(row.state) || typeof row.tag !== 'string') throw Error('Invalid coordination ticket');
-    return row;
-  }); } catch (error) {
+  try {
+    const ordinary = [], deferred = [], ids = new Set();
+    for (const name of fs.readdirSync(root(cwd)).sort()) {
+      const match = /^(\d{12})(\.release)?\.json$/u.exec(name);
+      if (!match) continue;
+      const [, id, suffix] = match;
+      const filename = path.join(root(cwd), name); privatePath(filename);
+      const row = JSON.parse(fs.readFileSync(filename, 'utf8'));
+      if (row.schemaVersion !== 1 || row.id !== id || ids.has(id) || row.deferredRelease !== undefined
+        || (suffix && (!row.tag || row.state !== 'waiting' || row.sourceSha !== row.sha))
+        || !Number.isSafeInteger(row.pid) || row.pid < 1
+        || row.pgid !== row.pid || typeof row.host !== 'string' || typeof row.cwd !== 'string'
+        || !TASK_BRANCH.test(row.branch ?? '') || !SHA.test(row.sha ?? '')
+        || (row.finishWorktree !== undefined && (row.finishWorktree !== true || row.tag))
+        || (row.remoteCleanupSha !== undefined && !SHA.test(row.remoteCleanupSha))
+        || !['waiting', 'running', 'verified'].includes(row.state) || typeof row.tag !== 'string') throw Error('Invalid coordination ticket');
+      ids.add(id);
+      if (suffix) deferred.push({...row, deferredRelease: true});
+      else ordinary.push(row);
+    }
+    // Older pins see only numeric tickets. A release enters that inventory
+    // only at claim, with an ID earlier than every later ordinary admission.
+    return [...ordinary, ...deferred];
+  } catch (error) {
     // A predecessor may finish between readdir and read. Retry the inventory,
     // never interpret disappearing/malformed state as an empty queue.
     if (error.code === 'ENOENT' && attempt < 3) return queue(cwd, attempt + 1);
@@ -236,7 +253,7 @@ export async function recover(cwd, id) {
       throw Error('Cannot recover an unknown or live owner/process group');
     }
     if (!result(cwd, id)) settle(cwd, entry, {state: 'recovered'});
-    fs.unlinkSync(path.join(root(cwd), id + '.json'));
+    fs.unlinkSync(ticketFile(cwd, id, entry.deferredRelease));
   });
 }
 function run(command, args, cwd) {
@@ -342,21 +359,36 @@ export async function coordinate(cwd, tag = '', actions = {}) {
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   const command = actions.run ?? run;
   try {
-    entry = await mutex(cwd, config, () => {
+    const admission = await mutex(cwd, config, () => {
       if (!fs.existsSync(root(cwd))) fs.mkdirSync(root(cwd), {mode: 0o700});
       privatePath(root(cwd), true);
       const counter = path.join(root(cwd), 'sequence');
       let next = 1;
       if (fs.existsSync(counter)) { privatePath(counter); next = JSON.parse(fs.readFileSync(counter, 'utf8')); }
-      if (!Number.isSafeInteger(next) || next < 1 || next >= 1e12 || queue(cwd).some(row => +row.id >= next)) throw Error('Invalid FIFO sequence');
-      const duplicate = queue(cwd).find(row => row.cwd === fs.realpathSync(cwd) || row.branch === initial.branch);
+      const existing = queue(cwd);
+      if (!Number.isSafeInteger(next) || next < 1 || next >= 1e12 || existing.some(row => +row.id >= next)) throw Error('Invalid FIFO sequence');
+      const duplicate = existing.find(row => row.cwd === cwd || row.branch === initial.branch);
+      const release = tag && existing.find(row => row.tag === tag);
+      if (release && (!duplicate || duplicate.id === release.id)) {
+        // A join grants access to the existing result only. Do not discard a
+        // different source, replace its version, or attach after claim.
+        if (release.deferredRelease && release.sourceSha === initial.sha) return {joinedRelease: release.id};
+        if (!duplicate) throw Error(`Release ${tag} already has candidate ${release.id}; inspect its status before CI`);
+      }
       if (duplicate) throw Object.assign(Error(`FIFO ${duplicate.id} already owns this task; inspect its status`), {code: 'INTEGRATION_ALREADY_QUEUED'});
       const row = {schemaVersion: 1, id: String(next).padStart(12, '0'), pid: process.pid, pgid: process.pid,
         host: startHost, stableHost, cwd: fs.realpathSync(cwd), ...initial, sourceSha: initial.sha, tag, state: 'waiting',
         createdAt: new Date().toISOString(), ...(actions.logFile ? {logFile: actions.logFile} : {}),
         ...(actions.finishWorktree ? {finishWorktree: true} : {})};
-      save(counter, next + 1); save(path.join(root(cwd), row.id + '.json'), row); return row;
+      save(counter, next + 1);
+      save(ticketFile(cwd, row.id, Boolean(tag)), row);
+      return row;
     }, () => cancelled);
+    if (admission.joinedRelease) {
+      if (actions.logFile) return await acknowledgeAdmission({id: admission.joinedRelease, releaseRole: 'observer'});
+      return await waitForReleaseObserver(canonical, admission.joinedRelease);
+    }
+    entry = admission;
     console.log(`FIFO ${entry.id}: ${entry.branch}${tag ? ' / ' + tag : ''}`);
     await acknowledgeAdmission({id: entry.id});
     for (;;) {
@@ -366,18 +398,26 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       // ticket snapshot can otherwise outlive that successful predecessor and
       // falsely demand dead-owner recovery. A crashed owner retains its ticket
       // and is still refused; no age/takeover or unknown-child rule changes.
-      const first = await mutex(cwd, config, () => {
+      const entered = await mutex(cwd, config, () => {
         const first = queue(cwd)[0];
         if (!first || !local(first) || !inventory().some(row => row.pid === first.pid && row.live)) {
           throw Error('First FIFO owner is not live; inspect --status and --recover TICKET');
         }
-        return first;
+        if (first.id !== entry.id) return false;
+        if (first.pid !== process.pid || first.cwd !== entry.cwd) throw Error('FIFO ownership changed');
+        if (first.deferredRelease) {
+          // Admission and promotion share the mutex. An ordinary ticket is
+          // either visible first or waits behind the already claimed release.
+          fs.renameSync(ticketFile(cwd, entry.id, true), ticketFile(cwd, entry.id));
+        }
+        entry.state = 'running';
+        save(ticketFile(cwd, entry.id), entry);
+        return true;
       }, () => cancelled);
-      if (first.id === entry.id) break;
+      if (entered) break;
       await delay(250);
     }
     candidate(cwd, entry);
-    entry.state = 'running'; save(path.join(root(cwd), entry.id + '.json'), entry);
     await command('git', ['fetch', '--prune', 'origin'], cwd);
     // Reserve the exact tag BEFORE CI. A stale proposed version fails here,
     // rather than spending another full gate and discovering the collision later.
@@ -452,11 +492,21 @@ export async function coordinate(cwd, tag = '', actions = {}) {
       await mutex(canonical, config, () => {
         const current = queue(canonical).find(row => row.id === entry.id);
         if (current && (current.pid !== process.pid || !local(current))) throw Error('Cannot remove another ticket');
-        if (current) { settle(canonical, entry, observation); fs.unlinkSync(path.join(root(canonical), entry.id + '.json')); }
+        if (current) {
+          settle(canonical, entry, observation);
+          fs.unlinkSync(ticketFile(canonical, entry.id, current.deferredRelease));
+        }
       });
     }
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
+}
+
+async function waitForReleaseObserver(canonical, id) {
+  await waitForIntegration(id, ticket => ({...status(canonical, ticket), releaseRole: 'observer'}));
+  // A shared successful integration must not trigger another caller's
+  // deploy or publish command when it is chained on a zero exit code.
+  if (!process.exitCode) process.exitCode = 3;
 }
 
 function reusable(cwd, canonical, tag, identity, finishWorktree) {
@@ -468,7 +518,7 @@ function reusable(cwd, canonical, tag, identity, finishWorktree) {
   if (finishWorktree && entry.finishWorktree !== true) throw Error(`FIFO ${entry.id} already owns this task without automatic worktree cleanup`);
   const value = status(canonical, entry.id);
   if (value.state === 'recovery_required') throw Error(`FIFO ${entry.id} needs recovery; no replacement was started`);
-  return value;
+  return tag ? {...value, releaseRole: 'observer'} : value;
 }
 async function background(cwd, canonical, tag, finishWorktree, followUp) {
   // Reattachment precedes clean-tree checks: the worker may be rebasing now.
@@ -485,7 +535,7 @@ async function background(cwd, canonical, tag, finishWorktree, followUp) {
     observe: message => {
       const value = message?.duplicate ? reusable(cwd, canonical, tag, identity, finishWorktree) : status(canonical, message?.id);
       if (!value || value.state === 'unknown') throw Error('No durable coordination admission was found');
-      return value;
+      return message?.releaseRole === 'observer' ? {...value, releaseRole: 'observer'} : value;
     }});
 }
 
@@ -535,6 +585,11 @@ export async function main(args = process.argv.slice(2)) {
       followUp = {canonical, statusScript: path.join(canonical, entryPath), statusEngine: 'shared'};
     }
     const result = await background(cwd, canonical, tag, finishWorktree, followUp);
+    if (result.releaseRole === 'observer') {
+      if (wait) return waitForReleaseObserver(canonical, result.id);
+      process.exitCode = 3;
+      return console.log(JSON.stringify(result));
+    }
     if (wait) return waitForIntegration(result.id, id => status(canonical, id));
     return console.log(JSON.stringify(integrationLaunchResult(result, canonical)));
   }

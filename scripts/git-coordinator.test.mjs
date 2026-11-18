@@ -36,6 +36,7 @@ function fixture(t, {remoteBranchCleanup = true} = {}) {
 const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim();
 fs.appendFileSync(${JSON.stringify(path.join(root, 'events'))},branch+'\\n');
 if(fs.existsSync(${JSON.stringify(path.join(root, 'fail'))}))throw Error('Synthetic executed CI failure');
+if(branch==='codex/release-task') while(fs.existsSync(${JSON.stringify(path.join(root, 'hold-release'))})) await new Promise(r=>setTimeout(r,30));
 if(branch==='codex/one') while(!fs.existsSync(${JSON.stringify(path.join(root, 'release'))})) await new Promise(r=>setTimeout(r,30));\n`);
   fs.writeFileSync(path.join(main, 'scripts/push.mjs'), `import {assertPush} from './git-coordinator.mjs'; import {execFileSync} from 'node:child_process';
 const sha=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); const tag=process.argv[3]??''; assertPush(process.cwd(),sha,tag);
@@ -339,6 +340,78 @@ test('real linked worktrees serialize preparation/CI/push and rebase only after 
   assert.deepEqual(f.events(), ['codex/one', 'codex/two']);
   assert.equal(command(two, 'show', 'HEAD:one.txt'), 'one');
   assert.deepEqual(queue(two), []);
+});
+
+test('only an unclaimed release yields to new main work and shares its exact result', async t => {
+  const f = fixture(t), one = f.branch('one'), release = f.branch('release-task'), two = f.branch('two');
+  const other = f.branch('other'), sourceSha = command(release, 'rev-parse', 'HEAD');
+  const observer = path.join(f.root, 'observer');
+  command(f.main, 'worktree', 'add', '-b', 'codex/observer', observer, sourceSha);
+  const first = f.start(one);
+  await until(() => f.events().length === 1);
+  const launched = await f.launch(release, '--tag', 'v9.9.9').done;
+  assert.equal(launched.code, 0, launched.output);
+  const ticket = JSON.parse(launched.output);
+  assert.equal(ticket.deferredRelease, true);
+  assert.equal(f.events().length, 1);
+  assert.throws(() => assertPush(release, sourceSha, 'v9.9.9'), /requires the verified live FIFO owner/);
+
+  const joined = f.launch(observer, '--wait', '--tag', 'v9.9.9');
+  await until(() => joined.output().includes(`Waiting for integration ${ticket.id}`));
+  const second = f.start(two);
+  await until(() => queue(f.main).length === 3);
+  assert.deepEqual(queue(f.main).map(entry => entry.branch), ['codex/one', 'codex/two', 'codex/release-task']);
+  const conflict = await f.launch(other, '--wait', '--tag', 'v9.9.9').done;
+  assert.equal(conflict.code, 1, conflict.output);
+  assert.match(conflict.output, /already has candidate .* before CI/);
+  assert.equal(queue(f.main).length, 3);
+
+  // Require an observable release CI start before enqueueing the next task.
+  // This proves that a claimed release stays ahead of a later main integration.
+  fs.writeFileSync(path.join(f.root, 'hold-release'), 'hold');
+  fs.writeFileSync(path.join(f.root, 'release'), 'go');
+  assert.equal((await first.done).code, 0);
+  assert.equal((await second.done).code, 0);
+  await until(() => f.events().includes('codex/release-task'));
+  const third = f.start(other);
+  await until(() => queue(f.main).length === 2);
+  assert.deepEqual(queue(f.main).map(entry => entry.branch), ['codex/release-task', 'codex/other']);
+  const late = await f.launch(observer, '--wait', '--tag', 'v9.9.9').done;
+  assert.equal(late.code, 1, late.output);
+  assert.match(late.output, /already has candidate/);
+  fs.rmSync(path.join(f.root, 'hold-release'));
+  const shared = await joined.done;
+  assert.equal(shared.code, 3, shared.output);
+  const outcome = JSON.parse(shared.output.trim().split('\n').at(-1));
+  assert.equal(outcome.releaseRole, 'observer');
+  assert.equal(outcome.id, ticket.id);
+  assert.equal(outcome.state, 'succeeded');
+  assert.equal(outcome.sha, command(f.main, 'rev-parse', 'v9.9.9^{}'));
+  assert.equal(command(f.main, 'show', 'v9.9.9:two.txt'), 'two');
+  assert.equal(command(observer, 'rev-parse', 'HEAD'), sourceSha);
+  assert.equal((await third.done).code, 0);
+  assert.deepEqual(f.events(), ['codex/one', 'codex/two', 'codex/release-task', 'codex/other']);
+});
+
+test('exact recovery releases a dead waiting release without skipping ordinary work', async t => {
+  const f = fixture(t), one = f.branch('one'), release = f.branch('waiting-release');
+  const first = f.start(one);
+  await until(() => f.events().length === 1);
+  const waiting = f.start(release, '--tag', 'v9.9.9');
+  await until(() => queue(f.main).some(entry => entry.deferredRelease));
+  const [, ticket] = queue(f.main);
+  await assert.rejects(recover(f.main, ticket.id), /live owner/);
+  process.kill(-ticket.pgid, 'SIGKILL');
+  await waiting.done;
+  assert.equal(status(f.main, ticket.id).state, 'recovery_required');
+  await recover(f.main, ticket.id);
+  assert.equal(status(f.main, ticket.id).state, 'recovered');
+  assert.equal(queue(f.main).length, 1);
+  fs.writeFileSync(path.join(f.root, 'release'), 'go');
+  const completed = await first.done;
+  assert.equal(completed.code, 0, completed.output);
+  assert.deepEqual(f.events(), ['codex/one']);
+  assert.equal(command(f.main, 'ls-remote', '--refs', 'origin', 'refs/tags/v9.9.9'), '');
 });
 
 test('an already occupied version fails before CI, with no source/tag overwrite', async t => {

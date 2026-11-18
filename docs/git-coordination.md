@@ -1,9 +1,12 @@
 # Maintainer Git coordination
 
-`npm run git:integrate` runs a FIFO shared by all linked worktrees of one clone.
-The first ticket fetches and rebases the final candidate, runs the affected
-local checks, then pushes main and reads it back. Release tickets publish their
-branch and dispatch full hosted checks. The final check runs inside the ticket.
+`npm run git:integrate` coordinates all linked worktrees of one clone.
+Ordinary tickets run in admission order. They take priority over releases
+until a release claims the empty ordinary queue under the main mutex.
+Release tickets claim in admission order with no extra collection delay.
+After claim, later arrivals wait behind the release. The owner fetches and
+rebases the final candidate, runs CI, pushes main and reads it back. Release
+tickets publish their branch and run the repository's release CI.
 Do not edit a queued branch, HEAD or files. Another clone remains an external
 writer: remote advance stops transport and requires a deliberate new enqueue.
 
@@ -15,12 +18,24 @@ silently renumbers a release. Tag creation follows verified CI and main+tag push
 is atomic. Artifact signing/activation and their CAS/read-back remain separate
 existing release steps. This command alone is not a product/runtime release.
 
+A second request for the same tag and original SHA can join a waiting release
+across worktrees. It acquires no ticket and leaves its worktree available for
+normal cleanup. A different source for the same tag is refused before CI.
+Different tags keep independent tickets. A caller marked `releaseRole=observer`
+sees the same integration result, with exit 3 for a successful observation so
+that shell chains cannot start a second publication. With a detached launch it
+gets the ticket immediately. Only the original launch continues the release.
+Reading `--wait TICKET` reports outcome without transferring ownership.
+
 For an already integrated exact main SHA the release ticket publishes its branch
 and uses the same full dispatch. It reuses successful evidence for the exact SHA
 and verifies the latest run, attempt, required jobs and native receipt.
 
-The short existing main mutex serializes FIFO admission and state changes;
-the durable ticket protects CI. Worktree creation therefore remains available.
+The short existing main mutex serializes ordinary admission and release claim.
+A deferred release starts as `<ticket>.release.json`. The claim atomically
+renames it to the numeric filename used by existing guards with the same ticket
+ID. Older workers therefore see the release in their FIFO only after claim.
+A durable ticket protects CI. Worktree creation remains available.
 Waiting workers read the first ticket and its process inventory under that same
 mutex, so normal predecessor removal/exit is an atomic handoff rather than a
 false dead-owner failure. An unchanged dead ticket still requires exact recovery. An occupied mutex may also

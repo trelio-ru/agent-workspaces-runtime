@@ -1531,8 +1531,9 @@ Exact legacy template bytes для распознавания при мигра�
   создавая вторую ветку. `--skip-bootstrap` допустим только без локальных
   отчётов, сборок и тестов.
 - Завершённая правка получает commit на русском, затем `npm run git:integrate`.
-  Общая FIFO linked worktree удерживает место до fresh fetch/rebase, локальных
-  проверок diff и guarded main push/read-back. Релиз отдельно публикует ветку
+  Общая очередь linked worktree удерживает место до fresh fetch/rebase, локальных
+  проверок diff и guarded main push/read-back. Обычные вливания идут FIFO перед
+  ожидающим выпуском до его захвата. Релиз отдельно публикует ветку
   и запускает full hosted CI. Не менять HEAD
   или files ожидающей/работающей ветки. Старые wrappers и boolean-флаги не
   заменяют live owner ancestry и verified exact SHA в canonical pre-push.
@@ -1553,7 +1554,10 @@ Exact legacy template bytes для распознавания при мигра�
   Без native Codex context автоматического возврата нет; результат читают при
   следующем обращении. Worker проверяет/вливает ветку и убирает чистый worktree.
   При полном релизе жди один exact ticket
-  через `--wait` без промежуточных отчётов о CI, затем продолжай выпуск.
+  через `--wait` без промежуточных отчётов о CI. Продолжай выпуск только из
+  исходного запуска. Повтор с теми же tag/source SHA может присоединиться к
+  ожидающему тикету. `releaseRole=observer` и exit 3 дают результат интеграции
+  без повторной публикации.
   GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
   CI требуют полной матрицы Windows, ARM64, macOS и browser jobs при релизе.
   При обычном вливании их проверяет локальный план. [Контракт CI](docs/runtime-ci.md).
