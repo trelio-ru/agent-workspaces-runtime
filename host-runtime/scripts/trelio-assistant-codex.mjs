@@ -1847,6 +1847,14 @@ const exactWorkspacePoll=(value,operation,run)=>value.operation===operation&&val
   &&sameDraftRun(value.nextCall.arguments.runIdentity,run)
   &&Object.keys(value.nextCall.arguments.parameters??{}).join(',')==='finishOperationId'
   &&value.nextCall.arguments.parameters.finishOperationId===value.operationId;
+// A completed native compaction changes model context only. Keep checking
+// every retained tool item in the full turn. A missing completion or a new
+// item shape cannot hide an in-flight native call.
+const completedTaskContextCompaction=item=>item?.type==='contextCompaction'
+  &&Object.keys(item).sort().join(',')==='completedAtMs,id,startedAtMs,type'
+  &&typeof item.id==='string'&&item.id.length>0&&item.id.length<=128
+  &&Number.isSafeInteger(item.startedAtMs)&&item.startedAtMs>0
+  &&Number.isSafeInteger(item.completedAtMs)&&item.completedAtMs>=item.startedAtMs;
 
 /** Prove an intermediate restart from the whole original native turn. The
  * native pass reader selected the exact current checkpoint independently.
@@ -1866,7 +1874,7 @@ export const assistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
   const run={workspaceId:selected.workspaceId,runId:selected.runId};
   let prepared=false,openHandle=null,opened=false,dirty=false,lastCheckpoint=null;
   for(const item of items){
-    if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
+    if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
     const args=item?.arguments,value=item?.result?.structuredContent;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'
       ||!args||Object.getPrototypeOf(args)!==Object.prototype)return false;

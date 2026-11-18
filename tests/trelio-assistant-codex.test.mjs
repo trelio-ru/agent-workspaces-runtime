@@ -836,7 +836,8 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
     const stdout='Synthetic signed read output';
     const taskSkillRead=bindAssistantTaskSkillRead({schemaVersion:1,releaseId:parameters.releaseId,packageSha256:'a'.repeat(64),
       outputSha256:createHash('sha256').update(stdout).digest('hex')},{scope:taskPass,parameters,stdout});
-    originalTurn.items.push(continuation('skill_run',parameters,{stdout,taskSkillRead}));
+    originalTurn.items.push({type:'contextCompaction',id:randomUUID(),startedAtMs:1,completedAtMs:2},
+      continuation('skill_run',parameters,{stdout,taskSkillRead}));
     const proof={taskPass,workStateContext,checkpoint};
     assert.equal(assistantInterruptedTaskCheckpoint(originalTurn,terminalMarkerId,proof),true);
     const observed=await readAssistantCodexDelivery(threadId,terminalMarkerId,{
@@ -852,7 +853,8 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
       value=>{value.items.push(structuredClone(replace));},
       value=>{value.items.push(add('create_comment',{},{}));},
       value=>{value.items.push(add('use_assistant_browser',{command:{operation:'navigate'}},{}));},
-      value=>{value.items.at(-2).result.structuredContent.taskDraftCheckpoint.checkpointId=randomUUID();},
+      value=>{value.items.at(-2).completedAtMs=null;},
+      value=>{value.items.at(-3).result.structuredContent.taskDraftCheckpoint.checkpointId=randomUUID();},
       value=>{value.items[2].result.structuredContent.authorityReads=[];},
     ]){
       const changed=structuredClone(originalTurn);mutate(changed);

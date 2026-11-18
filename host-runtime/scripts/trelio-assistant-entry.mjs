@@ -1934,7 +1934,8 @@ const productionContext = async (action, options = {}) => {
 // here: a transport/coordinator implementation alone is unreachable from the
 // production factory. This does not add it to the model-visible MCP catalogue.
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
-  'beginTaskPass','readTaskPass','readTaskRetainedFinishEvidence','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
+  'beginTaskPass','readTaskPass','readTaskRetainedFinishEvidence','readTaskPortableFinishEvidence','readTaskIntermediateDraftEvidence',
+  'renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
   'beginSourceIntake','reconcileAnsweredSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
   'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery','readRejectedTriageIgnore','reconcileRejectedTriageIgnore'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];

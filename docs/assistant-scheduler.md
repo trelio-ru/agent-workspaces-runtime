@@ -777,6 +777,9 @@ App Server rereads the full latest turn before renewal. A busy writer or
 changed turn blocks renewal. Recovery uses the original chat, workspace and
 Run and starts once. Normal task authorities and native outcome checks still
 govern work after the checkpoint.
+The real protected host factory forwards both stage-specific device reads.
+A completed native context-compaction item is inert and does not skip any
+surrounding tool evidence in that full turn.
 
 If the latest interrupted turn finished the Run, verify its exact finish
 operation and the same Run's clean accepted status with a new candidate head.

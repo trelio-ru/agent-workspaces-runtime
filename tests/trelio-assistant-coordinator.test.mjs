@@ -9,6 +9,7 @@ import { createAssistantInbox, readAssistantWorkspaceDraftRecovery } from '../ho
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { createAssistantRuntimeHost } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={}) => {
   if(ownsDatabase)t.after(()=>database.close());
@@ -3352,10 +3353,24 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
   await f.coordinator.close();
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-intermediate-checkpoint-'));
   const filename=path.join(directory,'journal.sqlite');
-  let database=new DatabaseSync(filename),coordinator=createAssistantCoordinator({...f.options,database});
   const native=f.options.native,client=f.options.client,readOutcome=client.readBusinessOutcome;
   const checkpoint={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
-  let original,writerReady=false,qualified=false,businessComplete=false,reviews=0,renewals=0,starts=0;
+  let original,database,host,writerReady=false,qualified=false,businessComplete=false,reviews=0,renewals=0,starts=0,clears=0;
+  // Enter via the production factory. A disconnected host-only device
+  // method would let isolated coordinator and HTTP fixtures pass separately.
+  client.sourceAccounts=async()=>[];
+  client.sourceRoutes=async()=>[];
+  client.readHealth=async()=>({code:'dispatch_review_required',revision:1});
+  client.reportHealth=async input=>{assert.equal(input.clearedReason,'dispatch_review_required');clears++;};
+  const openHost=()=>createAssistantRuntimeHost({context:async action=>action(client,{
+    ...f.options.passHost,readIdentity:async()=>f.identity,readActivation:async()=>null,withSetupLock:action=>action(),
+  }),dependencies:{directory,ensureDirectory:async()=>{},now:f.options.now,timeZone:'UTC',native,
+    readHookReadiness:async()=>({fingerprint:'b'.repeat(64)}),
+    openDatabase:async()=>{database=new DatabaseSync(filename);return {database,close:async()=>database.close()};},
+    readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,
+      authorizedByUserId:f.memberId,businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome',
+        'workspace_execution','owner_decisions','background_service']}}),
+  }});
   native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
   client.readBusinessOutcome=async args=>businessComplete?readOutcome(args):{schemaVersion:1,state:'pending'};
   client.readTaskIntermediateDraftEvidence=async args=>{
@@ -3373,8 +3388,8 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
     }
     return {state:'uncertain',turnId:originalTurn};
   };
-  f.options.passHost.continuePass=async(args,pass)=>{
-    assert.deepEqual(pass,original);
+  client.continueTaskPass=async args=>{
+    assert.deepEqual(f.activePass(),original);
     assert.deepEqual(args.intermediateDraft,checkpoint);
     assert.equal(args.terminalTurnId,originalTurn);
     const live=f.passes.get(original.deliveryId);
@@ -3401,6 +3416,8 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
     return {state:'completed',turnId:randomUUID(),receipt:`codex:${original.threadId}:${randomUUID()}`};
   };
   try{
+    host=await openHost();
+    let {coordinator}=host;
     await coordinator.pollOnce();await coordinator.workOnce();
     f.events.push({id:randomUUID(),revision:'owner-reply',taskId:f.taskId,wake:true,ownerQuestionId:questionId});
     f.advance(300001);await coordinator.pollOnce();
@@ -3411,16 +3428,17 @@ test('intermediate checkpoint resumes the original owner-answer pass once across
     qualified=true;
     await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
     assert.deepEqual([reviews,renewals,starts],[1,0,0]);
-    await coordinator.close();database.close();
-    database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
+    await host.close();
+    host=await openHost();coordinator=host.coordinator;
     const inbox=createAssistantInbox({database,now:f.options.now});
     assert.deepEqual(inbox.readPassContinuation(original.deliveryId).taskReadParent,{intermediateDraft:checkpoint});
     writerReady=true;
     await coordinator.workOnce();
     assert.deepEqual([reviews,renewals,starts],[1,1,1]);
+    assert.equal(clears,1);
     assert.equal(f.activePass(),null);
     assert.equal(coordinator.status()[0].threadId,original.threadId);
-  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+  }finally{await host?.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
 test('native final draft settles the same Run without resolving unknown external work',async t=>{

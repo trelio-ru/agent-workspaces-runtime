@@ -179,6 +179,9 @@ publication tooling также остаются вне этого публичн
   later edits and routed source slots retain their original fences. Existing
   owner-question locators remain in that same delivery. See the scheduler
   contract for one-use reservation and the separate final-save stage.
+  Both native draft evidence reads enter through the real protected host
+  factory. A closed native context-compaction item has no task effect;
+  keep checking the full original tool history after it.
   A final in-progress finish with its exact native poll handle may preserve
   the same local candidate after native expiry. This path verifies the
   private finish marker, intact Git tree and existing process lock before
