@@ -714,6 +714,26 @@ interrupted recovery cannot start another turn or borrow archive settlement.
 Only ordinary task evidence and completion advance the next scheduled slot.
 Older workers reject the new witness and retain the original uncertainty.
 
+### Interrupted technical prelude
+
+The same scheduled original may have prepared an empty canonical Run and then
+failed to open it. Classify the whole latest native turn with the same signed
+prompt, exact task proof, all selected authority and completed signed guide
+pages. Only host account inventory, literal pre-dispatch refusals, the exact
+unopened Run and the separately reviewed historical diagnostic command qualify.
+The historical release proof is scoped to the same public signed artifact.
+No provider invocation, account/credential material or raw history is used to
+obtain this proof.
+
+Freeze the Run, Workspace and historical release/project/skill identifiers in
+the existing one-use continuation intent. The host requires native v3 for this
+witness and repeats the proof under the exclusive writer before renewal. The
+server independently verifies the Run is still empty and unchanged and rejects
+any outcome or unrelated mutation. An older server's receipt, changed lead
+turn, failed proof, uncertain transport and private/revoked/different provider
+release supply no continuation authority. Continue from the same Run after fresh
+pinned reads. Ordinary task material and native completion still settle the pass.
+
 ### Interrupted Workspace draft settlement
 
 A stored `interrupted` is still uncertainty. The one narrow exception is a

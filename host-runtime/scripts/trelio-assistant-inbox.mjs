@@ -53,12 +53,20 @@ export const ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS=Object.freeze(
 export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract','complete_assistant_pass',
 ]);
+export const validateAssistantTechnicalPrelude=value=>{
+  const fields=['kind','workspaceId','runId','skillId','releaseId','projectId'];
+  object(value,fields);
+  if(Object.keys(value).length!==fields.length||value.kind!=='local_skill_diagnostics_v1'||value.skillId!=='telegram-mtproto')
+    inputError();
+  return {kind:value.kind,workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
+    skillId:value.skillId,releaseId:uuid(value.releaseId),projectId:uuid(value.projectId)};
+};
 const taskReadWitness=value=>{
   // A root witness never substitutes for a completed parent. Older workers
   // refuse this distinct shape and keep the original native-start fence.
   if(value?.initialScheduled===true){
-    object(value,['initialScheduled']);
-    return {initialScheduled:true};
+    object(value,['initialScheduled','technicalPrelude']);
+    return {initialScheduled:true,...(value.technicalPrelude===undefined?{}:{technicalPrelude:validateAssistantTechnicalPrelude(value.technicalPrelude)})};
   }
   const fields=['parentMarkerId','parentTurnId'];
   object(value,fields);

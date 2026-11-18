@@ -5139,6 +5139,16 @@ test('device-only terminal continuation uses SAME renew route, exact owner recei
   assert.equal(automatic.schemaVersion,2);assert.equal(automatic.questionPath,null);
   assert.equal(calls.at(-1).automatic,true);assert.equal(automatic.invocationId,reviewId);
   await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:false}),/INVALID_INPUT/);
+
+  const technicalPrelude={kind:'local_skill_diagnostics_v1',workspaceId:randomUUID(),runId:randomUUID(),
+    skillId:'telegram-mtproto',releaseId:randomUUID(),projectId:randomUUID()};
+  const technical={...base,reviewId,continuation:'read',automatic:true,technicalPrelude};
+  await assert.rejects(client.continueTaskPass(technical),/INVALID_RESPONSE/,'a v2 response cannot admit the retained prelude');
+  corrupt=v=>({...v,schemaVersion:3,questionPath:null});
+  await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:true}),/INVALID_RESPONSE/);
+  assert.equal((await client.continueTaskPass(technical)).schemaVersion,3);
+  assert.deepEqual(calls.at(-1).technicalPrelude,technicalPrelude);
+  await assert.rejects(client.continueTaskPass({...technical,technicalPrelude:{...technicalPrelude,accountId:randomUUID()}}),/INVALID_INPUT/);
 });
 
 test('multi-task intake read-back preserves an exact original partition and rejects mixed or incomplete receipts',async()=>{

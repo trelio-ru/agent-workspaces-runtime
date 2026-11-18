@@ -8,9 +8,10 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
-import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
+import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, assistantConversationKeyMatches, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
-import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity } from './trelio-workspace.mjs';
+import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
+import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -1296,6 +1297,135 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
   return taskReads===1&&(initialScheduled!==true||catalogue===null||nextPage===null);
 };
 
+const plainRecord=value=>value&&Object.getPrototypeOf(value)===Object.prototype;
+const onlyKeys=(value,keys)=>plainRecord(value)&&Object.keys(value).every(key=>keys.includes(key));
+const nativeTaskReadProof=(args,taskPass)=>exactDraftPass(args.taskPass,taskPass)&&plainRecord(args.runtimeSessionProof);
+
+/** Retained interrupted scheduled prelude, before any business action.
+ *
+ * All native items are consumed, including refused branches. This shape
+ * matches only one empty canonical Run, signed guide pages, the native local
+ * account list and an audited historical provider diagnostic. The backend
+ * independently proves the immutable release and empty Run at review and
+ * again at renewal. Names or provider success alone are not evidence.
+ * Keep every account argument and result in this bounded native reader.
+ */
+export const assistantInterruptedTechnicalPrelude=(turn,deliveryId,{taskPass,assistantId}={})=>{
+  if(!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length<5||turn.items.length>128)return null;
+  const [original,...items]=turn.items;
+  if(original?.type!=='userMessage')return null;
+  const nativeReads=[original];
+  const preflightReads=new Set(['get_task','get_task_instruction_page','get_assistant_status']);
+  let workspace=null,skill=null,openRefused=false,diagnosed=false,guideCount=null,guidePart=0;
+  const exactKeys=(value,keys)=>onlyKeys(value,keys)&&Object.keys(value).length===keys.length;
+  const passFields=['taskPass','runtimeSessionProof'];
+  const diagnoseShape=['ok','runtimeReady','appCredentialsBundled','appCredentialBoundary',
+    'appCredentialsUserConfigRequired','legacyApiHashCacheRemoved','sessionPresent','policy','localRoot','securityBoundary'];
+  for(const item of items){
+    if(['agentMessage','reasoning'].includes(item?.type))continue;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||item.error!=null
+      ||!plainRecord(item.arguments))return null;
+    // The native summary may retain an authority page as one bounded JSON
+    // text block. Only the existing exact read parser may accept that shape.
+    if(preflightReads.has(item.tool)){nativeReads.push(item);continue;}
+    if(!plainRecord(item.result?.structuredContent))return null;
+    const args=item.arguments,value=item.result.structuredContent;
+    const positive=item.status==='completed'&&item.result.isError!==true&&!Object.hasOwn(value,'code');
+    const refused=code=>item.status==='failed'&&item.result.isError!==false&&exactKeys(value,['code'])&&value.code===code;
+    if(item.tool==='list_assistant_skills'){
+      if(!refused('ASSISTANT_LOCAL_SETUP_TASK_ACTIVE')||args.companyId!==taskPass.companyId
+        ||args.skillId!=='telegram-mtproto'||!onlyKeys(args,['companyId','projectId','skillId','limit','offset']))return null;
+      continue;
+    }
+    if(!nativeTaskReadProof(args,taskPass))return null;
+    if(item.tool==='search'||item.tool==='search_agent_guidance'){
+      // These fixed native tools are read-only even when search preparation
+      // had not delivered its result at the time the turn stopped.
+      if(!positive)return null;
+      continue;
+    }
+    if(item.tool==='get_agent_skill'){
+      if(!positive||args.skillId!=='telegram-mtproto')return null;
+      continue;
+    }
+    if(item.tool==='get_assistant_operation_contract'||item.tool==='get_trelio_tool_contract'){
+      if(!positive&&!(item.tool==='get_assistant_operation_contract'&&refused('ASSISTANT_CAPABILITY_UNAVAILABLE'))
+        &&!(item.tool==='get_trelio_tool_contract'&&refused('ASSISTANT_MCP_INPUT_INVALID')))return null;
+      continue;
+    }
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(refused('ASSISTANT_CAPABILITY_UNAVAILABLE'))continue;
+      if(!positive||!onlyKeys(args,[...passFields,'clientRequestId','workspaceId','runId'])
+        ||!UUID.test(args.clientRequestId??'')||value.prepared!==true||value.workspace?.scopeType!=='task'
+        ||value.workspace.companyId!==taskPass.companyId||value.workspace.taskId!==taskPass.taskId)return null;
+      const selected={workspaceId:value.workspace.id,runId:value.run?.id};
+      if(![selected.workspaceId,selected.runId].every(v=>UUID.test(v??''))
+        ||!sameDraftRun(value.bridge?.actions?.open?.arguments?.parameters,selected)
+        ||args.workspaceId!==undefined&&args.workspaceId!==selected.workspaceId
+        ||args.runId!==undefined&&args.runId!==selected.runId
+        ||workspace&&!sameDraftRun(workspace,selected))return null;
+      workspace=selected;
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return null;
+    if(['open','status'].includes(args.operation)){
+      // A bare open/lookup refused before materialization. The companion
+      // server proof checks that exactly this Run remained unclaimed and
+      // empty. Successful, ambiguous and poll-handle actions all refuse.
+      if(!workspace||!refused('TRELIO_WORKSPACE_DIRECTORY_REQUIRED'))return null;
+      if(args.operation==='open'){
+        if(!exactKeys(args,[...passFields,'schemaVersion','operation','parameters'])||!sameDraftRun(args.parameters,workspace))return null;
+        openRefused=true;
+      }else if(!exactKeys(args,[...passFields,'schemaVersion','operation','parameters','runIdentity'])
+        ||!exactKeys(args.parameters,[])||!sameDraftRun(args.runIdentity,workspace))return null;
+      continue;
+    }
+    if(args.operation!=='skill_run'||!exactKeys(args,[...passFields,'schemaVersion','operation','parameters']))return null;
+    const params=args.parameters;
+    if(!onlyKeys(params,['companyId','projectId','skillId','releaseId','runtimeSessionId','arguments','guidePart'])
+      ||params.companyId!==taskPass.companyId||params.skillId!=='telegram-mtproto'
+      ||![params.projectId,params.releaseId,params.runtimeSessionId].every(v=>UUID.test(v??''))
+      ||!Array.isArray(params.arguments)||params.arguments.length>32
+      ||params.arguments.some(v=>typeof v!=='string'||Buffer.byteLength(v)>4096))return null;
+    const selected={skillId:params.skillId,releaseId:params.releaseId,projectId:params.projectId};
+    if(skill&&Object.keys(selected).some(key=>skill[key]!==selected[key]))return null;
+    skill=selected;
+    // These literal native codes are emitted by the schema/policy boundary
+    // before provider invocation. Do not treat a generic error as refusal.
+    if(refused('ASSISTANT_MCP_INPUT_INVALID')||refused('ASSISTANT_SKILL_COMMAND_DENIED'))continue;
+    if(!positive||value.schemaVersion!==1||value.operation!=='skill_run'
+      ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>64*1024)return null;
+    let stdout,accountCommand,selection,part;
+    try{
+      stdout=JSON.parse(value.stdout);
+      accountCommand=parseAccountCommand(params.arguments);
+      selection=splitAccountArguments(params.arguments);
+      part=assistantSkillGuideSelection(params.arguments,params.guidePart);
+    }catch{return null;}
+    if(accountCommand?.operation==='list'){
+      if(!exactKeys(stdout,['ok','accounts','revision'])||stdout.ok!==true||!Array.isArray(stdout.accounts)
+        ||!Number.isSafeInteger(stdout.revision)||params.guidePart!==undefined)return null;
+    }else if(part!==undefined){
+      if(!exactKeys(stdout,['schemaVersion','part','count','path','sha256','text','nextGuidePart'])
+        ||stdout.schemaVersion!==1||part!==guidePart||stdout.part!==part||!Number.isSafeInteger(stdout.count)
+        ||stdout.count<1||stdout.count>64||part>=stdout.count||guideCount!==null&&guideCount!==stdout.count
+        ||stdout.nextGuidePart!==(part+1<stdout.count?part+1:null)||!isAssistantSkillGuidePath(stdout.path)
+        ||typeof stdout.text!=='string'||createHash('sha256').update(stdout.text).digest('hex')!==stdout.sha256)return null;
+      guideCount=stdout.count;guidePart++;
+    }else{
+      if(selection.providerArguments.length!==1||selection.providerArguments[0]!=='doctor'||!selection.accountId
+        ||!exactKeys(stdout,diagnoseShape)||stdout.ok!==true||stdout.appCredentialBoundary!=='signed-runtime-package'
+        ||stdout.securityBoundary!=='chat-only')return null;
+      diagnosed=true;
+    }
+  }
+  if(!workspace||!openRefused||!skill||!diagnosed||guideCount===null||guidePart!==guideCount
+    ||!assistantInterruptedTaskRead({...turn,items:nativeReads},deliveryId,{taskPass,assistantId,initialScheduled:true}))
+    return null;
+  return validateAssistantTechnicalPrelude({kind:'local_skill_diagnostics_v1',...workspace,...skill});
+};
+
 const draftReads=new Set(['get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract']);
 const localDraftRefusal=(item,code)=>item.status==='failed'&&item.result?.isError!==false
   &&item.result?.structuredContent?.code===code&&(item.error==null||item.error.message===code);
@@ -1826,8 +1956,11 @@ const readInterruptedTaskReadTurn=async(request,threadId,deliveryId,witness)=>{
     // Prior completed cycles are independent and do not certify this delivery.
     const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
     const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
-    return assistantInterruptedTaskRead(turn,deliveryId,witness)
-      ?{state:'interrupted_task_read',turnId:turn.id}:{state:'uncertain'};
+    const technicalPrelude=assistantInterruptedTechnicalPrelude(turn,deliveryId,witness);
+    if(witness.technicalPrelude!==undefined){
+      if(!technicalPrelude||JSON.stringify(technicalPrelude)!==JSON.stringify(witness.technicalPrelude))return {state:'uncertain'};
+    }else if(!technicalPrelude&&!assistantInterruptedTaskRead(turn,deliveryId,witness))return {state:'uncertain'};
+    return {state:'interrupted_task_read',turnId:turn.id,...(technicalPrelude?{technicalPrelude}:{})};
   }
   // Fetch the two latest full turns together. An intervening turn or a
   // replaced parent makes the pending pass unsafe to recover automatically.
@@ -2249,7 +2382,8 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
     const initial=recovery?.initialScheduled===true;
     if(!recovery||Object.getPrototypeOf(recovery)!==Object.prototype
       ||Object.keys(recovery).sort().join(',')!==(initial
-        ?'initialScheduled,taskPass,terminalMarkerId,terminalTurnId':'parentMarkerId,parentTurnId,taskPass,terminalMarkerId,terminalTurnId')
+        ?'initialScheduled,taskPass,'+(recovery.technicalPrelude===undefined?'':'technicalPrelude,')+'terminalMarkerId,terminalTurnId'
+        :'parentMarkerId,parentTurnId,taskPass,terminalMarkerId,terminalTurnId')
       ||![recovery.terminalMarkerId,recovery.terminalTurnId].every(value=>UUID.test(value??''))
       ||deliveryId===recovery.terminalMarkerId
       ||(initial?workStateContext.scheduled!==true
@@ -2262,6 +2396,10 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
       ||!exactDraftPass(recovery.taskPass,recovery.taskPass)||recovery.taskPass.companyId!==workStateContext.companyId
       ||recovery.taskPass.taskId!==workStateContext.taskId||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
+    if(recovery.technicalPrelude!==undefined){
+      try{validateAssistantTechnicalPrelude(recovery.technicalPrelude);}
+      catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
+    }
   }
   if (typeof options.startInvocation !== 'function') fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) fail('ASSISTANT_CODEX_INVALID_INPUT');
@@ -2469,7 +2607,8 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       const {terminalMarkerId,terminalTurnId,...witness}=options.taskReadRecovery;
       const current=await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{
         ...witness,assistantId:workStateContext.assistantUserId});
-      if(current.state!=='interrupted_task_read'||current.turnId!==terminalTurnId)
+      if(current.state!=='interrupted_task_read'||current.turnId!==terminalTurnId
+        ||JSON.stringify(current.technicalPrelude??null)!==JSON.stringify(witness.technicalPrelude??null))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
     if(options.namedArchiveResume){
@@ -2536,7 +2675,10 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       const scope = options.readinessProbe === true ? '' : `TRELIO_ASSISTANT_${workStateContext?.kind==='source_intake'?'INTAKE':'SCOPE'} ${JSON.stringify(workStateContext)}\n`;
       const namedArchiveResume=options.namedArchiveResume
         ? 'The previous recovery turn finished the already retained archive save only. Reuse that accepted archive revision. Continue the original task from the first unfinished step, with current task authority, provider access, original receipts and deduplication. The previous save is not a task result. Do not repeat the old control or owner question.\n':'';
-      const readRecovery=options.taskReadRecovery
+      const prelude=options.taskReadRecovery?.technicalPrelude;
+      const readRecovery=prelude
+        ? 'The interrupted invocation stopped while preparing work. Continue from the same canonical Workspace ID '+prelude.workspaceId+' and Run ID '+prelude.runId+'. Use a fresh native prepare/open of this exact Run and both returned pinned authority files. Reconcile the prior state before doing the next unfinished task step. Do not rerun the prior provider diagnosis, repeat an external action or open a replacement Run. The preserved technical state does not grant authority to send, publish or change anything.\\n'
+        : options.taskReadRecovery
         ? 'The interrupted invocation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';
       const recovery=options.continuationReview
         ? `This is ONE automatic recovery continuation after terminal turn ${options.continuationReview.priorTurnId}, with invocation marker ${options.continuationReview.reviewId}. The original task authorization remains in force. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Re-read current status even if an earlier message or pending technical question says host recovery is required; the earlier error is not a current result. A lost finish operation handle requires ordinary status without that handle and an exact native Run read. When acceptance is absent, recover the same own Run through its native prepare/open and returned local recovery actions; technical reopening needs no new owner approval. Preserve the source files and reconcile their selected delta before saving. Decide what remains to be done and continue the task. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. Technical recovery does not approve sensitive actions or prove completion.\n`:'';

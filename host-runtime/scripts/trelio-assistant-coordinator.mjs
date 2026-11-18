@@ -1688,7 +1688,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||JSON.stringify(intent.taskReadParent??null)!==JSON.stringify(parentRead)
       ||JSON.stringify(intent.namedArchiveSettled??null)!==JSON.stringify(archive))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const request={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,expectedLeaseRevision:intent.expectedLeaseRevision,
-      clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId};
+      clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId,
+      ...(intent.taskReadParent?.technicalPrelude?{technicalPrelude:intent.taskReadParent.technicalPrelude}:{})};
     let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
     // A former runtime may have left a purely technical owner question. Ask
@@ -1896,8 +1897,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const interruptedTaskRead={...taskReadParent,assistantId:identity.assistantId,
         taskPass:{companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId}};
       const candidate=await native.readDelivery(threadId,marker,{signal,interruptedTaskRead});lease();
-      if(candidate.state==='interrupted_task_read'&&candidate.turnId===result.turnId)
-        return continueTerminalPass(job,{...candidate,taskReadParent},signal,marker);
+      if(candidate.state==='interrupted_task_read'&&candidate.turnId===result.turnId){
+        // Freeze the certified prelude on the same intent; a later native
+        // history read cannot substitute a different release or empty Run.
+        const witness=candidate.technicalPrelude?{...taskReadParent,technicalPrelude:candidate.technicalPrelude}:taskReadParent;
+        return continueTerminalPass(job,{...candidate,taskReadParent:witness},signal,marker);
+      }
     }
     if(result.state==='failed'&&result.failure==='model_capacity'&&job.kind==='task'&&!continued?.workspaceDraft&&!continued?.taskReadParent&&!continued?.namedArchiveSettled)
       return continueTerminalPass(job,result,signal,marker);

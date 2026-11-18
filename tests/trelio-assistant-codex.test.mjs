@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -2320,3 +2320,80 @@ for(const variant of ['exact','inline-authority','cached-authority','newer-turn'
       assert.equal(starts,0);assert.ok(!steps.includes('renew'));
     }
   });
+
+test('an interrupted technical prelude matches the original native Run and historical release under the same writer',async()=>{
+  const {turn,taskPass,terminalMarkerId,terminalTurnId}=interruptedTaskReadHistory();
+  const task={...taskContext,scheduled:true};
+  const run={workspaceId:randomUUID(),runId:randomUUID()};
+  const selection={skillId:'telegram-mtproto',releaseId:randomUUID(),projectId:randomUUID()};
+  const proof={taskPass,runtimeSessionProof:{synthetic:true}};
+  const known={taskPass,assistantId:task.assistantId,initialScheduled:true};
+  const complete=(tool,args,structuredContent)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:args,result:{structuredContent}});
+  const refuse=(item,code)=>({...item,status:'failed',result:{structuredContent:{code}}});
+  const local=(operation,parameters,output)=>complete('continue_assistant_workspace_action',
+    {...proof,operation,schemaVersion:1,parameters},output);
+  const provider=(args,stdout,more={})=>local('skill_run',
+    {...selection,companyId:task.companyId,runtimeSessionId:randomUUID(),arguments:args,...more},
+    {schemaVersion:1,operation:'skill_run',stdout:JSON.stringify(stdout)});
+  const doctor={ok:true,runtimeReady:true,appCredentialsBundled:true,appCredentialBoundary:'signed-runtime-package',
+    appCredentialsUserConfigRequired:false,legacyApiHashCacheRemoved:false,sessionPresent:true,
+    policy:{},localRoot:'synthetic',securityBoundary:'chat-only'};
+  const guide='fixture instruction';
+  turn.items[0].content[0].text=assistantNativePrompt(terminalMarkerId,assistantWorkStateContext(task),{});
+  turn.items.push(
+    complete('get_agent_skill',{...proof,skillId:selection.skillId},{schemaVersion:1}),
+    complete('prepare_assistant_workspace_run',{...proof,clientRequestId:randomUUID()},
+      {prepared:true,workspace:{id:run.workspaceId,scopeType:'task',taskId:task.taskId,companyId:task.companyId},
+        run:{id:run.runId},bridge:{actions:{open:{arguments:{parameters:run}}}}}),
+    refuse(local('open',run,{}),'TRELIO_WORKSPACE_DIRECTORY_REQUIRED'),
+    provider(['account','list'],{ok:true,accounts:[],revision:4}),
+    provider(['guides'],{schemaVersion:1,part:0,count:1,path:'instruction-guides/part-01.md',
+      sha256:createHash('sha256').update(guide).digest('hex'),text:guide,nextGuidePart:null}),
+    provider(['doctor','--local-account',randomUUID()],doctor),
+  );
+  const expected={kind:'local_skill_diagnostics_v1',...run,...selection};
+  assert.deepEqual(assistantInterruptedTechnicalPrelude(turn,terminalMarkerId,known),expected);
+  for(const mutate of [
+    value=>{value.items.at(-1).arguments.parameters.arguments[0]='send';},
+    value=>{value.items.at(-1).arguments.parameters.arguments.push('--unknown');},
+    value=>{value.items.at(-1).arguments.parameters.releaseId=randomUUID();},
+    value=>{value.items.at(-1).status='inProgress';},
+    value=>{value.items.at(-1).result.structuredContent={operation:'skill_run',schemaVersion:1,stdout:'{}'};},
+    value=>{value.items.at(-2).arguments.parameters.guidePart=1;},
+    value=>{value.items.at(-4).arguments.parameters.runId=randomUUID();},
+    value=>{value.items.at(-4).result.structuredContent.code='ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED';},
+    value=>{value.items.push(complete('create_comment',proof,{}));},
+    value=>{value.items.push({type:'commandExecution',status:'completed'});},
+    value=>{value.items.splice(3,1);},
+  ]){
+    const changed=structuredClone(turn);mutate(changed);
+    assert.equal(assistantInterruptedTechnicalPrelude(changed,terminalMarkerId,known),null);
+  }
+  const cwd=await fs.realpath(process.cwd()),threadId=randomUUID(),deliveryId=randomUUID();
+  for(const stale of [false,true]){
+    const steps=[];
+    let reads=0,starts=0;
+    const attempt=runAssistantCodexPass({threadId,deliveryId,cwd,taskContext:task,execution},{
+      executable:process.execPath,environment:{},requireAbsentMarker:true,
+      taskReadRecovery:{taskPass,initialScheduled:true,terminalMarkerId,terminalTurnId,
+        technicalPrelude:stale?{...expected,releaseId:randomUUID()}:expected},
+      continuationReview:{priorTurnId:terminalTurnId,reviewId:deliveryId},
+      readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+      readExecutionAvailability:async()=>true,beforeInvocation:async()=>{steps.push('renew');},
+      startInvocation:()=>{starts++;},
+      readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
+      spawnProcess:ownedRpc({threadId,cwd,priorTurn:[turn],onRequest:req=>{
+        if(req.method==='thread/resume')steps.push('writer');
+        if(req.method==='thread/turns/list'&&req.params.limit===1)steps.push('readlatest');
+      }}),
+    });
+    if(stale){
+      await assert.rejects(attempt,{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+      assert.equal(starts,0);assert.deepEqual(steps,['writer','readlatest']);
+    }else{
+      assert.equal((await attempt).state,'completed');
+      assert.equal(starts,1);assert.deepEqual(steps,['writer','readlatest','renew']);
+    }
+  }
+});

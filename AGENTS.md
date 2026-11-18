@@ -1632,6 +1632,11 @@ Exact legacy template bytes для распознавания при мигра�
   this distinct witness in the existing continuation row; older workers fail
   closed. Provider commands and Workspace operations still prevent recovery.
   [Contract](docs/assistant-scheduler.md#interrupted-read-only-task-continuation).
+  The separate historical technical prelude uses backend v3 and exact signed
+  diagnostic release/untouched canonical Run proof. Check the full original
+  turn under the same writer and freeze its structural witness. No provider
+  replay, new Run, source/owner input or ordinary v1/v2 receipt substitution.
+  [Contract](docs/assistant-scheduler.md#interrupted-technical-prelude).
   A later exact named-archive finish may settle through its separate restricted
   tool set and retained native handoff. Only accepted native/clean Git evidence
   permits one subsequent ordinary task continuation; the archive alone never

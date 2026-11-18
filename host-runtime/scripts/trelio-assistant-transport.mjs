@@ -11,7 +11,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
-import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata } from './trelio-assistant-inbox.mjs';
+import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -3041,16 +3041,23 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     },
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)
-        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId','reviewId','automatic'].includes(key))
+        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId','reviewId','automatic','technicalPrelude'].includes(key))
         ||input.automatic!==undefined&&input.automatic!==true
+        ||input.technicalPrelude!==undefined&&input.automatic!==true
         ||(input.continuation==='review')!==(input.reviewId===undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      let technicalPrelude;
+      if(input.technicalPrelude!==undefined){
+        try{technicalPrelude=validateAssistantTechnicalPrelude(input.technicalPrelude);}
+        catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+      }
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
-        ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{})};
+        ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{}),
+        ...(technicalPrelude?{technicalPrelude}:{})};
       const value=await call('passRenew',body,signal),pass=value?.pass;
       if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'
-        ||![1,2].includes(value.schemaVersion)||value.schemaVersion===2&&(!input.automatic||value.questionPath!==null)
-        ||value.schemaVersion===2&&!['approved','stale','resumed'].includes(value.state)
+        ||!(technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
+        ||value.schemaVersion!==1&&(!input.automatic||value.questionPath!==null||!['approved','stale','resumed'].includes(value.state))
         ||!['waiting_owner','approved','declined','clarification','expired','stale','resumed'].includes(value.state)
         ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision
         ||value.invocationId!==value.reviewId||body.reviewId&&body.reviewId!==value.reviewId
@@ -3059,7 +3066,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if(resumed&&(Object.keys(value.resumed).sort().join(',')!=='leaseExpiresAt,leaseRevision'||resumed.leaseRevision!==body.expectedLeaseRevision+1)
         ||(value.state==='resumed')!==(resumed!==null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {schemaVersion:value.schemaVersion,state:value.state,reviewId:id(value.reviewId),invocationId:id(value.invocationId),terminalTurnId:body.terminalTurnId,
-        expectedLeaseRevision:body.expectedLeaseRevision,questionPath:value.schemaVersion===2?null:text(value.questionPath,2048),resumed,
+        expectedLeaseRevision:body.expectedLeaseRevision,questionPath:value.schemaVersion!==1?null:text(value.questionPath,2048),resumed,
         pass:{passId:id(pass.passId),bindingId:id(pass.bindingId),bindingRevision:revision(pass.bindingRevision),deliveryId:id(pass.deliveryId),
           threadId:id(pass.threadId),leaseRevision:revision(pass.leaseRevision),leaseExpiresAt:isoTimestamp(pass.leaseExpiresAt),
           state:pass.state,execution:passExecution(pass),...workMode(pass.workMode)}};

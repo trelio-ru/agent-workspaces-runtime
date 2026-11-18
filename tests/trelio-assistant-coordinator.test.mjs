@@ -3162,7 +3162,7 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
 
 
 
-for(const ending of ['completed','interrupted','unproven','lost-renewal'])
+for(const ending of ['completed','interrupted','unproven','lost-renewal','technical-prelude'])
   test('event-free scheduled original uses the same pass across restart ('+ending+')',async t=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-scheduled-recovery-'));
     const filename=path.join(directory,'queue.sqlite');
@@ -3171,6 +3171,8 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal'])
     let coordinator=f.coordinator,successfulBasis=true,owned=false,original=null;
     const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
     const originalTurn=randomUUID(),retryMarker=randomUUID();
+    const technicalPrelude=ending==='technical-prelude'?{kind:'local_skill_diagnostics_v1',
+      workspaceId:randomUUID(),runId:randomUUID(),skillId:'telegram-mtproto',releaseId:randomUUID(),projectId:randomUUID()}:undefined;
     let provisionedNotice=0,rootStarts=0,reviews=0,renewals=0,recoveryStarts=0;
     f.authority.workMode='task';
     Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
@@ -3187,7 +3189,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal'])
           assert.equal(options.interruptedTaskRead.parentTurnId,undefined);
           assert.deepEqual(options.interruptedTaskRead.taskPass,
             {companyId:original.companyId,taskId:original.taskId,passId:original.passId});
-          if(ending!=='unproven')return {state:'interrupted_task_read',turnId:originalTurn};
+          if(ending!=='unproven')return {state:'interrupted_task_read',turnId:originalTurn,...(technicalPrelude?{technicalPrelude}:{})};
         }
         return {state:'uncertain',turnId:originalTurn};
       }
@@ -3198,6 +3200,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal'])
       const pass=f.passes.get(expected.deliveryId);
       assert.deepEqual(expected,original);
       assert.equal(args.terminalTurnId,originalTurn);
+      assert.deepEqual(args.technicalPrelude,technicalPrelude);
       if(args.continuation==='review')reviews++;
       if(args.continuation==='resume'){
         assert.ok(owned);
@@ -3206,7 +3209,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal'])
           leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
         if(ending==='lost-renewal')throw Object.assign(new Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
       }
-      return {schemaVersion:2,state:renewals?'resumed':'approved',reviewId:retryMarker,invocationId:retryMarker,
+      return {schemaVersion:technicalPrelude?3:2,state:renewals?'resumed':'approved',reviewId:retryMarker,invocationId:retryMarker,
         resumed:renewals?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
     };
     f.options.native.run=async(input,options)=>{
@@ -3255,7 +3258,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal'])
       assert.equal(renewals,0);assert.equal(readIntent().started,false);
       await coordinator.close();database.close();
       database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
-      assert.deepEqual(readIntent().taskReadParent,{initialScheduled:true});
+      assert.deepEqual(readIntent().taskReadParent,{initialScheduled:true,...(technicalPrelude?{technicalPrelude}:{})});
       owned=true;
       if(ending==='interrupted'){
         await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
