@@ -21,7 +21,8 @@ import {readCodexAssistantMarketplaceSource} from '../host-runtime/scripts/treli
 import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import http from 'node:http';
 import {randomUUID} from 'node:crypto';
-import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,readAssistantCodexDelivery,
+ readAssistantCodexMetadata,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -30,7 +31,7 @@ const snapshot = { conversationId: id, title: "Старое название", e
 test('actual Codex isolated assistant refuses alternate tools across process restart without changing user configuration',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const executable=process.env.TRELIO_TEST_CODEX_CLI,execute=promisify(execFile);
- const fixtureDeadline=Date.now()+120000,ownedChildren=[];
+ const fixtureDeadline=Date.now()+120000,ownedChildren=[],rpcChildren=[];
  // A completed RPC is not a native process-close receipt. The production
  // reader deliberately returns its result after requesting termination; retain
  // every actual fixture child independently so Windows never races rmdir with
@@ -58,8 +59,25 @@ test('actual Codex isolated assistant refuses alternate tools across process res
     })]);
    }finally{clearTimeout(terminate);clearTimeout(deadline);}
   })();
-  const owned={child,stop,get closed(){return didClose;}};
+  const owned={child,stop,closedEvent:closed,get closed(){return didClose;}};
   ownedChildren.push(owned);return owned;
+ };
+ // The fixture models a complete restart of its owned App Server before the
+ // next reader starts. The production RPC can return after requesting kill,
+ // while Windows still has the old process and its database handles open.
+ // Observe the original close, without sending another signal or retrying a
+ // native operation. Exclude the deliberate live competing writer in attach().
+ const awaitRpcClose=async()=>{
+  const pending=rpcChildren.filter(owned=>!owned.closed);
+  if(!pending.length)return;
+  const remaining=Math.min(5000,fixtureDeadline-Date.now());
+  if(remaining<=0)throw Error('Native isolation fixture restart deadline');
+  let deadline;
+  try {
+   await Promise.race([Promise.all(pending.map(owned=>owned.closedEvent)),new Promise((_,reject)=>{
+    deadline=setTimeout(()=>reject(Error('Native isolation fixture restart child did not close')),remaining);
+   })]);
+  } finally {clearTimeout(deadline);}
  };
  // The Windows carrier owns the pinned executable's disposable directory.
  // Its cleanup happens after this test process exits, so native cwd handles
@@ -233,7 +251,8 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  const phases=[];
  const observedSpawn=(...args)=>{
   processPhase=args[1].includes('--disable')?'controlled':'metadata';
-  const child=ownChild(spawn(...args)).child;let pending='';
+  const owned=ownChild(spawn(...args));rpcChildren.push(owned);
+  const {child}=owned;let pending='';
   child.stdout.on('data',chunk=>{
    pending+=chunk.toString();let at;
    while((at=pending.indexOf('\n'))>=0){const line=pending.slice(0,at);pending=pending.slice(at+1);
@@ -258,8 +277,15 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    }
   });return child;
  };
+ const afterRestart=read=>async(...args)=>{
+  await awaitRpcClose();
+  const value=await read(...args);
+  await awaitRpcClose();
+  return value;
+ };
  const options={executable,environment:{...environment,TRELIO_PLUGIN_ROOT:installed.installedPath},
   spawnProcess:observedSpawn,passTimeoutMs:30000,readExecutionAvailability:async()=>true,
+  readDelivery:afterRestart(readAssistantCodexDelivery),readMetadata:afterRestart(readAssistantCodexMetadata),
   // Hook trust/proof has its independent native fixture; this fixture has no
   // protected backend/account and must never manufacture approval for one.
   readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),onThreadStarted:value=>{threadId=value;},
@@ -272,6 +298,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // there first, then try to start the assistant from a different process. A
  // local notLoaded report alone cannot authorize taking over the chat.
  const attach=async()=>{
+  await awaitRpcClose();
   const owned=ownChild(spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,stdio:['pipe','pipe','ignore']}));
   const child=owned.child;
   const request=async(id,method,params)=>{

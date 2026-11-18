@@ -1252,7 +1252,9 @@ publication tooling также остаются вне этого публичн
   Test actual model input after a new owned process resumes stale history,
   preserving direct MCP, complete documents and no-replay/approval boundaries.
   The native isolation fixture retains every actual spawned child through its
-  close event. Hosted Windows disposes its own short pinned CLI/fixture root
+  close event. Restart phases join those events before opening native history
+  again, preserving the intentionally live competing writer and no RPC replay.
+  Hosted Windows disposes its own short pinned CLI/fixture root
   only after the entire test process exits successfully, with the original
   bounded removal. Inspection clients receive EOF for native MCP cleanup;
   production termination remains unchanged. Unknown close or a failed hosted
