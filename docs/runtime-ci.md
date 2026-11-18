@@ -32,8 +32,19 @@ assertions on the current OS, never proof that another OS's skipped native cases
 passed. Windows/ARM64/macOS/browser release lanes stay mandatory.
 
 The gate always checks the complete Git diff and the syntax of changed JavaScript.
-It verifies the local dependency installation once before selected tests. Root
-package changes check the tokenizer consumer; script-definition changes also
+It verifies the root dependency installation before selected tests. The
+`lockedTestPackages` mapping connects each nested npm project to its suites.
+Changes to either manifest select the linked suites. Selecting one of those
+suites for any reason prepares that project's dependencies once, using the
+candidate's committed lock and `npm ci` with lifecycle scripts disabled. The
+gate requires both manifests and stops on installation failure before running
+any suites. It reuses npm's download cache across worktrees and reconstructs
+each selected package's local tree after a rebase. The current mapping covers
+the DeepSeek Harness fixture and the visual browser packages. Add a new nested
+npm test project together with the suites that consume it. Hosted native
+browser and OS setup still belong to their CI jobs.
+
+Root package changes check the tokenizer consumer. Script-definition changes also
 select the Git guard. Bootstrap, native and workflow inputs have their own
 explicit owners. Only actual Git transport/queue/hooks/attributes changes select
 `test:git-guard`; an unrelated `.github` fixture does not. The composite Git guard

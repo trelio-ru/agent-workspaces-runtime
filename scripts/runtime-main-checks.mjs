@@ -15,6 +15,22 @@ const gitInputs = new Set(['git-coordination.json', '.gitattributes',
     'configure-canonical-main.sh', 'create-task-worktree.sh',
   ].map(file => `scripts/${file}`)]);
 
+// A nested npm project is both an input to these suites and a prerequisite
+// when the same suites are selected via their source imports. Keep both
+// directions in one reviewed mapping: a lock file alone does not explain
+// which tests load its modules (browser suites may load them conditionally).
+const lockedTestPackages = new Map([
+  ['host-runtime/scripts/visual-browser-dependencies', [
+    'tests/trelio-visual-browser.test.mjs',
+    'tests/trelio-visual-auth.test.mjs',
+    'tests/trelio-visual-extension-browser.test.mjs',
+    'tests/trelio-visual-native-store.test.mjs',
+    'tests/trelio-local-form.test.mjs',
+  ]],
+  ['tests/fixtures/deepseek-native', ['tests/trelio-deepseek-native.test.mjs']],
+]);
+const npmManifests = ['package.json', 'package-lock.json'];
+
 // These boundaries load native files, discover directories or compose paths at
 // runtime. Such edges cannot be proven by literal imports. Keep their owners
 // explicit and small: additions need a reviewed suite, never a generic smoke
@@ -25,10 +41,8 @@ const owners = new Map([
   ['host-runtime/scripts/native-bridge-keychain/BridgeKeychain.swift', ['tests/trelio-hook-private-session.test.mjs']],
   ['host-runtime/scripts/native-secret-browser/SecretBrowser.cs', ['tests/trelio-secret-browser-native.test.mjs']],
   ['host-runtime/scripts/native-secret-browser/SecretBrowser.swift', ['tests/trelio-secret-browser-native.test.mjs']],
-  ['host-runtime/scripts/visual-browser-dependencies/package.json', ['tests/trelio-visual-browser.test.mjs']],
-  ['host-runtime/scripts/visual-browser-dependencies/package-lock.json', ['tests/trelio-visual-browser.test.mjs']],
-  ['tests/fixtures/deepseek-native/package.json', ['tests/trelio-deepseek-native.test.mjs']],
-  ['tests/fixtures/deepseek-native/package-lock.json', ['tests/trelio-deepseek-native.test.mjs']],
+  ...[...lockedTestPackages].flatMap(([directory, suites]) =>
+    npmManifests.map(manifest => [`${directory}/${manifest}`, suites])),
   ['host-runtime/scripts/trelio-assistant-entry.mjs', ['tests/trelio-assistant-transport.test.mjs']],
   ['scripts/build-host-runtime-package.mjs', ['tests/trelio-host-runtime-entry.test.mjs']],
   ['scripts/build-windows-private-worker.ps1', ['tests/trelio-windows-native-private.test.mjs']],
@@ -186,7 +200,19 @@ export function planMainChecks(paths, {before, after}) {
     }
   }
   if (unmapped.length) throw Error(`Unmapped main checks:\n${unmapped.join('\n')}`);
-  return {syntax: [...syntax].sort(), tests: [...tests].sort(), dependencies, coordination,
+
+  const testPackages = [];
+  for (const [directory, suites] of lockedTestPackages) {
+    if (!suites.some(suite => tests.has(suite))) continue;
+    // Require both files in the candidate before npm can touch the checkout.
+    // A removed lock must fail here even if yesterday's modules are present.
+    for (const manifest of npmManifests) {
+      const file = `${directory}/${manifest}`;
+      if (typeof after.get(file) !== 'string') throw Error(`Missing main-check package input: ${file}`);
+    }
+    testPackages.push(directory);
+  }
+  return {syntax: [...syntax].sort(), tests: [...tests].sort(), dependencies, testPackages, coordination,
     reasons: Object.fromEntries([...reasons].sort().map(([suite, values]) => [suite, [...values].sort()]))};
 }
 
@@ -249,6 +275,12 @@ function main([baseSha, headSha, ...extra]) {
   console.log(JSON.stringify({mainChecks: plan}));
   if (plan.tests.length || plan.dependencies || plan.coordination) run('npm', ['run', 'check:dependencies'], cwd);
   for (const file of plan.syntax) run(process.execPath, ['--check', file], cwd);
+  // Reconcile each selected package once before any suite runs. Reuse npm's
+  // download cache, but rebuild node_modules from this candidate's lock rather
+  // than accepting a warm tree that may still reflect the pre-rebase lock.
+  for (const directory of plan.testPackages) {
+    run('npm', ['ci', '--prefix', directory, '--include=dev', '--ignore-scripts', '--prefer-offline', '--no-audit', '--no-fund'], cwd);
+  }
   for (const file of plan.tests) run(file.endsWith('.sh') ? 'bash' : process.execPath, [file], cwd);
   if (plan.coordination) run('npm', ['run', 'test:git-guard'], cwd);
   console.log(`Local main checks passed for ${headSha}: ${plan.tests.length} affected suites`);

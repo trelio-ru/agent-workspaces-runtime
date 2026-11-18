@@ -1586,7 +1586,10 @@ Exact legacy template bytes для распознавания при мигра�
   the Linux Kernel Archives HTTPS mirror for the same suite if needed. Keep APT signatures,
   mandatory index refresh, and the full native fixture lane.
 - Перед локальным gate `npm run check:dependencies` должен подтвердить exact
-  dependency tree; `node_modules` разных worktree не объединяются.
+  root dependency tree. Отдельные npm-пакеты связывай с их suites в
+  `lockedTestPackages`. Local gate ставит каждый выбранный пакет из lock
+  candidate один раз до первого теста. Общий npm cache допустим,
+  `node_modules` разных worktree не объединяются. [Контракт](docs/runtime-ci.md).
 - Package builder проверяй двумя сборками одной версии и byte comparison.
 - Search pacing parity executes the actual provider controllers from one immutable public revision; all CI lanes pin that same source, and controller names follow its declared API. Never skip parity or copy snippets after provider drift.
 - Cross-repository tests и `git:integrate` запускай с exact plugin root через
