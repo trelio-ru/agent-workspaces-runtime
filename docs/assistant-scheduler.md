@@ -790,6 +790,11 @@ history. Only the closed release locator is added to the durable reservation.
 The normal signed task read descriptor covers future skills through the same
 classifier without policy entries by website or task. No historical profile
 authorizes a live call or a repeat of external work.
+The guide producer and recovery share the same page frame and continuation
+projection. A completed legacy page may include bounded display instructions
+and the original next selector or terminal null. Recovery verifies the page
+digest and exact selector with the same code used for delivery. Presentation
+text and the prior selector grant no execution authority.
 The real protected host factory forwards both stage-specific device reads.
 A completed native context-compaction item is inert and does not skip any
 surrounding tool evidence in that full turn.

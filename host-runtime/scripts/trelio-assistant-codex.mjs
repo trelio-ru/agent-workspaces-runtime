@@ -6,13 +6,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, ASSISTANT_TASK_MCP_READ_TOOLS,
   assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude,
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, assistantWorkspaceCheckpointLocator } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
-import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
+import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { matchesAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from './trelio-skill-secret-setup.mjs';
 
@@ -1411,11 +1412,8 @@ export const assistantInterruptedTechnicalPrelude=(turn,deliveryId,{taskPass,ass
       if(!exactKeys(stdout,['ok','accounts','revision'])||stdout.ok!==true||!Array.isArray(stdout.accounts)
         ||!Number.isSafeInteger(stdout.revision)||params.guidePart!==undefined)return null;
     }else if(part!==undefined){
-      if(!exactKeys(stdout,['schemaVersion','part','count','path','sha256','text','nextGuidePart'])
-        ||stdout.schemaVersion!==1||part!==guidePart||stdout.part!==part||!Number.isSafeInteger(stdout.count)
-        ||stdout.count<1||stdout.count>64||part>=stdout.count||guideCount!==null&&guideCount!==stdout.count
-        ||stdout.nextGuidePart!==(part+1<stdout.count?part+1:null)||!isAssistantSkillGuidePath(stdout.path)
-        ||typeof stdout.text!=='string'||createHash('sha256').update(stdout.text).digest('hex')!==stdout.sha256)return null;
+      if(part!==guidePart||!isAssistantSkillGuidePage(stdout,part)
+        ||guideCount!==null&&guideCount!==stdout.count)return null;
       guideCount=stdout.count;guidePart++;
     }else{
       if(selection.providerArguments.length!==1||selection.providerArguments[0]!=='doctor'||!selection.accountId
@@ -1861,15 +1859,25 @@ const historicalTaskSkillRead=(parameters,value,taskPass)=>{
     ||Object.keys(parameters).some(key=>!['companyId','projectId','releaseId','skillId','arguments','runtimeSessionId','guidePart'].includes(key))
     ||parameters.projectId!==undefined&&parameters.projectId!==null&&!UUID.test(parameters.projectId)
     ||parameters.runtimeSessionId!==undefined&&!UUID.test(parameters.runtimeSessionId)
-    ||value.schemaVersion!==1||!['operation,schemaVersion,stdout','nextCall,operation,schemaVersion,stdout'].includes(Object.keys(value).sort().join(','))
+    ||value.schemaVersion!==1
     ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>65_536||!value.stdout.trim()
     ||!Array.isArray(parameters.arguments)||parameters.arguments.length>16
     ||parameters.arguments.some(token=>typeof token!=='string'||token.length>512))return null;
   let parsed;
   try{
     parsed=splitAccountArguments(parameters.arguments);
-    const page=assistantSkillGuideSelection(parameters.arguments,parameters.guidePart);
-    if(value.nextCall!==undefined&&page===undefined)return null;
+    const keys=Object.keys(value).sort().join(',');
+    const part=assistantSkillGuideSelection(parameters.arguments,parameters.guidePart);
+    if(keys!=='operation,schemaVersion,stdout'){
+      // Page results include display instructions and a native next selector.
+      // Verify the same result the normal reader produces, including terminal
+      // null and exact original account/arguments. Prose never grants replay.
+      if(part===undefined||keys!=='instruction,nextCall,operation,schemaVersion,stdout'
+        ||typeof value.instruction!=='string'||Buffer.byteLength(value.instruction)>512)return null;
+      const projected=projectAssistantSkillGuideResult({stdout:value.stdout},
+        {schemaVersion:1,operation:'skill_run',parameters},part);
+      if(!projected||!isDeepStrictEqual(value.nextCall,projected.nextCall))return null;
+    }
   }catch{return null;}
   return reviewedAssistantHistoricalSkillRead(parameters,parsed);
 };

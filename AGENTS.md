@@ -203,6 +203,9 @@ publication tooling также остаются вне этого публичн
   input, Secret fill, provider call or unknown effect gains recovery or replay.
   Accepted settlement composes prior same-Workspace accepted reads, exact
   negative operation lookups and a settled typed control receipt before save.
+  Paged signed guide reads reuse the actual producer's page/next-call contract
+  in recovery. Bound display text independently; exact page digest, old
+  release/arguments and terminal nextCall still prove reads only.
   Test the whole native history through durable completion, disk reopen and
   the next fixed daily cycle; isolated classifier tests are insufficient.
   The same expired accepted witness permits signed maintenance under the

@@ -17,7 +17,7 @@ import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground, createAssistantWindowsBackgroundRecovery, maintainAssistantBackgroundRecovery, validateAssistantBackgroundRecoveryObservation } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
-import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
+import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { bindAssistantTaskSkillRead, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
 import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft } from './trelio-assistant-inbox.mjs';
@@ -4141,18 +4141,9 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   if(plan.localAction.operation==='skill_run'){
     const part=assistantSkillGuidePart(plan.localAction.parameters);
     if(part!==undefined){
-      let page;try{page=JSON.parse(value.stdout);}catch{fail('ASSISTANT_SKILL_GUIDE_RESULT_INVALID');}
-      if(!page||Object.keys(page).sort().join(',')!=='count,nextGuidePart,part,path,schemaVersion,sha256,text'
-        ||page.schemaVersion!==1||page.part!==part||!Number.isSafeInteger(page.count)||page.count<1||page.count>64
-        ||part>=page.count||page.nextGuidePart!==(part+1<page.count?part+1:null)
-        ||!isAssistantSkillGuidePath(page.path)
-        ||typeof page.text!=='string'||Buffer.byteLength(page.text)>24*1024
-        ||createHash('sha256').update(page.text).digest('hex')!==page.sha256)fail('ASSISTANT_SKILL_GUIDE_RESULT_INVALID');
-      return {...value,instruction:page.nextGuidePart===null
-        ?'The last signed guide part is in stdout.text. Read it before working; all earlier parts remain required. No local file reader is needed.'
-        :'Read this signed guide part in stdout.text, then execute nextCall for the next part before working. No local file reader or owner action is needed; each call receives fresh native admission.',
-        nextCall:page.nextGuidePart===null?null:{tool:'continue_assistant_workspace_action',arguments:{
-          ...plan.localAction,parameters:{...plan.localAction.parameters,guidePart:page.nextGuidePart}}}};
+      const page=projectAssistantSkillGuideResult(value,plan.localAction,part);
+      if(!page)fail('ASSISTANT_SKILL_GUIDE_RESULT_INVALID');
+      return page;
     }
   }
   return value;

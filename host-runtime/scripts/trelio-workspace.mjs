@@ -10179,6 +10179,35 @@ export const assistantSkillActionWithoutGuidePart = action => {
 export const isAssistantSkillGuidePath = value => typeof value === "string"
   && /^(?:(?:scripts\/)?instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]+\.md)$/u.test(value);
 
+/** Check the producer's page frame without acquiring a file or a skill.
+ * Retained native history uses this same contract to classify completed
+ * reads. A page's text and continuation are never new execution authority. */
+export const isAssistantSkillGuidePage = (page, part) => !!page
+  && Object.keys(page).sort().join(',') === 'count,nextGuidePart,part,path,schemaVersion,sha256,text'
+  && page.schemaVersion === 1 && Number.isSafeInteger(part) && part >= 0 && page.part === part
+  && Number.isSafeInteger(page.count) && page.count >= 1 && page.count <= 64 && part < page.count
+  && page.nextGuidePart === (part + 1 < page.count ? part + 1 : null)
+  && isAssistantSkillGuidePath(page.path) && typeof page.text === 'string'
+  && Buffer.byteLength(page.text) <= 24 * 1024
+  && crypto.createHash('sha256').update(page.text).digest('hex') === page.sha256;
+
+/** Project only the already validated signed result and original action.
+ * Keeping the routing here lets historical inspection verify the actual
+ * delivered structure without treating mutable display text as a receipt. */
+export const projectAssistantSkillGuideResult = (value, action, part) => {
+  let page;
+  try { page = JSON.parse(value.stdout); } catch { return null; }
+  if (!isAssistantSkillGuidePage(page, part)) return null;
+  return { ...value,
+    instruction: page.nextGuidePart === null
+      ? 'The last signed guide part is in stdout.text. Read it before working; all earlier parts remain required. No local file reader is needed.'
+      : 'Read this signed guide part in stdout.text, then execute nextCall for the next part before working. No local file reader or owner action is needed; each call receives fresh native admission.',
+    nextCall: page.nextGuidePart === null ? null : { tool: 'continue_assistant_workspace_action', arguments: {
+      ...action, parameters: { ...action.parameters, guidePart: page.nextGuidePart },
+    } },
+  };
+};
+
 /** Resolve only a complete guide manifest from the signed command, then use
  * the already verified immutable package bytes. Provider stdout never
  * becomes authority to open a local path. One part is small enough to read

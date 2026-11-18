@@ -10,6 +10,7 @@ import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, ass
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
+import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -915,8 +916,26 @@ test('pre-receipt recovery classifies an exact signed legacy release and keeps a
   const common={companyId:taskPass.companyId,projectId:randomUUID(),skillId:release.skillId,
     releaseId:release.releaseId,runtimeSessionId:randomUUID()};
   const account=['--local-account',randomUUID()];
-  turn.items.push(historyCall('skill_run',{...common,arguments:['account','list']}),
-    historyCall('skill_run',{...common,arguments:['guides',...account],guidePart:3}),
+  // The real producer emits page JSON plus both display metadata and a
+  // native nextCall, including null at the end. A bare stdout fixture misses
+  // that boundary and can pass while actual signed guide reads refuse.
+  const runtimeDirectory=path.resolve('synthetic-guide-package');
+  const files=['references/first.md','references/last.md'].map(relative=>({path:relative,bytes:Buffer.from(relative)}));
+  const manifest=JSON.stringify({ok:true,guides:files.map(file=>({path:path.join(runtimeDirectory,file.path),
+    sizeBytes:file.bytes.length,sha256:createHash('sha256').update(file.bytes).digest('hex')}))});
+  const guideCall=part=>{
+    const parameters={...common,arguments:['guides',...account],...(part?{guidePart:part}:{})};
+    const call=historyCall('skill_run',parameters);
+    const page=assistantSkillGuidePage({stdout:manifest,runtimeDirectory,parsedPackage:{files},part});
+    call.result.structuredContent=projectAssistantSkillGuideResult(
+      {schemaVersion:1,operation:'skill_run',stdout:JSON.stringify(page)},
+      {schemaVersion:1,operation:'skill_run',parameters},part);
+    return call;
+  };
+  const first=guideCall(0),last=guideCall(1);
+  assert.equal(first.result.structuredContent.nextCall.arguments.parameters.guidePart,1);
+  assert.equal(last.result.structuredContent.nextCall,null);
+  turn.items.push(historyCall('skill_run',{...common,arguments:['account','list']}),first,last,
     historyCall('skill_run',{...common,arguments:['read','--link','https://t.me/c/12345/67','--context','2',...account]}));
   const threadId=randomUUID();
   const read=items=>readAssistantCodexDelivery(threadId,terminalMarkerId,{
@@ -936,8 +955,17 @@ test('pre-receipt recovery classifies an exact signed legacy release and keeps a
     items=>{items.at(-1).arguments.parameters.arguments[2]='https://example.test/something';},
     items=>{items.at(-1).arguments.parameters.arguments[0]='send';},
     items=>{items.at(-1).result.structuredContent.taskSkillRead={};},
-    items=>{items.at(-4).result.structuredContent.taskDraftCheckpoint={};},
+    items=>{items.at(-5).result.structuredContent.taskDraftCheckpoint={};},
     items=>{items.at(-2).arguments.parameters.guidePart=64;},
+    items=>{items.at(-3).result.structuredContent.nextCall.arguments.parameters.arguments=['send'];},
+    items=>{items.at(-3).result.structuredContent.nextCall.arguments.parameters.releaseId=randomUUID();},
+    items=>{items.at(-2).result.structuredContent.nextCall=items.at(-3).result.structuredContent.nextCall;},
+    items=>{
+      const result=items.at(-3).result.structuredContent,page=JSON.parse(result.stdout);
+      result.stdout=JSON.stringify({...page,text:page.text+' altered'});
+    },
+    items=>{items.at(-3).result.structuredContent.instruction='x'.repeat(513);},
+    items=>{items.at(-3).result.structuredContent.unverified=true;},
   ]){
     const edited=structuredClone(turn.items);change(edited);
     assert.deepEqual(await read(edited),{state:'uncertain'});
