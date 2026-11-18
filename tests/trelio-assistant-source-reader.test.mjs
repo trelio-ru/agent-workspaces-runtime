@@ -843,7 +843,7 @@ test('email/MAX wire projections discard content and cannot promote a sender to 
   }
 });
 
-for (const policyVersion of [1,2]) test(`task skills use the SAME signed package, native command and process engine with fresh pass admission (policy v${policyVersion})`,async()=>{
+for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed package, native command and process engine with fresh pass admission (policy v${policyVersion})`,async()=>{
   const {createAssistantWorkspaceProfile}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const taskIdentity={schemaVersion:1,origin:policyVersion===2?'https://assistant-qa.example.test':'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
@@ -871,7 +871,8 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     lockDirectory:path.join(directory,'task-locks'),lock:(_file,action)=>action()});
   const sourceDir=path.join(directory,`task-package-${policyVersion}`);await fs.mkdir(sourceDir);
   await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:policyVersion,taskCommands:[['read'],['fail']],
-    ...(policyVersion===2?{deniedOptions:['--chrome','--timeout-ms']}: {})}));
+    ...(policyVersion>=2?{deniedOptions:['--chrome','--timeout-ms']}: {}),
+    ...(policyVersion===3?{readOnlyCommands:[['read']]}:{})}));
   const calls=path.join(directory,`task-native-calls-${policyVersion}`);
   // This executes a real signed Node provider through runWorkspaceCommand.
   // The fixture must not inherit the source reader's chat or any human token.
@@ -932,6 +933,10 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     // This signed child boundary resumes only after another fresh resolution.
     consentPending=false;resolutions=0;
     const first=await run(plan);assert.deepEqual(JSON.parse(first.stdout),{result:'Прочитано',args:['read','hello world']});
+    const {assistantTaskSkillReadRequestDigest}=await import('../host-runtime/scripts/trelio-skill-secret-setup.mjs');
+    assert.deepEqual(first.taskSkillRead,policyVersion===3?{schemaVersion:1,releaseId:currentRelease,
+      packageSha256:packageHash,outputSha256:createHash('sha256').update(first.stdout,'utf8').digest('hex'),
+      requestSha256:assistantTaskSkillReadRequestDigest(plan.scope,plan.localAction.parameters)}:undefined);
     assert.deepEqual(JSON.parse((await run(plan)).stdout),JSON.parse(first.stdout));
     assert.equal(downloads,1);assert.equal(resolutions,4,'cache hit still resolves before and immediately before provider launch');
     assert.equal(await fs.readFile(calls,'utf8'),'11');
@@ -950,7 +955,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
         && !JSON.stringify(error).includes('PRIVATE_SETUP_CANARY'));
       assert.equal(await fs.readFile(calls,'utf8'),'111','forbidden command must not launch the signed provider');
     }
-    if(policyVersion===2)for(const args of [['read','--chrome','/PRIVATE_EXECUTABLE'],['read','--chrome=/PRIVATE_EXECUTABLE'],
+    if(policyVersion>=2)for(const args of [['read','--chrome','/PRIVATE_EXECUTABLE'],['read','--chrome=/PRIVATE_EXECUTABLE'],
       ['read','--timeout-ms','600000']]) {
       const denied=structuredClone(plan);denied.localAction.parameters.arguments=args;
       await assert.rejects(run(denied),{code:'ASSISTANT_SKILL_COMMAND_DENIED'});

@@ -19,6 +19,7 @@ import { createAssistantSetup, createAssistantWindowsBackground, createAssistant
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
+import { bindAssistantTaskSkillRead, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
@@ -4053,7 +4054,9 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   }
   let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
   if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation
-    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState'].includes(key))
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState','taskSkillRead'].includes(key))
+    || value.taskSkillRead!==undefined&&(value.operation!=='skill_run'||value.visual!==undefined
+      ||!matchesAssistantTaskSkillRead(value.taskSkillRead,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:value.stdout}))
     || value.localWorkspaceState!==undefined&&(value.operation!=='status'||value.localWorkspaceState!=='unverified'
       ||!value.nativeRunStatus||value.stdout!==''||value.stderr!=='')
     || value.nativeRunStatus!==undefined&&(value.operation!=='status'
@@ -4235,7 +4238,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // authoritative; this translation grants no task/status permission.
       return {...plan.localAction,parameters};
     })();
-    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight;
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight,taskSkillRead;
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
       resolveRunRootDirectory:async()=>root,
@@ -4307,22 +4310,27 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
               await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
                 baseHead:metadata.baseHead,candidateHead:head,draftHead,retainedTaskHandoff,portableFinish}});
             });
-          }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart,assistantMaterializationSignal:materialization,
-            retainedAssistantHandoff:pending?.namedArchive===true&&plan.localAction.operation==='finish',
-            ...(plan.localAction.operation==='finish'&&retainedTaskHandoff?{retainedTaskHandoff}:{}),
-            ...(plan.localAction.operation==='finish'&&portableFinish?{portableFinish}:{}),
-            ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
-              ?{assertAssistantMaterializationCurrent:async claimed=>{
-                materialization.throwIfAborted();
-                const response=await common.request(encryption?.requestOrigin??identity.origin,token,
-                  `/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/runs/${plan.runIdentity.runId}`,{signal:materialization});
-                const latest=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
-                  :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant opened Run')).toString('utf8'));
-                const run=latest.run;
-                if(run?.id!==claimed.id||run.workspaceId!==claimed.workspaceId||run.status!=='running'
-                  ||run.fencingToken!==claimed.fencingToken||run.leaseId!==claimed.leaseId
-                  ||!(Date.parse(run.leaseExpiresAt)>Date.now()))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-              }}:{})});
+          }else {
+            const commandResult=await common.runWorkspaceCommand(nativeArgs,{
+              assistantGuidePart:guidePart,assistantMaterializationSignal:materialization,
+              retainedAssistantHandoff:pending?.namedArchive===true&&plan.localAction.operation==='finish',
+              ...(plan.localAction.operation==='finish'&&retainedTaskHandoff?{retainedTaskHandoff}:{}),
+              ...(plan.localAction.operation==='finish'&&portableFinish?{portableFinish}:{}),
+              ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
+                ?{assertAssistantMaterializationCurrent:async claimed=>{
+                  materialization.throwIfAborted();
+                  const response=await common.request(encryption?.requestOrigin??identity.origin,token,
+                    `/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/runs/${plan.runIdentity.runId}`,{signal:materialization});
+                  const latest=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
+                    :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant opened Run')).toString('utf8'));
+                  const run=latest.run;
+                  if(run?.id!==claimed.id||run.workspaceId!==claimed.workspaceId||run.status!=='running'
+                    ||run.fencingToken!==claimed.fencingToken||run.leaseId!==claimed.leaseId
+                    ||!(Date.parse(run.leaseExpiresAt)>Date.now()))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+                }}:{}),
+            });
+            if(skill)taskSkillRead=commandResult?.taskSkillRead;
+          }
           return {stdout,stderr:''};
         }
         catch(error) {
@@ -4353,8 +4361,10 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // Preserve the common bounded evidence for semantic reconciliation in
       // this SAME chat. It stays local, not in HTTP/SQLite or a second journal.
       // A fresh open is not saved material and never completes the task.
+      const skillRead=skill&&bindAssistantTaskSkillRead(taskSkillRead,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:result.stdout});
       return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}
-        :nativeRunStatus?{...result,nativeRunStatus}:result;
+        :nativeRunStatus?{...result,nativeRunStatus}
+        :skillRead?{...result,taskSkillRead:skillRead}:result;
     } catch(error) {
       if(materialization?.aborted && (error===materialization.reason || error?.cause===materialization.reason))
         fail('ASSISTANT_WORKSPACE_OPEN_TIMED_OUT');

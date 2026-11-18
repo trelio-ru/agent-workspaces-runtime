@@ -1465,13 +1465,28 @@ unknown versions fail. Human CLI and fixed native source profiles are unchanged.
 This closes real provider-owned overrides such as MAX `read --chrome PATH`
 without a generic host provider map or second command executor.
 
+Version 3 adds `readOnlyCommands` to the same signed policy and allows empty
+`deniedOptions`. Every read-only entry repeats an admitted literal prefix. All
+matching prefixes must carry that classification, and the provider must review
+the effect of every permitted argument combination under those prefixes.
+The existing interpreter, account and authorization checks still run.
+
+A completed task skill call from a platform-verified release can return a
+separate `taskSkillRead` witness with the exact release and package digests
+and digests of the admitted task-pass invocation and complete output. The
+common runner checks those bindings again after projection and on the parent pipe. An outgoing action,
+company-local package, partial pipe or output field with the same name cannot
+supply the witness. Older policy versions still execute under their existing
+rules and supply no positive read classification. This witness does not
+advance source cursors, establish task completion or authorize a new invocation.
+
 The shared `skillCommand` checks after package verification but BEFORE managed
 account selection/import. It removes only the host's strict local-account
 selector, then compares literal leading tokens. The shared materialized executor
 checks again before interpreter/bootstrap/provider I/O. Native host account
 commands retain their independent existing gates. Human calls retain the old
 CLI; fixed source monitor/setup keep their separate exact native admissions.
-The composition fixture executes real signed v1/v2 Node providers, verifies
+The composition fixture executes real signed v1/v2/v3 Node providers, verifies
 approved task work, and proves forbidden setup/policy/ACK/import commands and
 v2 executable/time overrides never launch them.
 

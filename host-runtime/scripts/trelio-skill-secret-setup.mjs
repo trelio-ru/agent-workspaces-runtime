@@ -6,6 +6,34 @@ const invalid = () => new Error("Подписанная декларация н�
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 
+const assistantTaskPrefixMatches = (prefix, args) => prefix.every((token, index) => args[index] === token);
+
+/** Bind to the exact admitted parameters and the original pass. The parent
+ * repeats this after the private pipe. Do not return or log the arguments,
+ * provider config, native proof or account identifier in this witness. */
+export const assistantTaskSkillReadRequestDigest = (scope, parameters) => crypto.createHash('sha256')
+  .update(canonicalJson({companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,parameters}))
+  .digest('hex');
+
+const matchesTaskSkillReadOutput = (value, releaseId, stdout) =>
+  value.schemaVersion === 1 && value.releaseId === releaseId
+  && /^[a-f0-9]{64}$/u.test(value.packageSha256 ?? '')
+  && typeof stdout === 'string'
+  && value.outputSha256 === crypto.createHash('sha256').update(stdout, 'utf8').digest('hex');
+
+export const bindAssistantTaskSkillRead = (value, { scope, parameters, stdout }) => {
+  if (!exactKeys(value, ['schemaVersion', 'releaseId', 'packageSha256', 'outputSha256'])
+    || !matchesTaskSkillReadOutput(value, parameters.releaseId, stdout)) return null;
+  return {...value,requestSha256:assistantTaskSkillReadRequestDigest(scope,parameters)};
+};
+
+/** A provider-authored JSON field inside stdout is never a native witness.
+ * Require exact bytes, release and invocation, including across truncation. */
+export const matchesAssistantTaskSkillRead = (value, { scope, parameters, stdout }) =>
+  exactKeys(value, ['schemaVersion', 'releaseId', 'packageSha256', 'outputSha256', 'requestSha256'])
+  && matchesTaskSkillReadOutput(value, parameters.releaseId, stdout)
+  && value.requestSha256 === assistantTaskSkillReadRequestDigest(scope,parameters);
+
 /** The provider owns CLI classification in the SAME signed file inventory.
  * Absence is not legacy permission: a package that has not reviewed its task
  * surface cannot run with assistant credentials. This is a restriction only;
@@ -22,8 +50,9 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
   try { policy = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(files[0].bytes)); }
   catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
   const version = policy?.schemaVersion;
-  if (![1,2].includes(version)
-    || !exactKeys(policy, version === 2 ? ['schemaVersion', 'taskCommands', 'deniedOptions'] : ['schemaVersion', 'taskCommands'])
+  if (![1,2,3].includes(version)
+    || !exactKeys(policy, ['schemaVersion', 'taskCommands',
+      ...(version >= 2 ? ['deniedOptions'] : []), ...(version === 3 ? ['readOnlyCommands'] : [])])
     || !Array.isArray(policy.taskCommands) || !policy.taskCommands.length || policy.taskCommands.length > 64)
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
   const seen = new Set();
@@ -33,11 +62,23 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
       || seen.has(JSON.stringify(prefix))) fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
     seen.add(JSON.stringify(prefix));
   }
-  const deniedOptions = version === 2 ? policy.deniedOptions : [];
-  if (version === 2 && (!Array.isArray(deniedOptions) || !deniedOptions.length || deniedOptions.length > 32
+  const deniedOptions = version >= 2 ? policy.deniedOptions : [];
+  if (version >= 2 && (!Array.isArray(deniedOptions) || version === 2 && !deniedOptions.length || deniedOptions.length > 32
     || new Set(deniedOptions).size !== deniedOptions.length
     || deniedOptions.some(option => typeof option !== 'string' || !/^--[a-z][a-z0-9-]{0,63}$/u.test(option))))
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+  const readOnly = new Set();
+  if (version === 3) {
+    if (!Array.isArray(policy.readOnlyCommands) || policy.readOnlyCommands.length > seen.size)
+      fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+    for (const prefix of policy.readOnlyCommands) {
+      // Declaring an effect cannot admit an otherwise forbidden command. Each
+      // entry must repeat one of the already validated literal task prefixes.
+      const key = JSON.stringify(prefix);
+      if (!seen.has(key) || readOnly.has(key)) fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+      readOnly.add(key);
+    }
+  }
   let setup;
   try { setup = readSkillSetupDescriptor(parsedPackage); }
   catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
@@ -55,9 +96,14 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
     // provider map, closes both token spellings before any account/bootstrap.
     // Providers must review their native parser aliases/abbreviations too;
     // literal deny cannot promise to classify an undeclared synonym.
-    || runtimeArguments.some(arg => deniedOptions.some(option => arg === option || arg.startsWith(`${option}=`)))
-    || !policy.taskCommands.some(prefix => prefix.every((token, index) => runtimeArguments[index] === token)))
+    || runtimeArguments.some(arg => deniedOptions.some(option => arg === option || arg.startsWith(`${option}=`))))
     fail('ASSISTANT_SKILL_COMMAND_DENIED');
+  const matches = policy.taskCommands.filter(prefix => assistantTaskPrefixMatches(prefix, runtimeArguments));
+  if (!matches.length) fail('ASSISTANT_SKILL_COMMAND_DENIED');
+  // A more general read-only prefix never overrides an overlapping command
+  // whose effects were not reviewed. Legacy declarations still admit the
+  // exact same commands and give no positive evidence about their effects.
+  return matches.every(prefix => readOnly.has(JSON.stringify(prefix))) ? 'read_only' : 'unknown';
 };
 
 /** Both setup purposes read the SAME complete signed descriptor. A human-input

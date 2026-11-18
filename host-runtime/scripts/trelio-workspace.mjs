@@ -9605,6 +9605,7 @@ const runMaterializedAgentSkillUnqueued = async ({
       throw Object.assign(new Error('Invalid owner intake budget.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
     timeoutMs = Math.min(timeoutMs,remaining);
   }
+  let taskReadOnly=false;
   if (taskCapture) {
     if(privateSetup){
       const command=readSkillSecretSetupCommand(artifact.parsedPackage,runtimeArguments);
@@ -9615,7 +9616,7 @@ const runMaterializedAgentSkillUnqueued = async ({
       // grant. This placeholder has no credential and never reaches a child.
       buildAgentSkillRuntimeEnvironment({artifact,runtimeDirectory,executionContext,
         grantedEnvironment:{[privateSecretSetup.environmentVariable]:'protected-preflight'},now:runtimeStartedAt});
-    }else assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments);
+    }else taskReadOnly=assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments)==='read_only';
   }
   const entrypointPath = path.join(
     runtimeDirectory,
@@ -9764,7 +9765,8 @@ const runMaterializedAgentSkillUnqueued = async ({
         || (sourceIntakeCapture || captureMode==='monitor' && profile?.kind==='digital_assistant_source') && result.stderr.length>0);
       const stdout = privateSetup || interactiveSecretSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
         : new TextDecoder('utf-8', { fatal: true }).decode(failedPrivatePipe ? result.stderr : result.stdout);
-      return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
+      return captureExitCode ? { stdout, exitCode: result.exitCode }
+        : { stdout, ...(taskReadOnly ? {taskReadOnly:true} : {}) };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.
       // Raw output is private host memory, not model input or diagnostics.
@@ -10491,12 +10493,23 @@ const skillCommand = async (
     // output is discarded independently and never enters this projection.
     const projected = outgoing !== null && typeof profile.projectOutgoingConversation === 'function'
       ? await profile.projectOutgoingConversation(outgoing, executed) : executed;
+    let stdout=projected.stdout;
     if (assistantGuidePart !== undefined) {
       const page = assistantSkillGuidePage({ stdout: projected.stdout, runtimeDirectory,
         parsedPackage: artifactForCache.parsedPackage, part: assistantGuidePart });
       await verifyCurrentAssistantSkill();
-      process.stdout.write(`${JSON.stringify(page)}\n`);
-    } else process.stdout.write(projected.stdout);
+      stdout=`${JSON.stringify(page)}\n`;
+    }
+    process.stdout.write(stdout);
+    // The signed platform package and actual process arguments were checked
+    // by the common executor. A company-local consent, outgoing route or
+    // field inside provider stdout cannot issue a structural read witness.
+    if (executed.taskReadOnly===true && outgoing===null && resolution.artifact.contentProtection==='plain'
+      && resolution.trust.level==='platform_verified' && resolution.trust.artifactLevel==='platform_verified'
+      && !resolution.trust.requiresDeviceConsent) return {
+      taskSkillRead:{schemaVersion:1,releaseId,packageSha256:resolution.artifact.packageSha256,
+        outputSha256:crypto.createHash('sha256').update(stdout,'utf8').digest('hex')},
+    };
   }
   // Provider setup stdout may contain private profile paths or handoff URLs.
   // Exit zero/window close is not a login proof. Only this closed structural
@@ -21480,7 +21493,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
   } else if (command === "merge") {
     await mergeWorkspaceRun(options);
   } else if (command === "skill") {
-    await skillCommand(origin, options, positional, { assistantGuidePart });
+    return skillCommand(origin, options, positional, { assistantGuidePart });
   } else if (command === "secret") {
     if (positional[0] === "set") {
       await setSecretValue(options, positional);

@@ -46,6 +46,53 @@ test('v2 signed option restrictions close native overrides without changing v1',
     {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'},'v1 does not ignore an unrecognized restriction field');
 });
 
+test('a signed read declaration cannot admit extra commands or mask an overlapping effect', () => {
+  const policy = {schemaVersion:3,taskCommands:[['history'],['history','clear'],['publish']],
+    deniedOptions:['--ack'],readOnlyCommands:[['history']]};
+  const packaged = value => ({files:[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(value))}]});
+  assert.equal(assertAssistantTaskSkillCommand(packaged(policy),['history','--limit','10']),'read_only');
+  assert.equal(assertAssistantTaskSkillCommand(packaged(policy),['history','clear']),'unknown');
+  assert.equal(assertAssistantTaskSkillCommand(packaged(policy),['publish']),'unknown');
+  assert.throws(()=>assertAssistantTaskSkillCommand(packaged(policy),['history','--ack=yes']),
+    {code:'ASSISTANT_SKILL_COMMAND_DENIED'});
+  for (const readOnlyCommands of [[['unlisted']],[['history'],['history']],['history'],null]) {
+    assert.throws(()=>assertAssistantTaskSkillCommand(packaged({...policy,readOnlyCommands}),['history']),
+      {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
+  }
+  const legacy = {schemaVersion:1,taskCommands:policy.taskCommands};
+  assert.equal(assertAssistantTaskSkillCommand(packaged(legacy),['history']),'unknown');
+});
+
+test('the native child marks only the completed signed read, independent of provider stdout', async t => {
+  const {withWorkspaceExecutionProfile,runMaterializedAgentSkill}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const runtimeDirectory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-task-skill-effect-'));
+  t.after(()=>fs.rm(runtimeDirectory,{recursive:true,force:true}));
+  const executionContext={companyId:randomUUID(),releaseId:randomUUID(),runtimeSessionId:randomUUID(),projectId:null};
+  const profile={kind:'digital_assistant',requireToken:async()=>({}),prepareRequest:async()=>assert.fail('unexpected HTTP'),
+    resolveSkillRuntimeChat:async()=>randomUUID()};
+  // Both commands print the same lookalike. The result bit must come from the
+  // signed declaration, never from stdout or a partial/failed child result.
+  await fs.writeFile(path.join(runtimeDirectory,'main.mjs'),
+    "console.log(JSON.stringify({taskReadOnly:true})); if(process.argv.includes('--fail'))process.exit(2);");
+  const provider=(skillId,taskCommands,readOnlyCommands)=>({skillId,runtimeVersion:'1.0.0',
+    parsedPackage:{capabilities:[],entrypoint:{path:'main.mjs',interpreter:'node'},
+      files:[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(
+        {schemaVersion:3,taskCommands,deniedOptions:[],readOnlyCommands}))}]}});
+  await withWorkspaceExecutionProfile(profile,async()=>{
+    const run=(artifact,runtimeArguments)=>runMaterializedAgentSkill({artifact,runtimeDirectory,
+      runtimeArguments,executionContext,captureOutput:true,captureMode:'assistant_task'});
+    for (const [skillId,read,write] of [['synthetic-messages','history','send'],['synthetic-catalogue','inventory','publish']]) {
+      const artifact=provider(skillId,[[read],[write]],[[read]]);
+      const readResult=await run(artifact,[read]);
+      const writeResult=await run(artifact,[write]);
+      assert.equal(readResult.taskReadOnly,true);
+      assert.equal(writeResult.taskReadOnly,undefined);
+      assert.equal(readResult.stdout,writeResult.stdout);
+      await assert.rejects(run(artifact,[read,'--fail']));
+    }
+  });
+});
+
 test("setup declaration permits only complete signed argument vectors", () => {
   assert.deepEqual(readSkillSecretSetupCommand(packageWith([command]), ["configure"]), command);
   assert.equal(readSkillSecretSetupCommand(packageWith([command]), ["configure", "--export"]), null);

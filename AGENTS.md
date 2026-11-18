@@ -1266,6 +1266,10 @@ publication tooling также остаются вне этого публичн
   Pre-encryption and admitted execution share the same paging-to-CLI projection;
   keep guidePart in native signed bindings/echoes, never in provider argv.
   Compose protected nextCall paging with the real signed provider child in tests.
+  A signed v3 task-command policy can classify reads for the same verified
+  platform executor. Bind the witness to the exact release and complete
+  projected output, separately from stdout. Unknown or legacy classifications
+  grant no replay, external-effect resolution or business completion.
   Package-relative guide names use one producer/wire predicate: both
   instruction-guides/ and scripts/instruction-guides/ are valid build roots.
   Verify the complete manifest against signed bytes before any page. Test the

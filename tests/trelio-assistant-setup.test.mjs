@@ -1210,6 +1210,34 @@ test('assistant Workspace continuation uses fixed signed child and stdin; unknow
   }}),error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
 });
 
+test('the assistant pipe preserves only a separate read witness for the exact release and complete stdout',async()=>{
+  const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {assistantTaskSkillReadRequestDigest}=await import('../host-runtime/scripts/trelio-skill-secret-setup.mjs');
+  const {createHash}=await import('node:crypto');
+  const plan=workspacePlan(), releaseId=randomUUID();
+  plan.localAction={schemaVersion:1,operation:'skill_run',parameters:{companyId:plan.scope.companyId,
+    skillId:'synthetic-inventory',releaseId,runtimeSessionId:randomUUID(),arguments:['inventory']}};
+  const stdout=JSON.stringify({taskSkillRead:true,items:['one']});
+  const receipt={schemaVersion:1,releaseId,packageSha256:'b'.repeat(64),
+    outputSha256:createHash('sha256').update(stdout,'utf8').digest('hex'),
+    requestSha256:assistantTaskSkillReadRequestDigest(plan.scope,plan.localAction.parameters)};
+  const frame={schemaVersion:1,operation:'skill_run',stdout};
+  const run=(extra={},selected=plan)=>runAssistantWorkspaceProcess(selected,{resolveLoader:async()=>'/verified/loader.mjs',
+    runProcess:async()=>({stdout:JSON.stringify({...frame,...extra})})});
+  assert.equal((await run()).taskSkillRead,undefined,'provider JSON cannot stand in for the typed frame');
+  assert.deepEqual((await run({taskSkillRead:receipt})).taskSkillRead,receipt);
+  for (const extra of [{taskSkillRead:receipt,stdout:stdout.slice(0,-1)},
+    {taskSkillRead:{...receipt,releaseId:randomUUID()}}, {taskSkillRead:{...receipt,input:'unbound'}}]) {
+    await assert.rejects(run(extra),{code:'ASSISTANT_WORKSPACE_RESULT_INVALID'});
+  }
+  const changed=structuredClone(plan);
+  changed.localAction.parameters.arguments=['publish'];
+  await assert.rejects(run({taskSkillRead:receipt},changed),{code:'ASSISTANT_WORKSPACE_RESULT_INVALID'});
+  changed.localAction.parameters.arguments=['inventory'];
+  changed.scope.passId=randomUUID();
+  await assert.rejects(run({taskSkillRead:receipt},changed),{code:'ASSISTANT_WORKSPACE_RESULT_INVALID'});
+});
+
 test('signed guide delivery returns exact next calls without a shell or account substitution',async t=>{
   const {runAssistantWorkspaceProcess,validateAssistantWorkspacePlan,createAssistantWorkspaceExecutor,createForwardingAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {assistantSkillGuidePage}=await import('../host-runtime/scripts/trelio-workspace.mjs');
