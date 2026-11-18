@@ -40,6 +40,14 @@ export const validateAssistantWorkspaceCheckpoint=value=>{
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),checkpointId:uuid(value.checkpointId),draftHead:value.draftHead};
 };
 export const validateAssistantPortableFinish=validateAssistantWorkspaceCheckpoint;
+// The same closed task read surface is used for the native executor
+// catalogue and for checking retained history. It does not classify a
+// provider command or grant any of these tools outside a live native pass.
+export const ASSISTANT_TASK_MCP_READ_TOOLS=Object.freeze([
+  'get_assistant_status','review_outgoing_message','get_assistant_operation_contract','download_attachment',
+  'get_task_create_meta','get_task','get_task_sections','get_task_instruction_page','prepare_assistant_workspace_read',
+  'get_assistant_owner_question','search_agent_guidance','get_agent_skill','get_agent_procedure',
+]);
 const workspaceDraftIdentity = value => {
   object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
@@ -110,6 +118,10 @@ export const validateAssistantRetainedHandoff=(value,{selected=true}={})=>{
 const taskReadWitness=value=>{
   // A root witness never substitutes for a completed parent. Older workers
   // refuse this distinct shape and keep the original native-start fence.
+  if(value?.intermediateDraft!==undefined){
+    object(value,['intermediateDraft']);
+    return {intermediateDraft:validateAssistantWorkspaceCheckpoint(value.intermediateDraft)};
+  }
   if(value?.initialScheduled===true){
     object(value,['initialScheduled','technicalPrelude']);
     return {initialScheduled:true,...(value.technicalPrelude===undefined?{}:{technicalPrelude:validateAssistantTechnicalPrelude(value.technicalPrelude)})};
@@ -2189,7 +2201,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // original turn, release a pass, process an event or clear health.
         // The read-only recovery is one shot across all versions and hook
         // definitions. The previous attempt stays in the indexed journal.
-        if(parentRead?.initialScheduled){
+        if(parentRead?.intermediateDraft){
+          // A native owner answer is a structural input of this SAME
+          // delivery. It is never copied into the journal or interpreted
+          // as an authorization to reopen unresolved source work.
+          if(last||terminalMarkerId!==id||deliveryEvents(id).some(event=>event.conversation_key))fail('ASSISTANT_INBOX_CONFLICT');
+        }else if(parentRead?.initialScheduled){
           // No routed input or owner answer may be consumed by a root recovery,
           // even when its original body has since disappeared at the provider.
           if(last||!row.scheduled||terminalMarkerId!==id||deliveryEvents(id).length)fail('ASSISTANT_INBOX_CONFLICT');

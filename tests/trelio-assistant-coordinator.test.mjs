@@ -3346,6 +3346,83 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
   });
 
 
+test('intermediate checkpoint resumes the original owner-answer pass once across a coordinator restart',async t=>{
+  const f=fixture(t),questionId=randomUUID(),originalTurn=randomUUID(),marker=randomUUID();
+  f.authority.workMode='task';
+  await f.coordinator.close();
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-intermediate-checkpoint-'));
+  const filename=path.join(directory,'journal.sqlite');
+  let database=new DatabaseSync(filename),coordinator=createAssistantCoordinator({...f.options,database});
+  const native=f.options.native,client=f.options.client,readOutcome=client.readBusinessOutcome;
+  const checkpoint={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  let original,writerReady=false,qualified=false,businessComplete=false,reviews=0,renewals=0,starts=0;
+  native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
+  client.readBusinessOutcome=async args=>businessComplete?readOutcome(args):{schemaVersion:1,state:'pending'};
+  client.readTaskIntermediateDraftEvidence=async args=>{
+    assert.equal(args.passId,original.passId);
+    assert.equal(args.expectedLeaseRevision,0);
+    return checkpoint;
+  };
+  native.readDelivery=async(thread,id,{interruptedWorkspaceDraft}={})=>{
+    assert.equal(thread,original.threadId);
+    assert.equal(id,original.deliveryId);
+    if(interruptedWorkspaceDraft?.intermediateDraft){
+      assert.deepEqual(interruptedWorkspaceDraft.intermediateDraft.checkpoint,checkpoint);
+      assert.deepEqual(interruptedWorkspaceDraft.intermediateDraft.workStateContext.ownerQuestionIds,[questionId]);
+      if(qualified)return {state:'interrupted_task_checkpoint',turnId:originalTurn};
+    }
+    return {state:'uncertain',turnId:originalTurn};
+  };
+  f.options.passHost.continuePass=async(args,pass)=>{
+    assert.deepEqual(pass,original);
+    assert.deepEqual(args.intermediateDraft,checkpoint);
+    assert.equal(args.terminalTurnId,originalTurn);
+    const live=f.passes.get(original.deliveryId);
+    if(args.continuation==='review')reviews++;
+    if(args.continuation==='resume'){
+      assert.equal(renewals++,0);
+      Object.assign(live,{state:'leased',leaseRevision:1,leaseExpiresAt:new Date(f.options.now()+1_200_000).toISOString()});
+    }
+    return {schemaVersion:6,state:renewals?'resumed':'approved',reviewId:marker,invocationId:marker,
+      resumed:renewals?{leaseRevision:1,leaseExpiresAt:live.leaseExpiresAt}:null,pass:{...live}};
+  };
+  native.run=async(input,options)=>{
+    assert.deepEqual(input.taskContext.ownerQuestionIds,[questionId]);
+    if(!original){
+      original=f.activePass();
+      options.startInvocation();
+      return {state:'uncertain'};
+    }
+    assert.equal(input.deliveryId,marker);
+    assert.deepEqual(options.taskReadRecovery.intermediateDraft,checkpoint);
+    if(!writerReady)throw Object.assign(new Error('busy'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+    await options.beforeInvocation();
+    options.startInvocation();starts++;businessComplete=true;
+    return {state:'completed',turnId:randomUUID(),receipt:`codex:${original.threadId}:${randomUUID()}`};
+  };
+  try{
+    await coordinator.pollOnce();await coordinator.workOnce();
+    f.events.push({id:randomUUID(),revision:'owner-reply',taskId:f.taskId,wake:true,ownerQuestionId:questionId});
+    f.advance(300001);await coordinator.pollOnce();
+    await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    f.advance(21*60_000);f.passes.get(original.deliveryId).state='review_required';
+    assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.deepEqual([reviews,renewals,starts],[0,0,0]);
+    qualified=true;
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+    assert.deepEqual([reviews,renewals,starts],[1,0,0]);
+    await coordinator.close();database.close();
+    database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
+    const inbox=createAssistantInbox({database,now:f.options.now});
+    assert.deepEqual(inbox.readPassContinuation(original.deliveryId).taskReadParent,{intermediateDraft:checkpoint});
+    writerReady=true;
+    await coordinator.workOnce();
+    assert.deepEqual([reviews,renewals,starts],[1,1,1]);
+    assert.equal(f.activePass(),null);
+    assert.equal(coordinator.status()[0].threadId,original.threadId);
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 test('native final draft settles the same Run without resolving unknown external work',async t=>{
   const f=fixture(t);
   f.authority.workMode='task';

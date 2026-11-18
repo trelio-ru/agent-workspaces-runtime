@@ -8,11 +8,13 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
-import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS,
-  assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
+import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, ASSISTANT_TASK_MCP_READ_TOOLS,
+  assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude,
+  validateAssistantWorkspaceCheckpoint } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
+import { matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -1845,6 +1847,94 @@ const exactWorkspacePoll=(value,operation,run)=>value.operation===operation&&val
   &&sameDraftRun(value.nextCall.arguments.runIdentity,run)
   &&Object.keys(value.nextCall.arguments.parameters??{}).join(',')==='finishOperationId'
   &&value.nextCall.arguments.parameters.finishOperationId===value.operationId;
+
+/** Prove an intermediate restart from the whole original native turn. The
+ * native pass reader selected the exact current checkpoint independently.
+ * Only settled reads and writes already covered by that draft are admitted.
+ * The same proof is repeated under the native writer before lease renewal.
+ * In particular, a completed provider call says nothing about its effects
+ * until the signed execution policy has independently classified it. */
+export const assistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workStateContext,checkpoint}={})=>{
+  if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
+    ||!exactDraftPass(taskPass,taskPass)||!Array.isArray(turn.items)||turn.items.length>128
+    ||workStateContext?.workMode==='discussion'||workStateContext?.sourceReferences!==undefined
+    ||workStateContext?.companyId!==taskPass.companyId||workStateContext?.taskId!==taskPass.taskId)return false;
+  let selected;try{selected=validateAssistantWorkspaceCheckpoint(checkpoint);}catch{return false;}
+  const [original,...items]=turn.items;
+  if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
+    ||original.content[0].text!==assistantNativePrompt(deliveryId,workStateContext,{}))return false;
+  const run={workspaceId:selected.workspaceId,runId:selected.runId};
+  let prepared=false,openHandle=null,opened=false,dirty=false,lastCheckpoint=null;
+  for(const item of items){
+    if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
+    const args=item?.arguments,value=item?.result?.structuredContent;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'
+      ||!args||Object.getPrototypeOf(args)!==Object.prototype)return false;
+    const success=item.status==='completed'&&item.error==null&&item.result&&item.result.isError!==true;
+    if(item.tool==='get_assistant_status'){
+      if(!success||Object.keys(args).some(key=>key!=='view'))return false;
+      continue;
+    }
+    if(!exactDraftPass(args.taskPass,taskPass))return false;
+    // Only known read tools may omit structured content. They cannot serve
+    // as evidence for a provider call, checkpoint or local file replacement.
+    if(ASSISTANT_TASK_MCP_READ_TOOLS.includes(item.tool)||item.tool==='get_trelio_tool_contract'){
+      if(!success&&!(item.tool==='get_trelio_tool_contract'&&localDraftRefusal(item,'ASSISTANT_MCP_INPUT_INVALID')))return false;
+      continue;
+    }
+    if(!success||!value||Object.getPrototypeOf(value)!==Object.prototype||Object.hasOwn(value,'code'))return false;
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(prepared||value.prepared!==true||value.run?.id!==run.runId||value.workspace?.id!==run.workspaceId
+        ||value.workspace.scopeType!=='task'||value.workspace.taskId!==taskPass.taskId||value.workspace.companyId!==taskPass.companyId
+        ||args.workspaceId!==undefined&&args.workspaceId!==run.workspaceId||args.runId!==undefined&&args.runId!==run.runId)return false;
+      prepared=true;
+      continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'){
+      if(!opened||!sameDraftRun(args.runIdentity,run))return false;
+      let command;try{command=parseAssistantRunFileCommand(args.command);}catch{return false;}
+      if(command.action==='replace'){
+        if(value.state!=='draft_updated'||value.sha256!==createHash('sha256').update(command.text,'utf8').digest('hex'))return false;
+        dirty=true;
+      }
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return false;
+    if(args.operation==='skill_run'){
+      if(!args.parameters||value.operation!=='skill_run'||!matchesAssistantTaskSkillRead(value.taskSkillRead,{
+        scope:taskPass,parameters:args.parameters,stdout:value.stdout}))return false;
+      continue;
+    }
+    if(!prepared)return false;
+    const completesOpen=value.operation==='open'&&Array.isArray(value.authorityReads)
+      &&value.authorityReads.length===ASSISTANT_PINNED_AUTHORITY_FILES.length
+      &&value.authorityReads.every((call,index)=>call?.tool==='use_assistant_workspace_files'
+        &&sameDraftRun(call.arguments?.runIdentity,run)&&call.arguments.command?.action==='read'
+        &&call.arguments.command.source==='authority'&&call.arguments.command.path===ASSISTANT_PINNED_AUTHORITY_FILES[index]);
+    if(args.operation==='open'){
+      if(opened||openHandle||!sameDraftRun({workspaceId:args.parameters?.workspaceId,runId:args.parameters?.runId},run))return false;
+      if(completesOpen)opened=true;
+      else if(exactWorkspacePoll(value,'open',run))openHandle=value.operationId;
+      else return false;
+      continue;
+    }
+    if(!sameDraftRun(args.runIdentity,run))return false;
+    if(args.operation==='status'){
+      const handle=args.parameters?.finishOperationId;
+      if(handle!==undefined){
+        if(opened||handle!==openHandle)return false;
+        if(completesOpen)opened=true;
+        else if(value.operationId!==handle||!exactWorkspacePoll(value,'open',run))return false;
+      }else if(value.operation!=='status')return false;
+      continue;
+    }
+    if(args.operation!=='checkpoint'||args.parameters?.type!=='draft'||!opened||!dirty||value.operation!=='checkpoint')return false;
+    try{lastCheckpoint=validateAssistantWorkspaceCheckpoint(value.taskDraftCheckpoint);}catch{return false;}
+    if(!sameDraftRun({workspaceId:lastCheckpoint.workspaceId,runId:lastCheckpoint.runId},run))return false;
+    dirty=false;
+  }
+  return !dirty&&lastCheckpoint?.checkpointId===selected.checkpointId&&lastCheckpoint.draftHead===selected.draftHead;
+};
 /** A named archive has an independent accepted revision. Its save can be
  * recovered without claiming the enclosing task is complete. This closed
  * trace admits only one Run, one file delta, a positive portable checkpoint
@@ -2051,7 +2141,12 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   // action leaves the original uncertainty intact. No transcript leaves RAM.
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
-  const {namedArchive,retainedHandoff,portableFinish,...pass}=taskPass??{};
+  const {namedArchive,retainedHandoff,portableFinish,intermediateDraft,...pass}=taskPass??{};
+  if(intermediateDraft!==undefined){
+    return intermediateDraft&&!namedArchive&&!retainedHandoff&&portableFinish===undefined
+      &&assistantInterruptedTaskCheckpoint(turn,deliveryId,{...intermediateDraft,taskPass:pass})
+      ?{state:'interrupted_task_checkpoint',turnId:turn.id}:{state:'uncertain'};
+  }
   if(portableFinish!==undefined){
     return matchesAssistantPortableFinishTurn(turn,deliveryId,pass,portableFinish)
       ?{state:'interrupted_portable_finish',turnId:turn.id}:{state:'uncertain'};
@@ -2543,24 +2638,30 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   if(options.taskReadRecovery!==undefined){
     const recovery=options.taskReadRecovery;
     const initial=recovery?.initialScheduled===true;
+    const checkpoint=recovery?.intermediateDraft!==undefined;
     if(!recovery||Object.getPrototypeOf(recovery)!==Object.prototype
-      ||Object.keys(recovery).sort().join(',')!==(initial
+      ||Object.keys(recovery).sort().join(',')!==(checkpoint
+        ?'intermediateDraft,taskPass,terminalMarkerId,terminalTurnId':initial
         ?'initialScheduled,taskPass,'+(recovery.technicalPrelude===undefined?'':'technicalPrelude,')+'terminalMarkerId,terminalTurnId'
         :'parentMarkerId,parentTurnId,taskPass,terminalMarkerId,terminalTurnId')
       ||![recovery.terminalMarkerId,recovery.terminalTurnId].every(value=>UUID.test(value??''))
       ||deliveryId===recovery.terminalMarkerId
-      ||(initial?workStateContext.scheduled!==true
+      ||(!checkpoint&&(initial?workStateContext.scheduled!==true
         :![recovery.parentMarkerId,recovery.parentTurnId].every(value=>UUID.test(value??''))
           ||new Set([deliveryId,recovery.parentMarkerId,recovery.terminalMarkerId]).size!==3
-          ||recovery.parentTurnId===recovery.terminalTurnId)
+          ||recovery.parentTurnId===recovery.terminalTurnId))
       ||options.continuationReview?.priorTurnId!==recovery.terminalTurnId
       ||options.workspaceDraftRecovery!==undefined||intakeContext!==undefined||workStateContext.workMode==='discussion'
-      ||workStateContext.sourceReferences!==undefined||workStateContext.ownerQuestionIds!==undefined
+      ||workStateContext.sourceReferences!==undefined||!checkpoint&&workStateContext.ownerQuestionIds!==undefined
       ||!exactDraftPass(recovery.taskPass,recovery.taskPass)||recovery.taskPass.companyId!==workStateContext.companyId
       ||recovery.taskPass.taskId!==workStateContext.taskId||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
     if(recovery.technicalPrelude!==undefined){
       try{validateAssistantTechnicalPrelude(recovery.technicalPrelude);}
+      catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
+    }
+    if(checkpoint){
+      try{validateAssistantWorkspaceCheckpoint(recovery.intermediateDraft);}
       catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
     }
   }
@@ -2776,9 +2877,12 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // successful resume above owns the same thread. Verify the interrupted
       // witness again, including its completed parent when this is a continuation.
       const {terminalMarkerId,terminalTurnId,...witness}=options.taskReadRecovery;
-      const current=await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{
-        ...witness,assistantId:workStateContext.assistantUserId});
-      if(current.state!=='interrupted_task_read'||current.turnId!==terminalTurnId
+      const checkpoint=witness.intermediateDraft;
+      const current=checkpoint
+        ?await readInterruptedDraftTurn(request,threadId,terminalMarkerId,{...witness.taskPass,
+          intermediateDraft:{checkpoint,workStateContext}})
+        :await readInterruptedTaskReadTurn(request,threadId,terminalMarkerId,{...witness,assistantId:workStateContext.assistantUserId});
+      if(current.state!==(checkpoint?'interrupted_task_checkpoint':'interrupted_task_read')||current.turnId!==terminalTurnId
         ||JSON.stringify(current.technicalPrelude??null)!==JSON.stringify(witness.technicalPrelude??null))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }
@@ -2851,7 +2955,11 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       const namedArchiveResume=options.namedArchiveResume
         ? 'The previous recovery turn finished the already retained archive save only. Reuse that accepted archive revision. Continue the original task from the first unfinished step, with current task authority, provider access, original receipts and deduplication. The previous save is not a task result. Do not repeat the old control or owner question.\n':'';
       const prelude=options.taskReadRecovery?.technicalPrelude;
-      const readRecovery=prelude
+      const checkpoint=options.taskReadRecovery?.intermediateDraft;
+      const readRecovery=checkpoint
+        ?'The interrupted turn saved an intermediate draft. Prepare and open its exact Workspace ID '+checkpoint.workspaceId
+          +' and Run ID '+checkpoint.runId+' using fresh native authority. Read both pinned authority files and the retained WORK.md. Continue at the first unfinished step and preserve the original question references. Already recorded reads and draft edits stay in history. Use current channel authority and existing native receipts for any later external action.\n'
+        :prelude
         ? 'The interrupted invocation stopped while preparing work. Continue from the same canonical Workspace ID '+prelude.workspaceId+' and Run ID '+prelude.runId+'. Use a fresh native prepare/open of this exact Run and both returned pinned authority files. Reconcile the prior state before doing the next unfinished task step. Do not rerun the prior provider diagnosis, repeat an external action or open a replacement Run. The preserved technical state does not grant authority to send, publish or change anything.\\n'
         : options.taskReadRecovery
         ? 'The interrupted invocation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';

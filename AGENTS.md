@@ -172,6 +172,13 @@ publication tooling также остаются вне этого публичн
   saved. The signed pipe checks its Run and draft action independently. The
   locator codec is shared with final drafts; a draft receipt has no final-save
   or business-outcome authority.
+  Intermediate continuation v6 reuses the original task pass and keeper.
+  Require the whole latest native turn, exact committed checkpoint and the
+  same owned writer before renewal. The admitted task read inventory and
+  signed skill read witnesses cover prior reads. Unknown effects, unsaved
+  later edits and routed source slots retain their original fences. Existing
+  owner-question locators remain in that same delivery. See the scheduler
+  contract for one-use reservation and the separate final-save stage.
   A final in-progress finish with its exact native poll handle may preserve
   the same local candidate after native expiry. This path verifies the
   private finish marker, intact Git tree and existing process lock before

@@ -3,7 +3,7 @@
 import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
   assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
-import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
+import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
 import { randomUUID, createHash } from 'node:crypto';
@@ -1605,6 +1605,22 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       throw error;
     }finally{clearInterval(watch);clearTimeout(leaseTimer);controller.abort();}
   };
+  // Both the original invocation and recovery reconstruct exactly the same
+  // structural stdin context from the immutable delivery events, never from
+  // untrusted prompt text extracted by the history reader.
+  const taskContextForJob=(job,mode)=>({assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
+    ...(inbox.readDelivery(job.deliveryId).scheduled?{scheduled:true}:{}),
+    ...(mode==='discussion'?{workMode:'discussion'}:{}),
+    ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
+      const source=JSON.parse(event.event_scope_json);
+      return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,routeId:event.route_id,eventOrdinal:event.event_ordinal,provider:source.provider,
+        accountId:source.accountId,eventId:event.event_id,eventRevision:event.event_revision,conversationKey:event.conversation_key,
+        ...(inbox.sourceIntakeKind({eventKey:event.event_key,routeId:event.route_id,sourceRevision:event.route_source_revision})==='route_existing'?{intakeKind:'route_existing'}:{})};
+    })}:{}),
+    // Only structural question locators enter stdin; fresh read authority
+    // remains bound to each original question during the task.
+    ...(job.events.some(event=>event.owner_question_id)?{ownerQuestionIds:[...new Set(job.events
+      .flatMap(event=>event.owner_question_id?[event.owner_question_id]:[]))]}:{})});
   const continueTerminalPass = async (job,result,signal,terminalMarkerId) => {
     const capacity=result.state==='failed'&&result.failure==='model_capacity';
     const workspaceDraft=result.state==='interrupted_workspace_draft'?result.workspaceDraft:null;
@@ -1641,8 +1657,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(workspaceDraft&&(!retained&&!workspaceDraft.portableFinish||retained?.workspaceDraft&&retained.started||live.workMode!=='task'
       ||job.events.some(event=>event.conversation_key)
       ||!retained?.workspaceDraft&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
-    if(parentRead&&((parentRead.initialScheduled
-      ?job.events.length>0||!inbox.readDelivery(job.deliveryId).scheduled||terminalMarkerId!==job.deliveryId
+    if(parentRead&&((parentRead.intermediateDraft
+      ?terminalMarkerId!==job.deliveryId||job.events.some(event=>event.conversation_key)
+        ||retained&&!retained.taskReadParent?.intermediateDraft
+      :parentRead.initialScheduled
+        ?job.events.length>0||!inbox.readDelivery(job.deliveryId).scheduled||terminalMarkerId!==job.deliveryId
       :!retained||job.events.some(event=>event.conversation_key||event.owner_question_id))
       ||retained?.capacity||retained?.workspaceDraft||live.workMode!=='task'
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'
@@ -1692,10 +1711,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const request={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,expectedLeaseRevision:intent.expectedLeaseRevision,
       clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId,
       ...(intent.taskReadParent?.technicalPrelude?{technicalPrelude:intent.taskReadParent.technicalPrelude}:{}),
+      ...(intent.taskReadParent?.intermediateDraft?{intermediateDraft:intent.taskReadParent.intermediateDraft}:{}),
       ...(intent.workspaceDraft?.retainedHandoff?{retainedFinish:intent.workspaceDraft.retainedHandoff.locators}:{}),
       ...(intent.workspaceDraft?.portableFinish?{portableFinish:intent.workspaceDraft.portableFinish}:{})};
     let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
+    if(parentRead?.intermediateDraft&&review.schemaVersion!==6)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     // A former runtime may have left a purely technical owner question. Ask
     // the SAME native ledger to migrate only that pending intent; its UUID and
     // original native-start fence survive, including an expired pending prompt.
@@ -1716,6 +1737,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumeAttempted:true});
         review=await passHost.continuePass({...request,automatic:true,continuation:'resume',reviewId:intent.reviewId},saved,ownedSignal);
         lease();await recheck();
+        if(parentRead?.intermediateDraft&&review.schemaVersion!==6)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       }
       if(review.state!=='resumed')return null;
       if(!intent.resumeAttempted||review.pass.state!=='leased'||Date.parse(review.pass.leaseExpiresAt)<=now()
@@ -1943,6 +1965,29 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
         workspaceDraft:{workspaceId:locators.workspaceId,runId:locators.runId,finishPending:true,retainedHandoff:proof}},signal,marker);
     }
+    if(saved&&job.kind==='task'&&result.state==='uncertain'&&uuid.test(result.turnId??'')
+      &&marker===job.deliveryId&&(!continued||continued.taskReadParent?.intermediateDraft&&!continued.started)
+      &&!job.events.some(event=>event.conversation_key)&&typeof client.readTaskIntermediateDraftEvidence==='function'){
+      const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
+      const live=await client.readTaskPass(pass,signal);lease();
+      if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
+        ||live.deliveryId!==saved.deliveryId||live.state==='closed'||live.workMode!=='task')return true;
+      let checkpoint=continued?.taskReadParent?.intermediateDraft;
+      if(!checkpoint&&live.state==='review_required'&&Date.parse(live.leaseExpiresAt)<=now()){
+        checkpoint=await client.readTaskIntermediateDraftEvidence({...pass,expectedLeaseRevision:live.leaseRevision},signal);lease();
+      }
+      if(checkpoint){
+        const workStateContext=assistantWorkStateContext(taskContextForJob(job,live.workMode));
+        const candidate=await native.readDelivery(threadId,marker,{signal,
+          interruptedWorkspaceDraft:{...pass,intermediateDraft:{checkpoint,workStateContext}}});lease();
+        if(candidate.state==='interrupted_task_checkpoint'&&candidate.turnId===result.turnId)
+          return continueTerminalPass(job,{state:'interrupted_task_read',turnId:result.turnId,
+            taskReadParent:{intermediateDraft:checkpoint}},signal,marker);
+        // A pending reservation for this exact checkpoint cannot switch to
+        // another proof after the original native history changes.
+        if(continued)return true;
+      }
+    }
     const scheduledRoot=!continued&&job.events.length===0&&inbox.readDelivery(job.deliveryId).scheduled;
     if(saved&&job.kind==='task'&&(continued||scheduledRoot)&&!continued?.workspaceDraft&&!continued?.namedArchiveSettled&&!continued?.capacity
       &&(!continued?.taskReadParent||!continued.started)&&result.state==='uncertain'&&uuid.test(result.turnId??'')
@@ -2169,19 +2214,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }
         failureStage='native_preflight';
         result=await native.run({threadId:plan.threadId,deliveryId:continuation?.reviewId??job.deliveryId,cwd,execution,
-          taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
-            ...(inbox.readDelivery(job.deliveryId).scheduled?{scheduled:true}:{}),
-            ...(admitted.workMode==='discussion'?{workMode:'discussion'}:{}),
-            ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
-              const source=JSON.parse(event.event_scope_json);
-              return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,routeId:event.route_id,eventOrdinal:event.event_ordinal,provider:source.provider,
-                accountId:source.accountId,eventId:event.event_id,eventRevision:event.event_revision,conversationKey:event.conversation_key,
-                ...(inbox.sourceIntakeKind({eventKey:event.event_key,routeId:event.route_id,sourceRevision:event.route_source_revision})==='route_existing'?{intakeKind:'route_existing'}:{})};
-            })}:{}),
-            // Only current delivery refs enter stdin. Full answers are read
-            // by the task worker under fresh backend pass/owner/assignment ACL.
-            ...(job.events.some(event=>event.owner_question_id) ? {ownerQuestionIds:[...new Set(job.events
-              .flatMap(event=>event.owner_question_id?[event.owner_question_id]:[]))]} : {})}},options);
+          taskContext:taskContextForJob(job,admitted.workMode)},options);
       }
       failureStage='readback';
       if(result.state==='failed'&&result.failure==='model_capacity'&&uuid.test(result.turnId??''))

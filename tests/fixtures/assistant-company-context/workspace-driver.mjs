@@ -112,6 +112,16 @@ export const createWorkspaceSystemDriver=async configuration=>{
         }
       }
       assert.equal(result.error,undefined,JSON.stringify(result.error));
+      if(name==='continue_assistant_workspace_action'&&args.operation==='checkpoint'
+        &&args.parameters?.type==='draft'&&result.result?.isError!==true){
+        // The intermediate receipt must survive the genuine encrypted native
+        // checkpoint, isolated worker and serial model-facing transport.
+        const receipt=result.result?.structuredContent?.taskDraftCheckpoint;
+        assert.ok(receipt,'the actual native draft must return an immutable locator');
+        assert.deepEqual({workspaceId:receipt.workspaceId,runId:receipt.runId},args.runIdentity);
+        assert.match(receipt.checkpointId,/^[a-f0-9-]{36}$/u);
+        assert.match(receipt.draftHead,/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u);
+      }
       await fs.writeFile(path.join(root,'question-system-stage.json'),JSON.stringify({phase:'tool_settled',tool:name,
         operation:args.operation??null,state:result.result?.structuredContent?.state??null,code:result.result?.structuredContent?.code??null}),{mode:0o600});
       return result.result;

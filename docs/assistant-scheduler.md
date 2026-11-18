@@ -763,6 +763,21 @@ draft and final handoff evidence. Each stage names its own selector. An older
 server that rejects the new selector supplies no evidence, and authorization
 refusals remain errors.
 
+Intermediate continuation applies when the original interrupted task turn
+only performed known task reads, signed skill reads, and local edits already
+covered by that exact checkpoint. Signed reads must bind the executed
+release, arguments, pass and output. The full native history must show the
+same canonical Run and completed open. An unrelated write, an unfinished
+tool call, or edits after the last checkpoint keep the original fence.
+Owner-answer locators and regular scheduled work retain the same original
+task input. A routed source delivery stays on its separate processing path.
+The coordinator verifies the native and server observations independently
+and freezes the v6 reservation in the original SQLite delivery. The owning
+App Server rereads the full latest turn before renewal. A busy writer or
+changed turn blocks renewal. Recovery uses the original chat, workspace and
+Run and starts once. Normal task authorities and native outcome checks still
+govern work after the checkpoint.
+
 If the latest interrupted turn finished the Run, verify its exact finish
 operation and the same Run's clean accepted status with a new candidate head.
 One accepted-material continuation may use the ordinary outcome tool on that

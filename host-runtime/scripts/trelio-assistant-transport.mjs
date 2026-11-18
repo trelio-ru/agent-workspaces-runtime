@@ -12,7 +12,8 @@ import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistan
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata,
-  validateAssistantWorkspaceCheckpoint, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
+  validateAssistantWorkspaceCheckpoint, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
+  ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -3130,12 +3131,13 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     },
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)
-        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId','reviewId','automatic','technicalPrelude','retainedFinish','portableFinish'].includes(key))
+        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId',
+          'reviewId','automatic','technicalPrelude','retainedFinish','portableFinish','intermediateDraft'].includes(key))
         ||input.automatic!==undefined&&input.automatic!==true
         ||(input.continuation==='review')!==(input.reviewId===undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish].filter(value=>value!==undefined).length;
+      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish,input.intermediateDraft].filter(value=>value!==undefined).length;
       if(witnesses>1||witnesses&&input.automatic!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      let technicalPrelude,retainedFinish,portableFinish;
+      let technicalPrelude,retainedFinish,checkpoint;
       if(input.technicalPrelude!==undefined){
         try{technicalPrelude=validateAssistantTechnicalPrelude(input.technicalPrelude);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
@@ -3144,22 +3146,24 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         try{retainedFinish=validateAssistantRetainedFinishLocators(input.retainedFinish,{selected:true});}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
-      if(input.portableFinish!==undefined){
-        try{portableFinish=validateAssistantWorkspaceCheckpoint(input.portableFinish);}
+      const checkpointKey=input.intermediateDraft!==undefined?'intermediateDraft':'portableFinish';
+      if(input[checkpointKey]!==undefined){
+        try{checkpoint=validateAssistantWorkspaceCheckpoint(input[checkpointKey]);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
         ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{}),
-        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(portableFinish?{portableFinish}:{})};
+        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(checkpoint?{[checkpointKey]:checkpoint}:{})};
       const value=await call('passRenew',body,signal),pass=value?.pass;
       if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'
-        ||!(portableFinish?[5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
+        ||!(checkpoint?[checkpointKey==='intermediateDraft'?6:5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
         ||value.schemaVersion!==1&&(!input.automatic||value.questionPath!==null||!['approved','stale','resumed'].includes(value.state))
         ||!['waiting_owner','approved','declined','clarification','expired','stale','resumed'].includes(value.state)
         ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision
         ||value.invocationId!==value.reviewId||body.reviewId&&body.reviewId!==value.reviewId
-        ||!object(pass)||pass.passId!==body.passId||!['leased','closed','review_required'].includes(pass.state))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        ||!object(pass)||pass.passId!==body.passId||!['leased','closed','review_required'].includes(pass.state)
+        ||value.schemaVersion===6&&pass.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const resumed=value.resumed===null?null:{leaseRevision:revision(value.resumed?.leaseRevision),leaseExpiresAt:isoTimestamp(value.resumed?.leaseExpiresAt)};
       if(resumed&&(Object.keys(value.resumed).sort().join(',')!=='leaseExpiresAt,leaseRevision'||resumed.leaseRevision!==body.expectedLeaseRevision+1)
         ||(value.state==='resumed')!==(resumed!==null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -3436,7 +3440,6 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-const ASSISTANT_TASK_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "review_outgoing_message", "get_assistant_operation_contract", "download_attachment", "get_task_create_meta", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS,

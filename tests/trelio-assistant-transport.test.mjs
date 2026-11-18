@@ -1387,6 +1387,29 @@ test('checkpoint evidence uses one fixed native read and keeps intermediate and 
   assert.equal(calls,9,'neither selector retries or falls back to the other stage');
 });
 
+test('an intermediate draft reservation requires its own exact native receipt',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'i'.repeat(43)}`,expiresAt:1});
+  const intermediateDraft={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'b'.repeat(40)};
+  const input={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID(),continuation:'review',automatic:true,
+    expectedLeaseRevision:1,terminalTurnId:randomUUID(),clientRequestId:randomUUID(),intermediateDraft};
+  const reviewId=randomUUID(),pass={passId:input.passId,bindingId:randomUUID(),bindingRevision:1,
+    deliveryId:randomUUID(),threadId:randomUUID(),leaseRevision:1,leaseExpiresAt:new Date().toISOString(),
+    state:'review_required',workMode:'task'};
+  let calls=0,schemaVersion=6;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,body)=>{
+    calls++;assert.equal(operation,'passRenew');assert.deepEqual(body,input);
+    return {schemaVersion,state:'approved',reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
+      expectedLeaseRevision:1,questionPath:null,resumed:null,pass};
+  }});
+  assert.equal((await client.continueTaskPass(input)).schemaVersion,6);
+  schemaVersion=5;
+  await assert.rejects(client.continueTaskPass(input),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  await assert.rejects(client.continueTaskPass({...input,portableFinish:intermediateDraft}),{code:'ASSISTANT_TRANSPORT_INVALID_INPUT'});
+  await assert.rejects(client.continueTaskPass({...input,automatic:undefined}),{code:'ASSISTANT_TRANSPORT_INVALID_INPUT'});
+  assert.equal(calls,2);
+});
+
 test('business outcome read is fixed, exact and strict; pending never implies failure or permits a retry',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});

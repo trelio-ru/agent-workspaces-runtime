@@ -8,7 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
-import { matchesAssistantPortableFinishTurn } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { bindAssistantTaskSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -808,6 +809,89 @@ test('portable finish identifies the exact save independently of earlier provide
   assert.equal(matchesAssistantPortableFinishTurn({...turn,status:'inProgress'},terminalMarkerId,taskPass,receipt),false);
   turn.items[0].content[0].text=`${assistantDeliveryMarker(terminalMarkerId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify({...scope,scheduled:false})}\n`;
   assert.equal(matchesAssistantPortableFinishTurn(turn,terminalMarkerId,taskPass,receipt),false);
+});
+
+test('intermediate restart requires an exact durable checkpoint and signed read effects across the whole turn',async()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=draftHistory();
+  const threadId=randomUUID();
+  turn.items.splice(3,1); // This case has no unclassified local refusal.
+  const [original,,open,replace]=turn.items;
+  open.arguments.schemaVersion=1;
+  const checkpoint={...workspaceDraft,checkpointId:randomUUID(),draftHead:'b'.repeat(40)};
+  const add=(tool,args,result)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:{...args,taskPass},result:{structuredContent:result}});
+  const continuation=(operation,parameters,value,identity={})=>add('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...identity},{schemaVersion:1,operation,...value});
+  const stage=continuation('checkpoint',{type:'draft'},{taskDraftCheckpoint:checkpoint},{runIdentity:workspaceDraft});
+  turn.items.push(stage);
+  // The scheduler may be processing an owner answer instead of its regular
+  // clock. Neither that answer nor the provider name grants read classification.
+  for(const [skillId,inputs] of [['inventory-reader',{scheduled:true}],['archive-index',{ownerQuestionIds:[randomUUID()]}]]){
+    const workStateContext=assistantWorkStateContext({
+      assistantId:taskContext.assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,...inputs,
+    });
+    original.content[0].text=assistantNativePrompt(terminalMarkerId,workStateContext,{});
+    const originalTurn=structuredClone(turn);
+    const parameters={companyId:taskPass.companyId,skillId,releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['read','fixture']};
+    const stdout='Synthetic signed read output';
+    const taskSkillRead=bindAssistantTaskSkillRead({schemaVersion:1,releaseId:parameters.releaseId,packageSha256:'a'.repeat(64),
+      outputSha256:createHash('sha256').update(stdout).digest('hex')},{scope:taskPass,parameters,stdout});
+    originalTurn.items.push(continuation('skill_run',parameters,{stdout,taskSkillRead}));
+    const proof={taskPass,workStateContext,checkpoint};
+    assert.equal(assistantInterruptedTaskCheckpoint(originalTurn,terminalMarkerId,proof),true);
+    const observed=await readAssistantCodexDelivery(threadId,terminalMarkerId,{
+      executable:process.execPath,environment:{},interruptedWorkspaceDraft:{...taskPass,intermediateDraft:{workStateContext,checkpoint}},
+      spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[originalTurn],nextCursor:null}})),
+    });
+    assert.deepEqual(observed,{state:'interrupted_task_checkpoint',turnId:turn.id});
+    for(const mutate of [
+      value=>{value.items.at(-1).status='inProgress';},
+      value=>{value.items.at(-1).result.structuredContent.stdout+='x';},
+      value=>{delete value.items.at(-1).result.structuredContent.taskSkillRead;},
+      value=>{value.items.at(-1).arguments.parameters.arguments=['publish'];},
+      value=>{value.items.push(structuredClone(replace));},
+      value=>{value.items.push(add('create_comment',{},{}));},
+      value=>{value.items.push(add('use_assistant_browser',{command:{operation:'navigate'}},{}));},
+      value=>{value.items.at(-2).result.structuredContent.taskDraftCheckpoint.checkpointId=randomUUID();},
+      value=>{value.items[2].result.structuredContent.authorityReads=[];},
+    ]){
+      const changed=structuredClone(originalTurn);mutate(changed);
+      assert.equal(assistantInterruptedTaskCheckpoint(changed,terminalMarkerId,proof),false);
+    }
+    const cwd=await fs.realpath(process.cwd());
+    for(const variant of ['exact','busy','late-effect']){
+      const deliveryId=randomUUID(),steps=[],latest=structuredClone(originalTurn);
+      let starts=0,reads=0;
+      if(variant==='late-effect')latest.items.push(add('create_comment',{},{}));
+      const attempt=()=>runAssistantCodexPass({threadId,deliveryId,cwd,execution,
+        taskContext:{assistantId:taskContext.assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,...inputs}},{
+        executable:process.execPath,environment:{},requireAbsentMarker:true,
+        taskReadRecovery:{intermediateDraft:checkpoint,taskPass,terminalMarkerId,terminalTurnId:turn.id},
+        continuationReview:{priorTurnId:turn.id,reviewId:deliveryId},
+        readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+        readExecutionAvailability:async()=>true,
+        beforeInvocation:async()=>{steps.push('renew');},
+        startInvocation:()=>{starts++;},
+        readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
+        spawnProcess:ownedRpc({threadId,cwd,priorTurn:[latest],
+          resumeError:variant==='busy'?{code:-32600,message:'thread '+threadId+' already has an active writer'}:undefined,
+          onRequest:req=>{
+            if(req.method==='thread/resume')steps.push('writer');
+            if(req.method==='thread/turns/list'&&req.params.limit===1)steps.push('readlatest');
+          },
+        }),
+      });
+      if(variant==='exact'){
+        assert.equal((await attempt()).state,'completed');
+        assert.deepEqual(steps,['writer','readlatest','renew']);
+        assert.equal(starts,1);
+      }else{
+        await assert.rejects(attempt(),{code:variant==='busy'?'ASSISTANT_CODEX_THREAD_BUSY':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+        assert.equal(starts,0);
+        assert.ok(!steps.includes('renew'));
+      }
+    }
+  }
 });
 
 test('an interrupted named archive permits only recovery of its positively witnessed save',()=>{
