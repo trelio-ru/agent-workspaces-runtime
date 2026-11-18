@@ -4537,7 +4537,9 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
   }
 });
 
-for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles", "before_acceptance", "after_acceptance", "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied"]) test(
+for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles", "before_acceptance", "after_acceptance",
+  "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied",
+  "assistant_lost_checkpoint", "assistant_conflicting_checkpoint", "assistant_concurrent_edit"]) test(
   `bridge finish recovers saved handoff: ${recovery}`, {
   timeout: 30_000,
 }, async () => {
@@ -4549,11 +4551,13 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
     XDG_CONFIG_HOME: path.join(homeDirectory, ".config"), LOCALAPPDATA: path.join(homeDirectory, "AppData", "Local"),
     CODEX_HOME: path.join(homeDirectory, ".codex"), TRELIO_CONFIG_HOME: path.join(homeDirectory, "trelio"),
     TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" };
-  let baseHead, draftHead, latestCheckpoint = null;
+  let baseHead, draftHead, originalDraftHead, latestCheckpoint = null;
+  const assistantFinish = recovery.startsWith("assistant_");
   const outdated = ["outdated", "outdated_task"].includes(recovery);
   const interrupted = !["clean", "outdated", "outdated_task", "lingering_handles"].includes(recovery);
   let serverAccepted = false, serverCandidateHead = null, denyRecoveryRead = recovery === "read_denied";
   let handoffAttempts = 0;
+  let draftAttempts = 0;
   let handoffPayload = null;
   let candidateAttempts = 0;
   let heartbeatAttempts = 0;
@@ -4605,15 +4609,32 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
         handoffPayload = JSON.parse(body.toString("utf8"));
         assert.equal(handoffPayload.checkpointType, "handoff");
         assert.deepEqual(handoffPayload.filesChanged, ["artifacts/result.md"]);
+        if (assistantFinish) {
+          assert.equal(draftAttempts, 1, "the complete tree must already be portable when handoff is written");
+          assert.equal(handoffPayload.draftHead, draftHead);
+          assert.notEqual(draftHead, originalDraftHead);
+          assert.match((await runGit(workspaceDirectory, ["show", `${draftHead}:artifacts/result.md`])).stdout,
+            /Правка непосредственно перед finish/u);
+          assert.equal((await runGit(workspaceDirectory, ["status", "--porcelain"])).stdout, "");
+          assert.match((await runGit(workspaceDirectory, ["ls-tree", "-r", "--name-only", draftHead, "--", "worklog"])).stdout,
+            new RegExp(`-run-${runId}\\.md`, "u"));
+        }
         latestCheckpoint = { id: "99999999-9999-4999-8999-999999999999", runId,
-          checkpointType: "handoff", candidateHead: draftHead, summary: handoffPayload.summary,
+          checkpointType: "handoff", candidateHead: recovery === "assistant_conflicting_checkpoint" ? originalDraftHead : draftHead,
+          summary: handoffPayload.summary,
           evidenceJson: handoffPayload.evidence ?? [], filesChangedJson: handoffPayload.filesChanged ?? [],
-          openQuestionsJson: handoffPayload.openQuestions ?? [], nextActionJson: handoffPayload.nextAction ?? null,
+          openQuestionsJson: handoffPayload.openQuestions ?? [],
+          nextActionJson: handoffPayload.taskOutcome
+            ? { ...handoffPayload.nextAction, taskOutcome: handoffPayload.taskOutcome }
+            : handoffPayload.nextAction ?? null,
           createdAt: new Date().toISOString() };
-        if (recovery === "lost_checkpoint" && handoffAttempts === 1) {
+        if (["lost_checkpoint", "assistant_lost_checkpoint"].includes(recovery) && handoffAttempts === 1) {
           // The record exists, but its response never reaches this process.
           request.socket.destroy();
           return;
+        }
+        if (recovery === "assistant_concurrent_edit") {
+          await writeFile(path.join(workspaceDirectory, "artifacts", "result.md"), "Отдельная локальная правка.\n", "utf8");
         }
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify(latestCheckpoint));
@@ -4625,7 +4646,8 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
         response.end(JSON.stringify({ workspace: { acceptedHead: "d".repeat(40) } }));
         return;
       }
-      if (outdated && request.url?.endsWith("/draft")) {
+      if ((outdated || assistantFinish) && request.url?.endsWith("/draft")) {
+        draftAttempts += 1;
         assert.ok(body.byteLength > 0);
         draftHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
         response.setHeader("content-type", "application/json");
@@ -4641,7 +4663,7 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
           response.end(JSON.stringify({ code: "WORKSPACE_OUTDATED", message: "Synthetic competing acceptance" }));
           return;
         }
-        if (interrupted && recovery !== "lost_checkpoint" && candidateAttempts === 1) {
+        if (interrupted && !["lost_checkpoint", "assistant_lost_checkpoint"].includes(recovery) && candidateAttempts === 1) {
           // The handoff was committed already. A later connection loss must
           // not make a new bridge process append the same immutable record.
           if (["after_acceptance", "accepted_dirty", "accepted_identity_changed"].includes(recovery)) {
@@ -4705,7 +4727,7 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
       origin,
       pluginVersion: PLUGIN_VERSION,
       hostRuntimeVersion: HOST_RUNTIME_VERSION,
-      scopeType: recovery === "outdated_task" ? "task" : "project",
+      scopeType: recovery === "outdated_task" || assistantFinish ? "task" : "project",
       workspaceId: "44444444-4444-4444-8444-444444444444",
       runId,
       leaseId: "55555555-5555-4555-8555-555555555555",
@@ -4754,6 +4776,7 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
     await runGit(workspaceDirectory, ["add", "artifacts/result.md"]);
     await runGit(workspaceDirectory, ["commit", "-m", "Сохранить draft checkpoint"]);
     draftHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+    originalDraftHead = draftHead;
     assert.notEqual(draftHead, baseHead);
     assert.equal(
       (await runGit(workspaceDirectory, ["status", "--short"])).stdout,
@@ -4775,6 +4798,22 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
       "Завершён уже сохранённый переносимый draft без искусственной правки.", "--evidence",
       "Проверен полный candidate delta относительно pinned base.", "--next-action",
       "Используйте принятый итоговый материал."];
+    if (assistantFinish) {
+      // Only the test HTTP profile replaces native auth. The disposable
+      // child still runs the common lock, draft upload, handoff and submit.
+      await writeFile(path.join(workspaceDirectory, "artifacts", "result.md"),
+        "# Итог\n\nПравка непосредственно перед finish.\n", "utf8");
+      finishArguments.push("--task-outcome", "no_status_change");
+      const script = `import * as common from ${JSON.stringify(pathToFileURL(bridgePath).href)};
+        await common.withWorkspaceExecutionProfile({
+          kind: "digital_assistant",
+          requireToken: async () => "integration-token",
+          prepareRequest: async ({origin, pathname, options, buildHeaders}) => ({
+            url: new URL(pathname, origin), headers: buildHeaders("integration-token", options.headers || {}), options: {},
+          }),
+        }, () => common.runWorkspaceCommand(${JSON.stringify(finishArguments.slice(1))}));`;
+      finishArguments.splice(0, finishArguments.length, "--input-type=module", "-e", script);
+    }
     if (recovery === "lingering_handles") {
       // Exercise the actual CLI through server acceptance, metadata and lock
       // cleanup. A referenced dependency handle must not retain a settled
@@ -4786,6 +4825,18 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
     }
     if (recovery === "outdated_task") finishArguments.push("--task-outcome", "no_status_change");
     const finishOptions = { cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: fixtureEnv };
+    if (["assistant_conflicting_checkpoint", "assistant_concurrent_edit"].includes(recovery)) {
+      const refusal = recovery === "assistant_conflicting_checkpoint"
+        ? /handoff для другой ревизии draft/u : /изменились после сохранения handoff/u;
+      await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), refusal);
+      assert.equal(handoffAttempts, 1);
+      assert.equal(candidateAttempts, 0, "a mismatched native handoff cannot publish a candidate");
+      if (recovery === "assistant_concurrent_edit") {
+        assert.equal(await readFile(path.join(workspaceDirectory, "artifacts", "result.md"), "utf8"), "Отдельная локальная правка.\n");
+      }
+      assert.ifError(serverError);
+      return;
+    }
     if (outdated) {
       await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), error => {
         const envelope = parseWorkspaceMergeError(error.stderr);
@@ -4870,6 +4921,10 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
       "reuse only the exact live handoff, preserving changed semantic input/draft");
     assert.equal(candidateAttempts, ["before_acceptance", "changed_input", "changed_draft", "read_denied"].includes(recovery) ? 2 : 1);
     assert.equal(heartbeatAttempts, ["clean", "lingering_handles", "after_acceptance"].includes(recovery) ? 3 : recovery === "lost_checkpoint" ? 4 : 6);
+    if (assistantFinish) {
+      assert.equal(draftAttempts, 1, "the confirmed handoff reuses the original portable draft after response loss");
+      assert.equal(serverCandidateHead, draftHead);
+    }
     const receipt = JSON.parse(await readFile(metadataPath, "utf8"));
     assert.equal(receipt.terminalStatus, "accepted");
     assert.equal(receipt.finishRecovery, undefined, "confirmed acceptance retires the local recovery marker");

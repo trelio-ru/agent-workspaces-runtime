@@ -798,6 +798,15 @@ foreign path nor publishes the candidate. Ordinary handoff/finish and its
 server CAS still validate and accept the original material; the recovery may
 read but cannot change the files. A waiting goal remains waiting.
 
+For new assistant saves, finish first uploads the final portable draft under
+the same process lock, including file changes since the previous checkpoint
+and the generated worklog. The native handoff must acknowledge that exact
+Run and draft head before submission. If the reply is lost, exact read-back
+can reuse the same handoff and draft. A changed local tree or another native
+head refuses submission. Encrypted acceptance can promote the existing
+draft ciphertext. Human finish, historical handoffs and external-effect
+recovery keep their existing rules.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
 accepted head alongside the existing intent. The

@@ -16533,7 +16533,16 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
       // Do not encrypt/upload a second payload or append another handoff;
       // submission below still performs its normal validation and head CAS.
       process.stdout.write(`Handoff уже сохранён: ${retained.id}.\n`);
-      return;
+      // Legacy handoffs may predate the final draft snapshot. Keep recovery
+      // compatible, but use the exact head for a clean, complete assistant
+      // draft even when the first checkpoint response was lost.
+      if (currentWorkspaceExecutionProfile()?.kind === "digital_assistant"
+        && retained.candidateHead && metadata.candidateHead === retained.candidateHead
+        && metadata.materializedHead === retained.candidateHead
+        && !await getGitStatus(metadata.workspaceDirectory, metadata.objects || [])) {
+        return retained.candidateHead;
+      }
+      return undefined;
     }
   }
 
@@ -16586,12 +16595,30 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
         )),
       })
     : null;
+  let finalAssistantDraftHead;
   if (finishing && checkpointType === "handoff") {
     // Worklog preparation may have updated metadata. Merge into that exact
     // file rather than restoring the stale pre-worklog automatic path.
-    const current = await readOptionalRunMetadata(path.dirname(metadataPath));
-    if (!current || current.runId !== metadata.runId || current.workspaceId !== metadata.workspaceId) {
+    let current = await readOptionalRunMetadata(path.dirname(metadataPath));
+    if (!current || current.runId !== metadata.runId || current.workspaceId !== metadata.workspaceId
+      || current.baseHead !== metadata.baseHead || current.leaseId !== metadata.leaseId
+      || current.fencingToken !== metadata.fencingToken) {
       throw new Error("Локальный Agent Run изменился перед сохранением handoff.");
+    }
+    if (currentWorkspaceExecutionProfile()?.kind === "digital_assistant") {
+      // Prepare the portable final tree under the existing finish lock.
+      // A handoff attached to an earlier draft leaves later file changes
+      // stranded when the host stops before submit. Freeze the complete tree
+      // after generating the worklog, so recovery needs no new file edits.
+      const prepared = await saveRunDraftSnapshot({
+        metadata: current, metadataPath, origin: workspaceOrigin, token,
+        companyEncryption, message: String(options.message || "Подготовить результат Agent Run"),
+      });
+      finalAssistantDraftHead = prepared.draftHead;
+      current = prepared.metadata;
+      if (finalAssistantDraftHead === metadata.baseHead) {
+        throw new Error("В папке нет изменений для отправки.");
+      }
     }
     await writeRunMetadata(metadataPath, { ...current, finishRecovery: createFinishRecoveryMarker(metadata) });
   }
@@ -16623,6 +16650,7 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
         ...(nativeInput?.nextAction !== undefined ? { nextAction: nativeInput.nextAction }
           : nextActionInstruction ? { nextAction: { instruction: nextActionInstruction } } : {}),
       };
+  const checkpointDraftHead = draftSnapshot?.draftHead ?? finalAssistantDraftHead ?? nativeInput?.draftHead;
   const response = await requestWithRateLimitRetry({ origin: workspaceOrigin, token,
     pathname: `/api/agent-workspaces/runs/${metadata.runId}/checkpoints`, rejectedBeforeExecutionOnly: true,
     createOptions: () => ({
@@ -16634,11 +16662,18 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
         checkpointType,
         ...protectedContent,
         ...(taskOutcome ? { taskOutcome } : {}),
-        ...(draftSnapshot ? { draftHead: draftSnapshot.draftHead } : nativeInput?.draftHead ? { draftHead: nativeInput.draftHead } : {}),
+        ...(checkpointDraftHead ? { draftHead: checkpointDraftHead } : {}),
       }),
     }),
   });
   const checkpointPayload = await response.json();
+  // Check the native receipt before acceptance. A successful HTTP response can
+  // still describe a handoff tied to a different draft after a concurrent write.
+  if (finalAssistantDraftHead && (checkpointPayload.runId !== metadata.runId
+    || checkpointPayload.checkpointType !== "handoff"
+    || checkpointPayload.candidateHead !== finalAssistantDraftHead)) {
+    throw new Error("Trelio подтвердил handoff для другой ревизии draft.");
+  }
   if (draftSnapshot) {
     const nextMetadata = {
       ...draftSnapshot.metadata,
@@ -16658,6 +16693,7 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
   }
   process.stdout.write(`Checkpoint сохранён: ${checkpointPayload.id}.\n`);
   await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
+  return finalAssistantDraftHead;
 }, nativeInput ? { validateMetadata: metadata => assertNativeCheckpointBinding(nativeInput, metadata) } : {});
 
 const inspectBenignWorkspaceMetadataFile = async (workspaceDirectory, filePath) => {
@@ -17170,11 +17206,10 @@ const finish = async (options, { retainedAssistantHandoff = false } = {}) => {
       reportFinishProgress("heartbeat");
       await heartbeat();
       reportFinishProgress("checkpoint");
-      if (!retainedAssistantHandoff) {
-        await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
-      }
+      const checkpointHead = retainedAssistantHandoff ? current.candidateHead
+        : await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
       reportFinishProgress("preparing");
-      await submitWithMergeRecovery(options);
+      await submitWithMergeRecovery(options, checkpointHead);
       reportFinishProgress("cleanup");
       // Cleanup cannot turn confirmed acceptance into a failed save.
       await runAutomaticLocalCleanupForCurrentRun().catch(() => undefined);
@@ -18376,7 +18411,7 @@ const saveRunDraftSnapshot = async ({
   return { draftHead: prepared.head, metadata: draftMetadata };
 };
 
-const submit = async (options) => withRun(async ({
+const submit = async (options, checkpointHead) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -18395,6 +18430,11 @@ const submit = async (options) => withRun(async ({
   });
   const head = prepared.head;
 
+  if (checkpointHead && head !== checkpointHead) {
+    // A changed file still belongs to the working copy. Do not publish a
+    // candidate that differs from the final tree confirmed by the handoff.
+    throw new Error("Файлы Agent Run изменились после сохранения handoff.");
+  }
   if (head === metadata.baseHead) {
     throw new Error("В папке нет изменений для отправки.");
   }
@@ -18638,8 +18678,8 @@ const submit = async (options) => withRun(async ({
   );
 });
 
-const submitWithMergeRecovery = async (options) => {
-  try { return await submit(options); } catch (error) {
+const submitWithMergeRecovery = async (options, checkpointHead) => {
+  try { return await submit(options, checkpointHead); } catch (error) {
     // Only an explicit native CAS refusal establishes non-publication. A
     // timeout/lost response may already be accepted and stays read-back-only.
     if (error instanceof TrelioApiError && error.statusCode === 409 && error.code === "WORKSPACE_OUTDATED") {

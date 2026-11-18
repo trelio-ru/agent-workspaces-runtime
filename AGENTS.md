@@ -170,7 +170,10 @@ publication tooling также остаются вне этого публичн
   A final in-progress finish with its exact native poll handle may preserve
   the same local candidate after native expiry. This path verifies the
   private finish marker, intact Git tree and existing process lock before
-  claim. Settled native owner question/control receipts may precede
+  claim. New assistant finish uploads the validated final draft, including its
+  generated worklog, before writing handoff. The native handoff receipt and
+  submitted tree must match that draft; a lost reply reuses the same handoff.
+  Settled native owner question/control receipts may precede
   that save; neither may be repeated. No file edits or new Run in this mode.
   Native tool filtering plus signed argument checks limit recovery to that
   Run; no external work, comment, source processing or retry of an attempted
