@@ -3346,6 +3346,84 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
   });
 
 
+test('native final draft settles the same Run without resolving unknown external work',async t=>{
+  const f=fixture(t);
+  f.authority.workMode='task';
+  Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
+  await f.coordinator.close();
+  const coordinator=createAssistantCoordinator(f.options);
+  const native=f.options.native, client=f.options.client;
+  const receipt={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  const originalTurn=randomUUID(),marker=randomUUID(),settlementTurn=randomUUID();
+  let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0;
+  native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
+  try{
+    await coordinator.pollOnce();await coordinator.workOnce();
+    f.events.push({id:randomUUID(),revision:'first',taskId:f.taskId,wake:true});
+    f.advance(300001);await coordinator.pollOnce();await coordinator.workOnce();
+    const schedule=coordinator.status()[0];
+    f.advance(schedule.nextRunAt-f.options.now());
+    client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
+    client.readTaskPortableFinishEvidence=async args=>{
+      assert.equal(args.passId,original.passId);
+      assert.equal(args.expectedLeaseRevision,0);
+      return admitted?receipt:null;
+    };
+    native.readDelivery=async(_thread,id,options={})=>{
+      if(id===original?.deliveryId){
+        if(options.interruptedWorkspaceDraft?.portableFinish){
+          assert.deepEqual(options.interruptedWorkspaceDraft.portableFinish,receipt);
+          return {state:'interrupted_portable_finish',turnId:originalTurn};
+        }
+        return {state:'uncertain',turnId:originalTurn};
+      }
+      assert.equal(id,marker);
+      if(options.acceptedPortableFinish){
+        assert.deepEqual(options.acceptedPortableFinish.receipt,receipt);
+        return {state:'portable_finish_saved',turnId:settlementTurn,acceptedHead:receipt.draftHead};
+      }
+      return completedSave?{state:'completed',turnId:settlementTurn,receipt:`codex:${original.threadId}:${settlementTurn}`}:{state:'uncertain'};
+    };
+    f.options.passHost.continuePass=async(args,pass)=>{
+      assert.deepEqual(pass,original);
+      assert.deepEqual(args.portableFinish,receipt);
+      assert.equal(args.terminalTurnId,originalTurn);
+      const live=f.passes.get(original.deliveryId);
+      if(args.continuation==='review')reviews++;
+      if(args.continuation==='resume'){
+        assert.equal(renewals++,0);
+        Object.assign(live,{state:'leased',leaseRevision:1,leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+      }
+      return {schemaVersion:5,state:renewals?'resumed':'approved',reviewId:marker,invocationId:marker,
+        resumed:renewals?{leaseRevision:1,leaseExpiresAt:live.leaseExpiresAt}:null,pass:{...live}};
+    };
+    native.run=async(input,options)=>{
+      if(!original){
+        original=f.activePass();
+        options.startInvocation();
+        return {state:'uncertain'};
+      }
+      assert.equal(input.deliveryId,marker);
+      assert.deepEqual(options.workspaceDraftRecovery.workspaceDraft,{workspaceId:receipt.workspaceId,runId:receipt.runId,
+        finishPending:true,portableFinish:receipt});
+      await options.beforeInvocation();
+      options.startInvocation();starts++;completedSave=true;
+      return {state:'completed',turnId:settlementTurn,receipt:`codex:${original.threadId}:${settlementTurn}`};
+    };
+    await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    const pass=f.passes.get(original.deliveryId);
+    f.advance(21*60_000);pass.state='review_required';
+    assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.equal(reviews,0);
+    admitted=true;
+    assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.deepEqual([reviews,renewals,starts],[1,1,1]);
+    assert.deepEqual(f.activePass(),original);
+    assert.equal(coordinator.status()[0].nextRunAt,schedule.nextRunAt);
+  }finally{await coordinator.close();}
+});
+
 for(const repaired of [false,true])test(`retained named archive settles once, then requires a separate native task outcome (repair=${repaired})`,async t=>{
   const f=fixture(t),ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
   const originalTurn=randomUUID(),readMarker=randomUUID(),interruptedRead=randomUUID();

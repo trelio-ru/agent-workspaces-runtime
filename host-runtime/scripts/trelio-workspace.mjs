@@ -14011,6 +14011,33 @@ export const retainedAssistantFinishDraftHead = async (metadata, candidateHead) 
   return draftHead;
 };
 
+/** A final portable draft is already immutable and validated. No staging,
+ * new checkpoint, or inference about a provider is involved in resuming it.
+ * These checks run under the existing Workspace finish lock before claim and
+ * again before submission with the current Run lease.
+ */
+export const assertPortableAssistantFinish = async ({ metadata, snapshot, receipt, status }) => {
+  const { run, latestCheckpoint } = snapshot ?? {};
+  const { workspaceId, runId, draftHead, checkpointId } = receipt;
+  if (metadata.scopeType !== "task" || !hasFinishRecoveryMarker(metadata)
+    || metadata.terminalStatus || metadata.workspaceId !== workspaceId || metadata.runId !== runId
+    || run?.workspaceId !== workspaceId || run.id !== runId || run.status !== status
+    || run.baseHead !== metadata.baseHead || run.draftHead !== draftHead || run.candidateHead
+    || metadata.baseHead === draftHead || metadata.draftHead !== draftHead
+    || metadata.candidateHead !== draftHead || metadata.materializedHead !== draftHead
+    || latestCheckpoint?.id !== checkpointId || latestCheckpoint.runId !== runId
+    || latestCheckpoint.checkpointType !== "handoff" || latestCheckpoint.candidateHead !== draftHead
+    || latestCheckpoint.nextActionJson?.taskOutcome !== "no_status_change"
+    || (status === "running" && (run.leaseId !== metadata.leaseId || run.fencingToken !== metadata.fencingToken))) {
+    throw new Error("The final assistant draft or its native handoff changed.");
+  }
+  const head = await runGit(["rev-parse", "HEAD"], { cwd: metadata.workspaceDirectory,
+    env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" } });
+  if (head.stdout.trim() !== draftHead || await getGitStatus(metadata.workspaceDirectory, metadata.objects ?? [])) {
+    throw new Error("The final assistant draft has different local files.");
+  }
+};
+
 /** Preservation-only recovery of a pre-metadata open, never adoption. Native
  * base bytes are reconstructed independently by the ordinary bundle/object
  * engine. Compare real files (including ignored files), HEAD and complete index,
@@ -14329,6 +14356,12 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       throw new Error("Исходный Run изменился перед восстановлением незавершённого сохранения.");
     }
     const retainedTaskHandoff = retainedAssistantFinish?.retainedTaskHandoff;
+    if (retainedAssistantFinish?.portableFinish) {
+      const local = await readOptionalRunMetadata(rootDirectory);
+      if (!local) throw new Error("The final assistant draft lacks its original checkout.");
+      await assertPortableAssistantFinish({ metadata: local, snapshot: exactRuns.get(requestedRunId),
+        receipt: retainedAssistantFinish.portableFinish, status: "expired" });
+    }
     if (retainedTaskHandoff) {
       // The common opener rereads the native Run before claiming it. Compare
       // the previously verified handoff again under the same local lock.
@@ -16795,6 +16828,10 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
         ...protectedContent,
         ...(taskOutcome ? { taskOutcome } : {}),
         ...(checkpointDraftHead ? { draftHead: checkpointDraftHead } : {}),
+        // Only a task finish after the complete portable upload emits this
+        // structural flag. The backend binds it to the admitted pass and
+        // commits it with the handoff, under the same Run/draft CAS.
+        ...(metadata.scopeType === "task" && finalAssistantDraftHead ? { assistantFinalDraft: true } : {}),
       }),
     }),
   });
@@ -17245,7 +17282,7 @@ const mergeWorkspaceRun = async options => {
   return withWorkspaceFinishLock(requireUuid(metadata.runId, "run"), () => mergeWorkspaceRunUnlocked(options));
 };
 
-const finish = async (options, { retainedAssistantHandoff = false, retainedTaskHandoff } = {}) => {
+const finish = async (options, { retainedAssistantHandoff = false, retainedTaskHandoff, portableFinish } = {}) => {
   const { metadata } = await findRunMetadata();
   const runId = requireUuid(metadata.runId, "run");
   // The MCP registry prevents repeats within one host. This private process
@@ -17332,6 +17369,9 @@ const finish = async (options, { retainedAssistantHandoff = false, retainedTaskH
       await retainedAssistantFinishDraftHead(current, current.candidateHead);
     }
     let checkpointOptions = options;
+    if (portableFinish) {
+      await assertPortableAssistantFinish({ metadata: current, snapshot: finishSnapshot, receipt: portableFinish, status: "running" });
+    }
     if (retainedTaskHandoff) {
       const run = finishSnapshot?.run;
       if (run?.status !== "running" || run.leaseId !== current.leaseId || run.fencingToken !== current.fencingToken
@@ -17348,11 +17388,16 @@ const finish = async (options, { retainedAssistantHandoff = false, retainedTaskH
       reportFinishProgress("heartbeat");
       await heartbeat();
       reportFinishProgress("checkpoint");
-      const checkpointHead = retainedAssistantHandoff ? current.candidateHead
+      const checkpointHead = retainedAssistantHandoff || portableFinish ? current.candidateHead
         : await checkpoint({ ...checkpointOptions, type: "handoff" }, null,
           { finishing: true, finishSnapshot, mustReuseHandoff: Boolean(retainedTaskHandoff) });
       reportFinishProgress("preparing");
-      await submitWithMergeRecovery(retainedTaskHandoff ? checkpointOptions : options, checkpointHead, retainedTaskHandoff);
+      if (portableFinish) {
+        // A moved base cannot allocate a merge Run while settling this save.
+        await submit(options, checkpointHead, undefined, portableFinish);
+      } else {
+        await submitWithMergeRecovery(retainedTaskHandoff ? checkpointOptions : options, checkpointHead, retainedTaskHandoff);
+      }
       reportFinishProgress("cleanup");
       // Cleanup cannot turn confirmed acceptance into a failed save.
       await runAutomaticLocalCleanupForCurrentRun().catch(() => undefined);
@@ -18591,7 +18636,7 @@ const assertRetainedCandidateBytes = async (workspaceDirectory, previousHead, he
   }
 };
 
-const submit = async (options, checkpointHead, retainedTaskHandoff) => withRun(async ({
+const submit = async (options, checkpointHead, retainedTaskHandoff, portableFinish) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -18616,15 +18661,22 @@ const submit = async (options, checkpointHead, retainedTaskHandoff) => withRun(a
     expectedRetainedFiles = (await verifyRetainedAssistantHandoff({ metadata, checkpoint: snapshot.latestCheckpoint,
       proof: retainedTaskHandoff })).expectedFiles;
   }
-  const prepared = await prepareLocalCandidateSnapshot({
-    metadata,
-    metadataPath,
-    origin: workspaceOrigin,
-    token,
-    companyEncryption,
-    message: String(options.message || "Подготовить результат Agent Run"),
-    retainedFiles: expectedRetainedFiles,
-  });
+  let prepared;
+  if (portableFinish) {
+    const snapshot = await loadExactWorkspaceRun({ origin: workspaceOrigin, token, workspaceId: metadata.workspaceId,
+      runId: metadata.runId, companyEncryption });
+    await assertPortableAssistantFinish({ metadata, snapshot, receipt: portableFinish, status: "running" });
+    // The recorded head, existing object mappings and accepted-base CAS
+    // come from the original draft. No local edits can be staged or
+    // registered as objects by this continuation.
+    prepared = { head: portableFinish.draftHead, candidateMetadata: metadata };
+  } else {
+    prepared = await prepareLocalCandidateSnapshot({
+      metadata, metadataPath, origin: workspaceOrigin, token, companyEncryption,
+      message: String(options.message || "Подготовить результат Agent Run"),
+      retainedFiles: expectedRetainedFiles,
+    });
+  }
   const head = prepared.head;
   if (expectedRetainedFiles) {
     await assertRetainedCandidateBytes(metadata.workspaceDirectory, retainedTaskHandoff.draftHead, head, expectedRetainedFiles);
@@ -21362,7 +21414,7 @@ export const recoverBridgePluginUpgrade = async (
 };
 
 export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, retainedAssistantHandoff,
-  retainedTaskHandoff, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
+  retainedTaskHandoff, portableFinish, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -21422,7 +21474,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
   } else if (command === "pause") {
     await pause(options);
   } else if (command === "finish") {
-    await finish(options, { retainedAssistantHandoff, retainedTaskHandoff });
+    await finish(options, { retainedAssistantHandoff, retainedTaskHandoff, portableFinish });
   } else if (command === "submit") {
     await submitWithMergeRecovery(options);
   } else if (command === "merge") {

@@ -3076,8 +3076,9 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
   }
 });
 
-for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
-  const named=fixture==='named',retainedTask=fixture==='retained-task';
+for(const fixture of ['task','named','retained-task','portable-task'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
+  const named=fixture==='named',retainedTask=fixture==='retained-task',portableTask=fixture==='portable-task';
+  let loseFinalHandoffResponse=false;
   // An actual isolated child is necessary: the common module captures its
   // private config root at import time. Never write synthetic authority/cache
   // into the developer's real HOME or share a human remembered-key profile.
@@ -3336,7 +3337,13 @@ for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace 
         }
         latestCheckpoint={...input,id:randomUUID(),runId,candidateHead:nativeRun.draftHead,createdAt:new Date().toISOString(),
           ...(retainedTask?{evidenceJson:input.evidence,filesChangedJson:input.filesChanged,
-            openQuestionsJson:input.openQuestions,nextActionJson:input.nextAction}:{})};
+            openQuestionsJson:input.openQuestions,nextActionJson:input.nextAction}:{}),
+          ...(portableTask?{nextActionJson:{...input.nextAction,taskOutcome:input.taskOutcome}}:{})};
+        if(loseFinalHandoffResponse){
+          assert.equal(input.assistantFinalDraft,true);
+          loseFinalHandoffResponse=false;
+          throw new Error('Synthetic transport lost the committed handoff response');
+        }
         return json(latestCheckpoint);
       }
       const storage=`${base}/runs/${runId}/encrypted-storage`;
@@ -3388,7 +3395,7 @@ for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace 
           scopeEpoch:1,writerDeviceId:cryptoDeviceId,ciphertextSha256:input.ciphertextSha256,ciphertextSizeBytes:ciphertext.length,
           bundleFormat:input.bundleFormat,parentRevisionId:input.parentRevisionId};
         assert.equal(publishedFinalDraft,null,'the current assistant finish publishes one portable final draft');
-        publishedFinalDraft={revision,ciphertext};
+        publishedFinalDraft={revision,ciphertext,fencingToken:input.fencingToken};
         nativeRun={...nativeRun,draftHead:input.workspaceHead,draftUpdatedAt:new Date().toISOString()};
         return json({run:nativeRun,draft:revision});
       }
@@ -3722,10 +3729,12 @@ for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace 
       await fs.writeFile(metadataPath,JSON.stringify({...metadata,runAuthor,candidateHead:draftHead}));
     }
     stage('handoff');
-    const handedOff=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(handoffPlan,{
-      withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
-    assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
-    assert.equal(Object.hasOwn(latestCheckpoint,'taskOutcome'),!named);
+    if(!portableTask){
+      const handedOff=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(handoffPlan,{
+        withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
+      assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
+      assert.equal(Object.hasOwn(latestCheckpoint,'taskOutcome'),!named);
+    }
     let readDraftRecovery;
     if(retainedTask){
       const {createFinishRecoveryMarker}=await import('../host-runtime/scripts/trelio-workspace-finish-recovery.mjs');
@@ -3753,6 +3762,30 @@ for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace 
       assert.equal(claims,beforeClaims+1);
       assert.equal(nativeRun.id,runId);
       assert.equal(nativeRun.status,'running');
+    }else if(portableTask){
+      // Lose the response AFTER the normal finish records its final portable
+      // draft. This is a new native save attempt only for the immutable
+      // existing material, with no dependency on an earlier browser trace.
+      loseFinalHandoffResponse=true;
+      await assert.rejects(common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(finishPlan,{
+        withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),
+      })),/bridge transport failed before an HTTP response/u);
+      assert.equal(loseFinalHandoffResponse,false);
+      assert.equal(nativeHandoffs,1);assert.equal(acceptedPublications,0);
+      nativeRun={...nativeRun,status:'expired',leaseExpiresAt:new Date(Date.now()-1000).toISOString()};
+      const portableFinish={...runIdentity,checkpointId:latestCheckpoint.id,draftHead:publishedFinalDraft.revision.head};
+      readDraftRecovery=async()=>({...runIdentity,finishPending:true,portableFinish});
+      const recover=()=>common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
+        withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),readDraftRecovery,
+      }));
+      const beforeClaims=claims;
+      const originalBytes=await fs.readFile(path.join(writable,'new-result.md'));
+      await fs.writeFile(path.join(writable,'new-result.md'),'Synthetic unverified local change');
+      await assert.rejects(recover(),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+      assert.equal(claims,beforeClaims);
+      await fs.writeFile(path.join(writable,'new-result.md'),originalBytes);
+      await recover();
+      assert.equal(claims,beforeClaims+1);
     }else if(named){
       // The accepted named revision recovers the already committed handoff
       // under its own Run. No synthetic new checkpoint or task outcome.
@@ -3776,6 +3809,7 @@ for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace 
     assert.equal(finished.operation,'finish');assert.equal(nativeRun.status,'accepted');assert.equal(acceptedPublications,1);
     if(named||retainedTask)assert.equal(nativeHandoffs,handoffsBeforeFinish,'a retained save must not write another handoff');
     else {
+      if(portableTask)assert.equal(nativeHandoffs,handoffsBeforeFinish,'a portable save cannot rewrite its handoff');
       assert.equal(promotedFinalDrafts,1,'encryption promotes the same durable finish bytes');
       assert.equal(nativeRun.candidateHead,publishedFinalDraft.revision.head);
       assert.match((await common.runGit(['ls-tree','-r','--name-only',nativeRun.candidateHead,'--','worklog'],{cwd:writable})).stdout,
@@ -3798,7 +3832,9 @@ for(const fixture of ['task','named','retained-task'])test(`encrypted Workspace 
     const decoded=await decryptFileFromCompanyContainer({sourcePath:acceptedCipher,destinationPath:acceptedBundle,
       scopePrivateKey:pair.privateKey,scopePrivateJwk:privateJwk,expectedCiphertextSha256:digest(acceptedRevisionBytes)});
     assert.equal(decoded.header.aad.companyId,company.id);assert.equal(decoded.header.aad.entityId,runId);
-    assert.equal(decoded.header.aad.entityRevision,nativeRun.fencingToken);
+    // Claim fences the new submission request. An exact promotion reuses
+    // the original signed draft ciphertext, including its immutable AAD.
+    assert.equal(decoded.header.aad.entityRevision,portableTask?publishedFinalDraft.fencingToken:nativeRun.fencingToken);
     await git(['fetch',acceptedBundle,'+refs/*:refs/remotes/result-proof/*']);
     assert.equal((await git(['show',nativeRun.candidateHead+':new-result.md'])).stdout,'SYNTHETIC_ENCRYPTED_DELIVERABLE');
     assert.match((await git(['show',nativeRun.candidateHead+':assistants/'+f.identity.assistantId+'/WORK.md'])).stdout,/Verified material result/);

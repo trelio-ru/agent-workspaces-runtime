@@ -2817,12 +2817,13 @@ const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
   const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS,ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS}=await import('./trelio-assistant-inbox.mjs');
   const accepted=draft.acceptedHead!==undefined;
   const interruptedFinish=draft.finishPending===true;
+  const saveOnly=draft.namedArchive||draft.portableFinish;
   const same=value=>value?.workspaceId===draft.workspaceId&&value?.runId===draft.runId;
-  let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:draft.namedArchive
+  let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:saveOnly
     ?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS).includes(name);
   if(!accepted&&name==='prepare_assistant_workspace_run')permitted=same(args)&&args.relatedWorkspaceIds===undefined;
   if(!accepted&&name==='continue_assistant_workspace_action')permitted=
-    (!draft.namedArchive||args.operation!=='checkpoint')
+    (!saveOnly||args.operation!=='checkpoint')
     &&['open','status','heartbeat','checkpoint','finish'].includes(args.operation)
     &&same(args.operation==='open'?args.parameters:args.runIdentity)
     &&(args.operation!=='checkpoint'||!interruptedFinish&&args.parameters?.type==='draft')
@@ -2832,7 +2833,7 @@ const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
     permitted=same(args.runIdentity)&&(interruptedFinish?['list','read']:['list','read','replace'])
       .includes(parseAssistantRunFileCommand(args.command).action);
   }
-  if(name==='complete_assistant_pass')permitted=!draft.namedArchive&&args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
+  if(name==='complete_assistant_pass')permitted=!saveOnly&&args.workspaceId===draft.workspaceId&&args.acceptedRunId===draft.runId
     &&(accepted||interruptedFinish
       ?(accepted?args.workspaceHead===draft.acceptedHead:/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(args.workspaceHead??''))
         &&['active','waiting_external','waiting_owner','blocked','completed'].includes(args.goalState)
@@ -4149,6 +4150,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     let directory=path.join(root,'workspace');
     const pending=runLifecycle?await readDraftRecovery(identity,host):null;
     const interruptedFinish=pending?.finishPending===true;
+    const portableFinish=pending?.portableFinish;
     const retained=pending?.retainedHandoff;
     const retainedTaskHandoff=retained?{...retained.locators,handoffSha256:retained.handoffSha256,
       automaticFiles:retained.automaticFiles,replacements:retained.replacements}:undefined;
@@ -4172,14 +4174,15 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         return {schemaVersion:1,operation:'status',stdout:'',stderr:'',nativeRunStatus,localWorkspaceState:'unverified'};
       }
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-      if(pending?.namedArchive===true&&plan.localAction.operation==='status'&&nativeRunStatus?.status==='accepted'){
+      if((pending?.namedArchive===true||portableFinish)&&plan.localAction.operation==='status'&&nativeRunStatus?.status==='accepted'){
         // An accepted server revision can arrive before its local terminal
         // marker. Prove exact clean Git state without running a second finish
         // or pretending the enclosing task's WORK.md was accepted.
         return common.withWorkspaceFinishLock(plan.runIdentity.runId,async()=>{
           const metadata=await common.readAssistantWorkspaceRunMetadata(root);
           const head=(await common.runGit(['rev-parse','HEAD'],{cwd:directory})).stdout.trim();
-          if(!['project','company'].includes(metadata.scopeType)||metadata.workspaceId!==plan.runIdentity.workspaceId
+          if(!(portableFinish?metadata.scopeType==='task'&&head===portableFinish.draftHead:['project','company'].includes(metadata.scopeType))
+            ||metadata.workspaceId!==plan.runIdentity.workspaceId
             ||metadata.runId!==plan.runIdentity.runId||metadata.company?.id!==plan.scope.companyId
             ||metadata.origin!==identity.origin||!sameLocalPath(metadata.workspaceDirectory??'',directory)
             ||metadata.candidateHead!==head||metadata.materializedHead!==head
@@ -4292,15 +4295,22 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
                 // The common opener loads and decrypts the exact checkpoint
                 // before its claim. This outer read contains only locators.
               }
+              if(portableFinish){
+                // The final-draft receipt authorizes these exact bytes only.
+                // The common opener also repeats this pre-claim check.
+                await common.assertPortableAssistantFinish({metadata,snapshot:nativeRunSnapshot,
+                  receipt:portableFinish,status:'expired'});
+              }
               let draftHead;
               try{draftHead=await common.retainedAssistantFinishDraftHead(metadata,head);}
               catch{fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');}
               await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
-                baseHead:metadata.baseHead,candidateHead:head,draftHead,retainedTaskHandoff}});
+                baseHead:metadata.baseHead,candidateHead:head,draftHead,retainedTaskHandoff,portableFinish}});
             });
           }else await common.runWorkspaceCommand(nativeArgs,{assistantGuidePart:guidePart,assistantMaterializationSignal:materialization,
             retainedAssistantHandoff:pending?.namedArchive===true&&plan.localAction.operation==='finish',
             ...(plan.localAction.operation==='finish'&&retainedTaskHandoff?{retainedTaskHandoff}:{}),
+            ...(plan.localAction.operation==='finish'&&portableFinish?{portableFinish}:{}),
             ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
               ?{assertAssistantMaterializationCurrent:async claimed=>{
                 materialization.throwIfAborted();

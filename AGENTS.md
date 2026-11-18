@@ -195,6 +195,9 @@ publication tooling также остаются вне этого публичн
   the worklog, replacements and immutable final Git bytes before publication.
   No new handoff, external actions, task completion or dirty-tree acceptance
   from unexplained edits. Test the full encrypted save and subsequent cycle.
+  New portable finishes use the exact server-committed draft and handoff.
+  Save-only recovery ignores prior provider details, reuses those bytes
+  without staging, and preserves unresolved business and external effects.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

@@ -31,18 +31,26 @@ const integer = (value, min, max) => {
   return value;
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const validateAssistantPortableFinish=value=>{
+  object(value,['workspaceId','runId','checkpointId','draftHead']);
+  if(Object.keys(value).length!==4||!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value.draftHead??''))inputError();
+  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),checkpointId:uuid(value.checkpointId),draftHead:value.draftHead};
+};
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff']);
+  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
   if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined)
     ||value.namedArchive!==undefined&&(value.namedArchive!==true||value.finishPending!==true)
-    ||value.retainedHandoff!==undefined&&(value.namedArchive!==undefined||value.finishPending!==true))inputError();
+    ||value.retainedHandoff!==undefined&&(value.namedArchive!==undefined||value.finishPending!==true)
+    ||value.portableFinish!==undefined&&(value.namedArchive!==undefined||value.retainedHandoff!==undefined||value.finishPending!==true))inputError();
   const retainedHandoff=value.retainedHandoff===undefined?undefined:validateAssistantRetainedHandoff(value.retainedHandoff);
   if(retainedHandoff&&(retainedHandoff.locators.workspaceId!==value.workspaceId||retainedHandoff.locators.runId!==value.runId))inputError();
+  const portableFinish=value.portableFinish===undefined?undefined:validateAssistantPortableFinish(value.portableFinish);
+  if(portableFinish&&(portableFinish.workspaceId!==value.workspaceId||portableFinish.runId!==value.runId))inputError();
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
     ...(value.finishPending===true?{finishPending:true}:{}),
-    ...(value.namedArchive===true?{namedArchive:true}:{}),...(retainedHandoff?{retainedHandoff}:{})};
+    ...(value.namedArchive===true?{namedArchive:true}:{}),...(retainedHandoff?{retainedHandoff}:{}),...(portableFinish?{portableFinish}:{})};
 };
 export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',
@@ -2198,6 +2206,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
             ||deliveryEvents(id).length||prelude?.workspaceId!==workspaceId||prelude.runId!==runId||prelude.releaseId!==releaseId)
             fail('ASSISTANT_INBOX_CONFLICT');
         }
+        // Only the exact event-free task pass may reserve a save. The saved
+        // draft is independent of provider outcomes and grants no task work
+        // or permission to consume any original source input.
+        if(workspaceDraft?.portableFinish&&(!row.scheduled||deliveryEvents(id).length!==0||last?.capacity
+          ||last&&(!last.started||last.workspaceDraft||last.passId!==passId)))fail('ASSISTANT_INBOX_CONFLICT');
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
           fail('ASSISTANT_INBOX_CONFLICT');
@@ -2209,8 +2222,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(postArchive&&(last.passId!==passId||capacity||workspaceDraft||parentRead||namedArchiveSettled
           ||prerequisiteKey===null||!latest||prerequisiteKey===latest.prerequisite_key))fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled
-          ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff)
-          ||workspaceDraft&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
+          ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff&&!workspaceDraft?.portableFinish)
+          ||workspaceDraft&&!workspaceDraft.portableFinish&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');

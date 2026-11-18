@@ -12,7 +12,7 @@ import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistan
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata,
-  validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
+  validateAssistantPortableFinish, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -3092,6 +3092,24 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       try{return Object.freeze(validateAssistantRetainedFinishLocators({...locators,...evidence},{selected:true}));}
       catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
     },
+    async readTaskPortableFinishEvidence(input,signal){
+      const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
+        portableFinishEvidence:{expectedLeaseRevision:revision(input.expectedLeaseRevision)}};
+      let value;
+      try{value=await call('passRead',body,signal);}
+      catch(error){
+        // Older strict servers reject the additive read selector. This gives
+        // no evidence and does not touch the independent legacy witness.
+        if(error instanceof AssistantTransportError&&error.status===400&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
+        throw error;
+      }
+      if(value.passId!==body.passId||!Object.hasOwn(value,'portableFinishEvidence'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      if(value.portableFinishEvidence===null)return null;
+      if(value.state!=='review_required'||value.leaseRevision!==input.expectedLeaseRevision||value.businessReady!==false)
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      try{return Object.freeze(validateAssistantPortableFinish(value.portableFinishEvidence));}
+      catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+    },
     async renewTaskPass(input,signal) {
       if(input.preNativeRecovery!==undefined&&input.preNativeRecovery!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
@@ -3103,12 +3121,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     },
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)
-        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId','reviewId','automatic','technicalPrelude','retainedFinish'].includes(key))
+        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId','reviewId','automatic','technicalPrelude','retainedFinish','portableFinish'].includes(key))
         ||input.automatic!==undefined&&input.automatic!==true
-        ||(input.technicalPrelude!==undefined||input.retainedFinish!==undefined)&&input.automatic!==true
-        ||input.technicalPrelude!==undefined&&input.retainedFinish!==undefined
         ||(input.continuation==='review')!==(input.reviewId===undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      let technicalPrelude,retainedFinish;
+      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish].filter(value=>value!==undefined).length;
+      if(witnesses>1||witnesses&&input.automatic!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      let technicalPrelude,retainedFinish,portableFinish;
       if(input.technicalPrelude!==undefined){
         try{technicalPrelude=validateAssistantTechnicalPrelude(input.technicalPrelude);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
@@ -3117,13 +3135,17 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         try{retainedFinish=validateAssistantRetainedFinishLocators(input.retainedFinish,{selected:true});}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
+      if(input.portableFinish!==undefined){
+        try{portableFinish=validateAssistantPortableFinish(input.portableFinish);}
+        catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+      }
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
         ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{}),
-        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{})};
+        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(portableFinish?{portableFinish}:{})};
       const value=await call('passRenew',body,signal),pass=value?.pass;
       if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'
-        ||!(retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
+        ||!(portableFinish?[5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
         ||value.schemaVersion!==1&&(!input.automatic||value.questionPath!==null||!['approved','stale','resumed'].includes(value.state))
         ||!['waiting_owner','approved','declined','clarification','expired','stale','resumed'].includes(value.state)
         ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision

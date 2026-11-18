@@ -9,7 +9,7 @@ import path from 'node:path';
 import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS,
-  assistantConversationKeyMatches, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
+  assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePath } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
@@ -50,7 +50,8 @@ export const assistantCodexExecutionArguments = () => ['app-server','--listen','
  * No config file, enabled setting or native hook trust is changed on disk. */
 const workspaceRecoveryTools=mode=>mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS
   :mode==='named_archive'?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
-const workspaceRecoveryModeFor=options=>options.workspaceDraftRecovery?.workspaceDraft?.namedArchive===true?'named_archive'
+const workspaceRecoveryModeFor=options=>options.workspaceDraftRecovery?.workspaceDraft?.namedArchive===true
+  ||options.workspaceDraftRecovery?.workspaceDraft?.portableFinish!==undefined?'named_archive'
   :options.workspaceDraftRecovery?.workspaceDraft?.acceptedHead!==undefined
   ?'accepted':options.workspaceDraftRecovery?.workspaceDraft?.finishPending===true
     ?'finish_pending':Boolean(options.workspaceDraftRecovery);
@@ -1961,7 +1962,7 @@ export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)
 /** A completed save-only turn may qualify for one ordinary continuation.
  * The final native status is structural proof of the exact named accepted
  * candidate. No other mutation or provider receipt can enter this phase. */
-export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
+export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run,portable=false)=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='completed'||turn.error!=null
     ||!exactDraftPass(taskPass,taskPass)||!sameDraftRun(run,run)||!UUID.test(run.workspaceId)||!UUID.test(run.runId)
     ||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>128)return null;
@@ -1969,11 +1970,15 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
   if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
     ||typeof original.content[0].text!=='string')return null;
   const lines=original.content[0].text.split('\n',3);
+  const instruction=portable
+    ?`Preserve only the already committed final draft of workspaceId=${run.workspaceId}, runId=${run.runId}.`
+    :`Recover only the existing named Workspace save. Read exact status for workspaceId=${run.workspaceId}, runId=${run.runId}, `;
   if(lines[0]!==assistantDeliveryMarker(deliveryId)||!lines[1]?.startsWith('TRELIO_ASSISTANT_SCOPE ')
-    ||!lines[2]?.startsWith(`Recover only the existing named Workspace save. Read exact status for workspaceId=${run.workspaceId}, runId=${run.runId}, `))return null;
+    ||!lines[2]?.startsWith(instruction))return null;
   let scope;
   try{scope=JSON.parse(lines[1].slice('TRELIO_ASSISTANT_SCOPE '.length));}catch{return null;}
   if(scope?.companyId!==taskPass.companyId||scope.taskId!==taskPass.taskId||scope.sourceReferences!==undefined
+    ||portable&&scope.scheduled!==true
     ||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return null;
   let acceptedHead=null,openHandle=null,finishStarted=false;
   for(const item of items){
@@ -2002,11 +2007,13 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
     if(!exactDraftPass(args.taskPass,taskPass))return null;
     if(draftReads.has(item.tool))continue;
     if(item.tool==='prepare_assistant_workspace_run'){
+      const target=value.workspace;
       if(!sameDraftRun({workspaceId:args.workspaceId,runId:args.runId},run)
         ||args.relatedWorkspaceIds!==undefined||value.prepared!==true
-        ||value.workspace?.id!==run.workspaceId||value.run?.id!==run.runId
-        ||value.workspace.companyId!==taskPass.companyId||!['project','company'].includes(value.workspace.scopeType)
-        ||value.workspace.scopeKey!==`workspace:${run.workspaceId}`||value.workspace.taskId!==null)return null;
+        ||target?.id!==run.workspaceId||value.run?.id!==run.runId||target.companyId!==taskPass.companyId
+        ||(portable
+          ?target.scopeType!=='task'||target.scopeKey!==`task:${taskPass.taskId}`||target.taskId!==taskPass.taskId
+          :!['project','company'].includes(target.scopeType)||target.scopeKey!==`workspace:${run.workspaceId}`||target.taskId!==null))return null;
       continue;
     }
     if(item.tool==='use_assistant_workspace_files'){
@@ -2031,7 +2038,7 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>{
       }
     }
   }
-  return acceptedHead?{...run,acceptedHead}:null;
+  return acceptedHead&&(!portable||run.draftHead===acceptedHead)?{workspaceId:run.workspaceId,runId:run.runId,acceptedHead}:null;
 };
 const readAcceptedNamedArchiveTurn=async(request,threadId,deliveryId,{taskPass,run})=>{
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
@@ -2044,7 +2051,11 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   // action leaves the original uncertainty intact. No transcript leaves RAM.
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
-  const {namedArchive,retainedHandoff,...pass}=taskPass??{};
+  const {namedArchive,retainedHandoff,portableFinish,...pass}=taskPass??{};
+  if(portableFinish!==undefined){
+    return matchesAssistantPortableFinishTurn(turn,deliveryId,pass,portableFinish)
+      ?{state:'interrupted_portable_finish',turnId:turn.id}:{state:'uncertain'};
+  }
   if(retainedHandoff===true){
     const proof=assistantInterruptedRetainedHandoff(turn,deliveryId,pass);
     return proof?{state:'interrupted_retained_handoff',turnId:turn.id,proof}:{state:'uncertain'};
@@ -2054,6 +2065,30 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
     ??assistantInterruptedPendingWorkspaceFinish(turn,deliveryId,taskPass)
     ??assistantInterruptedWorkspaceDraft(turn,deliveryId,taskPass);
   return workspaceDraft?{state:'interrupted_workspace_draft',turnId:turn.id,workspaceDraft}:{state:'uncertain'};
+};
+/** The native turn confirms where the explicit finish was invoked. The
+ * server confirms the paired checkpoint and complete tree independently.
+ * No earlier tool result classifies external effects in this save-only mode.
+ */
+export const matchesAssistantPortableFinishTurn=(turn,deliveryId,pass,selection)=>{
+  if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
+    ||!exactDraftPass(pass,pass)||!Array.isArray(turn.items)||turn.items.length>128)return false;
+  let selected;try{selected=validateAssistantPortableFinish(selection);}catch{return false;}
+  const [original,...items]=turn.items;
+  if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
+    ||typeof original.content[0].text!=='string'
+    ||items.some(item=>item?.type==='userMessage'))return false;
+  const [marker,scopeLine]=original.content[0].text.split('\n',2);
+  const prefix='TRELIO_ASSISTANT_SCOPE ';
+  if(marker!==assistantDeliveryMarker(deliveryId)||!scopeLine?.startsWith(prefix)
+    ||Buffer.byteLength(scopeLine)>4096)return false;
+  let scope;try{scope=JSON.parse(scopeLine.slice(prefix.length));}catch{return false;}
+  if(scope?.companyId!==pass.companyId||scope.taskId!==pass.taskId||scope.scheduled!==true
+    ||scope.sourceReferences!==undefined||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return false;
+  return items.some(item=>item?.type==='mcpToolCall'&&item.server==='trelio-assistant'
+    &&item.tool==='continue_assistant_workspace_action'&&item.arguments?.schemaVersion===1&&item.arguments.operation==='finish'
+    &&item.arguments.parameters?.taskOutcome==='no_status_change'&&sameDraftRun(item.arguments.runIdentity,selected)
+    &&exactDraftPass(item.arguments.taskPass,pass));
 };
 const readInterruptedTaskReadTurn=async(request,threadId,deliveryId,witness)=>{
   if(witness?.initialScheduled===true){
@@ -2083,6 +2118,13 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.acceptedPortableFinish!==undefined){
+      const {taskPass,receipt}=options.acceptedPortableFinish;
+      const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
+      const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
+      const accepted=assistantAcceptedNamedArchive(turn,deliveryId,taskPass,validateAssistantPortableFinish(receipt),true);
+      return accepted?{state:'portable_finish_saved',turnId:turn.id,acceptedHead:accepted.acceptedHead}:{state:'uncertain'};
+    }
     if(options.interruptedWorkspaceDraft!==undefined)
       return readInterruptedDraftTurn(request,threadId,deliveryId,options.interruptedWorkspaceDraft);
     if(options.acceptedNamedArchive!==undefined)
@@ -2476,6 +2518,14 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
           ||proof.locators.runId!==workspaceDraft.runId)fail('ASSISTANT_CODEX_INVALID_INPUT');
       }catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
     }
+    if(workspaceDraft.portableFinish){
+      try{
+        const selected=validateAssistantPortableFinish(workspaceDraft.portableFinish);
+        if(workspaceDraft.finishPending!==true||workspaceDraft.namedArchive!==undefined||workspaceDraft.retainedHandoff!==undefined
+          ||workStateContext.scheduled!==true||workStateContext.ownerQuestionIds!==undefined
+          ||selected.workspaceId!==workspaceDraft.workspaceId||selected.runId!==workspaceDraft.runId)fail('ASSISTANT_CODEX_INVALID_INPUT');
+      }catch{fail('ASSISTANT_CODEX_INVALID_INPUT');}
+    }
   }
   if(options.namedArchiveResume!==undefined){
     const witness=options.namedArchiveResume;
@@ -2709,10 +2759,11 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // writer without starting any turn. Inspect again from that SAME server
       // before calling the host's protected pass renewal and one-use start.
       const bound=workspaceDraft.retainedHandoff;
+      const portableFinish=workspaceDraft.portableFinish;
       const current=await readInterruptedDraftTurn(request,threadId,terminalMarkerId,
-        bound?{...taskPass,retainedHandoff:true}:workspaceDraft.namedArchive===true?{...taskPass,namedArchive:true}:taskPass);
+        portableFinish?{...taskPass,portableFinish}:bound?{...taskPass,retainedHandoff:true}:workspaceDraft.namedArchive===true?{...taskPass,namedArchive:true}:taskPass);
       const {checkpointId,draftHead,...nativeLocators}=bound?.locators??{};
-      const matches=bound
+      const matches=portableFinish?current.state==='interrupted_portable_finish':bound
         ?current.state==='interrupted_retained_handoff'
           &&JSON.stringify(validateAssistantRetainedHandoff(current.proof,{selected:false}))
             ===JSON.stringify(validateAssistantRetainedHandoff({...bound,locators:nativeLocators},{selected:false}))
@@ -2776,6 +2827,8 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly confirm the result already accepted in the immediately preceding interrupted turn. Use its saved WORK.md content and the live task to determine the actual goal state, cadence and timezone. Use complete_assistant_pass with workspaceId=${workspaceDraft.workspaceId}, acceptedRunId=${workspaceDraft.runId}, workspaceHead=${workspaceDraft.acceptedHead}, noChange=false and no processed source references. This closes the pass, so keep an unfinished goal active, waiting or blocked as recorded in the accepted material. If the result or its accepted state cannot be verified, leave the pass unresolved.\n`;
         if(workspaceDraft.namedArchive===true)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nRecover only the existing named Workspace save. Read exact status for workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}, without the old poll handle. If the server already accepted it, verify the clean exact candidate and stop. Otherwise prepare and open this same expired Run and read both returned pinned authority files in full. Use finish with taskOutcome=no_status_change and a brief technical summary, evidence and next action; the host uses the previously committed handoff without changing it. Observe the new exact poll until native acceptance. No file edits, additional Run, controls, question, provider or task-completion tool. The archive's accepted state alone does not complete the assignment. If native acceptance cannot be verified, leave the original outcome unresolved.\n`;
+        if(workspaceDraft.portableFinish)
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nPreserve only the already committed final draft of workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}. Read its exact status without the old poll handle. If expired, prepare and open only that Run and read both pinned authority files. Invoke finish with taskOutcome=no_status_change and follow only its new poll. The bridge reuses the exact committed handoff. Verify the accepted status and stop. No edits, provider, task changes or business completion.\n`;
         if(workspaceDraft.retainedHandoff)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nSettle only the already recorded handoff of workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}. Read exact native status without its old poll handle. If expired, prepare and open the same Run. Read both pinned authority files in full and existing WORK.md. Invoke finish once with taskOutcome=no_status_change, a short technical summary, evidence and next action. The host verifies the original files and reuses the native handoff. Follow the new exact poll, verify native acceptance, then complete_assistant_pass with the accepted head, noChange=false, no processed source references and the true unfinished goal state. Do not edit files, start a Run, contact a provider, repeat a question or change a control. If the exact save cannot be verified, keep the original pass unresolved.\n`;
         if(workspaceDraft.finishPending===true)

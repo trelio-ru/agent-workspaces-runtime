@@ -831,6 +831,23 @@ head refuses submission. Encrypted acceptance can promote the existing
 draft ciphertext. Human finish, historical handoffs and external-effect
 recovery keep their existing rules.
 
+An event-free scheduled task can recover a new portable finish without
+classifying the earlier providers or browser origins. The final-draft marker
+and its handoff commit together on the backend with an exact draft-head CAS.
+The device reads the same task/pass and opaque Workspace, Run, checkpoint and
+draft locators. The latest interrupted native marker must have invoked finish
+on that exact Run. The exclusive native writer rechecks before the one v5
+renewal and start. An older backend's unsupported read grants no authority.
+
+The signed save-only tools reuse the already committed handoff and the clean,
+unchanged Git tree, using the common encrypted/plain submit path and the
+original base CAS. No file staging, replacement handoff, merge Run, provider
+operation or business completion is admitted. Acceptance requires the exact
+current Run and matching clean local/native status. Saving material does not
+resolve any unknown external operation or consume its receipt, queue item or
+scheduled cycle. The historical v4 recovery remains for older drafts without
+the final-draft marker.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
 accepted head alongside the existing intent. The

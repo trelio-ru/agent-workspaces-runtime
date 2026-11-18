@@ -4613,13 +4613,14 @@ for (const recovery of ["clean", "outdated", "outdated_task", "lingering_handles
         if (assistantFinish) {
           assert.equal(draftAttempts, 1, "the complete tree must already be portable when handoff is written");
           assert.equal(handoffPayload.draftHead, draftHead);
+          assert.equal(handoffPayload.assistantFinalDraft, true);
           assert.notEqual(draftHead, originalDraftHead);
           assert.match((await runGit(workspaceDirectory, ["show", `${draftHead}:artifacts/result.md`])).stdout,
             /Правка непосредственно перед finish/u);
           assert.equal((await runGit(workspaceDirectory, ["status", "--porcelain"])).stdout, "");
           assert.match((await runGit(workspaceDirectory, ["ls-tree", "-r", "--name-only", draftHead, "--", "worklog"])).stdout,
             new RegExp(`-run-${runId}\\.md`, "u"));
-        }
+        } else assert.equal(handoffPayload.assistantFinalDraft, undefined);
         latestCheckpoint = { id: "99999999-9999-4999-8999-999999999999", runId,
           checkpointType: "handoff", candidateHead: recovery === "assistant_conflicting_checkpoint" ? originalDraftHead : draftHead,
           summary: handoffPayload.summary,

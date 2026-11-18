@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { matchesAssistantPortableFinishTurn } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -783,6 +784,30 @@ test('retained handoff projects exact native history without exporting text, pat
     const edited=structuredClone(turn);change(edited);
     assert.equal(classify(edited),null);
   }
+});
+
+test('portable finish identifies the exact save independently of earlier providers',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
+  const receipt={workspaceId:workspaceDraft.workspaceId,runId:workspaceDraft.runId,
+    checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  const scope={companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true};
+  turn.items[0].content[0].text=`${assistantDeliveryMarker(terminalMarkerId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(scope)}\n`;
+  for(const siteOrigin of ['https://mail.google.com','https://portal.example.test','https://another.example.test:8443']){
+    const original=structuredClone(turn);
+    // The earlier operation has an unknown result. It conveys no evidence
+    // about the committed save, even when the provider has never been seen.
+    original.items.splice(-1,0,{type:'mcpToolCall',server:'trelio-assistant',tool:'use_assistant_browser',
+      status:'inProgress',arguments:{siteOrigin,taskPass}});
+    assert.equal(matchesAssistantPortableFinishTurn(original,terminalMarkerId,taskPass,receipt),true);
+    assert.equal(assistantInterruptedPendingWorkspaceFinish(original,terminalMarkerId,taskPass),null);
+    original.items.at(-1).arguments.runIdentity.runId=randomUUID();
+    assert.equal(matchesAssistantPortableFinishTurn(original,terminalMarkerId,taskPass,receipt),false);
+  }
+  assert.equal(matchesAssistantPortableFinishTurn(turn,randomUUID(),taskPass,receipt),false);
+  assert.equal(matchesAssistantPortableFinishTurn(turn,terminalMarkerId,{...taskPass,passId:randomUUID()},receipt),false);
+  assert.equal(matchesAssistantPortableFinishTurn({...turn,status:'inProgress'},terminalMarkerId,taskPass,receipt),false);
+  turn.items[0].content[0].text=`${assistantDeliveryMarker(terminalMarkerId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify({...scope,scheduled:false})}\n`;
+  assert.equal(matchesAssistantPortableFinishTurn(turn,terminalMarkerId,taskPass,receipt),false);
 });
 
 test('an interrupted named archive permits only recovery of its positively witnessed save',()=>{
