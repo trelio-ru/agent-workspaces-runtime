@@ -528,7 +528,17 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   await fs.mkdir(existing);
   const git = (...args) => execFileAsync("git", args, { cwd: existing, encoding: "utf8" });
   await git("init", "--quiet");
-  const { stdout } = await git("write-tree");
+  // An empty tree has no user data. Exercise the refusal using a
+  // nonempty orphan tree, without commits, refs or staged user changes.
+  const retainedNote = path.join(existing, "retained-note.txt");
+  const noteBytes = "Synthetic original folder contents\n";
+  const index = path.join(existing, ".git", "wizard-fixture-index");
+  const fixtureGit = (...args) => execFileAsync("git", args, { cwd: existing, encoding: "utf8",
+    env: { ...process.env, GIT_INDEX_FILE: index } });
+  await fs.writeFile(retainedNote, noteBytes);
+  await fixtureGit("add", "--", "retained-note.txt");
+  const { stdout } = await fixtureGit("write-tree");
+  await fs.rm(index);
   const treeId = stdout.trim();
   elements.get("folder-path").value = existing;
   elements.get("display-name").value = "App fixture"; elements.get("create").checked = true;
@@ -550,6 +560,7 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   assert.match(elements.get("status").textContent, /Автоматического восстановления.*отдельной папке/u);
   assert.equal(fixture.puts, 0);
   await assert.rejects(fs.access(path.join(existing, "AGENTS.md")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(retainedNote, "utf8"), noteBytes);
   assert.equal((await git("cat-file", "-t", treeId)).stdout.trim(), "tree");
 
   // Follow the recovery shown by the App. The original folder is still open
