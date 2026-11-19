@@ -2590,7 +2590,8 @@ test('a terminal cancelled PRE-BODY owner intake recovers automatically under fr
  const sourceId=randomUUID(),accountId=randomUUID(),ownerIdentityId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
  const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
   skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true,executionVerified:false};
- let clock=Date.now(),poll=0,active=null,runs=0,provisions=0,sends=0,closed=0;
+ let clock=Date.now(),poll=0,active=null,runs=0,provisions=0,sends=0,closed=0,hookWitness=null;
+ let fingerprint='a'.repeat(64);
  const intakes=new Map(),markers=new Map();
  const client={...f.options.client,tasks:async()=>({bindings:[],nextCursor:null}),sourceAccounts:async()=>[source],sourceRoutes:async()=>[],
   ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
@@ -2604,8 +2605,9 @@ test('a terminal cancelled PRE-BODY owner intake recovers automatically under fr
    Object.assign(current,{state:'cancelled',receiptId:randomUUID()});return structuredClone(current);},
   confirmOwnerReply:async input=>{const current=intakes.get(input.intakePass.intakeId);assert.equal(current.receiptId,input.receiptId);
    current.state='replied';return structuredClone(current);}};
- const native={...f.options.native,readPrerequisites:async()=>({fingerprint:'c'.repeat(64)}),
-  readDelivery:async(_thread,id)=>markers.get(id)??{state:'uncertain'},
+ const native={...f.options.native,readPrerequisites:async()=>({fingerprint}),
+  readDelivery:async(_thread,id,options)=>options?.unreadOwnerPreflight
+    ?hookWitness??{state:'uncertain'}:markers.get(id)??{state:'uncertain'},
   provision:async(input,options)=>{provisions++;options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
    const result={state:'completed',threadId,turnId:randomUUID(),receipt:`codex:${threadId}:${randomUUID()}`};markers.set(input.deliveryId,result);return result;},
   run:async(input,options)=>{runs++;options.startInvocation();const current=intakes.get(input.intakeContext.intakeId);
@@ -2630,7 +2632,10 @@ test('a terminal cancelled PRE-BODY owner intake recovers automatically under fr
  assert.equal(cancelled.outcome_state,'cancelled');assert.equal(cancelled.native_started,1);
  await coordinator.close();coordinator=createAssistantCoordinator(options);
  const nativeOriginal=intakes.get(original.id),terminal=markers.get(original.delivery_id);
- for(const denied of ['read_body','native_running','source_paused','native_unknown','native_task']){
+ for(const denied of ['same_prerequisite','provider_refusal','wrong_turn','read_body','native_running','source_paused','native_unknown','native_task']){
+  fingerprint=(denied==='same_prerequisite'?'a':'c').repeat(64);
+  hookWitness=denied==='provider_refusal'?null:{state:'unread_owner_hook_refused',
+    turnId:denied==='wrong_turn'?randomUUID():terminal.turnId};
   nativeOriginal.readConfirmed=denied==='read_body';nativeOriginal.state=denied==='native_unknown'?'leased':'cancelled';
   nativeOriginal.taskId=denied==='native_task'?randomUUID():null;
   source.state=denied==='source_paused'?'paused':'active';markers.set(original.delivery_id,denied==='native_running'?{state:'running'}:terminal);

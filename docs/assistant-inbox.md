@@ -805,11 +805,16 @@ Schema17 adds one narrow automatic technical recovery for owner-command intakes
 that never reached the original body. Fresh native read-back must confirm the
 same source/revision/device/thread/event, `cancelled`, the exact saved receipt,
 `readConfirmed:false` and no task. The original native marker must independently
-be completed/failed with a real turn UUID. Current source/owner/model admission
-and trusted native hook preflight are checked again. The SAME fingerprint binds
-runtime version and actual hook definitions; one retry per fingerprint and at
-most20 appended attempts in a source generation prevent loops. A five-minute
-backoff separates cancellation from recovery.
+be terminal with a real turn UUID. A changed runtime or hook digest must differ
+from the one observed for that exact attempt, including the original. For that
+change to qualify, the complete latest native turn must prove only a scoped
+missing/invalid hook refusal before original-body access. Provider or source
+read refusals, unknown history, and failed business calls retain the existing
+cancelled record; upgrades alone cannot resubmit them. Current source/owner/model
+admission and trusted native hook preflight are checked again. Capacity retains
+its separate paced native failure proof. One retry per fingerprint and at most
+20 appended attempts in a source generation remain; a five-minute backoff
+separates cancellation from recovery.
 
 The new attempt preserves the original event UUID and native message reference,
 gets new intake/provision/delivery IDs, and provisions a fresh visible restricted

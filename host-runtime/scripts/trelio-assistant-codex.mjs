@@ -2528,10 +2528,42 @@ const readInterruptedTaskReadTurn=async(request,threadId,deliveryId,witness)=>{
     ||!assistantInterruptedTaskRead(turn,deliveryId,witness))return {state:'uncertain'};
   return {state:'interrupted_task_read',turnId:turn.id};
 };
+/** A hook preflight refused the exact original intake before its body could
+ * be read. A native turn ending without a receipt does not diagnose that
+ * failure: an unavailable source reference, denied business tool or unknown
+ * effect remains unchanged when a different runtime build is installed.
+ * Read the WHOLE latest turn. This certificate alone cannot start recovery. */
+const unreadOwnerHookRefusal=(turn,deliveryId,intakePass)=>{
+  if(!intakePass||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||!Object.values(intakePass).every(value=>UUID.test(value??''))
+    ||!UUID.test(turn?.id??'')||turn.status!=='completed'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length>32)return false;
+  const [root,...items]=turn.items;
+  if(root?.type!=='userMessage'||!Array.isArray(root.content)||root.content.length!==1||root.content[0]?.type!=='text'
+    ||typeof root.content[0].text!=='string'||!root.content[0].text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'))return false;
+  const calls=items.filter(item=>!['agentMessage','reasoning','sleep'].includes(item?.type)&&!completedTaskContextCompaction(item));
+  if(!calls.length||calls.length>4)return false;
+  return calls.every(item=>{
+    const args=item?.arguments,value=item?.result?.structuredContent;
+    return item?.type==='mcpToolCall'&&item.server==='trelio-assistant'&&item.tool==='get_assistant_intake_context'
+      &&item.status==='failed'&&item.error==null
+      &&args&&['intakePass','intakePass,runtimeSessionProof'].includes(Object.keys(args).sort().join(','))
+      &&args.intakePass&&Object.keys(args.intakePass).sort().join(',')==='companyId,intakeId,sourceId'
+      &&Object.keys(intakePass).every(key=>args.intakePass[key]===intakePass[key])
+      &&value&&Object.keys(value).sort().join(',')==='code,reason'
+      &&value.code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid'].includes(value.reason);
+  });
+};
 export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.unreadOwnerPreflight!==undefined){
+      const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
+      const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
+      return unreadOwnerHookRefusal(turn,deliveryId,options.unreadOwnerPreflight)
+        ?{state:'unread_owner_hook_refused',turnId:turn.id}:{state:'uncertain'};
+    }
     if(options.recoveredWorkspaceOutcome!==undefined){
       const selection=options.recoveredWorkspaceOutcome;
       if(!selection||(selection.retry?.retryFromReviewId??selection.saveMarkerId)!==deliveryId)return {state:'uncertain'};

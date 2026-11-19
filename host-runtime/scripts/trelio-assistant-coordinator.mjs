@@ -831,8 +831,6 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(outcome.readConfirmed!==false)continue;
         const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
         if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??''))continue;
-        const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
-        const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
         const capacity=row.model_capacity_json?JSON.parse(row.model_capacity_json):null;
         // A cancelled capacity attempt has its own durable paced episode. It
         // does not borrow changed-hook authority or replay its turn. The existing
@@ -842,7 +840,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           &&capacity.waiting===false&&terminal.state==='failed'&&terminal.failure==='model_capacity';
         if(capacity?.markerId===row.delivery_id&&!retryCapacity)continue;
         if(retryCapacity&&capacity.nextAt>now())continue;
-        if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||!retryCapacity&&row.retry_prerequisite===prerequisite.fingerprint)continue;
+        const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+        const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
+        if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??''))continue;
+        if(!retryCapacity){
+          // Compare to the trusted prerequisites observed for this actual
+          // attempt, including the root. A different build is relevant only
+          // after the exact terminal history proves a hook preflight refusal.
+          // A provider/read failure or an unknown tool result grants no replay.
+          if(!/^[0-9a-f]{64}$/u.test(row.intake_prerequisite??'')
+            ||[row.intake_prerequisite,row.retry_prerequisite].includes(prerequisite.fingerprint))continue;
+          const witness=await native.readDelivery(row.thread_id,row.delivery_id,{
+            signal,unreadOwnerPreflight:intakeLocator(row)});lease();
+          if(witness.state!=='unread_owner_hook_refused'||witness.turnId!==terminal.turnId)continue;
+        }
         await intakeSource(row,signal);
         inbox.retryUnreadOwnerIntake(row.id,{receiptId:outcome.receiptId,terminalTurnId:terminal.turnId,
           prerequisiteKey:prerequisite.fingerprint,...(retryCapacity?{capacity:true}:{})});

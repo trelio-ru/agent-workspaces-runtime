@@ -55,6 +55,37 @@ test('independent readiness completion requires its exact tool-free GUI turn',as
     assert.deepEqual(await read({...turn,items}),{state:'uncertain'});
 });
 
+test('unread owner recovery needs a scoped hook refusal in the full latest native turn',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
+  const intakePass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()};
+  const root={type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nSYNTHETIC_OWNER'}]};
+  const hook={type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_intake_context',status:'failed',
+    arguments:{intakePass},result:{structuredContent:{code:'TRELIO_RUNTIME_HOOK_REQUIRED',reason:'missing'}}};
+  const read=(items,status='completed')=>readAssistantCodexDelivery(threadId,deliveryId,{
+    executable:process.execPath,environment:{},unreadOwnerPreflight:intakePass,
+    spawnProcess:nativeRpc(request=>{
+      if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd:process.cwd()}}};
+      assert.equal(request.method,'thread/turns/list');
+      assert.equal(request.params.itemsView,'full');assert.equal(request.params.limit,1);
+      return {result:{data:[{id:turnId,status,items}],nextCursor:null}};
+    }),
+  });
+  assert.deepEqual(await read([root,hook,{type:'agentMessage',text:'SYNTHETIC_NOTICE'}]),
+    {state:'unread_owner_hook_refused',turnId});
+  for(const items of [
+    [root], [root,{...hook,status:'completed'}],
+    [root,{...hook,result:{structuredContent:{code:'ASSISTANT_SOURCE_READ_TELEGRAM_REFERENCE_UNAVAILABLE'}}}],
+    [root,{...hook,result:{structuredContent:{code:'ASSISTANT_SOURCE_DEADLINE'}}}],
+    [root,{...hook,result:{structuredContent:{code:'TRELIO_RUNTIME_HOOK_REQUIRED',reason:'replayed'}}}],
+    [root,{...hook,arguments:{intakePass:{...intakePass,intakeId:randomUUID()}}}],
+    [root,{...hook,server:'other'}],
+    [root,hook,{...hook,tool:'resolve_assistant_intake'}],
+    [root,hook,{type:'commandExecution',status:'completed'}],
+    [root,hook,root],
+  ])assert.deepEqual(await read(items),{state:'uncertain'});
+  assert.deepEqual(await read([root,hook],'interrupted'),{state:'uncertain'});
+});
+
 test('independent READY uses the exact owned-process prompt through native readback',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
   let submitted=null,starts=0,turns=0;

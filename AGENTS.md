@@ -1835,9 +1835,9 @@ Exact legacy template bytes для распознавания при мигра�
   native create alone does not earn ACK. Positive native cancellation plus an
   explicit source generation remains the normal retry. Schema17 permits only a
   fresh native-confirmed unread/terminal owner attempt under a changed trusted
-  runtime/hook fingerprint, with preserved original history and bounded retries.
-  Recovery also requires the original native terminal marker; domain cancellation
-  cannot replace it. Closed ACL/transport failures defer, never recreate or ACK.
+  runtime/hook fingerprint and the exact full-turn preflight refusal. A different
+  build does not repair provider/reference failures. Keep original cancellation,
+  capacity and unknown-outcome fences; closed ACL/transport failures never recreate or ACK.
   Additional company bind uses immutable owner origin-source/revision admission
   and SAME atomic catalogue intent receipt/CAS, preserving sessions/old bindings;
   no human import, pre-existing binding adoption, provider login or extra vault.
