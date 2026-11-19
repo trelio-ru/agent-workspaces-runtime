@@ -863,6 +863,48 @@ test('local draft witness extracts only the exact native replacement bytes acros
   }
 });
 
+test('native local-draft read projects signed or audited file exports without settling any provider action',async()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
+  const basis={workspaceId:workspaceDraft.workspaceId,runId:workspaceDraft.runId,baseHead:'d'.repeat(40),anchorHead:'d'.repeat(40),checkpointId:null};
+  turn.items[0].content[0].text=assistantDeliveryMarker(terminalMarkerId)+'\nTRELIO_ASSISTANT_SCOPE '+JSON.stringify({
+    companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true,
+  });
+  turn.items.pop();
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  const {assistantArtifactPathDigest}=await import('../host-runtime/scripts/trelio-local-path.mjs');
+  const destination=path.resolve('synthetic-export-directory'),saved=path.join(destination,'message-3.eml');
+  const artifact={pathSha256:assistantArtifactPathDigest(saved),contentSha256:digest('sample'),sizeBytes:6};
+  const stdout=JSON.stringify({saved,uid:'3',format:'message/rfc822',size:6,sha256:artifact.contentSha256});
+  const parameters={companyId:taskPass.companyId,skillId:'generic-artifact-skill',releaseId:randomUUID(),runtimeSessionId:randomUUID(),
+    arguments:['save-message','--folder','archive','--uid','3','--output',destination,'--local-account',randomUUID()]};
+  const taskSkillArtifact=bindAssistantTaskSkillArtifact({schemaVersion:1,releaseId:parameters.releaseId,
+    packageSha256:'a'.repeat(64),outputSha256:digest(stdout),artifact},{scope:taskPass,parameters,stdout});
+  assert.ok(taskSkillArtifact);
+  turn.items.push({type:'mcpToolCall',server:'trelio-assistant',tool:'continue_assistant_workspace_action',status:'completed',
+    arguments:{schemaVersion:1,operation:'skill_run',parameters,taskPass},
+    result:{structuredContent:{schemaVersion:1,operation:'skill_run',stdout,taskSkillArtifact}}});
+  const threadId=randomUUID();
+  const read=history=>readAssistantCodexDelivery(threadId,terminalMarkerId,{executable:process.execPath,environment:{},
+    interruptedWorkspaceDraft:{...taskPass,localDraftBasis:basis},spawnProcess:nativeRpc(request=>({
+      result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[history],nextCursor:null},
+    }))});
+  assert.deepEqual((await read(turn)).retainedArtifacts,[artifact]);
+  const foreign=structuredClone(turn);
+  foreign.items.at(-1).result.structuredContent.stdout+='changed bytes';
+  assert.equal((await read(foreign)).state,'uncertain');
+  const legacy=structuredClone(turn),call=legacy.items.at(-1);
+  const release={skillId:'email-imap-smtp',releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
+    packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'};
+  Object.assign(call.arguments.parameters,{skillId:release.skillId,releaseId:release.releaseId});
+  delete call.result.structuredContent.taskSkillArtifact;
+  const recovered=await read(legacy);
+  assert.deepEqual(recovered.retainedArtifacts,[artifact]);
+  assert.deepEqual(recovered.historicalSkillReleases,[release]);
+  assert.doesNotMatch(JSON.stringify(recovered),/synthetic-export-directory|message-3\.eml/u);
+  call.arguments.parameters.releaseId=randomUUID();
+  assert.equal((await read(legacy)).retainedArtifacts,undefined);
+});
+
 test('portable finish identifies the exact save independently of earlier providers',()=>{
   const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
   const receipt={workspaceId:workspaceDraft.workspaceId,runId:workspaceDraft.runId,
@@ -1270,6 +1312,89 @@ for(const anchor of ['base','checkpoint','portable'])test(`native read-back reco
     const unfinished=structuredClone(turn);
     unfinished.items=unfinished.items.filter(item=>item.arguments?.operation!=='finish');
     assert.deepEqual(await read(unfinished),{state:'uncertain'});
+  }
+});
+
+test('an accepted local save can nominate only the exact observed outbound effect of its preceding turn',async()=>{
+  const {turn:save,deliveryId:saveMarkerId,taskPass,run,candidateHead}=archiveWithRefusedOpenPoll();
+  const scope={companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true};
+  const deliveryId=randomUUID(),sourceMarkerId=randomUUID(),threadId=randomUUID();
+  const receipt={...run,baseHead:'a'.repeat(40),anchorHead:'c'.repeat(40),checkpointId:randomUUID()};
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  const {assistantArtifactPathDigest}=await import('../host-runtime/scripts/trelio-local-path.mjs');
+  const destination=path.resolve('synthetic-provider-archive'),saved=path.join(destination,'message-7.eml');
+  const parent='<original@example.test>',messageId='<sent@example.test>',bytes=`Message-ID: ${messageId}\r\nIn-Reply-To: ${parent}\r\n\r\nsample`;
+  const artifact={pathSha256:assistantArtifactPathDigest(saved),contentSha256:digest(bytes),sizeBytes:Buffer.byteLength(bytes)};
+  const release={skillId:'email-imap-smtp',releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
+    packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'};
+  const call=(tool,args,structuredContent,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+    arguments:{...args,taskPass},result:{structuredContent}});
+  const action=(operation,parameters,result,status)=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...operation==='open'?{}:{runIdentity:run}},result,status);
+  const localAccount=randomUUID(),runtimeSessionId=randomUUID(),startedAt=1_700_000_000;
+  const skill=(args,outcome)=>{
+    const parameters={companyId:taskPass.companyId,skillId:release.skillId,releaseId:release.releaseId,
+      runtimeSessionId,arguments:['--local-account',localAccount,...args]};
+    return call('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters},
+      outcome===null?{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'}:{schemaVersion:1,operation:'skill_run',stdout:JSON.stringify(outcome)},
+      outcome===null?'failed':'completed');
+  };
+  const plan={source:{folder:'INBOX',uid:'3',messageId:parent},from:'assistant@example.test',to:['owner@example.test'],
+    cc:[],subject:'Re: Sample',body:'sample',attachments:[]};
+  const reply=['reply','--folder','INBOX','--uid','3','--body','sample'],planSha256=digest('synthetic preview');
+  const confirm=skill([...reply,'--confirm','--expected-plan-sha256',planSha256],null);
+  const obtain=['search','--special-use','sent','--since','2023-11-14','--to','owner@example.test','--limit','10'];
+  const sentRead=skill(['read','--folder','Sent','--uid','7'],{folder:'Sent',uid:'7',messageId,
+    from:plan.from,to:plan.to[0],cc:'',subject:plan.subject,body:'sample\r\n',attachments:[],
+    date:new Date((startedAt+60)*1000).toISOString(),originalSha256:artifact.contentSha256});
+  const original={id:randomUUID(),status:'interrupted',startedAt,completedAt:null,items:[
+    {type:'userMessage',content:[{type:'text',text:assistantNativePrompt(sourceMarkerId,scope,{})}]},
+    call('prepare_assistant_workspace_run',run,{prepared:true,workspace:{id:run.workspaceId,companyId:taskPass.companyId,
+      scopeType:'task',taskId:taskPass.taskId},run:{id:run.runId}}),
+    action('open',run,{operation:'open'}),skill(['signature','show'],{signatureSha256:digest('')}),
+    skill(reply,{prepared:true,sent:false,plan,planSha256}),confirm,skill(obtain,null),
+    skill(obtain,{folder:'Sent',messages:[{uid:'7',messageId}]}),sentRead,
+    skill(['save-message','--folder','Sent','--uid','7','--output',destination],
+      {saved,uid:'7',format:'message/rfc822',size:artifact.sizeBytes,sha256:artifact.contentSha256}),
+    action('checkpoint',{type:'draft'},{code:'TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED'},'failed'),
+    call('use_assistant_workspace_files',{runIdentity:run,command:{action:'replace',path:'WORK.md',text:'Reply archived',
+      expectedSha256:null}},{state:'draft_updated',sha256:digest('Reply archived')}),
+  ]};
+  save.items[0].content[0].text=assistantNativePrompt(saveMarkerId,scope,{workspaceDraftRecovery:{workspaceDraft:{...run,localDraft:{basis:receipt}}}});
+  save.items[2].result.structuredContent.workspace={id:run.workspaceId,scopeType:'task',scopeKey:`task:${taskPass.taskId}`,
+    companyId:taskPass.companyId,taskId:taskPass.taskId};
+  const read=(history=original)=>readAssistantCodexDelivery(threadId,saveMarkerId,{executable:process.execPath,environment:{},
+    recoveredWorkspaceOutcome:{deliveryId,originalTurnId:original.id,saveMarkerId,saveTurnId:save.id,taskPass,
+      mode:'local_draft',receipt,sourceMarkerId},spawnProcess:nativeRpc(request=>({
+      result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[save,history]},
+    }))});
+  const effect=await read();
+  assert.equal(effect.state,'recovered_outcome_observed');
+  assert.equal(effect.evidence.acceptedHead,candidateHead);
+  assert.deepEqual(effect.evidence.providerEffect.artifact,artifact);
+  assert.deepEqual(effect.evidence.historicalSkillReleases,[release]);
+  assert.doesNotMatch(JSON.stringify(effect),/original@example|sent@example|synthetic-provider-archive/u);
+  const openHandle=randomUUID(),openParameters={finishOperationId:openHandle};
+  const pending={schemaVersion:1,operation:'open',state:'running',operationId:openHandle,
+    nextCall:{tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,operation:'status',
+      runIdentity:run,parameters:openParameters}}};
+  const polled=structuredClone(original);
+  polled.items.splice(2,1,action('open',run,pending),
+    action('status',openParameters,{code:'TRELIO_RUNTIME_HOOK_FAILED'},'failed'),
+    action('status',{}, {operation:'status',stdout:JSON.stringify({...run,dirty:false})}));
+  assert.deepEqual(await read(polled),effect);
+  const unrelated=structuredClone(polled);
+  unrelated.items[3].arguments.parameters.finishOperationId=randomUUID();
+  assert.deepEqual(await read(unrelated),{state:'uncertain'});
+  for(const change of [
+    value=>value.items.splice(6,0,structuredClone(confirm)),
+    value=>{value.items[8].result.structuredContent.stdout=JSON.stringify({folder:'Sent',uid:'7',messageId});},
+    value=>{value.items[8].arguments.parameters.runtimeSessionId=randomUUID();},
+    value=>{value.items[0].content[0].text=assistantNativePrompt(randomUUID(),scope,{});},
+    value=>value.items.push(call('create_comment',{},{})),
+  ]){
+    const modified=structuredClone(original);change(modified);
+    assert.deepEqual(await read(modified),{state:'uncertain'});
   }
 });
 

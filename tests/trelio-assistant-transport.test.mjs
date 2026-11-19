@@ -3884,12 +3884,21 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
       const anchored={...metadata,latestDraftCheckpointId:checkpointId??randomUUID(),
         candidateHead:localBase?null:draftHead,draftHead:nativeRun.draftHead,materializedHead:anchorHead};
       await fs.writeFile(metadataPath,JSON.stringify(anchored));
-      const relativePaths=['local-only.md',`assistants/${f.identity.assistantId}/WORK.md`,'new-result.md',
+      const relativePaths=['local-only.md',`assistants/${f.identity.assistantId}/WORK.md`,
         ...(localBase?['server-draft.md']:[])];
       const replacements=await Promise.all(relativePaths.map(async filePath=>({pathSha256:digest(Buffer.from(filePath)),
         contentSha256:digest(await fs.readFile(path.join(writable,filePath)))})));
-      const {deltaSha256}=await common.verifyAssistantLocalDraft({metadata:anchored,basis,replacements});
-      readDraftRecovery=async()=>({...runIdentity,finishPending:true,localDraft:{basis:{...basis,deltaSha256},replacements}});
+      const {assistantArtifactPathDigest}=await import('../host-runtime/scripts/trelio-local-path.mjs');
+      const exportPath=path.join(writable,'new-result.md'),exportBytes=await fs.readFile(exportPath);
+      const artifact={pathSha256:assistantArtifactPathDigest(exportPath),contentSha256:digest(exportBytes),sizeBytes:exportBytes.length};
+      const retainedArtifacts=[artifact];
+      // A provider's file export must match the actual additional Git path
+      // and bounded bytes. The exact replace receipts alone cannot save it.
+      await assert.rejects(common.verifyAssistantLocalDraft({metadata:anchored,basis,replacements}));
+      await assert.rejects(common.verifyAssistantLocalDraft({metadata:anchored,basis,replacements,
+        retainedArtifacts:[{...artifact,sizeBytes:artifact.sizeBytes+1}]}));
+      const {deltaSha256}=await common.verifyAssistantLocalDraft({metadata:anchored,basis,replacements,retainedArtifacts});
+      readDraftRecovery=async()=>({...runIdentity,finishPending:true,localDraft:{basis:{...basis,deltaSha256},replacements,retainedArtifacts}});
       const recover=()=>common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
         withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),readDraftRecovery,
       }));

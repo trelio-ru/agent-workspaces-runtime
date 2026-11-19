@@ -781,7 +781,7 @@ export const createProductionAssistantHook = async ({context=productionContext,a
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedCompanyContext=null,companyReadPreparation=false,sourceAttachment=null,sourceWorkspaceFile=null,sourceRegistryDocument=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null,context=productionContext}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedCompanyContext=null,companyReadPreparation=false,sourceAttachment=null,sourceWorkspaceFile=null,sourceRegistryDocument=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,taskSkillExecution=false,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null,context=productionContext}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   if(typeof companyReadPreparation!=='boolean'||companyReadPreparation&&!encryptedCompanyContext)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -806,7 +806,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       prepareSkillAccountSetupArguments:profile.prepareSkillAccountSetupArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
-  },{signal,workspaceRun,...(companyReadPreparation?{companyReadPreparation:true}:{})});
+  },{signal,workspaceRun,...(taskSkillExecution?{taskSkillExecution}:{}),...(companyReadPreparation?{companyReadPreparation:true}:{})});
 };
 
 /** The native receipt contains only structural coordinates. Use the SAME
@@ -1346,6 +1346,14 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
 
 // Long-lived stdio is deliberately only a facade. A fresh child resolves the
 // current signed implementation for each invocation without reconnecting Codex.
+// Internal only. Nothing coming off the native pipe, or from the model, can
+// select the execution phase. It exists only for a validated task skill plan.
+const admittedTaskSkill = Symbol('admittedTaskSkill');
+// The signed provider still owns its original 180-second limit. One ordinary
+// HTTP budget covers the rest of the isolated invocation (local/native setup,
+// result projection and cleanup), under this single non-sliding outer bound.
+const taskSkillExecutionTimeoutMs = 240_000;
+
 export const createForwardingAssistantMcp = async ({presentationProfile='task',request=requestCurrentAssistantRuntime,createWorkspace=createAssistantWorkspaceExecutor,configurationDirectory}={}) => {
   // Preserve secret-free pre-enrollment discovery. A source-only or not-yet
   // paired installation must not require a loader, private worker or network.
@@ -1354,7 +1362,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
   catch(error){if(error.code==='ENOENT')return null;throw error;}
   const workspace = await createWorkspace();
   return {listTools:signal=>request({operation:'list',...(['remote_mcp','skill_setup','company_context'].includes(presentationProfile)?{presentationProfile}:{})},{signal}),
-    async callTool(name,args,signal) {
+    async callTool(name,args,signal,{separateTaskSkillExecution=false}={}) {
       // The deferred read retains this invocation beyond its first await.
       // Preserve exactly the parsed original, never a mutable caller object.
       args=JSON.parse(JSON.stringify(args));
@@ -1391,42 +1399,54 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
       // plans. The next returned secret_browser_fill continuation executes in
       // the SAME isolated Workspace worker; no second browser executor exists.
       if(['secret_list','secret_browser_prepare','secret_create','skill_consent','skill_account_setup','external_account_admit'].includes(args?.operation))return result;
-      let executed;
-      try {executed=await workspace.execute(result.structuredContent,{signal});}
-      catch(error) {
-        if(args?.operation==='secret_browser_fill' && isSecretBrowserPreflightRefusal(error)){
-          // This is evidence about this attempt only. The grant may have
-          // expired or been spent elsewhere. Keep recovery observational.
-          return {isError:true,content:[{type:'text',text:'Browser form preflight stopped before requesting the Secret. Inspect the exact current page and fields before deciding how to continue.'}],
-            structuredContent:{code:secretBrowserPreflightFailure,stage:'preflight',reasonCode:error.reasonCode,
-              secretRequested:false,grantConsumedByAttempt:false}};
-        }
-        await reportAssistantMaintenanceFailure(error).catch(()=>undefined);
-        if(error?.code==='TRELIO_WORKSPACE_FINISH_UNKNOWN'){
-          // The native request has already authorised this exact status plan.
-          // A facade restart loses only its in-memory handle: polling it again
-          // can never recover the writer's outcome. Return the existing READ
-          // action without that handle, not a finish/claim, cached receipt or
-          // permission to replay. The next call obtains a fresh native proof.
-          const plan=await validateAssistantWorkspacePlan(result.structuredContent);
-          if(plan.localAction.operation==='status' && plan.localAction.parameters.finishOperationId){
-            const nextCall={tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,
-              operation:'status',parameters:{},runIdentity:plan.runIdentity}};
-            return {isError:true,content:[{type:'text',text:'The local Workspace operation handle is no longer retained. Do not poll it again or infer acceptance/a running writer. Execute the returned ordinary read-only status, then read the exact server Run. For an expired own Run, prepare that runId and execute its returned open before further writes. Preserve files; never resubmit an accepted Run or blindly repeat a write. Technical inspection/recovery does not need a new owner decision or approve sensitive actions.'}],
-              structuredContent:{code:'TRELIO_WORKSPACE_FINISH_UNKNOWN',recovery:{readOnly:true,nextCall}}};
+      const executeWorkspace=async(plan,actionSignal)=>{
+        let executed;
+        try {executed=await workspace.execute(plan,{signal:actionSignal});}
+        catch(error) {
+          if(args?.operation==='secret_browser_fill' && isSecretBrowserPreflightRefusal(error)){
+            // This is evidence about this attempt only. The grant may have
+            // expired or been spent elsewhere. Keep recovery observational.
+            return {isError:true,content:[{type:'text',text:'Browser form preflight stopped before requesting the Secret. Inspect the exact current page and fields before deciding how to continue.'}],
+              structuredContent:{code:secretBrowserPreflightFailure,stage:'preflight',reasonCode:error.reasonCode,
+                secretRequested:false,grantConsumedByAttempt:false}};
           }
+          await reportAssistantMaintenanceFailure(error).catch(()=>undefined);
+          if(error?.code==='TRELIO_WORKSPACE_FINISH_UNKNOWN'){
+            // The native request has already authorised this exact status plan.
+            // A facade restart loses only its in-memory handle: polling it again
+            // can never recover the writer's outcome. Return the existing READ
+            // action without that handle, not a finish/claim, cached receipt or
+            // permission to replay. The next call obtains a fresh native proof.
+            const statusPlan=await validateAssistantWorkspacePlan(plan);
+            if(statusPlan.localAction.operation==='status' && statusPlan.localAction.parameters.finishOperationId){
+              const nextCall={tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,
+                operation:'status',parameters:{},runIdentity:statusPlan.runIdentity}};
+              return {isError:true,content:[{type:'text',text:'The local Workspace operation handle is no longer retained. Do not poll it again or infer acceptance/a running writer. Execute the returned ordinary read-only status, then read the exact server Run. For an expired own Run, prepare that runId and execute its returned open before further writes. Preserve files; never resubmit an accepted Run or blindly repeat a write. Technical inspection/recovery does not need a new owner decision or approve sensitive actions.'}],
+                structuredContent:{code:'TRELIO_WORKSPACE_FINISH_UNKNOWN',recovery:{readOnly:true,nextCall}}};
+            }
+          }
+          throw error;
         }
-        throw error;
+        if(executed?.operation==='skill_run' && executed.visual){
+          const {visualMcpResult}=await import('./trelio-visual-result.mjs');
+          return visualMcpResult(executed.visual);
+        }
+        return {content:[{type:'text',text:executed?.state==='running'&&['open','finish'].includes(executed.operation)?executed.instruction
+          :executed?.operation==='open'&&executed.authorityReads
+          ?'Read both pinned authority files in order using the exact structuredContent.authorityReads calls. If a response has nextOffset, repeat that read with command.offset set to nextOffset until null before proceeding to the next file.'
+          :executed?.operation==='skill_run'&&executed.instruction?executed.instruction
+          :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
+      };
+      if(separateTaskSkillExecution && args?.operation==='skill_run'){
+        const plan=await validateAssistantWorkspacePlan(result.structuredContent);
+        if(plan.localAction.operation!=='skill_run')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+        signal?.throwIfAborted();
+        // Retain the validated action and executor only. Native admission has
+        // spent the original proof. The signed child reads its own fresh live
+        // identity/lease and cannot borrow this short private process session.
+        return {[admittedTaskSkill]:executionSignal=>executeWorkspace(assistantWorkspaceExecutionPlan(plan),executionSignal)};
       }
-      if(executed?.operation==='skill_run' && executed.visual){
-        const {visualMcpResult}=await import('./trelio-visual-result.mjs');
-        return visualMcpResult(executed.visual);
-      }
-      return {content:[{type:'text',text:executed?.state==='running'&&['open','finish'].includes(executed.operation)?executed.instruction
-        :executed?.operation==='open'&&executed.authorityReads
-        ?'Read both pinned authority files in order using the exact structuredContent.authorityReads calls. If a response has nextOffset, repeat that read with command.offset set to nextOffset until null before proceeding to the next file.'
-        :executed?.operation==='skill_run'&&executed.instruction?executed.instruction
-        :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
+      return executeWorkspace(result.structuredContent,signal);
     }};
 };
 
@@ -1535,10 +1555,16 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
             throw Object.assign(new Error(), { code: 'ASSISTANT_TASK_INPUT_INVALID' });
           }
           const callProfile=assistantMcpCallProfile(presentationProfile,message.params.name,message.params.arguments);
-          const result=await withProxy((proxy, signal) => {
+          const admitted=await withProxy((proxy, signal) => {
             if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
-            return proxy.callTool(message.params.name, message.params.arguments, signal);
+            return proxy.callTool(message.params.name, message.params.arguments, signal,{separateTaskSkillExecution:true});
           },{interactiveSourceSetup:interactiveAssistantTool(message.params.name),callProfile});
+          // The native request and its private process session are closed.
+          // Execute once under the signed child lifetime; serial stdio keeps
+          // the result in this same call without a new schema or replay path.
+          const result=typeof admitted?.[admittedTaskSkill]==='function'
+            ?await admitted[admittedTaskSkill](AbortSignal.any([controller.signal,AbortSignal.timeout(taskSkillExecutionTimeoutMs)]))
+            :admitted;
           // Reflect the native view used by a successful call in discovery.
           // A refusal or malformed input does not replace the prior catalogue.
           // Exact skill/status reads can still request a narrower presentation.
@@ -1898,18 +1924,18 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
  * cell can omit the setup timer. Technical plugin maintenance has its own fixed
  * bounded budget; neither profile can extend a caller/outer hook signal.
  */
-export const assistantProductionContextSignal = ({signal,interactiveSourceSetup=false,workspaceRun=null,pluginMaintenance=false,codexMaintenance=false,companyReadPreparation=false}={},
+export const assistantProductionContextSignal = ({signal,interactiveSourceSetup=false,workspaceRun=null,pluginMaintenance=false,codexMaintenance=false,companyReadPreparation=false,taskSkillExecution=false}={},
   timeout=milliseconds=>AbortSignal.timeout(milliseconds)) => {
-  if(typeof pluginMaintenance!=='boolean'||typeof codexMaintenance!=='boolean'||typeof companyReadPreparation!=='boolean'
-    ||Number(pluginMaintenance)+Number(codexMaintenance)+Number(interactiveSourceSetup)+Number(companyReadPreparation)>1)fail('ASSISTANT_REQUEST_INVALID');
+  if(typeof pluginMaintenance!=='boolean'||typeof codexMaintenance!=='boolean'||typeof companyReadPreparation!=='boolean'||typeof taskSkillExecution!=='boolean'
+    ||Number(pluginMaintenance)+Number(codexMaintenance)+Number(interactiveSourceSetup)+Number(companyReadPreparation)+Number(taskSkillExecution)>1)fail('ASSISTANT_REQUEST_INVALID');
   if(workspaceRun!==null){
-    if(pluginMaintenance || codexMaintenance || interactiveSourceSetup || companyReadPreparation || !workspaceRun || Object.getPrototypeOf(workspaceRun)!==Object.prototype
+    if(pluginMaintenance || codexMaintenance || interactiveSourceSetup || companyReadPreparation || taskSkillExecution || !workspaceRun || Object.getPrototypeOf(workspaceRun)!==Object.prototype
       || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
       || Object.values(workspaceRun).some(value=>typeof value!=='string'||!new RegExp(UUID,'u').test(value)))
       fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     return signal;
   }
-  const deadline=timeout(codexMaintenance?15*60_000:companyReadPreparation?10*60_000:pluginMaintenance?150_000:interactiveSourceSetup?11*60_000:45_000);
+  const deadline=timeout(codexMaintenance?15*60_000:companyReadPreparation?10*60_000:pluginMaintenance?150_000:interactiveSourceSetup?11*60_000:taskSkillExecution?taskSkillExecutionTimeoutMs:45_000);
   return signal?AbortSignal.any([signal,deadline]):deadline;
 };
 
@@ -2092,7 +2118,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return await verifyAssistantRetainedLocalCheckpoint({
         config:host.configurationDirectory??configDirectory,identity:stableIdentity,pass:expected,witness,signal})&&await checkPass();
     });
-    const inspectLocalDraft=(expected,basis,replacements,signal)=>invoke(async(_live,host)=>{
+    const inspectLocalDraft=(expected,basis,replacements,signal,retainedArtifacts)=>invoke(async(_live,host)=>{
       const common=await import('./trelio-workspace.mjs');
       const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
       const checkPass=async()=>{
@@ -2114,7 +2140,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
           if(metadata.schemaVersion!==3||metadata.origin!==stableIdentity.origin||metadata.company?.id!==scope.companyId
             ||!sameLocalPath(metadata.workspaceDirectory??'',directory))return null;
           const verified=await common.verifyAssistantLocalDraft({metadata,basis,
-            replacements:validateAssistantDraftReplacementDigests(replacements)});
+            replacements:validateAssistantDraftReplacementDigests(replacements),retainedArtifacts});
           signal?.throwIfAborted();
           return await checkPass()?verified.deltaSha256:null;
         });
@@ -2122,6 +2148,46 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
         signal?.throwIfAborted();
         return null; // The original delivery remains fenced on any local refusal.
       }
+    });
+    const verifyRecoveredProviderOutcome=(expected,evidence,signal)=>invoke(async(_live,host)=>{
+      const common=await import('./trelio-workspace.mjs');
+      const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+      const {workspaceId,runId,acceptedHead,providerEffect}=evidence;
+      const current=async()=>{
+        const observed=validateAssistantActivePass(await host.readActivePass(),stableIdentity);
+        return Object.keys(observed).length===Object.keys(expected).length
+          &&Object.keys(expected).every(key=>observed[key]===expected[key]);
+      };
+      try{
+        signal?.throwIfAborted();
+        if(!providerEffect||!await current())return false;
+        const scope={assistantUserId:expected.assistantId,deviceId:expected.deviceId,companyId:expected.companyId,taskId:expected.taskId};
+        const root=await resolveAssistantWorkspaceRoot(host.configurationDirectory??configDirectory,
+          {scope,runIdentity:{workspaceId,runId}},stableIdentity.origin);
+        return await common.withWorkspaceFinishLock(runId,async()=>{
+          const directory=path.join(root,'workspace');
+          await common.assertPrivatePathKind(root,'directory');
+          await common.assertPrivatePathKind(directory,'directory');
+          const read=async()=>{
+            const metadata=await common.readAssistantWorkspaceRunMetadata(root);
+            if(metadata.schemaVersion!==3||metadata.origin!==stableIdentity.origin||metadata.scopeType!=='task'
+              ||metadata.company?.id!==expected.companyId||metadata.workspaceId!==workspaceId||metadata.runId!==runId
+              ||metadata.terminalStatus!=='accepted'||metadata.candidateHead!==acceptedHead||metadata.materializedHead!==acceptedHead
+              ||!sameLocalPath(metadata.workspaceDirectory??'',directory)||!isHead(metadata.baseHead)||metadata.baseHead===acceptedHead)return null;
+            return metadata.baseHead;
+          };
+          const isHead=value=>typeof value==='string'&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+          const baseHead=await read();
+          if(!baseHead)return false;
+          const options={cwd:directory,signal,timeout:10_000,env:{GIT_OPTIONAL_LOCKS:'0',GIT_NO_REPLACE_OBJECTS:'1'}};
+          if((await common.runGit(['status','--porcelain=v1','--untracked-files=all'],options)).stdout)return false;
+          await common.verifyAssistantCheckpointArtifacts({workspaceDirectory:directory,baseHead,draftHead:acceptedHead,
+            artifacts:[providerEffect.artifact],replyHeaderSha256:providerEffect.replyHeaderSha256,signal});
+          const head=(await common.runGit(['rev-parse','--verify','HEAD'],options)).stdout.trim();
+          signal?.throwIfAborted();
+          return head===acceptedHead&&baseHead===await read()&&await current();
+        });
+      }catch{return false;}
     });
 
     // Source calls re-enter the same protected private invocation and signed
@@ -2168,7 +2234,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     });
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
-      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,inspectLocalDraft,
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,inspectLocalDraft,verifyRecoveredProviderOutcome,
       readSourceMonitor,acknowledgeSource,verifyOwnerReply,
       deliverPreparedOwnerReply:dependencies.deliverPreparedOwnerReply??preparedReplyAction(false),
       verifyPreparedOwnerReply:dependencies.verifyPreparedOwnerReply??preparedReplyAction(true),
@@ -4147,6 +4213,7 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   const input=JSON.stringify(assistantWorkspaceExecutionPlan(plan));
   const loader=await resolveLoader({environment});
   const {runWorkspaceFinishProcess}=await import('./trelio-workspace-finish-progress.mjs');
+  signal?.throwIfAborted();
   let result;
   try {result=await (runProcess??runWorkspaceFinishProcess)(process.execPath,[loader,'bridge','assistant','workspace'],{signal,onProgress,input,
     maximumCharacters:(plan.localAction.operation==='skill_run'?3:1)*1024*1024});}
@@ -4507,6 +4574,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       throw error;
     }
   },{signal:materialization,encryptedInspection:plan.encryptedInspection??null,
+    ...(plan.localAction.operation==='skill_run'?{taskSkillExecution:true}:{}),
     workspaceRun:['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation)?plan.runIdentity:null,
     secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
     ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null,

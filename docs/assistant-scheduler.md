@@ -798,6 +798,12 @@ that immutable blob, and recheck the clean Git head and protected metadata.
 Both discovery and the native writer perform the check. The renewal request
 does not include the retained artifact digests. The server still verifies the exact
 checkpoint locator and any audited historical release on its existing path.
+The local-delta save uses the same artifact shape for an export after the last
+portable checkpoint. Enumerate changes from the verified local Git anchor and
+match each actual absolute path digest, size and bytes under its own Run.
+The native reservation carries only the delta digest and any audited legacy
+release locator. Evidence for a file export settles that file only. Any
+unknown external action remains independent of this save.
 The guide producer and recovery share the same page frame and continuation
 projection. A completed legacy page may include bounded display instructions
 and the original next selector or terminal null. Recovery verifies the page
@@ -964,6 +970,19 @@ adapter and native outcome endpoint. The result stays `waiting_owner` at
 the original cadence. Only the ordinary immutable outcome receipt closes the
 pass and releases the queue. A lost response is read back under that same
 marker and neither the save nor the business action is executed again.
+
+An interrupted intermediate-draft turn may have already delivered an
+outbound action. A signed, release-specific reader must prove one original
+attempt, the exact reviewed operation, and a unique positive provider
+read-back. The currently audited email receipt matches the sent copy to the
+original reply and its immutable exported RFC822 bytes. A timeout, an empty
+search, a filename or an accepted revision alone cannot prove delivery.
+After the local save, verify the same accepted export and reply headers
+before reservation and under the owned writer. The journal and server bind
+the intermediate predecessor, save, original attempt and accepted Run to
+the same pass. That v8 continuation confirms the recurring task as
+`active` with its existing schedule. It grants only completion, with no
+provider call, new Run, task status change or replay.
 
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
@@ -2582,6 +2601,18 @@ assistant Workspace HTTP profile. Only native `runtime/resolve` and
 `runtime/package` gain this task profile: fixed origin/company, genuine device
 grant, exact pass/project, observed model/effort and fresh operation proof.
 Setup/consent/secret endpoints never fall through to human OAuth. The Remote MCP declaration endpoint uses its separate genuine task profile below.
+
+The stdio host uses its ordinary 45-second private session for native task
+skill admission. It validates the returned plan, closes that session, then
+invokes one signed action worker under a fixed four-minute outer lifetime.
+The worker opens its own private session with that bound and rechecks the
+live pass, runtime session and skill before dispatch. The provider's existing
+three-minute deadline, browser lease and individual native HTTP deadlines
+remain in force. The extra outer time covers setup and complete result capture.
+The result returns on the original serial MCP request. A failed admission
+starts no child. An uncertain child stays under outcome review; this boundary
+does not hold a proof or provide a retry, polling or replay route. Other
+workspace, setup and protected secret actions keep their own lifetimes.
 
 The common engine verifies/materializes the signed artifact, selects the
 account and starts the normal Node/Python provider. Human admission caching is

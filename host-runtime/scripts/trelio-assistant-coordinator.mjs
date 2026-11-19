@@ -66,7 +66,8 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 };
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, verifyRetainedLocalCheckpoint = null, inspectLocalDraft = null, workspaceForIntake = null, readSourceMonitor = null,
+  passHost = null, verifyRetainedLocalCheckpoint = null, inspectLocalDraft = null, verifyRecoveredProviderOutcome = null,
+  workspaceForIntake = null, readSourceMonitor = null,
   acknowledgeSource = null, verifyOwnerReply = null,
   deliverPreparedOwnerReply = null, verifyPreparedOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
@@ -1765,10 +1766,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         &&await verifyRetainedLocalCheckpoint?.(saved,parentRead.intermediateDraft,ownedSignal)!==true)
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       if(workspaceDraft?.localDraft){
-        const {basis,replacements}=workspaceDraft.localDraft;
-        if(await inspectLocalDraft?.(saved,basis,replacements,ownedSignal)!==basis.deltaSha256)
+        const {basis,replacements,retainedArtifacts}=workspaceDraft.localDraft;
+        if(await inspectLocalDraft?.(saved,basis,replacements,ownedSignal,retainedArtifacts)!==basis.deltaSha256)
           fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       }
+      if(recoveredOutcome?.plan.evidence.providerEffect
+        &&await verifyRecoveredProviderOutcome?.(saved,recoveredOutcome.plan.evidence,ownedSignal)!==true)
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       if(review.state==='approved'&&!intent.resumeAttempted){
         // Persist before HTTP. A lost response is resolved ONLY by the read
         // branch; it cannot repeat the renewal or native model invocation.
@@ -1885,7 +1889,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   // just to recover the receipt. The original business fence is independent.
   const readWorkspaceSave = async (pass,workspaceDraft,markerId,turnId,signal) => {
     const {portableFinish,localDraft}=workspaceDraft;
-    const {deltaSha256:_localDelta,...localDraftBasis}=localDraft?.basis??{};
+    const {deltaSha256:_localDelta,historicalSkillReleases:_legacy,...localDraftBasis}=localDraft?.basis??{};
     const save=await native.readDelivery(pass.threadId,markerId,{signal,
       [localDraft?'acceptedLocalDraft':'acceptedPortableFinish']:{
         taskPass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
@@ -1896,7 +1900,6 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const observeRecoveredOutcome = async (job,pass,continuation,saveTurnId,acceptedHead,signal) => {
     if(!inbox.readDelivery(job.deliveryId).scheduled||job.events.length
-      ||continuation.terminalMarkerId!==job.deliveryId
       ||typeof client.readTaskRecoveredOutcomeEvidence!=='function')return null;
     // A save turn may have completed while its renewed pass still owns the
     // device. Observe only after that exact lease expires. This lookup does
@@ -1907,14 +1910,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||live.leaseRevision!==continuation.expectedLeaseRevision+1||live.bindingId!==pass.bindingId
       ||live.bindingRevision!==pass.bindingRevision||live.threadId!==pass.threadId||live.deliveryId!==pass.deliveryId)return null;
     const {portableFinish,localDraft}=continuation.workspaceDraft;
-    const {deltaSha256:_localDelta,...basis}=localDraft?.basis??{};
+    const sourceMarkerId=continuation.terminalMarkerId===job.deliveryId?undefined:continuation.terminalMarkerId;
+    if(sourceMarkerId&&(!localDraft||!verifyRecoveredProviderOutcome))return null;
+    const {deltaSha256:_localDelta,historicalSkillReleases:_legacy,...basis}=localDraft?.basis??{};
     const selection={deliveryId:job.deliveryId,originalTurnId:continuation.terminalTurnId,saveMarkerId:continuation.reviewId,
-      saveTurnId,taskPass:locator,mode:localDraft?'local_draft':'portable_draft',receipt:localDraft?basis:portableFinish};
+      saveTurnId,taskPass:locator,mode:localDraft?'local_draft':'portable_draft',receipt:localDraft?basis:portableFinish,
+      ...(sourceMarkerId?{sourceMarkerId}:{})};
     const nativeResult=await native.readDelivery(pass.threadId,continuation.reviewId,{signal,recoveredWorkspaceOutcome:selection});lease();
     const evidence=nativeResult.evidence;
     if(nativeResult.state!=='recovered_outcome_observed'||nativeResult.turnId!==saveTurnId
       ||evidence?.acceptedHead!==acceptedHead||evidence.workspaceId!==continuation.workspaceDraft.workspaceId
       ||evidence.runId!==continuation.workspaceDraft.runId)return null;
+    if(sourceMarkerId&&(!evidence.providerEffect||evidence.providerEffect.sourceMarkerId!==sourceMarkerId
+      ||await verifyRecoveredProviderOutcome(pass,evidence,signal)!==true))return null;
     const schedule=await client.readTaskRecoveredOutcomeEvidence({...locator,expectedLeaseRevision:live.leaseRevision,...evidence},signal);lease();
     return schedule?{workspaceId:evidence.workspaceId,runId:evidence.runId,acceptedHead,
       recoveredOutcome:{plan:{saveReviewId:continuation.reviewId,evidence,schedule},
@@ -1935,7 +1943,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // expired native lease and missing outcome are checked again under CAS,
     // so this successor cannot turn an ambiguous external write into replay.
     const selection={deliveryId:job.deliveryId,originalTurnId,saveMarkerId:plan.saveReviewId,saveTurnId:continuation.terminalTurnId,
-      taskPass:locator,mode,receipt,retry:{plan,retryFromReviewId:continuation.reviewId,terminalTurnId}};
+      taskPass:locator,mode,receipt,...(plan.evidence.providerEffect?{sourceMarkerId:plan.evidence.providerEffect.sourceMarkerId}:{}),
+      retry:{plan,retryFromReviewId:continuation.reviewId,terminalTurnId}};
     const result=await native.readDelivery(pass.threadId,continuation.reviewId,{signal,recoveredWorkspaceOutcome:selection});lease();
     if(result.state!=='recovered_outcome_observed'||result.turnId!==terminalTurnId
       ||!isDeepStrictEqual(result.evidence,plan.evidence))return null;
@@ -2099,7 +2108,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
         ||live.deliveryId!==saved.deliveryId||live.state==='closed'||live.workMode!=='task')return true;
       const retained=continued?.workspaceDraft?.localDraft;
-      const {deltaSha256:previousHash,...previousBasis}=retained?.basis??{};
+      const {deltaSha256:previousHash,historicalSkillReleases:previousReleases,...previousBasis}=retained?.basis??{};
       const localDraftBasis=retained?previousBasis:live.state==='review_required'&&Date.parse(live.leaseExpiresAt)<=now()
         ?await client.readTaskLocalDraftEvidence({...pass,expectedLeaseRevision:live.leaseRevision},signal):null;
       lease();
@@ -2107,13 +2116,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const candidate=await native.readDelivery(threadId,marker,{signal,interruptedWorkspaceDraft:{...pass,localDraftBasis}});
         lease();
         if(candidate.state==='interrupted_local_draft'&&candidate.turnId===result.turnId){
-          const {replacements}=candidate;
-          const deltaSha256=await inspectLocalDraft(saved,localDraftBasis,replacements,signal);
+          const {replacements,retainedArtifacts,historicalSkillReleases}=candidate;
+          const deltaSha256=await inspectLocalDraft(saved,localDraftBasis,replacements,signal,retainedArtifacts);
           lease();
-          if(deltaSha256&&(!retained||deltaSha256===previousHash&&JSON.stringify(retained.replacements)===JSON.stringify(replacements))){
+          if(deltaSha256&&(!retained||deltaSha256===previousHash&&isDeepStrictEqual(retained.replacements,replacements)
+            &&isDeepStrictEqual(retained.retainedArtifacts,retainedArtifacts)&&isDeepStrictEqual(previousReleases,historicalSkillReleases))){
             const {workspaceId,runId}=localDraftBasis;
             return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
-              workspaceDraft:{workspaceId,runId,finishPending:true,localDraft:{basis:{...localDraftBasis,deltaSha256},replacements}}},
+              workspaceDraft:{workspaceId,runId,finishPending:true,localDraft:{basis:{...localDraftBasis,deltaSha256,
+                ...(historicalSkillReleases?{historicalSkillReleases}:{})},replacements,...(retainedArtifacts?{retainedArtifacts}:{})}}},
             signal,marker);
           }
         }

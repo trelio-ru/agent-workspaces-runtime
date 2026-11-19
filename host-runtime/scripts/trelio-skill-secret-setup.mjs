@@ -125,19 +125,22 @@ export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{provid
   return {skillId,releaseId,packageSha256:policy.packageSha256};
 };
 
-/** Compatibility for one pre-receipt package, exclusively in the native
- * intermediate-draft classifier. The live catalogue attests this immutable
- * package and the server rechecks its digest and publication. The regular
- * task executor and other historical recovery states never use this audit.
+const historicalEmailRelease = Object.freeze({skillId:'email-imap-smtp',
+  releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
+  packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'});
+
+/** Compatibility for one pre-receipt package in native draft preservation.
+ * The live catalogue attests this immutable package and the server rechecks
+ * its digest and publication. The regular task executor never uses this audit.
  *
  * Source 205892438b5d773e3be424a3c4cad80e6af717d0: doctor disables SMTP repair,
  * SEARCH and FETCH use read-only IMAP selection/BODY.PEEK, and save-message
  * writes a single exclusive RFC822 file. Its stdout is only a claim until
- * the common verifier finds the same bytes in the exact portable draft.
+ * the common verifier finds the same bytes in the selected draft or local delta.
  */
 export const reviewedHistoricalCheckpointSkill = ({skillId,releaseId},{providerArguments,accountId},stdout) => {
-  if(skillId!=='email-imap-smtp'||releaseId!=='353b28f3-8c94-4d69-a287-5f66ae953484')return null;
-  const release={skillId,releaseId,packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'};
+  const release=historicalEmailRelease;
+  if(skillId!==release.skillId||releaseId!==release.releaseId)return null;
   const [command,...tail]=providerArguments;
   if(accountId===null)return command==='account'&&tail.length===1&&tail[0]==='list'?{release}:null;
   if(['guides','doctor','folders'].includes(command))return tail.length===0?{release}:null;
@@ -169,6 +172,127 @@ export const reviewedHistoricalCheckpointSkill = ({skillId,releaseId},{providerA
   if(!artifact||result?.uid!==uid||result.format!=='message/rfc822'
     ||!sameLocalPath(result.saved,path.join(output,`message-${uid}.eml`)))return null;
   return {release,artifact};
+};
+
+/** Decode the reviewed predecessor of a typed outbound-delivery receipt.
+ * Its preview was never an effect. Only the one exact attempted command and
+ * a later independently selected/read Sent object can nominate a receipt.
+ * The archive still needs immutable-byte and reply-header verification in the
+ * owning Run. Unsupported commands or additional attempts remain unresolved.
+ */
+export const inspectHistoricalTaskDelivery = (calls,{scope,startedAt,completedAt}) => {
+  if(!Array.isArray(calls)||calls.length<5||calls.length>32
+    ||!Number.isSafeInteger(startedAt)||startedAt<=0)return null;
+  // Native interrupted turns can have no completedAt. Bound the receipt date
+  // to the original execution window; its later search/read/export order is
+  // proven by the complete native history, not by the email's Date header.
+  const windowEnd=completedAt??Math.min(startedAt+1800,Math.floor(Date.now()/1000));
+  if(!Number.isSafeInteger(windowEnd)||windowEnd<startedAt||windowEnd-startedAt>1800)return null;
+  let accountBinding,preview,attempt,sent,observed,delivery;
+  for(const {parameters,stdout,failure} of calls){
+    if(parameters?.companyId!==scope.companyId||parameters.skillId!==historicalEmailRelease.skillId
+      ||parameters.releaseId!==historicalEmailRelease.releaseId||!Array.isArray(parameters.arguments)
+      ||parameters.arguments.length>20||parameters.arguments.some(arg=>typeof arg!=='string'||Buffer.byteLength(arg)>16*1024))return null;
+    let parsed,result;
+    try{
+      parsed=splitAccountArguments(parameters.arguments);
+      if(!failure){
+        if(typeof stdout!=='string'||Buffer.byteLength(stdout)>65_536)return null;
+        result=JSON.parse(stdout);
+      }else if(failure!=='ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED')return null;
+    }catch{return null;}
+    const {accountId,providerArguments}=parsed;
+    if(!accountId)return null;
+    // Account IDs live in the selected local scope. Keep the positive read
+    // and archived copy bound to the same project and observed session as
+    // the earlier attempt, even when another account has the same mailbox.
+    const binding=canonicalJson([accountId,parameters.projectId??null,parameters.runtimeSessionId]);
+    if(accountBinding&&accountBinding!==binding)return null;
+    accountBinding=binding;
+    const [command,...rest]=providerArguments;
+    if(['policy','signature'].includes(command)&&rest.length===1&&rest[0]==='show'&&!failure)continue;
+    const options=new Map();
+    // This parser is private to the audited old command vectors. It cannot
+    // execute them or reinterpret an unknown option as a harmless read.
+    const keys=command==='reply'?['--folder','--uid','--body','--expected-plan-sha256']
+      :command==='search'?['--folder','--special-use','--since','--limit','--from','--to','--subject','--before']
+      :command==='read'?['--folder','--uid']:command==='save-message'?['--folder','--uid','--output']:null;
+    if(!keys)return null;
+    for(let index=0;index<rest.length;index++){
+      const key=rest[index];
+      if(options.has(key))return null;
+      if(command==='reply'&&key==='--confirm'){options.set(key,true);continue;}
+      const value=rest[++index];
+      if(!keys.includes(key)||typeof value!=='string'||!value||value.startsWith('--')||value.includes('\0'))return null;
+      options.set(key,value);
+    }
+    const folder=options.get('--folder'),uid=options.get('--uid');
+    if(command==='search'){
+      if(Boolean(folder)===options.has('--special-use')||!/^\d{4}-\d{2}-\d{2}$/u.test(options.get('--since')??'')
+        ||!/^([1-9]|[1-9][0-9]|100)$/u.test(options.get('--limit')??''))return null;
+      // A timed-out audited SEARCH cannot have delivered another message.
+      if(!failure&&attempt&&options.get('--special-use')==='sent'&&accountId===preview?.accountId){
+        if(sent||!Array.isArray(result?.messages)||result.messages.length!==1||typeof result.folder!=='string')return null;
+        sent={...result.messages[0],folder:result.folder};
+      }
+      continue;
+    }
+    if(!folder||!/^[1-9][0-9]{0,9}$/u.test(uid??''))return null;
+    if(command==='reply'){
+      const identity=[accountId,parameters.projectId??null,parameters.runtimeSessionId,folder,uid,options.get('--body')];
+      if(typeof identity[5]!=='string'||delivery)return null;
+      if(!options.has('--confirm')){
+        const plan=result?.plan;
+        if(preview||attempt||failure||options.size!==3||result?.prepared!==true||result.sent!==false
+          ||!/^[a-f0-9]{64}$/u.test(result.planSha256??'')||plan?.source?.folder!==folder||plan.source.uid!==uid
+          ||typeof plan.source.messageId!=='string'||!/^<[^<>\s]{1,512}>$/u.test(plan.source.messageId)
+          ||typeof plan.subject!=='string'||typeof plan.body!=='string'||typeof plan.from!=='string'
+          ||!Array.isArray(plan.to)||!plan.to.length||!Array.isArray(plan.cc)
+          ||![...plan.to,...plan.cc].every(address=>typeof address==='string'&&address.length<512)
+          ||!Array.isArray(plan.attachments)||plan.attachments.length)return null;
+        preview={identity,accountId,plan,planSha256:result.planSha256};
+      }else{
+        if(!preview||attempt||!failure||options.size!==5||preview.planSha256!==options.get('--expected-plan-sha256')
+          ||JSON.stringify(identity)!==JSON.stringify(preview.identity))return null;
+        attempt=assistantTaskSkillReadRequestDigest(scope,parameters);
+      }
+      continue;
+    }
+    if(failure||!attempt||!sent||accountId!==preview.accountId||folder!==sent.folder||uid!==sent.uid)return null;
+    if(command==='read'){
+      const body=value=>value.replace(/\r\n/gu,'\n').replace(/\n$/u,'');
+      const date=Date.parse(result?.date),{plan}=preview;
+      if(observed||options.size!==2||result?.folder!==folder||result.uid!==uid||result.messageId!==sent.messageId
+        ||!/^<[^<>\s]{1,512}>$/u.test(result.messageId??'')||date<startedAt*1000||date>windowEnd*1000||!Number.isFinite(date)
+        ||typeof result.body!=='string'||body(result.body)!==body(plan.body)||result.subject!==plan.subject
+        ||result.from!==plan.from||result.to!==plan.to.join(', ')||result.cc!==plan.cc.join(', ')
+        ||!Array.isArray(result.attachments)||result.attachments.length||!/^[a-f0-9]{64}$/u.test(result.originalSha256??''))return null;
+      observed=result;
+      continue;
+    }
+    const retained=reviewedHistoricalCheckpointSkill(parameters,parsed,stdout);
+    if(delivery||!observed||!retained?.artifact||retained.artifact.contentSha256!==observed.originalSha256)return null;
+    // Keep identities private. Only the exact archived RFC822 object may use
+    // this receipt and its bound comparison keys when checking the saved Run.
+    delivery={attemptSha256:attempt,artifact:retained.artifact,release:retained.release,
+      replyHeaderSha256:crypto.createHash('sha256').update(canonicalJson([observed.messageId,preview.plan.source.messageId])).digest('hex')};
+  }
+  return delivery??null;
+};
+
+export const matchesHistoricalReplyHeaders = (bytes,expected) => {
+  // A complete, bound RFC822 object must carry one Message-ID and one
+  // In-Reply-To. Their equality with the observed Sent object and original
+  // reviewed source is checked locally, never from a model-visible label.
+  const match=/\r?\n\r?\n/u.exec(bytes.subarray(0,16*1024).toString('latin1'));
+  if(!match)return false;
+  const fields=bytes.subarray(0,match.index).toString('latin1').replace(/\r?\n[ \t]+/gu,' ').split(/\r?\n/u);
+  const pair=['message-id','in-reply-to'].map(name=>{
+    const rows=fields.filter(line=>line.toLowerCase().startsWith(`${name}:`));
+    return rows.length===1?rows[0].slice(name.length+1).trim():null;
+  });
+  return pair.every(id=>/^<[^<>\s]{1,512}>$/u.test(id??''))
+    &&crypto.createHash('sha256').update(canonicalJson(pair)).digest('hex')===expected;
 };
 
 /** The provider owns CLI classification in the SAME signed file inventory.

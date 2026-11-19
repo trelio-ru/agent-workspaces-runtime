@@ -224,6 +224,11 @@ publication tooling также остаются вне этого публичн
   original write receipts and private Git delta proof. Verify again under the
   native writer and finish lock. Stage only those files and the deterministic
   worklog. Promote the exact portable handoff with no external or task outcome.
+  A signed file export can cover an additional local path using the existing
+  artifact receipt and the actual Git delta. Recheck path digest, size and bytes
+  in the SAME private Run. Legacy receipt-free exports require the SAME audited
+  immutable release and fresh native provenance checks. Saving these files
+  provides no evidence about any external operation in the turn.
   Save initiation and accepted read-back share the mode-specific prompt binding.
   Validate checkpoint/base evidence separately from the strict two-field Run
   locator; this technical receipt does not settle the business outcome.
@@ -233,6 +238,11 @@ publication tooling также остаются вне этого публичн
   and previously committed schedule. Site origins are opaque lifecycle bindings.
   Only fixed completion is model-facing. Reuse exact native accepted-material
   proof and the ordinary outcome receipt before releasing the queue.
+  The same outcome-only path accepts an independently verified outbound
+  receipt from an exact intermediate predecessor and local save. Keep the
+  audited provider evidence adapter separate from scheduler policy. Verify
+  the immutable exported blob and reply binding twice, then confirm only
+  the existing active cadence. No second provider action or unknown replay.
   The accepted-material adapter separates its bounded local preparation from
   one ordinary-budget MCP dispatch. Cancellation before dispatch retains its
   closed stage, with no proof/lease extension or new attempt. Exercise the
@@ -1193,6 +1203,11 @@ publication tooling также остаются вне этого публичн
 - Assistant task skills use the SAME `skill_run`, signed loader/cache, account
   catalogue and process engine. Only native read admission/profile changes;
   no human cache/import/setup fallback. [Contract](docs/assistant-scheduler.md#shared-task-skill-execution).
+  Stdio closes its 45s native admission before starting the validated signed
+  task child once. Execution keeps a separate fixed 240s outer bound, the
+  existing 180s provider limit, fresh child admission and all original HTTP,
+  account and browser checks. No model timer, retained proof or automatic replay.
+  Test the real stdio and child pipe across expiry of the admission clock.
   Signed v2 humanInputCommands reuse the SAME setup parser; existing-account
   auth requires independent owner/account admission and never ordinary task prefixes.
   Task commands additionally require provider-owned signed command prefixes;

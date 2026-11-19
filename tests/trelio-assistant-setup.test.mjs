@@ -1173,6 +1173,68 @@ test('a slow own-Run opening survives a short caller wait, with one child and fr
   assert.equal(launches,1);assert.equal(admissions,3);
 });
 
+test('stdio closes native skill admission before its one isolated child and keeps the two clocks independent',async t=>{
+  const {runtimeHookSignal}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
+  const {runWorkspaceFinishProcess}=await import('../host-runtime/scripts/trelio-workspace-finish-progress.mjs');
+  const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-skill-deadline-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+  const plan=workspacePlan();
+  plan.localAction={schemaVersion:1,operation:'skill_run',parameters:{companyId:plan.scope.companyId,
+    skillId:'signed-fixture',releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['inspect']}};
+
+  // Advance only the actual facade admission clock. The child really runs
+  // through the production process reader and emits its complete pipe frame.
+  const admissions=[],deadlines=[];
+  const realTimeout=AbortSignal.timeout;
+  t.mock.method(AbortSignal,'timeout',milliseconds=>{
+    deadlines.push(milliseconds);
+    if(milliseconds!==45_000)return realTimeout(milliseconds);
+    const admission=new AbortController();admissions.push(admission);return admission.signal;
+  });
+  let requests=0,launches=0;
+  const executor=await createAssistantWorkspaceExecutor({configDirectory:root,runPlan:(raw,options)=>
+    runAssistantWorkspaceProcess(raw,{...options,resolveLoader:async()=>'/verified/loader.mjs',
+      runProcess:(executable,_args,processOptions)=>{
+        launches++;
+        assert.equal(runtimeHookSignal(),undefined,'no private admission session survives into execution');
+        assert.deepEqual(JSON.parse(processOptions.input),plan);
+        const command=`let data='';for await(const chunk of process.stdin)data+=chunk;
+          const action=JSON.parse(data).localAction;
+          process.stdout.write(JSON.stringify({schemaVersion:1,operation:action.operation,stdout:action.parameters.arguments[0]}));`;
+        const pending=runWorkspaceFinishProcess(executable,['--input-type=module','-e',command],processOptions);
+        admissions[0].abort(new Error('short admission lifetime elapsed'));
+        assert.equal(processOptions.signal.aborted,false,'admission expiry cannot terminate an admitted provider');
+        return pending;
+      }})});
+  const input=Readable.from([
+    {jsonrpc:'2.0',id:1,method:'initialize'},
+    ...[2,3,4].map(id=>({jsonrpc:'2.0',id,method:'tools/call',params:{
+      name:'continue_assistant_workspace_action',arguments:plan.localAction,
+    }})),
+  ].map(message=>JSON.stringify(message)+'\n'));
+  const responses=[];
+  await runAssistantSetupMcp({input,output:{write:line=>responses.push(JSON.parse(line))},
+    createWorkspace:async()=>executor,preservePlugin:()=>null,
+    createMcp:options=>createForwardingAssistantMcp({...options,configurationDirectory:root,request:async (raw,{signal})=>{
+      assert.equal(raw.name,'continue_assistant_workspace_action');
+      assert.deepEqual(raw.arguments,plan.localAction);
+      const index=requests++;
+      assert.equal(signal,admissions[index].signal);
+      if(index===1)admissions[index].abort(new Error('admission failed before dispatch'));
+      if(index===2)return {isError:true,content:[],structuredContent:{code:'ASSISTANT_ACCESS_DENIED'}};
+      return {content:[],structuredContent:plan};
+    }})});
+  assert.equal(responses.find(x=>x.id===2).result.structuredContent.stdout,'inspect');
+  assert.equal(responses.find(x=>x.id===3).result.isError,true);
+  assert.equal(responses.find(x=>x.id===4).result.structuredContent.code,'ASSISTANT_ACCESS_DENIED');
+  assert.deepEqual(deadlines,[45_000,240_000,45_000,45_000]);
+  assert.equal(launches,1,'failed admission never launches and execution never repeats it');
+  assert.equal(requests,3);
+});
+
 test('assistant Workspace plan rejects unreviewed paths/operations before private or child access',async()=>{
   const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const raw=workspacePlan(),valid=await validateAssistantWorkspacePlan(raw);
@@ -1882,12 +1944,16 @@ test('full skill discovery routes original task/setup calls through fresh worker
             ?{assistantExecution:{state:'shared_remote_mcp'},remoteMcpExecution:{localMcpServer:'trelio-assistant'}}
             :{assistantExecution:{state:'shared_runtime_setup',accountSetup:{state:'owner_review_required',operation:'setup_skill_account'}}}});
           if(args.operation==='skill_account_setup')return response({content:[],isError:true,structuredContent:{code:'ASSISTANT_OWNER_DECISION_REQUIRED'}});
+          if(args.operation==='skill_run')return response({content:[],structuredContent:{prepared:true,
+            scope:{...pass,assistantUserId:identity.assistantId,deviceId:identity.deviceId},
+            localAction:{schemaVersion:1,operation:'skill_run',parameters:args.parameters}}});
           return response({content:[],structuredContent:{schemaVersion:1,operation:args.operation??null}});
         }});
     }};
   const args=value=>({...value,taskPass:pass,runtimeSessionProof:proof});
   const skillRead=args({skillId:'synthetic-configured',sections:['instructions','execution','connection','publication']});
-  const skillRun=args({schemaVersion:1,operation:'skill_run',parameters:{arguments:['account','list']}});
+  const skillRun=args({schemaVersion:1,operation:'skill_run',parameters:{companyId:pass.companyId,
+    skillId:'synthetic-configured',releaseId:randomUUID(),runtimeSessionId:proof.runtimeSessionId,arguments:['account','list']}});
   const actions=[['get_agent_skill',skillRead],['continue_assistant_workspace_action',skillRun],
     ['get_assistant_operation_contract',args({operation:'skill_run'})],
     ['prepare_assistant_workspace_run',args({clientRequestId:randomUUID()})],
@@ -2095,7 +2161,7 @@ test('QA launcher composes the same protected factories and fresh bounded worker
     configurationFile:file,configurationSha256:hash,modules}),error=>error.code==='ASSISTANT_QA_PILOT_UNAVAILABLE');
 });
 
-test('Workspace lifetime does not inherit a setup timer or extend an enclosing hook/caller deadline',async()=>{
+test('Workspace and signed skill execution lifetimes preserve independent setup and caller deadlines',async()=>{
   const {assistantProductionContextSignal}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {withPrivateProcessSession,runtimeHookSignal,assertRuntimeHookBudget}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
   const calls=[],timer=milliseconds=>{calls.push(milliseconds);return new AbortController().signal;};
@@ -2106,6 +2172,12 @@ test('Workspace lifetime does not inherit a setup timer or extend an enclosing h
   assert.equal(assistantProductionContextSignal({workspaceRun:run},timer),undefined);
   assert.equal(assistantProductionContextSignal({workspaceRun:run,signal:caller.signal},timer),caller.signal);
   assert.deepEqual(calls,[45_000,660_000],'the bridge reuses the human private-session lifetime, not another enlarged timer');
+  const skillCaller=new AbortController();
+  const skill=assistantProductionContextSignal({taskSkillExecution:true,signal:skillCaller.signal},timer);
+  assert.equal(calls.pop(),240_000);
+  skillCaller.abort();assert.equal(skill.aborted,true,'the signed skill cannot outlive its caller');
+  assert.throws(()=>assistantProductionContextSignal({taskSkillExecution:true,workspaceRun:run},timer),/ASSISTANT_WORKSPACE_PROFILE_DENIED/);
+  assert.throws(()=>assistantProductionContextSignal({taskSkillExecution:true,interactiveSourceSetup:true},timer),/ASSISTANT_REQUEST_INVALID/);
   const maintenance=assistantProductionContextSignal({pluginMaintenance:true,signal:caller.signal},timer);
   assert.deepEqual(calls,[45_000,660_000,150_000],'only the closed technical maintenance profile owns its bounded update budget');
   assert.ok(assistantProductionContextSignal({codexMaintenance:true,signal:caller.signal},timer));

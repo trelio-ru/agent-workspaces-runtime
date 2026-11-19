@@ -59,9 +59,11 @@ export const validateAssistantLocalDraftBasis=value=>{
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),baseHead,anchorHead,checkpointId};
 };
 export const validateAssistantLocalDraft=value=>{
-  object(value,['workspaceId','runId','baseHead','anchorHead','checkpointId','deltaSha256']);
-  const {deltaSha256,...basis}=value;
-  return {...validateAssistantLocalDraftBasis(basis),deltaSha256:sha256(deltaSha256)};
+  object(value,['workspaceId','runId','baseHead','anchorHead','checkpointId','deltaSha256','historicalSkillReleases']);
+  const {deltaSha256,historicalSkillReleases,...basis}=value;
+  const releases=historicalSkillReleaseReceipts(historicalSkillReleases);
+  return {...validateAssistantLocalDraftBasis(basis),deltaSha256:sha256(deltaSha256),
+    ...(releases?{historicalSkillReleases:releases}:{})};
 };
 export const validateAssistantDraftReplacementDigests=value=>{
   if(!Array.isArray(value)||!value.length||value.length>64)inputError();
@@ -73,9 +75,12 @@ export const validateAssistantDraftReplacementDigests=value=>{
   return replacements;
 };
 export const validateAssistantLocalDraftWitness=value=>{
-  object(value,['basis','replacements']);
-  return {basis:validateAssistantLocalDraft(value.basis),
-    replacements:validateAssistantDraftReplacementDigests(value.replacements)};
+  object(value,['basis','replacements','retainedArtifacts']);
+  const basis=validateAssistantLocalDraft(value.basis);
+  const artifacts=retainedDraftArtifacts(value.retainedArtifacts);
+  if(basis.historicalSkillReleases&&!artifacts)inputError();
+  return {basis,replacements:validateAssistantDraftReplacementDigests(value.replacements),
+    ...(artifacts?{retainedArtifacts:artifacts}:{})};
 };
 // Project an already validated intermediate witness onto the native locator.
 export const assistantWorkspaceCheckpointLocator=({workspaceId,runId,checkpointId,draftHead})=>
@@ -95,46 +100,56 @@ const historicalSkillReleaseReceipts=historicalSkillReleases=>{
   if(releases?.some((row,index)=>index>0&&row.releaseId<=releases[index-1].releaseId))inputError();
   return releases;
 };
+// Both portable-checkpoint and local-delta preservation use this same closed
+// artifact witness. Actual file identity and bytes are checked independently.
+const retainedDraftArtifacts=value=>{
+  if(value===undefined)return undefined;
+  if(!Array.isArray(value)||!value.length||value.length>16)inputError();
+  const artifacts=value.map(artifact=>{
+    object(artifact,['pathSha256','contentSha256','sizeBytes']);
+    return {pathSha256:sha256(artifact.pathSha256),contentSha256:sha256(artifact.contentSha256),
+      sizeBytes:integer(artifact.sizeBytes,1,512*1024)};
+  });
+  if(artifacts.some((artifact,index)=>index>0&&artifact.pathSha256<=artifacts[index-1].pathSha256))inputError();
+  return artifacts;
+};
 export const validateAssistantIntermediateDraft=value=>{
   object(value,['workspaceId','runId','checkpointId','draftHead','retainedLocalCheckpoint','historicalSkillReleases','retainedArtifacts']);
   const {retainedLocalCheckpoint,historicalSkillReleases,retainedArtifacts,...checkpoint}=value;
   if(retainedLocalCheckpoint!==undefined&&retainedLocalCheckpoint!==true)inputError();
   const releases=historicalSkillReleaseReceipts(historicalSkillReleases);
-  let artifacts;
-  if(retainedArtifacts!==undefined){
-    // Private host proof: no paths, message bodies or provider locator can
-    // enter the continuation journal in this shape. The bytes must be checked
-    // both during discovery and by the owning native writer.
-    if(retainedLocalCheckpoint!==true||!Array.isArray(retainedArtifacts)||!retainedArtifacts.length
-      ||retainedArtifacts.length>16)inputError();
-    artifacts=retainedArtifacts.map(artifact=>{
-      object(artifact,['pathSha256','contentSha256','sizeBytes']);
-      const {pathSha256,contentSha256,sizeBytes}=artifact;
-      if(typeof pathSha256!=='string'||typeof contentSha256!=='string'
-        ||!/^[a-f0-9]{64}$/u.test(pathSha256)||!/^[a-f0-9]{64}$/u.test(contentSha256))inputError();
-      return {pathSha256,contentSha256,sizeBytes:integer(sizeBytes,1,512*1024)};
-    });
-    if(artifacts.some((artifact,index)=>index>0&&artifact.pathSha256<=artifacts[index-1].pathSha256))inputError();
-  }
+  const artifacts=retainedDraftArtifacts(retainedArtifacts);
+  if(artifacts&&retainedLocalCheckpoint!==true)inputError();
   return {...validateAssistantWorkspaceCheckpoint(checkpoint),
     ...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),...(releases?{historicalSkillReleases:releases}:{}),
     ...(artifacts?{retainedArtifacts:artifacts}:{})};
 };
 
 /** The save and the task outcome are separate. Keep only the recorded
- * question/control locators, current accepted head and package references.
- * In particular neither goal text nor mutable schedules come from history. */
+ * question/control locators or closed provider evidence, the accepted head
+ * and package references. Goal text and schedules never come from history. */
 export const validateAssistantRecoveredOutcomeEvidence=value=>{
-  object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases']);
+  object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases','providerEffect']);
   if(!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead??''))inputError();
   const releases=historicalSkillReleaseReceipts(value.historicalSkillReleases);
+  const run={workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),acceptedHead:value.acceptedHead};
+  if(value.providerEffect!==undefined){
+    if(value.questionId!==undefined||value.questionRequestId!==undefined||value.control!==undefined||!releases)inputError();
+    const effect=value.providerEffect;
+    object(effect,['schemaVersion','kind','sourceMarkerId','sourceTurnId','attemptSha256','artifact','replyHeaderSha256']);
+    if(effect.schemaVersion!==1||effect.kind!=='outbound_delivery')inputError();
+    return {...run,historicalSkillReleases:releases,providerEffect:{schemaVersion:1,kind:'outbound_delivery',
+      sourceMarkerId:uuid(effect.sourceMarkerId),sourceTurnId:uuid(effect.sourceTurnId),
+      attemptSha256:sha256(effect.attemptSha256),artifact:retainedDraftArtifacts([effect.artifact])[0],
+      replyHeaderSha256:sha256(effect.replyHeaderSha256)}};
+  }
   let control;
   if(value.control!==undefined){
     object(value.control,['controlId','controlRequestId','controlReceiptId']);
     control={controlId:uuid(value.control.controlId),controlRequestId:uuid(value.control.controlRequestId),
       controlReceiptId:uuid(value.control.controlReceiptId)};
   }
-  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),acceptedHead:value.acceptedHead,
+  return {...run,
     questionId:uuid(value.questionId),questionRequestId:uuid(value.questionRequestId),
     ...(control?{control}:{}),...(releases?{historicalSkillReleases:releases}:{})};
 };
@@ -158,7 +173,7 @@ export const validateAssistantRecoveredOutcomePlan=value=>{
 export const assistantRecoveredOutcomeCompletion=(plan,reviewId)=>{
   const {evidence,schedule}=validateAssistantRecoveredOutcomePlan(plan);
   return {workspaceId:evidence.workspaceId,acceptedRunId:evidence.runId,workspaceHead:evidence.acceptedHead,
-    goalState:'waiting_owner',noChange:false,clientRequestId:uuid(reviewId),cadence:schedule.cadence,timeZone:schedule.timeZone,
+    goalState:evidence.providerEffect?'active':'waiting_owner',noChange:false,clientRequestId:uuid(reviewId),cadence:schedule.cadence,timeZone:schedule.timeZone,
     ...(schedule.dailyLocalTime===null?{}:{dailyLocalTime:schedule.dailyLocalTime})};
 };
 // The same closed task read surface is used for the native executor
@@ -2378,9 +2393,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(recovered){
           const saved=last?.workspaceDraft;
           const {retryFromReviewId,...basePlan}=recovered.plan;
-          const {deltaSha256:_delta,...localBasis}=saved?.localDraft?.basis??{};
+          const {deltaSha256:_delta,historicalSkillReleases:_legacy,...localBasis}=saved?.localDraft?.basis??{};
           const priorReceipt=recovered.mode==='local_draft'
             ?saved?.localDraft&&localBasis:saved?.portableFinish;
+          const effect=basePlan.evidence.providerEffect;
           if(!row.scheduled||deliveryEvents(id).length||!latest||!last.started||last.passId!==passId
             ||terminalTurnId===last.terminalTurnId||terminalTurnId===recovered.originalTurnId
             ||expectedLeaseRevision!==last.expectedLeaseRevision+1)fail('ASSISTANT_INBOX_CONFLICT');
@@ -2394,9 +2410,24 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
               ||previous.originalTurnId!==recovered.originalTurnId||previous.mode!==recovered.mode
               ||JSON.stringify(previous.receipt)!==JSON.stringify(recovered.receipt)
               ||JSON.stringify(previous.plan)!==JSON.stringify(basePlan))fail('ASSISTANT_INBOX_CONFLICT');
-          }else if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==id
-            ||last.terminalTurnId!==recovered.originalTurnId||!priorReceipt
-            ||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
+          }else{
+            if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==(effect?.sourceMarkerId??id)
+              ||last.terminalTurnId!==recovered.originalTurnId||!priorReceipt
+              ||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
+            if(effect){
+              // The local save must be the successor of this exact resumed
+              // intermediate draft. Retain both original native start fences.
+              const row=get('SELECT intent_json FROM assistant_pass_continuations WHERE delivery_id=? AND ordinal=?',id,latest.ordinal-1);
+              const source=row&&continuationIntent(JSON.parse(row.intent_json));
+              const checkpoint=source?.taskReadParent?.intermediateDraft;
+              if(!source?.started||!source.resumed||source.passId!==passId||source.reviewId!==effect.sourceMarkerId
+                ||effect.sourceTurnId!==last.terminalTurnId||!saved?.localDraft||checkpoint?.workspaceId!==workspaceDraft.workspaceId
+                ||checkpoint.runId!==workspaceDraft.runId||checkpoint.draftHead!==localBasis.anchorHead
+                ||checkpoint.checkpointId!==localBasis.checkpointId||source.expectedLeaseRevision>=last.expectedLeaseRevision
+                ||!saved.localDraft.retainedArtifacts?.some(artifact=>JSON.stringify(artifact)===JSON.stringify(effect.artifact)))
+                fail('ASSISTANT_INBOX_CONFLICT');
+            }
+          }
         }
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))

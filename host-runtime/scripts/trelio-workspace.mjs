@@ -26,7 +26,7 @@ const reportFinishProgress = (stage, counts = {}) => {
   writeFinishProgress({ stage, ...counts });
 };
 
-import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand, assistantTaskArtifactFromOutput } from "./trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand, assistantTaskArtifactFromOutput, matchesHistoricalReplyHeaders } from "./trelio-skill-secret-setup.mjs";
 import { browserControllerEnabled, parseBrowserControllerArguments, skillResourcePolicy, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
@@ -16313,7 +16313,8 @@ const readAssistantRecoveryChanges = async (metadata, anchorHead) => {
 const verifyAssistantRecoveryFiles = async (directory, changes, hydrated, expectedHash, worklogPath) => {
   const expectedFiles = new Map();
   for (const { status, filePath } of changes) {
-    const expected = expectedHash(filePath);
+    const receipt = expectedHash(filePath);
+    const expected = typeof receipt === 'string' ? receipt : receipt?.contentSha256;
     if (!expected || ![" M", "??"].includes(status)
       || filePath !== worklogPath && (isProtectedWorkspaceControlPath(filePath) || hydrated.has(filePath))) {
       refuseAssistantRecovery("file_receipt");
@@ -16330,7 +16331,8 @@ const verifyAssistantRecoveryFiles = async (directory, changes, hydrated, expect
       if ((await fs.lstat(fullPath)).isSymbolicLink()) refuseAssistantRecovery("file_link");
     }
     const stat = await fs.lstat(fullPath);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64 * 1024) refuseAssistantRecovery("file_bytes");
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64 * 1024
+      || receipt?.sizeBytes !== undefined && stat.size !== receipt.sizeBytes) refuseAssistantRecovery("file_bytes");
     const handle = await fs.open(fullPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
     try {
       const opened = await handle.stat();
@@ -16354,7 +16356,9 @@ const verifyAssistantRecoveryFiles = async (directory, changes, hydrated, expect
  * regular files of the independently selected draft, and hash the immutable
  * Git blob. No provider invocation, working tree import or path from
  * provider stdout is used for the verification. */
-export const verifyAssistantCheckpointArtifacts = async ({workspaceDirectory,baseHead,draftHead,artifacts,signal}) => {
+export const verifyAssistantCheckpointArtifacts = async ({workspaceDirectory,baseHead,draftHead,artifacts,replyHeaderSha256,signal}) => {
+  if (replyHeaderSha256 !== undefined && (artifacts.length !== 1 || !/^[a-f0-9]{64}$/u.test(replyHeaderSha256)))
+    refuseAssistantRecovery("artifact_reply_binding");
   const options={cwd:workspaceDirectory,signal,timeout:10_000,
     env:{GIT_OPTIONAL_LOCKS:"0",GIT_NO_REPLACE_OBJECTS:"1"}};
   const delta=(await runGit(["diff","--no-ext-diff","--no-renames","--diff-filter=AM","--name-only","-z",baseHead,draftHead,"--"],
@@ -16374,13 +16378,18 @@ export const verifyAssistantCheckpointArtifacts = async ({workspaceDirectory,bas
     if(entry?.objectType!=="blob"||entry.mode!=="100644")refuseAssistantRecovery("artifact_blob");
     const matches=await readAcceptedWorkspaceBlob({workspaceDirectory,blobId:entry.objectId,signal},async stream=>{
       const hash=crypto.createHash("sha256");
+      // Ordinary artifact checks stream only a hash. The closed delivery
+      // receipt needs this one bounded immutable blob's original headers.
+      const header=replyHeaderSha256===undefined?null:Buffer.alloc(Math.min(16*1024,artifact.sizeBytes));
       let bytes=0;
       for await(const chunk of stream){
+        if(header&&bytes<header.length)chunk.copy(header,bytes,0,Math.min(chunk.length,header.length-bytes));
         bytes+=chunk.length;
         if(bytes>artifact.sizeBytes)refuseAssistantRecovery("artifact_size");
         hash.update(chunk);
       }
-      return bytes===artifact.sizeBytes&&hash.digest("hex")===artifact.contentSha256;
+      return bytes===artifact.sizeBytes&&hash.digest("hex")===artifact.contentSha256
+        &&(!header||matchesHistoricalReplyHeaders(header,replyHeaderSha256));
     });
     if(!matches)refuseAssistantRecovery("artifact_bytes");
   }
@@ -16401,19 +16410,24 @@ const assertAssistantLocalDraftRun = (metadata, snapshot, basis, status) => {
 /** Select the exact still-local delta off the server-certified anchor. A
  * successful old tool call does not cover staged, unrelated or changed files.
  * Paths stay private; reserve the save using just an order-independent hash. */
-export const verifyAssistantLocalDraft = async ({ metadata, basis, replacements }) => {
+export const verifyAssistantLocalDraft = async ({ metadata, basis, replacements, retainedArtifacts = [] }) => {
   if (metadata.scopeType !== "task" || metadata.terminalStatus || hasFinishRecoveryMarker(metadata)
     || metadata.workspaceId !== basis.workspaceId || metadata.runId !== basis.runId || metadata.baseHead !== basis.baseHead
     || (metadata.draftHead ?? null) !== (basis.checkpointId === null ? null : basis.anchorHead)
     || metadata.materializedHead !== basis.anchorHead || metadata.candidateHead && metadata.candidateHead !== basis.anchorHead
     || basis.checkpointId !== null && metadata.latestDraftCheckpointId !== basis.checkpointId) refuseAssistantRecovery("identity");
   const receipts = new Map(replacements.map(row => [row.pathSha256, row.contentSha256]));
+  const artifacts = new Map(retainedArtifacts.map(row => [row.pathSha256, row]));
   const { hydrated, changes } = await readAssistantRecoveryChanges(metadata, basis.anchorHead);
-  if (changes.length < 1 || changes.length > receipts.size) {
+  if (changes.length < 1 || changes.length > receipts.size + artifacts.size) {
     refuseAssistantRecovery("changes");
   }
+  // Look up each actual Git path, never open a destination from stdout.
+  // Export receipts use the normalized absolute-path digest already shared
+  // with checkpoint verification. The delta below still uses relative paths.
   const expectedFiles = await verifyAssistantRecoveryFiles(metadata.workspaceDirectory, changes, hydrated,
-    filePath => receipts.get(assistantRecoveryDigest(filePath)));
+    filePath => receipts.get(assistantRecoveryDigest(filePath)) ?? artifacts.get(assistantArtifactPathDigest(
+      path.join(metadata.workspaceDirectory, ...filePath.split('/')))));
   const delta = Array.from(expectedFiles, ([filePath, contentSha256]) => [assistantRecoveryDigest(filePath), contentSha256]).sort();
   // Compare the checked-out witness during discovery, under the native
   // writer and again in the signed opener/finisher using the same rule.

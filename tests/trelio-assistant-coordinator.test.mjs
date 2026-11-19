@@ -3489,9 +3489,10 @@ for(const retained of [false,true])test(`intermediate checkpoint resumes the ori
   }finally{await host?.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
-for(const {local,settled,retry=false} of [{local:false,settled:false},{local:true,settled:false},
-  {local:false,settled:true},{local:true,settled:true},{local:true,settled:true,retry:true}])test(
-  `native draft recovery keeps save and original outcome independent (local=${local}, settled=${settled}, retry=${retry})`,async t=>{
+for(const {local,settled,retry=false,provider=false} of [{local:false,settled:false},{local:true,settled:false},
+  {local:false,settled:true},{local:true,settled:true},{local:true,settled:true,retry:true},
+  {local:true,settled:true,provider:true}])test(
+  `native draft recovery keeps save and original outcome independent (local=${local}, settled=${settled}, retry=${retry}, provider=${provider})`,async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-outcome-recovery-'));
   const filename=path.join(directory,'journal.sqlite');
   let database=new DatabaseSync(filename);
@@ -3501,35 +3502,49 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
   await f.coordinator.close();
   const native=f.options.native, client=f.options.client,readBusinessOutcome=client.readBusinessOutcome;
   const run={workspaceId:randomUUID(),runId:randomUUID()},acceptedHead='a'.repeat(40);
-  const basis={...run,baseHead:'b'.repeat(40),anchorHead:'b'.repeat(40),checkpointId:null};
+  const basis={...run,baseHead:'b'.repeat(40),anchorHead:(provider?'f':'b').repeat(40),checkpointId:provider?randomUUID():null};
   const receipt=local?basis:{...run,checkpointId:randomUUID(),draftHead:acceptedHead};
   const replacements=[{pathSha256:'c'.repeat(64),contentSha256:'d'.repeat(64)}],deltaSha256='e'.repeat(64);
-  const savedLocalDraft={basis:{...basis,deltaSha256},replacements};
+  const artifact={pathSha256:'1'.repeat(64),contentSha256:'2'.repeat(64),sizeBytes:154};
+  const historicalSkillReleases=[{skillId:'email-imap-smtp',releaseId:randomUUID(),packageSha256:'3'.repeat(64)}];
+  const savedLocalDraft={basis:{...basis,deltaSha256,...(provider?{historicalSkillReleases}:{})},replacements,
+    ...(provider?{retainedArtifacts:[artifact]}:{})};
   let inspectCount=0;
-  if(local)f.options.inspectLocalDraft=async(_pass,selected,received)=>{
+  if(local)f.options.inspectLocalDraft=async(_pass,selected,received,_signal,artifacts)=>{
     assert.deepEqual(selected,inspectCount++===0?basis:savedLocalDraft.basis);
     assert.deepEqual(received,replacements);
+    assert.deepEqual(artifacts,provider?[artifact]:undefined);
     return deltaSha256;
   };
-  let coordinator=createAssistantCoordinator(f.options);
   const originalTurn=randomUUID(),marker=randomUUID(),settlementTurn=randomUUID();
+  const sourceMarkerId=randomUUID(),initialRevision=provider?1:0;
   const outcomeMarker=randomUUID(),outcomeTurn=randomUUID(),priorReceiptId=randomUUID();
   const retryMarker=randomUUID(),retryTurn=randomUUID();
   let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0,saveReads=0,outcomeObservations=0;
   let writerBusy=true,confirmed=false,outcomeReviews=0,outcomeRenewals=0,outcomeStarts=0,retryStarts=0;
   const questionId=randomUUID(),questionRequestId=randomUUID();
   const preservedSchedule={priorReceiptId,cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00'};
-  const evidence={...run,acceptedHead,questionId,questionRequestId};
+  const evidence={...run,acceptedHead,...(provider?{historicalSkillReleases,
+    providerEffect:{schemaVersion:1,kind:'outbound_delivery',sourceMarkerId,sourceTurnId:originalTurn,
+      attemptSha256:'4'.repeat(64),artifact,replyHeaderSha256:'5'.repeat(64)}}:{questionId,questionRequestId})};
+  let providerChecks=0,providerIntact=false;
+  if(provider) f.options.verifyRecoveredProviderOutcome=async(pass,value)=>{
+    assert.deepEqual(pass,original);
+    assert.deepEqual(value,evidence);
+    providerChecks++;
+    return providerIntact;
+  };
   const plan={saveReviewId:marker,evidence,schedule:preservedSchedule};
   if(settled) client.readTaskRecoveredOutcomeEvidence=async args=>{
     outcomeObservations++;
     assert.equal(args.passId,original.passId);
-    assert.equal(args.expectedLeaseRevision,retry&&outcomeStarts===1?2:1);
+    assert.equal(args.expectedLeaseRevision,initialRevision+(retry&&outcomeStarts===1?2:1));
     assert.deepEqual({workspaceId:args.workspaceId,runId:args.runId},run);
     assert.equal(args.acceptedHead,acceptedHead);
     return preservedSchedule;
   };
   native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
+  let coordinator=createAssistantCoordinator(f.options);
   try{
     await coordinator.pollOnce();await coordinator.workOnce();
     f.events.push({id:randomUUID(),revision:'first',taskId:f.taskId,wake:true});
@@ -3539,7 +3554,7 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
     client.readBusinessOutcome=async args=>confirmed?readBusinessOutcome(args):{schemaVersion:1,state:'pending'};
     client[local?'readTaskLocalDraftEvidence':'readTaskPortableFinishEvidence']=async args=>{
       assert.equal(args.passId,original.passId);
-      assert.equal(args.expectedLeaseRevision,0);
+      assert.equal(args.expectedLeaseRevision,initialRevision);
       return admitted?receipt:null;
     };
     native.readDelivery=async(_thread,id,options={})=>{
@@ -3552,10 +3567,11 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
         }
         return {state:'completed',turnId:outcomeTurn,receipt:`codex:${original.threadId}:${outcomeTurn}`};
       }
-      if(id===original?.deliveryId){
+      if(id===(provider?sourceMarkerId:original?.deliveryId)){
         if(options.interruptedWorkspaceDraft?.localDraftBasis){
           assert.deepEqual(options.interruptedWorkspaceDraft.localDraftBasis,basis);
-          return {state:'interrupted_local_draft',turnId:originalTurn,replacements};
+          return {state:'interrupted_local_draft',turnId:originalTurn,replacements,
+            ...(provider?{retainedArtifacts:[artifact],historicalSkillReleases}:{})};
         }
         if(options.interruptedWorkspaceDraft?.portableFinish){
           assert.deepEqual(options.interruptedWorkspaceDraft.portableFinish,receipt);
@@ -3568,8 +3584,8 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
         assert.deepEqual(options.recoveredWorkspaceOutcome.receipt,receipt);
         assert.equal(options.recoveredWorkspaceOutcome.originalTurnId,originalTurn);
         assert.equal(options.recoveredWorkspaceOutcome.saveTurnId,settlementTurn);
-        return settled?{state:'recovered_outcome_observed',turnId:settlementTurn,
-          evidence:{...run,acceptedHead,questionId,questionRequestId}}:{state:'uncertain'};
+        assert.equal(options.recoveredWorkspaceOutcome.sourceMarkerId,provider?sourceMarkerId:undefined);
+        return settled?{state:'recovered_outcome_observed',turnId:settlementTurn,evidence}:{state:'uncertain'};
       }
       const inspectSave=options.acceptedPortableFinish??options.acceptedLocalDraft;
       if(inspectSave){
@@ -3585,7 +3601,7 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
       if(args.recoveredOutcome){
         const isRetry=args.recoveredOutcome.retryFromReviewId!==undefined;
         const selectedMarker=isRetry?retryMarker:outcomeMarker;
-        const requiredRevision=isRetry?2:1;
+        const requiredRevision=initialRevision+(isRetry?2:1);
         assert.deepEqual(args.recoveredOutcome,isRetry?{...plan,retryFromReviewId:outcomeMarker}:plan);
         assert.equal(args.terminalTurnId,isRetry?outcomeTurn:settlementTurn);
         assert.equal(args.expectedLeaseRevision,requiredRevision);
@@ -3605,10 +3621,10 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
       if(args.continuation==='review')reviews++;
       if(args.continuation==='resume'){
         assert.equal(renewals++,0);
-        Object.assign(live,{state:'leased',leaseRevision:1,leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+        Object.assign(live,{state:'leased',leaseRevision:initialRevision+1,leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
       }
       return {schemaVersion:local?7:5,state:renewals?'resumed':'approved',reviewId:marker,invocationId:marker,
-        resumed:renewals?{leaseRevision:1,leaseExpiresAt:live.leaseExpiresAt}:null,pass:{...live}};
+        resumed:renewals?{leaseRevision:initialRevision+1,leaseExpiresAt:live.leaseExpiresAt}:null,pass:{...live}};
     };
     native.run=async(input,options)=>{
       if(!original){
@@ -3625,7 +3641,7 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
         if(writerBusy)throw Object.assign(new Error('busy'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
         await options.beforeInvocation();
         options.startInvocation();
-        outcomeStarts++;confirmed=!retry;f.continuation.goalState='waiting_owner';
+        outcomeStarts++;confirmed=!retry;f.continuation.goalState=provider?'active':'waiting_owner';
         return {state:'completed',turnId:outcomeTurn,receipt:`codex:${original.threadId}:${outcomeTurn}`};
       }
       if(input.deliveryId===retryMarker){
@@ -3645,6 +3661,17 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
     };
     await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
     const pass=f.passes.get(original.deliveryId);
+    if(provider){
+      // Retain the same v6 start fence before saving files left by its
+      // interrupted turn. A different prior marker cannot settle this send.
+      const inbox=createAssistantInbox({database,now:f.options.now});
+      const prior=inbox.preparePassContinuation(original.deliveryId,{passId:original.passId,expectedLeaseRevision:0,
+        terminalTurnId:randomUUID(),terminalMarkerId:original.deliveryId,prerequisiteKey:'b'.repeat(64),
+        taskReadParent:{intermediateDraft:{...run,checkpointId:basis.checkpointId,draftHead:basis.anchorHead}}});
+      inbox.updatePassContinuation(original.deliveryId,prior.clientRequestId,
+        {reviewId:sourceMarkerId,resumeAttempted:true,resumed:true,started:true});
+      Object.assign(pass,{leaseRevision:initialRevision});
+    }
     f.advance(21*60_000);pass.state='review_required';
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.equal(reviews,0);
@@ -3664,6 +3691,11 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
       // an accepted Run alone must never release the queue in either variant.
       assert.equal(outcomeObservations,0);
       f.advance(21*60_000);pass.state='review_required';
+      if(provider){
+        assert.equal((await coordinator.workOnce()).state,'blocked','unbound immutable bytes cannot reserve settlement');
+        assert.deepEqual([providerChecks,outcomeObservations,outcomeReviews],[1,0,0]);
+        providerIntact=true;
+      }
       await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       assert.equal(outcomeObservations,1,'verified save must reach an independent original-outcome observation');
       assert.deepEqual([outcomeReviews,outcomeRenewals,outcomeStarts],[1,0,0]);
@@ -3687,6 +3719,7 @@ for(const {local,settled,retry=false} of [{local:false,settled:false},{local:tru
       assert.equal(coordinator.status()[0].state,'active','waiting preserves the original recurring assignment');
       assert.ok(coordinator.status()[0].nextRunAt>f.options.now());
       assert.equal(coordinator.status()[0].dailyLocalTime,'20:00');
+      if(provider)assert.equal(providerChecks,3,'verify before reservation and again under the writer after disk reopen');
     }
   }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });

@@ -111,8 +111,10 @@ const mergeFixture = async (t, { base, ours, theirs }) => {
 test("checkpoint export evidence binds native file digests to regular changed Git blobs", async t => {
   const original = Buffer.from([0x00, 0xff, 0x0d, 0x0a, 0x61]);
   const report = Buffer.from("A settled provider report\n");
+  const sent = Buffer.from("Message-ID: <reply@trelio.invalid>\r\nIn-Reply-To: <source@trelio.invalid>\r\n\r\nSynthetic body\r\n");
   const { source, target } = await mergeFixture(t, { base: { "unchanged.bin": original },
-    ours: { "exports/original.bin": original, "report.txt": report, "secrets.json": "{}", "Agents.md": "Private control" }, theirs: {} });
+    ours: { "exports/original.bin": original, "exports/sent.eml": sent, "report.txt": report,
+      "secrets.json": "{}", "Agents.md": "Private control" }, theirs: {} });
   const receipt = (relative, bytes) => ({
     pathSha256: assistantArtifactPathDigest(path.join(target.workspaceDirectory, relative)),
     contentSha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length,
@@ -120,6 +122,14 @@ test("checkpoint export evidence binds native file digests to regular changed Gi
   const artifacts = [receipt("exports/original.bin", original), receipt("report.txt", report)];
   const input = { workspaceDirectory: target.workspaceDirectory, baseHead: source.baseHead, draftHead: target.draftHead };
   await verifyAssistantCheckpointArtifacts({ ...input, artifacts });
+  // An unchanged blob digest proves preservation only. Delivery settlement
+  // must also bind the archived reply to the independently observed source.
+  const reply = { ...input, artifacts: [receipt("exports/sent.eml", sent)] };
+  const headerDigest = sourceId => createHash("sha256")
+    .update(JSON.stringify(["<reply@trelio.invalid>", sourceId])).digest("hex");
+  await verifyAssistantCheckpointArtifacts({ ...reply, replyHeaderSha256: headerDigest("<source@trelio.invalid>") });
+  await assert.rejects(verifyAssistantCheckpointArtifacts({ ...reply, replyHeaderSha256: headerDigest("<other@trelio.invalid>") }),
+    { code: "ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED" });
   for (const refused of [
     receipt("unchanged.bin", original), receipt("secrets.json", Buffer.from("{}")),
     receipt("Agents.md", Buffer.from("Private control")),

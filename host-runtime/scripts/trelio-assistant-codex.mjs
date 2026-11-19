@@ -17,7 +17,8 @@ import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, AS
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
-import { matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill } from './trelio-skill-secret-setup.mjs';
+import { inspectHistoricalTaskDelivery, matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead,
+  reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill } from './trelio-skill-secret-setup.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -2293,19 +2294,104 @@ const recoveredOutcomeSkillRead=(args,result,pass)=>{
   return historicalTaskSkillRead(p,result,pass,{terminal:true});
 };
 
+/** Independently account for every operation in a continuation that obtained
+ * a provider read-back. The save's exact Run still owns the exported file.
+ * Only this projection can turn the ordered provider records into a
+ * candidate for settlement. The native host must also verify the immutable
+ * accepted bytes before this candidate can become an outcome intent. */
+const inspectDeliveredProviderOutcome=(original,sourceMarkerId,taskPass,receipt,run)=>{
+  const local=inspectAssistantInterruptedLocalDraft(original,sourceMarkerId,taskPass,receipt);
+  if(!local?.retainedArtifacts)return null;
+  const calls=[];
+  let prepared=false,opened=false,openHandle=null;
+  for(const item of original.items.slice(1)){
+    if(['agentMessage','reasoning','sleep'].includes(item.type))continue;
+    const args=item.arguments,value=item.result?.structuredContent;
+    const success=item.status==='completed'&&item.error==null&&item.result?.isError!==true;
+    if(item.tool==='get_assistant_status'||item.tool==='review_outgoing_message'){
+      // These fixed readers carry no provider action or grant.
+      if(!success||args.taskPass!==undefined&&!exactDraftPass(args.taskPass,taskPass))return null;
+      continue;
+    }
+    if(!exactDraftPass(args.taskPass,taskPass))return null;
+    if(recoveredOutcomeReads.has(item.tool)){
+      if(!success)return null;
+      continue;
+    }
+    if(item.tool==='prepare_assistant_workspace_run'&&success){
+      // The local-delta projection checked every successful prepare against
+      // the original Run. A second prepare may reopen only that same Run.
+      if(args.relatedWorkspaceIds?.length||openHandle)return null;
+      prepared=true;opened=false;
+      continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'&&success&&opened
+      &&sameDraftRun(args.runIdentity,run)&&['read','list','replace'].includes(args.command?.action))continue;
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return null;
+    const parameters=args.parameters??{};
+    if(args.operation==='skill_run'&&opened&&(success||localDraftRefusal(item,'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'))){
+      if(success&&(value?.operation!=='skill_run'||value.schemaVersion!==1))return null;
+      calls.push({parameters,stdout:value?.stdout,...(!success?{failure:value.code}:{})});
+      continue;
+    }
+    if(!sameDraftRun(args.operation==='open'?{workspaceId:parameters.workspaceId,runId:parameters.runId}:args.runIdentity,run))return null;
+    if(args.operation==='open'&&prepared&&!opened&&!openHandle&&success&&value?.operation==='open'){
+      if(value.state==='running'){
+        openHandle=observedWorkspacePollHandle(value,'open',run);
+        if(!openHandle)return null;
+      }else opened=true;
+      continue;
+    }
+    if(args.operation==='status'){
+      const keys=Object.keys(parameters);
+      if(keys.length===1&&keys[0]==='finishOperationId'){
+        // Historical open polling used the same closed status route as
+        // finish. Only the originating native open handle can be observed
+        // here. A hook refusal does not itself prove the Run opened.
+        if(!openHandle||parameters.finishOperationId!==openHandle
+          ||(success?(!value||observedWorkspacePollHandle(value,'open',run)!==openHandle)
+            :!localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED')))return null;
+        continue;
+      }
+      if(keys.length||!success||value?.operation!=='status'||typeof value.stdout!=='string'
+        ||Buffer.byteLength(value.stdout)>65_536)return null;
+      let status;
+      try{status=JSON.parse(value.stdout);}catch{return null;}
+      if(status?.workspaceId!==run.workspaceId||status.runId!==run.runId||status.terminalStatus
+        ||typeof status.dirty!=='boolean')return null;
+      if(openHandle){openHandle=null;opened=true;}
+      continue;
+    }
+    if(args.operation==='checkpoint'&&opened&&parameters.type==='draft'
+      &&localDraftRefusal(item,'TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED'))continue;
+    return null;
+  }
+  if(!opened||openHandle)return null;
+  const delivery=inspectHistoricalTaskDelivery(calls,{scope:taskPass,startedAt:original.startedAt,completedAt:original.completedAt});
+  if(!delivery||!local.retainedArtifacts.some(receipt=>isDeepStrictEqual(receipt,delivery.artifact)))return null;
+  const {release,...evidence}=delivery;
+  try{return validateAssistantRecoveredOutcomeEvidence({...run,historicalSkillReleases:[release],providerEffect:{
+    schemaVersion:1,kind:'outbound_delivery',sourceMarkerId,sourceTurnId:original.id,...evidence}});}
+  catch{return null;}
+};
+
 /** A settled save is not a pass receipt. This independent native projection
  * reads EVERY item in the original scheduled turn and projects only recorded
  * receipt locators. The backend will recheck those receipts, release trust,
  * live pending question, active assignment and accepted immutable Run.
  * None of these historical calls can be repeated by this recovery. */
 export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,originalTurnId,saveMarkerId,saveTurnId,
-  taskPass,mode,receipt})=>{
+  taskPass,mode,receipt,sourceMarkerId})=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(saveMarkerId??'')||saveMarkerId===deliveryId
     ||!UUID.test(originalTurnId??'')||!UUID.test(saveTurnId??'')||originalTurnId===saveTurnId
     ||original?.id!==originalTurnId||save?.id!==saveTurnId||original.status!=='interrupted'||original.error!=null
     ||!['local_draft','portable_draft'].includes(mode)||!Array.isArray(original.items)||original.items.length>128)return null;
   const run=inspectAcceptedWorkspaceSave(save,saveMarkerId,taskPass,receipt,mode);
   if(!run)return null;
+  if(sourceMarkerId!==undefined){
+    if(mode!=='local_draft'||!UUID.test(sourceMarkerId)||sourceMarkerId===deliveryId||sourceMarkerId===saveMarkerId)return null;
+    return inspectDeliveredProviderOutcome(original,sourceMarkerId,taskPass,receipt,run);
+  }
   if(mode==='local_draft'&&!assistantInterruptedLocalDraft(original,deliveryId,taskPass,receipt)
     ||mode==='portable_draft'&&!matchesAssistantPortableFinishTurn(original,deliveryId,taskPass,receipt))return null;
   const releases=new Map();
@@ -2428,8 +2514,8 @@ const readInterruptedDraftTurn=async(request,threadId,deliveryId,taskPass)=>{
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
   const {namedArchive,retainedHandoff,portableFinish,intermediateDraft,localDraftBasis,...pass}=taskPass??{};
   if(localDraftBasis!==undefined){
-    const replacements=assistantInterruptedLocalDraft(turn,deliveryId,pass,localDraftBasis);
-    return replacements?{state:'interrupted_local_draft',turnId:turn.id,replacements}:{state:'uncertain'};
+    const files=inspectAssistantInterruptedLocalDraft(turn,deliveryId,pass,localDraftBasis);
+    return files?{state:'interrupted_local_draft',turnId:turn.id,...files}:{state:'uncertain'};
   }
   if(intermediateDraft!==undefined){
     const checkpoint=intermediateDraft&&!namedArchive&&!retainedHandoff&&portableFinish===undefined
@@ -2475,12 +2561,12 @@ export const matchesAssistantPortableFinishTurn=(turn,deliveryId,pass,selection)
     &&exactDraftPass(item.arguments.taskPass,pass));
 };
 
-/** Project only file replacements acknowledged in the exact interrupted
- * native task turn. Earlier browser and skills history gives this routine
- * neither a successful external outcome nor permission to replay anything.
+/** Project the local file receipts in the exact interrupted native task turn.
+ * A provider's declared file export can also account for a changed file. It
+ * cannot settle any other action in the same turn or authorize its replay.
  * The server anchor and protected local tree must also agree, under the
  * owning writer, before these digests can be used to save any bytes. */
-export const assistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
+const inspectAssistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
     ||!exactDraftPass(pass,pass)||!Array.isArray(turn.items)||turn.items.length>128)return null;
   let selected;
@@ -2497,7 +2583,7 @@ export const assistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
   if(scope?.companyId!==pass.companyId||scope.taskId!==pass.taskId||scope.scheduled!==true
     ||scope.sourceReferences!==undefined||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return null;
 
-  const replacements=new Map();
+  const replacements=new Map(),artifacts=new Map(),releases=new Map();
   let prepared=false;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
@@ -2515,6 +2601,28 @@ export const assistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
         ||value.workspace.taskId!==pass.taskId||value.run?.id!==selected.runId)return null;
       prepared=true;
     }
+    if(prepared&&ok&&item.tool==='continue_assistant_workspace_action'&&args.operation==='skill_run'
+      &&args.schemaVersion===1&&value?.operation==='skill_run'&&exactDraftPass(args.taskPass,pass)){
+      const parameters=args.parameters;
+      if(!parameters||parameters.companyId!==pass.companyId)return null;
+      const binding={scope:pass,parameters,stdout:value.stdout};
+      let artifact;
+      if(Object.hasOwn(value,'taskSkillArtifact')){
+        if(Object.hasOwn(value,'taskSkillRead')||!matchesAssistantTaskSkillArtifact(value.taskSkillArtifact,binding))return null;
+        artifact=value.taskSkillArtifact.artifact;
+      }else if(!Object.hasOwn(value,'taskSkillRead')){
+        const parsed=historicalTaskSkillArguments(parameters,value,pass);
+        const historical=parsed&&reviewedHistoricalCheckpointSkill(parameters,parsed,value.stdout);
+        if(historical?.artifact){
+          artifact=historical.artifact;
+          releases.set(historical.release.releaseId,historical.release);
+        }
+      }
+      if(artifact){
+        if(artifacts.has(artifact.pathSha256)||artifacts.size>=16)return null;
+        artifacts.set(artifact.pathSha256,artifact);
+      }
+    }
     if(item.tool!=='use_assistant_workspace_files'||args.command?.action!=='replace')continue;
     if(!prepared||!ok||!exactDraftPass(args.taskPass,pass)||!sameDraftRun(args.runIdentity,selected))return null;
     let command;
@@ -2523,10 +2631,13 @@ export const assistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
     if(value?.state!=='draft_updated'||value.sha256!==digest(command.text))return null;
     replacements.set(digest(command.path),value.sha256);
   }
-  try{return validateAssistantDraftReplacementDigests([...replacements].map(([pathSha256,contentSha256])=>
-    ({pathSha256,contentSha256})).sort((left,right)=>left.pathSha256.localeCompare(right.pathSha256)));}
+  try{return {replacements:validateAssistantDraftReplacementDigests([...replacements].map(([pathSha256,contentSha256])=>
+    ({pathSha256,contentSha256})).sort((left,right)=>left.pathSha256.localeCompare(right.pathSha256))),
+    ...(artifacts.size?{retainedArtifacts:[...artifacts.values()].sort((a,b)=>a.pathSha256.localeCompare(b.pathSha256))}:{}),
+    ...(releases.size?{historicalSkillReleases:[...releases.values()].sort((a,b)=>a.releaseId.localeCompare(b.releaseId))}:{})};}
   catch{return null;}
 };
+export const assistantInterruptedLocalDraft=(...args)=>inspectAssistantInterruptedLocalDraft(...args)?.replacements??null;
 const readInterruptedTaskReadTurn=async(request,threadId,deliveryId,witness)=>{
   if(witness?.initialScheduled===true){
     // Only the newest full turn can prove an original scheduled invocation.
@@ -3265,6 +3376,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
         originalTurnId:recoveredOutcome.originalTurnId,saveMarkerId:recoveredOutcome.plan.saveReviewId,
         saveTurnId:recoveredOutcome.saveTurnId??terminalTurnId,
         taskPass,mode:recoveredOutcome.mode,receipt:recoveredOutcome.receipt,
+        sourceMarkerId:recoveredOutcome.plan.evidence.providerEffect?.sourceMarkerId,
         ...(recoveredOutcome.plan.retryFromReviewId?{retry:{retryFromReviewId:terminalMarkerId,terminalTurnId,plan:recoveredOutcome.plan}}:{})});
       if(current.state!=='recovered_outcome_observed'||!isDeepStrictEqual(current.evidence,recoveredOutcome.plan.evidence))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
@@ -3277,13 +3389,15 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       const bound=workspaceDraft.retainedHandoff;
       const portableFinish=workspaceDraft.portableFinish;
       const localDraft=workspaceDraft.localDraft;
-      const {deltaSha256:_localDelta,...localDraftBasis}=localDraft?.basis??{};
+      const {deltaSha256:_localDelta,historicalSkillReleases,...localDraftBasis}=localDraft?.basis??{};
       const current=await readInterruptedDraftTurn(request,threadId,terminalMarkerId,{...taskPass,
         ...(localDraft?{localDraftBasis}:portableFinish?{portableFinish}:bound?{retainedHandoff:true}
           :workspaceDraft.namedArchive===true?{namedArchive:true}:{})});
       const {checkpointId,draftHead,...nativeLocators}=bound?.locators??{};
       const matches=localDraft?current.state==='interrupted_local_draft'
         &&JSON.stringify(localDraft.replacements)===JSON.stringify(current.replacements)
+        &&isDeepStrictEqual(localDraft.retainedArtifacts,current.retainedArtifacts)
+        &&isDeepStrictEqual(historicalSkillReleases,current.historicalSkillReleases)
         :portableFinish?current.state==='interrupted_portable_finish':bound
         ?current.state==='interrupted_retained_handoff'
           &&JSON.stringify(validateAssistantRetainedHandoff(current.proof,{selected:false}))
@@ -3351,7 +3465,10 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
         if(workspaceDraft.recoveredOutcome){
           // The facade supplies the live task pass and native proof itself.
           const args=assistantRecoveredOutcomeCompletion(workspaceDraft.recoveredOutcome.plan,deliveryId);
-          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nCall only complete_assistant_pass once with these exact arguments: ${JSON.stringify(args)}. The host confirmed the accepted save and the outstanding owner question. Stop after the tool returns.\n`;
+          const evidence=workspaceDraft.recoveredOutcome.plan.evidence.providerEffect
+            ?'The host confirmed the accepted save and the previously delivered outbound message. The task remains active on its existing schedule.'
+            :'The host confirmed the accepted save and the outstanding owner question.';
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nCall only complete_assistant_pass once with these exact arguments: ${JSON.stringify(args)}. ${evidence} Stop after the tool returns.\n`;
         }
         if(workspaceDraft.acceptedHead!==undefined)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly confirm the result already accepted in the immediately preceding interrupted turn. Use its saved WORK.md content and the live task to determine the actual goal state, cadence and timezone. Use complete_assistant_pass with workspaceId=${workspaceDraft.workspaceId}, acceptedRunId=${workspaceDraft.runId}, workspaceHead=${workspaceDraft.acceptedHead}, noChange=false and no processed source references. This closes the pass, so keep an unfinished goal active, waiting or blocked as recorded in the accepted material. If the result or its accepted state cannot be verified, leave the pass unresolved.\n`;
