@@ -573,7 +573,7 @@ test('an owned minimized Chromium completes one wheel after screenshot without r
       await new Promise(resolve => setTimeout(resolve, 50));
       minimized = await controller.windowState();
     }
-    assert.deepEqual(minimized, { state: 'fixture', count: 1, minimized: true });
+    assert.deepEqual(minimized, { state: 'fixture', count: 1, minimized: true, focused: false });
     const before = ready(await browser.call('screenshot'));
     assert.equal(before.scroll.up, false);
     const after = ready(await browser.call('scroll', { frameId: before.frameId, x: 300, y: 300, deltaY: 600 }));
