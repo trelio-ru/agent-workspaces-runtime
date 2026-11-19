@@ -5,10 +5,49 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
-import { visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
+import { normalizeVisualAttachmentFilePolicy, visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { saveVisualAttachment, freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { validVisualArguments, visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
+
+test('file-only destinations and diagnostic stages have a closed signed contract', () => {
+  const origins = ['https://z.files.test', 'https://a.files.test'];
+  assert.deepEqual(normalizeVisualAttachmentFilePolicy({ origins }, true), { origins: [...origins].sort() });
+  assert.throws(() => normalizeVisualAttachmentFilePolicy({ origins }, false), { code: 'invalid_input' });
+  for (const origin of ['https://localhost', 'https://127.0.0.1', 'https://a.files.test:443',
+    'http://a.files.test', 'https://a.files.test/path', 'https://user@a.files.test']) {
+    assert.throws(() => normalizeVisualAttachmentFilePolicy({ origins: [origin] }, true), { code: 'invalid_input' });
+  }
+  for (const stage of ['initial_url', 'redirect', 'response_url']) {
+    const attachmentDiagnostic = { stage };
+    const value = visualStatus('error', 'navigation_blocked', { attachmentDiagnostic });
+    assert.deepEqual(JSON.parse(visualMcpResult(parseVisualSkillOutput(JSON.stringify(value))).content[0].text).attachmentDiagnostic, attachmentDiagnostic);
+    assert.throws(() => visualStatus('error', 'navigation_blocked', {
+      attachmentDiagnostic: { stage, url: 'https://synthetic.test/private' },
+    }), { code: 'VISUAL_RESULT_INVALID' });
+    assert.throws(() => visualStatus('error', 'attachment_unsupported', { attachmentDiagnostic }), { code: 'VISUAL_RESULT_INVALID' });
+  }
+});
+
+test('explicit unknown formats are stored as inert originals and legacy scopes cannot receive them', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-opaque-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const bytes = Buffer.from('<svg>synthetic original</svg>');
+  const session = randomUUID();
+  const file = { mimeType: 'image/svg+xml', dataBase64: bytes.toString('base64'), explicitFile: true };
+  await assert.rejects(saveVisualAttachment(directory, file, session), { code: 'attachment_unsupported' });
+  await assert.rejects(saveVisualAttachment(directory, file, session, { allowOpaque: true, audioOnly: true }), { code: 'attachment_unsupported' });
+  const result = await saveVisualAttachment(directory, file, session, { allowOpaque: true });
+  assert.equal(result.mimeType, 'application/octet-stream');
+  assert.equal(path.dirname(result.filePath), path.join(directory, 'opaque-attachments'));
+  assert.equal(path.extname(result.filePath), '.bin');
+  assert.deepEqual(await fs.readFile(result.filePath), bytes);
+  assert.equal(result.sha256, createHash('sha256').update(bytes).digest('hex'));
+  const typed = await saveVisualAttachment(directory, { ...file, mimeType: 'text/plain',
+    dataBase64: Buffer.from('Полный оригинал').toString('base64') }, session, { allowOpaque: true });
+  assert.equal(typed.mimeType, 'text/plain');
+  assert.equal(path.dirname(typed.filePath), path.join(directory, 'attachments'));
+});
 
 test('audio refusal diagnostics survive MCP with closed evidence only and never authorize a receipt', () => {
   const diagnostics = [

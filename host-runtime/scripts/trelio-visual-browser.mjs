@@ -216,6 +216,18 @@ export function visualAttachmentFormat(bytes, mimeType) {
   throw fault('attachment_unsupported');
 }
 
+// File-only origins never join navigation, content script or credential scope.
+export function normalizeVisualAttachmentFilePolicy(value, attachmentDownloads) {
+  if (value === null) return null;
+  if (!attachmentDownloads || !value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).join() !== 'origins'
+    || !Array.isArray(value.origins) || value.origins.length > 8
+    || new Set(value.origins).size !== value.origins.length
+    || value.origins.some(origin => typeof origin !== 'string' || origin.length > 261
+      || !/^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$/u.test(origin))) throw fault('invalid_input');
+  return { origins: [...value.origins].sort() };
+}
+
 /** A redirect-only suffix never enters the content or session-cookie scope.
  * Accept a small canonical set of DNS names so live owner comparisons and
  * native rules cannot depend on request order or malformed pattern syntax. */

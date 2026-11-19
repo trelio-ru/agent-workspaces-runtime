@@ -959,6 +959,49 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
 });
 
 
+test('signed attachment policy downloads opaque originals without rendering them in Chromium',
+  { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 120_000 }, async t => {
+    const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-opaque-original-')));
+    const original = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg">synthetic attachment</svg>');
+    const server = http.createServer((request, response) => {
+      if (request.url.startsWith('/original.svg')) {
+        response.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Content-Length': original.length,
+          ...(request.url.endsWith('?download') ? { 'Content-Disposition': 'attachment; filename="synthetic.svg"' } : {}) });
+        response.end(original); return;
+      }
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end('<!doctype html><body>Fixture chat<a href="/original.svg?download" style="position:absolute;left:30px;top:60px">Save</a><a href="/original.svg" style="position:absolute;left:30px;top:120px">Inline</a>');
+    });
+    const fixture = ownFixtureHttpServer(server, t.signal);
+    let browser;
+    try {
+      await fixture.listen();
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+      browser = new ExtensionVisualBrowser({ dependencies, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1',
+        store: { directory, async read() {}, async prepare() {}, async write() {}, close() {} },
+        policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin],
+        observationMode: 'text', attachmentDownloads: true, attachmentFilePolicy: { origins: [] },
+        lease: { deadlineAt: Date.now() + 110_000 } });
+      const chat = await browser.call('navigate', { url: origin + '/' });
+      assert.equal(chat.state, 'ready', chat.reason);
+      const downloaded = await browser.call('download-attachment', { frameId: chat.frameId, x: 45, y: 65 });
+      assert.equal(downloaded.kind, 'trelio.browser-file/v1', downloaded.reason);
+      assert.equal(path.extname(downloaded.filePath), '.bin');
+      assert.equal(downloaded.mimeType, 'application/octet-stream');
+      assert.deepEqual(await fs.readFile(downloaded.filePath), original);
+      const preserved = await browser.call('read-text');
+      assert.match(preserved.text, /Fixture chat/u);
+      const inline = await browser.call('download-attachment', { frameId: preserved.frameId, x: 45, y: 125 });
+      assert.equal(inline.reason, 'attachment_unsupported');
+      assert.equal(inline.filePath, undefined);
+    } finally {
+      await browser?.close().catch(() => browser.abort());
+      await fixture.stop();
+      await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  });
+
 test('signed manual completion closes only a stable authenticated document, saves once and resumes hidden without chat acknowledgement', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-manual-complete-')));

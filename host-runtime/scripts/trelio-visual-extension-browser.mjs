@@ -13,8 +13,8 @@ import { visualLinkRouter, visualAttachmentRouter, visualAudioReceiver, visualAu
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, normalizeVisualManualCompletion, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
-import { visualAttachmentFormat, visualAudioFormat, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validateVisualAttachmentDiagnostic, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { visualAttachmentFormat, visualAudioFormat, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
@@ -182,27 +182,47 @@ export function visualNativeStartupEvidence(text) {
  * files last 24h, at most 32/200 MiB per personal account; cleanup never follows
  * links, deletes unknown entries, or evicts a fresh file another tool may read.
  */
-export async function saveVisualAttachment(directory, file, sessionId, { audioOnly = false } = {}) {
-  if (!file || Object.keys(file).sort().join() !== 'dataBase64,mimeType' || typeof file.dataBase64 !== 'string' || file.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 || file.dataBase64.length % 4) throw fault('attachment_unsupported');
+export async function saveVisualAttachment(directory, file, sessionId, { audioOnly = false, allowOpaque = false } = {}) {
+  const opaque = allowOpaque && !audioOnly && file?.explicitFile === true;
+  const expectedFields = opaque ? 'dataBase64,explicitFile,mimeType' : 'dataBase64,mimeType';
+  if (!file || Object.keys(file).sort().join() !== expectedFields || typeof file.dataBase64 !== 'string' || file.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 || file.dataBase64.length % 4) throw fault('attachment_unsupported');
   const bytes = Buffer.from(file.dataBase64, 'base64');
   try {
     // Canonical round-trip rejects whitespace/invalid alphabet/padding without
     // a quantified regex whose backtracking stack can grow with a 20 MiB file.
     if (bytes.toString('base64') !== file.dataBase64) throw fault('attachment_unsupported');
-    const format = audioOnly ? visualAudioFormat(bytes, file.mimeType) : visualAttachmentFormat(bytes, file.mimeType);
-    const root = path.join(directory, 'attachments');
+    if (bytes.length > MAX_ATTACHMENT_BYTES) throw fault('attachment_too_large');
+    let format;
+    try { format = audioOnly ? visualAudioFormat(bytes, file.mimeType) : visualAttachmentFormat(bytes, file.mimeType); }
+    catch (error) {
+      if (!opaque || !['attachment_unsupported', 'attachment_too_large'].includes(error.code)) throw error;
+      // An explicitly downloaded original of unknown type is inert data.
+      // Keep the server MIME and filename out of the receipt and filesystem.
+      format = { extension: 'bin', mimeType: 'application/octet-stream' };
+    }
+    const typedRoot = path.join(directory, 'attachments');
+    const opaqueRoot = path.join(directory, 'opaque-attachments');
+    const root = format.extension === 'bin' ? opaqueRoot : typedRoot;
     await prepareVisualPrivateDirectory(root);
-    const entries = await fs.readdir(root);
-    if (entries.length > 128) throw fault('attachment_limit_reached');
     let count = 0, total = 0;
     const now = Date.now(), ttl = 24 * 60 * 60 * 1000;
-    for (const entry of entries) {
-      if (!/^[0-9a-f-]{36}\.(?:pdf|png|jpg|gif|webp|tiff|bmp|doc|xls|ppt|docx|xlsx|pptx|odt|ods|odp|zip|txt|csv|rtf|wav|mp3|ogg|opus|m4a|aac|flac)$/u.test(entry)) throw fault('storage_unavailable');
-      const target = path.join(root, entry); await assertPrivatePathKind(target, 'file');
-      const stat = await fs.lstat(target);
-      if (!stat.isFile() || stat.nlink !== 1) throw fault('storage_unavailable');
-      if (stat.mtimeMs + ttl <= now) await fs.unlink(target);
-      else { count++; total += stat.size; }
+    // Separate storage keeps a downgraded host from rejecting a cache entry it
+    // cannot recognize. This host still shares one quota across both stores.
+    for (const cache of [typedRoot, opaqueRoot]) {
+      try { await assertPrivatePathKind(cache, 'directory'); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      const entries = await fs.readdir(cache);
+      if (entries.length > 128) throw fault('attachment_limit_reached');
+      for (const entry of entries) {
+        const knownName = cache === opaqueRoot ? /^[0-9a-f-]{36}\.bin$/u
+          : /^[0-9a-f-]{36}\.(?:pdf|png|jpg|gif|webp|tiff|bmp|doc|xls|ppt|docx|xlsx|pptx|odt|ods|odp|zip|txt|csv|rtf|wav|mp3|ogg|opus|m4a|aac|flac)$/u;
+        if (!knownName.test(entry)) throw fault('storage_unavailable');
+        const target = path.join(cache, entry); await assertPrivatePathKind(target, 'file');
+        const stat = await fs.lstat(target);
+        if (!stat.isFile() || stat.nlink !== 1) throw fault('storage_unavailable');
+        if (stat.mtimeMs + ttl <= now) await fs.unlink(target);
+        else { count++; total += stat.size; }
+      }
     }
     if (count >= 32 || total + bytes.length > 200 * 1024 * 1024) throw fault('attachment_limit_reached');
     const filePath = path.join(root, `${crypto.randomUUID()}.${format.extension}`);
@@ -335,7 +355,7 @@ export class ExtensionVisualBrowser {
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic; #headless = false;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
+  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
     visualBrowserHeadless(presentation, false);
     if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); } catch { throw fault('invalid_input'); }
@@ -353,7 +373,8 @@ export class ExtensionVisualBrowser {
     referenceRoutes = normalizeVisualReferenceRoutes(referenceRoutes, origins, observationMode);
     attachmentRedirectDomains = normalizeVisualAttachmentRedirectDomains(attachmentRedirectDomains, attachmentDownloads);
     fileUploadPickerPaths = normalizeVisualPickerPaths(fileUploadPickerPaths, fileUploads, referenceRoutes);
-    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, attachmentRedirectDomains, audioDownloads, fileUploads, fileUploadPickerPaths, mailIdentity });
+    attachmentFilePolicy = normalizeVisualAttachmentFilePolicy(attachmentFilePolicy, attachmentDownloads);
+    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, attachmentRedirectDomains, attachmentFilePolicy, audioDownloads, fileUploads, fileUploadPickerPaths, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.manualCompletion = normalizeVisualManualCompletion(manualCompletion, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
@@ -614,7 +635,7 @@ export class ExtensionVisualBrowser {
     // Give those launches a deterministic extension event instead of relying
     // on the timing of Chrome's new-tab page versus lazy worker installation.
     const bootstrap = process.platform !== 'darwin' || this.#headless ? visualExtensionBootstrapPage() : null;
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, referenceRoutes: this.referenceRoutes, attachmentDownloads: this.attachmentDownloads, attachmentRedirectDomains: this.attachmentRedirectDomains, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, fileUploadPickerPaths: this.fileUploadPickerPaths, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly,
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, referenceRoutes: this.referenceRoutes, attachmentDownloads: this.attachmentDownloads, attachmentRedirectDomains: this.attachmentRedirectDomains, attachmentFilePolicy: this.attachmentFilePolicy, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, fileUploadPickerPaths: this.fileUploadPickerPaths, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly,
       ...(this.testHeadless ? { fixtureHeadless: true } : {}) };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
@@ -1107,6 +1128,8 @@ export class ExtensionVisualBrowser {
       if (fresh) await sleep(500);
       const value = await this.#send(fresh && operation === 'navigate' ? (this.observationMode === 'text' ? 'read-text' : 'screenshot') : operation, args);
       if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId,
+        ...(operation === 'download-attachment' && value.reason === 'navigation_blocked' && value.attachmentDiagnostic
+          ? { attachmentDiagnostic: validateVisualAttachmentDiagnostic(value.attachmentDiagnostic) } : {}),
         ...(operation === 'download-audio' && value.reason === 'attachment_unsupported' && value.audioDiagnostic
           ? { audioDiagnostic: validateVisualAudioDiagnostic(value.audioDiagnostic) } : {}),
         ...(value.reason === 'document_blocked' && value.documentDiagnostic
@@ -1138,7 +1161,8 @@ export class ExtensionVisualBrowser {
         && !(value.kind === TEXT_KIND || value.image)) {
         if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
         if (Object.keys(value).sort().join() !== 'file,state') throw fault('attachment_unsupported');
-        return await saveVisualAttachment(this.store.directory, value.file, this.sessionId, { audioOnly: (completedOperation || operation) === 'download-audio' });
+        return await saveVisualAttachment(this.store.directory, value.file, this.sessionId, { audioOnly: (completedOperation || operation) === 'download-audio',
+          allowOpaque: this.attachmentFilePolicy !== null });
       }
       const response = { kind: value.kind || VISUAL_RESULT_KIND, sessionId: this.sessionId, reason: 'none', ...value };
       return value.kind === TEXT_KIND ? validateTextResult(response) : normalizeBrowserVisualResult(response);

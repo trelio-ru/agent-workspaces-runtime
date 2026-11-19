@@ -817,6 +817,28 @@ viewer. Обычная навигация, аудио и cookie overlay сохр
 Пустой CSV допускается, когда успешный ответ содержит `Content-Length: 0`,
 `Content-Disposition: attachment` и фактически пустой поток без сжатия.
 
+`VISUAL_ATTACHMENT_FILE_API = trelio.visual-attachment-file/v1` добавляет
+подписанную политику `attachmentFilePolicy: { origins }` к `attachmentDownloads`.
+До восьми точных HTTPS origins без пользовательских адресов, IP, портов и путей
+разрешены только для выбранного файла: прямой anchor, выбранная кнопка или
+подтверждённый redirect. Для off-origin GET ставится и отзывается то же exact
+правило одной вкладки. Оно не добавляет content scripts, cookie scopes,
+навигацию или аудио. CDN может вернуть файл, HTML viewer с него не открывается.
+
+С этим opt-in ответ с явным `Content-Disposition: attachment` может сохранить
+оригинал произвольного формата. При успешной проверке известного формата
+сохраняется его обычное расширение. Иначе байты хранятся под случайным именем
+`.bin` с `application/octet-stream`. Исходное имя, MIME неподтверждённого формата
+и содержимое не попадают в receipt. HTML и скрипты не исполняются. Обычные
+inline-ответы остаются под проверками прежних форматов. Пустой opaque-файл
+допускается только при явном вложении, пустом identity-потоке и
+`Content-Length: 0`. Общая квота сохраняется, отдельный private каталог
+не мешает старому host читать свой cache после rollback.
+
+При `navigation_blocked` команда может вернуть закрытый
+`attachmentDiagnostic.stage`: `initial_url`, `redirect` или `response_url`.
+Это этап отказа, он не содержит URL и не разрешает повтор или смену маршрута.
+
 Host независимо проверяет bytes/MIME: PDF, PNG/JPEG/GIF/WebP/BMP/TIFF,
 DOC/XLS/PPT, DOCX/XLSX/PPTX, ODT/ODS/ODP, UTF-8 TXT/CSV/RTF и ZIP. Для octet-stream
 тип определяется по сигнатуре, не server filename. ZIP directory ограничен

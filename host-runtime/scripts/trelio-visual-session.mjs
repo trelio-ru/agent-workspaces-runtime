@@ -10,7 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind, renderLocalFormPage, parseAgentSecretTotpValue, deriveAgentSecretTotp } from './trelio-workspace.mjs';
 import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
-import { createVisualOriginPolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths } from './trelio-visual-browser.mjs';
+import { createVisualOriginPolicy, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths } from './trelio-visual-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding, browserExecutionOwner, browserExecutionDirectory, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -276,6 +276,7 @@ export async function closeVisualExecutionSessions({ companyId, runtimeSessionId
 }
 
 export const VISUAL_AUDIO_DOWNLOAD_API = 'trelio.visual-audio-download/v1';
+export const VISUAL_ATTACHMENT_FILE_API = 'trelio.visual-attachment-file/v1';
 export const VISUAL_ATTACHMENT_REDIRECT_API = 'trelio.visual-attachment-redirect/v1';
 export const VISUAL_DOCUMENT_REFERENCE_API = 'trelio.visual-document-reference/v1';
 // Signed provider opt-in; ordinary CLI/MCP arguments never select this policy.
@@ -321,7 +322,7 @@ export function normalizeVisualManualCompletion(value, { origins, fixtureOnly = 
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], externalNavigation = false, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], externalNavigation = false, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture }) {
   if (typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation) return visualStatus('error', 'invalid_input');
   if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || !semanticControls && operation === 'read-text'
     && ['controlQuery', 'controlOffset'].some(key => Object.hasOwn(args || {}, key))) return visualStatus('error', 'invalid_input');
@@ -339,6 +340,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
   if (typeof externalNavigation !== 'boolean' || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads) || (operation === 'download-audio' && !audioDownloads) || (operation === 'upload-files' && !fileUploads)) return visualStatus('error', 'invalid_input');
   try {
     attachmentRedirectDomains = normalizeVisualAttachmentRedirectDomains(attachmentRedirectDomains, attachmentDownloads);
+    attachmentFilePolicy = normalizeVisualAttachmentFilePolicy(attachmentFilePolicy, attachmentDownloads);
     fileUploadPickerPaths = normalizeVisualPickerPaths(fileUploadPickerPaths, fileUploads, referenceRoutes);
   }
   catch { return visualStatus('error', 'invalid_input'); }
@@ -408,7 +410,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
       // Upgrading a provider may reuse its saved auth but must not silently
       // reuse an older live worker with a different content-disclosure mode.
       // Cleanup/status remain available so the exact owner can finish it safely.
-      if (((owner.externalNavigation === true) !== externalNavigation || (owner.profileAuthentication === true) !== profileAuthentication || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.referenceRoutes || []) !== JSON.stringify(referenceRoutes) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || JSON.stringify(owner.attachmentRedirectDomains || []) !== JSON.stringify(attachmentRedirectDomains) || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads || JSON.stringify(owner.fileUploadPickerPaths || []) !== JSON.stringify(fileUploadPickerPaths)) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      if (((owner.externalNavigation === true) !== externalNavigation || (owner.profileAuthentication === true) !== profileAuthentication || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.referenceRoutes || []) !== JSON.stringify(referenceRoutes) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || JSON.stringify(owner.attachmentRedirectDomains || []) !== JSON.stringify(attachmentRedirectDomains) || JSON.stringify(owner.attachmentFilePolicy ?? null) !== JSON.stringify(attachmentFilePolicy) || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads || JSON.stringify(owner.fileUploadPickerPaths || []) !== JSON.stringify(fileUploadPickerPaths)) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       // Do not slide the original deadline when another CLI invocation arrives.
       if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
@@ -468,7 +470,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
         schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
         ...(binding.executionOwner ? { executionOwner: binding.executionOwner } : {}),
         pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-        origins, domains, externalNavigation, profileAuthentication, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, attachmentDownloads, attachmentRedirectDomains, audioDownloads, fileUploads, fileUploadPickerPaths, authentication, authenticationFingerprint, manualCompletion,
+        origins, domains, externalNavigation, profileAuthentication, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, attachmentDownloads, attachmentRedirectDomains, attachmentFilePolicy, audioDownloads, fileUploads, fileUploadPickerPaths, authentication, authenticationFingerprint, manualCompletion,
         mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
         ...(assistantBrowserSecrets === true ? { assistantBrowserSecrets: true } : {}),
         ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),

@@ -136,6 +136,18 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       return !u.username && !u.password && ((config.externalNavigation === true && ['http:', 'https:'].includes(u.protocol)) || config.origins.includes(u.origin) || (u.protocol === 'https:' && !u.port && config.domains.some(d => u.hostname === d || u.hostname.endsWith('.' + d))));
     } catch { return false; }
   };
+  // An approved CDN is reachable only from one explicit file operation. It
+  // never joins the general browser, HTML observation or cookie policy.
+  const fileOnlyOrigin = url => url.protocol === 'https:' && !url.port && !url.username && !url.password
+    && config.attachmentFilePolicy?.origins.includes(url.origin) === true;
+  const filePathIsResource = url => /\.(?:js|mjs|cjs|css|json|map|xml|html?|xhtml|svg|wasm|exe|dll|dmg|sh|ps1|bat|cmd)$/iu.test(decodeURIComponent(url.pathname));
+  const attachmentNavigationBlocked = stage => Object.assign(Error('navigation_blocked'), { attachmentDiagnostic: { stage } });
+  async function exactFileRuleUrl(url, stage) {
+    if (url.href.length > 1536 || !(await chrome.declarativeNetRequest.isRegexSupported({
+      regex: '^' + escapeRule(url.href) + '$', isCaseSensitive: true,
+    }))?.isSupported) throw attachmentNavigationBlocked(stage);
+    return url.href;
+  }
   const allowedNavigation = raw => {
     const u = new URL(raw);
     if (!allowed(raw) || /\.(?:js|mjs|css|json|map|xml|txt|pdf|wasm|zip|exe|dmg)$/iu.test(decodeURIComponent(u.pathname))) throw Error('navigation_blocked');
@@ -394,7 +406,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           const stale = Date.now() >= pending.until || pending.generation !== navigationGeneration(pending.tabId)
             || !main && (tree.frameTree.frame.id !== pending.mainFrameId || tree.frameTree.frame.loaderId !== pending.loaderId)
             || manual || authenticating;
-          if (stale || params.request?.method !== 'GET' || !allowed(params.request?.url)) {
+          const url = new URL(params.request?.url);
+          if (stale || params.request?.method !== 'GET' || (!allowed(url.href) && !fileOnlyOrigin(url))) {
             await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' });
             pending.reject(Error(stale ? 'stale_frame' : 'attachment_link_required')); return;
           }
@@ -417,8 +430,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           try {
             const url = new URL(params.request?.url);
             url.hash = '';
-            const redirectOnly = download.redirectUrl === url.href;
-            if (url.href !== download.expectedUrl || (!allowed(url.href) && !redirectOnly)) throw Error('navigation_blocked');
+            const downloadOnly = download.downloadOnlyUrl === url.href;
+            if (url.href !== download.expectedUrl || (!allowed(url.href) && !downloadOnly)
+              || (config.attachmentFilePolicy && !download.audioOnly && params.request?.method !== 'GET')) {
+              throw attachmentNavigationBlocked('response_url');
+            }
             const decision = documentPolicy(params.responseStatusCode, params.responseHeaders);
             if (decision === 'redirect') {
               await prepareAttachmentRedirect(download, params, url);
@@ -428,7 +444,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
             // it normally and return a fresh observation, never HTML bytes or
             // a counterfeit file receipt. Signed providers own any subsequent
             // read-only download-menu workflow in that viewer.
-            if (!download.audioOnly && !redirectOnly && params.responseStatusCode === 200 && decision === 'html') {
+            if (!download.audioOnly && !downloadOnly && !download.explicitRequired && params.responseStatusCode === 200 && decision === 'html') {
               await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
               download.resolve({ viewer: true }); return;
             }
@@ -506,29 +522,25 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   });
   async function prepareAttachmentRedirect(download, params, sourceUrl) {
     const locations = params.responseHeaders.filter(header => header.name.toLowerCase() === 'location');
-    if (locations.length !== 1 || typeof locations[0].value !== 'string' || !locations[0].value.trim()) throw Error('navigation_blocked');
-    const target = new URL(locations[0].value, sourceUrl);
+    if (locations.length !== 1 || typeof locations[0].value !== 'string' || !locations[0].value.trim()) throw attachmentNavigationBlocked('redirect');
+    let target;
+    try { target = new URL(locations[0].value, sourceUrl); } catch { throw attachmentNavigationBlocked('redirect'); }
     target.hash = '';
-    if (target.username || target.password) throw Error('navigation_blocked');
-    let redirectUrl = null;
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw attachmentNavigationBlocked('redirect');
+    let downloadOnlyUrl = null;
     if (!allowed(target.href)) {
       // Trust only an actual browser redirect from the exact pending GET.
-      // Other document types, normal navigation and the cookie overlay never
-      // receive this permission. Limit the URL/chain before touching DNR.
+      // Ordinary navigation, audio and the cookie overlay retain their scope.
+      const redirectDomain = (config.attachmentRedirectDomains || []).some(domain => target.hostname === domain
+        || target.hostname.endsWith('.' + domain));
       if (download.audioOnly || params.request?.method !== 'GET' || target.protocol !== 'https:' || target.port
-        || target.href.length > 1536 || ++download.redirectCount > 4
-        || !(config.attachmentRedirectDomains || []).some(domain => target.hostname === domain
-          || target.hostname.endsWith('.' + domain))) throw Error('navigation_blocked');
-      const supported = await chrome.declarativeNetRequest.isRegexSupported({
-        regex: '^' + escapeRule(target.href) + '$', isCaseSensitive: true,
-      });
-      if (!supported?.isSupported) throw Error('navigation_blocked');
-      redirectUrl = target.href;
+        || ++download.redirectCount > 4 || !(redirectDomain || fileOnlyOrigin(target))) throw attachmentNavigationBlocked('redirect');
+      downloadOnlyUrl = await exactFileRuleUrl(target, 'redirect');
     }
     if (pendingAttachment !== download || manual || authenticating || guardFailed || Date.now() >= download.until) throw Error('operation_failed');
     download.expectedUrl = target.href;
-    if (download.redirectUrl !== redirectUrl) {
-      download.redirectUrl = redirectUrl;
+    if (download.downloadOnlyUrl !== downloadOnlyUrl) {
+      download.downloadOnlyUrl = downloadOnlyUrl;
       // Publish (or revoke) the exact rule before Chromium can follow the
       // native redirect. No second GET or network client is used.
       guardUpdate = guardUpdate.then(() => installRules()).catch(() => recordGuardFailure('session_rules'));
@@ -559,7 +571,13 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const types = download.audioOnly
       ? /^(?:audio\/(?:wav|x-wav|wave|mpeg|mp3|ogg|opus|mp4|x-m4a|aac|aacp|flac|x-flac)|application\/(?:ogg|octet-stream))$/u
       : /^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:octet-stream|pdf|rtf|zip|x-zip-compressed|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u;
-    if (!types.test(mimeType)) {
+    // A response advertised as an actual attachment can be stored as inert
+    // bytes under the signed policy. Inline site resources and HTML views
+    // remain on the existing narrow receiver or are rejected before body I/O.
+    const explicit = /^attachment(?:\s*;|$)/iu.test((headers.get('content-disposition') || '').trim());
+    const explicitFile = !download.audioOnly && Boolean(config.attachmentFilePolicy) && explicit;
+    if (download.explicitRequired && !explicitFile) throw refuse('unsupported_mime');
+    if (!types.test(mimeType) && !explicitFile) {
       const families = { 'audio/webm': 'webm', 'video/webm': 'webm', 'audio/amr': 'amr', 'audio/3gpp': '3gpp' };
       const format = Object.hasOwn(families, mimeType) ? families[mimeType] : 'other';
       throw refuse('unsupported_mime', { format });
@@ -591,9 +609,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // explicit successful empty *attachment* with an identity transfer.
       // An empty/truncated stream with any other metadata still fails closed.
       const identity = !headers.get('content-encoding') || headers.get('content-encoding') === 'identity';
-      const emptyCsv = mimeType === 'text/csv' && length === '0' && identity
-        && /^attachment(?:\s*;|$)/iu.test(headers.get('content-disposition') || '');
-      if ((!total && !emptyCsv) || (identity && length !== undefined && Number(length) !== total)) throw refuse('invalid_body');
+      const emptyFile = (mimeType === 'text/csv' || explicitFile) && length === '0' && identity && explicit;
+      if ((!total && !emptyFile) || (identity && length !== undefined && Number(length) !== total)) throw refuse('invalid_body');
       const bytes = new Uint8Array(total); let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; chunk.fill(0); }
       let dataBase64 = '';
@@ -610,7 +627,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await command(download.tabId, 'Fetch.fulfillRequest', { requestId: params.requestId, responseCode: 204,
         responseHeaders: [{ name: 'Cache-Control', value: 'no-store' }], body: '' });
       check();
-      download.resolve({ state: 'ready', file: { mimeType, dataBase64 } });
+      download.resolve({ state: 'ready', file: { mimeType, dataBase64, ...(explicitFile ? { explicitFile: true } : {}) } });
     } finally {
       for (const chunk of chunks) chunk.fill(0);
       await command(download.tabId, 'IO.close', { handle: stream }).catch(() => {});
@@ -618,17 +635,25 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   }
   async function downloadOriginal(f, candidate, audioOnly, until) {
     if (typeof candidate !== 'string' || !candidate || candidate.length > 4096) throw Error('attachment_link_required');
-    const url = new URL(candidate);
-    if (!allowed(url.href) || /\.(?:js|mjs|cjs|css|json|map|xml|html?|xhtml|svg|wasm|exe|dll|dmg|sh|ps1|bat|cmd)$/iu.test(decodeURIComponent(url.pathname))) throw Error('navigation_blocked');
+    let url, explicitRequired;
+    try {
+      url = new URL(candidate);
+      // Network request URLs omit fragments even if the viewer link had one.
+      url.hash = '';
+      explicitRequired = filePathIsResource(url);
+    } catch { throw attachmentNavigationBlocked('initial_url'); }
+    const ownOrigin = ['http:', 'https:'].includes(url.protocol) && allowed(url.href);
+    const filePolicy = !audioOnly && config.attachmentFilePolicy;
+    if ((!ownOrigin && !(filePolicy && fileOnlyOrigin(url)))
+      || (explicitRequired && !filePolicy)) throw attachmentNavigationBlocked('initial_url');
+    const downloadOnlyUrl = ownOrigin ? null : await exactFileRuleUrl(url, 'initial_url');
     // This helper is the SAME single main-document browser stream for files
     // and audio. It never enables XHR/subresource interception or raw HTTP.
     // Source discovery, blob reading and network transfer share ONE deadline.
     let timer;
     const promise = new Promise((resolve, reject) => {
-      // Network request URLs omit fragments even if the viewer link had one.
-      url.hash = '';
       pendingAttachment = { tabId: f.tabId, mainFrameId: f.mainFrameId, audioOnly, until, resolve, reject,
-        expectedUrl: url.href, redirectUrl: null, redirectCount: 0 };
+        expectedUrl: url.href, explicitRequired, downloadOnlyUrl, redirectCount: 0 };
       timer = setTimeout(() => reject(Error('operation_failed')), Math.max(1, until - Date.now()));
     });
     promise.catch(() => {});
@@ -1405,7 +1430,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         }
       }
       if (typeof candidate !== 'string' || !candidate || candidate.length > 4096) throw Error('attachment_link_required');
-      return downloadOriginal({ ...f, generation }, new URL(candidate, tab.url).href, false, Math.min(Date.now() + 30_000, config.deadlineAt));
+      let href;
+      try { href = new URL(candidate, tab.url).href; } catch { throw attachmentNavigationBlocked('initial_url'); }
+      return downloadOriginal({ ...f, generation }, href, false, Math.min(Date.now() + 30_000, config.deadlineAt));
     }
     if (op === 'click') {
       // Arm a fixed, isolated content adapter before this exact trusted click.
@@ -1490,6 +1517,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           send({ kind: 'result', id: message.id, result: { state: 'error', reason,
             ...(reason === 'document_blocked' && error.documentDiagnostic
               ? { documentDiagnostic: error.documentDiagnostic } : {}),
+            ...(message.operation === 'download-attachment' && reason === 'navigation_blocked' && error.attachmentDiagnostic
+              ? { attachmentDiagnostic: error.attachmentDiagnostic } : {}),
             ...(message.operation === 'download-audio' && reason === 'attachment_unsupported' && error.audioDiagnostic
               ? { audioDiagnostic: error.audioDiagnostic } : {}) } });
         }
@@ -1555,9 +1584,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (config.externalNavigation === true) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https?://[^/?#@]+(?:[/?#]|$)', resourceTypes: ['main_frame'] } });
       for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escapeRule(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escapeRule(domain) + '/', resourceTypes: ['main_frame'] } });
-      if (pendingAttachment?.redirectUrl && guardedTabs.has(pendingAttachment.tabId)) {
+      if (pendingAttachment?.downloadOnlyUrl && guardedTabs.has(pendingAttachment.tabId)) {
         rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: {
-          regexFilter: '^' + escapeRule(pendingAttachment.redirectUrl) + '$', isUrlFilterCaseSensitive: true,
+          regexFilter: '^' + escapeRule(pendingAttachment.downloadOnlyUrl) + '$', isUrlFilterCaseSensitive: true,
           tabIds: [pendingAttachment.tabId], resourceTypes: ['main_frame'], requestMethods: ['get'],
         } });
       }

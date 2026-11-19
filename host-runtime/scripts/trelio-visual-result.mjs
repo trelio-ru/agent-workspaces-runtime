@@ -52,6 +52,13 @@ export function validateVisualAudioDiagnostic(value) {
   return { ...value };
 }
 
+// A browser refusal uses one fixed stage. Never return the destination URL,
+// headers or file bytes as diagnostics.
+export function validateVisualAttachmentDiagnostic(value) {
+  if (!exact(value, ['stage']) || !['initial_url', 'redirect', 'response_url'].includes(value.stage)) fail();
+  return { stage: value.stage };
+}
+
 // A document refusal separates failed native operations from a rejected
 // response or renderer. No registered stage can change the original refusal.
 export function validateVisualDocumentDiagnostic(value) {
@@ -178,7 +185,11 @@ function validatePng(bytes, discardBrowserColorProfile = false) {
 }
 
 function validateResult(value, discardBrowserColorProfile) {
-  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic', 'audioDiagnostic', 'documentDiagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic', 'audioDiagnostic', 'documentDiagnostic', 'attachmentDiagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (value.attachmentDiagnostic !== undefined) {
+    if (value.state !== 'error' || value.reason !== 'navigation_blocked') fail();
+    validateVisualAttachmentDiagnostic(value.attachmentDiagnostic);
+  }
   if (value.documentDiagnostic !== undefined) {
     if (value.state !== 'error' || value.reason !== 'document_blocked') fail();
     validateVisualDocumentDiagnostic(value.documentDiagnostic);
@@ -222,9 +233,9 @@ export function validateVisualResult(value) {
   if (value?.kind === BROWSER_FILE_KIND) {
     if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'filePath', 'sizeBytes', 'sha256', 'mimeType', 'expiresAt']) || value.state !== 'ready' || value.reason !== 'none' || !uuid.test(value.sessionId)
       || typeof value.filePath !== 'string' || value.filePath.length > 4096 || !path.isAbsolute(value.filePath) || /[\x00-\x1f]/u.test(value.filePath)
-      || !Number.isInteger(value.sizeBytes) || value.sizeBytes < 0 || (value.sizeBytes === 0 && value.mimeType !== 'text/csv')
+      || !Number.isInteger(value.sizeBytes) || value.sizeBytes < 0 || (value.sizeBytes === 0 && !['text/csv', 'application/octet-stream'].includes(value.mimeType))
       || value.sizeBytes > 20 * 1024 * 1024 || !/^[0-9a-f]{64}$/u.test(value.sha256)
-      || typeof value.mimeType !== 'string' || value.mimeType.length > 128 || !/^(?:audio\/(?:wav|mpeg|ogg|mp4|aac|flac)|image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:pdf|rtf|zip|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u.test(value.mimeType)
+      || typeof value.mimeType !== 'string' || value.mimeType.length > 128 || !/^(?:audio\/(?:wav|mpeg|ogg|mp4|aac|flac)|image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:octet-stream|pdf|rtf|zip|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u.test(value.mimeType)
       || !Number.isSafeInteger(value.expiresAt)) fail();
     return value;
   }

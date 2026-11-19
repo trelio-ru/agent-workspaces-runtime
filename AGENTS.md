@@ -834,7 +834,11 @@ publication tooling также остаются вне этого публичн
   Generic ARIA menuitem получает
   прежний button DTO, без расширения mutation authority. Empty 204 не кешируется.
   Signed attachment CDN redirects use a temporary exact top-frame GET rule,
-  revoked before other navigation. Zero-byte CSV needs explicit empty identity
+  revoked before other navigation. Signed `attachmentFilePolicy` also admits an exact
+  file-only origin for the direct GET. Site-declared unsupported formats use
+  inert originals under a separate rollback-safe directory and the same quota.
+  No new browsing, cookie or execution access. Closed navigation diagnostics
+  carry the refusal stage, never a URL. Zero-byte CSV needs explicit empty identity
   attachment metadata. Signed document references project the top-frame ID and
   approved tab selector only. See the same visual contract.
   Embedded upload requires a signed direct same-origin picker pathname and

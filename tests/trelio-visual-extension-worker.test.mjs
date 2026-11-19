@@ -875,6 +875,8 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
   let socket, nativeEvent, currentUrl = 'about:blank', mode = 'main', paused = false, clicks = 0, reads = 0;
   let rules = [], continuations = 0;
   const cdn = 'https://files.download.test/export?sig=PRIVATE_REDIRECT_ID';
+  const direct = 'https://files.direct.test/fixture.svg?sig=PRIVATE_FILE_ID';
+  let exactFileRequests = 0;
   const context = { URL, Date, TextEncoder, Uint8Array, performance, atob, btoa, setTimeout, clearTimeout,
     crypto: { randomUUID }, chrome: {
       runtime: { id: 'fixture', onMessage: events },
@@ -899,6 +901,7 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
           if (method === 'Fetch.fulfillRequest' || method === 'Fetch.failRequest') {
             paused = false;
             if (method === 'Fetch.fulfillRequest') {
+              if (mode.startsWith('direct')) currentUrl = 'https://example.test/original';
               assert.equal(args.responseCode, 204);
               assert.deepEqual(JSON.parse(JSON.stringify(args.responseHeaders)), [{ name: 'Cache-Control', value: 'no-store' }]);
             }
@@ -912,11 +915,12 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
             assert.deepEqual(JSON.parse(JSON.stringify(condition.tabIds)), [1]);
             assert.deepEqual(JSON.parse(JSON.stringify(condition.requestMethods)), ['get']);
             assert.equal(condition.isUrlFilterCaseSensitive, true);
-            assert.match(cdn, new RegExp(condition.regexFilter));
-            assert.doesNotMatch(cdn + '&unreviewed=1', new RegExp(condition.regexFilter));
+            const target = mode === 'cdn-file-scope' ? direct : cdn;
+            assert.match(target, new RegExp(condition.regexFilter));
+            assert.doesNotMatch(target + '&unreviewed=1', new RegExp(condition.regexFilter));
             continuations++;
             queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
-              requestId: 'redirect-body', frameId: 'main', resourceType: 'Document', request: { url: cdn, method: 'GET' },
+              requestId: 'redirect-body', frameId: 'main', resourceType: 'Document', request: { url: target, method: 'GET' },
               responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: mode === 'cdn-html' ? 'text/html' : 'text/csv' }],
             }));
           }
@@ -934,13 +938,30 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
         async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
         async update(_id, input) {
           currentUrl = input.url || currentUrl;
+          if (currentUrl === direct) {
+            exactFileRequests++;
+            const active = rules.filter(rule => rule.condition.tabIds);
+            assert.equal(active.length, 1);
+            const condition = JSON.parse(JSON.stringify(active[0].condition));
+            assert.deepEqual(condition.tabIds, [1]);
+            assert.deepEqual(condition.requestMethods, ['get']);
+            assert.deepEqual(condition.resourceTypes, ['main_frame']);
+            assert.match(direct, new RegExp(condition.regexFilter));
+            assert.doesNotMatch(direct + 'unreviewed', new RegExp(condition.regexFilter));
+            queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
+              requestId: 'guarded-direct', frameId: 'main', resourceType: 'Document', responseStatusCode: 200,
+              request: { url: mode === 'direct-wrong-response' ? direct + '&unexpected=1' : direct, method: 'GET' },
+              responseHeaders: [{ name: 'Content-Type', value: 'image/svg+xml' },
+                ...(mode === 'direct-inline' ? [] : [{ name: 'Content-Disposition', value: 'attachment; filename=PRIVATE_NAME' }])],
+            }));
+          }
           if (currentUrl === 'https://example.test/original') {
             routed.push(currentUrl);
             const redirect = mode.startsWith('cdn');
             queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
               requestId: redirect ? 'network-redirect' : 'guarded-original', frameId: 'main', resourceType: 'Document',
               request: { url: currentUrl, method: 'GET' }, responseStatusCode: redirect ? 307 : 200,
-              responseHeaders: redirect ? [{ name: 'Location', value: mode === 'cdn-foreign' ? cdn.replace('download.test', 'download.test.other') : cdn }]
+              responseHeaders: redirect ? [{ name: 'Location', value: mode === 'cdn-foreign' ? cdn.replace('download.test', 'download.test.other') : mode === 'cdn-file-scope' ? direct : cdn }]
                 : [{ name: 'Content-Type', value: 'application/octet-stream' }],
             }));
           }
@@ -948,14 +969,18 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
         },
         async sendMessage(_id, message) {
           if (message.kind === 'authentication-guard') return { blocked: false };
-          if (message.kind === 'resolve_attachment_link') return null;
+          if (message.kind === 'resolve_attachment_link') return mode.startsWith('direct')
+            ? { url: mode === 'direct-foreign' ? direct.replace('direct.test', 'direct.test.other')
+              : mode === 'direct-blob' ? 'blob:' + direct : direct }
+            : null;
           if (message.kind === 'arm_attachment_click') return { ready: true };
           return { text: 'synthetic', controls: [], nextOffset: null, scanLimited: false };
         } },
     }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
     initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text',
-    attachmentDownloads: true, attachmentRedirectDomains: ['download.test'], deadlineAt: Date.now() + 10_000 }, context);
+    attachmentDownloads: true, attachmentRedirectDomains: ['download.test'],
+    attachmentFilePolicy: { origins: ['https://files.direct.test'] }, deadlineAt: Date.now() + 10_000 }, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen(); let sequence = 0;
   const dispatch = async (operation, args = {}) => {
@@ -966,20 +991,46 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
   await dispatch('restore-session-auth', { cookies: [], replace: false });
   for (const [next, reason] of [['main', null], ['iframe', null], ['post', 'attachment_link_required'],
     ['foreign', 'attachment_link_required'], ['navigate', 'stale_frame'], ['cdn', null],
-    ['cdn-html', 'attachment_unsupported'], ['cdn-foreign', 'navigation_blocked']]) {
+    ['cdn-file-scope', null], ['cdn-html', 'attachment_unsupported'], ['cdn-foreign', 'navigation_blocked']]) {
     mode = next;
     const frame = await dispatch('read-text'), args = { frameId: frame.frameId, x: 10, y: 20 };
     assert.equal(frame.state, 'ready', JSON.stringify({ mode, reason: frame.reason }));
     const result = await dispatch('download-attachment', args);
-    if (reason) { assert.equal(result.reason, reason); assert.equal(result.file, undefined); }
+    if (reason) {
+      assert.equal(result.reason, reason);
+      assert.equal(result.file, undefined);
+      if (mode === 'cdn-foreign') assert.equal(result.attachmentDiagnostic?.stage, 'redirect');
+    }
     else { assert.equal(result.state, 'ready', JSON.stringify({ mode, reason: result.reason, clicks, reads, routedCount: routed.length, stages })); assert.equal(result.file.dataBase64, 'AQID'); }
     assert.equal(stages.at(-1), 'Response', 'request-stage routing is revoked after every result/refusal');
     assert.equal(rules.some(rule => rule.condition.tabIds), false, 'transient destination authority is revoked after the request');
     assert.equal((await dispatch('download-attachment', args)).reason, 'stale_frame', 'the original click token cannot replay');
   }
-  assert.equal(clicks, 8); assert.equal(reads, 3); assert.equal(routed.length, 5, 'POST/foreign/stale clicks never reach the receiver');
-  assert.equal(continuations, 2);
+  assert.equal(clicks, 9); assert.equal(reads, 4); assert.equal(routed.length, 6, 'POST/foreign/stale clicks never reach the receiver');
+  assert.equal(continuations, 3);
   assert.equal((await dispatch('navigate', { url: cdn })).reason, 'navigation_blocked');
+  for (const [next, reason, stage] of [
+    ['direct-file', 'none', undefined],
+    ['direct-inline', 'attachment_unsupported', undefined],
+    ['direct-foreign', 'navigation_blocked', 'initial_url'],
+    ['direct-blob', 'navigation_blocked', 'initial_url'],
+    ['direct-wrong-response', 'navigation_blocked', 'response_url'],
+  ]) {
+    mode = next;
+    const frame = await dispatch('read-text');
+    const result = await dispatch('download-attachment', { frameId: frame.frameId, x: 10, y: 20 });
+    if (reason === 'none') {
+      assert.deepEqual(JSON.parse(JSON.stringify(result.file)), { mimeType: 'image/svg+xml', dataBase64: 'AQID', explicitFile: true });
+    } else {
+      assert.equal(result.reason, reason);
+      assert.equal(result.file, undefined);
+    }
+    assert.equal(result.attachmentDiagnostic?.stage, stage);
+    assert.equal(rules.some(rule => rule.condition.tabIds), false);
+  }
+  assert.equal(exactFileRequests, 3, 'a lookalike host was never requested');
+  assert.equal(reads, 5, 'no inline or mismatched response body was read');
+  assert.equal((await dispatch('navigate', { url: direct })).reason, 'navigation_blocked');
   assert.doesNotMatch(JSON.stringify(sent), /foreign\.test|original-click|PRIVATE/);
 });
 
