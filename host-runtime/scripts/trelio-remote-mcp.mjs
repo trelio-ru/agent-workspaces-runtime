@@ -20,6 +20,7 @@ import { isDeepStrictEqual } from "node:util";
 import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
 import { recoverSelectedContinuation, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import { withPrivateProcessSession, TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutError, withTrelioCallBudget } from "./trelio-hook-private-session.mjs";
+import { BROWSER_FILL_CALL_BUDGET_MS } from "./trelio-secret-browser-native.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION, appendSkillConnectionHints } from "./trelio-skill-accounts.mjs";
 import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
@@ -6913,11 +6914,20 @@ export const handleLocalMcpMessage = async (
       // Only the exact read-only intent receives this allowance. Onboarding,
       // folder planning and ordinary MCP handlers keep their previous clock.
       const diagnostic = name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME && args?.intent === "diagnostics";
+      // Exact bridge operation only. A longer outer bound accommodates cold
+      // native compilation, but cannot turn a lost fill response into proof
+      // that the original grant was unused or allow a new submission.
+      const secretBrowserFill = workspace?.operation === "secret_browser_fill";
       const budget = diagnostic ? {
         timeoutMs: INSTALLATION_DIAGNOSTIC_BUDGET_MS,
         timeoutError: () => new RemoteMcpHostError(INSTALLATION_DIAGNOSTIC_TIMEOUT_CODE,
           "Диагностика установки Trelio не вернула отчёт за 180 секунд.",
           { timeoutMs: INSTALLATION_DIAGNOSTIC_BUDGET_MS, automaticRetry: false }),
+      } : secretBrowserFill ? {
+        timeoutMs: BROWSER_FILL_CALL_BUDGET_MS,
+        timeoutError: () => new RemoteMcpHostError("SECRET_BROWSER_CALL_TIMEOUT",
+          "Защищённое заполнение не вернуло результат за 120 секунд. Проверьте исходную попытку и состояние входа перед новой подстановкой.",
+          { timeoutMs: BROWSER_FILL_CALL_BUDGET_MS, automaticRetry: false }),
       } : { timeoutMs: toolCallBudgetMs };
       const value = await (ownsLifetime ? execute(signal)
         : withTrelioCallBudget(execute, { signal, ...budget }));
@@ -6939,7 +6949,9 @@ export const handleLocalMcpMessage = async (
       let diagnosticCode = errorPayload.code;
       // Reuse the published Trelio deadline bucket without widening the
       // backend-owned telemetry vocabulary or degrading this result to UNKNOWN.
-      if (effectiveError instanceof TrelioCallTimeoutError || diagnosticCode === INSTALLATION_DIAGNOSTIC_TIMEOUT_CODE) {
+      if (effectiveError instanceof TrelioCallTimeoutError
+        || [INSTALLATION_DIAGNOSTIC_TIMEOUT_CODE, "SECRET_BROWSER_CALL_TIMEOUT"].includes(diagnosticCode)
+        || (diagnosticCode === "SECRET_BROWSER_PREFLIGHT_FAILED" && effectiveError.details?.reasonCode === "timeout")) {
         diagnosticCode = "REMOTE_MCP_TRELIO_TIMEOUT";
       }
       // Folder Git evidence stays in the local result. Retain the existing

@@ -538,10 +538,16 @@ publication tooling также остаются вне этого публичн
   дубликаты и смена pinned объекта останавливают выдачу. Ненаблюдаемый документ
   просит показать исходную вкладку, без переключения приложения из helper.
   Preflight receipt не разрешает replay consume/fill: [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
+  Exact browser fill получает 120 секунд на весь вызов и 90 на подготовку до
+  consume. Native и Chrome делят срок. Опоздавшая готовность закрывает свой
+  helper/controller. MCP возвращает закрытую фазу из финального кадра дочерней
+  команды без разрешения на повтор. На macOS холодная сборка использует
+  системный Swift без оптимизации и отдельный digest приватного кэша.
   Вложенная форма требует explicit same-origin URL/hash path; native имена
   полей допустимы только с unique/object binding, без AX/UIA value reads.
   Старый host отказывается до checkout; такой план не меняет native surface.
-  Discovery останавливается на HTTP(S) WebArea. `AXWindows`, main/focused и
+  Discovery останавливается на HTTP(S) WebArea; Chrome также пропускает
+  WebArea без URL и служебные страницы. `AXWindows`, main/focused и
   application roots разделяют прежний бюджет и дедупликацию native объектов.
   Chrome запрашивает дерево через AXRole своего подписанного приложения.
   Закрытые stage/limit не разрешают fill retry.

@@ -116,6 +116,26 @@ test("ordinary MCP calls share one 60s budget and a timed-out stdio call does no
   } finally { await harness.close(); }
 });
 
+test("only the exact protected browser operation receives its own MCP time budget", async () => {
+  for (const [name, args, expectedCode] of [
+    ["continue_trelio_workspace_action", { operation: "secret_browser_fill" }, "READY"],
+    ["continue_trelio_local_action", { route: "workspace", parameters: { operation: "secret_browser_fill" } }, "READY"],
+    ["continue_trelio_workspace_action", { operation: "doctor" }, "TRELIO_CALL_TIMEOUT"],
+    ["continue_trelio_local_action", { route: "action", parameters: { operation: "secret_browser_fill" } }, "TRELIO_CALL_TIMEOUT"],
+  ]) {
+    const response = await handleLocalMcpMessageProduction({
+      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args },
+    }, {
+      toolCallBudgetMs: 15,
+      callTool: async () => {
+        await new Promise(resolve => setTimeout(resolve, 45));
+        return { content: [{ type: "text", text: "READY" }] };
+      },
+    });
+    assert.match(JSON.stringify(response.result), new RegExp(expectedCode, "u"), name);
+  }
+});
+
 test("one MCP deadline aborts stalled HTTP headers, stalled bodies and trickling bodies without replaying a POST", async () => {
   for (const phase of ["headers", "body", "trickle"]) {
     let attempts = 0;

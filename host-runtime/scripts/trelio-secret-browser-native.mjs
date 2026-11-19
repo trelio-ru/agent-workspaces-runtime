@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { trelioCallSignal, waitWithinTrelioCall, withTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 import {
   normalizeSecretBrowserTarget,
   normalizeSecretBrowserFieldSelector,
@@ -26,6 +27,49 @@ const NATIVE_UNAVAILABLE = new Set([
 ]);
 const NATIVE_PREFLIGHT_CHROME_RETRY = new Set(["target_url_changed", "field_not_found"]);
 const NATIVE_PREFLIGHT_ATTEMPTS = 3;
+// A cold native build and a browser launch can exceed the generic MCP
+// minute. The exact browser operation has its own bound, with part reserved
+// for child startup, cleanup and delivery. Both transports share ONE
+// value-free preparation clock and cannot restart it during fallback.
+export const BROWSER_FILL_CALL_BUDGET_MS = 120_000;
+const BROWSER_PREFLIGHT_TIMEOUT_MS = BROWSER_FILL_CALL_BUDGET_MS - 30_000;
+const PREFLIGHT_TIMEOUT_STEPS = new Map([
+  ["run_context", "подготовить контекст Agent Run"],
+  ["grant_context", "прочитать контекст одноразового разрешения"],
+  ["native_helper", "подготовить нативный браузерный помощник"],
+  ["native_document", "проверить исходную вкладку и поля входа"],
+  ["chrome_profile", "подключить выделенный профиль Chrome"],
+  ["chrome_document", "открыть страницу и проверить поля в выделенном Chrome"],
+]);
+
+export const secretBrowserPreflightTimeoutMessage = (phase) => {
+  const step = PREFLIGHT_TIMEOUT_STEPS.get(phase);
+  return step ? `Trelio не успел ${step}. Секрет в этой попытке не запрашивался.` : null;
+};
+
+export const withSecretBrowserPreflight = async (prepare, timeoutMs = BROWSER_PREFLIGHT_TIMEOUT_MS) => {
+  let phase = "run_context";
+  return withTrelioCallBudget(async () => {
+    const result = await prepare((nextPhase) => {
+      trelioCallSignal()?.throwIfAborted();
+      phase = nextPhase;
+    });
+    // A non-cooperative preparation may return a handle after cancellation.
+    // Dispose that handle without allowing the caller to reach consume.
+    const signal = trelioCallSignal();
+    if (signal?.aborted) {
+      await result.browserSession.close();
+      throw signal.reason;
+    }
+    return result;
+  }, {
+    timeoutMs,
+    timeoutError: () => Object.assign(
+      new SecretBrowserFillError(secretBrowserPreflightTimeoutMessage(phase), "timeout"),
+      { preflight: true, phase },
+    ),
+  });
+};
 const nativeApplicationKind = (reply) => {
   if (reply?.application === undefined) return undefined;
   if (reply.status !== "ready" || !["client", "chrome"].includes(reply.application)) {
@@ -204,18 +248,27 @@ const safeNativeEnvironment = (platform) => {
 const runCompiler = (executable, args, options) => new Promise((resolve, reject) => {
   // Compiler output can contain source snippets/paths; runtime diagnostics are
   // intentionally fixed. The build itself never receives any credential.
-  const child = spawn(executable, args, { ...options, shell: false, stdio: "ignore", windowsHide: true });
-  const timer = setTimeout(() => { child.kill(); reject(new EmbeddedBrowserUnavailable("helper_unavailable")); }, 60_000);
-  child.once("error", () => { clearTimeout(timer); reject(new EmbeddedBrowserUnavailable("helper_unavailable")); });
-  child.once("exit", (code) => {
+  const signal = trelioCallSignal();
+  signal?.throwIfAborted();
+  const child = spawn(executable, args, { ...options, signal, shell: false, stdio: "ignore", windowsHide: true });
+  let failed = false;
+  const timer = setTimeout(() => { failed = true; child.kill(); }, 60_000);
+  child.once("error", () => { failed = true; });
+  // Wait for the compiler to close before removing its private build tree.
+  // Abort can emit an error while the process is still releasing its files.
+  child.once("close", (code) => {
     clearTimeout(timer);
-    code === 0 ? resolve() : reject(new EmbeddedBrowserUnavailable("helper_unavailable"));
+    !failed && code === 0 ? resolve() : reject(new EmbeddedBrowserUnavailable("helper_unavailable"));
   });
 });
 
 const compileMacOsNativeSecretBrowser = async ({ sourceFile, temporary, env, cwd }) => {
+  // Cold Swift optimization can exhaust most of an interactive login budget.
+  // This helper spends most of its time in OS Accessibility calls. Preserve
+  // the exact source and system compiler while avoiding the optimizer here.
+  const args = ["-Onone", sourceFile, "-o", temporary];
   try {
-    await runCompiler("/usr/bin/swiftc", ["-O", sourceFile, "-o", temporary], { env, cwd });
+    await runCompiler("/usr/bin/swiftc", args, { env, cwd });
     return;
   } catch {
     // `/usr/bin/swiftc` follows the active Xcode selected by xcode-select and
@@ -225,7 +278,7 @@ const compileMacOsNativeSecretBrowser = async ({ sourceFile, temporary, env, cwd
     // never fall back to PATH, Homebrew or a downloaded executable.
     const compiler = path.join(MACOS_COMMAND_LINE_TOOLS_DIRECTORY, "usr/bin/swiftc");
     const sdk = path.join(MACOS_COMMAND_LINE_TOOLS_DIRECTORY, "SDKs/MacOSX.sdk");
-    await runCompiler(compiler, ["-O", sourceFile, "-o", temporary], {
+    await runCompiler(compiler, args, {
       env: { ...env, SDKROOT: sdk },
       cwd,
     });
@@ -248,7 +301,8 @@ export const buildNativeSecretBrowserHelper = async ({
   if (!["darwin", "win32"].includes(platform)) throw new EmbeddedBrowserUnavailable("platform_unsupported");
   const sourceName = platform === "darwin" ? "SecretBrowser.swift" : "SecretBrowser.cs";
   const sourceBytes = await fs.readFile(path.join(SOURCE_DIRECTORY, sourceName));
-  const digest = createHash("sha256").update(sourceBytes).update(platform + process.arch + "-v2").digest("hex");
+  const buildAbi = platform === "darwin" ? "-v3-Onone" : "-v2";
+  const digest = createHash("sha256").update(sourceBytes).update(platform + process.arch + buildAbi).digest("hex");
   await ensurePrivateDirectory(directory);
   const buildDirectory = path.join(directory, digest);
   await ensurePrivateDirectory(buildDirectory);
@@ -309,8 +363,10 @@ export const buildNativeSecretBrowserHelper = async ({
 };
 
 export const openNativeSecretBrowserChannel = ({ executable, platform = process.platform, timeoutMs = 60_000 }) => {
+  const signal = trelioCallSignal();
+  signal?.throwIfAborted();
   const child = spawn(executable, [], {
-    env: safeNativeEnvironment(platform), shell: false, windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
+    env: safeNativeEnvironment(platform), signal, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
   });
   const exited = new Promise((resolve) => child.once("close", resolve));
   let pending = null;
@@ -349,6 +405,7 @@ export const openNativeSecretBrowserChannel = ({ executable, platform = process.
   });
   return {
     request: (payload) => new Promise((resolve, reject) => {
+      trelioCallSignal()?.throwIfAborted();
       if (closed || pending) return reject(new SecretBrowserFillError("Нативный browser transport закрыт."));
       const message = JSON.stringify(payload) + "\n";
       if (Buffer.byteLength(message) > MAX_PROTOCOL_BYTES) return reject(new SecretBrowserFillError("Browser request превышает лимит."));
@@ -365,6 +422,7 @@ const prepareSecretBrowserSessionInternal = async ({
   openChannel = openNativeSecretBrowserChannel,
   prepareChrome = prepareSecretBrowserFill,
   prepareManaged,
+  onPreflightPhase,
 }) => {
   mode = normalizeSecretBrowserMode(mode);
   if (prepareManaged && mode === "auto") {
@@ -393,6 +451,7 @@ const prepareSecretBrowserSessionInternal = async ({
     const selectedProfileDirectory = headless
       ? path.join(path.dirname(profileDirectory), `${path.basename(profileDirectory)}-background`)
       : profileDirectory;
+    onPreflightPhase?.("chrome_profile");
     const prepared = await prepareChrome({
       targetUrl,
       targetOrigin: binding.targetOrigin,
@@ -401,6 +460,7 @@ const prepareSecretBrowserSessionInternal = async ({
       profileDirectory: selectedProfileDirectory,
       headless,
       ensurePrivateDirectory,
+      onPreflightPhase,
     });
     return {
       surface: "chrome", fallbackReason, background: headless,
@@ -451,7 +511,9 @@ const prepareSecretBrowserSessionInternal = async ({
         ...(step.submitSelector ? { submitId: nativeIdFromSecretSelector(step.submitSelector) } : {}),
       };
     });
+    onPreflightPhase?.("native_helper");
     const executable = await buildHelper({ directory, ensurePrivateDirectory, platform });
+    onPreflightPhase?.("native_document");
     let ready;
     for (let attempt = 0; attempt < NATIVE_PREFLIGHT_ATTEMPTS; attempt++) {
       channel = openChannel({ executable, platform });
@@ -471,7 +533,7 @@ const prepareSecretBrowserSessionInternal = async ({
       // The one-use grant is consumed only after this function returns ready.
       await channel.close();
       channel = null;
-      await new Promise((resolve) => setTimeout(resolve, (discoveryPending ? 500 : 200) * (attempt + 1)));
+      await waitWithinTrelioCall((discoveryPending ? 500 : 200) * (attempt + 1));
     }
     const traversalDiagnostic = nativeTraversalDiagnostic(ready);
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {

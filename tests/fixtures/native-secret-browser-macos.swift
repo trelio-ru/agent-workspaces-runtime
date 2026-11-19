@@ -72,7 +72,9 @@ func children(_ element: AXUIElement) -> [AXUIElement] {
     precondition(!element.forbidChildren, "Nested document traversal is forbidden")
     return element.delayedChildren?() ?? element.nodes
 }
-func documentURL(_ element: AXUIElement) -> String? { return element.role == "AXWebArea" ? element.url : nil }
+func documentURL(_ element: AXUIElement, webAreaConfirmed: Bool = false) -> String? {
+    return webAreaConfirmed || element.role == "AXWebArea" ? element.url : nil
+}
 func visible(_ element: AXUIElement, in document: AXUIElement) -> Bool { return element.shown }
 func belongs(_ element: AXUIElement, to document: AXUIElement) -> Bool {
     var cursor: AXUIElement? = element
@@ -137,11 +139,18 @@ chrome.append(mainWindow)
 chrome.windows = [mainWindow, loginWindow, loginWindow]
 chrome.mainWindow = mainWindow
 chrome.focusedWindow = mainWindow
-let chromeDocs = try Session.applicationDocuments(chrome)
-precondition(chromeDocs.count == 2 && chromeDocs.contains { $0 === selectedPage })
+// Loading/internal WebAreas are also tab roots in Chrome. Traversing their
+// content wastes the document deadline even when the actual login is ready.
+let loadingTab = FixtureElement("AXWebArea"); loadingTab.forbidChildren = true
+mainWindow.append(loadingTab)
+let internalTab = FixtureElement("AXWebArea"); internalTab.url = "chrome://newtab/"
+internalTab.forbidChildren = true
+mainWindow.append(internalTab)
+let chromeDocs = try Session.applicationDocuments(chrome, chrome: true)
+precondition(chromeDocs.count == 3 && chromeDocs.contains { $0 === selectedPage })
 let duplicateWindow = FixtureElement("AXWindow"); duplicateWindow.append(anotherTab)
 chrome.windows.append(duplicateWindow)
-let duplicateChromeDocs = try Session.applicationDocuments(chrome)
+let duplicateChromeDocs = try Session.applicationDocuments(chrome, chrome: true)
 precondition(duplicateChromeDocs.filter { $0.url == selectedPage.url }.count == 2)
 // A non-HTTP Electron shell is not an authorization boundary for its embedded
 // browser. Its actual HTTP child still needs ordinary exact URL selection.

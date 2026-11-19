@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { trelioCallSignal, waitWithinTrelioCall } from "./trelio-hook-private-session.mjs";
 
 const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 const DEFAULT_BROWSER_START_TIMEOUT_MS = 15_000;
@@ -23,7 +24,7 @@ const SAFE_REASON_CODES = new Set([
   "timeout",
 ]);
 
-const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const wait = waitWithinTrelioCall;
 
 export const isSecretBrowserFillReason = (reason) => SAFE_REASON_CODES.has(reason);
 
@@ -236,6 +237,7 @@ const prepareSecretBrowserProfile = async ({ profileDirectory, ensurePrivateDire
 };
 
 const launchSecretBrowser = async ({ executable, args, headless = false, spawnProcess = spawn }) => {
+  trelioCallSignal()?.throwIfAborted();
   await new Promise((resolve, reject) => {
     const child = spawnProcess(executable, args, {
       detached: true,
@@ -323,6 +325,9 @@ class DevToolsClient {
   }
 
   request(method, params = {}, sessionId = undefined) {
+    // A timed-out preflight can still have a promise settling in the
+    // background. It must never send another activation or browser request.
+    trelioCallSignal()?.throwIfAborted();
     return new Promise((resolve, reject) => {
       const id = this.nextRequestId;
       this.nextRequestId += 1;
@@ -384,10 +389,12 @@ const acquireSecretBrowser = async ({
     if (!staleMetadata.isFile() || staleMetadata.isSymbolicLink()) {
       throw new SecretBrowserFillError("DevToolsActivePort имеет небезопасный тип.", "browser_unavailable");
     }
+    trelioCallSignal()?.throwIfAborted();
     await fs.unlink(activePortPath);
   }
 
   const executable = await resolveBrowserExecutable();
+  trelioCallSignal()?.throwIfAborted();
   await launchBrowser({ executable, args, headless });
 
   const deadline = Date.now() + browserStartTimeoutMs;
@@ -1287,6 +1294,7 @@ export const prepareSecretBrowserFill = async ({
   prepareController = prepareSecretBrowserControllerViaDevTools,
   browserStartTimeoutMs = DEFAULT_BROWSER_START_TIMEOUT_MS,
   fillTimeoutMs = DEFAULT_FILL_TIMEOUT_MS,
+  onPreflightPhase,
 }) => {
   const normalizedTargetUrl = normalizeSecretBrowserTarget(
     targetUrl,
@@ -1314,7 +1322,10 @@ export const prepareSecretBrowserFill = async ({
   const args = buildSecretBrowserArguments({ profileDirectory, headless });
 
   let client;
+  const signal = trelioCallSignal();
+  const abortPreflight = () => client?.close?.();
   try {
+    signal?.throwIfAborted();
     client = await acquireBrowser({
       profileDirectory,
       args,
@@ -1323,6 +1334,11 @@ export const prepareSecretBrowserFill = async ({
       launchBrowser,
       browserStartTimeoutMs,
     });
+    trelioCallSignal()?.throwIfAborted();
+    // Close only our controller connection on cancellation. The persistent
+    // browser and its profile may also belong to another active invocation.
+    signal?.addEventListener("abort", abortPreflight, { once: true });
+    onPreflightPhase?.("chrome_document");
     const controller = await prepareController({
       client,
       targetUrl: normalizedTargetUrl,
@@ -1333,6 +1349,7 @@ export const prepareSecretBrowserFill = async ({
       headless,
       fillTimeoutMs,
     });
+    trelioCallSignal()?.throwIfAborted();
     let closed = false;
     return {
       targetId: controller.targetId,
@@ -1345,12 +1362,15 @@ export const prepareSecretBrowserFill = async ({
     };
   } catch (error) {
     client?.close?.();
+    if (signal?.aborted) throw signal.reason;
     if (error instanceof SecretBrowserFillError) throw error;
     throw new SecretBrowserFillError(
       "Trelio Secret Browser завершился локальной ошибкой.",
       "adapter_error",
       { cause: error },
     );
+  } finally {
+    signal?.removeEventListener("abort", abortPreflight);
   }
 };
 

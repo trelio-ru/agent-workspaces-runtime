@@ -13,7 +13,9 @@ import {
   describeBackgroundSecretBrowserContinuation, EmbeddedBrowserUnavailable,
   nativeIdFromSecretSelector, openNativeSecretBrowserChannel,
   prepareSecretBrowserSession, nativeFieldFromSecretSelector, isNamedSecretBrowserSelector,
+  withSecretBrowserPreflight,
 } from "../host-runtime/scripts/trelio-secret-browser-native.mjs";
+import { withTrelioCallBudget } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 import {
   createSecretBrowserControllerExpression, observeSecretBrowserPostSubmit,
   prepareSecretBrowserControllerForExistingTab, prepareSecretBrowserControllerViaDevTools,
@@ -77,6 +79,55 @@ test("native selectors preserve CSS id meaning and reject compound, type and pse
   for (const selector of ["#password.hidden", "#password:focus", "input#password", "[name=password]", "#a #b", "#a\\:b"]) {
     assert.throws(() => nativeIdFromSecretSelector(selector), SecretBrowserFillError);
   }
+});
+
+test("a stalled Chrome fallback reports its pre-consume phase inside the ordinary MCP budget", async () => {
+  const fake = fixture({ status: "failed", reasonCode: "field_not_found" });
+  let allowLateReady;
+  let closeLateHandle;
+  const lateHandleClosed = new Promise(resolve => { closeLateHandle = resolve; });
+  let consumes = 0;
+  const prepareChrome = async ({ onPreflightPhase }) => {
+    onPreflightPhase("chrome_document");
+    await new Promise(resolve => { allowLateReady = resolve; });
+    return { close: closeLateHandle };
+  };
+  await assert.rejects(withTrelioCallBudget(async () => {
+    await withSecretBrowserPreflight(async onPreflightPhase => ({
+      browserSession: await prepareSecretBrowserSession({ ...fake.args, prepareChrome, onPreflightPhase }),
+    }), 800);
+    consumes++;
+  }, { timeoutMs: 4000 }), error =>
+    error instanceof SecretBrowserFillError && error.preflight === true
+      && error.reasonCode === "timeout" && error.phase === "chrome_document");
+  assert.equal(fake.closed, true, "native helper closed before fallback");
+  assert.equal(consumes, 0);
+  allowLateReady();
+  await lateHandleClosed;
+  assert.equal(consumes, 0, "a late ready handle is closed, never used for checkout");
+});
+
+test("a timed-out native helper build cannot open the browser after the deadline", async () => {
+  const fake = fixture();
+  let finishBuild;
+  let buildCompleted;
+  const built = new Promise(resolve => { buildCompleted = resolve; });
+  await assert.rejects(withSecretBrowserPreflight(async onPreflightPhase => ({
+    browserSession: await prepareSecretBrowserSession({
+      ...fake.args,
+      onPreflightPhase,
+      buildHelper: async () => {
+        await new Promise(resolve => { finishBuild = resolve; });
+        buildCompleted();
+        return "/synthetic/private/helper";
+      },
+    }),
+  }), 400), error => error.preflight === true && error.phase === "native_helper");
+  finishBuild();
+  await built;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fake.requests, []);
+  assert.equal(fake.chromePreflights, 0);
 });
 
 test("native id-less password binding is explicit; names never become guessed AX ids", async () => {
@@ -877,7 +928,7 @@ test("macOS background window discovery never activates or raises the client", a
   const source = await fs.readFile(new URL("../host-runtime/scripts/native-secret-browser/SecretBrowser.swift", import.meta.url), "utf8");
   assert.match(source, /kAXMainWindowAttribute/u);
   assert.match(source, /kAXFocusedWindowAttribute/u);
-  assert.match(source, /Session\.applicationDocuments\(ax\)/u);
+  assert.match(source, /Session\.applicationDocuments\(ax, chrome: identity\.0 == "com\.google\.Chrome"\)/u);
   assert.doesNotMatch(source, /\.(?:activate|unhide|hide)\s*\(|kAXRaiseAction/u);
 });
 

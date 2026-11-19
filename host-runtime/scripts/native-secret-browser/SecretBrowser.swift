@@ -94,11 +94,12 @@ func rectangle(_ element: AXUIElement) -> CGRect? {
           extent.width > 0, extent.height > 0 else { return nil }
     return CGRect(origin: point, size: extent)
 }
-func documentURL(_ element: AXUIElement) -> String? {
+func documentURL(_ element: AXUIElement, webAreaConfirmed: Bool = false) -> String? {
     // AXURL is read only for a WebArea, never an input's value.
-    guard text(element, kAXRoleAttribute) == "AXWebArea" else { return nil }
-    if let url = attribute(element, "AXURL") as? URL { return url.absoluteString }
-    return text(element, "AXURL")
+    guard webAreaConfirmed || text(element, kAXRoleAttribute) == "AXWebArea" else { return nil }
+    let value = attribute(element, "AXURL")
+    if let url = value as? URL { return url.absoluteString }
+    return value as? String
 }
 func matchesTarget(_ raw: String?, _ targetOrigin: String, _ targetUrlSha256: String) -> Bool {
     guard let raw = raw, let url = URL(string: raw), url.scheme == "https",
@@ -197,9 +198,13 @@ func walkRoots(_ roots: [AXUIElement], stopAtWebArea: Bool = false, budget: Walk
             // must not exhaust the allowance before the target URL is chosen.
             // Keep traversing non-HTTP shell WebAreas: an embedded browser can
             // live beneath a native/custom-URL Electron shell.
-            if let url = documentURL(current) {
-                result.append(current)
-                if url.hasPrefix("https://") || url.hasPrefix("http://") { continue }
+            if text(current, kAXRoleAttribute) == "AXWebArea" {
+                let url = documentURL(current, webAreaConfirmed: true)
+                if url != nil { result.append(current) }
+                // In signed Chrome a WebArea is the end of a tab search,
+                // including a loading, internal or URL-less document.
+                // Electron still needs its custom shell WebArea traversed.
+                if stopAtWebArea || url?.hasPrefix("https://") == true || url?.hasPrefix("http://") == true { continue }
             }
         } else {
             result.append(current)
@@ -233,9 +238,9 @@ final class Session {
             && code != nil && SecCodeCheckValidity(code!, SecCSFlags(), requirement) == errSecSuccess
     }
     static func documents(_ root: AXUIElement) throws -> [AXUIElement] { return try documentCandidates([root]) }
-    static func documentCandidates(_ roots: [AXUIElement]) throws -> [AXUIElement] {
+    static func documentCandidates(_ roots: [AXUIElement], chrome: Bool = false) throws -> [AXUIElement] {
         let budget = WalkBudget(stage: .documentDiscovery)
-        let nodes = try walkRoots(roots, budget: budget)
+        let nodes = try walkRoots(roots, stopAtWebArea: chrome, budget: budget)
         let found = try nodes.filter { candidate in
             try budget.check(nodes.count)
             guard documentURL(candidate) != nil, rectangle(candidate) != nil,
@@ -254,7 +259,7 @@ final class Session {
         try budget.check(nodes.count)
         return found
     }
-    static func applicationDocuments(_ application: AXUIElement) throws -> [AXUIElement] {
+    static func applicationDocuments(_ application: AXUIElement, chrome: Bool = false) throws -> [AXUIElement] {
         // Application children and window attributes are independent AX views.
         // Chrome can expose the form's window in AXWindows without exposing it
         // through AXChildren or marking it main/focused. An inactive Electron
@@ -271,7 +276,7 @@ final class Session {
         // Application/main/focused roots commonly overlap. Traverse them once
         // under one budget and deduplicate by native identity, never by URL:
         // two independent tabs at the same URL must remain ambiguous.
-        return try documentCandidates(roots)
+        return try documentCandidates(roots, chrome: chrome)
     }
     static func boundDocument(_ root: AXUIElement, _ step: Step) throws -> (AXUIElement, [AXUIElement]) {
         var current = root
@@ -443,7 +448,7 @@ final class Session {
                 // already confirmed Accessibility permission for this helper.
                 AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             }
-            let docs = try Session.applicationDocuments(ax)
+            let docs = try Session.applicationDocuments(ax, chrome: identity.0 == "com.google.Chrome")
             exposedDocuments += docs.count
             for doc in docs where matches(documentURL(doc), steps[0]) { candidates.append((app, ax, doc, requirement)) }
         }

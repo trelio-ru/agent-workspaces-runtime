@@ -386,6 +386,36 @@ test("unknown operation recovery never reflects arbitrary input or guesses a mut
   });
 });
 
+test("a browser preflight timeout is returned as closed metadata from the original bridge command", async () => {
+  const failure = {
+    code: "SECRET_BROWSER_PREFLIGHT_FAILED", stage: "preflight", phase: "native_document",
+    reasonCode: "timeout", secretRequested: false, grantConsumedByAttempt: false,
+    message: "PRIVATE_CANARY",
+  };
+  const argumentsForFill = {
+    schemaVersion: 1, operation: "secret_browser_fill", workingDirectory: actionWorkingDirectory,
+    parameters: { grantId: "66666666-6666-4666-8666-666666666663", targetUrl: "https://synthetic.example/login" },
+  };
+  let invokes = 0;
+  await assert.rejects(handleTrelioWorkspaceActionOperation("https://trelio.example", argumentsForFill, {
+    runBridge: async () => {
+      invokes++;
+      throw Object.assign(new Error("PRIVATE_CANARY"), {
+        code: 1, stdout: "PRIVATE_CANARY", stderr: "Ошибка: " + JSON.stringify(failure),
+      });
+    },
+  }), error => {
+    assert.equal(error.code, "SECRET_BROWSER_PREFLIGHT_FAILED");
+    assert.deepEqual(error.details, {
+      stage: "preflight", phase: "native_document", reasonCode: "timeout",
+      secretRequested: false, grantConsumedByAttempt: false, automaticRetry: false,
+    });
+    assert.doesNotMatch(error.message, /PRIVATE_CANARY/u);
+    return true;
+  });
+  assert.equal(invokes, 1);
+});
+
 test("child transport diagnostics keep the same closed cause contract as in-process reads", async () => {
   for (const causeCode of ["ECONNRESET", "PRIVATE_CAUSE_CANARY"]) {
     let calls = 0;

@@ -17,6 +17,7 @@ import { rememberDiagnosticDetail, readDiagnosticDetail, diagnosticValueType } f
 import { isTelegramExactRead, parseProcessDiagnostic, ProcessDiagnosticError,
   TELEGRAM_EXACT_READ_MESSAGE } from "./trelio-process-diagnostics.mjs";
 import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
+import { secretBrowserPreflightTimeoutMessage } from "./trelio-secret-browser-native.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "./trelio-skill-accounts.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
@@ -11279,6 +11280,25 @@ const parseBridgeTransportError = (stderr, operation) => {
   );
 };
 
+const parseBrowserPreflightTimeout = (stderr) => {
+  if (typeof stderr !== "string" || Buffer.byteLength(stderr, "utf8") > 64 * 1024) return null;
+  const line = stderr.trimEnd().split("\n").at(-1);
+  if (!line.startsWith("Ошибка: {") || Buffer.byteLength(line, "utf8") > 8 * 1024) return null;
+  let payload;
+  try { payload = JSON.parse(line.slice("Ошибка: ".length)); }
+  catch { return null; }
+  const message = secretBrowserPreflightTimeoutMessage(payload?.phase);
+  if (!message || payload.code !== "SECRET_BROWSER_PREFLIGHT_FAILED" || payload.stage !== "preflight"
+    || payload.reasonCode !== "timeout" || payload.secretRequested !== false
+    || payload.grantConsumedByAttempt !== false) return null;
+  // Only this bridge command can prove a pre-consume timeout. Build the
+  // message here from the closed phase and discard child prose and stdout.
+  return new TrelioLocalContextError(payload.code, message, {
+    stage: "preflight", phase: payload.phase, reasonCode: "timeout",
+    secretRequested: false, grantConsumedByAttempt: false, automaticRetry: false,
+  });
+};
+
 export const classifyWorkspaceRunLeaseFailure = (error) => {
   const errorText = [
     error?.code,
@@ -11872,6 +11892,9 @@ const executeTrelioWorkspaceActionOperation = async (
     const stdout = truncateWorkspaceActionOutput(error?.stdout).trim();
     const callTimeout = parseTrelioCallTimeout(error?.stderr);
     if (callTimeout) throw callTimeout;
+    const browserPreflightTimeout = invocation.operation === "secret_browser_fill" && error?.code === 1 && !error.signal && !error.killed
+      ? parseBrowserPreflightTimeout(error?.stderr) : null;
+    if (browserPreflightTimeout) throw browserPreflightTimeout;
     const checkpointError = invocation.parameters.nativeInput ? parseNativeCheckpointError(stderr) : null;
     if (checkpointError) throw new TrelioLocalContextError(checkpointError.code, checkpointError.message);
     const runtimeRecovery = parseHostRuntimeRecoveryError(error?.stderr);

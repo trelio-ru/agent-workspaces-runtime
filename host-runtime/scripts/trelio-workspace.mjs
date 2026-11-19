@@ -105,6 +105,8 @@ import {
   assertBrowserFillBindingUnchanged,
   normalizeSecretBrowserMode,
   prepareSecretBrowserSession,
+  secretBrowserPreflightTimeoutMessage,
+  withSecretBrowserPreflight,
   describeBackgroundSecretBrowserContinuation,
 } from "./trelio-secret-browser-native.mjs";
 import {
@@ -1634,6 +1636,8 @@ export const formatBridgeCommandError = (error, command = "") => {
       code: "SECRET_BROWSER_PREFLIGHT_FAILED",
       message: error.message,
       stage: "preflight",
+      ...(error.reasonCode === "timeout" && secretBrowserPreflightTimeoutMessage(error.phase)
+        ? { phase: error.phase } : {}),
       reasonCode: error.reasonCode,
       secretRequested: false,
       grantConsumedByAttempt: false,
@@ -20050,7 +20054,7 @@ const reportSecretBrowserFillOutcome = async ({
   throw lastError;
 };
 
-const executeSecretBrowserFill = async (options, positional) => withRun(async ({
+const prepareSecretBrowserFillAction = async (options, positional, onPreflightPhase, {
   metadata,
   workspaceOrigin,
   token,
@@ -20073,6 +20077,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
   const browserStorage=profile ? await profile.resolveSecretBrowserStorage({configDirectory:CONFIG_DIRECTORY,grantId,runId:metadata.runId})
     : {directory:path.join(SECRET_BROWSER_DIRECTORY,'native'),profileDirectory:SECRET_BROWSER_PROFILE_DIRECTORY};
   const browserMode = normalizeSecretBrowserMode(options.browser);
+  onPreflightPhase("grant_context");
   let browserContext;
   // GET не содержит value/ciphertext, не claim-ит grant и безопасен для
   // bounded transport retry. Runtime обязан проверить собственную изолированную
@@ -20099,18 +20104,28 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     profileDirectory: browserStorage.profileDirectory,
     prepareManaged: browserStorage.prepareManaged,
     ensurePrivateDirectory,
+    onPreflightPhase,
   });
+  return { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId: metadata.runId };
+};
+
+const executeSecretBrowserFill = async (options, positional) => {
+  // The inner deadline is exclusively value-free. Await its successful
+  // completion before there is any path to atomically spend the grant.
+  const { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId } =
+    await withSecretBrowserPreflight((onPreflightPhase) => withRun((context) =>
+      prepareSecretBrowserFillAction(options, positional, onPreflightPhase, context)));
   try {
     // Plaintext появляется только в памяти bridge после atomic consume. Target
     // URL не доверяется: helper повторно сравнит его с закреплённым origin.
     const response = await request(workspaceOrigin, token, `/api/agent-secrets/checkout-grants/${grantId}/consume`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runId: metadata.runId }),
+      body: JSON.stringify({ runId }),
     });
     const payload = await response.json();
     if (
-      payload.runId !== metadata.runId
+      payload.runId !== runId
       || payload.deliveryMode !== "browser"
       || payload.executable !== "trelio-workspace"
       || typeof payload.targetOrigin !== "string"
@@ -20131,22 +20146,16 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     try {
       assertBrowserFillBindingUnchanged(browserContext, payload);
       const secretValues = await resolveCheckoutSecretValues(payload, companyEncryption);
-      const result = await browserSession.fill({
-        secretValues,
-        targetUrl,
-        targetOrigin: payload.targetOrigin,
-        targetUrlSha256: payload.targetUrlSha256,
-        browserSteps: payload.browserSteps,
-        profileDirectory: browserStorage.profileDirectory,
-        ensurePrivateDirectory,
-      });
+      // The prepared session already owns the checked URL, fields and
+      // profile. Delivery supplies only the values from the one-use grant.
+      const result = await browserSession.fill({ secretValues });
       localResult = result;
 
       await reportSecretBrowserFillOutcome({
         origin: workspaceOrigin,
         token,
         grantId,
-        runId: metadata.runId,
+        runId,
         outcome: result.outcome,
         reasonCode: result.reasonCode,
       });
@@ -20193,7 +20202,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
           origin: workspaceOrigin,
           token,
           grantId,
-          runId: metadata.runId,
+          runId,
           outcome: "failed",
           reasonCode,
         });
@@ -20213,7 +20222,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     // повторять checkout: сервер уже мог потратить одноразовый grant.
     await browserSession.close();
   }
-});
+};
 
 const calculateDirectoryBytes = async (directory) => {
   let totalBytes = 0;
