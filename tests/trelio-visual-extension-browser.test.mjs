@@ -581,7 +581,7 @@ test('an owned minimized Chromium completes one wheel after screenshot without r
     assert.equal(wheels, 1, 'one native wheel, never a retry after an unknown acknowledgement');
     assert.equal((await browser.call('scroll', { frameId: before.frameId, x: 300, y: 300, deltaY: 600 })).reason, 'stale_frame');
     assert.equal(wheels, 1);
-    assert.deepEqual(await controller.windowState(), { state: 'fixture', count: 1, minimized: true }, 'input/capture never restore the native window');
+    assert.deepEqual(await controller.windowState(), { state: 'fixture', count: 1, minimized: true, focused: false }, 'input/capture never restore the native window');
   } catch (error) { failure = error; }
   finally {
     // Always close the owned listener, even if Chromium cannot finish shutdown.
@@ -781,6 +781,20 @@ test('manual window close and ready save once before unlocking images; crash pre
     for (completion of ['window_close', 'ready', 'logout_window_close']) {
       diagnostics.push({ stage: completion });
       assert.equal((await call('setup', { url: `${origin}/login` })).state, 'manual_input_required', JSON.stringify(diagnostics));
+      if (process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') {
+        assert.equal((await window.windowState()).focused, true, 'initial setup presents the owned window before returning');
+      }
+      if (process.platform === 'win32' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') {
+        let state = await window.minimize();
+        const until = Date.now() + 3000;
+        while (!state.minimized && Date.now() < until) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+          state = await window.windowState();
+        }
+        assert.equal(state.minimized, true, 'Windows fixture withdrew the owned window');
+        assert.equal((await call('show-login')).state, 'manual_input_required');
+        assert.equal((await window.windowState()).focused, true, 'explicit show restores and focuses the same Windows session');
+      }
       assert.equal((await call('show-login')).image, undefined);
       assert.equal((await call('screenshot')).reason, 'manual_control_active');
       assert.equal((await call('type-text', { frameId: 'invalid', text: 'blocked' })).reason, 'manual_control_active');

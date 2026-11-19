@@ -579,6 +579,8 @@ publication tooling также остаются вне этого публичн
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
   Signed presentation по умолчанию windowed; hidden opt-in, owner pinning и
   видимый human setup сохраняют исходную lease и stop/save-before-relaunch.
+  Manual setup and explicit show confirm the same owned window's focus before
+  returning the input request; focus failure keeps content private.
   Signed manualCompletion reuses the SAME manual stop/save gate after two stable
   readonly exact-origin/document observations; blockers/unknown/expiry never
   authorize close, input, credential access or lease renewal. Default remains off.

@@ -16,12 +16,12 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true, referenceRoutes = [], uploadChooser, fileUploadPickerPaths = [] } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, windowState = 'normal', requestWindowFocus, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true, referenceRoutes = [], uploadChooser, fileUploadPickerPaths = [] } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[], networkRules=[];
   const openTabs = new Set([1]);
-  let windowCreated, windowRemoved, tabCreated, headersReceived, detached, connections = 0, selectedTab = 1;
+  let windowCreated, windowRemoved, tabCreated, headersReceived, detached, connections = 0, selectedTab = 1, windowFocused = false;
   let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', loaderId = 'original', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
@@ -95,9 +95,14 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
       declarativeNetRequest: { async getSessionRules() { await policyRead?.(); return []; }, async updateSessionRules(value) { networkRules.push(JSON.parse(JSON.stringify(value))); } },
       windows: { onCreated: {addListener(fn){windowCreated=fn;}}, onRemoved: {addListener(fn){windowRemoved=fn;}},
         async getAll() { return [{ id: 1 }]; }, async remove(id){windowRemoved(id);},
-        async update(id, input) { windowUpdates.push({ id, input: JSON.parse(JSON.stringify(input)) }); } },
+        async get(id) { return { id, state: windowState, focused: windowFocused }; },
+        async update(id, input) {
+          windowUpdates.push({ id, input: JSON.parse(JSON.stringify(input)) });
+          if (input.state) windowState = input.state;
+          if (input.focused) { await requestWindowFocus?.(); windowFocused = true; }
+        } },
       tabs: { onCreated: { addListener(fn) { tabCreated = fn; } }, onRemoved: events,
-        async query() { return [...openTabs].map(id => ({ id, url: currentUrl, status: 'complete', active: id === selectedTab })); },
+        async query() { return [...openTabs].map(id => ({ id, windowId: 1, url: currentUrl, status: 'complete', active: id === selectedTab })); },
         async get(id) { return { id, url: currentUrl, status: 'complete' }; },
         async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); tabUpdates.push(JSON.parse(JSON.stringify(input))); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
         async sendMessage(_id, message, target) {
@@ -405,6 +410,21 @@ test('manual phases release renderer emulation and a new owned attachment enable
   worker.detach();
   assert.equal((await worker.dispatch('read-text')).state, 'ready');
   assert.equal(activations(), 3, 'unexpected native detach cannot leave a stale activated-tab cache');
+});
+
+test('explicit manual handoff restores only its browser window and fails closed on a focus refusal', async () => {
+  let refuse = true;
+  const worker = await dialogWorker({ manual: true, windowState: 'minimized', requestWindowFocus() {
+    if (refuse) throw Error('PRIVATE_WINDOW_MANAGER_ERROR');
+  } });
+  assert.deepEqual(await worker.dispatch('manual'), { state: 'error', reason: 'operation_failed' });
+  assert.deepEqual(worker.windowUpdates, [{ id: 1, input: { state: 'normal' } }, { id: 1, input: { focused: true } }]);
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'manual_control_active' });
+  assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_WINDOW_MANAGER_ERROR/u);
+  refuse = false;
+  assert.deepEqual(await worker.dispatch('manual'), { state: 'manual_input_required' });
+  assert.deepEqual(worker.windowUpdates.at(-1), { id: 1, input: { focused: true } });
+  assert.equal(worker.windowUpdates.length, 3, 'repeat only on a new explicit handoff, without restoring an already visible window');
 });
 
 test('renderer activation refusal fences later work without input, retry or native error disclosure', async () => {

@@ -34,6 +34,11 @@ owner/session identity и исходной lease. Ошибка stop/persist бл
 авторизацию, а не произвольный несохранённый черновик/transaction: до setup
 необходимо установить исход предыдущих бизнес-действий. `show-login` показывает
 уже открытый ручной setup, не является автоматическим новым входом.
+На старте и при `show-login` runtime выбирает вкладку своего профиля,
+восстанавливает свёрнутое окно и один раз запрашивает его активацию. Проверяет
+состояние того же окна перед `manual_input_required`. Если окно не удалось
+показать, возвращает ошибку. Режим ручного ввода и его защита сохраняются до
+явного повторного показа, завершения или закрытия окна.
 После human `ready`/window-close прежний save gate сохраняет профиль до снятия
 блокировки снимков; следующая явно порученная navigate работает скрыто.
 
@@ -1224,6 +1229,9 @@ Pure tests: result/MCP projection, loopback auth, AEAD, profile traversal и bou
 Windows regression читает настоящие `GetStartupInfoW` flags внутри собственного
 native child общего GUI launcher и запрещает `STARTF_USESHOWWINDOW/SW_HIDE`;
 готовность extension сама по себе не доказывает видимость OS-окна.
+Native manual setup проверяет, что Chromium подтверждает фокус окна при первом
+ответе, а Windows fixture дополнительно сворачивает и повторно показывает ту
+же сессию. Синтетическая ошибка фокуса оставляет закрытым доступ модели к форме.
 Его PowerShell child отключает module auto-discovery и импортирует только
 Utility по fixed `$PSHOME` manifest, как существующий native scheduler fixture.
 Исходные 30 секунд и Win32 assertions сохраняются; timeout выдаёт только

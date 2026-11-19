@@ -614,7 +614,8 @@ export class ExtensionVisualBrowser {
     // Give those launches a deterministic extension event instead of relying
     // on the timing of Chrome's new-tab page versus lazy worker installation.
     const bootstrap = process.platform !== 'darwin' || this.#headless ? visualExtensionBootstrapPage() : null;
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, referenceRoutes: this.referenceRoutes, attachmentDownloads: this.attachmentDownloads, attachmentRedirectDomains: this.attachmentRedirectDomains, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, fileUploadPickerPaths: this.fileUploadPickerPaths, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, externalNavigation: this.externalNavigation, profileAuthentication: this.profileAuthentication, matches, initialUrl: url, ...(bootstrap ? { bootstrapUrl: bootstrap.url } : {}), manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, referenceRoutes: this.referenceRoutes, attachmentDownloads: this.attachmentDownloads, attachmentRedirectDomains: this.attachmentRedirectDomains, audioDownloads: this.audioDownloads, fileUploads: this.fileUploads, fileUploadPickerPaths: this.fileUploadPickerPaths, authentication: Boolean(this.authentication), manualCompletion: Boolean(this.manualCompletion), ...(this.#assistantBrowserSecrets ? { assistantBrowserSecrets: true } : {}), fixtureOnly: this.policy.fixtureOnly,
+      ...(this.testHeadless ? { fixtureHeadless: true } : {}) };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads, this.audioDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     if (bootstrap) {
@@ -701,8 +702,8 @@ export class ExtensionVisualBrowser {
     });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#startupStage = undefined;
-    this.#state = manual ? 'manual_input_required' : 'saved_unverified';
-    if (manual) this.#watchManualCompletion();
+    if (manual) await this.#presentManualWindow();
+    else this.#state = 'saved_unverified';
   }
   #send(operation, args = {}) {
     // The detached native fixture needs the outcome of this exact request.
@@ -839,6 +840,24 @@ export class ExtensionVisualBrowser {
       throw error;
     }
   }
+  async #presentManualWindow() {
+    // The extension handshake confirms transport only. On Windows it can
+    // reuse the bootstrap tab in a window behind Codex. Use the same native
+    // handoff for cold setup and explicit re-show, and report its failure
+    // without releasing the manual input gate or opening a second browser.
+    const reply = await this.#send('manual').catch(() => null);
+    if (this.#finishing) return this.#finishing;
+    if (!this.#manual || this.#terminal || this.#closed) return this.#status();
+    if (reply?.state !== 'manual_input_required') {
+      this.#state = 'error';
+      this.#setupReason = 'operation_failed';
+      return this.#status();
+    }
+    if (this.#state !== 'manual_input_required') this.#watchManualCompletion();
+    this.#state = 'manual_input_required';
+    if (this.#setupReason === 'operation_failed') this.#setupReason = undefined;
+    return this.#status();
+  }
   #watchManualCompletion() {
     clearInterval(this.#manualCompletionTimer); this.#manualCompletionEvidence = undefined;
     if (!this.manualCompletion) return;
@@ -874,7 +893,11 @@ export class ExtensionVisualBrowser {
     if (!this.#manual) return Promise.resolve(this.#status());
     this.#finishing = (async () => {
       this.#starting = true;
-      try { await this.#stopBrowser(); await this.#saveStopped(); this.#manual = false; this.#state = 'saved_unverified'; return this.#status(); }
+      try {
+        await this.#stopBrowser(); await this.#saveStopped(); this.#manual = false; this.#state = 'saved_unverified';
+        if (this.#setupReason === 'operation_failed') this.#setupReason = undefined;
+        return this.#status();
+      }
       catch (error) { this.testDiagnostics?.({ stage: 'manual_finish_failed', ...visualLifecycleFailureEvidence(error) }); this.#state = 'error'; this.#terminal = error.code === 'browser_process_lost' ? error.code : 'storage_unavailable'; throw error; }
       finally { this.#starting = false; this.#finishing = undefined; }
     })();
@@ -1038,7 +1061,7 @@ export class ExtensionVisualBrowser {
         return visualStatus(result.state, result.reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
       }
       if (operation === 'ready') return this.#manual ? this.#finishManual() : this.#status();
-      if (operation === 'show-login') { if (this.#manual && this.#child) await this.#send('manual'); return this.#status(); }
+      if (operation === 'show-login') return this.#manual && this.#child ? this.#presentManualWindow() : this.#status();
       if (operation === 'setup' || operation === 'navigate') this.policy.navigate(args.url);
       if (operation === 'setup' && this.#child && this.#headless && !this.testHeadless) {
         // Explicit human setup is a navigation to the reviewed setup URL, not
@@ -1058,10 +1081,9 @@ export class ExtensionVisualBrowser {
         await this.#start(args.url, true);
         return this.#status();
       }
-      if (operation === 'setup' && this.#manual) { await this.#send('manual'); return this.#status(); }
       if (operation === 'setup' && this.#child) {
-        this.#manual = true; this.#state = 'manual_input_required';
-        await this.#send('manual'); this.#watchManualCompletion(); return this.#status();
+        this.#manual = true;
+        return this.#presentManualWindow();
       }
       let fresh = false;
       if (!this.#child) {

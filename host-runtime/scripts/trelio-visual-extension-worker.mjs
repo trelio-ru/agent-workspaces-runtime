@@ -972,7 +972,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       }
       const after = await chrome.windows.getAll({ windowTypes: ['normal'] });
       return { state: 'fixture', count: after.length,
-        minimized: after.length > 0 && after.every(window => window.state === 'minimized') };
+        minimized: after.length > 0 && after.every(window => window.state === 'minimized'),
+        focused: after.some(window => window.focused && window.state !== 'minimized') };
     }
     if (op === 'fixture-tab-budget' && config.fixtureOnly) {
       // Only the localhost native fixture may deliberately bypass host creation
@@ -1111,13 +1112,30 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       for (const tabId of attached) await chrome.debugger.detach({ tabId }).catch(() => {});
       attached.clear();
       renderingTabs.clear();
+      if (config.fixtureOnly && config.fixtureHeadless) return { state: 'manual_input_required' };
       // Human authentication may use an owned popup. Counting/showing these
       // surfaces does not enable model-facing popup/DOM extraction.
       const tab = (await chrome.tabs.query({})).filter(tab => allowed(tab.url)).at(-1);
-      if (!tab) throw Error('session_closed');
+      if (!tab || !ownedWindows.has(tab.windowId)) throw Error('session_closed');
+      const before = await chrome.windows.get(tab.windowId);
+      activeStartup();
+      if (before.state === 'minimized') await chrome.windows.update(tab.windowId, { state: 'normal' });
+      activeStartup();
       await chrome.tabs.update(tab.id, { active: true });
+      activeStartup();
       await chrome.windows.update(tab.windowId, { focused: true });
-      return { state: 'manual_input_required' };
+      // Activation can settle after the native update returns. Observe the
+      // same window under the existing lease without repeating the focus
+      // request or inspecting any login content.
+      const until = Math.min(config.deadlineAt, Date.now() + 1500);
+      do {
+        activeStartup();
+        const window = await chrome.windows.get(tab.windowId);
+        activeStartup();
+        if (window.focused === true && window.state !== 'minimized') return { state: 'manual_input_required' };
+        await pause(50);
+      } while (Date.now() < until);
+      throw Error('operation_failed');
     }
     if (op === 'ready') { manual = false; frame = undefined; await installRules(); return { state: 'saved_unverified' }; }
     if (op === 'close-windows' || (op === 'fixture-close-windows' && config.fixtureOnly)) {
