@@ -16,7 +16,7 @@ const startWorker = (config, context) => {
  * withheld until its dialog is answered. A listener-only mock would miss the
  * deadlock: the ORIGINAL mouseReleased promise must remain outstanding across
  * one or several independent model turns, without a second input dispatch. */
-async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, windowState = 'normal', requestWindowFocus, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true, referenceRoutes = [], uploadChooser, fileUploadPickerPaths = [] } = {}) {
+async function dialogWorker({ image = false, policyFailure, manual = false, profileAuthentication = false, immediateAck = false, bootstrapUrl, fixtureOnly = false, screenshot, layout, credentialCheck, armLink, textObservation, authenticationMessage, mouseWheel, policyRead, focusEmulation, resolvePausedResponse, windowState = 'normal', requestWindowFocus, deferAuthentication = false, assistantBrowserSecrets = false, secretHit = true, referenceRoutes = [], uploadChooser, fileUploadPickerPaths = [] } = {}) {
   const events = { addListener() {} }, sent = [], answers = [], policy = [], raster = [];
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[], networkRules=[];
@@ -42,6 +42,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
         async sendCommand(_source, method, args) {
           nativeCommands.push({ method, args: JSON.parse(JSON.stringify(args)) });
           if (method === 'Emulation.setFocusEmulationEnabled') await focusEmulation?.();
+          if (['Fetch.continueRequest', 'Fetch.failRequest'].includes(method)) await resolvePausedResponse?.(method);
           if (method === 'Page.getFrameTree') {
             reads++;
             return { frameTree: { frame: { id: 'main', loaderId, mimeType: 'text/html', url: currentUrl },
@@ -131,6 +132,11 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
     throw Error('synthetic_command_timeout');
   };
   if (!policyFailure && !deferAuthentication) await dispatch('restore-session-auth', { cookies: [], replace: false });
+  const pauseDocument = async (frameId, contentType, tabId) => {
+    nativeEvent({ tabId }, 'Fetch.requestPaused', { frameId, requestId: frameId, resourceType: 'Document',
+      responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: contentType }] });
+    await tick();
+  };
   return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates, networkRules,
     frameEvent: (method, params, tabId = 1) => nativeEvent({ tabId }, method, params),
     restoreDocument(id) {
@@ -145,11 +151,8 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
       selectedTab = tabId;
     },
     reportHttpError(statusCode) { headersReceived({ tabId: 1, url: currentUrl, statusCode }); },
-    async rejectDocument(frameId, tabId = 1) {
-      nativeEvent({ tabId }, 'Fetch.requestPaused', { frameId, requestId: frameId, resourceType: 'Document',
-        responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html-invalid' }] });
-      await tick();
-    },
+    rejectDocument: (frameId, tabId = 1) => pauseDocument(frameId, 'text/html-invalid', tabId),
+    allowDocument: (frameId, tabId = 1) => pauseDocument(frameId, 'text/html', tabId),
     detach: () => detached({ tabId: 1 }),
     addWindow:id=>windowCreated({id,type:'normal'}), removeWindow:id=>windowRemoved(id),
     disconnect:()=>socket.close(), connections:()=>connections,
@@ -375,6 +378,47 @@ test('the document guard still fences a blocked root or an unknown frame', async
         documentDiagnostic: { stage: 'response_rejected', frame: 'unresolved', httpStatus: 200 } });
     assert.deepEqual(worker.nativeCommands.filter(value => value.method === 'Fetch.failRequest'),
       [frameId, 'current-child'].map(requestId => ({ method: 'Fetch.failRequest', args: { requestId, errorReason: 'BlockedByClient' } })));
+  }
+});
+
+test('a retired native child response revokes its old frame without fencing the parent', async () => {
+  for (const [pause, method] of [['rejectDocument', 'Fetch.failRequest'], ['allowDocument', 'Fetch.continueRequest']]) {
+    const worker = await dialogWorker({ resolvePausedResponse() {
+      // Exact response from chrome.debugger after Chromium destroys a paused
+      // iframe, observed with the native browser and a loopback fixture.
+      throw Error('{"code":-32602,"message":"Invalid InterceptionId."}');
+    } });
+    const before = await worker.dispatch('read-text');
+    assert.equal(before.state, 'ready');
+    worker.frameEvent('Page.frameAttached', { frameId: 'child', parentFrameId: 'main' });
+    await worker[pause]('child');
+    assert.deepEqual(await worker.dispatch('click', { frameId: before.frameId, x: 20, y: 20 }),
+      { state: 'error', reason: 'stale_frame' });
+    const after = await worker.dispatch('read-text');
+    assert.equal(after.state, 'ready');
+    assert.notEqual(after.frameId, before.frameId);
+    assert.equal(worker.counts().clicks, 0);
+    assert.deepEqual(worker.nativeCommands.filter(call => ['Fetch.continueRequest', 'Fetch.failRequest'].includes(call.method))
+      .map(call => call.method), [method], 'a retired response never authorizes another native command');
+  }
+});
+
+test('retirement evidence cannot clear a root or unknown response or an unexpected native error', async () => {
+  for (const [frame, nativeError, expectedFrame, failure] of [
+    ['main', '{"code":-32602,"message":"Invalid InterceptionId."}', 'main', 'request_retired'],
+    ['unknown', '{"code":-32602,"message":"Invalid InterceptionId."}', 'unresolved', 'request_retired'],
+    ['child', '{"code":-32000,"message":"Invalid InterceptionId."}', 'child', 'unknown'],
+    ['child', '{"code":-32602,"message":"Invalid InterceptionId.","data":"PRIVATE_NATIVE_VALUE"}', 'child', 'unknown'],
+  ]) {
+    const worker = await dialogWorker({ resolvePausedResponse() { throw Error(nativeError); } });
+    worker.frameEvent('Page.frameNavigated', { frame: { id: 'main' } });
+    worker.frameEvent('Page.frameAttached', { frameId: 'child', parentFrameId: 'main' });
+    await worker.rejectDocument(frame);
+    const reads = worker.counts().reads;
+    assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked',
+      documentDiagnostic: { stage: 'response_interception', frame: expectedFrame, resolution: 'block', failure } });
+    assert.equal(worker.counts().reads, reads);
+    assert.equal(worker.nativeCommands.filter(call => call.method === 'Fetch.failRequest').length, 1);
   }
 });
 

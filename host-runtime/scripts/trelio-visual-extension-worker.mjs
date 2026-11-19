@@ -86,13 +86,31 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const rootFrames = new Map();
   let guardUpdate = Promise.resolve(), guardFailed = false;
   let guardDiagnostic;
-  const recordGuardFailure = stage => {
+  const recordGuardFailure = (stage, evidence) => {
     guardFailed = true;
     // Keep the first failure: later operations run under that same fence.
-    guardDiagnostic ??= { stage };
+    guardDiagnostic ??= { stage, ...evidence };
   };
   const documentBlocked = documentDiagnostic => Object.assign(Error('document_blocked'), { documentDiagnostic });
   const metadataFailure = stage => documentBlocked({ stage });
+  function retiredResponse(error) {
+    // chrome.debugger serializes the native protocol error object. Chromium's
+    // Fetch interceptor returns this exact InvalidParams message only when
+    // the ID has no live request job. No site text, prefix match or CDP error
+    // code alone can establish retirement, and the message stays here.
+    if (typeof error?.message !== 'string' || error.message.length > 128) return false;
+    try {
+      const value = JSON.parse(error.message);
+      return value?.code === -32602 && value.message === 'Invalid InterceptionId.'
+        && Object.keys(value).length === 2;
+    } catch { return false; }
+  }
+  function invalidateDocumentFrame(tabId) {
+    // Revoke both an active observation and an asynchronous capture that
+    // could otherwise publish an old token after a response is canceled.
+    if (frame?.tabId === tabId) frame = undefined;
+    navigationGenerations.set(tabId, ++nextNavigationGeneration);
+  }
   let pendingAttachment, pendingFileLink, pendingAudio, pendingUpload;
   const escapeRule = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
@@ -426,36 +444,49 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           }
           return;
         }
-        const decision = params.resourceType === 'Document' ? documentPolicy(params.responseStatusCode, params.responseHeaders) : 'block';
-        if (decision !== 'block') {
-          await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
-        } else {
-          // An embedded failure can change geometry in its own tab. A
-          // failure in another tab cannot revoke the observed frame.
-          if (frame?.tabId === source.tabId) frame = undefined;
-          // Also revoke an observation whose asynchronous capture has not
-          // published its frame yet. Otherwise it could restore the token
-          // just invalidated here after the blocked response is aborted.
-          navigationGenerations.set(source.tabId, ++nextNavigationGeneration);
+        const document = params.resourceType === 'Document';
+        const decision = document ? documentPolicy(params.responseStatusCode, params.responseHeaders) : 'block';
+        const child = document && !source.sessionId && childFrames.get(source.tabId)?.has(params.frameId);
+        const documentFrame = child ? 'child' : document && !source.sessionId && typeof params.frameId === 'string'
+          && rootFrames.get(source.tabId) === params.frameId ? 'main' : 'unresolved';
+        if (decision === 'block') {
+          invalidateDocumentFrame(source.tabId);
           // Fetch pauses both top-level and embedded Documents on this native
           // target. Both are refused below; only a positively identified child
           // may leave the parent readable. Missing native frame evidence must
           // still fence the tab (e.g. a rejected navigation may leave the old
           // HTML visually intact rather than commit a Chromium error page).
-          const child = params.resourceType === 'Document' && !source.sessionId
-            && childFrames.get(source.tabId)?.has(params.frameId);
           if (!child) {
             // Report only native structural evidence. Raw MIME, response
             // headers, URLs and native errors are deliberately kept here.
             const httpStatus = params.responseStatusCode;
             documentFailures.set(source.tabId, {
               stage: 'response_rejected',
-              frame: rootFrames.get(source.tabId) === params.frameId && typeof params.frameId === 'string' ? 'main' : 'unresolved',
+              frame: documentFrame,
               ...(Number.isInteger(httpStatus) && httpStatus >= 200 && httpStatus <= 599 ? { httpStatus } : {}),
               ...(params.responseErrorReason !== undefined ? { networkError: true } : {}),
             });
           }
-          await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' });
+        }
+        try {
+          if (decision === 'block') {
+            await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' });
+          } else {
+            await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
+          }
+        } catch (error) {
+          const retired = retiredResponse(error);
+          // A known embedded frame can disappear between Fetch.requestPaused
+          // and the one completion command. The native request is already
+          // gone. Keep the parent guard intact and require fresh observation.
+          // Root/unknown frames and every other failure still fence the session.
+          if (child && retired && guardedTabs.has(source.tabId)) {
+            if (decision !== 'block') invalidateDocumentFrame(source.tabId);
+            return;
+          }
+          recordGuardFailure('response_interception', { frame: documentFrame,
+            resolution: decision === 'block' ? 'block' : 'continue', failure: retired ? 'request_retired' : 'unknown' });
+          frame = undefined;
         }
       })().catch(() => { recordGuardFailure('response_interception'); frame = undefined; });
       return;

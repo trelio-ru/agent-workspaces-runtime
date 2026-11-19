@@ -728,6 +728,10 @@ publication tooling также остаются вне этого публичн
   Browser document refusals project closed evidence of response, renderer or
   the first global guard failure under the same session fence. Do not expose
   URL/MIME/native text or use this evidence to relax policy or replay input.
+  An already-retired Fetch response for a positively identified child of
+  the guarded native tab only retires the observation. Require Chromium's
+  exact structured missing-request failure; keep root/unknown frames and
+  every unexpected command error fail-closed. Never retry a native command.
   See [visual browser contract](docs/visual-browser.md).
   Native manual-close regression shares the auth fixture's owned HTTP abort
   helper: abort its failed producer before HTTP-close waits, close listener/sockets

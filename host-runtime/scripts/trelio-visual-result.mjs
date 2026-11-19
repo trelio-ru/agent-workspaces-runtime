@@ -55,12 +55,19 @@ export function validateVisualAudioDiagnostic(value) {
 // A document refusal separates failed native operations from a rejected
 // response or renderer. No registered stage can change the original refusal.
 export function validateVisualDocumentDiagnostic(value) {
-  if (!exact(value, ['stage', 'frame', 'httpStatus', 'networkError'])) fail();
+  if (!exact(value, ['stage', 'frame', 'httpStatus', 'networkError', 'resolution', 'failure'])) fail();
   if (value.stage === 'response_rejected') {
     if (!['main', 'unresolved'].includes(value.frame)
       || value.httpStatus !== undefined && (!Number.isInteger(value.httpStatus) || value.httpStatus < 200 || value.httpStatus > 599)
-      || value.networkError !== undefined && value.networkError !== true) fail();
-  } else if (!['session_rules', 'response_interception', 'renderer_focus', 'browser_error_page', 'rendered_mime'].includes(value.stage)
+      || value.networkError !== undefined && value.networkError !== true
+      || value.resolution !== undefined || value.failure !== undefined) fail();
+  } else if (value.stage === 'response_interception') {
+    // Older worker results and unidentified interception failures only carry
+    // the stage. A native command refusal adds this complete closed tuple.
+    if (Object.keys(value).length !== 1
+      && (Object.keys(value).length !== 4 || !['main', 'child', 'unresolved'].includes(value.frame)
+        || !['block', 'continue'].includes(value.resolution) || !['request_retired', 'unknown'].includes(value.failure))) fail();
+  } else if (!['session_rules', 'renderer_focus', 'browser_error_page', 'rendered_mime'].includes(value.stage)
     || Object.keys(value).length !== 1) fail();
   return { ...value };
 }

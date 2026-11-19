@@ -25,9 +25,15 @@ test('document refusal exposes only closed browser evidence', () => {
   const evidence = { stage: 'response_rejected', frame: 'unresolved', httpStatus: 304 };
   const original = visualStatus('error', 'document_blocked', { documentDiagnostic: evidence });
   assert.deepEqual(original.documentDiagnostic, evidence);
+  const interception = { stage: 'response_interception', frame: 'main', resolution: 'continue', failure: 'request_retired' };
+  for (const payload of [interception, { stage: 'response_interception' }])
+    assert.deepEqual(visualStatus('error', 'document_blocked', { documentDiagnostic: payload }).documentDiagnostic, payload);
   for (const payload of [
     { ...evidence, mime: 'PRIVATE_MIME' }, { ...evidence, frame: 'PRIVATE_FRAME' },
     { ...evidence, httpStatus: 600 }, { ...evidence, networkError: 'PRIVATE_NETWORK_ERROR' },
+    { ...evidence, resolution: 'block' }, { ...interception, failure: 'PRIVATE_DEBUGGER_MESSAGE' },
+    { ...interception, resolution: 'retry' }, { stage: 'response_interception', frame: 'main' },
+    { ...interception, requestId: 'PRIVATE_REQUEST_ID' },
     { stage: 'renderer_focus', httpStatus: 200 }, { stage: 'PRIVATE_STAGE' },
   ]) assert.throws(() => visualStatus('error', 'document_blocked', { documentDiagnostic: payload }), /VISUAL_RESULT_INVALID/);
   assert.throws(() => visualStatus('ready', 'none', { documentDiagnostic: evidence }), /VISUAL_RESULT_INVALID/);
