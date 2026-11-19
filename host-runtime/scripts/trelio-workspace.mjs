@@ -14398,6 +14398,13 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       throw new Error("Исходный Run изменился перед восстановлением незавершённого сохранения.");
     }
     const retainedTaskHandoff = retainedAssistantFinish?.retainedTaskHandoff;
+    const localDraftRecovery = retainedAssistantFinish?.localDraftRecovery;
+    if (localDraftRecovery) {
+      const local = await readOptionalRunMetadata(rootDirectory);
+      if (!local) refuseAssistantRecovery("checkout");
+      assertAssistantLocalDraftRun(local, exactRuns.get(requestedRunId), localDraftRecovery.basis, "expired");
+      await verifyAssistantLocalDraft({ metadata: local, ...localDraftRecovery });
+    }
     if (retainedAssistantFinish?.portableFinish) {
       const local = await readOptionalRunMetadata(rootDirectory);
       if (!local) throw new Error("The final assistant draft lacks its original checkout.");
@@ -14604,15 +14611,19 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     // gets this exception, and the ordinary finish still validates/uploads
     // the complete delta and performs its server acceptance CAS.
     if (retainedAssistantFinish && (!continuingSameRun
-      || existingMetadata.candidateHead !== retainedAssistantFinish.candidateHead
+      || !retainedAssistantFinish.localDraftRecovery && existingMetadata.candidateHead !== retainedAssistantFinish.candidateHead
       || localHead !== retainedAssistantFinish.candidateHead
       || existingMetadata.baseHead !== agentRun.baseHead
-      || (!retainedAssistantFinish.retainedTaskHandoff && await getGitStatus(workspaceDirectory, existingMetadata.objects || [])))) {
+      || (!retainedAssistantFinish.retainedTaskHandoff && !retainedAssistantFinish.localDraftRecovery
+        && await getGitStatus(workspaceDirectory, existingMetadata.objects || [])))) {
       throw new Error("Локальный кандидат изменился; незавершённое сохранение не восстановлено.");
     }
     if (retainedAssistantFinish?.retainedTaskHandoff) {
       await verifyRetainedAssistantHandoff({ metadata: existingMetadata,
         checkpoint: exactRuns.get(runId)?.latestCheckpoint, proof: retainedAssistantFinish.retainedTaskHandoff });
+    }
+    if (retainedAssistantFinish?.localDraftRecovery) {
+      await verifyAssistantLocalDraft({ metadata: existingMetadata, ...retainedAssistantFinish.localDraftRecovery });
     }
     if (localHead !== materializedHead && !retainedAssistantFinish) {
       const syncDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-draft-sync-"));
@@ -16237,6 +16248,105 @@ const renderAutomaticRunWorklog = ({
   ].join("\n");
 };
 
+const assistantRecoveryDigest = value => crypto.createHash("sha256").update(value).digest("hex");
+const refuseAssistantRecovery = stage => {
+  const error = new Error(`The retained task handoff or local files changed (${stage}).`);
+  error.code = "ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED";
+  throw error;
+};
+
+const readAssistantRecoveryChanges = async (metadata, anchorHead) => {
+  const directory = metadata.workspaceDirectory;
+  const gitOptions = { cwd: directory, env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" } };
+  const [head, index] = await Promise.all([
+    runGit(["rev-parse", "--verify", "HEAD"], gitOptions),
+    runGit(["ls-files", "-v", "-z"], gitOptions),
+  ]);
+  if (head.stdout.trim() !== anchorHead) refuseAssistantRecovery("head");
+  await runGit(["diff", "--cached", "--quiet", "--no-ext-diff", anchorHead, "--"], gitOptions);
+  // Only hydrated objects may be skip-worktree. They are compared through
+  // the common Git status reader and are never replaced by this recovery.
+  const hydrated = new Set((metadata.objects ?? []).map(object => object.filePath));
+  if (index.stdout.split("\0").filter(Boolean).some(entry => !entry.startsWith("H ")
+    && !(entry.startsWith("S ") && hydrated.has(entry.slice(2))))) refuseAssistantRecovery("index");
+  return { hydrated, changes: await getGitStatusEntries(directory, metadata.objects ?? []) };
+};
+
+const verifyAssistantRecoveryFiles = async (directory, changes, hydrated, expectedHash, worklogPath) => {
+  const expectedFiles = new Map();
+  for (const { status, filePath } of changes) {
+    const expected = expectedHash(filePath);
+    if (!expected || ![" M", "??"].includes(status)
+      || filePath !== worklogPath && (isProtectedWorkspaceControlPath(filePath) || hydrated.has(filePath))) {
+      refuseAssistantRecovery("file_receipt");
+    }
+    // Check the exact Git path without following a link or opening an
+    // alternate data stream, then read through the verified file handle.
+    let fullPath = directory;
+    const segments = filePath.split("/");
+    if (!segments.every(part => part && part !== "." && part !== ".." && !/[\\:\x00-\x1f]/u.test(part))) {
+      refuseAssistantRecovery("file_path");
+    }
+    for (const segment of segments) {
+      fullPath = path.join(fullPath, segment);
+      if ((await fs.lstat(fullPath)).isSymbolicLink()) refuseAssistantRecovery("file_link");
+    }
+    const stat = await fs.lstat(fullPath);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64 * 1024) refuseAssistantRecovery("file_bytes");
+    const handle = await fs.open(fullPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.nlink !== 1
+        || opened.size !== stat.size) refuseAssistantRecovery("file_bytes");
+      const bytes = Buffer.alloc(stat.size + 1);
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+      if (bytesRead !== stat.size || assistantRecoveryDigest(bytes.subarray(0, bytesRead)) !== expected) {
+        refuseAssistantRecovery("file_bytes");
+      }
+    } finally {
+      await handle.close();
+    }
+    expectedFiles.set(filePath, expected);
+  }
+  return expectedFiles;
+};
+
+const assertAssistantLocalDraftRun = (metadata, snapshot, basis, status) => {
+  const { run, latestCheckpoint } = snapshot ?? {};
+  if (run?.id !== basis.runId || run.workspaceId !== basis.workspaceId || run.status !== status
+    || run.baseHead !== basis.baseHead || run.candidateHead
+    || (run.draftHead ?? null) !== (basis.checkpointId === null ? null : basis.anchorHead)
+    || (latestCheckpoint?.id ?? null) !== basis.checkpointId
+    || latestCheckpoint && (latestCheckpoint.checkpointType !== "draft" || latestCheckpoint.candidateHead !== basis.anchorHead)
+    || status === "running" && (run.leaseId !== metadata.leaseId || run.fencingToken !== metadata.fencingToken)) {
+    refuseAssistantRecovery("native_anchor");
+  }
+};
+
+/** Select the exact still-local delta off the server-certified anchor. A
+ * successful old tool call does not cover staged, unrelated or changed files.
+ * Paths stay private; reserve the save using just an order-independent hash. */
+export const verifyAssistantLocalDraft = async ({ metadata, basis, replacements }) => {
+  if (metadata.scopeType !== "task" || metadata.terminalStatus || hasFinishRecoveryMarker(metadata)
+    || metadata.workspaceId !== basis.workspaceId || metadata.runId !== basis.runId || metadata.baseHead !== basis.baseHead
+    || (metadata.draftHead ?? null) !== (basis.checkpointId === null ? null : basis.anchorHead)
+    || metadata.materializedHead !== basis.anchorHead || metadata.candidateHead && metadata.candidateHead !== basis.anchorHead
+    || basis.checkpointId !== null && metadata.latestDraftCheckpointId !== basis.checkpointId) refuseAssistantRecovery("identity");
+  const receipts = new Map(replacements.map(row => [row.pathSha256, row.contentSha256]));
+  const { hydrated, changes } = await readAssistantRecoveryChanges(metadata, basis.anchorHead);
+  if (changes.length < 1 || changes.length > receipts.size) {
+    refuseAssistantRecovery("changes");
+  }
+  const expectedFiles = await verifyAssistantRecoveryFiles(metadata.workspaceDirectory, changes, hydrated,
+    filePath => receipts.get(assistantRecoveryDigest(filePath)));
+  const delta = Array.from(expectedFiles, ([filePath, contentSha256]) => [assistantRecoveryDigest(filePath), contentSha256]).sort();
+  // Compare the checked-out witness during discovery, under the native
+  // writer and again in the signed opener/finisher using the same rule.
+  const deltaSha256 = assistantRecoveryDigest(JSON.stringify(delta));
+  if (basis.deltaSha256 !== undefined && basis.deltaSha256 !== deltaSha256) refuseAssistantRecovery("delta");
+  return { deltaSha256, expectedFiles };
+};
+
 /** The old finish persisted the handoff against the previous draft. Read back
  * the authenticated checkpoint and compare every later local byte with the
  * original native replace receipts or the same deterministic worklog writer.
@@ -16244,11 +16354,7 @@ const renderAutomaticRunWorklog = ({
  * Nothing here edits, hides or stages a file on a failed observation.
  */
 export const verifyRetainedAssistantHandoff = async ({ metadata, checkpoint, proof }) => {
-  const refuse = stage => {
-    const error = new Error(`The retained task handoff or local files changed (${stage}).`);
-    error.code = "ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED";
-    throw error;
-  };
+  const refuse = refuseAssistantRecovery;
   if (metadata.scopeType !== "task" || !hasFinishRecoveryMarker(metadata)
     || metadata.terminalStatus || metadata.runId !== checkpoint?.runId
     || metadata.workspaceId !== proof.workspaceId || metadata.runId !== proof.runId
@@ -16258,7 +16364,7 @@ export const verifyRetainedAssistantHandoff = async ({ metadata, checkpoint, pro
     || metadata.baseHead === proof.draftHead || checkpoint.nextActionJson?.taskOutcome !== "no_status_change"
     || !normalizeAgentWorkspaceRunAuthor(metadata.runAuthor)) refuse("identity");
 
-  const digest = value => crypto.createHash("sha256").update(value).digest("hex");
+  const digest = assistantRecoveryDigest;
   const fields = [checkpoint.summary, checkpoint.evidenceJson ?? [], checkpoint.filesChangedJson ?? [],
     checkpoint.openQuestionsJson ?? [], checkpoint.nextActionJson.instruction, "no_status_change"];
   const boundFields = proof.automaticFiles ? [fields[0], fields[1], null, ...fields.slice(3)] : fields;
@@ -16275,20 +16381,7 @@ export const verifyRetainedAssistantHandoff = async ({ metadata, checkpoint, pro
   const worklogPath = metadata.automaticWorklogPath;
   if (!/^worklog\/\d{4}-\d{2}-\d{2}-run-[0-9a-f-]{36}\.md$/u.test(worklogPath ?? "")
     || !worklogPath.endsWith(`-run-${metadata.runId}.md`)) refuse("worklog_path");
-  const gitOptions = { cwd: directory, env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" } };
-  const [head, index] = await Promise.all([
-    runGit(["rev-parse", "HEAD"], gitOptions),
-    runGit(["ls-files", "-v", "-z"], gitOptions),
-  ]);
-  if (head.stdout.trim() !== proof.draftHead) refuse("head");
-  await runGit(["diff", "--cached", "--quiet", "--no-ext-diff", proof.draftHead, "--"], gitOptions);
-  // Only the ordinary hydrated object files may be skip-worktree. Compare
-  // their private content through getGitStatusEntries, as for normal finish.
-  const hydrated = new Set((metadata.objects ?? []).map(object => object.filePath));
-  if (index.stdout.split("\0").filter(Boolean).some(entry => !entry.startsWith("H ")
-    && !(entry.startsWith("S ") && hydrated.has(entry.slice(2))))) refuse("index");
-
-  const changes = await getGitStatusEntries(directory, metadata.objects ?? []);
+  const { hydrated, changes } = await readAssistantRecoveryChanges(metadata, proof.draftHead);
   if (!changes.some(entry => entry.filePath === worklogPath) || changes.length < 2 || changes.length > 65) refuse("changes");
   const candidatePaths = await getCandidateChangedPaths(metadata);
   if (proof.automaticFiles) {
@@ -16302,38 +16395,8 @@ export const verifyRetainedAssistantHandoff = async ({ metadata, checkpoint, pro
   const expectedWorklog = renderAutomaticRunWorklog({ metadata, summary: fields[0], evidence: fields[1],
     candidatePaths, openQuestions: fields[3],
     nextActionInstruction: fields[4], automaticWorklogPath: worklogPath });
-  const expectedFiles = new Map();
-  for (const { status, filePath } of changes) {
-    const expected = filePath === worklogPath ? digest(expectedWorklog) : replacements.get(digest(filePath));
-    if (!expected || ![" M", "??"].includes(status)
-      || filePath !== worklogPath && (isProtectedWorkspaceControlPath(filePath) || hydrated.has(filePath))) refuse("file_receipt");
-    // Walk the exact Git path without following a symlink/junction or reading
-    // an alternate data stream. Bound both replace receipts and the worklog.
-    let fullPath = directory;
-    const segments = filePath.split("/");
-    if (!segments.every(part => part && part !== "." && part !== ".." && !/[\\:\x00-\x1f]/u.test(part))) refuse("file_path");
-    for (const segment of segments) {
-      fullPath = path.join(fullPath, segment);
-      if ((await fs.lstat(fullPath)).isSymbolicLink()) refuse("file_link");
-    }
-    const stage = filePath === worklogPath ? "worklog_bytes" : "file_bytes";
-    const stat = await fs.lstat(fullPath);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64 * 1024) refuse(stage);
-    const handle = await fs.open(fullPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-    try {
-      const opened = await handle.stat();
-      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.nlink !== 1
-        || opened.size !== stat.size) refuse(stage);
-      // Read at most the observed size plus one byte. Growth or substitution
-      // while opening must not create an unbounded read of workspace content.
-      const bytes = Buffer.alloc(stat.size + 1);
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-      if (bytesRead !== stat.size || digest(bytes.subarray(0, bytesRead)) !== expected) refuse(stage);
-    } finally {
-      await handle.close();
-    }
-    expectedFiles.set(filePath, expected);
-  }
+  const expectedFiles = await verifyAssistantRecoveryFiles(directory, changes, hydrated,
+    filePath => filePath === worklogPath ? digest(expectedWorklog) : replacements.get(digest(filePath)), worklogPath);
   // Keep the original payload in the private caller. The finish adapter can
   // reuse these parameters from the server without trusting model prose.
   return { options: { summary: fields[0], evidence: fields[1], file: fields[2], question: fields[3],
@@ -16649,7 +16712,9 @@ export const protectAgentWorkspaceCheckpoint = async ({
   };
 };
 
-const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, finishing = false, mustReuseHandoff = false } = {}) => withRun(async ({
+const checkpoint = async (options, nativeInput = null, {
+  finishSnapshot = null, finishing = false, mustReuseHandoff = false, localDraftRecovery,
+} = {}) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -16763,7 +16828,7 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
       ? { ...metadata, runAuthor }
       : metadata;
 
-    await ensureAutomaticRunWorklog({
+    const worklogInput = {
       metadata: worklogMetadata,
       metadataPath,
       summary,
@@ -16771,7 +16836,18 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
       candidatePaths,
       openQuestions,
       nextActionInstruction,
-    });
+    };
+    // The ordinary handoff writer can add only its deterministic journal
+    // to the verified delta. If a receipt already covers that path, preserve
+    // its bytes exactly and leave the previous user/model journal intact.
+    const existingWorklog = worklogMetadata.automaticWorklogPath;
+    if (!localDraftRecovery?.expectedFiles.has(existingWorklog)) {
+      const worklogPath = await ensureAutomaticRunWorklog(worklogInput);
+      if (localDraftRecovery && worklogPath) {
+        const worklog = renderAutomaticRunWorklog({ ...worklogInput, automaticWorklogPath: existingWorklog });
+        localDraftRecovery.expectedFiles.set(worklogPath, assistantRecoveryDigest(worklog));
+      }
+    }
   }
 
   if (checkpointType === "blocker") {
@@ -16820,6 +16896,7 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
       const prepared = await saveRunDraftSnapshot({
         metadata: current, metadataPath, origin: workspaceOrigin, token,
         companyEncryption, message: String(options.message || "Подготовить результат Agent Run"),
+        localDraftRecovery,
       });
       finalAssistantDraftHead = prepared.draftHead;
       current = prepared.metadata;
@@ -16904,6 +16981,11 @@ const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, 
   }
   process.stdout.write(`Checkpoint сохранён: ${checkpointPayload.id}.\n`);
   await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
+  if (localDraftRecovery && finalAssistantDraftHead) {
+    if (!UUID_PATTERN.test(checkpointPayload.id || "")) refuseAssistantRecovery("handoff_id");
+    return { workspaceId: metadata.workspaceId, runId: metadata.runId,
+      checkpointId: checkpointPayload.id, draftHead: finalAssistantDraftHead };
+  }
   if (finalAssistantDraftHead) return finalAssistantDraftHead;
   // This witness comes from the native checkpoint response after the portable
   // draft and local metadata are both saved. A printed acknowledgement or
@@ -17340,7 +17422,7 @@ const mergeWorkspaceRun = async options => {
   return withWorkspaceFinishLock(requireUuid(metadata.runId, "run"), () => mergeWorkspaceRunUnlocked(options));
 };
 
-const finish = async (options, { retainedAssistantHandoff = false, retainedTaskHandoff, portableFinish } = {}) => {
+const finish = async (options, { retainedAssistantHandoff = false, retainedTaskHandoff, portableFinish, localDraftRecovery } = {}) => {
   const { metadata } = await findRunMetadata();
   const runId = requireUuid(metadata.runId, "run");
   // The MCP registry prevents repeats within one host. This private process
@@ -17439,6 +17521,24 @@ const finish = async (options, { retainedAssistantHandoff = false, retainedTaskH
       checkpointOptions = (await verifyRetainedAssistantHandoff({ metadata: current,
         checkpoint: finishSnapshot.latestCheckpoint, proof: retainedTaskHandoff })).options;
     }
+    let verifiedLocalDraft;
+    if (localDraftRecovery) {
+      // Only describe the witnessed local save. Earlier external effects and
+      // new model parameters cannot determine what this recovery publishes.
+      const { basis } = localDraftRecovery;
+      const snapshot = await withRun(context => loadExactWorkspaceRun({
+        origin: context.workspaceOrigin, token: context.token,
+        workspaceId: basis.workspaceId, runId: basis.runId, companyEncryption: context.companyEncryption,
+      }));
+      assertAssistantLocalDraftRun(current, snapshot, basis, "running");
+      verifiedLocalDraft = await verifyAssistantLocalDraft({ metadata: current, ...localDraftRecovery });
+      checkpointOptions = {
+        summary: "Сохранены проверенные локальные правки прерванного прохода.",
+        evidence: ["Файлы сверены с исходными квитанциями записи и ревизией рабочего пространства."],
+        "next-action": "Сверить итог прохода по сохранённым материалам и подтверждённым квитанциям.",
+        "task-outcome": "no_status_change",
+      };
+    }
     finishProgressStage = "validating";
     try {
       reportFinishProgress("validating");
@@ -17448,11 +17548,16 @@ const finish = async (options, { retainedAssistantHandoff = false, retainedTaskH
       reportFinishProgress("checkpoint");
       const checkpointHead = retainedAssistantHandoff || portableFinish ? current.candidateHead
         : await checkpoint({ ...checkpointOptions, type: "handoff" }, null,
-          { finishing: true, finishSnapshot, mustReuseHandoff: Boolean(retainedTaskHandoff) });
+          { finishing: true, finishSnapshot, mustReuseHandoff: Boolean(retainedTaskHandoff),
+            ...(verifiedLocalDraft ? { localDraftRecovery: { ...verifiedLocalDraft, anchorHead: localDraftRecovery.basis.anchorHead } } : {}) });
       reportFinishProgress("preparing");
       if (portableFinish) {
         // A moved base cannot allocate a merge Run while settling this save.
         await submit(options, checkpointHead, undefined, portableFinish);
+      } else if (verifiedLocalDraft) {
+        // The verified local delta is now an immutable portable draft.
+        // Continue with its exact handoff, without staging or merge again.
+        await submit(checkpointOptions, checkpointHead.draftHead, undefined, checkpointHead);
       } else {
         await submitWithMergeRecovery(retainedTaskHandoff ? checkpointOptions : options, checkpointHead, retainedTaskHandoff);
       }
@@ -17566,6 +17671,7 @@ const prepareCandidateIndex = async ({
   token,
   companyEncryption,
   retainedFiles,
+  preserveExistingObjects = false,
 }) => {
   const workspaceDirectory = metadata.workspaceDirectory;
   const knownObjectPaths = (metadata.objects || []).map((object) => object.filePath);
@@ -17574,10 +17680,15 @@ const prepareCandidateIndex = async ({
   // only byte-identical generated scaffold so the same candidate converges to
   // the compact current contract.
   if (retainedFiles) {
-    if (!companyEncryption || knownObjectPaths.length) throw new Error("The retained task tree requires an encrypted file-only draft.");
+    if (!preserveExistingObjects && (!companyEncryption || knownObjectPaths.length)) {
+      throw new Error("The retained task tree requires an encrypted file-only draft.");
+    }
     // The historical save covers only positively verified original files.
     // Do not stage extra paths or rewrite old scaffolding in this mode.
     await runGit(["add", "--", ...retainedFiles.keys()], { cwd: workspaceDirectory });
+    // A plain recovered delta contains only the witnessed inline text.
+    // Existing external mappings stay pinned to the original index paths.
+    if (!companyEncryption) return metadata.objects || [];
   } else {
     await normalizeLegacyWorkspaceScaffold(workspaceDirectory);
     await setSkipWorktree(workspaceDirectory, knownObjectPaths, false);
@@ -17758,6 +17869,7 @@ const prepareLocalCandidateSnapshot = async ({
   companyEncryption,
   message,
   retainedFiles,
+  preserveExistingObjects = false,
 }) => {
   const workspaceDirectory = metadata.workspaceDirectory;
   const gitStatus = await getGitStatus(workspaceDirectory, metadata.objects || []);
@@ -17776,6 +17888,7 @@ const prepareLocalCandidateSnapshot = async ({
       token,
       companyEncryption,
       retainedFiles,
+      preserveExistingObjects,
     });
 
     if (await hasStagedChanges(workspaceDirectory)) {
@@ -18563,6 +18676,7 @@ const saveRunDraftSnapshot = async ({
   companyEncryption,
   message,
   requireChangedHead = false,
+  localDraftRecovery,
 }) => {
   // Даже draft без файловых изменений должен получить свежую lease перед
   // blocker checkpoint. В этом случае baseHead уже является полным
@@ -18575,7 +18689,13 @@ const saveRunDraftSnapshot = async ({
     token,
     companyEncryption,
     message,
+    retainedFiles: localDraftRecovery?.expectedFiles,
+    preserveExistingObjects: Boolean(localDraftRecovery),
   });
+  if (localDraftRecovery) {
+    await assertRetainedCandidateBytes(metadata.workspaceDirectory, localDraftRecovery.anchorHead,
+      prepared.head, localDraftRecovery.expectedFiles);
+  }
 
   // Ordinary autosave checkpoints describe new coherent work, not another
   // timestamp beside the same server tree. A blocker is different: it may
@@ -21472,7 +21592,7 @@ export const recoverBridgePluginUpgrade = async (
 };
 
 export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, retainedAssistantHandoff,
-  retainedTaskHandoff, portableFinish, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
+  retainedTaskHandoff, portableFinish, localDraftRecovery, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -21533,7 +21653,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
   } else if (command === "pause") {
     await pause(options);
   } else if (command === "finish") {
-    await finish(options, { retainedAssistantHandoff, retainedTaskHandoff, portableFinish });
+    await finish(options, { retainedAssistantHandoff, retainedTaskHandoff, portableFinish, localDraftRecovery });
   } else if (command === "submit") {
     await submitWithMergeRecovery(options);
   } else if (command === "merge") {

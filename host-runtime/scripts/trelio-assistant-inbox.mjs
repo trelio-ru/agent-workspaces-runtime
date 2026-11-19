@@ -40,6 +40,42 @@ export const validateAssistantWorkspaceCheckpoint=value=>{
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),checkpointId:uuid(value.checkpointId),draftHead:value.draftHead};
 };
 export const validateAssistantPortableFinish=validateAssistantWorkspaceCheckpoint;
+const workspaceObjectId=value=>{
+  if(typeof value!=='string'||!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value))inputError();
+  return value;
+};
+const sha256=value=>{
+  if(typeof value!=='string'||!/^[a-f0-9]{64}$/u.test(value))inputError();
+  return value;
+};
+// The server certifies the anchor; only the signed host observes dirty bytes.
+// An absent portable checkpoint pins the original base, never local metadata.
+export const validateAssistantLocalDraftBasis=value=>{
+  object(value,['workspaceId','runId','baseHead','anchorHead','checkpointId']);
+  const baseHead=workspaceObjectId(value.baseHead),anchorHead=workspaceObjectId(value.anchorHead);
+  const checkpointId=value.checkpointId===null?null:uuid(value.checkpointId);
+  if((checkpointId===null)!==(baseHead===anchorHead))inputError();
+  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),baseHead,anchorHead,checkpointId};
+};
+export const validateAssistantLocalDraft=value=>{
+  object(value,['workspaceId','runId','baseHead','anchorHead','checkpointId','deltaSha256']);
+  const {deltaSha256,...basis}=value;
+  return {...validateAssistantLocalDraftBasis(basis),deltaSha256:sha256(deltaSha256)};
+};
+export const validateAssistantDraftReplacementDigests=value=>{
+  if(!Array.isArray(value)||!value.length||value.length>64)inputError();
+  const replacements=value.map(row=>{
+    object(row,['pathSha256','contentSha256']);
+    return {pathSha256:sha256(row.pathSha256),contentSha256:sha256(row.contentSha256)};
+  });
+  if(new Set(replacements.map(row=>row.pathSha256)).size!==replacements.length)inputError();
+  return replacements;
+};
+export const validateAssistantLocalDraftWitness=value=>{
+  object(value,['basis','replacements']);
+  return {basis:validateAssistantLocalDraft(value.basis),
+    replacements:validateAssistantDraftReplacementDigests(value.replacements)};
+};
 // Project an already validated intermediate witness onto the native locator.
 export const assistantWorkspaceCheckpointLocator=({workspaceId,runId,checkpointId,draftHead})=>
   ({workspaceId,runId,checkpointId,draftHead});
@@ -71,21 +107,31 @@ export const ASSISTANT_TASK_MCP_READ_TOOLS=Object.freeze([
   'get_assistant_owner_question','search_agent_guidance','get_agent_skill','get_agent_procedure',
 ]);
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish']);
+  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish','localDraft']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
   if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined)
     ||value.namedArchive!==undefined&&(value.namedArchive!==true||value.finishPending!==true)
     ||value.retainedHandoff!==undefined&&(value.namedArchive!==undefined||value.finishPending!==true)
-    ||value.portableFinish!==undefined&&(value.namedArchive!==undefined||value.retainedHandoff!==undefined||value.finishPending!==true))inputError();
+    ||value.portableFinish!==undefined&&(value.namedArchive!==undefined||value.retainedHandoff!==undefined||value.finishPending!==true)
+    ||value.localDraft!==undefined&&(value.namedArchive!==undefined||value.retainedHandoff!==undefined
+      ||value.portableFinish!==undefined||value.finishPending!==true))inputError();
   const retainedHandoff=value.retainedHandoff===undefined?undefined:validateAssistantRetainedHandoff(value.retainedHandoff);
   if(retainedHandoff&&(retainedHandoff.locators.workspaceId!==value.workspaceId||retainedHandoff.locators.runId!==value.runId))inputError();
   const portableFinish=value.portableFinish===undefined?undefined:validateAssistantPortableFinish(value.portableFinish);
   if(portableFinish&&(portableFinish.workspaceId!==value.workspaceId||portableFinish.runId!==value.runId))inputError();
+  const localDraft=value.localDraft===undefined?undefined:validateAssistantLocalDraftWitness(value.localDraft);
+  if(localDraft&&(localDraft.basis.workspaceId!==value.workspaceId||localDraft.basis.runId!==value.runId))inputError();
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
     ...(value.finishPending===true?{finishPending:true}:{}),
-    ...(value.namedArchive===true?{namedArchive:true}:{}),...(retainedHandoff?{retainedHandoff}:{}),...(portableFinish?{portableFinish}:{})};
+    ...(value.namedArchive===true?{namedArchive:true}:{}),...(retainedHandoff?{retainedHandoff}:{}),
+    ...(portableFinish?{portableFinish}:{}),...(localDraft?{localDraft}:{})};
 };
+// A v7 start may have durably uploaded a final handoff before stopping.
+// Only the same Run's new immutable v5 head can follow that one local save.
+export const isAssistantLocalDraftFinalization=(previous,next)=>Boolean(previous?.localDraft&&next?.portableFinish
+  &&previous.workspaceId===next.workspaceId&&previous.runId===next.runId
+  &&previous.localDraft.basis.anchorHead!==next.portableFinish.draftHead);
 export const ASSISTANT_WORKSPACE_DRAFT_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract',
   'prepare_assistant_workspace_run','continue_assistant_workspace_action','use_assistant_workspace_files','complete_assistant_pass',
@@ -123,19 +169,10 @@ export const validateAssistantRetainedFinishLocators=(value,{selected=false}={})
 };
 export const validateAssistantRetainedHandoff=(value,{selected=true}={})=>{
   object(value,['locators','handoffSha256','automaticFiles','replacements']);
-  const sha256=hash=>{
-    if(typeof hash!=='string'||!/^[a-f0-9]{64}$/u.test(hash))inputError();
-    return hash;
-  };
-  if(typeof value.automaticFiles!=='boolean'||!Array.isArray(value.replacements)
-    ||!value.replacements.length||value.replacements.length>64)inputError();
-  const replacements=value.replacements.map(row=>{
-    object(row,['pathSha256','contentSha256']);
-    return {pathSha256:sha256(row.pathSha256),contentSha256:sha256(row.contentSha256)};
-  });
-  if(new Set(replacements.map(row=>row.pathSha256)).size!==replacements.length)inputError();
+  if(typeof value.automaticFiles!=='boolean')inputError();
   return {locators:validateAssistantRetainedFinishLocators(value.locators,{selected}),
-    handoffSha256:sha256(value.handoffSha256),automaticFiles:value.automaticFiles,replacements};
+    handoffSha256:sha256(value.handoffSha256),automaticFiles:value.automaticFiles,
+    replacements:validateAssistantDraftReplacementDigests(value.replacements)};
 };
 const taskReadWitness=value=>{
   // A root witness never substitutes for a completed parent. Older workers
@@ -2252,8 +2289,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // Only the exact event-free task pass may reserve a save. The saved
         // draft is independent of provider outcomes and grants no task work
         // or permission to consume any original source input.
-        if(workspaceDraft?.portableFinish&&(!row.scheduled||deliveryEvents(id).length!==0||last?.capacity
-          ||last&&(!last.started||last.workspaceDraft||last.passId!==passId)))fail('ASSISTANT_INBOX_CONFLICT');
+        const independentSave=workspaceDraft?.portableFinish||workspaceDraft?.localDraft;
+        const localFinalization=isAssistantLocalDraftFinalization(last?.workspaceDraft,workspaceDraft);
+        if(independentSave&&(!row.scheduled||deliveryEvents(id).length!==0||last?.capacity
+          ||last&&(!last.started||last.workspaceDraft&&!localFinalization||last.passId!==passId)))fail('ASSISTANT_INBOX_CONFLICT');
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
           fail('ASSISTANT_INBOX_CONFLICT');
@@ -2264,9 +2303,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const postArchive=last?.namedArchiveSettled;
         if(postArchive&&(last.passId!==passId||capacity||workspaceDraft||parentRead||namedArchiveSettled
           ||prerequisiteKey===null||!latest||prerequisiteKey===latest.prerequisite_key))fail('ASSISTANT_INBOX_CONFLICT');
-        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled
-          ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff&&!workspaceDraft?.portableFinish)
-          ||workspaceDraft&&!workspaceDraft.portableFinish&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
+        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled&&!localFinalization
+          ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff&&!independentSave)
+          ||workspaceDraft&&!independentSave&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');

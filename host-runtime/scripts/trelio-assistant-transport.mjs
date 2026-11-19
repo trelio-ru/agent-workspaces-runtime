@@ -13,6 +13,7 @@ import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata,
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
+  validateAssistantLocalDraftBasis, validateAssistantLocalDraft,
   ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -2881,8 +2882,9 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     if(value.passId!==body.passId||!Object.hasOwn(value,key))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
     if(value[key]===null)return null;
     if(value.state!=='review_required'||value.leaseRevision!==expectedLeaseRevision||value.businessReady!==false
-      ||key==='intermediateDraftEvidence'&&value.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-    try{return Object.freeze(validateAssistantWorkspaceCheckpoint(value[key]));}
+      ||key!=='portableFinishEvidence'&&value.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    const validate=key==='localDraftEvidence'?validateAssistantLocalDraftBasis:validateAssistantWorkspaceCheckpoint;
+    try{return Object.freeze(validate(value[key]));}
     catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
   };
 
@@ -3120,6 +3122,9 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async readTaskIntermediateDraftEvidence(input,signal){
       return readTaskCheckpointEvidence('intermediateDraftEvidence',input,signal);
     },
+    async readTaskLocalDraftEvidence(input,signal){
+      return readTaskCheckpointEvidence('localDraftEvidence',input,signal);
+    },
     async renewTaskPass(input,signal) {
       if(input.preNativeRecovery!==undefined&&input.preNativeRecovery!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
@@ -3132,12 +3137,17 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)
         ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId',
-          'reviewId','automatic','technicalPrelude','retainedFinish','portableFinish','intermediateDraft'].includes(key))
+          'reviewId','automatic','technicalPrelude','retainedFinish','portableFinish','intermediateDraft','localDraft'].includes(key))
         ||input.automatic!==undefined&&input.automatic!==true
         ||(input.continuation==='review')!==(input.reviewId===undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish,input.intermediateDraft].filter(value=>value!==undefined).length;
+      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish,input.intermediateDraft,input.localDraft]
+        .filter(value=>value!==undefined).length;
       if(witnesses>1||witnesses&&input.automatic!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      let technicalPrelude,retainedFinish,checkpoint;
+      let technicalPrelude,retainedFinish,checkpoint,localDraft;
+      if(input.localDraft!==undefined){
+        try{localDraft=validateAssistantLocalDraft(input.localDraft);}
+        catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+      }
       if(input.technicalPrelude!==undefined){
         try{technicalPrelude=validateAssistantTechnicalPrelude(input.technicalPrelude);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
@@ -3155,16 +3165,17 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
         ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{}),
-        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(checkpoint?{[checkpointKey]:checkpoint}:{})};
+        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(checkpoint?{[checkpointKey]:checkpoint}:{}),
+        ...(localDraft?{localDraft}:{})};
       const value=await call('passRenew',body,signal),pass=value?.pass;
       if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'
-        ||!(checkpoint?[checkpointKey==='intermediateDraft'?6:5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
+        ||!(localDraft?[7]:checkpoint?[checkpointKey==='intermediateDraft'?6:5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
         ||value.schemaVersion!==1&&(!input.automatic||value.questionPath!==null||!['approved','stale','resumed'].includes(value.state))
         ||!['waiting_owner','approved','declined','clarification','expired','stale','resumed'].includes(value.state)
         ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision
         ||value.invocationId!==value.reviewId||body.reviewId&&body.reviewId!==value.reviewId
         ||!object(pass)||pass.passId!==body.passId||!['leased','closed','review_required'].includes(pass.state)
-        ||value.schemaVersion===6&&pass.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        ||[6,7].includes(value.schemaVersion)&&pass.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const resumed=value.resumed===null?null:{leaseRevision:revision(value.resumed?.leaseRevision),leaseExpiresAt:isoTimestamp(value.resumed?.leaseExpiresAt)};
       if(resumed&&(Object.keys(value.resumed).sort().join(',')!=='leaseExpiresAt,leaseRevision'||resumed.leaseRevision!==body.expectedLeaseRevision+1)
         ||(value.state==='resumed')!==(resumed!==null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');

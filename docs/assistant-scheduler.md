@@ -847,8 +847,9 @@ prelude can enter one separate v4 continuation. Match its own original native
 turn, reviewed signed read-only provider release, closed value-free visit,
 exact browser grant, question and control receipts. The backend must confirm
 the expired grant was never consumed or reported and the handoff still binds
-the same expired Run and draft. A generic provider failure cannot supply this
-proof. Recheck native history under the exclusive App Server writer before
+the same expired Run and draft. The proof uses the grant's original exact
+document binding independently of the website. A generic provider failure
+cannot supply this proof. Recheck native history under the exclusive App Server writer before
 renewal and keep only bounded original locators and digests in the same inbox.
 
 The signed encrypted Workspace opener checks the decrypted native handoff,
@@ -896,6 +897,18 @@ current Run and matching clean local/native status. Saving material does not
 resolve any unknown external operation or consume its receipt, queue item or
 scheduled cycle. The historical v4 recovery remains for older drafts without
 the final-draft marker.
+
+A still-local delta uses the same save-only flow. The backend certifies the
+original base or the latest portable draft of the same expired Run. The
+native full turn provides only the acknowledged file replacement digests,
+independently of earlier tools or sites. The host verifies the entire local
+Git delta against those receipts, then repeats it under the native writer
+and finish lock. The final upload contains exactly the proved files and the
+normal deterministic worklog. Its native handoff becomes a portable draft
+for the ordinary acceptance CAS. Prior effects and the business outcome
+remain independent and unresolved. If the worker stops after upload and
+handoff, the new native final-draft receipt permits only that Run's one
+immutable finalization. It cannot reserve or stage the local delta again.
 
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the

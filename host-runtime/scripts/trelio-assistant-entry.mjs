@@ -20,7 +20,8 @@ import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindow
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { bindAssistantTaskSkillRead, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
-import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft } from './trelio-assistant-inbox.mjs';
+import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft,
+  validateAssistantDraftReplacementDigests } from './trelio-assistant-inbox.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
@@ -1935,6 +1936,7 @@ const productionContext = async (action, options = {}) => {
 // production factory. This does not add it to the model-visible MCP catalogue.
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','readTaskRetainedFinishEvidence','readTaskPortableFinishEvidence','readTaskIntermediateDraftEvidence',
+  'readTaskLocalDraftEvidence',
   'renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
   'beginSourceIntake','reconcileAnsweredSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
   'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery','readRejectedTriageIgnore','reconcileRejectedTriageIgnore'];
@@ -2088,6 +2090,37 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return await verifyAssistantRetainedLocalCheckpoint({
         config:host.configurationDirectory??configDirectory,identity:stableIdentity,pass:expected,witness,signal})&&await checkPass();
     });
+    const inspectLocalDraft=(expected,basis,replacements,signal)=>invoke(async(_live,host)=>{
+      const common=await import('./trelio-workspace.mjs');
+      const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+      const checkPass=async()=>{
+        const current=validateAssistantActivePass(await host.readActivePass(),stableIdentity);
+        return Object.keys(current).length===Object.keys(expected).length
+          &&Object.keys(expected).every(key=>current[key]===expected[key]);
+      };
+      try{
+        signal?.throwIfAborted();
+        if(!await checkPass())return null;
+        const scope={assistantUserId:expected.assistantId,deviceId:expected.deviceId,companyId:expected.companyId,taskId:expected.taskId};
+        const runIdentity={workspaceId:basis.workspaceId,runId:basis.runId};
+        const root=await resolveAssistantWorkspaceRoot(host.configurationDirectory??configDirectory,{scope,runIdentity},stableIdentity.origin);
+        return await common.withWorkspaceFinishLock(basis.runId,async()=>{
+          const directory=path.join(root,'workspace');
+          await common.assertPrivatePathKind(root,'directory');
+          await common.assertPrivatePathKind(directory,'directory');
+          const metadata=await common.readAssistantWorkspaceRunMetadata(root);
+          if(metadata.schemaVersion!==3||metadata.origin!==stableIdentity.origin||metadata.company?.id!==scope.companyId
+            ||!sameLocalPath(metadata.workspaceDirectory??'',directory))return null;
+          const verified=await common.verifyAssistantLocalDraft({metadata,basis,
+            replacements:validateAssistantDraftReplacementDigests(replacements)});
+          signal?.throwIfAborted();
+          return await checkPass()?verified.deltaSha256:null;
+        });
+      }catch(error){
+        signal?.throwIfAborted();
+        return null; // The original delivery remains fenced on any local refusal.
+      }
+    });
 
     // Source calls re-enter the same protected private invocation and signed
     // account/provider reader. No long-lived credential/worker or provider code
@@ -2133,7 +2166,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     });
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
-      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,inspectLocalDraft,
       readSourceMonitor,acknowledgeSource,verifyOwnerReply,
       deliverPreparedOwnerReply:dependencies.deliverPreparedOwnerReply??preparedReplyAction(false),
       verifyPreparedOwnerReply:dependencies.verifyPreparedOwnerReply??preparedReplyAction(true),
@@ -2833,7 +2866,7 @@ const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
   const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS,ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS}=await import('./trelio-assistant-inbox.mjs');
   const accepted=draft.acceptedHead!==undefined;
   const interruptedFinish=draft.finishPending===true;
-  const saveOnly=draft.namedArchive||draft.portableFinish;
+  const saveOnly=draft.namedArchive||draft.portableFinish||draft.localDraft;
   const same=value=>value?.workspaceId===draft.workspaceId&&value?.runId===draft.runId;
   let permitted=(accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:saveOnly
     ?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS).includes(name);
@@ -4211,6 +4244,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const pending=runLifecycle?await readDraftRecovery(identity,host):null;
     const interruptedFinish=pending?.finishPending===true;
     const portableFinish=pending?.portableFinish;
+    const localDraftRecovery=pending?.localDraft;
     const retained=pending?.retainedHandoff;
     const retainedTaskHandoff=retained?{...retained.locators,handoffSha256:retained.handoffSha256,
       automaticFiles:retained.automaticFiles,replacements:retained.replacements}:undefined;
@@ -4234,14 +4268,17 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         return {schemaVersion:1,operation:'status',stdout:'',stderr:'',nativeRunStatus,localWorkspaceState:'unverified'};
       }
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-      if((pending?.namedArchive===true||portableFinish)&&plan.localAction.operation==='status'&&nativeRunStatus?.status==='accepted'){
+      if((pending?.namedArchive===true||portableFinish||localDraftRecovery)
+        &&plan.localAction.operation==='status'&&nativeRunStatus?.status==='accepted'){
         // An accepted server revision can arrive before its local terminal
         // marker. Prove exact clean Git state without running a second finish
         // or pretending the enclosing task's WORK.md was accepted.
         return common.withWorkspaceFinishLock(plan.runIdentity.runId,async()=>{
           const metadata=await common.readAssistantWorkspaceRunMetadata(root);
           const head=(await common.runGit(['rev-parse','HEAD'],{cwd:directory})).stdout.trim();
-          if(!(portableFinish?metadata.scopeType==='task'&&head===portableFinish.draftHead:['project','company'].includes(metadata.scopeType))
+          if(!(portableFinish?metadata.scopeType==='task'&&head===portableFinish.draftHead
+            :localDraftRecovery?metadata.scopeType==='task'&&head!==localDraftRecovery.basis.anchorHead
+              &&metadata.baseHead===localDraftRecovery.basis.baseHead:['project','company'].includes(metadata.scopeType))
             ||metadata.workspaceId!==plan.runIdentity.workspaceId
             ||metadata.runId!==plan.runIdentity.runId||metadata.company?.id!==plan.scope.companyId
             ||metadata.origin!==identity.origin||!sameLocalPath(metadata.workspaceDirectory??'',directory)
@@ -4342,11 +4379,21 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
               const head=(await common.runGit(['rev-parse','HEAD'],{cwd:directory})).stdout.trim();
               if(local.workspaceId!==plan.runIdentity.workspaceId||local.runId!==plan.runIdentity.runId||local.terminalStatus
                 ||metadata.company?.id!==plan.scope.companyId||metadata.origin!==identity.origin
-                ||!hasFinishRecoveryMarker(metadata)
-                ||metadata.candidateHead!==head||metadata.materializedHead!==head||metadata.baseHead===head
-                ||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)
-                ||(!retainedTaskHandoff&&await common.getGitStatus(directory,metadata.objects??[])))
+                ||!sameLocalPath(metadata.workspaceDirectory??'',directory))
                 fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+              if(!localDraftRecovery&&(!hasFinishRecoveryMarker(metadata)||metadata.candidateHead!==head
+                ||metadata.materializedHead!==head||metadata.baseHead===head
+                ||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)
+                ||(!retainedTaskHandoff&&await common.getGitStatus(directory,metadata.objects??[]))))
+                fail('ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+              if(localDraftRecovery){
+                await common.verifyAssistantLocalDraft({metadata,...localDraftRecovery});
+                const {basis}=localDraftRecovery;
+                const draftHead=basis.checkpointId===null?null:basis.anchorHead;
+                await common.runWorkspaceCommand(nativeArgs,{retainedAssistantFinish:{...plan.runIdentity,
+                  baseHead:basis.baseHead,candidateHead:basis.anchorHead,draftHead,localDraftRecovery}});
+                return;
+              }
               if(retainedTaskHandoff){
                 if(nativeRunSnapshot?.run?.status!=='expired'||nativeRunSnapshot.run.baseHead!==metadata.baseHead
                   ||nativeRunSnapshot.run.draftHead!==retainedTaskHandoff.draftHead||nativeRunSnapshot.run.candidateHead
@@ -4373,6 +4420,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
               retainedAssistantHandoff:pending?.namedArchive===true&&plan.localAction.operation==='finish',
               ...(plan.localAction.operation==='finish'&&retainedTaskHandoff?{retainedTaskHandoff}:{}),
               ...(plan.localAction.operation==='finish'&&portableFinish?{portableFinish}:{}),
+              ...(plan.localAction.operation==='finish'&&localDraftRecovery?{localDraftRecovery}:{}),
               ...(opening&&typeof common.currentWorkspaceExecutionProfile==='function'&&common.currentWorkspaceExecutionProfile()?.kind==='digital_assistant'
                 ?{assertAssistantMaterializationCurrent:async claimed=>{
                   materialization.throwIfAborted();

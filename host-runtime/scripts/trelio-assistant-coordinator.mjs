@@ -2,7 +2,7 @@
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
 import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
   assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff,
-  assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft } from './trelio-assistant-inbox.mjs';
+  assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft, isAssistantLocalDraftFinalization } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -65,7 +65,7 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 };
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, verifyRetainedLocalCheckpoint = null, workspaceForIntake = null, readSourceMonitor = null,
+  passHost = null, verifyRetainedLocalCheckpoint = null, inspectLocalDraft = null, workspaceForIntake = null, readSourceMonitor = null,
   acknowledgeSource = null, verifyOwnerReply = null,
   deliverPreparedOwnerReply = null, verifyPreparedOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
@@ -1656,9 +1656,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // An interrupted snapshot alone is never a terminal receipt. Wait for the
     // exact prior lease to expire. An event-free scheduled root requires its
     // own complete native read witness and cannot borrow another turn as parent.
-    if(workspaceDraft&&(!retained&&!workspaceDraft.portableFinish||retained?.workspaceDraft&&retained.started||live.workMode!=='task'
+    const independentSave=workspaceDraft?.portableFinish||workspaceDraft?.localDraft;
+    const localFinalization=isAssistantLocalDraftFinalization(retained?.workspaceDraft,workspaceDraft);
+    if(workspaceDraft&&(!retained&&!independentSave||retained?.workspaceDraft&&retained.started&&!localFinalization||live.workMode!=='task'
       ||job.events.some(event=>event.conversation_key)
-      ||!retained?.workspaceDraft&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
+      ||(!retained?.workspaceDraft||localFinalization)&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
     if(parentRead&&((parentRead.intermediateDraft
       ?terminalMarkerId!==job.deliveryId||job.events.some(event=>event.conversation_key)
         ||retained&&!retained.taskReadParent?.intermediateDraft
@@ -1683,7 +1685,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
     if(postArchive&&(live.workMode!=='task'||job.events.some(event=>event.conversation_key||event.owner_question_id)
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
-    const saveWithIndependentOutcomeCheck=workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||workspaceDraft?.portableFinish;
+    const saveWithIndependentOutcomeCheck=workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||independentSave;
     if(parentRead||saveWithIndependentOutcomeCheck||archive||postArchive)await assertPendingOutcome(signal);
     // Do not consume another continuation intent/lease while the actual native
     // client has no usable hooks. Production reads its current task folder;
@@ -1715,10 +1717,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ...(intent.taskReadParent?.technicalPrelude?{technicalPrelude:intent.taskReadParent.technicalPrelude}:{}),
       ...(intent.taskReadParent?.intermediateDraft?{intermediateDraft:intent.taskReadParent.intermediateDraft}:{}),
       ...(intent.workspaceDraft?.retainedHandoff?{retainedFinish:intent.workspaceDraft.retainedHandoff.locators}:{}),
-      ...(intent.workspaceDraft?.portableFinish?{portableFinish:intent.workspaceDraft.portableFinish}:{})};
+      ...(intent.workspaceDraft?.portableFinish?{portableFinish:intent.workspaceDraft.portableFinish}:{}),
+      ...(intent.workspaceDraft?.localDraft?{localDraft:intent.workspaceDraft.localDraft.basis}:{})};
     let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
-    if(parentRead?.intermediateDraft&&review.schemaVersion!==6)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    const validateVersion=()=>{
+      if(parentRead?.intermediateDraft&&review.schemaVersion!==6||request.localDraft&&review.schemaVersion!==7)
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    };
+    validateVersion();
     // A former runtime may have left a purely technical owner question. Ask
     // the SAME native ledger to migrate only that pending intent; its UUID and
     // original native-start fence survive, including an expired pending prompt.
@@ -1738,13 +1745,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(parentRead?.intermediateDraft?.retainedLocalCheckpoint
         &&await verifyRetainedLocalCheckpoint?.(saved,parentRead.intermediateDraft,ownedSignal)!==true)
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if(workspaceDraft?.localDraft){
+        const {basis,replacements}=workspaceDraft.localDraft;
+        if(await inspectLocalDraft?.(saved,basis,replacements,ownedSignal)!==basis.deltaSha256)
+          fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      }
       if(review.state==='approved'&&!intent.resumeAttempted){
         // Persist before HTTP. A lost response is resolved ONLY by the read
         // branch; it cannot repeat the renewal or native model invocation.
         intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumeAttempted:true});
         review=await passHost.continuePass({...request,automatic:true,continuation:'resume',reviewId:intent.reviewId},saved,ownedSignal);
         lease();await recheck();
-        if(parentRead?.intermediateDraft&&review.schemaVersion!==6)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        validateVersion();
       }
       if(review.state!=='resumed')return null;
       if(!intent.resumeAttempted||review.pass.state!=='leased'||Date.parse(review.pass.leaseExpiresAt)<=now()
@@ -1924,7 +1936,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     if(saved&&job.kind==='task'&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&!job.events.length&&inbox.readDelivery(job.deliveryId).scheduled&&!continued?.capacity&&!continued?.namedArchiveSettled
-      &&(!continued?.workspaceDraft||continued.workspaceDraft.portableFinish&&!continued.started)
+      &&(!continued?.workspaceDraft||continued.workspaceDraft.portableFinish&&!continued.started
+        ||continued.workspaceDraft.localDraft&&continued.started)
       &&typeof client.readTaskPortableFinishEvidence==='function'){
       const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
       const live=await client.readTaskPass(pass,signal);lease();
@@ -1971,6 +1984,37 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(existing&&JSON.stringify(existing)!==JSON.stringify(proof))return true;
       return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
         workspaceDraft:{workspaceId:locators.workspaceId,runId:locators.runId,finishPending:true,retainedHandoff:proof}},signal,marker);
+    }
+    if(saved&&job.kind==='task'&&result.state==='uncertain'&&uuid.test(result.turnId??'')
+      &&!job.events.length&&inbox.readDelivery(job.deliveryId).scheduled
+      &&(!continued||continued.started&&continued.taskReadParent?.intermediateDraft
+        ||!continued.started&&continued.workspaceDraft?.localDraft)
+      &&typeof client.readTaskLocalDraftEvidence==='function'&&typeof inspectLocalDraft==='function'){
+      const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
+      const live=await client.readTaskPass(pass,signal);lease();
+      if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
+        ||live.deliveryId!==saved.deliveryId||live.state==='closed'||live.workMode!=='task')return true;
+      const retained=continued?.workspaceDraft?.localDraft;
+      const {deltaSha256:previousHash,...previousBasis}=retained?.basis??{};
+      const localDraftBasis=retained?previousBasis:live.state==='review_required'&&Date.parse(live.leaseExpiresAt)<=now()
+        ?await client.readTaskLocalDraftEvidence({...pass,expectedLeaseRevision:live.leaseRevision},signal):null;
+      lease();
+      if(localDraftBasis){
+        const candidate=await native.readDelivery(threadId,marker,{signal,interruptedWorkspaceDraft:{...pass,localDraftBasis}});
+        lease();
+        if(candidate.state==='interrupted_local_draft'&&candidate.turnId===result.turnId){
+          const {replacements}=candidate;
+          const deltaSha256=await inspectLocalDraft(saved,localDraftBasis,replacements,signal);
+          lease();
+          if(deltaSha256&&(!retained||deltaSha256===previousHash&&JSON.stringify(retained.replacements)===JSON.stringify(replacements))){
+            const {workspaceId,runId}=localDraftBasis;
+            return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
+              workspaceDraft:{workspaceId,runId,finishPending:true,localDraft:{basis:{...localDraftBasis,deltaSha256},replacements}}},
+            signal,marker);
+          }
+        }
+        if(retained)return true;
+      }
     }
     if(saved&&job.kind==='task'&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&marker===job.deliveryId&&(!continued||continued.taskReadParent?.intermediateDraft&&!continued.started)
@@ -2240,12 +2284,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // coordinator cycle; never project a task receipt from this turn.
         return {state:'archive_settlement',kind:job.kind};
       }
-      if(continuation?.workspaceDraft?.portableFinish){
-        const save=await native.readDelivery(threadId,continuation.reviewId,{signal:combined,acceptedPortableFinish:{
-          taskPass:{companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},
-          receipt:continuation.workspaceDraft.portableFinish}});lease();
+      if(continuation?.workspaceDraft?.portableFinish||continuation?.workspaceDraft?.localDraft){
+        const {portableFinish,localDraft}=continuation.workspaceDraft;
+        const {deltaSha256:_localDelta,...localDraftBasis}=localDraft?.basis??{};
+        const save=await native.readDelivery(threadId,continuation.reviewId,{signal:combined,
+          [localDraft?'acceptedLocalDraft':'acceptedPortableFinish']:{
+            taskPass:{companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},
+            receipt:localDraft?localDraftBasis:portableFinish}});lease();
         if(save.state!=='portable_finish_saved'||save.turnId!==result.turnId
-          ||save.acceptedHead!==continuation.workspaceDraft.portableFinish.draftHead)
+          ||portableFinish&&save.acceptedHead!==portableFinish.draftHead)
           fail('ASSISTANT_COORDINATOR_DRAFT_OUTCOME_REQUIRED');
         // The verified save is independent of any original provider effect,
         // so keep the pass unresolved until its business evidence is known.

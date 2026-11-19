@@ -3137,8 +3137,9 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
   }
 });
 
-for(const fixture of ['task','named','retained-task','portable-task'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
+for(const fixture of ['task','named','retained-task','portable-task','local-draft','local-base'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
   const named=fixture==='named',retainedTask=fixture==='retained-task',portableTask=fixture==='portable-task';
+  const localBase=fixture==='local-base',localTask=fixture==='local-draft'||localBase;
   let loseFinalHandoffResponse=false;
   // An actual isolated child is necessary: the common module captures its
   // private config root at import time. Never write synthetic authority/cache
@@ -3399,7 +3400,7 @@ for(const fixture of ['task','named','retained-task','portable-task'])test(`encr
         latestCheckpoint={...input,id:randomUUID(),runId,candidateHead:nativeRun.draftHead,createdAt:new Date().toISOString(),
           ...(retainedTask?{evidenceJson:input.evidence,filesChangedJson:input.filesChanged,
             openQuestionsJson:input.openQuestions,nextActionJson:input.nextAction}:{}),
-          ...(portableTask?{nextActionJson:{...input.nextAction,taskOutcome:input.taskOutcome}}:{})};
+          ...(portableTask||localTask?{nextActionJson:{...input.nextAction,taskOutcome:input.taskOutcome}}:{})};
         if(loseFinalHandoffResponse){
           assert.equal(input.assistantFinalDraft,true);
           loseFinalHandoffResponse=false;
@@ -3790,7 +3791,7 @@ for(const fixture of ['task','named','retained-task','portable-task'])test(`encr
       await fs.writeFile(metadataPath,JSON.stringify({...metadata,runAuthor,candidateHead:draftHead}));
     }
     stage('handoff');
-    if(!portableTask){
+    if(!portableTask&&!localTask){
       const handedOff=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(handoffPlan,{
         withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
       assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
@@ -3823,6 +3824,42 @@ for(const fixture of ['task','named','retained-task','portable-task'])test(`encr
       assert.equal(claims,beforeClaims+1);
       assert.equal(nativeRun.id,runId);
       assert.equal(nativeRun.status,'running');
+    }else if(localTask){
+      const anchorHead=localBase?head:draftHead,checkpointId=localBase?null:randomUUID();
+      const basis={...runIdentity,baseHead:head,anchorHead,checkpointId};
+      if(localBase)await common.runGit(['reset','--mixed',head],{cwd:writable});
+      latestCheckpoint=localBase?null:{id:checkpointId,runId,checkpointType:'draft',candidateHead:draftHead,createdAt:new Date().toISOString()};
+      nativeRun={...nativeRun,status:'expired',draftHead:localBase?null:draftHead,leaseExpiresAt:new Date(Date.now()-1000).toISOString()};
+      const metadata=JSON.parse(await fs.readFile(metadataPath,'utf8'));
+      // An older Run's local checkpoint pointer must never replace the
+      // server's absence of a checkpoint for this exact Run.
+      const anchored={...metadata,latestDraftCheckpointId:checkpointId??randomUUID(),
+        candidateHead:localBase?null:draftHead,draftHead:nativeRun.draftHead,materializedHead:anchorHead};
+      await fs.writeFile(metadataPath,JSON.stringify(anchored));
+      const relativePaths=['local-only.md',`assistants/${f.identity.assistantId}/WORK.md`,'new-result.md',
+        ...(localBase?['server-draft.md']:[])];
+      const replacements=await Promise.all(relativePaths.map(async filePath=>({pathSha256:digest(Buffer.from(filePath)),
+        contentSha256:digest(await fs.readFile(path.join(writable,filePath)))})));
+      const {deltaSha256}=await common.verifyAssistantLocalDraft({metadata:anchored,basis,replacements});
+      readDraftRecovery=async()=>({...runIdentity,finishPending:true,localDraft:{basis:{...basis,deltaSha256},replacements}});
+      const recover=()=>common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
+        withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun}),readDraftRecovery,
+      }));
+      const beforeClaims=claims;
+      const added=path.join(writable,'unwitnessed.md');
+      await fs.writeFile(added,'Synthetic unverified text');
+      await assert.rejects(recover(),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+      assert.equal(claims,beforeClaims);
+      await fs.rm(added);
+      const originalCheckpoint=latestCheckpoint;
+      latestCheckpoint={id:randomUUID(),runId,checkpointType:'draft',candidateHead:anchorHead};
+      await assert.rejects(recover());
+      assert.equal(claims,beforeClaims);
+      latestCheckpoint=originalCheckpoint;
+      await recover();
+      assert.equal(claims,beforeClaims+1);
+      assert.equal(acceptedPublications,0);
+      assert.equal((await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim(),anchorHead);
     }else if(portableTask){
       // Lose the response AFTER the normal finish records its final portable
       // draft. This is a new native save attempt only for the immutable

@@ -7,8 +7,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
-import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
-import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
+  ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
@@ -745,7 +746,7 @@ test('retained handoff projects exact native history without exporting text, pat
   });
   const browser=(operation,args,state)=>({
     type:'mcpToolCall',server:'trelio-assistant',tool:'use_assistant_browser',status:'completed',
-    arguments:{taskPass,siteOrigin:'https://mail.google.com',command:{operation,args}},
+    arguments:{taskPass,siteOrigin:'https://portal.example.test',command:{operation,args}},
     result:{structuredContent:{state,reason:'none'}},
   });
   const finish=turn.items.at(-1);
@@ -757,12 +758,12 @@ test('retained handoff projects exact native history without exporting text, pat
       {operation:'skill_run',stdout:JSON.stringify({ok:true,accounts:[],revision:1})}),
     action('skill_run',{skillId:'telegram-mtproto',releaseId,arguments:['chat-info','--chat','PRIVATE_PEER','--local-account',accountId]},
       {code:'TRELIO_WORKSPACE_ACTION_FAILED'},true),
-    browser('navigate',{url:'https://mail.google.com/mail/'},'preparing'),
+    browser('navigate',{url:'https://portal.example.test/inbox'},'preparing'),
     browser('status',{},'ready'),
     action('secret_browser_prepare',{runId}, {prepared:true,grant:{id:grantId,workspaceId,runId},bridge:{action:{arguments:{
       operation:'secret_browser_fill',runIdentity,parameters:{grantId},
     }}}}),
-    action('secret_browser_fill',{grantId,targetUrl:'https://accounts.google.com/?private=CANARY'},
+    action('secret_browser_fill',{grantId,targetUrl:'https://login.example.test/?private=CANARY'},
       {code:'TRELIO_WORKSPACE_ACTION_FAILED'},true),
     browser('close',{},'closed'),
   );
@@ -776,15 +777,58 @@ test('retained handoff projects exact native history without exporting text, pat
   assert.doesNotMatch(JSON.stringify(witness),/CANARY|PRIVATE_PEER|WORK\.md|Synthetic/u);
   assert.equal(assistantInterruptedPendingWorkspaceFinish(turn,terminalMarkerId,taskPass),null);
 
+  for(const origin of ['https://mail.google.com','https://calendar.example.test']){
+    const edited=structuredClone(turn);
+    for(const item of edited.items.filter(item=>item.tool==='use_assistant_browser')){
+      item.arguments.siteOrigin=origin;
+      if(item.arguments.command.operation==='navigate')item.arguments.command.args.url=origin+'/entry';
+    }
+    assert.deepEqual(classify(edited),witness);
+  }
   for(const change of [
     value=>{value.items.at(-7).arguments.parameters.arguments[0]='send';},
     value=>{value.items.at(-3).arguments.parameters.grantId=randomUUID();},
     value=>{value.items.at(-2).arguments.command.operation='type-text';},
+    value=>{value.items.at(-2).arguments.siteOrigin='https://different-origin.example.test';},
+    value=>{value.items.at(-2).arguments.siteOrigin='http://portal.example.test';},
     value=>{value.items.at(-1).arguments.parameters.summary='';},
     value=>{value.items.push(structuredClone(value.items.at(-3)));},
   ]){
     const edited=structuredClone(turn);change(edited);
     assert.equal(classify(edited),null);
+  }
+});
+
+test('local draft witness extracts only the exact native replacement bytes across provider histories',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
+  const {workspaceId,runId}=workspaceDraft;
+  const basis={workspaceId,runId,baseHead:'d'.repeat(40),anchorHead:'d'.repeat(40),checkpointId:null};
+  turn.items[0].content[0].text=assistantDeliveryMarker(terminalMarkerId)+'\nTRELIO_ASSISTANT_SCOPE '+JSON.stringify({
+    companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true,
+  });
+  const finish=turn.items.pop();
+  const findReplacement=value=>value.items.find(item=>item.arguments?.command?.action==='replace');
+  const replace=findReplacement(turn);
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  replace.arguments.command.path='work/verified-result.md';
+  const later=structuredClone(replace);
+  later.arguments.command.text='The latest exact bytes';
+  later.result.structuredContent.sha256=digest(later.arguments.command.text);
+  turn.items.push({type:'mcpToolCall',server:'trelio-assistant',tool:'continue_assistant_workspace_action',
+    status:'failed',arguments:{schemaVersion:1,operation:'skill_run',parameters:{skillId:'different-provider'}},
+    result:{isError:true,structuredContent:{code:'SYNTHETIC_UNRESOLVED_EXTERNAL_EFFECT'}}},later);
+  const read=(history=turn)=>assistantInterruptedLocalDraft(history,terminalMarkerId,taskPass,basis);
+  assert.deepEqual(read(),[{pathSha256:digest(later.arguments.command.path),contentSha256:digest(later.arguments.command.text)}]);
+  for(const mutate of [
+    value=>{value.items.at(-1).result.structuredContent.sha256='f'.repeat(64);},
+    value=>{value.items.at(-1).arguments.runIdentity.runId=randomUUID();},
+    value=>{value.items.at(-1).arguments.taskPass.passId=randomUUID();},
+    value=>{value.items.at(-2).status='inProgress';},
+    value=>{value.items.push(finish);},
+    value=>{value.items.push(structuredClone(value.items[0]));},
+  ]){
+    const changed=structuredClone(turn);mutate(changed);
+    assert.equal(read(changed),null);
   }
 });
 
@@ -1158,15 +1202,28 @@ for(const changed of [false,true])test(`native archive read and owned-writer rec
   }
 });
 
-for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending','accepted_observation','accepted_observation_busy','accepted_observation_changed','accepted_observation_unfiltered','accepted_control','accepted_control_busy','accepted_control_changed','accepted_control_unfiltered'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
+for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish_pending','accepted_observation','accepted_observation_busy','accepted_observation_changed','accepted_observation_unfiltered','accepted_control','accepted_control_busy','accepted_control_changed','accepted_control_unfiltered','local','local_busy','local_changed','local_unfiltered'])test(`native Workspace recovery requires its own writer and restricted catalogue (${state})`,async()=>{
   const accepted=state==='accepted'||state.startsWith('accepted_observation')||state.startsWith('accepted_control');
-  const mode=state.replace(/^accepted_(?:observation|control)_/u,'');
-  const {turn,...workspaceDraftRecovery}=state.startsWith('accepted_control')?acceptedControlHistory():state.startsWith('accepted_observation')?acceptedObservationHistory():state==='accepted'?acceptedHistory():state==='finish_pending'?pendingFinishHistory():draftHistory();
+  const local=state==='local'||state.startsWith('local_');
+  const mode=state.replace(/^(?:accepted_(?:observation|control)|local)_/u,'');
+  const {turn,...workspaceDraftRecovery}=state.startsWith('accepted_control')?acceptedControlHistory():state.startsWith('accepted_observation')?acceptedObservationHistory():state==='accepted'?acceptedHistory():state==='finish_pending'||local?pendingFinishHistory():draftHistory();
   const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),steps=[];
   const pluginId='trelio-digital-assistant@trelio-digital-assistants';
-  const tools=accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
+  const tools=accepted?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS:local?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
+  if(local){
+    const {workspaceId,runId}=workspaceDraftRecovery.workspaceDraft;
+    const {terminalMarkerId,taskPass}=workspaceDraftRecovery;
+    const basis={workspaceId,runId,baseHead:'c'.repeat(40),anchorHead:'c'.repeat(40),checkpointId:null};
+    turn.items.pop(); // No finish was invoked in this original turn.
+    turn.items[0].content[0].text=assistantDeliveryMarker(terminalMarkerId)+'\nTRELIO_ASSISTANT_SCOPE '+JSON.stringify({
+      companyId:taskContext.companyId,taskId:taskContext.taskId,scheduled:true,
+    });
+    const replacements=assistantInterruptedLocalDraft(turn,terminalMarkerId,taskPass,basis);
+    assert.ok(replacements);
+    workspaceDraftRecovery.workspaceDraft.localDraft={basis:{...basis,deltaSha256:'c'.repeat(64)},replacements};
+  }
   let reads=0,starts=0;
-  const operation=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},{
+  const operation=()=>runAssistantCodexPass({threadId,deliveryId,cwd,taskContext:local?{...taskContext,scheduled:true}:taskContext,execution},{
     executable:process.execPath,environment:{},workspaceDraftRecovery,requireAbsentMarker:true,
     continuationReview:{priorTurnId:workspaceDraftRecovery.terminalTurnId,reviewId:deliveryId},
     readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
@@ -1193,6 +1250,8 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish
         }else if(state==='finish_pending'){
           assert.match(text,/First call continue_assistant_workspace_action/u);
           assert.match(text,/do not repeat any question, control change/u);
+        }else if(local){
+          assert.match(text,/Only save the verified local changes/u);
         }else{
           assert.match(text,/only to preserve its interrupted Workspace draft/u);
           assert.match(text,/Do not repeat the browser check/u);
@@ -1200,7 +1259,7 @@ for(const state of ['confirmed','busy','changed','unfiltered','accepted','finish
       },
     }),
   });
-  if(['confirmed','accepted','finish_pending','accepted_observation','accepted_control'].includes(mode)){
+  if(['confirmed','accepted','finish_pending','accepted_observation','accepted_control','local'].includes(mode)){
     assert.equal((await operation()).state,'completed');
     assert.deepEqual(steps,['writer','draft','renew']);assert.equal(starts,1);
   }else{
