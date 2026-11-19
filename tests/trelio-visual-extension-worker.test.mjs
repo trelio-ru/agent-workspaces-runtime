@@ -318,7 +318,8 @@ test('a blocked document in another attached tab leaves the active frame usable'
   assert.equal(worker.nativeCommands.filter(value => value.method === 'Input.dispatchMouseEvent'
     && value.args.type === 'mouseWheel').length, 1);
   worker.selectTab(2);
-  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked' });
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked',
+    documentDiagnostic: { stage: 'response_rejected', frame: 'unresolved', httpStatus: 200 } });
 });
 
 test('a confirmed main document 403 has the same diagnostic for text and screenshots', async () => {
@@ -370,7 +371,8 @@ test('the document guard still fences a blocked root or an unknown frame', async
     worker.frameEvent('Page.frameAttached', { frameId: 'current-child', parentFrameId: 'main' });
     await worker.rejectDocument('current-child');
     for (const operation of ['read-text', 'screenshot'])
-      assert.deepEqual(await worker.dispatch(operation), { state: 'error', reason: 'document_blocked' });
+      assert.deepEqual(await worker.dispatch(operation), { state: 'error', reason: 'document_blocked',
+        documentDiagnostic: { stage: 'response_rejected', frame: 'unresolved', httpStatus: 200 } });
     assert.deepEqual(worker.nativeCommands.filter(value => value.method === 'Fetch.failRequest'),
       [frameId, 'current-child'].map(requestId => ({ method: 'Fetch.failRequest', args: { requestId, errorReason: 'BlockedByClient' } })));
   }
@@ -432,9 +434,9 @@ test('renderer activation refusal fences later work without input, retry or nati
   const worker = await dialogWorker({ focusEmulation() { calls++; if (refuse) throw Error('PRIVATE_NATIVE_FOCUS_ERROR'); } });
   const before = await worker.dispatch('read-text'); assert.equal(before.state, 'ready');
   refuse = true; worker.detach();
-  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked' });
-  assert.deepEqual(await worker.dispatch('scroll', { frameId: before.frameId, x: 20, y: 20, deltaY: 100 }), { state: 'error', reason: 'document_blocked' });
-  assert.deepEqual(await worker.dispatch('navigate', { url: 'https://example.test/other' }), { state: 'error', reason: 'document_blocked' });
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'document_blocked', documentDiagnostic: { stage: 'renderer_focus' } });
+  assert.deepEqual(await worker.dispatch('scroll', { frameId: before.frameId, x: 20, y: 20, deltaY: 100 }), { state: 'error', reason: 'document_blocked', documentDiagnostic: { stage: 'renderer_focus' } });
+  assert.deepEqual(await worker.dispatch('navigate', { url: 'https://example.test/other' }), { state: 'error', reason: 'document_blocked', documentDiagnostic: { stage: 'renderer_focus' } });
   assert.equal(calls, 2, 'the failed activation is not retried by another command');
   assert.equal(worker.nativeCommands.filter(value => value.method.startsWith('Input.')).length, 0);
   assert.deepEqual(worker.navigation, ['https://example.test/']);

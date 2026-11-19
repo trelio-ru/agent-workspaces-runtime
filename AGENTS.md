@@ -708,6 +708,10 @@ publication tooling также остаются вне этого публичн
   Scroll keeps the SAME original closed transport/input/capture phases and
   response before cleanup; no additional input, capture or larger deadline.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
+  Browser document refusals project closed evidence of response, renderer or
+  the first global guard failure under the same session fence. Do not expose
+  URL/MIME/native text or use this evidence to relax policy or replay input.
+  See [visual browser contract](docs/visual-browser.md).
   Native manual-close regression shares the auth fixture's owned HTTP abort
   helper: abort its failed producer before HTTP-close waits, close listener/sockets
   before browser-queue cleanup, retain the original assertion, and emit only

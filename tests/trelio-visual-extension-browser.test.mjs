@@ -890,6 +890,10 @@ test('document guard follows headerless redirects, blocks final files and isolat
       const result = await browser.call('navigate', { url: origin + suffix });
       assert.equal(result.state, 'error');
       assert.equal(result.reason, 'document_blocked');
+      assert.ok(['response_rejected', 'browser_error_page'].includes(result.documentDiagnostic?.stage),
+        JSON.stringify({ state: result.state, diagnostic: result.documentDiagnostic }));
+      if (result.documentDiagnostic?.stage === 'response_rejected')
+        assert.equal(result.documentDiagnostic.httpStatus, 200);
       assert.equal(result.text, undefined);
       assert.equal(result.image, undefined);
     }

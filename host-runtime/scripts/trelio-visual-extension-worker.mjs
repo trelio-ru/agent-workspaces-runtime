@@ -82,8 +82,17 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   let windowInventoryReady = false;
   const attached = new Set();
   const renderingTabs = new Set();
-  const guardedTabs = new Set(), documentFailures = new Set(), childFrames = new Map();
+  const guardedTabs = new Set(), documentFailures = new Map(), childFrames = new Map();
+  const rootFrames = new Map();
   let guardUpdate = Promise.resolve(), guardFailed = false;
+  let guardDiagnostic;
+  const recordGuardFailure = stage => {
+    guardFailed = true;
+    // Keep the first failure: later operations run under that same fence.
+    guardDiagnostic ??= { stage };
+  };
+  const documentBlocked = documentDiagnostic => Object.assign(Error('document_blocked'), { documentDiagnostic });
+  const metadataFailure = stage => documentBlocked({ stage });
   let pendingAttachment, pendingFileLink, pendingAudio, pendingUpload;
   const escapeRule = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
@@ -193,6 +202,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   chrome.tabs.onRemoved.addListener((tabId, info) => {
     tabBudget.removed(tabId); httpFailures.delete(tabId); documentFailures.delete(tabId); childFrames.delete(tabId);
     navigationGenerations.delete(tabId);
+    rootFrames.delete(tabId);
     secretDocumentMasks.delete(tabId);
     if (protectedSecretTab?.tabId === tabId) protectedSecretTab = undefined;
     if (followingSecretClick?.tabId === tabId) followingSecretClick = undefined;
@@ -237,6 +247,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     attached.delete(source.tabId); renderingTabs.delete(source.tabId); guardedTabs.delete(source.tabId);
     childFrames.delete(source.tabId);
     navigationGenerations.delete(source.tabId);
+    rootFrames.delete(source.tabId);
     dialogs.delete(source.tabId); dialogGuards.delete(source.tabId); notifyDialogs();
     if (frame?.tabId === source.tabId) frame = undefined;
     if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
@@ -244,7 +255,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (pendingUpload?.tabId === source.tabId) pendingUpload.reject(Error('operation_failed'));
     // Revoke the response-rule exception after unexpected native detach. No
     // further observation/input runs while that policy write is unresolved.
-    guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+    guardUpdate = guardUpdate.then(() => installRules()).catch(() => recordGuardFailure('session_rules'));
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
     // Classify only native frame identities from this exact attached tab.
@@ -267,6 +278,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         // Back/forward may restore a credential-bearing renderer even if a
         // different loader was observed in between. Keep former loader masks
         // until tab close. On BFCache restore, mask the returned identity too.
+        rootFrames.set(source.tabId, params.frame?.id);
         if (params.type === 'BackForwardCacheRestore' && secretDocumentMasks.has(source.tabId))
           maskSecretDocument(source.tabId, params.frame?.loaderId);
       } else if (method === 'Page.frameDetached') {
@@ -432,10 +444,20 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           // HTML visually intact rather than commit a Chromium error page).
           const child = params.resourceType === 'Document' && !source.sessionId
             && childFrames.get(source.tabId)?.has(params.frameId);
-          if (!child) documentFailures.add(source.tabId);
+          if (!child) {
+            // Report only native structural evidence. Raw MIME, response
+            // headers, URLs and native errors are deliberately kept here.
+            const httpStatus = params.responseStatusCode;
+            documentFailures.set(source.tabId, {
+              stage: 'response_rejected',
+              frame: rootFrames.get(source.tabId) === params.frameId && typeof params.frameId === 'string' ? 'main' : 'unresolved',
+              ...(Number.isInteger(httpStatus) && httpStatus >= 200 && httpStatus <= 599 ? { httpStatus } : {}),
+              ...(params.responseErrorReason !== undefined ? { networkError: true } : {}),
+            });
+          }
           await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' });
         }
-      })().catch(() => { guardFailed = true; frame = undefined; });
+      })().catch(() => { recordGuardFailure('response_interception'); frame = undefined; });
       return;
     }
     // An allowed main-frame navigation still replaces the observed document.
@@ -478,7 +500,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       download.redirectUrl = redirectUrl;
       // Publish (or revoke) the exact rule before Chromium can follow the
       // native redirect. No second GET or network client is used.
-      guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+      guardUpdate = guardUpdate.then(() => installRules()).catch(() => recordGuardFailure('session_rules'));
       await guardUpdate;
       if (pendingAttachment !== download || guardFailed || Date.now() >= download.until) throw Error('operation_failed');
     }
@@ -590,7 +612,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       return result.viewer === true ? captureDefault() : result;
     } finally {
       clearTimeout(timer); pendingAttachment = undefined;
-      guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+      guardUpdate = guardUpdate.then(() => installRules()).catch(() => recordGuardFailure('session_rules'));
       await guardUpdate;
     }
   }
@@ -613,7 +635,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       guardedTabs.add(tabId);
     }
     guardUpdate = guardUpdate.then(() => installRules());
-    try { await guardUpdate; } catch (error) { guardFailed = true; throw error; }
+    try { await guardUpdate; } catch (error) { recordGuardFailure('session_rules'); throw error; }
     await keepRendering(tabId);
   }
   async function keepRendering(tabId) {
@@ -628,7 +650,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // Manual handoff detaches the debugger, which releases Chromium's capture
     // handle; failed activation permanently fences this worker's observations.
     try { await command(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }); }
-    catch { guardFailed = true; throw Error('document_blocked'); }
+    catch { recordGuardFailure('renderer_focus'); throw documentBlocked(guardDiagnostic); }
     renderingTabs.add(tabId);
   }
   // Input belongs to the browser's already-selected tab. Merely choosing the
@@ -637,7 +659,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const preferredTab = tabs => tabs.sort((a, b) => Number(Boolean(b.active)) - Number(Boolean(a.active)) || b.id - a.id)[0];
   async function selected() {
     await guardUpdate;
-    if (guardFailed) throw Error('document_blocked');
+    if (guardFailed) throw documentBlocked(guardDiagnostic);
     await tabCleanup;
     if (tabCleanupFailed) throw Error('tab_limit_reached');
     const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => tabBudget.contains(t.id) && allowed(t.url));
@@ -669,7 +691,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // first click, key, wheel, file selection or navigation uses retired UI.
     if (Date.now() >= config.deadlineAt) throw Error('lease_expired');
     if (manual || authenticating) throw Error('manual_control_active');
-    if (guardFailed) throw Error('document_blocked');
+    if (guardFailed) throw documentBlocked(guardDiagnostic);
     if (observation.generation !== navigationGeneration(observation.tabId)) throw Error('stale_frame');
   }
   function dialogText(dialog) {
@@ -844,12 +866,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // macOS even tabs.update({active:true}) can activate the containing app.
     navigationStage?.('observe_attach');
     await attach(tab.id);
-    if (documentFailures.has(tab.id)) throw Error('document_blocked');
+    if (documentFailures.has(tab.id)) throw documentBlocked(documentFailures.get(tab.id));
     const generation = navigationGeneration(tab.id);
     navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
-    if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
-    if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw metadataFailure('browser_error_page');
+    if (tree.frameTree.frame.mimeType !== 'text/html') throw metadataFailure('rendered_mime');
     navigationStage?.('credential_guard');
     await credentialGuard(tab.id);
     navigationStage?.('layout');
@@ -871,7 +893,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         // returned pixels may belong to an earlier document or layout even
         // if the current page still has the same MIME type and URL.
         const after = await command(tab.id, 'Page.getFrameTree');
-        if (guardFailed) throw Error('document_blocked');
+        if (guardFailed) throw documentBlocked(guardDiagnostic);
         if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.id !== tree.frameTree.frame.id
           || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
         const frameId = crypto.randomUUID();
@@ -908,12 +930,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
     navigationStage?.('observe_attach');
     await attach(tab.id);
-    if (documentFailures.has(tab.id)) throw Error('document_blocked');
+    if (documentFailures.has(tab.id)) throw documentBlocked(documentFailures.get(tab.id));
     const generation = navigationGeneration(tab.id);
     navigationStage?.('frame_tree');
     const tree = await command(tab.id, 'Page.getFrameTree');
-    if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
-    if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw metadataFailure('browser_error_page');
+    if (tree.frameTree.frame.mimeType !== 'text/html') throw metadataFailure('rendered_mime');
     await assertSecretDocumentUnmasked(tab.id, tree.frameTree.frame.loaderId);
     navigationStage?.('layout');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
@@ -924,7 +946,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // A navigation during extraction cannot mint a token for the old document.
     navigationStage?.('frame_recheck');
     const after = await command(tab.id, 'Page.getFrameTree');
-    if (guardFailed) throw Error('document_blocked');
+    if (guardFailed) throw documentBlocked(guardDiagnostic);
     if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.id !== tree.frameTree.frame.id
       || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
@@ -1004,7 +1026,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       }
       if (manual || authenticating || currentDialog()) throw Error('manual_control_active');
       const tab = await selected();
-      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
+      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw documentBlocked(documentFailures.get(tab.id));
       const generation = navigationGeneration(tab.id);
       const { frameTree } = await command(tab.id, 'Page.getFrameTree');
       const main = frameTree?.frame;
@@ -1053,9 +1075,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (op === 'manual-completion-probe') {
       if (!config.manualCompletion || !manual || authenticating || Object.keys(args).length) throw Error('invalid_input');
       await guardUpdate;
-      if (guardFailed) throw Error('document_blocked');
+      if (guardFailed) throw documentBlocked(guardDiagnostic);
       const tab = await selected(), generation = navigationGeneration(tab.id);
-      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
+      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw documentBlocked(documentFailures.get(tab.id));
       const evidence = await chrome.tabs.sendMessage(tab.id, { kind: op }, { frameId: 0 });
       // A stale top document or changed selected tab cannot close a new human
       // challenge. This private read never detaches guards or sends input.
@@ -1074,9 +1096,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       }
       if (!authenticating) throw Error('invalid_input');
       await guardUpdate;
-      if (guardFailed) throw Error('document_blocked');
+      if (guardFailed) throw documentBlocked(guardDiagnostic);
       const tab = await selected(); allowedNavigation(tab.url);
-      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
+      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw documentBlocked(documentFailures.get(tab.id));
       if (op === 'authentication-end') {
         const verified = args.success === true && (await chrome.tabs.sendMessage(tab.id, { kind: 'authentication-probe' }, { frameId: 0 }))?.state === 'success';
         authenticating = false; manual = !verified; frame = undefined;
@@ -1157,7 +1179,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (manual || authenticating) throw Error('manual_control_active');
     navigationStage?.('policy_queue');
     await guardUpdate;
-    if (guardFailed) throw Error('document_blocked');
+    if (guardFailed) throw documentBlocked(guardDiagnostic);
     if (op === 'navigate') {
       const url = allowedNavigation(args.url);
       frame = undefined;
@@ -1435,6 +1457,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           const pacingReason = { BROWSER_REQUEST_PREVIOUS_RESULT_NOT_REVIEWED: 'request_not_reviewed', BROWSER_REQUEST_NO_RESULT_TO_REVIEW: 'request_not_ready' }[error.message];
           const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required', 'upload_control_required'].includes(error.message) ? error.message : 'operation_failed');
           send({ kind: 'result', id: message.id, result: { state: 'error', reason,
+            ...(reason === 'document_blocked' && error.documentDiagnostic
+              ? { documentDiagnostic: error.documentDiagnostic } : {}),
             ...(message.operation === 'download-audio' && reason === 'attachment_unsupported' && error.audioDiagnostic
               ? { audioDiagnostic: error.audioDiagnostic } : {}) } });
         }

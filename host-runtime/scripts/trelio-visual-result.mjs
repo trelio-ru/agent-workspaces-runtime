@@ -52,6 +52,19 @@ export function validateVisualAudioDiagnostic(value) {
   return { ...value };
 }
 
+// A document refusal separates failed native operations from a rejected
+// response or renderer. No registered stage can change the original refusal.
+export function validateVisualDocumentDiagnostic(value) {
+  if (!exact(value, ['stage', 'frame', 'httpStatus', 'networkError'])) fail();
+  if (value.stage === 'response_rejected') {
+    if (!['main', 'unresolved'].includes(value.frame)
+      || value.httpStatus !== undefined && (!Number.isInteger(value.httpStatus) || value.httpStatus < 200 || value.httpStatus > 599)
+      || value.networkError !== undefined && value.networkError !== true) fail();
+  } else if (!['session_rules', 'response_interception', 'renderer_focus', 'browser_error_page', 'rendered_mime'].includes(value.stage)
+    || Object.keys(value).length !== 1) fail();
+  return { ...value };
+}
+
 // Startup diagnostics are a CLOSED protocol, not a redacted exception dump.
 // Keep this beside the existing result validator so the detached worker, its
 // private HTTP client and MCP all enforce exactly the same disclosure boundary.
@@ -158,7 +171,11 @@ function validatePng(bytes, discardBrowserColorProfile = false) {
 }
 
 function validateResult(value, discardBrowserColorProfile) {
-  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic', 'audioDiagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic', 'audioDiagnostic', 'documentDiagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (value.documentDiagnostic !== undefined) {
+    if (value.state !== 'error' || value.reason !== 'document_blocked') fail();
+    validateVisualDocumentDiagnostic(value.documentDiagnostic);
+  }
   if (value.audioDiagnostic !== undefined) {
     if (value.state !== 'error' || value.reason !== 'attachment_unsupported' || value.diagnostic !== undefined) fail();
     validateVisualAudioDiagnostic(value.audioDiagnostic);

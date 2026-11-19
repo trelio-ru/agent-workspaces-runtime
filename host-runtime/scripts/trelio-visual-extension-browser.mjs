@@ -13,7 +13,7 @@ import { visualLinkRouter, visualAttachmentRouter, visualAudioReceiver, visualAu
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, normalizeVisualManualCompletion, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validateVisualAudioDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, visualAudioFormat, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
@@ -1109,6 +1109,8 @@ export class ExtensionVisualBrowser {
       if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId,
         ...(operation === 'download-audio' && value.reason === 'attachment_unsupported' && value.audioDiagnostic
           ? { audioDiagnostic: validateVisualAudioDiagnostic(value.audioDiagnostic) } : {}),
+        ...(value.reason === 'document_blocked' && value.documentDiagnostic
+          ? { documentDiagnostic: validateVisualDocumentDiagnostic(value.documentDiagnostic) } : {}),
         ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
       // A native prompt outside the supported alert/confirm contract is a
       // concrete handoff, not a successful click or a generic transport error.

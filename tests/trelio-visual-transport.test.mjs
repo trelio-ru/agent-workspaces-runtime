@@ -21,6 +21,18 @@ import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-d
 import { BrowserSessionError, resolveNpmInvocation } from '../host-runtime/scripts/trelio-browser-session.mjs';
 import { nodeChildEnvironment } from '../host-runtime/scripts/trelio-local-path.mjs';
 
+test('document refusal exposes only closed browser evidence', () => {
+  const evidence = { stage: 'response_rejected', frame: 'unresolved', httpStatus: 304 };
+  const original = visualStatus('error', 'document_blocked', { documentDiagnostic: evidence });
+  assert.deepEqual(original.documentDiagnostic, evidence);
+  for (const payload of [
+    { ...evidence, mime: 'PRIVATE_MIME' }, { ...evidence, frame: 'PRIVATE_FRAME' },
+    { ...evidence, httpStatus: 600 }, { ...evidence, networkError: 'PRIVATE_NETWORK_ERROR' },
+    { stage: 'renderer_focus', httpStatus: 200 }, { stage: 'PRIVATE_STAGE' },
+  ]) assert.throws(() => visualStatus('error', 'document_blocked', { documentDiagnostic: payload }), /VISUAL_RESULT_INVALID/);
+  assert.throws(() => visualStatus('ready', 'none', { documentDiagnostic: evidence }), /VISUAL_RESULT_INVALID/);
+});
+
 test('closed startup diagnostics cross actual worker HTTP and typed MCP unchanged without raw output fallback', async () => {
   let diagnostic = { stage: 'browser_spawn', code: 'browser_exited', exitCode: 1, signal: 'SIGTERM' };
   const server = createVisualControlServer({ token: 'a'.repeat(64), dispatch: async () => visualStatus('error', 'bootstrap_failed', { diagnostic }) });
