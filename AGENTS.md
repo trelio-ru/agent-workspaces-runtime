@@ -1580,7 +1580,8 @@ Exact legacy template bytes для распознавания при мигра�
   Подсказки добавляются только ошибкам, а обычный context budget не увеличивается.
 - Cross-repository tests используют реальный plugin checkout через
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
-  не попадает в package.
+  не попадает в package. При независимом выпуске оболочки проверяй текущий и
+  исторический manifest по [контракту CI](docs/runtime-ci.md#exact-tag-verification).
 - Search discovery и ordinary list/refinement имеют разные корпуса. Matching,
   list predicates и ranking генерируются из backend; parity проверяется реальным
   local provider, включая raw-leaf score, child locator, archives и pagination.

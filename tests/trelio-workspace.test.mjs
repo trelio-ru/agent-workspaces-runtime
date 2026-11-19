@@ -5885,7 +5885,11 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
     assert.deepEqual(servers["trelio-runtime"], {
       ...codexMcp, args: [...codexMcp.args, "--codex", "remote"], startup_timeout_sec: 60,
     });
-    assert.deepEqual(servers["trelio-runtime-local"], {
+    // The independently released Codex shell can add a startup deadline
+    // while the deployed plugin still inherits Codex's earlier default.
+    const { startup_timeout_sec: localStartupTimeout, ...localServer } = servers["trelio-runtime-local"];
+    if (localStartupTimeout !== undefined) assert.equal(localStartupTimeout, 60);
+    assert.deepEqual(localServer, {
       ...codexMcp, args: [...codexMcp.args, "--codex", "local"],
     });
   } else {
