@@ -629,14 +629,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return taskWorkModes.get(modeKey(job.scope,job.taskId))==='discussion'
       ?schedule.setState(scopeFor(job.scope,job.taskId),{state:'paused',expectedRevision:plan.revision}):plan;
   };
-  const completedReceipt = async (job,threadId,nativeReceipt,signal) => {
-    if(job.kind==='provision') return {receipt:nativeReceipt,outcome:null};
+  const completionScope = async (job,threadId) => {
     if(typeof client.readBusinessOutcome!=='function' || !passHost) fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     const pass=validateAssistantActivePass(await passHost.readActivePass(),identity);
     if(pass.companyId!==job.scope.companyId || pass.taskId!==job.taskId || pass.deliveryId!==job.deliveryId
       || pass.threadId!==threadId) fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
     const expected={assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,
       taskId:job.taskId,bindingId:pass.bindingId,bindingRevision:pass.bindingRevision,deliveryId:job.deliveryId,threadId};
+    return {pass,expected};
+  };
+  const completedReceipt = async (job,threadId,nativeReceipt,signal,expectedReceiptId) => {
+    if(job.kind==='provision') return {receipt:nativeReceipt,outcome:null};
+    const {expected}=await completionScope(job,threadId);
     // A native turn can end while waiting for a reply, on a tool denial, or
     // before any Workspace save. Only a trusted live backend outcome for this
     // exact pass can acknowledge its source events. This adapter is supplied
@@ -646,11 +650,24 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     catch { fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED'); }
     lease();
     const nativeParts=typeof nativeReceipt==='string'?nativeReceipt.split(':'):[];
-    if(outcome.state!=='confirmed'
+    if(outcome.state!=='confirmed'||expectedReceiptId!==undefined&&outcome.receiptId!==expectedReceiptId
       || nativeParts.length!==3 || nativeParts[0]!=='codex' || nativeParts[1]!==threadId || !uuid.test(nativeParts[2])) {
       fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
     }
     return {receipt:`assistant:${outcome.receiptId}:${nativeReceipt}`,outcome};
+  };
+  const observeCommittedTaskOutcome = async (job,threadId,marker,turn,signal) => {
+    if(job.kind!=='task'||turn.state!=='uncertain'||!uuid.test(turn.turnId??''))return null;
+    const {pass,expected}=await completionScope(job,threadId);
+    // First select the exact successful call under the existing local lease.
+    // Its receipt is only a candidate until independently confirmed by the
+    // backend. No RPC reads the receipt for arbitrary interrupted work.
+    const observed=await native.readDelivery(threadId,marker,{signal,committedTaskOutcome:{
+      turnId:turn.turnId,taskPass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},expected}});
+    lease();
+    return observed.state==='committed_task_outcome'&&observed.turnId===turn.turnId&&uuid.test(observed.receiptId??'')
+      &&observed.receipt===`codex:${threadId}:${turn.turnId}`
+      ?observed:null;
   };
   const businessConfirmed = async () => {
     // Same fixed journal reader counts ALL retained device uncertainty,
@@ -664,8 +681,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(summary.uncertainDeliveries===0)await onBusinessConfirmed();
     } catch { /* Keep the independent server incident until a later real completion. */ }
   };
-  const commitCompletion = async (job,threadId,nativeReceipt,signal) => {
-    const result=await completedReceipt(job,threadId,nativeReceipt,signal);
+  const commitCompletion = async (job,threadId,nativeReceipt,signal,expectedReceiptId) => {
+    const result=await completedReceipt(job,threadId,nativeReceipt,signal,expectedReceiptId);
     let binding;
     if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{requireModel:false,
       allowTaskDone:job.kind!=='provision',captureBinding:value=>{binding=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
@@ -1963,9 +1980,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         || row.kind!=='task') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
       if(row.state==='complete') {
         const continued=inbox.readPassContinuation(pass.deliveryId);
-        const nativeResult=await native.readDelivery(pass.threadId,continued?(continued.started?continued.reviewId:continued.terminalMarkerId):pass.deliveryId,{signal});lease();
-        if(nativeResult.state!=='completed') fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
-        const result=await completedReceipt(row,pass.threadId,nativeResult.receipt,signal);
+        const marker=continued?(continued.started?continued.reviewId:continued.terminalMarkerId):pass.deliveryId;
+        const nativeResult=await native.readDelivery(pass.threadId,marker,{signal});lease();
+        const closed=nativeResult.state==='completed'?null:await observeCommittedTaskOutcome(row,pass.threadId,marker,nativeResult,signal);
+        const nativeReceipt=nativeResult.state==='completed'?nativeResult.receipt:closed?.receipt;
+        if(!nativeReceipt) fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
+        const result=await completedReceipt(row,pass.threadId,nativeReceipt,signal,closed?.receiptId);
         if(row.receipt!==result.receipt) fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
         await passHost.releasePass(result.outcome);
         await businessConfirmed();
@@ -2036,6 +2056,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }
       notices.clear();
       return false;
+    }
+    if(saved&&job.kind==='task'&&(!continued||continued.started||!continued.resumeAttempted&&!continued.resumed)
+      &&result.state==='uncertain'&&uuid.test(result.turnId??'')){
+      const closed=await observeCommittedTaskOutcome(job,threadId,marker,result,signal);
+      if(closed){
+        await commitCompletion(job,threadId,closed.receipt,signal,closed.receiptId);
+        notices.clear();
+        return false;
+      }
     }
     const namedArchive=Boolean(continued?.taskReadParent?.parentMarkerId||continued?.workspaceDraft?.namedArchive);
     // A full native outcome witness can still finish the original pass.
@@ -2561,7 +2590,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const marker=intent?(intent.started?intent.reviewId:intent.terminalMarkerId):pass.deliveryId;
         const terminal=await native.readDelivery(pass.threadId,marker,{signal});lease();
         if(!uuid.test(terminal.turnId??''))return false;
-        if(terminal.state!=='completed'){
+        const closed=await observeCommittedTaskOutcome(row,pass.threadId,marker,terminal,signal);
+        if(closed)await completedReceipt(row,pass.threadId,closed.receipt,signal,closed.receiptId);
+        if(terminal.state!=='completed'&&!closed){
           // Code maintenance after a positively classified interrupted save
           // still holds the coordinator and read-backs. It cannot renew the
           // pass, start Codex, settle the Run or clear a dispatch notice.

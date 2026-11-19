@@ -495,6 +495,42 @@ test('stored interrupted history is uncertain, not a failed or completed receipt
   }
 });
 
+test('an exact committed task receipt settles interrupted native history without a completion marker',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),markerId=randomUUID();
+  const taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const expected={
+    assistantId:randomUUID(),deviceId:randomUUID(),companyId:taskPass.companyId,taskId:taskPass.taskId,
+    threadId,deliveryId,bindingId:randomUUID(),bindingRevision:5};
+  const marker={type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(markerId)+'\nScheduled input'}]};
+  const effect={type:'mcpToolCall',server:'trelio-assistant',tool:'continue_assistant_workspace_action',status:'completed'};
+  const receiptId=randomUUID();
+  const done={type:'mcpToolCall',server:'trelio-assistant',tool:'complete_assistant_pass',status:'completed',
+    arguments:{taskPass},result:{structuredContent:{schemaVersion:1,state:'confirmed',receiptId,...expected}}};
+  const original={id:turnId,status:'interrupted',items:[marker,effect,done,{type:'agentMessage',text:'Final prose interrupted'}]};
+  const read=async(change=()=>{},threadStatus='notLoaded',selection={turnId,taskPass,expected})=>{
+    const turn=structuredClone(original);change(turn);
+    return readAssistantCodexDelivery(threadId,markerId,{executable:process.execPath,environment:{},
+      committedTaskOutcome:selection,spawnProcess:nativeRpc(request=>{
+        if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd:process.cwd(),status:{type:threadStatus}}}};
+        assert.equal(request.method,'thread/turns/list');
+        assert.deepEqual(request.params,{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
+        return {result:{data:[turn],nextCursor:'older'}};
+      })});
+  };
+  assert.deepEqual(await read(),{state:'committed_task_outcome',turnId,receiptId,receipt:`codex:${threadId}:${turnId}`});
+  const reject=async(...args)=>assert.deepEqual(await read(...args),{state:'uncertain'});
+  await reject(()=>{},'active');
+  await reject(()=>{},'notLoaded',{turnId,taskPass,expected:{threadId:randomUUID()}});
+  await reject(turn=>{turn.id=randomUUID();});
+  await reject(turn=>{turn.items[0].content[0].text=assistantDeliveryMarker(deliveryId)+'\nWrong invocation';});
+  await reject(turn=>{turn.items[1].status='inProgress';});
+  await reject(turn=>{turn.items[2].arguments.taskPass.passId=randomUUID();});
+  await reject(turn=>{delete turn.items[2].result.structuredContent.receiptId;});
+  await reject(turn=>{turn.items[2].result.structuredContent.bindingRevision++;});
+  await reject(turn=>{turn.items[2].status='failed';});
+  await reject(turn=>{turn.items.push(effect);});
+});
+
 const draftHistory=()=>{
   const terminalMarkerId=randomUUID(),terminalTurnId=randomUUID(),workspaceDraft={workspaceId:randomUUID(),runId:randomUUID()};
   const taskPass={companyId:taskContext.companyId,taskId:taskContext.taskId,passId:randomUUID()};

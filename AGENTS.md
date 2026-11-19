@@ -1779,7 +1779,7 @@ Exact legacy template bytes для распознавания при мигра�
   refusal of its exact open-status poll before finish; native handle/Run/pass
   and later clean accepted-head evidence remain mandatory. No failed write or
   unknown result qualifies. [Contract](docs/assistant-scheduler.md#interrupted-named-archive-finish).
-- Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
+- Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. A latest interrupted native turn may settle only its final successful typed completion call, with exact original marker, pass, receipt, no executable successor and independent current backend confirmation. The same evidence permits signed maintenance, without a new turn, write replay or authorization expansion. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
   SELECT-only dispatch summaries accept scheduler v1/v2's unchanged task/source
   projection. Test actual daily completion, health boundary, read-only SQLite
   reopen and the next scheduled cycle; unknown schema and retained uncertainty

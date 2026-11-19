@@ -2688,10 +2688,47 @@ const unreadOwnerHookRefusal=(turn,deliveryId,intakePass)=>{
       &&value.code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid'].includes(value.reason);
   });
 };
+// A tool can commit and return its receipt before the owned Codex turn is
+// interrupted during final prose. Certify only that already committed outcome.
+// An interrupted turn alone can also be a live turn reconstructed from disk.
+// The coordinator independently confirms the selected receipt at the backend.
+const readCommittedTaskOutcome=async(thread,request,marker,{turnId,taskPass,expected})=>{
+  const uncertain={state:'uncertain'};
+  if(thread.status?.type!=='notLoaded'||!UUID.test(turnId??'')||expected?.threadId!==thread.id
+    ||expected.companyId!==taskPass?.companyId||expected.taskId!==taskPass?.taskId)return uncertain;
+  const page=await request('thread/turns/list',{threadId:thread.id,limit:1,sortDirection:'desc',itemsView:'full'});
+  const turn=Array.isArray(page?.data)&&page.data.length===1?page.data[0]:null;
+  if(turn?.id!==turnId||turn.status!=='interrupted'||!Array.isArray(turn.items)
+    ||turn.items.length<2||turn.items.length>512)return uncertain;
+  const [root,...items]=turn.items;
+  if(root?.type!=='userMessage'||!Array.isArray(root.content)||root.content.length!==1
+    ||root.content[0]?.type!=='text'||typeof root.content[0].text!=='string'
+    ||!root.content[0].text.startsWith(marker+'\n'))return uncertain;
+  let receiptId=null;
+  for(const item of items){
+    if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
+    // Nothing executable may follow the receipt, and every earlier action
+    // must have a terminal native item. This is settlement, not authority to
+    // replay any previous action or certify it from chat text.
+    if(receiptId||!['mcpToolCall','dynamicToolCall','commandExecution','webSearch','imageGeneration'].includes(item?.type)
+      ||!['completed','failed'].includes(item.status))return uncertain;
+    if(item.type!=='mcpToolCall'||item.server!=='trelio-assistant'||item.tool!=='complete_assistant_pass'
+      ||item.status!=='completed'||item.error!=null||item.result?.isError===true)continue;
+    const receipt=item.result?.structuredContent;
+    if(!exactDraftPass(item.arguments?.taskPass,taskPass)||receipt?.schemaVersion!==1
+      ||receipt.state!=='confirmed'||!UUID.test(receipt.receiptId??'')
+      ||['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId']
+        .some(key=>receipt[key]!==expected[key]))return uncertain;
+    receiptId=receipt.receiptId;
+  }
+  return receiptId?{state:'committed_task_outcome',turnId,receiptId,receipt:`codex:${thread.id}:${turnId}`}:uncertain;
+};
 export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.committedTaskOutcome!==undefined)
+      return readCommittedTaskOutcome(_thread,request,marker,options.committedTaskOutcome);
     if(options.unreadOwnerPreflight!==undefined){
       const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
       const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;

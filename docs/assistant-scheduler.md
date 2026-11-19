@@ -653,6 +653,13 @@ archive/status are independent. Archived tasks, like done tasks, permit only
 existing own canonical Run settlement and original outcome reconciliation.
 
 Positive native read-back and the exact backend receipt must both exist.
+If Codex is interrupted after the successful `complete_assistant_pass` response,
+the coordinator can select the receipt from the full latest native turn under
+its existing lease. Require the original invocation marker and exact pass,
+no unfinished item and no executable successor. Independently read the same
+receipt from the closed backend pass. An interrupted turn or final prose by
+itself is still uncertain. This path also permits fenced signed maintenance
+and can resume pass release after local commit without another native turn.
 Continuation, inbox processing, completion timestamps and next-run are committed
 inside the same SQLite transaction. Ordinary changed cadence resets its anchor
 to this completion; unchanged cadence preserves its calendar anchor. A fixed

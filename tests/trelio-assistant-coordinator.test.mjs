@@ -2050,6 +2050,72 @@ test('fixed daily completion survives file reopen, stays readable and starts the
   }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
+test('a committed interrupted task settles the same journal across loss, reopen and the next daily slot',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-committed-outcome-'));
+  const file=path.join(directory,'queue.sqlite');
+  let database=new DatabaseSync(file);
+  const f=fixture(t,{database,ownsDatabase:false});
+  Object.assign(f.continuation,{goalState:'waiting_owner',cadence:'daily',dailyLocalTime:'20:00'});
+  const ordinaryRun=f.options.native.run,ordinaryReceipt=f.options.client.readBusinessOutcome;
+  const release=f.options.passHost.releasePass,turnId=randomUUID();
+  let coordinator=f.coordinator,interrupted,durable,observations=0,health=0,loseRelease=true,matchBackend=false;
+  f.options.onBusinessConfirmed=()=>{assert.equal(f.activePass(),null);health++;};
+  f.options.native.run=async(input,options)=>{
+    if(interrupted)return ordinaryRun(input,options);
+    await ordinaryRun(input,options);
+    interrupted={deliveryId:input.deliveryId,threadId:input.threadId};
+    f.deliveries.set(input.deliveryId,{state:'uncertain',turnId});
+    throw Object.assign(new Error('native turn interrupted after committed receipt'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  };
+  f.options.native.readDelivery=async(thread,marker,options)=>{
+    if(!options.committedTaskOutcome)return f.deliveries.get(marker)??{state:'uncertain'};
+    assert.deepEqual({threadId:thread,deliveryId:marker},interrupted);
+    const {taskPass,expected}=options.committedTaskOutcome;
+    assert.equal(taskPass.passId,f.activePass().passId);
+    assert.equal(options.committedTaskOutcome.turnId,turnId);
+    assert.deepEqual(f.deliveries.get(marker),{state:'uncertain',turnId});
+    durable??=await ordinaryReceipt(expected);
+    observations++;
+    return {state:'committed_task_outcome',turnId,receiptId:durable.receiptId,receipt:`codex:${thread}:${turnId}`};
+  };
+  f.options.client.readBusinessOutcome=async args=>{
+    if(args.deliveryId!==interrupted?.deliveryId)return ordinaryReceipt(args);
+    const outcome=await ordinaryReceipt(args);
+    return matchBackend?outcome:{...outcome,receiptId:randomUUID()};
+  };
+  f.options.passHost.releasePass=async outcome=>{
+    if(loseRelease)throw Object.assign(new Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    return release(outcome);
+  };
+  try{
+    await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+    await coordinator.pollOnce();await coordinator.workOnce();
+    f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});
+    f.advance(300001);await coordinator.pollOnce();
+    await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    const state=()=>database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(interrupted.deliveryId).state;
+    await assert.rejects(coordinator.workOnce(),/BUSINESS_OUTCOME_REQUIRED/);
+    assert.equal(state(),'uncertain');assert.equal(health,0);assert.equal(f.counts().runs,1);
+    matchBackend=true;
+    assert.equal(await coordinator.updateRuntimeAtBoundary(async()=>{
+      assert.equal(state(),'uncertain');assert.equal(health,0);assert.equal(f.counts().runs,1);
+    }),true);
+    await assert.rejects(coordinator.workOnce(),/UNAVAILABLE/);
+    // The schedule and journal committed before the lost independent pass
+    // release. Reopen on disk and compare the exact receipt again.
+    assert.equal(state(),'complete');assert.ok(f.activePass());assert.equal(health,0);
+    await coordinator.close();database.close();database=new DatabaseSync(file);
+    loseRelease=false;coordinator=createAssistantCoordinator({...f.options,database});
+    await coordinator.workOnce();
+    assert.equal(f.activePass(),null);assert.equal(health,1);assert.equal(observations,4);assert.equal(f.counts().runs,1);
+    const next=coordinator.status()[0];
+    assert.equal(next.threadId,interrupted.threadId);assert.equal(next.nextRunAt,Date.parse('2026-01-01T17:00:00Z'));
+    f.advance(next.nextRunAt-f.options.now());await coordinator.workOnce();await coordinator.workOnce();
+    assert.equal(f.counts().runs,2);
+    assert.equal(coordinator.status()[0].nextRunAt,Date.parse('2026-01-02T17:00:00Z'));
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 test('another retained device delivery suppresses dispatch recovery even after this task committed',async t=>{
   const f=fixture(t);let recoveries=0;f.options.onBusinessConfirmed=async()=>{recoveries++;};
   Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
