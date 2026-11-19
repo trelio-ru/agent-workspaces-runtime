@@ -1124,15 +1124,19 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await chrome.tabs.update(tab.id, { active: true });
       activeStartup();
       await chrome.windows.update(tab.windowId, { focused: true });
-      // Activation can settle after the native update returns. Observe the
-      // same window under the existing lease without repeating the focus
-      // request or inspecting any login content.
+      // Restoring the owned window is a stable property of this handoff.
+      // Desktop focus is global and another valid window can acquire it
+      // immediately after the OS acknowledged our one activation request.
+      // Verify visibility under the same lease without competing for focus.
       const until = Math.min(config.deadlineAt, Date.now() + 1500);
       do {
         activeStartup();
         const window = await chrome.windows.get(tab.windowId);
         activeStartup();
-        if (window.focused === true && window.state !== 'minimized') return { state: 'manual_input_required' };
+        if (window.id !== tab.windowId || !ownedWindows.has(tab.windowId)) throw Error('session_closed');
+        if (['normal', 'maximized', 'fullscreen', 'locked-fullscreen'].includes(window.state)) {
+          return { state: 'manual_input_required' };
+        }
         await pause(50);
       } while (Date.now() < until);
       throw Error('operation_failed');

@@ -99,7 +99,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
         async update(id, input) {
           windowUpdates.push({ id, input: JSON.parse(JSON.stringify(input)) });
           if (input.state) windowState = input.state;
-          if (input.focused) { await requestWindowFocus?.(); windowFocused = true; }
+          if (input.focused) windowFocused = await requestWindowFocus?.() !== false;
         } },
       tabs: { onCreated: { addListener(fn) { tabCreated = fn; } }, onRemoved: events,
         async query() { return [...openTabs].map(id => ({ id, windowId: 1, url: currentUrl, status: 'complete', active: id === selectedTab })); },
@@ -439,6 +439,13 @@ test('renderer activation refusal fences later work without input, retry or nati
   assert.equal(worker.nativeCommands.filter(value => value.method.startsWith('Input.')).length, 0);
   assert.deepEqual(worker.navigation, ['https://example.test/']);
   assert.doesNotMatch(JSON.stringify(worker.sent), /PRIVATE_NATIVE_FOCUS_ERROR/u);
+});
+
+test('an acknowledged handoff stays manual when another window owns desktop focus', async () => {
+  const worker = await dialogWorker({ manual: true, windowState: 'minimized', requestWindowFocus: () => false });
+  assert.deepEqual(await worker.dispatch('manual'), { state: 'manual_input_required' });
+  assert.deepEqual(worker.windowUpdates, [{ id: 1, input: { state: 'normal' } }, { id: 1, input: { focused: true } }]);
+  assert.deepEqual(await worker.dispatch('read-text'), { state: 'error', reason: 'manual_control_active' });
 });
 
 test('fixture window controls cannot be enabled by ordinary transport arguments', async () => {
