@@ -10,7 +10,7 @@ import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, ass
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
   ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
-import { bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
+import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -972,6 +972,61 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
   }
 });
 
+
+test('a completed legacy file export requires the same opened Run and a later checkpoint',async()=>{
+  const {assistantArtifactPathDigest}=await import('../host-runtime/scripts/trelio-local-path.mjs');
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=draftHistory();
+  turn.items.splice(3,2); // No text replacement: the export is the only delta.
+  turn.items[2].arguments.schemaVersion=1;
+  const context=assistantWorkStateContext({assistantId:taskContext.assistantId,companyId:taskPass.companyId,
+    taskId:taskPass.taskId,scheduled:true});
+  turn.items[0].content[0].text=assistantNativePrompt(terminalMarkerId,context,{});
+  const checkpoint={...workspaceDraft,checkpointId:randomUUID(),draftHead:'b'.repeat(40)};
+  const release={skillId:'email-imap-smtp',releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
+    packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'};
+  const output=path.resolve('synthetic-workspace','originals'),saved=path.join(output,'message-17.eml');
+  const contentSha256='d'.repeat(64),sizeBytes=6541;
+  const native=(operation,parameters,result,identity={})=>({type:'mcpToolCall',server:'trelio-assistant',
+    tool:'continue_assistant_workspace_action',status:'completed',
+    arguments:{schemaVersion:1,operation,parameters,taskPass,...identity},
+    result:{structuredContent:{schemaVersion:1,operation,...result}}});
+  const exportCall=native('skill_run',{companyId:taskPass.companyId,skillId:release.skillId,releaseId:release.releaseId,
+    arguments:['--local-account',randomUUID(),'save-message','--folder','INBOX','--uid','17','--output',output]},
+    {stdout:JSON.stringify({saved,size:sizeBytes,sha256:contentSha256,uid:'17',format:'message/rfc822',subject:'private'})});
+  turn.items.push(exportCall,native('checkpoint',{type:'draft'},{taskDraftCheckpoint:checkpoint},{runIdentity:workspaceDraft}));
+  const read=items=>readAssistantCodexDelivery(randomUUID(),terminalMarkerId,{
+    executable:process.execPath,environment:{},interruptedWorkspaceDraft:{...taskPass,intermediateDraft:{workStateContext:context,checkpoint}},
+    spawnProcess:nativeRpc(req=>({result:req.method==='thread/read'?{thread:{id:req.params.threadId,cwd:process.cwd()}}
+      :{data:[{...turn,items}],nextCursor:null}})),
+  });
+  const receipt=await read(turn.items);
+  const artifact={pathSha256:assistantArtifactPathDigest(saved),contentSha256,sizeBytes};
+  assert.deepEqual(receipt,{state:'interrupted_task_checkpoint',turnId:turn.id,checkpoint:{...checkpoint,
+    retainedLocalCheckpoint:true,historicalSkillReleases:[release],retainedArtifacts:[artifact]}});
+  assert.doesNotMatch(JSON.stringify(receipt),/synthetic-workspace|private/);
+  for(const mutate of [
+    items=>{items.push(items.splice(-2,1)[0]);}, // An export after checkpoint is unsaved.
+    items=>{items.splice(2,0,items.splice(-2,1)[0]);}, // No completed open.
+    items=>{items.at(-2).arguments.parameters.arguments.push('--overwrite');},
+    items=>{items.at(-2).arguments.parameters.releaseId=randomUUID();},
+    items=>{items.at(-2).result.structuredContent.stdout=JSON.stringify({saved,size:sizeBytes,sha256:contentSha256,uid:'18',format:'message/rfc822'});},
+    items=>{items.at(-2).status='inProgress';},
+  ]){
+    const items=structuredClone(turn.items);mutate(items);
+    assert.deepEqual(await read(items),{state:'uncertain'});
+  }
+  const generic=structuredClone(turn.items);
+  const call=generic.at(-2),parameters=call.arguments.parameters;
+  Object.assign(parameters,{skillId:'different-signed-exporter',releaseId:randomUUID(),arguments:['export','--output',output]});
+  const value=call.result.structuredContent;
+  value.taskSkillArtifact=bindAssistantTaskSkillArtifact({schemaVersion:1,releaseId:parameters.releaseId,packageSha256:'2'.repeat(64),
+    outputSha256:createHash('sha256').update(value.stdout).digest('hex'),artifact},{scope:taskPass,parameters,stdout:value.stdout});
+  assert.ok(value.taskSkillArtifact);
+  assert.deepEqual(await read(generic),{state:'interrupted_task_checkpoint',turnId:turn.id,
+    checkpoint:{...checkpoint,retainedLocalCheckpoint:true,retainedArtifacts:[artifact]}});
+  value.stdout+=' ';
+  assert.deepEqual(await read(generic),{state:'uncertain'});
+});
 
 test('pre-receipt recovery classifies an exact signed legacy release and keeps all other effects fenced',async()=>{
   const {turn,terminalMarkerId,taskPass,workspaceDraft}=draftHistory();

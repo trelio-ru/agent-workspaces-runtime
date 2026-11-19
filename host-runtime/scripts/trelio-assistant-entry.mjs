@@ -20,7 +20,7 @@ import { createAssistantSetup, createAssistantWindowsBackground, createAssistant
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommandError, assistantSkillGuideSelection, assistantSkillActionWithoutGuidePart, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
-import { bindAssistantTaskSkillRead, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
+import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
 import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft,
   validateAssistantDraftReplacementDigests } from './trelio-assistant-inbox.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
@@ -3649,9 +3649,11 @@ const verifyAssistantRetainedLocalCheckpoint=async({config,identity,pass,witness
     };
     const first=await read();
     if(!first)return false;
-    const options={cwd:directory,signal,timeout:10_000,env:{GIT_OPTIONAL_LOCKS:'0'}};
+    const options={cwd:directory,signal,timeout:10_000,env:{GIT_OPTIONAL_LOCKS:'0',GIT_NO_REPLACE_OBJECTS:'1'}};
     const status=await common.runGit(['status','--porcelain=v1','--untracked-files=all'],options);
     if(status.stdout.length)return false;
+    if(selected.retainedArtifacts)await common.verifyAssistantCheckpointArtifacts({
+      workspaceDirectory:directory,baseHead:first[0],draftHead:selected.draftHead,artifacts:selected.retainedArtifacts,signal});
     const head=await common.runGit(['rev-parse','--verify','HEAD'],options);
     signal?.throwIfAborted();
     return head.stdout.trim()===selected.draftHead&&JSON.stringify(first)===JSON.stringify(await read());
@@ -4164,10 +4166,12 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   }
   let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
   if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation
-    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState','taskSkillRead','taskDraftCheckpoint'].includes(key))
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual','nativeRunStatus','localWorkspaceState','taskSkillRead','taskSkillArtifact','taskDraftCheckpoint'].includes(key))
     || value.taskDraftCheckpoint!==undefined&&!assistantTaskDraftCheckpoint(value.taskDraftCheckpoint,plan.localAction)
     || value.taskSkillRead!==undefined&&(value.operation!=='skill_run'||value.visual!==undefined
       ||!matchesAssistantTaskSkillRead(value.taskSkillRead,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:value.stdout}))
+    || value.taskSkillArtifact!==undefined&&(value.operation!=='skill_run'||value.visual!==undefined||value.taskSkillRead!==undefined
+      ||!matchesAssistantTaskSkillArtifact(value.taskSkillArtifact,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:value.stdout}))
     || value.localWorkspaceState!==undefined&&(value.operation!=='status'||value.localWorkspaceState!=='unverified'
       ||!value.nativeRunStatus||value.stdout!==''||value.stderr!=='')
     || value.nativeRunStatus!==undefined&&(value.operation!=='status'
@@ -4344,7 +4348,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // authoritative; this translation grants no task/status permission.
       return {...plan.localAction,parameters};
     })();
-    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight,taskSkillRead,taskDraftCheckpoint;
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight,taskSkillRead,taskSkillArtifact,taskDraftCheckpoint;
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
       resolveRunRootDirectory:async()=>root,
@@ -4446,7 +4450,10 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
                     ||!(Date.parse(run.leaseExpiresAt)>Date.now()))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
                 }}:{}),
             });
-            if(skill)taskSkillRead=commandResult?.taskSkillRead;
+            if(skill){
+              taskSkillRead=commandResult?.taskSkillRead;
+              taskSkillArtifact=commandResult?.taskSkillArtifact;
+            }
             if(commandResult?.taskDraftCheckpoint!==undefined)
               taskDraftCheckpoint=assistantTaskDraftCheckpoint(commandResult.taskDraftCheckpoint,action);
           }
@@ -4480,10 +4487,13 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       // Preserve the common bounded evidence for semantic reconciliation in
       // this SAME chat. It stays local, not in HTTP/SQLite or a second journal.
       // A fresh open is not saved material and never completes the task.
-      const skillRead=skill&&bindAssistantTaskSkillRead(taskSkillRead,{scope:plan.scope,parameters:plan.localAction.parameters,stdout:result.stdout});
+      const skillBinding={scope:plan.scope,parameters:plan.localAction.parameters,stdout:result.stdout};
+      const skillRead=skill&&bindAssistantTaskSkillRead(taskSkillRead,skillBinding);
+      const skillArtifact=skill&&bindAssistantTaskSkillArtifact(taskSkillArtifact,skillBinding);
       return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}
         :nativeRunStatus?{...result,nativeRunStatus}
         :skillRead?{...result,taskSkillRead:skillRead}
+        :skillArtifact?{...result,taskSkillArtifact:skillArtifact}
         :taskDraftCheckpoint?{...result,taskDraftCheckpoint}:result;
     } catch(error) {
       if(materialization?.aborted && (error===materialization.reason || error?.cause===materialization.reason))

@@ -26,7 +26,7 @@ const reportFinishProgress = (stage, counts = {}) => {
   writeFinishProgress({ stage, ...counts });
 };
 
-import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand, assistantTaskArtifactFromOutput } from "./trelio-skill-secret-setup.mjs";
 import { browserControllerEnabled, parseBrowserControllerArguments, skillResourcePolicy, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
@@ -69,7 +69,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { isDirectModuleInvocation, isLocalPathInside, sameLocalPath, nodeChildEnvironment } from "./trelio-local-path.mjs";
+import { assistantArtifactPathDigest, isDirectModuleInvocation, isLocalPathInside, sameLocalPath, nodeChildEnvironment } from "./trelio-local-path.mjs";
 import {
   buildEncryptedWorkspaceProjectionRecord, materializeEncryptedWorkspaceChain,
   prepareCachedEncryptedWorkspaceFile, uploadEncryptedWorkspaceFile,
@@ -9605,7 +9605,7 @@ const runMaterializedAgentSkillUnqueued = async ({
       throw Object.assign(new Error('Invalid owner intake budget.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
     timeoutMs = Math.min(timeoutMs,remaining);
   }
-  let taskReadOnly=false;
+  let taskEffect;
   if (taskCapture) {
     if(privateSetup){
       const command=readSkillSecretSetupCommand(artifact.parsedPackage,runtimeArguments);
@@ -9616,7 +9616,7 @@ const runMaterializedAgentSkillUnqueued = async ({
       // grant. This placeholder has no credential and never reaches a child.
       buildAgentSkillRuntimeEnvironment({artifact,runtimeDirectory,executionContext,
         grantedEnvironment:{[privateSecretSetup.environmentVariable]:'protected-preflight'},now:runtimeStartedAt});
-    }else taskReadOnly=assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments)==='read_only';
+    }else taskEffect=assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments);
   }
   const entrypointPath = path.join(
     runtimeDirectory,
@@ -9766,7 +9766,8 @@ const runMaterializedAgentSkillUnqueued = async ({
       const stdout = privateSetup || interactiveSecretSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
         : new TextDecoder('utf-8', { fatal: true }).decode(failedPrivatePipe ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode }
-        : { stdout, ...(taskReadOnly ? {taskReadOnly:true} : {}) };
+        : { stdout, ...(taskEffect==='read_only'?{taskReadOnly:true}
+          :taskEffect==='local_artifact'?{taskLocalArtifact:true}:{}) };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.
       // Raw output is private host memory, not model input or diagnostics.
@@ -10449,22 +10450,6 @@ const skillCommand = async (
     localIdentity: resolution.localIdentity,
     companyConnection: resolution.companyConnection,
   };
-  let runtimeArguments = positional.slice(1);
-  if (humanInputSetup) await profile.prepareHumanInputSkillSetupAccount({artifact:artifactForCache,runtimeDirectory,executionContext,humanInputCommand});
-  if (artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)) {
-    const accountResult = await prepareSkillAccount({ origin, artifact: artifactForCache,
-      runtimeDirectory, executionContext, runtimeArguments });
-    if (accountResult.handled) return;
-    executionContext.account = accountResult.account;
-    runtimeArguments = accountResult.runtimeArguments;
-  }
-  if (controllerCommand) {
-    const { runBrowserControllerCommand } = await import('./trelio-browser-session.mjs');
-    const result = await runBrowserControllerCommand({ command: controllerCommand,
-      environment: buildAgentSkillRuntimeEnvironment({ artifact: artifactForCache, runtimeDirectory, executionContext }) });
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    return;
-  }
   const verifyCurrentAssistantSkill = async () => {
     // Materialization/account discovery may cross I/O. Repeat only the native
     // read admission immediately before launch; never replay the provider.
@@ -10490,6 +10475,41 @@ const skillCommand = async (
     if (live.artifact.id !== resolution.artifact.id || live.artifact.packageSha256 !== resolution.artifact.packageSha256)
       throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
   };
+  const taskEffectReceipt = (stdout,artifact) => {
+    if(resolution.artifact.contentProtection!=='plain'||resolution.trust.level!=='platform_verified'
+      ||resolution.trust.artifactLevel!=='platform_verified'||resolution.trust.requiresDeviceConsent)return undefined;
+    const binding={schemaVersion:1,releaseId,packageSha256:resolution.artifact.packageSha256,
+      outputSha256:crypto.createHash('sha256').update(stdout,'utf8').digest('hex')};
+    return artifact?{taskSkillArtifact:{...binding,artifact}}:{taskSkillRead:binding};
+  };
+  let runtimeArguments = positional.slice(1);
+  if (humanInputSetup) await profile.prepareHumanInputSkillSetupAccount({artifact:artifactForCache,runtimeDirectory,executionContext,humanInputCommand});
+  if (artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)) {
+    const inventory = assistant && profile.interactiveLocal !== true && !privateSecretSetup && !humanInputSetup
+      && parseAccountCommand(runtimeArguments)?.operation === 'list';
+    let inventoryOutput;
+    // Account inventory runs on the host and never enters the child executor.
+    // Repeat the same live admission before taking the bound, existing-only
+    // snapshot. Capture the host's bytes through the usual result pipe.
+    if (inventory) await verifyCurrentAssistantSkill();
+    const accountResult = await prepareSkillAccount({ origin, artifact: artifactForCache,
+      runtimeDirectory, executionContext, runtimeArguments,
+      ...(inventory ? { existingInventoryOnly: true, output: result => {
+        inventoryOutput = `${JSON.stringify(result)}\n`;
+        process.stdout.write(inventoryOutput);
+      } } : {}),
+    });
+    if (accountResult.handled) return inventory ? taskEffectReceipt(inventoryOutput) : undefined;
+    executionContext.account = accountResult.account;
+    runtimeArguments = accountResult.runtimeArguments;
+  }
+  if (controllerCommand) {
+    const { runBrowserControllerCommand } = await import('./trelio-browser-session.mjs');
+    const result = await runBrowserControllerCommand({ command: controllerCommand,
+      environment: buildAgentSkillRuntimeEnvironment({ artifact: artifactForCache, runtimeDirectory, executionContext }) });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
   if (assistant) await verifyCurrentAssistantSkill();
   // Observe an exact queued body through the SAME signed process/account
   // engine. The private profile validates native source/task routing before
@@ -10533,12 +10553,13 @@ const skillCommand = async (
     // The signed platform package and actual process arguments were checked
     // by the common executor. A company-local consent, outgoing route or
     // field inside provider stdout cannot issue a structural read witness.
-    if (executed.taskReadOnly===true && outgoing===null && resolution.artifact.contentProtection==='plain'
-      && resolution.trust.level==='platform_verified' && resolution.trust.artifactLevel==='platform_verified'
-      && !resolution.trust.requiresDeviceConsent) return {
-      taskSkillRead:{schemaVersion:1,releaseId,packageSha256:resolution.artifact.packageSha256,
-        outputSha256:crypto.createHash('sha256').update(stdout,'utf8').digest('hex')},
-    };
+    if(outgoing===null){
+      if(executed.taskReadOnly===true)return taskEffectReceipt(stdout);
+      // The declaration can issue only a candidate bound to this successful
+      // child and output. Never promote it to a read or a completed save.
+      const artifact=executed.taskLocalArtifact===true?assistantTaskArtifactFromOutput(stdout,runtimeArguments):null;
+      if(artifact)return taskEffectReceipt(stdout,artifact);
+    }
   }
   // Provider setup stdout may contain private profile paths or handoff URLs.
   // Exit zero/window close is not a login proof. Only this closed structural
@@ -10611,7 +10632,7 @@ const supportsSkillAccountRemoval = artifact => {
 };
 
 export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, executionContext,
-  runtimeArguments, catalogueDirectory = CONFIG_DIRECTORY,
+  runtimeArguments, catalogueDirectory = CONFIG_DIRECTORY, existingInventoryOnly = false,
   discover = discoverSkillAccounts, output = value => process.stdout.write(`${JSON.stringify(value)}\n`) }) => {
   // Admission/signature checks belong to skillCommand above. This local syntax
   // pass must precede account I/O: even an empty legacy import writes a durable
@@ -10668,9 +10689,14 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   // A managed identity never silently imports the logged-in human's old local
   // accounts. The owner must configure/bind its accounts explicitly. Ordinary
   // users retain the existing migration, catalogue and storage implementation.
-  await catalogue.importOnce(assistant ? async () => [] : () => discover({ artifact, runtimeDirectory, executionContext }));
+  // Protected setup also calls this helper for the revision that precedes its
+  // authorized account CAS. Keep that path on its original migration logic.
+  const taskInventory = existingInventoryOnly && profile?.kind === 'digital_assistant'
+    && profile.interactiveLocal !== true && command?.operation === 'list';
+  if (!taskInventory)
+    await catalogue.importOnce(assistant ? async () => [] : () => discover({ artifact, runtimeDirectory, executionContext }));
   if (command?.operation === 'list') {
-    const listed = await catalogue.list();
+    const listed = await catalogue.list({ existingOnly: taskInventory });
     const accounts = assistant ? listed.accounts.filter(account => account.bound) : listed.accounts;
     // A scoped native Telegram source can identify an account even when the
     // locally installed entries share a display name. Keep the real list
@@ -10941,10 +10967,10 @@ const isForbiddenWorkspaceSecretPath = (filePath) => {
     || basename.endsWith(".key");
 };
 
-const readGitTreeEntry = async (workspaceDirectory, revision, filePath) => {
+const readGitTreeEntry = async (workspaceDirectory, revision, filePath, options = {}) => {
   const output = (await runGit(
     ["ls-tree", "-r", "-z", revision, "--", filePath],
-    { cwd: workspaceDirectory },
+    { ...options, cwd: workspaceDirectory },
   )).stdout.split("\0").find(Boolean);
 
   if (!output) {
@@ -11140,7 +11166,7 @@ const inspectGitRevisionFile = async ({ workspaceDirectory, workspaceHead, fileP
     "-c", "init.templateDir=", "-c", "core.longpaths=true", "show", `${workspaceHead}:${filePath}`], {
     cwd: workspaceDirectory, stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, GIT_CONFIG_GLOBAL: GIT_DISABLED_GLOBAL_CONFIG_PATH,
-      GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" },
+      GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_NO_REPLACE_OBJECTS: "1" },
   });
   // Attach completion/error handlers before consuming either stream. Kill on
   // invalid UTF-8 so a failing consumer cannot leave Git blocked on a full pipe.
@@ -16317,6 +16343,43 @@ const verifyAssistantRecoveryFiles = async (directory, changes, hydrated, expect
     expectedFiles.set(filePath, expected);
   }
   return expectedFiles;
+};
+
+/** A native export completion can name bytes, but it cannot prove those
+ * bytes were committed. Match each bounded receipt against the changed
+ * regular files of the independently selected draft, and hash the immutable
+ * Git blob. No provider invocation, working tree import or path from
+ * provider stdout is used for the verification. */
+export const verifyAssistantCheckpointArtifacts = async ({workspaceDirectory,baseHead,draftHead,artifacts,signal}) => {
+  const options={cwd:workspaceDirectory,signal,timeout:10_000,
+    env:{GIT_OPTIONAL_LOCKS:"0",GIT_NO_REPLACE_OBJECTS:"1"}};
+  const delta=(await runGit(["diff","--no-ext-diff","--no-renames","--diff-filter=AM","--name-only","-z",baseHead,draftHead,"--"],
+    options)).stdout.split("\0").filter(Boolean);
+  const files=new Map();
+  for(const relative of delta){
+    if(["agents.md","claude.md"].includes(relative.toLowerCase())||isForbiddenWorkspaceSecretPath(relative)
+      ||!relative.split("/").every(part=>part&&!part.startsWith(".")&&!/[\\:\x00-\x1f]/u.test(part)))continue;
+    const key=assistantArtifactPathDigest(path.join(workspaceDirectory,...relative.split("/")));
+    if(files.has(key))refuseAssistantRecovery("artifact_path");
+    files.set(key,relative);
+  }
+  for(const artifact of artifacts){
+    const relative=files.get(artifact.pathSha256);
+    if(!relative)refuseAssistantRecovery("artifact_delta");
+    const entry=await readGitTreeEntry(workspaceDirectory,draftHead,relative,options);
+    if(entry?.objectType!=="blob"||entry.mode!=="100644")refuseAssistantRecovery("artifact_blob");
+    const matches=await readAcceptedWorkspaceBlob({workspaceDirectory,blobId:entry.objectId,signal},async stream=>{
+      const hash=crypto.createHash("sha256");
+      let bytes=0;
+      for await(const chunk of stream){
+        bytes+=chunk.length;
+        if(bytes>artifact.sizeBytes)refuseAssistantRecovery("artifact_size");
+        hash.update(chunk);
+      }
+      return bytes===artifact.sizeBytes&&hash.digest("hex")===artifact.contentSha256;
+    });
+    if(!matches)refuseAssistantRecovery("artifact_bytes");
+  }
 };
 
 const assertAssistantLocalDraftRun = (metadata, snapshot, basis, status) => {

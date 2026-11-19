@@ -17,7 +17,7 @@ import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, AS
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
-import { matchesAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from './trelio-skill-secret-setup.mjs';
+import { matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill } from './trelio-skill-secret-setup.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -1877,7 +1877,7 @@ const completedTaskContextCompaction=item=>item?.type==='contextCompaction'
   &&Number.isSafeInteger(item.startedAtMs)&&item.startedAtMs>0
   &&Number.isSafeInteger(item.completedAtMs)&&item.completedAtMs>=item.startedAtMs;
 
-const historicalTaskSkillRead=(parameters,value,taskPass,{terminal=false}={})=>{
+const historicalTaskSkillArguments=(parameters,value,taskPass)=>{
   if(Object.getPrototypeOf(parameters)!==Object.prototype||parameters.companyId!==taskPass.companyId
     ||Object.keys(parameters).some(key=>!['companyId','projectId','releaseId','skillId','arguments','runtimeSessionId','guidePart'].includes(key))
     ||parameters.projectId!==undefined&&parameters.projectId!==null&&!UUID.test(parameters.projectId)
@@ -1902,7 +1902,11 @@ const historicalTaskSkillRead=(parameters,value,taskPass,{terminal=false}={})=>{
       if(!projected||!isDeepStrictEqual(value.nextCall,projected.nextCall))return null;
     }
   }catch{return null;}
-  return reviewedAssistantHistoricalSkillRead(parameters,parsed,{terminal});
+  return parsed;
+};
+const historicalTaskSkillRead=(parameters,value,taskPass,options)=>{
+  const parsed=historicalTaskSkillArguments(parameters,value,taskPass);
+  return parsed?reviewedAssistantHistoricalSkillRead(parameters,parsed,options):null;
 };
 
 /** Prove an intermediate restart from the whole original native turn. The
@@ -1922,7 +1926,7 @@ const inspectAssistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
     ||original.content[0].text!==assistantNativePrompt(deliveryId,workStateContext,{}))return false;
   const run={workspaceId:selected.workspaceId,runId:selected.runId};
   let prepared=false,openHandle=null,opened=false,dirty=false,lastCheckpoint=null,retainedLocalCheckpoint=false;
-  const historicalSkillReleases=new Map();
+  const historicalSkillReleases=new Map(),retainedArtifacts=new Map();
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
     const args=item?.arguments,value=item?.result?.structuredContent;
@@ -1960,12 +1964,29 @@ const inspectAssistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
     if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return false;
     if(args.operation==='skill_run'){
       if(!args.parameters||value.operation!=='skill_run')return false;
+      const binding={scope:taskPass,parameters:args.parameters,stdout:value.stdout};
+      let artifact;
       if(Object.hasOwn(value,'taskSkillRead')){
-        if(!matchesAssistantTaskSkillRead(value.taskSkillRead,{scope:taskPass,parameters:args.parameters,stdout:value.stdout}))return false;
+        if(Object.hasOwn(value,'taskSkillArtifact')||!matchesAssistantTaskSkillRead(value.taskSkillRead,binding))return false;
+      }else if(Object.hasOwn(value,'taskSkillArtifact')){
+        if(!matchesAssistantTaskSkillArtifact(value.taskSkillArtifact,binding))return false;
+        artifact=value.taskSkillArtifact.artifact;
       }else{
-        const release=historicalTaskSkillRead(args.parameters,value,taskPass);
-        if(!release)return false;
-        historicalSkillReleases.set(release.releaseId,release);
+        const parsed=historicalTaskSkillArguments(args.parameters,value,taskPass);
+        if(!parsed)return false;
+        const read=reviewedAssistantHistoricalSkillRead(args.parameters,parsed);
+        const historical=read?{release:read}:reviewedHistoricalCheckpointSkill(args.parameters,parsed,value.stdout);
+        if(!historical)return false;
+        artifact=historical.artifact;
+        historicalSkillReleases.set(historical.release.releaseId,historical.release);
+      }
+      if(artifact){
+        // A completed export adds a possible local effect. Require the same
+        // opened Run, a later checkpoint and independent immutable-byte
+        // verification under the owning native writer.
+        if(!opened||retainedArtifacts.has(artifact.pathSha256)||retainedArtifacts.size>=16)return false;
+        retainedArtifacts.set(artifact.pathSha256,artifact);
+        dirty=true;
       }
       continue;
     }
@@ -2008,9 +2029,11 @@ const inspectAssistantInterruptedTaskCheckpoint=(turn,deliveryId,{taskPass,workS
     dirty=false;
   }
   if(dirty||lastCheckpoint?.checkpointId!==selected.checkpointId||lastCheckpoint.draftHead!==selected.draftHead)return false;
-  return validateAssistantIntermediateDraft({...selected,...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),
+  return validateAssistantIntermediateDraft({...selected,...(retainedLocalCheckpoint||retainedArtifacts.size?{retainedLocalCheckpoint:true}:{}),
     ...(historicalSkillReleases.size?{historicalSkillReleases:[...historicalSkillReleases.values()]
-      .sort((left,right)=>left.releaseId.localeCompare(right.releaseId))}:{})});
+      .sort((left,right)=>left.releaseId.localeCompare(right.releaseId))}:{}),
+    ...(retainedArtifacts.size?{retainedArtifacts:[...retainedArtifacts.values()]
+      .sort((left,right)=>left.pathSha256.localeCompare(right.pathSha256))}:{})});
 };
 export const assistantInterruptedTaskCheckpoint=(...args)=>Boolean(inspectAssistantInterruptedTaskCheckpoint(...args));
 /** A named archive has an independent accepted revision. Its save can be
@@ -3364,6 +3387,8 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       const readRecovery=checkpoint
         ?'The interrupted turn saved an intermediate draft. Prepare and open its exact Workspace ID '+checkpoint.workspaceId
           +' and Run ID '+checkpoint.runId+' using fresh native authority. Read both pinned authority files and the retained WORK.md. Continue at the first unfinished step and preserve the original question references. Already recorded reads and draft edits stay in history. Use current channel authority and existing native receipts for any later external action.\n'
+          +(checkpoint.retainedArtifacts?.length
+            ?'The exact original exports are present in this draft. Reuse them from the reopened Run and its retained history. Do not invoke those export commands again.\n':'')
         :prelude
         ? 'The interrupted invocation stopped while preparing work. Continue from the same canonical Workspace ID '+prelude.workspaceId+' and Run ID '+prelude.runId+'. Use a fresh native prepare/open of this exact Run and both returned pinned authority files. Reconcile the prior state before doing the next unfinished task step. Do not rerun the prior provider diagnosis, repeat an external action or open a replacement Run. The preserved technical state does not grant authority to send, publish or change anything.\\n'
         : options.taskReadRecovery

@@ -1403,6 +1403,16 @@ test('an intermediate draft reservation requires its own exact native receipt',a
       expectedLeaseRevision:1,questionPath:null,resumed:null,pass};
   }});
   assert.equal((await client.continueTaskPass(input)).schemaVersion,6);
+  const retained={...intermediateDraft,retainedLocalCheckpoint:true};
+  const nativeInput={...input,intermediateDraft:retained};
+  const withLocal=await createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,body)=>{
+    assert.equal(operation,'passRenew');
+    assert.deepEqual(body,nativeInput,'native authorization receives the exact checkpoint, never local artifact digests');
+    return {schemaVersion,state:'approved',reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
+      expectedLeaseRevision:1,questionPath:null,resumed:null,pass};
+  }}).continueTaskPass({...input,intermediateDraft:{...retained,
+    retainedArtifacts:[{pathSha256:'a'.repeat(64),contentSha256:'b'.repeat(64),sizeBytes:12}]}});
+  assert.equal(withLocal.schemaVersion,6);
   schemaVersion=5;
   await assert.rejects(client.continueTaskPass(input),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
   await assert.rejects(client.continueTaskPass({...input,portableFinish:intermediateDraft}),{code:'ASSISTANT_TRANSPORT_INVALID_INPUT'});

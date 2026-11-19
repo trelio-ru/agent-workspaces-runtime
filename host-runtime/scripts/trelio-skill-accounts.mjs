@@ -346,21 +346,29 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
     const item = state.accounts.find(a => a.id === id);
     requireThat(item, 'ACCOUNT_NOT_FOUND'); return item;
   };
+  // A managed account inventory must not create the directory or mark the
+  // legacy import complete. An absent catalogue is a valid empty snapshot;
+  // any ACL, I/O or format error in an existing one still propagates.
+  const readExisting = async () => {
+    try {
+      await io.checkDirectory(directory);
+      await io.checkDirectory(root);
+      await fs.lstat(file);
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+    return read();
+  };
   return {
     /** Startup discovery must be genuinely read-only: list() creates/hardens a
      * directory and importOnce() can spawn a provider. Inspect only an already
      * validated catalogue and this exact company/member binding. An absent or
      * not-yet-imported catalogue says nothing about legacy login state. */
     async observe() {
-      try {
-        await io.checkDirectory(directory);
-        await io.checkDirectory(root);
-        await fs.lstat(file);
-      } catch (error) {
-        if (error.code === 'ENOENT') return { state: 'not_checked', reason: 'catalogue_not_observed' };
-        throw error;
-      }
-      const state = await read(), current = binding(state);
+      const state = await readExisting();
+      if (!state) return { state: 'not_checked', reason: 'catalogue_not_observed' };
+      const current = binding(state);
       const count = current.accountIds.length;
       if (!count) {
         const observed = Object.hasOwn(state.bindings, scope.company)
@@ -370,9 +378,10 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
       return { state: current.defaultAccountId || count === 1 ? 'account_saved' : 'selection_required',
         accountCount: count, selection: current.defaultAccountId ? 'default' : count === 1 ? 'single' : 'required' };
     },
-    async list() {
-      await io.ensureDirectory(root);
-      const state = await read(), current = binding(state);
+    async list({ existingOnly = false } = {}) {
+      if (!existingOnly) await io.ensureDirectory(root);
+      const state = existingOnly ? await readExisting() ?? emptyState() : await read();
+      const current = binding(state);
       return { revision: state.revision, accounts: state.accounts.map(({ id, name, comment }) => ({
         id, name, comment, bound: current.accountIds.includes(id), default: current.defaultAccountId === id,
       })) };

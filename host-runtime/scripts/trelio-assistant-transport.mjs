@@ -3184,10 +3184,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
           :validateAssistantWorkspaceCheckpoint)(input[checkpointKey]);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
       }
+      // The local native writer verifies artifact bytes. The server still
+      // independently authorizes the exact checkpoint and historical release.
+      // Keep the native v6 schema unchanged and the private digests local.
+      const {retainedArtifacts:_localArtifactEvidence,...nativeCheckpoint}=checkpoint??{};
       const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
         ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{}),
-        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(checkpoint?{[checkpointKey]:checkpoint}:{}),
+        ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(checkpoint?{[checkpointKey]:nativeCheckpoint}:{}),
         ...(localDraft?{localDraft}:{}),...(recoveredOutcome?{recoveredOutcome}:{})};
       const value=await call('passRenew',body,signal),pass=value?.pass;
       if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'

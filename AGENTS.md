@@ -1736,6 +1736,12 @@ Exact legacy template bytes для распознавания при мигра�
   this distinct witness in the existing continuation row; older workers fail
   closed. Provider commands and Workspace operations still prevent recovery.
   [Contract](docs/assistant-scheduler.md#interrupted-read-only-task-continuation).
+  Task account inventory attests the existing-only bound host catalogue with
+  the same read witness. It never creates/imports accounts or starts a provider.
+  Signed artifact commands return a separate file-effect witness. Match only
+  exact changed Git blobs in the same portable Run, twice under native recovery.
+  Local path/content digests stay on the device. Historical releases use the
+  same verifier and keep the existing server release check.
   The separate historical technical prelude uses backend v3 and exact signed
   diagnostic release/untouched canonical Run proof. Check the full original
   turn under the same writer and freeze its structural witness. No provider

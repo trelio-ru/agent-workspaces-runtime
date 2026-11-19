@@ -9,11 +9,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { assistantArtifactPathDigest } from "../host-runtime/scripts/trelio-local-path.mjs";
 import {
   formatBridgeCommandError,
   resolveRegisteredWorkspaceRootDirectory,
   resolveWorkspaceBridgeConfigDirectory,
   runGit as runBridgeGit,
+  verifyAssistantCheckpointArtifacts,
   mergeWorkspaceSnapshots,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
@@ -105,6 +107,30 @@ const mergeFixture = async (t, { base, ours, theirs }) => {
   }
   return { source: metadata[0], target: metadata[1] };
 };
+
+test("checkpoint export evidence binds native file digests to regular changed Git blobs", async t => {
+  const original = Buffer.from([0x00, 0xff, 0x0d, 0x0a, 0x61]);
+  const report = Buffer.from("A settled provider report\n");
+  const { source, target } = await mergeFixture(t, { base: { "unchanged.bin": original },
+    ours: { "exports/original.bin": original, "report.txt": report, "secrets.json": "{}", "Agents.md": "Private control" }, theirs: {} });
+  const receipt = (relative, bytes) => ({
+    pathSha256: assistantArtifactPathDigest(path.join(target.workspaceDirectory, relative)),
+    contentSha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length,
+  });
+  const artifacts = [receipt("exports/original.bin", original), receipt("report.txt", report)];
+  const input = { workspaceDirectory: target.workspaceDirectory, baseHead: source.baseHead, draftHead: target.draftHead };
+  await verifyAssistantCheckpointArtifacts({ ...input, artifacts });
+  for (const refused of [
+    receipt("unchanged.bin", original), receipt("secrets.json", Buffer.from("{}")),
+    receipt("Agents.md", Buffer.from("Private control")),
+    receipt("exports/unknown.bin", original), receipt("exports/original.bin", Buffer.alloc(original.length)),
+    { ...artifacts[0], sizeBytes: original.length - 1 },
+  ]) {
+    await assert.rejects(verifyAssistantCheckpointArtifacts({ ...input, artifacts: [refused] }),
+      { code: "ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED" });
+  }
+  await assert.rejects(verifyAssistantCheckpointArtifacts({ ...input, draftHead: source.draftHead, artifacts }));
+});
 
 test("three-way merge preserves both branches, literal paths, deletions and disjoint text edits", async t => {
   const lines = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n") + "\n";

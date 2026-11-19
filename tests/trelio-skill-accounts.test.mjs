@@ -760,6 +760,7 @@ test('the signed SDK resource queues actual provider children before native disp
 test('startup account observations are read-only, scope-bound and never authentication evidence', async t => {
   const {directory,make} = await fixture(t), catalogue = make();
   assert.deepEqual(await catalogue.observe(), {state:'not_checked',reason:'catalogue_not_observed'});
+  assert.deepEqual(await catalogue.list({existingOnly:true}), {revision:0,accounts:[]});
   assert.deepEqual(await fs.readdir(directory), [], 'discovery creates neither catalogue nor lock');
   await catalogue.importOnce(async () => []);
   assert.deepEqual(await catalogue.observe(), {state:'account_required'});

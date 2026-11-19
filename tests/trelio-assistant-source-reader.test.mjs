@@ -1049,10 +1049,22 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
       await fs.writeFile(file,texts[index]);
     }
     await fs.writeFile(path.join(guideDirectory,'trelio-assistant-execution.json'),
-      JSON.stringify({schemaVersion:1,taskCommands:[['guides']]}));
+      JSON.stringify(policyVersion===3?{schemaVersion:4,taskCommands:[['guides'],['export']],
+        deniedOptions:['--overwrite'],readOnlyCommands:[],localArtifactCommands:[['export']]}
+        :{schemaVersion:1,taskCommands:[['guides']]}));
     const guideCalls=path.join(directory,'guide-calls-'+policyVersion);
     await fs.writeFile(path.join(guideDirectory,'main.mjs'),`import assert from 'node:assert/strict';
       import fs from 'node:fs';import {fileURLToPath} from 'node:url';import {createHash} from 'node:crypto';
+      const argv=process.argv.slice(2);
+      if(argv[0]==='export'){
+        assert.equal(argv[1],'--output');assert.equal(argv.length,3);
+        const saved=new URL('./result.bin',await import('node:url').then(url=>url.pathToFileURL(argv[2]+'/')));
+        const bytes=Buffer.from([1,0,255,2]);
+        fs.writeFileSync(saved,bytes,{flag:'wx'});
+        process.stdout.write(JSON.stringify({saved:fileURLToPath(saved),size:bytes.length,
+          sha256:createHash('sha256').update(bytes).digest('hex')}));
+        process.exit(0);
+      }
       assert.deepEqual(process.argv.slice(2),['guides']);
       assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(guideAccount)});
       assert.equal(process.env.TRELIO_MCP_ACCESS_TOKEN,undefined);
@@ -1083,6 +1095,33 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
         try{return {stdout:JSON.stringify(await run(JSON.parse(input)))};}
         catch(error){throw Object.assign(error,{stderr:JSON.stringify({code:error.code})});}
       }});
+    // The account command is host-owned even for a legacy provider package.
+    // It must never spawn the package, import a personal account or borrow
+    // the signed provider-read classification for an effectful host command.
+    const inventory=structuredClone(guidePlan);
+    inventory.localAction.parameters.arguments=['account','list'];
+    const accountResult=await throughWire(inventory);
+    assert.deepEqual(JSON.parse(accountResult.stdout),{ok:true,revision:1,
+      accounts:[{id:guideAccount,name:'Guide fixture',comment:'',bound:true,default:true}]});
+    assert.deepEqual(accountResult.taskSkillRead,{schemaVersion:1,releaseId:guideRelease,
+      packageSha256:outgoingDto.artifact.packageSha256,
+      outputSha256:createHash('sha256').update(accountResult.stdout).digest('hex'),
+      requestSha256:assistantTaskSkillReadRequestDigest(inventory.scope,inventory.localAction.parameters)});
+    await assert.rejects(fs.readFile(guideCalls),{code:'ENOENT'},'account list may not start a provider child');
+    if(policyVersion===3){
+      const output=path.join(directory,'signed-artifact-output');await fs.mkdir(output);
+      const exporting=structuredClone(guidePlan);
+      exporting.localAction.parameters.arguments=['export','--output',output,'--local-account',guideAccount];
+      const result=await throughWire(exporting);
+      assert.equal(result.taskSkillRead,undefined,'file export is a distinct native effect');
+      const {assistantArtifactPathDigest}=await import('../host-runtime/scripts/trelio-local-path.mjs');
+      const saved=path.join(output,'result.bin'),bytes=await fs.readFile(saved);
+      assert.deepEqual(bytes,Buffer.from([1,0,255,2]));
+      assert.deepEqual(result.taskSkillArtifact,{schemaVersion:1,releaseId:guideRelease,
+        packageSha256:outgoingDto.artifact.packageSha256,outputSha256:createHash('sha256').update(result.stdout).digest('hex'),
+        artifact:{pathSha256:assistantArtifactPathDigest(saved),contentSha256:createHash('sha256').update(bytes).digest('hex'),sizeBytes:4},
+        requestSha256:assistantTaskSkillReadRequestDigest(exporting.scope,exporting.localAction.parameters)});
+    }
     // Exercise the encrypted carrier BEFORE the SAME signed provider path.
     // Earlier coverage began with an already admitted plaintext plan, so it
     // missed a continuation which failed while sealing guidePart=1. Only the

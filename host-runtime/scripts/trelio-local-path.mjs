@@ -1,6 +1,7 @@
 import path from "node:path";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 /**
  * Node resolves an entry module through filesystem aliases, while argv[1]
@@ -37,6 +38,18 @@ export const sameLocalPath = (left, right, pathApi = path) => (
   && typeof right === "string" && right.length > 0
   && pathApi.relative(pathApi.resolve(left), pathApi.resolve(right)) === ""
 );
+
+/** Bind a retained native output to one local path without persisting the
+ * path itself. Only a later exact Run-tree lookup may read the referenced
+ * bytes. This is a comparison key and carries no filesystem authority. */
+export const assistantArtifactPathDigest = (absolute, pathApi = path) => {
+  if (typeof absolute !== "string" || !pathApi.isAbsolute(absolute) || absolute.includes("\0")) {
+    throw new Error("ASSISTANT_ARTIFACT_PATH_INVALID");
+  }
+  const normalized = pathApi.normalize(absolute);
+  return createHash("sha256").update("trelio-assistant-task-artifact/v1\0")
+    .update(pathApi.sep === "\\" ? normalized.toLowerCase() : normalized).digest("hex");
+};
 
 /** Build the mode of an already selected Node executable, never an executable
  * override. Desktop Harness runs its Node host through Electron: execPath is

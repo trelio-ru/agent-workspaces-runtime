@@ -96,12 +96,29 @@ const historicalSkillReleaseReceipts=historicalSkillReleases=>{
   return releases;
 };
 export const validateAssistantIntermediateDraft=value=>{
-  object(value,['workspaceId','runId','checkpointId','draftHead','retainedLocalCheckpoint','historicalSkillReleases']);
-  const {retainedLocalCheckpoint,historicalSkillReleases,...checkpoint}=value;
+  object(value,['workspaceId','runId','checkpointId','draftHead','retainedLocalCheckpoint','historicalSkillReleases','retainedArtifacts']);
+  const {retainedLocalCheckpoint,historicalSkillReleases,retainedArtifacts,...checkpoint}=value;
   if(retainedLocalCheckpoint!==undefined&&retainedLocalCheckpoint!==true)inputError();
   const releases=historicalSkillReleaseReceipts(historicalSkillReleases);
+  let artifacts;
+  if(retainedArtifacts!==undefined){
+    // Private host proof: no paths, message bodies or provider locator can
+    // enter the continuation journal in this shape. The bytes must be checked
+    // both during discovery and by the owning native writer.
+    if(retainedLocalCheckpoint!==true||!Array.isArray(retainedArtifacts)||!retainedArtifacts.length
+      ||retainedArtifacts.length>16)inputError();
+    artifacts=retainedArtifacts.map(artifact=>{
+      object(artifact,['pathSha256','contentSha256','sizeBytes']);
+      const {pathSha256,contentSha256,sizeBytes}=artifact;
+      if(typeof pathSha256!=='string'||typeof contentSha256!=='string'
+        ||!/^[a-f0-9]{64}$/u.test(pathSha256)||!/^[a-f0-9]{64}$/u.test(contentSha256))inputError();
+      return {pathSha256,contentSha256,sizeBytes:integer(sizeBytes,1,512*1024)};
+    });
+    if(artifacts.some((artifact,index)=>index>0&&artifact.pathSha256<=artifacts[index-1].pathSha256))inputError();
+  }
   return {...validateAssistantWorkspaceCheckpoint(checkpoint),
-    ...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),...(releases?{historicalSkillReleases:releases}:{})};
+    ...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),...(releases?{historicalSkillReleases:releases}:{}),
+    ...(artifacts?{retainedArtifacts:artifacts}:{})};
 };
 
 /** The save and the task outcome are separate. Keep only the recorded

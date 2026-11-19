@@ -790,6 +790,14 @@ history. Only the closed release locator is added to the durable reservation.
 The normal signed task read descriptor covers future skills through the same
 classifier without policy entries by website or task. No historical profile
 authorizes a live call or a repeat of external work.
+A completed file export is an independently checked local effect. When the
+whole turn contains an admitted artifact receipt, require the same opened
+Run and a subsequent portable checkpoint. Match its opaque path digest to
+a changed regular file in the exact base-to-draft Git diff. Stream and hash
+that immutable blob, and recheck the clean Git head and protected metadata.
+Both discovery and the native writer perform the check. The renewal request
+does not include the retained artifact digests. The server still verifies the exact
+checkpoint locator and any audited historical release on its existing path.
 The guide producer and recovery share the same page frame and continuation
 projection. A completed legacy page may include bounded display instructions
 and the original next selector or terminal null. Recovery verifies the page
@@ -1588,6 +1596,28 @@ company-local package, partial pipe or output field with the same name cannot
 supply the witness. Older policy versions still execute under their existing
 rules and supply no positive read classification. This witness does not
 advance source cursors, establish task completion or authorize a new invocation.
+
+The host-owned task account inventory uses the same receipt after an existing-only
+catalogue snapshot and a fresh native release check. It never creates a
+catalogue, imports accounts, changes a binding or starts the provider.
+The output contains only accounts bound to the selected company/member. Its
+receipt attests inventory and does not establish authentication. Setup and
+interactive account changes remain separate.
+
+Version 4 adds `localArtifactCommands`, with the same literal prefixes and
+the same overlap rule as read-only commands. Read-only and artifact prefixes
+are disjoint. A provider may opt in only after reviewing **all** permitted
+arguments: the command performs settled reads and emits one new local file
+with exclusive creation under its literal `--output` directory. It must
+return complete JSON with `saved`, `size`, and `sha256`; the supported
+proof covers one regular file of 1–524288 bytes. No overwrite, external
+mutation, or arbitrary resource write belongs in this class.
+The host exposes a separate `taskSkillArtifact` field only from the trusted
+signed child policy and complete output, bound to the exact pass, release,
+invocation and pipe bytes. A result can be reported successfully while
+remaining unproved for recovery. A file outside the verified Run or absent
+from the exact Git draft never qualifies. This classification grants
+neither a new executable command nor permission to repeat a previous one.
 
 The shared `skillCommand` checks after package verification but BEFORE managed
 account selection/import. It removes only the host's strict local-account

@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import { canonicalJson } from "./trelio-company-encryption.mjs";
+import { assistantArtifactPathDigest, sameLocalPath } from "./trelio-local-path.mjs";
+import { splitAccountArguments } from "./trelio-skill-accounts.mjs";
 
 export const SKILL_SECRET_SETUP_FILE = "trelio-secret-setup.json";
 const invalid = () => new Error("Подписанная декларация настройки навыка недействительна.");
@@ -33,6 +36,40 @@ export const matchesAssistantTaskSkillRead = (value, { scope, parameters, stdout
   exactKeys(value, ['schemaVersion', 'releaseId', 'packageSha256', 'outputSha256', 'requestSha256'])
   && matchesTaskSkillReadOutput(value, parameters.releaseId, stdout)
   && value.requestSha256 === assistantTaskSkillReadRequestDigest(scope,parameters);
+
+/** One complete positive file-export result. The signed command declares its
+ * effect, but the otherwise untrusted output merely names a candidate.
+ * Only unchanged bytes in the exact later checkpoint settle that effect. */
+export const assistantTaskArtifactFromOutput = (stdout, args) => {
+  const at=args.indexOf('--output'), destination=args[at+1];
+  if(at<0||at!==args.lastIndexOf('--output')||args.some(token=>/^--(?:output|overwrite)=/u.test(token)||token==='--overwrite')
+    ||typeof destination!=='string'||!path.isAbsolute(destination)||destination.includes('\0')
+    ||typeof stdout!=='string'||Buffer.byteLength(stdout)>65_536)return null;
+  let result;
+  try{result=JSON.parse(stdout);}catch{return null;}
+  const {saved,size,sha256}=result??{};
+  if(typeof saved!=='string'||!path.isAbsolute(saved)||saved.includes('\0')
+    ||!sameLocalPath(path.dirname(saved),destination)
+    ||!Number.isSafeInteger(size)||size<1||size>512*1024||typeof sha256!=='string'||!/^[a-f0-9]{64}$/u.test(sha256))return null;
+  return {pathSha256:assistantArtifactPathDigest(saved),contentSha256:sha256,sizeBytes:size};
+};
+
+const taskSkillArtifactMatches = (value,parameters,stdout) => {
+  if(!matchesTaskSkillReadOutput(value,parameters.releaseId,stdout))return false;
+  let candidate;
+  try{candidate=assistantTaskArtifactFromOutput(stdout,splitAccountArguments(parameters.arguments).providerArguments);}
+  catch{return false;}
+  return candidate&&exactKeys(value.artifact,Object.keys(candidate))
+    &&Object.entries(candidate).every(([key,expected])=>value.artifact[key]===expected);
+};
+export const bindAssistantTaskSkillArtifact = (value,{scope,parameters,stdout}) =>
+  exactKeys(value,['schemaVersion','releaseId','packageSha256','outputSha256','artifact'])
+  && taskSkillArtifactMatches(value,parameters,stdout)
+    ?{...value,requestSha256:assistantTaskSkillReadRequestDigest(scope,parameters)}:null;
+export const matchesAssistantTaskSkillArtifact = (value,{scope,parameters,stdout}) =>
+  exactKeys(value,['schemaVersion','releaseId','packageSha256','outputSha256','artifact','requestSha256'])
+  && taskSkillArtifactMatches(value,parameters,stdout)
+  && value.requestSha256===assistantTaskSkillReadRequestDigest(scope,parameters);
 
 // A historical package has no typed effect receipt. The signed host can
 // classify an exact reviewed old command vector, then native renewal checks
@@ -88,6 +125,52 @@ export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{provid
   return {skillId,releaseId,packageSha256:policy.packageSha256};
 };
 
+/** Compatibility for one pre-receipt package, exclusively in the native
+ * intermediate-draft classifier. The live catalogue attests this immutable
+ * package and the server rechecks its digest and publication. The regular
+ * task executor and other historical recovery states never use this audit.
+ *
+ * Source 205892438b5d773e3be424a3c4cad80e6af717d0: doctor disables SMTP repair,
+ * SEARCH and FETCH use read-only IMAP selection/BODY.PEEK, and save-message
+ * writes a single exclusive RFC822 file. Its stdout is only a claim until
+ * the common verifier finds the same bytes in the exact portable draft.
+ */
+export const reviewedHistoricalCheckpointSkill = ({skillId,releaseId},{providerArguments,accountId},stdout) => {
+  if(skillId!=='email-imap-smtp'||releaseId!=='353b28f3-8c94-4d69-a287-5f66ae953484')return null;
+  const release={skillId,releaseId,packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'};
+  const [command,...tail]=providerArguments;
+  if(accountId===null)return command==='account'&&tail.length===1&&tail[0]==='list'?{release}:null;
+  if(['guides','doctor','folders'].includes(command))return tail.length===0?{release}:null;
+  if(command==='policy')return tail.length===1&&tail[0]==='show'?{release}:null;
+  const options=command==='search'?['--folder','--limit','--since','--from','--subject']
+    :command==='read'?['--folder','--uid']:command==='save-message'?['--folder','--uid','--output']:null;
+  if(!options||tail.length!==2*(command==='search'?4:options.length))return null;
+  const values=new Map();
+  for(let index=0;index<tail.length;index+=2){
+    const name=tail[index], value=tail[index+1];
+    if(!options.includes(name)||values.has(name)||typeof value!=='string'||!value||value.startsWith('--')||/[\0\r\n]/u.test(value))
+      return null;
+    values.set(name,value);
+  }
+  if(!values.has('--folder'))return null;
+  if(command==='search'){
+    const limit=Number(values.get('--limit')),since=values.get('--since');
+    return Number.isInteger(limit)&&limit>=1&&limit<=100&&/^\d{4}-\d{2}-\d{2}$/u.test(since??'')
+      &&(values.has('--from')||values.has('--subject'))?{release}:null;
+  }
+  const uid=values.get('--uid');
+  if(!/^[1-9][0-9]{0,9}$/u.test(uid??''))return null;
+  if(command==='read')return {release};
+  const output=values.get('--output');
+  if(!path.isAbsolute(output))return null;
+  let result;
+  try{result=JSON.parse(stdout);}catch{return null;}
+  const artifact=assistantTaskArtifactFromOutput(stdout,providerArguments);
+  if(!artifact||result?.uid!==uid||result.format!=='message/rfc822'
+    ||!sameLocalPath(result.saved,path.join(output,`message-${uid}.eml`)))return null;
+  return {release,artifact};
+};
+
 /** The provider owns CLI classification in the SAME signed file inventory.
  * Absence is not legacy permission: a package that has not reviewed its task
  * surface cannot run with assistant credentials. This is a restriction only;
@@ -104,9 +187,10 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
   try { policy = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(files[0].bytes)); }
   catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
   const version = policy?.schemaVersion;
-  if (![1,2,3].includes(version)
+  if (![1,2,3,4].includes(version)
     || !exactKeys(policy, ['schemaVersion', 'taskCommands',
-      ...(version >= 2 ? ['deniedOptions'] : []), ...(version === 3 ? ['readOnlyCommands'] : [])])
+      ...(version >= 2 ? ['deniedOptions'] : []), ...(version >= 3 ? ['readOnlyCommands'] : []),
+      ...(version === 4 ? ['localArtifactCommands'] : [])])
     || !Array.isArray(policy.taskCommands) || !policy.taskCommands.length || policy.taskCommands.length > 64)
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
   const seen = new Set();
@@ -122,7 +206,7 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
     || deniedOptions.some(option => typeof option !== 'string' || !/^--[a-z][a-z0-9-]{0,63}$/u.test(option))))
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
   const readOnly = new Set();
-  if (version === 3) {
+  if (version >= 3) {
     if (!Array.isArray(policy.readOnlyCommands) || policy.readOnlyCommands.length > seen.size)
       fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
     for (const prefix of policy.readOnlyCommands) {
@@ -131,6 +215,16 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
       const key = JSON.stringify(prefix);
       if (!seen.has(key) || readOnly.has(key)) fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
       readOnly.add(key);
+    }
+  }
+  const localArtifact = new Set();
+  if (version === 4) {
+    if (!Array.isArray(policy.localArtifactCommands) || policy.localArtifactCommands.length > seen.size)
+      fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+    for (const prefix of policy.localArtifactCommands) {
+      const key = JSON.stringify(prefix);
+      if (!seen.has(key) || readOnly.has(key) || localArtifact.has(key)) fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+      localArtifact.add(key);
     }
   }
   let setup;
@@ -157,7 +251,9 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
   // A more general read-only prefix never overrides an overlapping command
   // whose effects were not reviewed. Legacy declarations still admit the
   // exact same commands and give no positive evidence about their effects.
-  return matches.every(prefix => readOnly.has(JSON.stringify(prefix))) ? 'read_only' : 'unknown';
+  if(matches.every(prefix => readOnly.has(JSON.stringify(prefix))))return 'read_only';
+  if(matches.every(prefix => localArtifact.has(JSON.stringify(prefix))))return 'local_artifact';
+  return 'unknown';
 };
 
 /** Both setup purposes read the SAME complete signed descriptor. A human-input
