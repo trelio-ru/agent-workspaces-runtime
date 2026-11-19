@@ -50,6 +50,11 @@ const IGNORE_BLOCK = [IGNORE_START, "/workspaces/", IGNORE_END].join("\n");
 const CODEX_CHECKPOINT_REF = /^refs\/codex\/turn-diffs\/checkpoints\/(?:[0-9a-f]{32}\/[0-9a-f]{32}|[0-9a-f]{64}\/[0-9a-f]{64})\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CODEX_CAPTURE_REF = /^refs\/codex\/turn-diffs\/captures\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/(?:base|head)$/u;
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+// Git hashes the object header and payload together. The canonical empty tree
+// has only this header and cannot reference a file, directory or Git object.
+const EMPTY_TREE_IDS = new Set(["sha1", "sha256"].map((algorithm) => (
+  createHash(algorithm).update("tree 0\0").digest("hex")
+)));
 const ALLOWED_LOCAL_CONFIG_KEYS = new Set([
   "core.bare",
   "core.filemode",
@@ -479,8 +484,12 @@ const parseObjectInventory = (stdout) => String(stdout || "")
   .split(/\r?\n/u)
   .filter(Boolean)
   .map((line) => {
-    const [objectId, type, rawSize] = line.split(" ");
-    return { objectId, type, size: Number(rawSize) };
+    const [objectId, type, rawSize, extra] = line.split(" ");
+    // Number() alone would coerce a missing size between spaces to zero.
+    const size = extra === undefined && /^(?:0|[1-9][0-9]*)$/u.test(rawSize)
+      ? Number(rawSize)
+      : NaN;
+    return { objectId, type, size };
   });
 
 const isCodexMetadataDirectory = (name) => (
@@ -719,7 +728,14 @@ const inspectServiceGit = async ({
     // Reachability alone cannot authorize a subtree reused at another path.
     await inspectTree({ gitPath, rootPath, treeId, objectsById, reachable, execFileCommand });
   }
-  const orphanTree = objects.find(({ objectId, type }) => type === "tree" && !reachable.has(objectId));
+  // Git may retain the empty tree after Codex drops a snapshot ref. Accept
+  // that one content-free object only when the complete inventory confirms
+  // both its identity and size. Keep it out of the reachability set so this
+  // exception cannot authorize an entry in a snapshot at a forbidden path.
+  const orphanTree = objects.find(({ objectId, type, size }) => (
+    type === "tree" && !reachable.has(objectId)
+    && !(size === 0 && EMPTY_TREE_IDS.has(objectId))
+  ));
   if (orphanTree) {
     throw new FolderGitHistoryError(
       "orphan_tree",

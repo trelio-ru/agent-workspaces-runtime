@@ -660,6 +660,73 @@ for (const segmentLength of [32, 64]) {
   });
 }
 
+test("onboarding keeps an unreferenced empty Git tree and connects the same folder", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const instructionPath = path.join(root, "AGENTS.md");
+  const personalInstructions = "# Keep these instructions\n";
+  await fs.writeFile(instructionPath, personalInstructions);
+
+  // Git writes the canonical empty tree from an empty index. The fixture has
+  // no refs, so the object cannot be admitted through Codex snapshot reachability.
+  const emptyTree = (await runGit(root, "write-tree")).stdout.trim();
+  const readGitState = async () => {
+    const [head, config, refs, inventory, index] = await Promise.all([
+      fs.readFile(path.join(root, ".git", "HEAD"), "utf8"),
+      fs.readFile(path.join(root, ".git", "config"), "utf8"),
+      runGit(root, "for-each-ref"),
+      runGit(root, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype) %(objectsize)"),
+      runGit(root, "ls-files", "--stage", "-z"),
+    ]);
+    return { head, config, refs: refs.stdout, inventory: inventory.stdout, index: index.stdout };
+  };
+  const before = await readGitState();
+  assert.equal(before.refs, "");
+  assert.equal(before.inventory.trim(), `${emptyTree} tree 0`);
+  assert.equal(before.index, "");
+
+  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  assert.equal(prepared.inspection.folder.kind, "service_git");
+  const result = await handleTrelioWorkspaceActionOperation(
+    "https://trelio.example", prepared.plan.apply.arguments,
+    { runBridge: async () => assert.fail("Folder binding must stay in the host") },
+  );
+  assert.equal(result.status, "applied");
+  assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
+  assert.ok((await fs.readFile(instructionPath, "utf8")).startsWith(personalInstructions));
+  assert.match(
+    (await runGit(root, "check-ignore", "--no-index", "--verbose", "--", "workspaces/.test")).stdout,
+    /^\.gitignore:\d+:\/workspaces\/\tworkspaces\/\.test\r?\n$/u,
+  );
+  assert.deepEqual(await readGitState(), before);
+});
+
+test("service Git requires both the canonical ID and a complete zero-byte tree record", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const emptyTree = (await runGit(root, "write-tree")).stdout.trim();
+  for (const [record, reason] of [
+    [`${"a".repeat(emptyTree.length)} tree 0`, "orphan_tree"],
+    [`${emptyTree} tree 1`, "orphan_tree"],
+    [`${emptyTree} tree  0`, "malformed_inventory_entry"],
+  ]) {
+    const execFileCommand = async (executable, argumentsList, options) => {
+      const result = await execFileAsync(executable, argumentsList, options);
+      // Simulate inconsistent inventory output without relying on how a
+      // particular Git version reports a damaged on-disk object.
+      return argumentsList.includes("--batch-all-objects")
+        ? { ...result, stdout: `${record}\n` }
+        : result;
+    };
+    await assert.rejects(
+      prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+      (error) => projectFolderGitHistoryBlocker(error)?.details.gitBlocker.reason === reason,
+      record,
+    );
+    assert.deepEqual(await fs.readdir(root), [".git"]);
+  }
+});
+
 test("service Git rejects unknown checkpoint widths and malformed ref components", async () => {
   const prefix = "refs/codex/turn-diffs/checkpoints";
   const uuid = "123e4567-e89b-12d3-a456-426614174000";
@@ -773,6 +840,7 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
 
   const orphanTreeRoot = await makeRoot();
   await runGit(orphanTreeRoot, "init");
+  await runGit(orphanTreeRoot, "write-tree");
   await fs.writeFile(path.join(orphanTreeRoot, "AGENTS.md"), "# Orphan tree\n", "utf8");
   const orphanTreeId = await writeTurnDiffTree(orphanTreeRoot);
   await assert.rejects(
@@ -787,6 +855,8 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
 
   const orphanRoot = await makeRoot();
   await runGit(orphanRoot, "init");
+  // An allowed empty tree must not conceal a separate orphan blob.
+  await runGit(orphanRoot, "write-tree");
   const orphanFile = path.join(orphanRoot, ".git", "orphan-source");
   await fs.writeFile(orphanFile, "unreferenced object\n", "utf8");
   const { stdout: orphanBlobId } = await runGit(orphanRoot, "hash-object", "-w", orphanFile);
