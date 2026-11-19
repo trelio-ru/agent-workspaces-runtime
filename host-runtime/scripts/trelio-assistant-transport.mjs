@@ -13,7 +13,8 @@ import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches, assistantReadOnlyRecoveryMetadata,
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
-  validateAssistantLocalDraftBasis, validateAssistantLocalDraft,
+  validateAssistantLocalDraftBasis, validateAssistantLocalDraft, validateAssistantRecoveredOutcomeEvidence,
+  validateAssistantRecoveredOutcomePlan, validateAssistantRecoveredOutcomeSchedule,
   ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -3125,6 +3126,23 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async readTaskLocalDraftEvidence(input,signal){
       return readTaskCheckpointEvidence('localDraftEvidence',input,signal);
     },
+    async readTaskRecoveredOutcomeEvidence(input,signal){
+      const {companyId,taskId,passId,expectedLeaseRevision,...raw}=input;
+      let locators;
+      try{locators=validateAssistantRecoveredOutcomeEvidence(raw);}
+      catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+      const value=await call('passRead',{companyId:id(companyId),taskId:id(taskId),passId:id(passId),
+        recoveredOutcomeEvidence:{expectedLeaseRevision:revision(expectedLeaseRevision),...locators}},signal);
+      if(value?.passId!==passId||value.businessReady!==false||!Object.hasOwn(value,'recoveredOutcomeEvidence'))
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const evidence=value.recoveredOutcomeEvidence;
+      if(evidence===null)return null;
+      if(!object(evidence)||Object.keys(evidence).sort().join(',')!=='cadence,dailyLocalTime,priorReceiptId,timeZone'
+        ||value.state!=='review_required'||value.workMode!=='task'||value.leaseRevision!==expectedLeaseRevision)
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      try{return Object.freeze(validateAssistantRecoveredOutcomeSchedule(evidence));}
+      catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+    },
     async renewTaskPass(input,signal) {
       if(input.preNativeRecovery!==undefined&&input.preNativeRecovery!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
@@ -3137,13 +3155,17 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)
         ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId',
-          'reviewId','automatic','technicalPrelude','retainedFinish','portableFinish','intermediateDraft','localDraft'].includes(key))
+          'reviewId','automatic','technicalPrelude','retainedFinish','portableFinish','intermediateDraft','localDraft','recoveredOutcome'].includes(key))
         ||input.automatic!==undefined&&input.automatic!==true
         ||(input.continuation==='review')!==(input.reviewId===undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish,input.intermediateDraft,input.localDraft]
+      const witnesses=[input.technicalPrelude,input.retainedFinish,input.portableFinish,input.intermediateDraft,input.localDraft,input.recoveredOutcome]
         .filter(value=>value!==undefined).length;
       if(witnesses>1||witnesses&&input.automatic!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      let technicalPrelude,retainedFinish,checkpoint,localDraft;
+      let technicalPrelude,retainedFinish,checkpoint,localDraft,recoveredOutcome;
+      if(input.recoveredOutcome!==undefined){
+        try{recoveredOutcome=validateAssistantRecoveredOutcomePlan(input.recoveredOutcome);}
+        catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+      }
       if(input.localDraft!==undefined){
         try{localDraft=validateAssistantLocalDraft(input.localDraft);}
         catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
@@ -3166,16 +3188,16 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
         ...(input.reviewId?{reviewId:id(input.reviewId)}:{}),...(input.automatic?{automatic:true}:{}),
         ...(technicalPrelude?{technicalPrelude}:{}),...(retainedFinish?{retainedFinish}:{}),...(checkpoint?{[checkpointKey]:checkpoint}:{}),
-        ...(localDraft?{localDraft}:{})};
+        ...(localDraft?{localDraft}:{}),...(recoveredOutcome?{recoveredOutcome}:{})};
       const value=await call('passRenew',body,signal),pass=value?.pass;
       if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'
-        ||!(localDraft?[7]:checkpoint?[checkpointKey==='intermediateDraft'?6:5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
+        ||!(recoveredOutcome?[8]:localDraft?[7]:checkpoint?[checkpointKey==='intermediateDraft'?6:5]:retainedFinish?[4]:technicalPrelude?[3]:[1,2]).includes(value.schemaVersion)
         ||value.schemaVersion!==1&&(!input.automatic||value.questionPath!==null||!['approved','stale','resumed'].includes(value.state))
         ||!['waiting_owner','approved','declined','clarification','expired','stale','resumed'].includes(value.state)
         ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision
         ||value.invocationId!==value.reviewId||body.reviewId&&body.reviewId!==value.reviewId
         ||!object(pass)||pass.passId!==body.passId||!['leased','closed','review_required'].includes(pass.state)
-        ||[6,7].includes(value.schemaVersion)&&pass.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        ||[6,7,8].includes(value.schemaVersion)&&pass.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const resumed=value.resumed===null?null:{leaseRevision:revision(value.resumed?.leaseRevision),leaseExpiresAt:isoTimestamp(value.resumed?.leaseExpiresAt)};
       if(resumed&&(Object.keys(value.resumed).sort().join(',')!=='leaseExpiresAt,leaseRevision'||resumed.leaseRevision!==body.expectedLeaseRevision+1)
         ||(value.state==='resumed')!==(resumed!==null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');

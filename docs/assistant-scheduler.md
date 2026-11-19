@@ -918,6 +918,28 @@ locator. Keep this compatible with the original saved prompts.
 The invocation and the following coordinator cycle use the same read-back.
 An interrupted receipt read never restarts a save or creates a business outcome.
 
+An accepted task save without a pass outcome is a separate reconciliation.
+For an original event-free scheduled pass followed by its one direct local or
+portable save, read both full native turns and verify their exact shared Run.
+Prove the original effects from native receipts: a committed owner question,
+an optional committed control, the same bounded read evidence and the saved
+file receipts. The same passive browser lifecycle validator applies to any
+admitted HTTPS origin. A pending visit, browser input or an unproved provider
+effect cannot qualify. Older unsigned effect projections qualify only through
+the specifically audited immutable package and command, while modern signed
+skill receipts use the common request/output digest.
+
+The backend verifies the original save journal, projected acceptance, current
+pending question and unchanged previously committed waiting schedule. The one
+v8 continuation reserves already observed facts, rechecks both turns under
+the owned native writer and only admits the fixed `complete_assistant_pass`
+arguments. The model transports that call to obtain the ordinary observed
+runtime proof. The signed host reuses the existing encrypted accepted-material
+adapter and native outcome endpoint. The result stays `waiting_owner` at
+the original cadence. Only the ordinary immutable outcome receipt closes the
+pass and releases the queue. A lost response is read back under that same
+marker and neither the save nor the business action is executed again.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
 accepted head alongside the existing intent. The

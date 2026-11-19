@@ -2,6 +2,7 @@
 import { maintainAssistantHostHealth, maintainAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-host-runtime-recovery.mjs';
 // Internal source-tree harness compatibility only, not a model capability or
 // an environment switch. An older signed worker must not silently ignore its
@@ -1937,6 +1938,7 @@ const productionContext = async (action, options = {}) => {
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','readTaskRetainedFinishEvidence','readTaskPortableFinishEvidence','readTaskIntermediateDraftEvidence',
   'readTaskLocalDraftEvidence',
+  'readTaskRecoveredOutcomeEvidence',
   'renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
   'beginSourceIntake','reconcileAnsweredSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply','abandonUnattemptedOwnerReply',
   'prepareOwnerReplyDelivery','readOwnerReplyDelivery','confirmOwnerReplyDelivery','readRejectedTriageIgnore','reconcileRejectedTriageIgnore'];
@@ -2863,7 +2865,17 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
  * list filtering hides unrelated tools; this check also rejects stale
  * catalogues and disallowed operations of the generic continuation tool. */
 const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
-  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS,ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS}=await import('./trelio-assistant-inbox.mjs');
+  const {ASSISTANT_WORKSPACE_DRAFT_TOOLS,ASSISTANT_WORKSPACE_ACCEPTED_TOOLS,ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS,
+    assistantRecoveredOutcomeCompletion}=await import('./trelio-assistant-inbox.mjs');
+  if(draft.recoveredOutcome){
+    if(name!=='complete_assistant_pass'||!draft.recoveryReviewId)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+    const {taskPass:_scope,runtimeSessionProof:_proof,...input}=args;
+    // Native admission still validates the actual scope and proof. Even an
+    // older cached schema cannot choose different completion fields.
+    if(!isDeepStrictEqual(input,assistantRecoveredOutcomeCompletion(draft.recoveredOutcome.plan,draft.recoveryReviewId)))
+      fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+    return;
+  }
   const accepted=draft.acceptedHead!==undefined;
   const interruptedFinish=draft.finishPending===true;
   const saveOnly=draft.namedArchive||draft.portableFinish||draft.localDraft;

@@ -7,6 +7,7 @@
  * No message text, instructions, secrets or guessed task mapping enter this DB.
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 
 export class AssistantInboxError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -82,10 +83,7 @@ export const assistantWorkspaceCheckpointLocator=({workspaceId,runId,checkpointI
 // Historical facts are content-free and sealed with the same one-use intent.
 // No provider arguments, paths, stdout or unverified checkpoint replacements
 // enter this journal. A portable modern receipt has no legacy fields.
-export const validateAssistantIntermediateDraft=value=>{
-  object(value,['workspaceId','runId','checkpointId','draftHead','retainedLocalCheckpoint','historicalSkillReleases']);
-  const {retainedLocalCheckpoint,historicalSkillReleases,...checkpoint}=value;
-  if(retainedLocalCheckpoint!==undefined&&retainedLocalCheckpoint!==true)inputError();
+const historicalSkillReleaseReceipts=historicalSkillReleases=>{
   if(historicalSkillReleases!==undefined&&(!Array.isArray(historicalSkillReleases)
     ||historicalSkillReleases.length<1||historicalSkillReleases.length>8))inputError();
   const releases=historicalSkillReleases?.map(row=>{
@@ -95,8 +93,53 @@ export const validateAssistantIntermediateDraft=value=>{
     return {skillId:row.skillId,releaseId:uuid(row.releaseId),packageSha256:row.packageSha256};
   });
   if(releases?.some((row,index)=>index>0&&row.releaseId<=releases[index-1].releaseId))inputError();
+  return releases;
+};
+export const validateAssistantIntermediateDraft=value=>{
+  object(value,['workspaceId','runId','checkpointId','draftHead','retainedLocalCheckpoint','historicalSkillReleases']);
+  const {retainedLocalCheckpoint,historicalSkillReleases,...checkpoint}=value;
+  if(retainedLocalCheckpoint!==undefined&&retainedLocalCheckpoint!==true)inputError();
+  const releases=historicalSkillReleaseReceipts(historicalSkillReleases);
   return {...validateAssistantWorkspaceCheckpoint(checkpoint),
     ...(retainedLocalCheckpoint?{retainedLocalCheckpoint}:{}),...(releases?{historicalSkillReleases:releases}:{})};
+};
+
+/** The save and the task outcome are separate. Keep only the recorded
+ * question/control locators, current accepted head and package references.
+ * In particular neither goal text nor mutable schedules come from history. */
+export const validateAssistantRecoveredOutcomeEvidence=value=>{
+  object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases']);
+  if(!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead??''))inputError();
+  const releases=historicalSkillReleaseReceipts(value.historicalSkillReleases);
+  let control;
+  if(value.control!==undefined){
+    object(value.control,['controlId','controlRequestId','controlReceiptId']);
+    control={controlId:uuid(value.control.controlId),controlRequestId:uuid(value.control.controlRequestId),
+      controlReceiptId:uuid(value.control.controlReceiptId)};
+  }
+  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),acceptedHead:value.acceptedHead,
+    questionId:uuid(value.questionId),questionRequestId:uuid(value.questionRequestId),
+    ...(control?{control}:{}),...(releases?{historicalSkillReleases:releases}:{})};
+};
+export const validateAssistantRecoveredOutcomeSchedule=value=>{
+  object(value,['priorReceiptId','cadence','timeZone','dailyLocalTime']);
+  if(Object.keys(value).length!==4)inputError();
+  const {priorReceiptId,...schedule}=value;
+  const {cadence,timeZone,dailyLocalTime}=assistantPassContinuation({...schedule,goalState:'waiting_owner'});
+  return {priorReceiptId:uuid(priorReceiptId),cadence,timeZone,dailyLocalTime};
+};
+export const validateAssistantRecoveredOutcomePlan=value=>{
+  object(value,['saveReviewId','evidence','schedule']);
+  return {saveReviewId:uuid(value.saveReviewId),evidence:validateAssistantRecoveredOutcomeEvidence(value.evidence),
+    schedule:validateAssistantRecoveredOutcomeSchedule(value.schedule)};
+};
+// Compute the only effect permitted in this lease from native evidence.
+// Neither history prose nor the model can choose a different task outcome.
+export const assistantRecoveredOutcomeCompletion=(plan,reviewId)=>{
+  const {evidence,schedule}=validateAssistantRecoveredOutcomePlan(plan);
+  return {workspaceId:evidence.workspaceId,acceptedRunId:evidence.runId,workspaceHead:evidence.acceptedHead,
+    goalState:'waiting_owner',noChange:false,clientRequestId:uuid(reviewId),cadence:schedule.cadence,timeZone:schedule.timeZone,
+    ...(schedule.dailyLocalTime===null?{}:{dailyLocalTime:schedule.dailyLocalTime})};
 };
 // The same closed task read surface is used for the native executor
 // catalogue and for checking retained history. It does not classify a
@@ -107,7 +150,7 @@ export const ASSISTANT_TASK_MCP_READ_TOOLS=Object.freeze([
   'get_assistant_owner_question','search_agent_guidance','get_agent_skill','get_agent_procedure',
 ]);
 const workspaceDraftIdentity = value => {
-  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish','localDraft']);
+  object(value,['workspaceId','runId','acceptedHead','finishPending','namedArchive','retainedHandoff','portableFinish','localDraft','recoveredOutcome']);
   if(value.acceptedHead!==undefined&&!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead))inputError();
   if(value.finishPending!==undefined&&(value.finishPending!==true||value.acceptedHead!==undefined)
     ||value.namedArchive!==undefined&&(value.namedArchive!==true||value.finishPending!==true)
@@ -121,11 +164,23 @@ const workspaceDraftIdentity = value => {
   if(portableFinish&&(portableFinish.workspaceId!==value.workspaceId||portableFinish.runId!==value.runId))inputError();
   const localDraft=value.localDraft===undefined?undefined:validateAssistantLocalDraftWitness(value.localDraft);
   if(localDraft&&(localDraft.basis.workspaceId!==value.workspaceId||localDraft.basis.runId!==value.runId))inputError();
+  let recoveredOutcome;
+  if(value.recoveredOutcome!==undefined){
+    object(value.recoveredOutcome,['plan','originalTurnId','mode','receipt']);
+    const {plan,originalTurnId,mode,receipt}=value.recoveredOutcome;
+    const selected=validateAssistantRecoveredOutcomePlan(plan),evidence=selected.evidence;
+    if(!value.acceptedHead||evidence.acceptedHead!==value.acceptedHead||evidence.workspaceId!==value.workspaceId
+      ||evidence.runId!==value.runId||!['local_draft','portable_draft'].includes(mode))inputError();
+    const basis=mode==='local_draft'?validateAssistantLocalDraftBasis(receipt):validateAssistantPortableFinish(receipt);
+    if(basis.workspaceId!==value.workspaceId||basis.runId!==value.runId
+      ||mode==='portable_draft'&&basis.draftHead!==value.acceptedHead)inputError();
+    recoveredOutcome={plan:selected,originalTurnId:uuid(originalTurnId),mode,receipt:basis};
+  }
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
     ...(value.finishPending===true?{finishPending:true}:{}),
     ...(value.namedArchive===true?{namedArchive:true}:{}),...(retainedHandoff?{retainedHandoff}:{}),
-    ...(portableFinish?{portableFinish}:{}),...(localDraft?{localDraft}:{})};
+    ...(portableFinish?{portableFinish}:{}),...(localDraft?{localDraft}:{}),...(recoveredOutcome?{recoveredOutcome}:{})};
 };
 // A v7 start may have durably uploaded a final handoff before stopping.
 // Only the same Run's new immutable v5 head can follow that one local save.
@@ -144,6 +199,7 @@ export const ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS=Object.freeze(
 export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
   'get_assistant_status','get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract','complete_assistant_pass',
 ]);
+export const ASSISTANT_RECOVERED_OUTCOME_TOOLS=Object.freeze(['complete_assistant_pass']);
 export const validateAssistantTechnicalPrelude=value=>{
   const fields=['kind','workspaceId','runId','skillId','releaseId','projectId'];
   object(value,fields);
@@ -192,7 +248,7 @@ const taskReadWitness=value=>{
 };
 const namedArchiveAcceptedIdentity = value => {
   const selected=workspaceDraftIdentity(value);
-  if(!selected.acceptedHead||selected.finishPending||selected.namedArchive)inputError();
+  if(!selected.acceptedHead||selected.finishPending||selected.namedArchive||selected.recoveredOutcome)inputError();
   return selected;
 };
 const continuationIntent = value => {
@@ -224,7 +280,8 @@ export const readAssistantWorkspaceDraftRecovery = (database,pass) => {
   const intent=continuationIntent(JSON.parse(row.intent_json));
   if(!intent.workspaceDraft)return null;
   if(intent.passId!==uuid(pass.passId))fail('ASSISTANT_INBOX_CONFLICT');
-  return Object.freeze(intent.workspaceDraft);
+  return Object.freeze(intent.workspaceDraft.recoveredOutcome
+    ?{...intent.workspaceDraft,recoveryReviewId:intent.reviewId}:intent.workspaceDraft);
 };
 const capacityState = value => {
   object(value,['firstAt','nextAt','step','turnId','markerId','waiting']);
@@ -2291,8 +2348,22 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // or permission to consume any original source input.
         const independentSave=workspaceDraft?.portableFinish||workspaceDraft?.localDraft;
         const localFinalization=isAssistantLocalDraftFinalization(last?.workspaceDraft,workspaceDraft);
+        const recovered=workspaceDraft?.recoveredOutcome;
         if(independentSave&&(!row.scheduled||deliveryEvents(id).length!==0||last?.capacity
           ||last&&(!last.started||last.workspaceDraft&&!localFinalization||last.passId!==passId)))fail('ASSISTANT_INBOX_CONFLICT');
+        // Keep the save as an immutable predecessor in the same journal.
+        // A valid continuation result alone cannot establish this lineage.
+        if(recovered){
+          const saved=last?.workspaceDraft;
+          const {deltaSha256:_delta,...localBasis}=saved?.localDraft?.basis??{};
+          const priorReceipt=recovered.mode==='local_draft'
+            ?saved?.localDraft&&localBasis:saved?.portableFinish;
+          if(!row.scheduled||deliveryEvents(id).length||!latest||!last.started||last.passId!==passId
+            ||last.reviewId!==recovered.plan.saveReviewId||last.terminalMarkerId!==id
+            ||last.terminalTurnId!==recovered.originalTurnId||terminalTurnId===recovered.originalTurnId
+            ||expectedLeaseRevision!==last.expectedLeaseRevision+1
+            ||!priorReceipt||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
+        }
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))
           fail('ASSISTANT_INBOX_CONFLICT');
@@ -2303,7 +2374,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const postArchive=last?.namedArchiveSettled;
         if(postArchive&&(last.passId!==passId||capacity||workspaceDraft||parentRead||namedArchiveSettled
           ||prerequisiteKey===null||!latest||prerequisiteKey===latest.prerequisite_key))fail('ASSISTANT_INBOX_CONFLICT');
-        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled&&!localFinalization
+        if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled&&!localFinalization&&!recovered
           ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff&&!independentSave)
           ||workspaceDraft&&!independentSave&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
           ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)

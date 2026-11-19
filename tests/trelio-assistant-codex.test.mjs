@@ -10,7 +10,7 @@ import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, ass
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
   ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
-import { bindAssistantTaskSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
+import { bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
@@ -1185,6 +1185,151 @@ for(const anchor of ['base','checkpoint','portable'])test(`native read-back reco
     unfinished.items=unfinished.items.filter(item=>item.arguments?.operation!=='finish');
     assert.deepEqual(await read(unfinished),{state:'uncertain'});
   }
+});
+
+for(const mode of ['local_draft','portable_draft'])test(`a verified ${mode} save can observe only its settled original outcome`,async()=>{
+  const {turn:save,deliveryId:saveMarkerId,taskPass,run,candidateHead}=archiveWithRefusedOpenPoll();
+  const {workspaceId,runId}=run,threadId=randomUUID(),deliveryId=randomUUID(),requestId=randomUUID(),questionId=randomUUID();
+  const scope={...taskContext,scheduled:true,workMode:'task'};
+  const local={...run,baseHead:'a'.repeat(40),anchorHead:'a'.repeat(40),checkpointId:null};
+  const portable={...run,checkpointId:randomUUID(),draftHead:candidateHead};
+  const receipt=mode==='local_draft'?local:portable;
+  const workspaceDraft={...run,finishPending:true,...mode==='local_draft'
+    ?{localDraft:{basis:local}}:{portableFinish:portable}};
+  const root=marker=>({type:'userMessage',content:[{type:'text',text:assistantNativePrompt(marker,scope,{})}]});
+  const call=(tool,args,value,status='completed')=>({type:'mcpToolCall',server:'trelio-assistant',tool,status,
+    arguments:{...args,taskPass},result:{structuredContent:value}});
+  const action=(operation,parameters,value)=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...operation==='open'?{}:{runIdentity:run}},value);
+  const nativeWorkspace={id:workspaceId,companyId:taskPass.companyId,scopeType:'task',
+    scopeKey:`task:${taskPass.taskId}`,taskId:taskPass.taskId};
+  save.items[0].content[0].text=assistantNativePrompt(saveMarkerId,scope,{workspaceDraftRecovery:{workspaceDraft}});
+  save.items[2].result.structuredContent.workspace=nativeWorkspace;
+  const p={companyId:taskPass.companyId,skillId:'example-read',releaseId:randomUUID(),arguments:['read']};
+  const stdout='{"ok":true,"private":"do not project"}';
+  const signedRead=bindAssistantTaskSkillRead({schemaVersion:1,releaseId:p.releaseId,packageSha256:'b'.repeat(64),
+    outputSha256:createHash('sha256').update(stdout).digest('hex')},{scope:taskPass,parameters:p,stdout});
+  const legacy={...p,skillId:'telegram-mtproto',releaseId:'b1dabd59-00fa-42e1-a4f4-45e09081de2a',
+    arguments:['--local-account',randomUUID(),'chat-info','--chat','1234']};
+  const historical=reviewedAssistantHistoricalSkillRead(legacy,
+    {providerArguments:['chat-info','--chat','1234'],accountId:legacy.arguments[1]},{terminal:true});
+  assert.ok(historical);
+  assert.equal(reviewedAssistantHistoricalSkillRead(legacy,
+    {providerArguments:['chat-info','--chat','1234'],accountId:legacy.arguments[1]}),null);
+  const original={id:randomUUID(),status:'interrupted',items:[root(deliveryId),
+    call('prepare_assistant_workspace_run',run,{prepared:true,workspace:nativeWorkspace,run:{id:runId}}),
+    action('open',run,{operation:'open'}),
+    call('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters:p},
+      {schemaVersion:1,operation:'skill_run',stdout,taskSkillRead:signedRead}),
+    call('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters:legacy},
+      {schemaVersion:1,operation:'skill_run',stdout}),
+    call('ask_assistant_owner',{clientRequestId:requestId},{id:questionId,path:'/profile/',state:'pending',replayed:false}),
+    call('use_assistant_workspace_files',{runIdentity:run,command:{action:'replace',path:'WORK.md',text:'pending',
+      expectedSha256:null}},{state:'draft_updated',sha256:createHash('sha256').update('pending').digest('hex')}),
+  ]};
+  const guideParameters={...legacy,arguments:['guides']};
+  const guideText='Synthetic signed guide';
+  const guide=projectAssistantSkillGuideResult({schemaVersion:1,operation:'skill_run',stdout:JSON.stringify({
+    schemaVersion:1,part:0,count:1,nextGuidePart:null,path:'instruction-guides/part-01.md',text:guideText,
+    sha256:createHash('sha256').update(guideText).digest('hex'),
+  })},{schemaVersion:1,operation:'skill_run',parameters:guideParameters},0);
+  original.items.push(call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation:'skill_run',parameters:guideParameters},guide));
+  if(mode==='portable_draft')original.items.push(action('finish',{taskOutcome:'no_status_change'},{operation:'finish'}));
+  const read=(history=[save,original])=>readAssistantCodexDelivery(threadId,saveMarkerId,{
+    executable:process.execPath,environment:{},recoveredWorkspaceOutcome:{deliveryId,originalTurnId:original.id,
+      saveMarkerId,saveTurnId:save.id,taskPass,mode,receipt},
+    spawnProcess:nativeRpc(request=>{
+      if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd:process.cwd()}}};
+      assert.equal(request.method,'thread/turns/list');assert.equal(request.params.limit,2);
+      assert.equal(request.params.itemsView,'full');
+      return {result:{data:history}};
+    }),
+  });
+  assert.deepEqual(await read(),{state:'recovered_outcome_observed',turnId:save.id,
+    evidence:{...run,acceptedHead:candidateHead,questionId,questionRequestId:requestId,historicalSkillReleases:[historical]}});
+  const evidence={...run,acceptedHead:candidateHead,questionId,questionRequestId:requestId,historicalSkillReleases:[historical]};
+  const historyWithBrowser=siteOrigin=>{
+    const parent=structuredClone(original);
+    const browser=(operation,args,state)=>call('use_assistant_browser',{siteOrigin,command:{operation,args}}, {state,reason:'none'});
+    parent.items.splice(3,0,browser('navigate',{url:siteOrigin+'/read'},'preparing'),
+      browser('status',{},'ready'),browser('screenshot',{},'ready'),browser('close',{},'closed'));
+    return parent;
+  };
+  for(const origin of ['https://mail.google.com','https://school.example.test','https://different.example.test:8443']){
+    const parent=historyWithBrowser(origin);
+    assert.deepEqual(await read([save,parent]),{state:'recovered_outcome_observed',turnId:save.id,evidence});
+    const changed=structuredClone(parent);
+    changed.items[6].arguments.siteOrigin='https://unrelated.example.test';
+    assert.deepEqual(await read([save,changed]),{state:'uncertain'});
+    changed.items[6].arguments.siteOrigin=origin;
+    changed.items[6].arguments.command.operation='type-text';
+    assert.deepEqual(await read([save,changed]),{state:'uncertain'});
+    parent.items.splice(6,1);
+    assert.deepEqual(await read([save,parent]),{state:'uncertain'});
+  }
+  const reviewId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const plan={saveReviewId:saveMarkerId,evidence,schedule:{
+    priorReceiptId:randomUUID(),cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00',
+  }};
+  for(const changed of [false,true]){
+    let reads=0,starts=0;
+    const steps=[],parent=historyWithBrowser('https://unrelated.example.test');
+    if(changed)parent.items[6].status='inProgress';
+    const attempt=runAssistantCodexPass({threadId,deliveryId:reviewId,cwd,taskContext:scope,execution},{
+      executable:process.execPath,environment:{},requireAbsentMarker:true,
+      continuationReview:{priorTurnId:save.id,reviewId},
+      workspaceDraftRecovery:{terminalMarkerId:saveMarkerId,terminalTurnId:save.id,originalDeliveryId:deliveryId,taskPass,
+        workspaceDraft:{...run,acceptedHead:candidateHead,recoveredOutcome:{plan,originalTurnId:original.id,mode,receipt}}},
+      readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+      readExecutionAvailability:async()=>true,beforeInvocation:async()=>{steps.push('renew');},
+      startInvocation:()=>{starts++;},
+      readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'native:accepted'},
+      spawnProcess:ownedRpc({threadId,cwd,priorTurn:[save,parent],
+        executionPolicy:(request,base)=>{
+          if(request.method!=='mcpServerStatus/list')return;
+          base.result.data[0].tools={complete_assistant_pass:{name:'complete_assistant_pass'}};
+          return base;
+        },
+        onRequest:request=>{
+          if(request.method==='thread/resume'){
+            const plugin=request.params.config.plugins['trelio-digital-assistant@trelio-digital-assistants'];
+            assert.deepEqual(plugin.mcp_servers['trelio-assistant'].enabled_tools,['complete_assistant_pass']);
+            steps.push('writer');
+          }
+          if(request.method==='thread/turns/list'&&request.params.limit===2)steps.push('readboth');
+        },
+        onInput:text=>{
+          assert.match(text,/Call only complete_assistant_pass once/u);
+          assert.match(text,/"goalState":"waiting_owner"/u);assert.match(text,/"dailyLocalTime":"20:00"/u);
+          assert.doesNotMatch(text,/unrelated\.example|do not project/u);
+        },
+      }),
+    });
+    if(changed){
+      await assert.rejects(attempt,{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+      assert.equal(starts,0);assert.deepEqual(steps,['writer','readboth']);
+    }else{
+      assert.equal((await attempt).state,'completed');
+      assert.equal(starts,1);assert.deepEqual(steps,['writer','readboth','renew']);
+    }
+  }
+  for(const change of [
+    parent=>{parent.items[3].result.structuredContent.stdout+='x';},
+    parent=>{parent.items[4].arguments.parameters.arguments.push('--send');},
+    parent=>{parent.items[5].result.structuredContent.replayed=true;},
+    parent=>{parent.items[5].arguments.taskPass={...taskPass,passId:randomUUID()};},
+    parent=>{parent.items.push(call('use_assistant_browser',{},{}));},
+    parent=>{parent.items.push(call('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',
+      parameters:{...legacy,arguments:['send']}},{code:'TRELIO_WORKSPACE_ACTION_FAILED'},'failed'));},
+    parent=>{parent.items.push(call('update_task_control',{},{}));},
+    parent=>{parent.items.push(structuredClone(parent.items[0]));},
+  ]){
+    const changed=structuredClone(original);change(changed);
+    assert.deepEqual(await read([save,changed]),{state:'uncertain'});
+  }
+  assert.deepEqual(await read([save]),{state:'uncertain'});
+  assert.deepEqual(await read([save,{...original,id:randomUUID()}]),{state:'uncertain'});
 });
 
 test('accepted named archive tolerates only its own pre-finish hook-refused open-status read',()=>{

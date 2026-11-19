@@ -38,6 +38,27 @@ export const matchesAssistantTaskSkillRead = (value, { scope, parameters, stdout
 // classify an exact reviewed old command vector, then native renewal checks
 // the same immutable release, verified bytes and publication time. The
 // catalog is only for retained turns. Live calls use the signed effect policy.
+// These terminal-only vectors are evidence about the *already executed* old
+// process. The only non-observation work is local session/cache maintenance.
+// Keep them out of checkpoint resumption and never use them to run a command.
+const historicalTelegramHistoryRead=(arguments_, accountId)=>{
+  // The reviewed guides branch reads a fixed signed manifest before account
+  // selection, credential I/O or provider startup.
+  if(arguments_.length===1&&arguments_[0]==='guides')return true;
+  if(accountId===null)return arguments_.length===2&&arguments_[0]==='account'&&arguments_[1]==='list';
+  const peer=value=>/^-?[1-9][0-9]{0,17}$/u.test(value??'');
+  const instant=value=>/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/u.test(value??'')
+    &&Number.isFinite(Date.parse(value));
+  if(arguments_.length===1)return arguments_[0]==='doctor';
+  if(arguments_.length===3)return arguments_[0]==='chat-info'&&arguments_[1]==='--chat'&&peer(arguments_[2]);
+  const [kind,chat,target,since,from,until,to,timezone,zone,links,order]=arguments_;
+  if(arguments_.length!==11||kind!=='export'||chat!=='--chat'||since!=='--since'||until!=='--until'
+    ||timezone!=='--timezone'||links!=='--include-links'||order!=='--chronological'
+    ||!peer(target)||!instant(from)||!instant(to)||Date.parse(from)>=Date.parse(to)
+    ||typeof zone!=='string'||!/^[A-Za-z_]+(?:\/[A-Za-z0-9_+\-]+){0,3}$/u.test(zone))return false;
+  try{new Intl.DateTimeFormat('en',{timeZone:zone});return true;}catch{return false;}
+};
+
 const historicalTaskSkillReads=[{
   skillId:'telegram-mtproto',releaseId:'8f0e4a2a-c63d-4aa2-958c-1fb2701c5c76',
   packageSha256:'ef85be194ef9a52c8ac20b497cd726a5487553884afd511f882be06901f8eaf0',
@@ -51,10 +72,19 @@ const historicalTaskSkillReads=[{
       &&arguments_[1]==='--link'&&/^https:\/\/t\.me\/(?:c\/\d+|[a-zA-Z0-9_]{1,64})\/\d+(?:\/\d+)?$/u.test(arguments_[2])
       &&arguments_[3]==='--context'&&/^(?:[0-9]|10)$/u.test(arguments_[4]);
   },
+},{
+  skillId:'telegram-mtproto',releaseId:'b1dabd59-00fa-42e1-a4f4-45e09081de2a',
+  packageSha256:'d43aa594c16e67f808b5a01a9ddb04865330e93cfa4d7b561002a9ff72f92780',
+  // Public source 181959eb24c3ef8ede4748931a3a043e22305d9f.
+  // doctor never connects, chat-info reads exact rights, and the closed
+  // single-chat export reads history without ACK, views, send or mutation.
+  // This release predates signed effect metadata. Native reconciliation
+  // also checks the publication, package digest and revocation under lock.
+  terminalOnly:true,accepts:historicalTelegramHistoryRead,
 }];
-export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{providerArguments,accountId})=>{
+export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{providerArguments,accountId},{terminal=false}={})=>{
   const policy=historicalTaskSkillReads.find(row=>row.skillId===skillId&&row.releaseId===releaseId);
-  if(!policy?.accepts(providerArguments,accountId))return null;
+  if(!policy||policy.terminalOnly&&!terminal||!policy.accepts(providerArguments,accountId))return null;
   return {skillId,releaseId,packageSha256:policy.packageSha256};
 };
 

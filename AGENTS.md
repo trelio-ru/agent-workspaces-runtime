@@ -227,6 +227,12 @@ publication tooling также остаются вне этого публичн
   Save initiation and accepted read-back share the mode-specific prompt binding.
   Validate checkpoint/base evidence separately from the strict two-field Run
   locator; this technical receipt does not settle the business outcome.
+  Recovered exact scheduled saves and their original settled effects share a
+  receipt-based waiting continuation. Check both full turns under the same
+  native writer and confirm only the same pending question, accepted revision
+  and previously committed schedule. Site origins are opaque lifecycle bindings.
+  Only fixed completion is model-facing. Reuse exact native accepted-material
+  proof and the ordinary outcome receipt before releasing the queue.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

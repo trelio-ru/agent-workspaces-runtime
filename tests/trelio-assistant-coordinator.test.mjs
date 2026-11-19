@@ -3484,12 +3484,17 @@ for(const retained of [false,true])test(`intermediate checkpoint resumes the ori
   }finally{await host?.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
-for(const local of [false,true])test(`native draft settles the same Run without resolving unknown external work (local=${local})`,async t=>{
-  const f=fixture(t);
+for(const {local,settled} of [{local:false,settled:false},{local:true,settled:false},
+  {local:false,settled:true},{local:true,settled:true}])test(
+  `native draft recovery keeps save and original outcome independent (local=${local}, settled=${settled})`,async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-outcome-recovery-'));
+  const filename=path.join(directory,'journal.sqlite');
+  let database=new DatabaseSync(filename);
+  const f=fixture(t,{database,ownsDatabase:false});
   f.authority.workMode='task';
   Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
   await f.coordinator.close();
-  const native=f.options.native, client=f.options.client;
+  const native=f.options.native, client=f.options.client,readBusinessOutcome=client.readBusinessOutcome;
   const run={workspaceId:randomUUID(),runId:randomUUID()},acceptedHead='a'.repeat(40);
   const basis={...run,baseHead:'b'.repeat(40),anchorHead:'b'.repeat(40),checkpointId:null};
   const receipt=local?basis:{...run,checkpointId:randomUUID(),draftHead:acceptedHead};
@@ -3501,9 +3506,23 @@ for(const local of [false,true])test(`native draft settles the same Run without 
     assert.deepEqual(received,replacements);
     return deltaSha256;
   };
-  const coordinator=createAssistantCoordinator(f.options);
+  let coordinator=createAssistantCoordinator(f.options);
   const originalTurn=randomUUID(),marker=randomUUID(),settlementTurn=randomUUID();
-  let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0,saveReads=0;
+  const outcomeMarker=randomUUID(),outcomeTurn=randomUUID(),priorReceiptId=randomUUID();
+  let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0,saveReads=0,outcomeObservations=0;
+  let writerBusy=true,confirmed=false,outcomeReviews=0,outcomeRenewals=0,outcomeStarts=0;
+  const questionId=randomUUID(),questionRequestId=randomUUID();
+  const preservedSchedule={priorReceiptId,cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00'};
+  const evidence={...run,acceptedHead,questionId,questionRequestId};
+  const plan={saveReviewId:marker,evidence,schedule:preservedSchedule};
+  if(settled) client.readTaskRecoveredOutcomeEvidence=async args=>{
+    outcomeObservations++;
+    assert.equal(args.passId,original.passId);
+    assert.equal(args.expectedLeaseRevision,1);
+    assert.deepEqual({workspaceId:args.workspaceId,runId:args.runId},run);
+    assert.equal(args.acceptedHead,acceptedHead);
+    return preservedSchedule;
+  };
   native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
   try{
     await coordinator.pollOnce();await coordinator.workOnce();
@@ -3511,13 +3530,17 @@ for(const local of [false,true])test(`native draft settles the same Run without 
     f.advance(300001);await coordinator.pollOnce();await coordinator.workOnce();
     const schedule=coordinator.status()[0];
     f.advance(schedule.nextRunAt-f.options.now());
-    client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
+    client.readBusinessOutcome=async args=>confirmed?readBusinessOutcome(args):{schemaVersion:1,state:'pending'};
     client[local?'readTaskLocalDraftEvidence':'readTaskPortableFinishEvidence']=async args=>{
       assert.equal(args.passId,original.passId);
       assert.equal(args.expectedLeaseRevision,0);
       return admitted?receipt:null;
     };
     native.readDelivery=async(_thread,id,options={})=>{
+      if(id===outcomeMarker){
+        assert.ok(confirmed);
+        return {state:'completed',turnId:outcomeTurn,receipt:`codex:${original.threadId}:${outcomeTurn}`};
+      }
       if(id===original?.deliveryId){
         if(options.interruptedWorkspaceDraft?.localDraftBasis){
           assert.deepEqual(options.interruptedWorkspaceDraft.localDraftBasis,basis);
@@ -3530,6 +3553,13 @@ for(const local of [false,true])test(`native draft settles the same Run without 
         return {state:'uncertain',turnId:originalTurn};
       }
       assert.equal(id,marker);
+      if(options.recoveredWorkspaceOutcome){
+        assert.deepEqual(options.recoveredWorkspaceOutcome.receipt,receipt);
+        assert.equal(options.recoveredWorkspaceOutcome.originalTurnId,originalTurn);
+        assert.equal(options.recoveredWorkspaceOutcome.saveTurnId,settlementTurn);
+        return settled?{state:'recovered_outcome_observed',turnId:settlementTurn,
+          evidence:{...run,acceptedHead,questionId,questionRequestId}}:{state:'uncertain'};
+      }
       const inspectSave=options.acceptedPortableFinish??options.acceptedLocalDraft;
       if(inspectSave){
         assert.deepEqual(inspectSave.receipt,receipt);
@@ -3540,10 +3570,23 @@ for(const local of [false,true])test(`native draft settles the same Run without 
     };
     f.options.passHost.continuePass=async(args,pass)=>{
       assert.deepEqual(pass,original);
+      const live=f.passes.get(original.deliveryId);
+      if(args.recoveredOutcome){
+        assert.deepEqual(args.recoveredOutcome,plan);
+        assert.equal(args.terminalTurnId,settlementTurn);
+        assert.equal(args.expectedLeaseRevision,1);
+        if(args.continuation==='review')outcomeReviews++;
+        else assert.equal(args.reviewId,outcomeMarker);
+        if(args.continuation==='resume'){
+          assert.equal(outcomeRenewals++,0);
+          Object.assign(live,{state:'leased',leaseRevision:2,leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+        }
+        return {schemaVersion:8,state:outcomeRenewals?'resumed':'approved',reviewId:outcomeMarker,invocationId:outcomeMarker,
+          resumed:outcomeRenewals?{leaseRevision:2,leaseExpiresAt:live.leaseExpiresAt}:null,pass:{...live}};
+      }
       if(local)assert.deepEqual(args.localDraft,savedLocalDraft.basis);
       else assert.deepEqual(args.portableFinish,receipt);
       assert.equal(args.terminalTurnId,originalTurn);
-      const live=f.passes.get(original.deliveryId);
       if(args.continuation==='review')reviews++;
       if(args.continuation==='resume'){
         assert.equal(renewals++,0);
@@ -3557,6 +3600,18 @@ for(const local of [false,true])test(`native draft settles the same Run without 
         original=f.activePass();
         options.startInvocation();
         return {state:'uncertain'};
+      }
+      if(input.deliveryId===outcomeMarker){
+        const selected=options.workspaceDraftRecovery;
+        assert.equal(selected.originalDeliveryId,original.deliveryId);
+        assert.equal(selected.terminalMarkerId,marker);
+        assert.deepEqual(selected.workspaceDraft.recoveredOutcome,{plan,originalTurnId:originalTurn,
+          mode:local?'local_draft':'portable_draft',receipt});
+        if(writerBusy)throw Object.assign(new Error('busy'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+        await options.beforeInvocation();
+        options.startInvocation();
+        outcomeStarts++;confirmed=true;f.continuation.goalState='waiting_owner';
+        return {state:'completed',turnId:outcomeTurn,receipt:`codex:${original.threadId}:${outcomeTurn}`};
       }
       assert.equal(input.deliveryId,marker);
       assert.deepEqual(options.workspaceDraftRecovery.workspaceDraft,{...run,finishPending:true,
@@ -3579,7 +3634,31 @@ for(const local of [false,true])test(`native draft settles the same Run without 
     if(local)assert.equal(inspectCount,2,'repeated filesystem proof under owned writer');
     assert.deepEqual(f.activePass(),original);
     assert.equal(coordinator.status()[0].nextRunAt,schedule.nextRunAt);
-  }finally{await coordinator.close();}
+    if(settled){
+      // Even with verified bytes the recovery must wait for the save lease to
+      // expire, then independently look for native business evidence. The
+      // fixture has a pending owner question and no unconfirmed external effect;
+      // an accepted Run alone must never release the queue in either variant.
+      assert.equal(outcomeObservations,0);
+      f.advance(21*60_000);pass.state='review_required';
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      assert.equal(outcomeObservations,1,'verified save must reach an independent original-outcome observation');
+      assert.deepEqual([outcomeReviews,outcomeRenewals,outcomeStarts],[1,0,0]);
+      await coordinator.close();database.close();
+      database=new DatabaseSync(filename);
+      coordinator=createAssistantCoordinator({...f.options,database});
+      writerBusy=false;
+      await coordinator.workOnce();
+      assert.deepEqual([outcomeReviews,outcomeRenewals,outcomeStarts],[1,1,1]);
+      assert.deepEqual([reviews,renewals,starts],[1,1,1], 'outcome confirmation never repeats the save');
+      assert.equal(f.activePass(),null);
+      const inbox=createAssistantInbox({database,now:f.options.now});
+      assert.equal(inbox.readDelivery(original.deliveryId).state,'complete');
+      assert.equal(coordinator.status()[0].state,'active','waiting preserves the original recurring assignment');
+      assert.ok(coordinator.status()[0].nextRunAt>f.options.now());
+      assert.equal(coordinator.status()[0].dailyLocalTime,'20:00');
+    }
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
 for(const repaired of [false,true])test(`retained named archive settles once, then requires a separate native task outcome (repair=${repaired})`,async t=>{

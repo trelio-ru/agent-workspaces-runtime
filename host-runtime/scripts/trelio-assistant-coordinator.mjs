@@ -1625,7 +1625,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       .flatMap(event=>event.owner_question_id?[event.owner_question_id]:[]))]}:{})});
   const continueTerminalPass = async (job,result,signal,terminalMarkerId) => {
     const capacity=result.state==='failed'&&result.failure==='model_capacity';
-    const workspaceDraft=result.state==='interrupted_workspace_draft'?result.workspaceDraft:null;
+    const workspaceDraft=['interrupted_workspace_draft','recovered_outcome_ready'].includes(result.state)?result.workspaceDraft:null;
     const parentRead=result.state==='interrupted_task_read'?result.taskReadParent:null;
     const archive=result.state==='named_archive_saved'?result.namedArchiveSettled:null;
     const ownedHistory=workspaceDraft||parentRead||archive;
@@ -1652,15 +1652,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(live.state==='closed'||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
       ||live.bindingRevision!==saved.bindingRevision||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const retained=inbox.readPassContinuation(job.deliveryId);
+    const recoveredOutcome=workspaceDraft?.recoveredOutcome;
     const postArchive=Boolean(retained?.namedArchiveSettled&&retained.started&&result.state==='completed'&&!ownedHistory);
     // An interrupted snapshot alone is never a terminal receipt. Wait for the
     // exact prior lease to expire. An event-free scheduled root requires its
     // own complete native read witness and cannot borrow another turn as parent.
     const independentSave=workspaceDraft?.portableFinish||workspaceDraft?.localDraft;
     const localFinalization=isAssistantLocalDraftFinalization(retained?.workspaceDraft,workspaceDraft);
-    if(workspaceDraft&&(!retained&&!independentSave||retained?.workspaceDraft&&retained.started&&!localFinalization||live.workMode!=='task'
+    if(workspaceDraft&&(!retained&&!independentSave||retained?.workspaceDraft&&retained.started&&!localFinalization&&!recoveredOutcome||live.workMode!=='task'
       ||job.events.some(event=>event.conversation_key)
       ||(!retained?.workspaceDraft||localFinalization)&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
+    if(recoveredOutcome&&(!inbox.readDelivery(job.deliveryId).scheduled||job.events.length
+      ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'
+      ||retained?.started&&(retained.reviewId!==recoveredOutcome.plan.saveReviewId
+        ||live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
     if(parentRead&&((parentRead.intermediateDraft
       ?terminalMarkerId!==job.deliveryId||job.events.some(event=>event.conversation_key)
         ||retained&&!retained.taskReadParent?.intermediateDraft
@@ -1685,7 +1690,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
     if(postArchive&&(live.workMode!=='task'||job.events.some(event=>event.conversation_key||event.owner_question_id)
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
-    const saveWithIndependentOutcomeCheck=workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||independentSave;
+    const saveWithIndependentOutcomeCheck=workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||independentSave||recoveredOutcome;
     if(parentRead||saveWithIndependentOutcomeCheck||archive||postArchive)await assertPendingOutcome(signal);
     // Do not consume another continuation intent/lease while the actual native
     // client has no usable hooks. Production reads its current task folder;
@@ -1718,11 +1723,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ...(intent.taskReadParent?.intermediateDraft?{intermediateDraft:intent.taskReadParent.intermediateDraft}:{}),
       ...(intent.workspaceDraft?.retainedHandoff?{retainedFinish:intent.workspaceDraft.retainedHandoff.locators}:{}),
       ...(intent.workspaceDraft?.portableFinish?{portableFinish:intent.workspaceDraft.portableFinish}:{}),
-      ...(intent.workspaceDraft?.localDraft?{localDraft:intent.workspaceDraft.localDraft.basis}:{})};
+      ...(intent.workspaceDraft?.localDraft?{localDraft:intent.workspaceDraft.localDraft.basis}:{}),
+      ...(recoveredOutcome?{recoveredOutcome:recoveredOutcome.plan}:{})};
     let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
     const validateVersion=()=>{
-      if(parentRead?.intermediateDraft&&review.schemaVersion!==6||request.localDraft&&review.schemaVersion!==7)
+      if(parentRead?.intermediateDraft&&review.schemaVersion!==6||request.localDraft&&review.schemaVersion!==7
+        ||recoveredOutcome&&review.schemaVersion!==8)
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     };
     validateVersion();
@@ -1872,7 +1879,34 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         taskPass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
         receipt:localDraft?localDraftBasis:portableFinish}});lease();
     return save.state==='portable_finish_saved'&&save.turnId===turnId
-      &&(!portableFinish||save.acceptedHead===portableFinish.draftHead);
+      &&typeof save.acceptedHead==='string'&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(save.acceptedHead)
+      &&(!portableFinish||save.acceptedHead===portableFinish.draftHead)?save.acceptedHead:null;
+  };
+  const observeRecoveredOutcome = async (job,pass,continuation,saveTurnId,acceptedHead,signal) => {
+    if(!inbox.readDelivery(job.deliveryId).scheduled||job.events.length
+      ||continuation.terminalMarkerId!==job.deliveryId
+      ||typeof client.readTaskRecoveredOutcomeEvidence!=='function')return null;
+    // A save turn may have completed while its renewed pass still owns the
+    // device. Observe only after that exact lease expires. This lookup does
+    // not renew it or accept later work on a different binding or thread.
+    const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+    const live=await client.readTaskPass(locator,signal);lease();
+    if(live.state!=='review_required'||live.workMode!=='task'||!(Date.parse(live.leaseExpiresAt)<=now())
+      ||live.leaseRevision!==continuation.expectedLeaseRevision+1||live.bindingId!==pass.bindingId
+      ||live.bindingRevision!==pass.bindingRevision||live.threadId!==pass.threadId||live.deliveryId!==pass.deliveryId)return null;
+    const {portableFinish,localDraft}=continuation.workspaceDraft;
+    const {deltaSha256:_localDelta,...basis}=localDraft?.basis??{};
+    const selection={deliveryId:job.deliveryId,originalTurnId:continuation.terminalTurnId,saveMarkerId:continuation.reviewId,
+      saveTurnId,taskPass:locator,mode:localDraft?'local_draft':'portable_draft',receipt:localDraft?basis:portableFinish};
+    const nativeResult=await native.readDelivery(pass.threadId,continuation.reviewId,{signal,recoveredWorkspaceOutcome:selection});lease();
+    const evidence=nativeResult.evidence;
+    if(nativeResult.state!=='recovered_outcome_observed'||nativeResult.turnId!==saveTurnId
+      ||evidence?.acceptedHead!==acceptedHead||evidence.workspaceId!==continuation.workspaceDraft.workspaceId
+      ||evidence.runId!==continuation.workspaceDraft.runId)return null;
+    const schedule=await client.readTaskRecoveredOutcomeEvidence({...locator,expectedLeaseRevision:live.leaseRevision,...evidence},signal);lease();
+    return schedule?{workspaceId:evidence.workspaceId,runId:evidence.runId,acceptedHead,
+      recoveredOutcome:{plan:{saveReviewId:continuation.reviewId,evidence,schedule},
+        originalTurnId:selection.originalTurnId,mode:selection.mode,receipt:selection.receipt}}:null;
   };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
@@ -1922,9 +1956,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       catch(error){
         if(error?.code!=='ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED')throw error;
         const savedDraft=continued?.workspaceDraft;
+        if(saved&&savedDraft?.recoveredOutcome){
+          // A crash between review and native start resumes the same intent.
+          // Once started, only the normal immutable outcome read can settle.
+          return continued.started||result.turnId!==continued.terminalTurnId?true
+            :continueTerminalPass(job,{state:'recovered_outcome_ready',turnId:result.turnId,workspaceDraft:savedDraft},signal,marker);
+        }
         if(saved&&continued?.started&&(savedDraft?.localDraft||savedDraft?.portableFinish)){
-          if(await readWorkspaceSave(saved,savedDraft,marker,result.turnId,signal))
+          const acceptedHead=await readWorkspaceSave(saved,savedDraft,marker,result.turnId,signal);
+          if(acceptedHead){
+            const workspaceDraft=await observeRecoveredOutcome(job,saved,continued,result.turnId,acceptedHead,signal);
+            if(workspaceDraft)return continueTerminalPass(job,{state:'recovered_outcome_ready',turnId:result.turnId,workspaceDraft},signal,marker);
             emit('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+          }
           return true;
         }
         const savedArchive=continued?.workspaceDraft?.namedArchive&&continued.started?continued.workspaceDraft:null;
@@ -2208,6 +2252,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             workspaceDraft:continuation.workspaceDraft,terminalTurnId:continuation.terminalTurnId,
             terminalMarkerId:continuation.terminalMarkerId,
             taskPass:{companyId:expectedPass.companyId,taskId:expectedPass.taskId,passId:expectedPass.passId},
+            ...(continuation.workspaceDraft.recoveredOutcome?{originalDeliveryId:job.deliveryId}:{}),
           };
           if(continuation.taskReadParent)options.taskReadRecovery={
             ...continuation.taskReadParent,terminalTurnId:continuation.terminalTurnId,terminalMarkerId:continuation.terminalMarkerId,
