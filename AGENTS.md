@@ -224,6 +224,9 @@ publication tooling также остаются вне этого публичн
   original write receipts and private Git delta proof. Verify again under the
   native writer and finish lock. Stage only those files and the deterministic
   worklog. Promote the exact portable handoff with no external or task outcome.
+  Save initiation and accepted read-back share the mode-specific prompt binding.
+  Validate checkpoint/base evidence separately from the strict two-field Run
+  locator; this technical receipt does not settle the business outcome.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

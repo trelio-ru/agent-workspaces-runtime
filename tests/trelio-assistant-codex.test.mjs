@@ -1136,6 +1136,57 @@ const archiveWithRefusedOpenPoll=()=>{
   return {turn,deliveryId,taskPass,run,candidateHead};
 };
 
+// Compose the actual prompt builder and native reader across all task save
+// entry points. A precomputed portable prompt hid the local-draft mismatch.
+for(const anchor of ['base','checkpoint','portable'])test(`native read-back recognizes its own restricted save (${anchor})`,async()=>{
+  const {turn,deliveryId,taskPass,run,candidateHead}=archiveWithRefusedOpenPoll();
+  const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const scope={...taskContext,scheduled:true};
+  const portable=anchor==='portable';
+  const receipt=portable
+    ?{...run,checkpointId:randomUUID(),draftHead:candidateHead}
+    :{...run,baseHead:'a'.repeat(40),anchorHead:(anchor==='base'?'a':'c').repeat(40),
+      checkpointId:anchor==='base'?null:randomUUID()};
+  const selected=portable?{portableFinish:receipt}:{localDraft:{
+    basis:{...receipt,deltaSha256:'d'.repeat(64)},
+    replacements:[{pathSha256:'e'.repeat(64),contentSha256:'f'.repeat(64)}],
+  }};
+  const options=workspaceDraft=>({workspaceDraftRecovery:{workspaceDraft:{...run,finishPending:true,...workspaceDraft}}});
+  const text=assistantNativePrompt(deliveryId,scope,options(selected));
+  turn.items[0].content[0].text=text;
+  Object.assign(turn.items[2].result.structuredContent.workspace,{
+    scopeType:'task',scopeKey:`task:${taskPass.taskId}`,taskId:taskPass.taskId,
+  });
+  const read=history=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
+    [portable?'acceptedPortableFinish':'acceptedLocalDraft']:{taskPass,receipt},
+    spawnProcess:nativeRpc(request=>{
+      if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd}}};
+      assert.equal(request.method,'thread/turns/list');
+      assert.equal(request.params.itemsView,'full');
+      return {result:{data:[history]}};
+    }),
+  });
+  assert.deepEqual(await read(turn),{state:'portable_finish_saved',turnId:turn.id,acceptedHead:candidateHead});
+  const wrongMode=structuredClone(turn);
+  wrongMode.items[0].content[0].text=assistantNativePrompt(deliveryId,scope,
+    options(portable?{localDraft:{}}:{portableFinish:{}}));
+  assert.deepEqual(await read(wrongMode),{state:'uncertain'});
+  const changed=structuredClone(turn);
+  changed.items.at(-1).result.structuredContent.nativeRunStatus.candidateHead='9'.repeat(40);
+  assert.deepEqual(await read(changed),{state:'uncertain'});
+  const stale=structuredClone(turn);
+  const accepted=stale.items.at(-1).result.structuredContent;
+  const staleHead=portable?'9'.repeat(40):receipt.anchorHead;
+  accepted.nativeRunStatus.candidateHead=staleHead;
+  accepted.stdout=JSON.stringify({...JSON.parse(accepted.stdout),candidateHead:staleHead});
+  assert.deepEqual(await read(stale),{state:'uncertain'});
+  if(!portable){
+    const unfinished=structuredClone(turn);
+    unfinished.items=unfinished.items.filter(item=>item.arguments?.operation!=='finish');
+    assert.deepEqual(await read(unfinished),{state:'uncertain'});
+  }
+});
+
 test('accepted named archive tolerates only its own pre-finish hook-refused open-status read',()=>{
   const {turn,deliveryId,taskPass,run,candidateHead}=archiveWithRefusedOpenPoll();
   assert.deepEqual(assistantAcceptedNamedArchive(turn,deliveryId,taskPass,run),{...run,acceptedHead:candidateHead});

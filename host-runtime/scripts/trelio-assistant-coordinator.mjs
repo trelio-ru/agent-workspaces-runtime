@@ -1861,6 +1861,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(!final?.started||final.markerId!==intent.markerId||!final.threadId||result.threadId!==final.threadId)return true;
     return settle(result,final.threadId);
   };
+  // The live invocation and a later coordinator use the same exact native
+  // read-back. A restart after the save must never reopen or submit the Run
+  // just to recover the receipt. The original business fence is independent.
+  const readWorkspaceSave = async (pass,workspaceDraft,markerId,turnId,signal) => {
+    const {portableFinish,localDraft}=workspaceDraft;
+    const {deltaSha256:_localDelta,...localDraftBasis}=localDraft?.basis??{};
+    const save=await native.readDelivery(pass.threadId,markerId,{signal,
+      [localDraft?'acceptedLocalDraft':'acceptedPortableFinish']:{
+        taskPass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
+        receipt:localDraft?localDraftBasis:portableFinish}});lease();
+    return save.state==='portable_finish_saved'&&save.turnId===turnId
+      &&(!portableFinish||save.acceptedHead===portableFinish.draftHead);
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -1908,6 +1921,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       try{await commitCompletion(job,threadId,result.receipt,signal);}
       catch(error){
         if(error?.code!=='ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED')throw error;
+        const savedDraft=continued?.workspaceDraft;
+        if(saved&&continued?.started&&(savedDraft?.localDraft||savedDraft?.portableFinish)){
+          if(await readWorkspaceSave(saved,savedDraft,marker,result.turnId,signal))
+            emit('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+          return true;
+        }
         const savedArchive=continued?.workspaceDraft?.namedArchive&&continued.started?continued.workspaceDraft:null;
         const retainedArchive=savedArchive??continued?.namedArchiveSettled;
         if(retainedArchive&&saved&&(!continued.namedArchiveSettled||!continued.started)){
@@ -2285,14 +2304,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         return {state:'archive_settlement',kind:job.kind};
       }
       if(continuation?.workspaceDraft?.portableFinish||continuation?.workspaceDraft?.localDraft){
-        const {portableFinish,localDraft}=continuation.workspaceDraft;
-        const {deltaSha256:_localDelta,...localDraftBasis}=localDraft?.basis??{};
-        const save=await native.readDelivery(threadId,continuation.reviewId,{signal:combined,
-          [localDraft?'acceptedLocalDraft':'acceptedPortableFinish']:{
-            taskPass:{companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},
-            receipt:localDraft?localDraftBasis:portableFinish}});lease();
-        if(save.state!=='portable_finish_saved'||save.turnId!==result.turnId
-          ||portableFinish&&save.acceptedHead!==portableFinish.draftHead)
+        if(!await readWorkspaceSave(taskPass,continuation.workspaceDraft,continuation.reviewId,result.turnId,combined))
           fail('ASSISTANT_COORDINATOR_DRAFT_OUTCOME_REQUIRED');
         // The verified save is independent of any original provider effect,
         // so keep the pass unresolved until its business evidence is known.

@@ -2104,26 +2104,53 @@ export const assistantInterruptedNamedWorkspaceFinish=(turn,deliveryId,taskPass)
   // exact native checkpoint, never the prompt or recreated prose.
   return {...run,finishPending:true,namedArchive:true};
 };
-/** A completed save-only turn may qualify for one ordinary continuation.
- * The final native status is structural proof of the exact named accepted
- * candidate. No other mutation or provider receipt can enter this phase. */
-export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run,portable=false)=>{
+// Store the emitted binding and its prose together. The read-back uses the
+// same binding chosen by the trusted recovery mode, including for retained
+// turns. Matching a header alone is never native acceptance: the whole trace
+// below still has to prove one selected Run and its exact clean candidate.
+const workspaceSaveInstruction=(run,mode)=>{
+  const target=`workspaceId=${run.workspaceId}, runId=${run.runId}`;
+  switch(mode){
+    case 'named_archive': return {header:`Recover only the existing named Workspace save. Read exact status for ${target}, `,
+      instruction:`without the old poll handle. If the server already accepted it, verify the clean exact candidate and stop. Otherwise prepare and open this same expired Run and read both returned pinned authority files in full. Use finish with taskOutcome=no_status_change and a brief technical summary, evidence and next action; the host uses the previously committed handoff without changing it. Observe the new exact poll until native acceptance. No file edits, additional Run, controls, question, provider or task-completion tool. The archive's accepted state alone does not complete the assignment. If native acceptance cannot be verified, leave the original outcome unresolved.`};
+    case 'local_draft': return {header:`Only save the verified local changes from the interrupted invocation. Prepare and open ${target}, `,
+      instruction:`read both returned pinned authority files in full, then finish with taskOutcome=no_status_change, a brief technical summary, evidence and next action. The signed host fixes the handoff and verifies the original bytes. Observe exact accepted status for this Run and stop. No file replacements, task outcomes, source processing or external actions.`};
+    case 'portable_draft': return {header:`Preserve only the already committed final draft of ${target}.`,
+      instruction:` Read its exact status without the old poll handle. If expired, prepare and open only that Run and read both pinned authority files. Invoke finish with taskOutcome=no_status_change and follow only its new poll. The bridge reuses the exact committed handoff. Verify the accepted status and stop. No edits, provider, task changes or business completion.`};
+    default: throw new TypeError('Unknown Workspace save mode');
+  }
+};
+
+/** A save-only turn proves the exact accepted candidate. Named archives may
+ * use that proof in their existing continuation. Task saves retain their
+ * independent business and external-effect checks. */
+const inspectAcceptedWorkspaceSave=(turn,deliveryId,taskPass,receipt,mode)=>{
   if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||turn.status!=='completed'||turn.error!=null
-    ||!exactDraftPass(taskPass,taskPass)||!sameDraftRun(run,run)||!UUID.test(run.workspaceId)||!UUID.test(run.runId)
-    ||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>128)return null;
+    ||!exactDraftPass(taskPass,taskPass)||!Array.isArray(turn.items)||turn.items.length<2||turn.items.length>128)return null;
+  const taskSave=mode!=='named_archive';
+  let evidence;
+  try{
+    if(mode==='local_draft')evidence=validateAssistantLocalDraftBasis(receipt);
+    else if(mode==='portable_draft')evidence=validateAssistantPortableFinish(receipt);
+    else if(mode==='named_archive'&&sameDraftRun(receipt,receipt)
+      &&UUID.test(receipt.workspaceId)&&UUID.test(receipt.runId))evidence=receipt;
+    else return null;
+  }catch{return null;}
+  // The strict tool locator always contains exactly two fields. Keep the
+  // independently validated checkpoint/base evidence beside it, so neither
+  // adding proof fields nor selecting another mode can weaken tool identity.
+  const run={workspaceId:evidence.workspaceId,runId:evidence.runId};
   const [original,...items]=turn.items;
   if(original?.type!=='userMessage'||original.content?.length!==1||original.content[0]?.type!=='text'
     ||typeof original.content[0].text!=='string')return null;
   const lines=original.content[0].text.split('\n',3);
-  const instruction=portable
-    ?`Preserve only the already committed final draft of workspaceId=${run.workspaceId}, runId=${run.runId}.`
-    :`Recover only the existing named Workspace save. Read exact status for workspaceId=${run.workspaceId}, runId=${run.runId}, `;
+  const {header}=workspaceSaveInstruction(run,mode);
   if(lines[0]!==assistantDeliveryMarker(deliveryId)||!lines[1]?.startsWith('TRELIO_ASSISTANT_SCOPE ')
-    ||!lines[2]?.startsWith(instruction))return null;
+    ||!lines[2]?.startsWith(header))return null;
   let scope;
   try{scope=JSON.parse(lines[1].slice('TRELIO_ASSISTANT_SCOPE '.length));}catch{return null;}
   if(scope?.companyId!==taskPass.companyId||scope.taskId!==taskPass.taskId||scope.sourceReferences!==undefined
-    ||portable&&scope.scheduled!==true
+    ||taskSave&&scope.scheduled!==true
     ||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return null;
   let acceptedHead=null,openHandle=null,finishStarted=false;
   for(const item of items){
@@ -2156,7 +2183,7 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run,portabl
       if(!sameDraftRun({workspaceId:args.workspaceId,runId:args.runId},run)
         ||args.relatedWorkspaceIds!==undefined||value.prepared!==true
         ||target?.id!==run.workspaceId||value.run?.id!==run.runId||target.companyId!==taskPass.companyId
-        ||(portable
+        ||(taskSave
           ?target.scopeType!=='task'||target.scopeKey!==`task:${taskPass.taskId}`||target.taskId!==taskPass.taskId
           :!['project','company'].includes(target.scopeType)||target.scopeKey!==`workspace:${run.workspaceId}`||target.taskId!==null))return null;
       continue;
@@ -2179,14 +2206,17 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run,portabl
       if(native?.status==='accepted'){
         if(status.terminalStatus!=='accepted'||status.dirty!==false||!acceptedWorkspaceHead(native.candidateHead)||native.candidateHead!==status.candidateHead
           ||native.baseHead!==status.baseHead||native.baseHead===native.candidateHead||acceptedHead&&acceptedHead!==native.candidateHead
-          ||run.anchorHead!==undefined&&(native.baseHead!==run.baseHead||native.candidateHead===run.anchorHead))return null;
+          ||mode==='local_draft'&&(native.baseHead!==evidence.baseHead||native.candidateHead===evidence.anchorHead))return null;
         acceptedHead=native.candidateHead;
       }
     }
   }
-  return acceptedHead&&(!portable||(run.anchorHead!==undefined?finishStarted:run.draftHead===acceptedHead))
-    ?{workspaceId:run.workspaceId,runId:run.runId,acceptedHead}:null;
+  if(!acceptedHead||mode==='local_draft'&&!finishStarted||mode==='portable_draft'&&evidence.draftHead!==acceptedHead)
+    return null;
+  return {...run,acceptedHead};
 };
+export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>
+  inspectAcceptedWorkspaceSave(turn,deliveryId,taskPass,run,'named_archive');
 const readAcceptedNamedArchiveTurn=async(request,threadId,deliveryId,{taskPass,run})=>{
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
   const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
@@ -2331,8 +2361,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       const {taskPass,receipt}=options.acceptedPortableFinish??options.acceptedLocalDraft;
       const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
       const turn=Array.isArray(response?.data)&&response.data.length===1?response.data[0]:null;
-      const run=options.acceptedLocalDraft?validateAssistantLocalDraftBasis(receipt):validateAssistantPortableFinish(receipt);
-      const accepted=assistantAcceptedNamedArchive(turn,deliveryId,taskPass,run,true);
+      const accepted=inspectAcceptedWorkspaceSave(turn,deliveryId,taskPass,receipt,
+        options.acceptedLocalDraft?'local_draft':'portable_draft');
       return accepted?{state:'portable_finish_saved',turnId:turn.id,acceptedHead:accepted.acceptedHead}:{state:'uncertain'};
     }
     if(options.interruptedWorkspaceDraft!==undefined)
@@ -3058,12 +3088,12 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
         const {workspaceDraft}=options.workspaceDraftRecovery;
         if(workspaceDraft.acceptedHead!==undefined)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly confirm the result already accepted in the immediately preceding interrupted turn. Use its saved WORK.md content and the live task to determine the actual goal state, cadence and timezone. Use complete_assistant_pass with workspaceId=${workspaceDraft.workspaceId}, acceptedRunId=${workspaceDraft.runId}, workspaceHead=${workspaceDraft.acceptedHead}, noChange=false and no processed source references. This closes the pass, so keep an unfinished goal active, waiting or blocked as recorded in the accepted material. If the result or its accepted state cannot be verified, leave the pass unresolved.\n`;
-        if(workspaceDraft.namedArchive===true)
-          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nRecover only the existing named Workspace save. Read exact status for workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}, without the old poll handle. If the server already accepted it, verify the clean exact candidate and stop. Otherwise prepare and open this same expired Run and read both returned pinned authority files in full. Use finish with taskOutcome=no_status_change and a brief technical summary, evidence and next action; the host uses the previously committed handoff without changing it. Observe the new exact poll until native acceptance. No file edits, additional Run, controls, question, provider or task-completion tool. The archive's accepted state alone does not complete the assignment. If native acceptance cannot be verified, leave the original outcome unresolved.\n`;
-        if(workspaceDraft.localDraft)
-          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nOnly save the verified local changes from the interrupted invocation. Prepare and open workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}, read both returned pinned authority files in full, then finish with taskOutcome=no_status_change, a brief technical summary, evidence and next action. The signed host fixes the handoff and verifies the original bytes. Observe exact accepted status for this Run and stop. No file replacements, task outcomes, source processing or external actions.\n`;
-        if(workspaceDraft.portableFinish)
-          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nPreserve only the already committed final draft of workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}. Read its exact status without the old poll handle. If expired, prepare and open only that Run and read both pinned authority files. Invoke finish with taskOutcome=no_status_change and follow only its new poll. The bridge reuses the exact committed handoff. Verify the accepted status and stop. No edits, provider, task changes or business completion.\n`;
+        const saveMode=workspaceDraft.namedArchive===true?'named_archive'
+          :workspaceDraft.localDraft?'local_draft':workspaceDraft.portableFinish?'portable_draft':null;
+        if(saveMode){
+          const {header,instruction}=workspaceSaveInstruction(workspaceDraft,saveMode);
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\n${header}${instruction}\n`;
+        }
         if(workspaceDraft.retainedHandoff)
           return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nSettle only the already recorded handoff of workspaceId=${workspaceDraft.workspaceId}, runId=${workspaceDraft.runId}. Read exact native status without its old poll handle. If expired, prepare and open the same Run. Read both pinned authority files in full and existing WORK.md. Invoke finish once with taskOutcome=no_status_change, a short technical summary, evidence and next action. The host verifies the original files and reuses the native handoff. Follow the new exact poll, verify native acceptance, then complete_assistant_pass with the accepted head, noChange=false, no processed source references and the true unfinished goal state. Do not edit files, start a Run, contact a provider, repeat a question or change a control. If the exact save cannot be verified, keep the original pass unresolved.\n`;
         if(workspaceDraft.finishPending===true)

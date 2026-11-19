@@ -910,6 +910,14 @@ remain independent and unresolved. If the worker stops after upload and
 handoff, the new native final-draft receipt permits only that Run's one
 immutable finalization. It cannot reserve or stage the local delta again.
 
+The save-only prompt and acceptance reader share the same mode and Run
+identifier binding. The reader validates the selected evidence for the mode,
+then checks a separate two-field Run locator, current native head and matching
+clean local candidate. A checkpoint or base field cannot change the tool
+locator. Keep this compatible with the original saved prompts.
+The invocation and the following coordinator cycle use the same read-back.
+An interrupted receipt read never restarts a save or creates a business outcome.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
 accepted head alongside the existing intent. The

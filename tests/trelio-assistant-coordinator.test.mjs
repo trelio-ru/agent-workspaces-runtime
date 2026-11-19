@@ -3503,7 +3503,7 @@ for(const local of [false,true])test(`native draft settles the same Run without 
   };
   const coordinator=createAssistantCoordinator(f.options);
   const originalTurn=randomUUID(),marker=randomUUID(),settlementTurn=randomUUID();
-  let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0;
+  let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0,saveReads=0;
   native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
   try{
     await coordinator.pollOnce();await coordinator.workOnce();
@@ -3533,6 +3533,7 @@ for(const local of [false,true])test(`native draft settles the same Run without 
       const inspectSave=options.acceptedPortableFinish??options.acceptedLocalDraft;
       if(inspectSave){
         assert.deepEqual(inspectSave.receipt,receipt);
+        saveReads++;
         return {state:'portable_finish_saved',turnId:settlementTurn,acceptedHead};
       }
       return completedSave?{state:'completed',turnId:settlementTurn,receipt:`codex:${original.threadId}:${settlementTurn}`}:{state:'uncertain'};
@@ -3571,7 +3572,9 @@ for(const local of [false,true])test(`native draft settles the same Run without 
     assert.equal(reviews,0);
     admitted=true;
     assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.equal(saveReads,1,'recovery reads the accepted Run after its one save');
     assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.equal(saveReads,2,'the next cycle rereads the same native receipt without another save');
     assert.deepEqual([reviews,renewals,starts],[1,1,1]);
     if(local)assert.equal(inspectCount,2,'repeated filesystem proof under owned writer');
     assert.deepEqual(f.activePass(),original);
