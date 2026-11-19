@@ -8419,7 +8419,21 @@ const saveLocalProposal = async ({
   }
 };
 
-const applyLocalProposalAction = async ({
+const LOCAL_PROPOSAL_PUBLICATION_DOCUMENT = Symbol("localProposalPublicationDocument");
+
+const prepareLocalProposalPublication = ({ bodyMarkdown, publicationContext, attachmentIds }) => {
+  const bodyJson = buildLocalProposalPublicationDocument({ bodyMarkdown, publicationContext, attachmentIds });
+  // Send the delivery audience from the exact document being encrypted.
+  // Parsing the Markdown separately would also pick up code and links and
+  // would let the displayed comment and the native notification disagree.
+  const { memberIds } = collectLocalTaskCommentMentions(bodyJson, {
+    members: publicationContext.mentionableMembers,
+    groupIds: [],
+  });
+  return { bodyJson, mentionedMemberIds: memberIds };
+};
+
+export const applyLocalProposalAction = async ({
   origin,
   requestOrigin = null,
   token,
@@ -8428,7 +8442,12 @@ const applyLocalProposalAction = async ({
   kind,
   rawPayload,
   signal,
-}) => {
+}, {
+  postRequest = postProposalRequest,
+  hydrate = hydrateAgentCompanyEncryptedJson,
+  upload = uploadProposalPayload,
+  invalidate = invalidateLocalCompanyMirrorSession,
+} = {}) => {
   const dataPlaneOrigin = requestOrigin
     ?? resolveCompanyEncryptionRequestOrigin(origin, companyEncryption);
   if (rawPayload?.confirmed !== true) {
@@ -8446,6 +8465,7 @@ const applyLocalProposalAction = async ({
   );
   const common = { kind, action, confirmed: true, proposalId, expectedRevision };
   let body;
+  let publicationDocument;
 
   if (kind === "comment") {
     if (!["publish", "dismiss"].includes(action)) {
@@ -8467,33 +8487,39 @@ const applyLocalProposalAction = async ({
             value,
             `payload.attachmentIds[${index}]`,
           ));
-      // Current proposal Apps bind this decrypted, immutable render context to
-      // their local capability. That lets the trusted host build the complete
-      // ProseMirror document, including mentions and selected file links,
-      // before the body crosses the E2EE boundary. Compatibility Apps without
-      // that context retain the historical body_text-only publication path.
-      const bodyJson = rawPayload?._localMarkdownPublicationContext
-        ? buildLocalProposalPublicationDocument({
-            bodyMarkdown: bodyText,
-            publicationContext: rawPayload._localMarkdownPublicationContext,
-            attachmentIds,
-          })
-        : null;
-      const markers = await uploadProposalPayload({
+      // Every review surface prepares the same actual draft before encryption.
+      // Only the proposal locator crosses this read boundary. A replaced or
+      // already published draft is resolved by the ordinary App read-back;
+      // this step cannot re-issue a previously ambiguous publication.
+      const prepared = await postRequest({
+        origin: dataPlaneOrigin, token, companySlug, endpoint: "context",
+        body: { kind: "comment", publication: { proposalId, expectedRevision } },
+        signal,
+      });
+      const publicationContext = await hydrate({
+        value: prepared, origin: dataPlaneOrigin, token, companyEncryption, signal,
+      });
+      if (publicationContext?.companySlug !== companySlug
+        || !Array.isArray(publicationContext.mentionableMembers)
+        || !Array.isArray(publicationContext.attachments)) {
+        throw new TrelioLocalContextError(
+          "LOCAL_CONTEXT_PROPOSAL_MARKDOWN_CONTEXT_MISSING",
+          "Refresh the protected proposal card before publishing its Markdown body.",
+        );
+      }
+      const { bodyJson, mentionedMemberIds } = prepareLocalProposalPublication({
+        bodyMarkdown: bodyText, publicationContext, attachmentIds,
+      });
+      publicationDocument = bodyJson;
+      const markers = await upload({
         origin: dataPlaneOrigin,
         token,
         companyEncryption,
         values: {
           body_text: bodyText,
-          ...(bodyJson
-            ? {
-                body_json: bodyJson,
-                // createTaskComment derives this exact sibling marker from
-                // body_json. Store the value in the same payload so local
-                // search, notifications and hydrated read models stay whole.
-                body_plain_text: extractLocalRichTextPlainText(bodyJson),
-              }
-            : {}),
+          body_json: bodyJson,
+          // createTaskComment keeps the exact sibling field from the same payload.
+          body_plain_text: extractLocalRichTextPlainText(bodyJson),
         },
         source: { kind: "agent_task_proposal", proposalKind: kind, action },
         signal,
@@ -8501,7 +8527,8 @@ const applyLocalProposalAction = async ({
       body = {
         ...common,
         bodyText: markers.body_text,
-        ...(markers.body_json ? { bodyJson: markers.body_json } : {}),
+        bodyJson: markers.body_json,
+        ...(mentionedMemberIds.length ? { mentionedMemberIds } : {}),
         ...(attachmentIds === undefined ? {} : { attachmentIds }),
       };
     } else {
@@ -8569,7 +8596,7 @@ const applyLocalProposalAction = async ({
   }
 
   try {
-    return await postProposalRequest({
+    const result = await postRequest({
       origin: dataPlaneOrigin,
       token,
       companySlug,
@@ -8577,8 +8604,14 @@ const applyLocalProposalAction = async ({
       body,
       signal,
     });
+    if (publicationDocument !== undefined) {
+      // The exact reviewed document is local verification data, never part
+      // of the provider response, an App capability or the model-facing DTO.
+      Object.defineProperty(result, LOCAL_PROPOSAL_PUBLICATION_DOCUMENT, { value: publicationDocument });
+    }
+    return result;
   } finally {
-    await invalidateLocalCompanyMirrorSession({
+    await invalidate({
       origin,
       companySlug,
       companyEncryption,
@@ -9665,17 +9698,9 @@ export const handleTrelioLocalProposalOperation = async (
     && kind === "comment"
     && String(rawPayload?.action ?? "").trim() === "publish"
   ) {
-    const expectedBodyJson = rawPayload?._localMarkdownPublicationContext
-      ? buildLocalProposalPublicationDocument({
-          bodyMarkdown: rawPayload?.bodyText,
-          publicationContext: rawPayload._localMarkdownPublicationContext,
-          attachmentIds: rawPayload?.attachmentIds,
-        })
-      : undefined;
     assertHydratedLocalProposalPublicationMatches({
       publication: hydrated,
-      expectedBodyText: rawPayload?.bodyText,
-      expectedBodyJson,
+      expectedBodyJson: rawResult[LOCAL_PROPOSAL_PUBLICATION_DOCUMENT],
     });
   }
   if (operation === "save" && kind === "comment" && Array.isArray(hydrated?.automaticWorkStartProposals)

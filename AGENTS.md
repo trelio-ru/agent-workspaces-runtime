@@ -1605,6 +1605,9 @@ Exact legacy template bytes для распознавания при мигра�
   authoring history; полный Codex event envelope проверяется вместе с hidden
   metadata и text delivery. Headless authoring read сохраняет evidence/CAS:
   [контракт](docs/agent-workspace-runtime.md#local-proposal-app-payload).
+  Local encrypted comment publication reads the exact approved draft before
+  upload. It derives structural member IDs from the same encrypted document
+  and leaves native ACL, notifications and original idempotency to the backend.
 - Metadata create/release: [единый draft и source reader](docs/agent-workspace-runtime.md#private-skill-metadata).
 - Основная инструкция новой публикации ограничена 16 КиБ UTF-8 до encryption.
   Полный `get_agent_skill` после hydration/projection и final text delivery

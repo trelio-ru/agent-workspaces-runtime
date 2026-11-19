@@ -20,6 +20,7 @@ import {
   createEncryptedSearchFileCache,
   assertLocalAgentInstructionPublicationWithinLimit,
   assertHydratedLocalProposalPublicationMatches,
+  applyLocalProposalAction,
   canonicalizeProposalTargetFromMirror,
   TRELIO_LOCAL_MIRROR_MEMORY_TTL_SECONDS,
   TrelioLocalContextError,
@@ -4286,6 +4287,68 @@ test("encrypted proposal publication verifies the hydrated persisted plaintext",
     }),
     (error) => error?.code === "LOCAL_CONTEXT_PROPOSAL_PUBLICATION_MISMATCH",
   );
+});
+
+test("all local encrypted review surfaces prepare the same canonical comment and deliver only its mention IDs", async () => {
+  const proposalId = "11111111-1111-4111-8111-111111111111";
+  const reviewer = "22222222-2222-4222-8222-222222222222";
+  const codeMention = "33333333-3333-4333-8333-333333333333";
+  const reviewed = "@reviewer @reviewer `@codeuser` [@codeuser](https://trelio.example/) @unknown Private wording";
+  const input = {
+    origin: "https://trelio.example", requestOrigin: "https://trelio.example",
+    companyEncryption: {}, companySlug: "protected", kind: "comment",
+    rawPayload: { action: "publish", confirmed: true, proposalId, expectedRevision: 7, bodyText: reviewed },
+  };
+  const stages = [];
+  let document;
+  const result = await applyLocalProposalAction(input, {
+    postRequest: async ({ endpoint, body }) => {
+      stages.push(endpoint);
+      if (endpoint === "context") {
+        assert.deepEqual(body, { kind: "comment", publication: { proposalId, expectedRevision: 7 } });
+        return {
+          companySlug: "protected",
+          project: { slug: "project" },
+          task: { number: 3, url: "https://trelio.example/protected/project/tasks/3/" },
+          mentionableMembers: [
+            { memberId: reviewer, username: "reviewer", displayName: "A reviewer" },
+            { memberId: codeMention, username: "codeuser", displayName: "A code example" },
+          ],
+          attachments: [],
+        };
+      }
+      assert.equal(endpoint, "action");
+      assert.deepEqual(body, {
+        kind: "comment", action: "publish", confirmed: true, proposalId, expectedRevision: 7,
+        bodyText: "opaque-text-marker", bodyJson: "opaque-json-marker", mentionedMemberIds: [reviewer],
+      });
+      return { comment: { id: "saved" } };
+    },
+    hydrate: async ({ value }) => value,
+    upload: async ({ values }) => {
+      stages.push("encrypt");
+      assert.equal(values.body_text, reviewed);
+      document = values.body_json;
+      assert.equal(document.content[0].content.filter((node) => node.type === "mention").length, 2);
+      assert.ok(document.content[0].content.filter((node) => node.type === "mention")
+        .every((node) => node.attrs.id === reviewer));
+      return { body_text: "opaque-text-marker", body_json: "opaque-json-marker" };
+    },
+    invalidate: async () => { stages.push("invalidate"); },
+  });
+  assert.deepEqual(stages, ["context", "encrypt", "action", "invalidate"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { comment: { id: "saved" } });
+  assert.deepEqual(result[Object.getOwnPropertySymbols(result)[0]], document);
+
+  const stale = new Error("PROPOSAL_STATE_CHANGED");
+  await assert.rejects(applyLocalProposalAction(input, {
+    postRequest: async ({ endpoint }) => {
+      assert.equal(endpoint, "context");
+      throw stale;
+    },
+    upload: async () => assert.fail("A stale review must never upload a comment"),
+    invalidate: async () => assert.fail("No mutation was dispatched"),
+  }), (error) => error === stale);
 });
 
 test("decrypted mirror residency has the exact ten-minute hard TTL", () => {

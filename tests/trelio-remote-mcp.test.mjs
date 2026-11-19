@@ -5196,13 +5196,6 @@ test("local proposal App capability binds refresh and one delayed final action t
         action: "publish",
         bodyText: "Отредактированный комментарий",
         attachmentIds: [],
-        _localMarkdownPublicationContext: {
-          companySlug: "protected-company",
-          project: { slug: "mobile" },
-          task: { number: 17, url: "https://trelio.example/acme/mobile/tasks/17/" },
-          mentionableMembers: [],
-          attachments: [],
-        },
       },
     },
   ]);

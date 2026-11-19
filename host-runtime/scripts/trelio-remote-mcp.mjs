@@ -4493,29 +4493,6 @@ const readLocalProposalTarget = (proposal) => {
   return null;
 };
 
-const readLocalCommentMarkdownPublicationContext = (proposal, companySlug) => {
-  const draft = proposal?.currentDraft;
-  if (
-    !draft
-    || !proposal?.project
-    || !proposal?.task
-    || !Array.isArray(draft.attachments)
-    || !Array.isArray(proposal.mentionableMembers)
-  ) return null;
-
-  // The capability already binds proposal id, revision and target. Keep the
-  // matching decrypted presentation data beside that binding so the local
-  // action can turn reviewed Markdown into rich text without another server
-  // round trip or any plaintext crossing the encrypted-company boundary.
-  return structuredClone({
-    companySlug,
-    project: proposal.project,
-    task: proposal.task,
-    mentionableMembers: proposal.mentionableMembers,
-    attachments: draft.attachments,
-  });
-};
-
 const localizeProposalPayload = (value, companySlug, kind) => {
   if (Array.isArray(value)) {
     return value.map((item) => localizeProposalPayload(item, companySlug, kind));
@@ -5548,12 +5525,6 @@ const handleGenericLocalProposalAppToolCall = async (
           expiresAtMs,
           target: structuredClone(target),
           actionDigest: hashLocalProposalAppAction(normalizedAction),
-          markdownPublicationContext: target.kind === "comment"
-            ? readLocalCommentMarkdownPublicationContext(
-                childResult.structuredContent,
-                target.companySlug,
-              )
-            : null,
           consumed: false,
         });
         childResult._meta = {
@@ -5626,11 +5597,6 @@ const handleGenericLocalProposalAppToolCall = async (
       actionPayload.bodyText = normalizedAction.bodyText;
       if (normalizedAction.attachmentIds !== undefined) {
         actionPayload.attachmentIds = normalizedAction.attachmentIds;
-      }
-      const markdownPublicationContext = actionCapability?.markdownPublicationContext
-        || target.markdownPublicationContext;
-      if (markdownPublicationContext) {
-        actionPayload._localMarkdownPublicationContext = markdownPublicationContext;
       }
     } else if (target.kind === "status") {
       actionPayload.targetStatusCode = normalizedAction.targetStatusCode;

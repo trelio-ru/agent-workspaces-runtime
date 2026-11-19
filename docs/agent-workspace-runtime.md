@@ -2225,6 +2225,20 @@ baseline остаются в headless authoring context и серверной CA
 Markdown и вложенные пользовательские значения не обходятся и не обрезаются.
 Projection не меняет исходный context, signing, ACL/CAS либо срок grant.
 
+Публикация локального зашифрованного комментария из App, формы или подтверждённой
+команды сначала читает review projection по exact proposal UUID и revision.
+Этот read не отправляет Markdown и не получает private draft prose. При
+замене или уже завершённом решении preflight не начинает новый upload или
+publish. Обычное чтение карточки показывает текущий итог.
+Доверенный host строит rich-text с выбранными файлами и берёт unique member IDs
+из его canonical mention nodes. Markdown, JSON и plain projection шифруются
+вместе прежним writer. За transport boundary выходят только markers и
+выбранные structural IDs. Backend повторяет live audience ACL и создаёт
+канонические упоминания и inbox wake в исходной транзакции комментария.
+Verified publication сравнивает весь сохранённый документ с локальным
+reviewed document. Capability не хранит его вторую копию. Backend выпускается
+до runtime, legacy payload остаётся совместимым, minimum не меняется.
+
 Codex [`truncate_mcp_tool_result`](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/utils/output-truncation/src/lib.rs#L64)
 ограничивает полный serialized result при
 создании MCP event/rollout. При превышении бюджета он заменяет envelope одной
