@@ -13,6 +13,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
+import { buildMcpTaskBatchContinuation } from "./trelio-task-read-budget.mjs";
 import { resolveTrelioHookToolIdentity } from "./trelio-hook-tool-identity.mjs";
 
 const REVISION_TOOLS = new Set([
@@ -267,8 +268,20 @@ export const collectCodexInstructionHints = ({ rows, header, hookInput, input, i
             manifest.set(entry.key, { ...entry, parts: new Map(), conflicted: false });
           }
         }
+        // A split batch's manifest covers only the delivered prefix. Verify
+        // the executable remainder before binding reuse to that exact prefix.
+        // Otherwise a fabricated or truncated receipt grants no reuse.
+        let locators = taskLocators(call.tool, call.args);
+        if (result.nextBatch !== undefined) {
+          const original = call.args.tasks;
+          const count = result.tasks?.length;
+          if (call.tool !== "get_tasks" || !Array.isArray(original)
+            || !Array.isArray(result.tasks) || count < 1 || count >= original.length
+            || canonicalJson(result.nextBatch) !== canonicalJson(buildMcpTaskBatchContinuation(original.slice(count)))) continue;
+          locators = canonicalJson(original.slice(0, count));
+        }
         pageCatalogs.set(catalog.delivery.catalogRevisionKey, {
-          reused: [...catalog.reusedLayerKeys], manifest, locators: taskLocators(call.tool, call.args),
+          reused: [...catalog.reusedLayerKeys], manifest, locators,
         });
       }
     }

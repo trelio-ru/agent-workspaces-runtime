@@ -5543,6 +5543,49 @@ test("fresh task core and instruction pages never depend on a company search gen
   await assert.rejects(read("get_task", { ...target, companySlug: "other" }), { code: "LOCAL_CONTEXT_COMPANY_MISMATCH" });
 });
 
+test("local exact task batches deliver every locator with its own complete budgeted authority", () => {
+  const fixture = structuredClone(mirror);
+  fixture.instructions = { company: { compiledMarkdown: "Правило🙂 ".repeat(1550) },
+    projects: [], userProfile: { compiledMarkdown: "Личные правила" } };
+  const prototype = fixture.tasks[0];
+  fixture.tasks = Array.from({ length: 20 }, (_, index) => {
+    const record = structuredClone(prototype);
+    record.number = 100 + index;
+    record.id = crypto.randomUUID();
+    record.payload.task.title = "Я".repeat(1250);
+    return record;
+  });
+  const requested = fixture.tasks.map(task => ({ companySlug: fixture.company.slug, projectSlug: task.projectSlug,
+    taskNumber: task.number }));
+  let next = { tool: "get_tasks", arguments: { tasks: requested } };
+  const delivered = [];
+  while (next) {
+    assert.ok(delivered.length < requested.length, "every page advances");
+    const result = handleNativeLocalContextRead(fixture, next.tool, next.arguments);
+    if (!delivered.length) assert.ok(result.nextBatch);
+    assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(result)));
+    assert.ok(result.tasks.every(item => item.task.title === "Я".repeat(1250)));
+    if (result.effectiveInstructions.status === "incomplete") {
+      const tasks = requested.slice(delivered.length, delivered.length + result.tasks.length);
+      const { catalogRevisionKey } = result.effectiveInstructions.delivery;
+      let pageIndex = 0;
+      while (pageIndex !== null) {
+        const page = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+          tasks, expectedCatalogRevisionKey: catalogRevisionKey, pageIndex, pageSize: 4,
+        });
+        assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
+        pageIndex = page.nextPageIndex;
+      }
+    }
+    delivered.push(...result.tasks.map(item => item.locator));
+    next = result.nextBatch;
+  }
+  assert.deepEqual(delivered, requested);
+  assert.throws(() => handleNativeLocalContextRead(fixture, "get_tasks", {
+    tasks: [...requested.slice(0, 19), { ...requested[19], taskNumber: 999 }],
+  }));
+});
+
 test("fresh Workspace reads open only the selected head and repeat the exact target fence", async () => {
   const workspaceId = mirror.workspaceEntries[0].id;
   const fixture = { schemaVersion: 1, revisionToken: "d".repeat(64), company: mirror.company,
@@ -5600,6 +5643,41 @@ test("fresh Workspace reads open only the selected head and repeat the exact tar
   });
   assert.equal(deleted.acceptedWorkspace, null);
   assert.equal(deleted.materialize, undefined);
+});
+
+test("encrypted get_workspace pages metadata at one exact head and rejects a changed revision before opening files", async () => {
+  const workspaceId = mirror.workspaceEntries[0].id;
+  const head = "c".repeat(40);
+  const fixture = { schemaVersion: 1, revisionToken: "d".repeat(64), company: mirror.company,
+    viewer: mirror.viewer, projects: mirror.projects, instructions: { company: { compiledMarkdown: "Rules" } },
+    workspaceEntries: structuredClone(mirror.workspaceEntries), workspaces: [{ id: workspaceId, acceptedHead: head }] };
+  const inventory = Array.from({ length: 225 }, (_, index) => ({ path: "artifacts/file-" + index + ".md",
+    sizeBytes: 12, chunks: [{ text: "PRIVATE_FILE_BODY_CANARY" }] }));
+  let fileReads = 0;
+  const options = { origin: "https://trelio.example", companySlug: fixture.company.slug, workspaceId,
+    nativeTool: "get_workspace", provider: { companyEncryption: { runtime: { company: fixture.company } } },
+    requestJson: async () => structuredClone(fixture), hydrate: async value => value,
+    readDocuments: async () => { fileReads++; return inventory; } };
+  let filesPage;
+  let firstContinuation;
+  const delivered = [];
+  do {
+    const result = await readFreshExactWorkspaceContext({ ...options, input: { workspaceId, filesPage } });
+    assert.equal(result.filesPage.workspaceHead, head);
+    assert.equal(result.filesPage.offset, delivered.length);
+    assert.equal(result.filesPage.total, inventory.length);
+    assert.ok(result.acceptedWorkspace.files.length > 0 && result.acceptedWorkspace.files.length <= 100);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_FILE_BODY_CANARY|chunks/);
+    delivered.push(...result.acceptedWorkspace.files.map(file => file.path));
+    filesPage = result.filesPage.nextArguments;
+    firstContinuation ??= filesPage;
+  } while (filesPage);
+  assert.deepEqual(delivered, inventory.map(file => file.path));
+  const before = fileReads;
+  fixture.workspaces[0].acceptedHead = "e".repeat(40);
+  await assert.rejects(readFreshExactWorkspaceContext({ ...options, input: { workspaceId, filesPage: firstContinuation } }),
+    { code: "WORKSPACE_OUTDATED" });
+  assert.equal(fileReads, before);
 });
 
 test("fresh action reads bypass the company mirror only for known structural routing", () => {

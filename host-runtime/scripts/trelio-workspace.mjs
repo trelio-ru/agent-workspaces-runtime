@@ -15360,6 +15360,11 @@ export const readAcceptedWorkspaceBlob = async ({ workspaceDirectory, blobId, si
 export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks } =
     await import("./trelio-workspace-files.mjs");
+  // get_workspace needs only the accepted file inventory. Search and fetch
+  // still hydrate their complete text projection on their existing paths.
+  const toInventoryFile = file => ({ kind: "workspace_file", workspaceId: input.workspaceId,
+    workspaceHead: input.acceptedHead, path: file.path, name: file.path.split("/").at(-1),
+    sizeBytes: file.sizeBytes, contentType: file.contentType });
   const requestInput = { ...input, workspaceHead: input.acceptedHead };
   const readSource = input.readSource ?? (read => read());
   let files;
@@ -15369,6 +15374,9 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
     // into an alternate read. Only a proven missing derived projection has a
     // complete canonical encrypted snapshot that can replace it.
     if (error?.code !== "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" || error.encryptedBundleReadable !== true) throw error;
+    if (input.inventoryOnly) {
+      return withEncryptedAcceptedWorkspaceFiles(requestInput, ({ files }) => files.map(toInventoryFile));
+    }
     const { chunkWorkspaceText } = await import("./trelio-workspace-text-chunks.mjs");
     return withEncryptedAcceptedWorkspaceFiles(requestInput, async ({ workspaceDirectory, files }) => {
       const documents = [];
@@ -15398,12 +15406,12 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
       return documents;
     });
   }
-  const documents = files.filter((file) => isHumanFacingEncryptedWorkspacePath(file.path))
-    .sort((left, right) => left.sizeBytes - right.sizeBytes || (left.path < right.path ? -1 : 1))
-    .map((file) => ({ kind: "workspace_file", workspaceId: input.workspaceId, workspaceHead: input.acceptedHead,
-      path: file.path, name: file.path.split("/").at(-1), sizeBytes: file.sizeBytes,
-      contentType: file.contentType, sourceFileId: file.id, text: "", chunks: [],
-      searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } }));
+  const inventory = files.filter((file) => isHumanFacingEncryptedWorkspacePath(file.path))
+    .sort((left, right) => left.sizeBytes - right.sizeBytes || (left.path < right.path ? -1 : 1));
+  if (input.inventoryOnly) return inventory.map(toInventoryFile);
+  const documents = inventory.map((file) => ({ ...toInventoryFile(file),
+    sourceFileId: file.id, text: "", chunks: [],
+    searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } }));
   const byId = new Map(files.map((file) => [file.id, file]));
   const textDocuments = documents.filter((file) => file.contentType.startsWith("text/plain"));
   // Amortize per-file HTTP latency only for small, manifest-bounded inputs:

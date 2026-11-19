@@ -194,6 +194,28 @@ test("pagination freezes the original reuse set rather than newly delivered laye
     identity: { status: "native", toolName: "get_task_instruction_page" } }), { knownInstructionLayerKeys: [layer.key] });
 });
 
+test("a split batch freezes reuse only for its exact delivered prefix", () => {
+  const second = { ...input, taskNumber: 2 };
+  const original = [input, second];
+  const revision = hash("split-batch-catalog");
+  const begin = {
+    tasks: [{ locator: input }],
+    nextBatch: { tool: "get_task", arguments: second },
+    effectiveInstructions: { schemaVersion: 3, status: "incomplete", layers: [],
+      reusedLayerKeys: [layer.key], delivery: { catalogRevisionKey: revision } },
+  };
+  const evaluate = (tasks, result = begin) => {
+    const pageInput = { tasks, expectedCatalogRevisionKey: revision, pageIndex: 0 };
+    return collect({ input: pageInput, identity: { status: "native", toolName: "get_task_instruction_page" },
+      rows: [call("first"), output("first", catalog), call("paged", "get_tasks", { tasks: original }),
+        output("paged", result), call("current", "get_task_instruction_page", pageInput)] });
+  };
+  assert.deepEqual(evaluate([input]), { knownInstructionLayerKeys: [layer.key] });
+  assert.deepEqual(evaluate(original), {});
+  assert.deepEqual(evaluate([second]), {});
+  assert.deepEqual(evaluate([input], { ...begin, nextBatch: { tool: "get_task", arguments: input } }), {});
+});
+
 test("paged authority needs all manifest parts and their concatenated hash", () => {
   const revision = hash("paged");
   const textParts = ["Complete ", "rules"];

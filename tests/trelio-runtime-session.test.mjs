@@ -96,7 +96,7 @@ const buildTestBridgeCompatibility = (request, minimumVersion) => {
 // their journal when only the first child exits: another live hook may still
 // be writing its final observation. Production cleanup is not changed here.
 const activeFixtureJournals = new Map();
-const runHook = async (hookInput, environment = {}, onDiagnostics) => {
+const runHook = async (hookInput, environment = {}, onDiagnostics, preload) => {
   const fallbackHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-test-home-"));
   const isolatedHome = environment.HOME || environment.CODEX_HOME || fallbackHome;
   const origin = environment.TRELIO_WORKSPACE_ORIGIN || "https://hook-tests.invalid";
@@ -109,7 +109,7 @@ const runHook = async (hookInput, environment = {}, onDiagnostics) => {
   activeFixtureJournals.set(journalDirectory, (activeFixtureJournals.get(journalDirectory) || 0) + 1);
   try {
     const result = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [hookScriptPath], {
+      const child = spawn(process.execPath, [...(preload ? ["--import", preload] : []), hookScriptPath], {
         env: {
           ...process.env,
           TRELIO_PLUGIN_VERSION: TEST_PLUGIN_VERSION,
@@ -2267,6 +2267,50 @@ test("SessionEnd removes the local key before a bounded remote cleanup", async (
     await new Promise((resolve) => server.close(resolve));
     await rm(temporaryHome, { recursive: true, force: true });
   }
+});
+
+test("SessionEnd deadline during the private state read precedes local removal and HTTP", {
+  skip: process.platform !== "darwin",
+}, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-session-end-stage-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const configDirectory = path.join(directory, ".config", "trelio", "workspace-bridge");
+  const stateDirectory = path.join(configDirectory, "runtime-sessions");
+  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  await chmod(configDirectory, 0o700);
+  const threadId = crypto.randomUUID();
+  const origin = "http://127.0.0.1:1";
+  const statePath = path.join(stateDirectory, crypto.createHash("sha256")
+    .update(origin + "\n" + threadId).digest("hex") + ".json");
+  // Use a real synthetic key so this verifies that a deadline during the
+  // read leaves the actual private key file in place, even if open later works.
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const state = JSON.stringify({ schemaVersion: 1, runtimeSessionId: crypto.randomUUID(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    privateKeyPkcs8: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url") });
+  await writeFile(statePath, state, { mode: 0o600 });
+  const evidencePath = path.join(directory, "entered-state-read");
+  const prelude = path.join(directory, "delayed-state-read.mjs");
+  await writeFile(prelude, `
+    import fs from "node:fs/promises";
+    import { setTimeout } from "node:timers/promises";
+    const open = fs.open;
+    fs.open = async (file, ...args) => {
+      if (file === ${JSON.stringify(statePath)}) {
+        await fs.writeFile(${JSON.stringify(evidencePath)}, "entered");
+        await setTimeout(2100);
+      }
+      return open(file, ...args);
+    };
+  `);
+  const result = await runHook({ hook_event_name: "SessionEnd", session_id: threadId, reason: "other" }, {
+    HOME: directory, XDG_CONFIG_HOME: path.join(directory, ".config"), TRELIO_WORKSPACE_ORIGIN: origin,
+  }, undefined, prelude);
+  assert.equal(await readFile(evidencePath, "utf8"), "entered");
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED/u);
+  assert.match(result.stderr, /stage=runtime_state_read/u);
+  assert.ok(state === await readFile(statePath, "utf8"), "the local key file remains in place");
 });
 
 const testPairingRecovery = async (t, expiredSession) => {

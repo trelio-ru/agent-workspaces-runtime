@@ -3107,6 +3107,11 @@ read остаётся доступен после исчерпания двух 
 план выбора/fresh admission описан в company-context контракте scheduler.
 
 Точный `get_workspace` и `fetch` с `workspace:<UUID>` не запускают company sync.
+Точный `get_workspace` возвращает только список метаданных принятых файлов
+порциями до 100 записей и 64 КиБ. `filesPage.nextArguments` передаётся в
+следующий вызов с тем же `workspaceId` как `filesPage`. Изменение accepted
+head отклоняет эту страницу, а metadata ACL проверяется на каждом вызове.
+Для `fetch` и exact file read сохраняется доставка прежнего содержимого.
 Backend exact GET `/company-context/:companySlug/workspaces/:workspaceId`
 проверяет paired read bridge/source OAuth scopes, company MCP policy и canonical
 relation-union ACL, возвращая один read-only MVCC snapshot: видимые metadata/
@@ -3267,6 +3272,13 @@ reuse; локальная папка не подтверждает текущи�
 Для выпуска требуется согласованная пара plugin/backend с search v2 и
 `download_file`; live activation следует обычному marketplace/policy read-back.
 
+
+Для `get_tasks` при переполнении 40 000 байтов возвращается помещающийся
+префикс с полными cores. `nextBatch` содержит готовый вызов для остатка.
+Сначала соберите authority текущей части. При `incomplete` передайте
+`get_task_instruction_page` соответствующий префикс исходных локаторов.
+Reuse подтверждается только для этого префикса после проверки exact
+продолжения в доставленном результате.
 
 ## Инкрементальное encrypted хранилище
 

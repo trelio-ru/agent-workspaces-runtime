@@ -9,7 +9,8 @@ import {
 } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
-import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
+import { buildLocalTaskReadToolResult, buildMcpTaskBatchContinuation, buildMcpWorkspaceFilePage,
+  fitsMcpTaskReadResult, isMcpWorkspaceFilesPage, selectMcpTaskReadBatch } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { rememberDiagnosticDetail, readDiagnosticDetail, diagnosticValueType } from "./trelio-diagnostic-observation.mjs";
@@ -5708,7 +5709,7 @@ const buildLocalTaskInstructionDelivery = (catalog, canInline) => {
     catalog: {
       schemaVersion: 3,
       status: "incomplete",
-      authority: "Instruction delivery is incomplete. Call get_task_instruction_page with the same task locator(s) and expectedCatalogRevisionKey; omit knownInstructionLayerKeys, managed by the runtime. Use pageSize=recommendedPageSize and follow returned nextPageIndex until null; pageSize=1 keeps the single-part format. Concatenate each layer's parts in partIndex order and verify SHA-256 before task content. Restart the exact read if the revision changes.",
+      authority: "Instruction delivery is incomplete. Call get_task_instruction_page with the first original task locator(s) covered by this part and expectedCatalogRevisionKey; omit knownInstructionLayerKeys, managed by the runtime. Use pageSize=recommendedPageSize and follow returned nextPageIndex until null; pageSize=1 keeps the single-part format. Concatenate each layer's parts in partIndex order and verify SHA-256 before task content. Restart the exact read if the revision changes.",
       layers: [],
       reusedLayerKeys: catalog.reusedLayerKeys,
       delivery: {
@@ -5718,6 +5719,41 @@ const buildLocalTaskInstructionDelivery = (catalog, canInline) => {
     },
     pages,
   };
+};
+
+const buildLocalExactTaskCatalog = (snapshots, knownInstructionLayerKeys) => {
+  const instructionsLoaded = snapshots.every((snapshot) => snapshot.reference.status === "loaded");
+  const knownKeys = new Set(Array.isArray(knownInstructionLayerKeys) ? knownInstructionLayerKeys : []);
+  const layersByKey = new Map();
+  snapshots.forEach((snapshot) => snapshot.layers.forEach((layer) => {
+    const previous = layersByKey.get(layer.key);
+    if (previous && JSON.stringify(previous) !== JSON.stringify(layer)) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_MIRROR_INVALID",
+        `Instruction layer collision for ${layer.key}.`,
+      );
+    }
+    layersByKey.set(layer.key, layer);
+  }));
+  const reusedLayerKeys = [...layersByKey.keys()].filter((key) => knownKeys.has(key));
+  return instructionsLoaded
+    ? {
+        schemaVersion: 3,
+        status: "loaded",
+        authority: "Resolve each task's instructionScope.orderedLayerKeys against this response and same-context reusedLayerKeys before interpreting or acting on that task. Inside a prepared Run, its pinned instructions remain authoritative.",
+        layers: [...layersByKey.values()].filter((layer) => !knownKeys.has(layer.key)),
+        reusedLayerKeys,
+        nextReadArguments: { knownInstructionLayerKeys: [...layersByKey.keys()] },
+      }
+    : {
+        schemaVersion: 3,
+        status: "requires_scope",
+        requiredScope: "mcp:workspaces:read",
+        instruction: "Authorize mcp:workspaces:read before substantive work so company, project and personal agent instructions can be loaded.",
+        layers: [],
+        reusedLayerKeys: [],
+      };
+
 };
 
 const buildLocalExactTaskRead = (
@@ -5748,38 +5784,6 @@ const buildLocalExactTaskRead = (
     );
   }
   const instructionSnapshots = records.map((record) => buildLocalTaskInstructionSnapshot(mirror, record));
-  const instructionsLoaded = instructionSnapshots.every((snapshot) => snapshot.reference.status === "loaded");
-  const knownKeys = new Set(Array.isArray(knownInstructionLayerKeys) ? knownInstructionLayerKeys : []);
-  const layersByKey = new Map();
-  instructionSnapshots.forEach((snapshot) => snapshot.layers.forEach((layer) => {
-    const previous = layersByKey.get(layer.key);
-    if (previous && JSON.stringify(previous) !== JSON.stringify(layer)) {
-      throw new TrelioLocalContextError(
-        "LOCAL_CONTEXT_MIRROR_INVALID",
-        `Instruction layer collision for ${layer.key}.`,
-      );
-    }
-    layersByKey.set(layer.key, layer);
-  }));
-  const reusedLayerKeys = [...layersByKey.keys()].filter((key) => knownKeys.has(key));
-  const effectiveInstructions = instructionsLoaded
-    ? {
-        schemaVersion: 3,
-        status: "loaded",
-        authority: "Resolve each task's instructionScope.orderedLayerKeys against this response and same-context reusedLayerKeys before interpreting or acting on that task. Inside a prepared Run, its pinned instructions remain authoritative.",
-        layers: [...layersByKey.values()].filter((layer) => !knownKeys.has(layer.key)),
-        reusedLayerKeys,
-        nextReadArguments: { knownInstructionLayerKeys: [...layersByKey.keys()] },
-      }
-    : {
-        schemaVersion: 3,
-        status: "requires_scope",
-        requiredScope: "mcp:workspaces:read",
-        instruction: "Authorize mcp:workspaces:read before substantive work so company, project and personal agent instructions can be loaded.",
-        layers: [],
-        reusedLayerKeys: [],
-      };
-
   const taskReads = records.map((record, index) => ({
     locator: {
       companySlug: mirror.company.slug,
@@ -5794,19 +5798,12 @@ const buildLocalExactTaskRead = (
     connections: record.payload?.connections ?? {},
     relatedWorkspaces: record.payload?.relatedWorkspaces ?? [],
   }));
-  // Budget the actual returned envelope. The loaded-title reminder can itself
-  // move a borderline inline result into paged delivery; a manifest never has it.
-  const buildResult = (catalog) => withLocalTaskTitleReminder({
-    effectiveInstructions: catalog,
-    tasks: taskReads,
-    ...(unfiledQueue ? { unfiledQueue } : {}),
-  }, taskReads);
-  const delivery = instructionsLoaded
-    ? buildLocalTaskInstructionDelivery(effectiveInstructions,
-        (catalog) => fitsLocalTaskReadResult(buildResult(catalog)))
-    : { catalog: effectiveInstructions, pages: [] };
   if (pageRequest) {
-    if (!instructionsLoaded || delivery.pages.length === 0) {
+    const effectiveInstructions = buildLocalExactTaskCatalog(instructionSnapshots, knownInstructionLayerKeys);
+    const delivery = effectiveInstructions.status === "loaded"
+      ? buildLocalTaskInstructionDelivery(effectiveInstructions, () => false)
+      : { catalog: effectiveInstructions, pages: [] };
+    if (delivery.pages.length === 0) {
       throw new TrelioLocalContextError(
         "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE",
         "The instruction catalog is no longer paged. Restart the exact task read.",
@@ -5827,11 +5824,25 @@ const buildLocalExactTaskRead = (
       (selectedPage) => withLocalTaskTitleReminder({ ...selectedPage,
         ...(unfiledQueue ? { unfiledQueue } : {}) }, taskReads));
   }
-  const result = buildResult(delivery.catalog);
-  if (!fitsLocalTaskReadResult(result)) {
+  const result = selectMcpTaskReadBatch(taskReads.length, (count) => {
+    const effectiveInstructions = buildLocalExactTaskCatalog(instructionSnapshots.slice(0, count), knownInstructionLayerKeys);
+    const nextBatch = buildMcpTaskBatchContinuation(rawLocators.slice(count));
+    const buildResult = catalog => {
+      const payload = { effectiveInstructions: catalog, tasks: taskReads.slice(0, count),
+        ...(nextBatch ? { nextBatch } : {}), ...(unfiledQueue ? { unfiledQueue } : {}) };
+      return taskReads.length === 1 ? withLocalTaskTitleReminder(payload, taskReads) : payload;
+    };
+    // A paged result must fit including the next exact request, the prose
+    // authority for its own locators and every byte of the local text envelope.
+    const delivery = effectiveInstructions.status === "loaded"
+      ? buildLocalTaskInstructionDelivery(effectiveInstructions, catalog => fitsLocalTaskReadResult(buildResult(catalog)))
+      : { catalog: effectiveInstructions };
+    return buildResult(delivery.catalog);
+  }, fitsLocalTaskReadResult);
+  if (!result) {
     throw new TrelioLocalContextError(
       "LOCAL_CONTEXT_RESULT_TOO_LARGE",
-      "Exact task response exceeds the bounded result. Narrow the task batch.",
+      "A single exact task core exceeds the bounded result.",
     );
   }
   return result;
@@ -7048,6 +7059,36 @@ export const hydrateLocalActionMirror = async ({ origin, ready, nativeTool, inpu
   return ready.mirror;
 };
 
+// Reuse the exact encrypted reader and keep the full fetch representation
+// separate. get_workspace pages file metadata; use an exact accepted file
+// read or materialization for contents. No model-controlled path is decrypted.
+const pageLocalWorkspaceFiles = (result, request) => {
+  if (request !== undefined && !isMcpWorkspaceFilesPage(request)) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Invalid Workspace file continuation.");
+  }
+  const workspace = result.acceptedWorkspace;
+  if (request && request.workspaceHead !== workspace?.acceptedHead) {
+    throw new TrelioLocalContextError("WORKSPACE_OUTDATED", "The accepted Workspace revision changed. Restart get_workspace without filesPage.");
+  }
+  if (!workspace) return result;
+  if (request && request.offset >= workspace.files.length) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "The file offset is outside the accepted Workspace revision.");
+  }
+  const offset = request?.offset ?? 0;
+  // Legacy mirrors still carry search documents. Size the file metadata, not
+  // their body/chunks. The exact reader skips downloading text in the first place.
+  const inventory = workspace.files.map(({text: _text, chunks: _chunks, ...metadata}) => metadata);
+  const page = buildMcpWorkspaceFilePage(inventory, offset);
+  if (!page) throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_TOO_LARGE", "One accepted file entry exceeds the file page budget.");
+  const { files, nextOffset } = page;
+  return { ...result, acceptedWorkspace: { ...workspace, files },
+    ...(request || nextOffset !== null ? { filesPage: {
+      workspaceHead: workspace.acceptedHead, offset, total: inventory.length,
+      nextArguments: nextOffset === null ? null : { workspaceHead: workspace.acceptedHead, offset: nextOffset },
+    } } : {}),
+  };
+};
+
 export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) => {
   const input = rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)
     ? rawArguments
@@ -7117,11 +7158,9 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
   }
   if (nativeTool === "list_workspaces") return listWorkspacesFromMirror(mirror, input);
   if (nativeTool === "get_workspace") {
-    return fetchMirrorResult(
-      mirror,
-      `workspace:${input.workspaceId}`,
-      input.knownInstructionLayerKeys,
-    );
+    return pageLocalWorkspaceFiles(fetchMirrorResult(
+      mirror, `workspace:${input.workspaceId}`, input.knownInstructionLayerKeys,
+    ), input.filesPage);
   }
   if (nativeTool === "list_knowledge_base_pages") {
     return listDomainDocumentsFromMirror(mirror, "knowledge_page", input);
@@ -9091,13 +9130,13 @@ export const readFreshExactContextDocument = async ({
  * company data or return partially opened files.
  */
 export const readFreshExactWorkspaceContext = async ({
-  origin, companySlug, workspaceId, input, provider, signal, unfiledQueue,
+  origin, companySlug, workspaceId, nativeTool = "fetch", input, provider, signal, unfiledQueue,
   requestJson = async pathname => readJson(await request(provider.requestOrigin, provider.token, pathname, { signal })),
   hydrate = value => hydrateAgentCompanyEncryptedJson({ value, origin: provider.requestOrigin,
     token: provider.token, companyEncryption: provider.companyEncryption, signal }),
   readDocuments = workspace => readEncryptedWorkspaceSearchDocuments({ origin: provider.requestOrigin,
     token: provider.token, companyEncryption: provider.companyEncryption, workspaceId,
-    acceptedHead: workspace.acceptedHead, signal }),
+    acceptedHead: workspace.acceptedHead, signal, inventoryOnly: nativeTool === "get_workspace" }),
 }) => {
   workspaceId = normalizeUuid(workspaceId, "workspaceId");
   const pathname = `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/workspaces/${workspaceId}`;
@@ -9116,6 +9155,12 @@ export const readFreshExactWorkspaceContext = async ({
     return raw;
   };
   const raw = validate(await requestJson(pathname));
+  if (nativeTool === "get_workspace" && input?.filesPage !== undefined) {
+    if (!isMcpWorkspaceFilesPage(input.filesPage))
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Invalid Workspace file continuation.");
+    if (input.filesPage.workspaceHead !== raw.workspaces[0]?.acceptedHead)
+      throw new TrelioLocalContextError("WORKSPACE_OUTDATED", "The accepted Workspace revision changed. Restart get_workspace without filesPage.");
+  }
   const scoped = await hydrate(raw);
   const workspaces = [];
   for (const workspace of scoped.workspaces) {
@@ -9126,7 +9171,10 @@ export const readFreshExactWorkspaceContext = async ({
   if (final.revisionToken !== raw.revisionToken) {
     throw new TrelioLocalContextError("WORKSPACE_OUTDATED", "Workspace changed during the exact read.");
   }
-  const result = fetchMirrorResult({ ...scoped, workspaces }, `workspace:${workspaceId}`, input?.knownInstructionLayerKeys);
+  const snapshot = { ...scoped, workspaces };
+  const result = nativeTool === "get_workspace"
+    ? handleNativeLocalContextRead(snapshot, nativeTool, input)
+    : fetchMirrorResult(snapshot, `workspace:${workspaceId}`, input?.knownInstructionLayerKeys);
   return unfiledQueue ? { ...result, unfiledQueue } : result;
 };
 
@@ -9335,7 +9383,7 @@ export const handleTrelioLocalContextOperation = async (
       const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
         ? await readUnfiledResponseContext(origin, companySlug,
           { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
-      return readFreshExactWorkspaceContext({ origin, companySlug, workspaceId,
+      return readFreshExactWorkspaceContext({ origin, companySlug, workspaceId, nativeTool,
         input, provider, signal, unfiledQueue });
     }
     if (usesFreshExactTaskRead(nativeTool, input)) {

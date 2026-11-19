@@ -998,6 +998,7 @@ publication tooling также остаются вне этого публичн
   backend `shared/task-read-budget.ts`; его копию вручную не менять.
   Native/local bounds и continuation проверять
   по [контракту exact read](docs/agent-workspace-runtime.md).
+  Split batches carry intact cores and exact prefix authority; Workspace file pages pin the accepted head.
 - Exact task read сохраняет native `codexThreadTitleReminder` только после
   полной authority для одной задачи с человеческим названием; при пагинации –
   на последней реально включённой странице. Подсказка входит в envelope budget
