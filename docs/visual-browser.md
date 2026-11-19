@@ -501,6 +501,13 @@ preference: Chromium игнорирует restore switch у нового Profile
 диагностика ограничена stage/exit и категориями sandbox/display; raw stderr,
 native сообщения, пути и token никогда не печатаются.
 
+При холодном открытии `wait` сохраняет исходный отказ первой навигации.
+Успешное восстановление профиля может оставить статус `saved_unverified`
+при отказе наблюдения, поэтому статус не заменяет результат открытия.
+Повторный `wait` выдаёт тот же отказ до следующей явной рабочей команды.
+Это чтение состояния под прежней lease. Оно не повторяет навигацию
+и не выдаёт новый токен наблюдения.
+
 Desktop Linux требует доступный sandbox/user namespaces и Secret Service.
 Ubuntu 23.10+ может запрещать namespace для downloaded binary: нужен OS-owned
 AppArmor profile с `userns` для managed Chromium, как в

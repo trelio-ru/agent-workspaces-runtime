@@ -19,6 +19,7 @@ const file = process.argv[2];
 let engine, server, timer, idle, owner, current = visualStatus('preparing'), stopping = false;
 const startupAbort = new AbortController();
 let startup, startupFailed = false;
+let initialNavigationPending = false, awaitingOriginalNavigation = false, initialNavigationFailure;
 let startupPhase = 'owner_read';
 let fixtureOnly = false, fixtureWrites = Promise.resolve();
 const fixtureEvidence = [];
@@ -126,6 +127,7 @@ async function stop() {
 try {
   owner = await readVisualOwner(file);
   if (owner.schemaVersion !== 1 || !/^[0-9a-f]{64}$/u.test(owner.token) || !Number.isSafeInteger(owner.deadlineAt) || owner.deadlineAt <= Date.now()) throw new Error('invalid_input');
+  awaitingOriginalNavigation = initialNavigationPending = owner.operation === 'navigate';
   startupPhase = 'policy';
   const policy = createVisualOriginPolicy(owner);
   fixtureOnly = policy.fixtureOnly === true;
@@ -144,13 +146,24 @@ try {
       if (!args || Object.keys(args).length) return visualStatus('error', 'invalid_input');
       const until = Math.min(Date.now() + 30_000, owner.deadlineAt);
       do {
-        if (!startupFailed) current = engine ? await engine.call('status') : current;
+        if (stopping) return visualStatus('closed');
+        if (!startupFailed && !initialNavigationPending) {
+          // The first navigation can fail after Chromium restores the saved
+          // profile. Its generic status then says saved_unverified. Return
+          // the original refusal instead, without repeating input or minting
+          // a new observation. Preserve it across repeated wait/status calls.
+          if (awaitingOriginalNavigation && initialNavigationFailure) return initialNavigationFailure;
+          current = engine ? await engine.call('status') : current;
+        }
         if (!['preparing', 'manual_input_required'].includes(current.state)) break;
         await sleep(250);
       } while (Date.now() < until);
       return current;
     }
     if (!engine || startupFailed) return current;
+    // Explicit work supersedes the opening observation. A read-only status
+    // poll, including one from another short invocation, cannot retire it.
+    if (operation !== 'status') awaitingOriginalNavigation = false;
     return idle.run(operation, args, () => engine.call(operation, args));
   }
   startupPhase = 'control_server';
@@ -183,6 +196,8 @@ try {
   engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, externalNavigation: owner.externalNavigation === true, profileAuthentication: owner.profileAuthentication === true, authentication: owner.authentication || null, manualCompletion: owner.manualCompletion || null, mailIdentity: owner.mailIdentity || null, observationMode: owner.observationMode || 'image', presentation: owner.presentation || 'windowed', semanticControls: owner.semanticControls === true, fieldCheckPolicy: owner.fieldCheckPolicy || null, referenceRoutes: owner.referenceRoutes || [], attachmentDownloads: owner.attachmentDownloads === true, attachmentRedirectDomains: owner.attachmentRedirectDomains || [], audioDownloads: owner.audioDownloads === true, fileUploads: owner.fileUploads === true, fileUploadPickerPaths: owner.fileUploadPickerPaths || [], lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   if (owner.assistantBrowserSecrets === true) engine.enableAssistantBrowserSecrets();
   current = await idle.run(owner.operation, owner.args, () => engine.call(owner.operation, owner.args));
+  if (awaitingOriginalNavigation && current.state === 'error') initialNavigationFailure = current;
+  initialNavigationPending = false;
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed', startupPhase, error, failureCode:error.diagnosticCode,
     causeCode:processDiagnosticCauseCode(error) });

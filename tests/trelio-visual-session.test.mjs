@@ -492,7 +492,17 @@ test('all signing and version discovery shares one non-sliding deadline', () => 
 
 test('detached worker keeps its original lease and encrypted storage across short calls', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-worker-test-')));
-  const server = http.createServer((req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><body style="background:#45cc77;height:1800px">Synthetic visual fixture</body>'); });
+  let invalidDocumentRequests = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/non-document') {
+      invalidDocumentRequests++;
+      res.setHeader('Content-Type', 'application/json');
+      res.end('{"fixture":"never observed"}');
+      return;
+    }
+    res.setHeader('Content-Type', 'text/html');
+    res.end('<!doctype html><body style="background:#45cc77;height:1800px">Synthetic visual fixture</body>');
+  });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const start = Date.now();
@@ -535,6 +545,21 @@ test('detached worker keeps its original lease and encrypted storage across shor
     // claim to disappear before removing this synthetic key and directory.
     await waitForClose();
     assert.ok(await store.read());
+    // A cold Chromium restores its synthetic snapshot but refuses a non-HTML
+    // response. Wait must observe that result, even though storage restored.
+    assert.equal((await call('navigate', { url: origin + '/non-document' })).state, 'preparing');
+    const original = await call('wait');
+    assert.equal(original.reason, 'document_blocked', JSON.stringify({ state: original.state, reason: original.reason }));
+    assert.equal(original.state, 'error');
+    assert.ok(original.sessionId);
+    assert.equal((await call('status')).state, 'saved_unverified');
+    assert.deepEqual(await call('wait'), original);
+    assert.equal(invalidDocumentRequests, 1, 'waiting never repeats the original navigation');
+    const recovered = await call('navigate', { url: origin });
+    assert.equal(recovered.state, 'ready');
+    assert.equal(recovered.sessionId, original.sessionId);
+    assert.equal((await call('wait')).state, 'ready', 'a new operation supersedes the initial failure');
+    await call('close'); await waitForClose();
     // Exercise the REAL detached entrypoint and repeated public observations
     // after a deterministic pre-browser failure. Never corrupt a real account
     // or unlock the synthetic vault again: malformed envelope shape is refused
