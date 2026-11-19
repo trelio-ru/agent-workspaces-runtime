@@ -233,6 +233,14 @@ publication tooling также остаются вне этого публичн
   and previously committed schedule. Site origins are opaque lifecycle bindings.
   Only fixed completion is model-facing. Reuse exact native accepted-material
   proof and the ordinary outcome receipt before releasing the queue.
+  The accepted-material adapter separates its bounded local preparation from
+  one ordinary-budget MCP dispatch. Cancellation before dispatch retains its
+  closed stage, with no proof/lease extension or new attempt. Exercise the
+  production private profile and signer through the encrypted test composition.
+  A closed confirmation preparation refusal can supersede its expired
+  outcome-only lease once. Inspect the complete latest turn plus the original
+  save and work turns under the SAME native writer. Native CAS requires the
+  unchanged plan and missing durable outcome. An unknown send cannot qualify.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

@@ -807,6 +807,23 @@ opening, editing or submitting a Workspace in this mode. The outcome gate
 still verifies live acceptance and the assistant's own material. A confirmed
 pass may preserve an active or blocked task goal.
 
+Task-material completion has one fixed 60-second outer MCP budget so a cold
+read of accepted ciphertext, Git materialization and recipient checks can finish
+before the native write. Dispatch stays within the ordinary MCP deadline and
+the original caller, proof and lease fences. The adapter reports a closed
+pre-dispatch deadline or cancellation only from its actual abort signal. It
+never infers cancellation from an upstream error code, retries dispatch, or
+extends a proof. Discussion-reply completion retains its ordinary budget.
+
+The outcome confirmation may be interrupted before dispatch. After the exact
+lease expires, an owned native reader can certify the closed preparation
+refusal from the full latest turn, its exact attempted arguments, and the
+original two prerequisite turns. Recheck this under the same writer before
+renewal. Native CAS independently requires an unchanged accepted save, original
+settled receipts and schedule, and no outcome. One successor may confirm this
+same limited result with fresh proof. The previous marker, save and external
+effects remain untouched. A missing response after dispatch is still uncertain.
+
 That accepted-only certificate also permits an already closed, value-free
 managed browser visit (status, HTTPS navigation, screenshot, close), successful
 company Secret metadata and the exact historical pre-I/O argument refusals.

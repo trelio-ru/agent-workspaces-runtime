@@ -1272,6 +1272,28 @@ for(const mode of ['local_draft','portable_draft'])test(`a verified ${mode} save
   const plan={saveReviewId:saveMarkerId,evidence,schedule:{
     priorReceiptId:randomUUID(),cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00',
   }};
+  const failureMarker=randomUUID(),failureTurnId=randomUUID();
+  const failed={id:failureTurnId,status:'completed',items:[root(failureMarker),
+    call('complete_assistant_pass',{workspaceId,acceptedRunId:runId,workspaceHead:candidateHead,goalState:'waiting_owner',
+      noChange:false,clientRequestId:failureMarker,cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00'},
+    {code:'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_FAILED'},'failed')]};
+  const retry={plan,retryFromReviewId:failureMarker,terminalTurnId:failureTurnId};
+  const readRetry=(latest=failed,parent=original)=>readAssistantCodexDelivery(threadId,failureMarker,{
+    executable:process.execPath,environment:{},recoveredWorkspaceOutcome:{deliveryId,originalTurnId:original.id,
+      saveMarkerId,saveTurnId:save.id,taskPass,mode,receipt,retry},
+    spawnProcess:nativeRpc(request=>{
+      if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd:process.cwd()}}};
+      assert.equal(request.method,'thread/turns/list');assert.equal(request.params.limit,3);
+      return {result:{data:[latest,save,parent]}};
+    })});
+  assert.deepEqual(await readRetry(),{state:'recovered_outcome_observed',turnId:failureTurnId,evidence});
+  for(const change of ['changed-head','unknown-transport','duplicate-call']){
+    const wrong=structuredClone(failed),tool=wrong.items[1];
+    if(change==='changed-head')tool.arguments.workspaceHead=receipt.baseHead??'a'.repeat(40);
+    if(change==='unknown-transport')tool.result.structuredContent.code='ASSISTANT_MCP_UNAVAILABLE';
+    if(change==='duplicate-call')wrong.items.push(structuredClone(tool));
+    assert.deepEqual(await readRetry(wrong),{state:'uncertain'});
+  }
   for(const changed of [false,true]){
     let reads=0,starts=0;
     const steps=[],parent=historyWithBrowser('https://unrelated.example.test');

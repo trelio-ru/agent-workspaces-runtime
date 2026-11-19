@@ -1563,6 +1563,44 @@ test('trusted local Workspace recovery errors keep their closed code across the 
   assert.equal(preparations,4);assert.equal(business,0);
 });
 
+test('Workspace completion can prepare accepted material beyond the ordinary MCP deadline',async()=>{
+  const origin='https://material-preparation.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'m'.repeat(43)}`,expiresAt:1});
+  const args={workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),acceptedRunId:randomUUID(),
+    clientRequestId:randomUUID(),noChange:false,goalState:'waiting_owner',cadence:'hourly',timeZone:'Europe/Moscow'};
+  const schema={type:'object',properties:Object.fromEntries(Object.entries(args).map(([key,value])=>
+    [key,{type:typeof value}])),required:Object.keys(args),additionalProperties:false};
+  let preparations=0,dispatches=0,cancel;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,timeoutMs:100,
+    withWorkspaceArguments:async({args:input,signal},send)=>{
+      preparations++;
+      // Simulate a cold accepted read with a monotonic wait longer than the
+      // deliberately short ordinary session budget. There is exactly one
+      // attempt and any caller cancellation still refuses before dispatch.
+      if(cancel)cancel.abort();
+      await new Promise(resolve=>setTimeout(resolve,150));
+      signal.throwIfAborted();
+      return send(input);
+    },
+    httpRequest:async request=>{
+      const reply=result=>({sessionId:'material-preparation',message:{jsonrpc:'2.0',id:request.payload?.id,result}});
+      if(request.method==='DELETE'||request.payload.method==='notifications/initialized')return reply({});
+      if(request.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(request.payload.method==='tools/list')return reply({tools:[{name:'complete_assistant_pass',
+        description:'Synthetic native completion definition',inputSchema:schema}]});
+      assert.equal(request.payload.method,'tools/call');
+      assert.deepEqual(request.payload.params,{name:'complete_assistant_pass',arguments:args});
+      dispatches++;
+      return reply({content:[{type:'text',text:'confirmed'}],structuredContent:{state:'confirmed'}});
+    }});
+  assert.equal((await client.callTool('complete_assistant_pass',args)).structuredContent.state,'confirmed');
+  assert.equal(preparations,1);assert.equal(dispatches,1);
+  cancel=new AbortController();
+  await assert.rejects(client.callTool('complete_assistant_pass',args,cancel.signal),
+    {code:'ASSISTANT_MATERIAL_PREPARATION_CANCELLED'});
+  assert.equal(preparations,2);assert.equal(dispatches,1,'a cancelled caller can never start or retry dispatch');
+});
+
 test('all trusted materializers preserve local refusal provenance without claiming native MCP auth or retrying',async()=>{
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});
   const {RemoteMcpHostError}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
@@ -3955,9 +3993,7 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
     selectedCipher=Buffer.concat([Buffer.from('TRELIOH1'),chainLength,chainHeader,bytes,acceptedRevisionBytes]);
     snapshot.workspace.acceptedHead=selectedHead;
     stage('material');
-    const materialProfile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
-      materialWorkspaceId:descriptor.workspaceId,lockDirectory:path.join(os.tmpdir(),'synthetic-material-locks'),lock:(_file,action)=>action()});
-    const {withAssistantEncryptedMaterial}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    const {withAssistantEncryptedMaterial,withProductionAssistantWorkspace}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
     const {buildRuntimeSessionProof}=await import('../host-runtime/scripts/trelio-runtime-session.mjs');
     const {assistantEncryptedMaterialProofPayload,assistantEncryptedMaterialProofTool}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
     const completion={clientRequestId:randomUUID(),goalState:'waiting_external',cadence:'hourly',timeZone:'Europe/Moscow',
@@ -3966,7 +4002,12 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
     let completionCalls=0;
     const downloadsBeforeMaterial=downloads;
     const gitBeforeMaterial=await fs.readFile(process.env.GIT_TRACE2_EVENT);
-    const completed=await common.withWorkspaceExecutionProfile(materialProfile,()=>withAssistantEncryptedMaterial({args:completion},async wire=>{
+    // Positive material preparation enters through the production private
+    // Workspace composition. Substitute only the fixture's protected stores
+    // and native responses, never the profile, signer or accepted-file path.
+    const withProfile=(action,options)=>withProductionAssistantWorkspace(action,{...options,
+      context:opened=>opened({...f.client,identity:f.identity},f.host,f.store)});
+    const completed=await withAssistantEncryptedMaterial({args:completion},async wire=>{
       completionCalls++;
       assert.doesNotMatch(JSON.stringify(wire),/Verified material result|SYNTHETIC_ENCRYPTED_DELIVERABLE|privateKey|WORK\.md/u);
       const {runtimeSessionProof:proof,...facts}=wire.encryptedMaterialWitness;
@@ -3976,7 +4017,7 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
       assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
         createPublicKey({key:Buffer.from(f.runtime.state.privateKeyPkcs8,'base64url'),format:'der',type:'pkcs8'}),Buffer.from(proof.signature,'base64url')),true);
       return {state:'confirmed'};
-    },{withProfile:action=>action({...f,prepareWorkspaceMaterial:materialProfile.prepareWorkspaceMaterial})}));
+    },{withProfile});
     if(named){
       assert.equal(completed.isError,true);
       assert.equal(completed.structuredContent.code,'ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED');
@@ -3988,14 +4029,14 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
       // Scope/recipient violations are still hard errors, never a suggestion
       // to adopt another task or a canonical-Workspace recovery certificate.
       mode='foreign';
-      await assert.rejects(common.withWorkspaceExecutionProfile(materialProfile,()=>withAssistantEncryptedMaterial({args:completion},
-        ()=>assert.fail('foreign completion dispatched'),{withProfile:action=>action({...f,prepareWorkspaceMaterial:materialProfile.prepareWorkspaceMaterial})})),
+      await assert.rejects(withAssistantEncryptedMaterial({args:completion},
+        ()=>assert.fail('foreign completion dispatched'),{withProfile}),
         {code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
       mode='valid';
     }else{assert.equal(completed.state,'confirmed');assert.equal(completionCalls,1);}
     // A named archive remains independently readable; refusal of task evidence
     // cannot delete, rewrite or prohibit the accepted related-context save.
-    const inspection=await common.withWorkspaceExecutionProfile(named?f.profile:materialProfile,()=>common.inspectAcceptedWorkspace(f.identity.origin,{workspace:descriptor.workspaceId}));
+    const inspection=await common.withWorkspaceExecutionProfile(f.profile,()=>common.inspectAcceptedWorkspace(f.identity.origin,{workspace:descriptor.workspaceId}));
     await common.validateAcceptedAssistantWorkState({inspection,assistantId:f.identity.assistantId,workspaceHead:selectedHead,previousHead:selectedHead});
     await assert.rejects(common.validateAcceptedAssistantWorkState({inspection,assistantId:f.identity.assistantId,workspaceHead:selectedHead,previousHead:head}),
       'old accepted head without this assistant state cannot attest noChange');

@@ -3888,7 +3888,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         'x-trelio-assistant-schedule-protocol':'2',
       }, authentication: { type: "assistant_device" } };
       const session = await protocol.createRemoteSession(config, credential, request, { signal: boundedSignal });
-      try { return await action({ protocol, config, credential, session, request, signal: boundedSignal }); }
+      try { return await action({ protocol, config, credential, session, request, signal: boundedSignal, deadline }); }
       finally { await protocol.closeRemoteSession(config, credential, session.sessionId, request, { signal: boundedSignal }); }
     } catch (error) {
       if (error instanceof AssistantTransportError) throw error;
@@ -3988,6 +3988,13 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
       if(['localContextRead','localBrowserAction','localFileAction'].some(key=>Object.hasOwn(argumentsSnapshot,key)))fail('ASSISTANT_MCP_INPUT_INVALID');
       const workspaceFileAction=name==='use_assistant_workspace_files';
+      // Task material completion has a local read phase: resolve the current
+      // recipient, verify the immutable bundle and WORK.md, and bind their
+      // witness. A cold encrypted read can consume the whole ordinary MCP
+      // clock before a tools/call is even attempted. Its fixed whole-operation
+      // budget is independent of the site or skill that produced the result.
+      const preparesAcceptedMaterial=name==='complete_assistant_pass'&&typeof withWorkspaceArguments==='function'
+        &&!Object.hasOwn(argumentsSnapshot,'replyCommentId');
       if(workspaceFileAction&&typeof materializeWorkspaceFiles!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
       // Reject a task writer in an intake before initializing any native MCP
       // session. Repeat after initialization too: the protected pass can change
@@ -3999,7 +4006,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       const active=typeof readActivePass==='function'?await readActivePass():null;
       const companyReadSession=ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(name)||active?.kind==='source_intake'
         &&(ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name)||name==='get_trelio_tool_contract');
-      return perform(async ({ protocol, config, credential, session, request, signal }) => {
+      return perform(async ({ protocol, config, credential, session, request, signal, deadline }) => {
         const allowed=await selectedTools();
         if(!allowed.includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         // Fetch the exact native schema in this SAME session/deadline. A prior
@@ -4072,18 +4079,40 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         }
 
         const nativeSendErrors=new WeakSet();
+        let dispatchAttempted=false;
         const send=async wireArguments=>{
           // The public input bound was checked before protection. Ciphertext
           // adds only the standard bounded envelope/base64 overhead; this is
           // not a larger model input or a caller-controlled wire override.
-          if(Buffer.byteLength(JSON.stringify(wireArguments))>96*1024)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          if(preparesAcceptedMaterial&&dispatchAttempted
+            ||Buffer.byteLength(JSON.stringify(wireArguments))>96*1024)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          // Never start a write after preparation has lost its original
+          // caller/deadline fence. The dispatch still has the ordinary MCP
+          // ceiling, within the shared whole-operation window. Its original
+          // admission proof and native lease are neither renewed nor replaced.
+          signal.throwIfAborted();
+          const dispatchSignal=preparesAcceptedMaterial
+            ?AbortSignal.any([signal,AbortSignal.timeout(timeoutMs)]):signal;
+          dispatchAttempted=true;
           try{
             const response=await request({config,credential,sessionId:session.sessionId,payload:{
               jsonrpc:"2.0",id:session.nextRequestId(),method:"tools/call",params:{name,arguments:wireArguments},
-            }},{signal});
+            }},{signal:dispatchSignal});
             return protocol.assertJsonRpcResult(response,"tools/call");
           }catch(error){
             if(error!==null&&(typeof error==='object'||typeof error==='function'))nativeSendErrors.add(error);
+            throw error;
+          }
+        };
+        const prepareArguments=async()=>{
+          try{return await withWorkspaceArguments({name,args:argumentsSnapshot,signal},send);}
+          catch(error){
+            // Identity of the observed abort proves only this local stage.
+            // Once dispatch starts, the ordinary native outcome checks own
+            // uncertainty. Never turn a provider-shaped code into replay.
+            if(preparesAcceptedMaterial&&!dispatchAttempted&&signal.aborted&&error===signal.reason)
+              fail(deadline.aborted&&error===deadline.reason
+                ?'ASSISTANT_MATERIAL_PREPARATION_DEADLINE':'ASSISTANT_MATERIAL_PREPARATION_CANCELLED');
             throw error;
           }
         };
@@ -4104,7 +4133,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             ?await send({localBrowserAction:true,...(argumentsSnapshot.intakePass?{intakePass:argumentsSnapshot.intakePass}:{taskPass:argumentsSnapshot.taskPass}),runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
             :fail('ASSISTANT_CAPABILITY_UNAVAILABLE')
           :typeof withWorkspaceArguments==='function'
-          ?await localOperation('workspace_arguments',()=>withWorkspaceArguments({name,args:argumentsSnapshot,signal},send),nativeSendErrors)
+          ?await localOperation('workspace_arguments',prepareArguments,nativeSendErrors)
           :await send(argumentsSnapshot);
 
         if (!object(value) || !Array.isArray(value.content) || value.content.length > 20
@@ -4187,7 +4216,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
-      }, signal, name==='connect_remote_agent_skill'?10*60*1000:name==='use_assistant_browser'?60_000:timeoutMs,
+      }, signal, name==='connect_remote_agent_skill'?10*60*1000:name==='use_assistant_browser'||preparesAcceptedMaterial?60_000:timeoutMs,
         name==='request_assistant_profile_update'||name==='use_assistant_browser'||workspaceFileAction||name==='review_outgoing_message'
           ||name==='get_trelio_tool_contract'&&argumentsSnapshot.name==='use_assistant_browser'?'source_intake':companyReadSession?'company_context':null);
     },

@@ -129,9 +129,12 @@ export const validateAssistantRecoveredOutcomeSchedule=value=>{
   return {priorReceiptId:uuid(priorReceiptId),cadence,timeZone,dailyLocalTime};
 };
 export const validateAssistantRecoveredOutcomePlan=value=>{
-  object(value,['saveReviewId','evidence','schedule']);
-  return {saveReviewId:uuid(value.saveReviewId),evidence:validateAssistantRecoveredOutcomeEvidence(value.evidence),
-    schedule:validateAssistantRecoveredOutcomeSchedule(value.schedule)};
+  object(value,['saveReviewId','evidence','schedule','retryFromReviewId']);
+  const saveReviewId=uuid(value.saveReviewId);
+  const retryFromReviewId=value.retryFromReviewId===undefined?undefined:uuid(value.retryFromReviewId);
+  if(retryFromReviewId===saveReviewId)inputError();
+  return {saveReviewId,evidence:validateAssistantRecoveredOutcomeEvidence(value.evidence),
+    schedule:validateAssistantRecoveredOutcomeSchedule(value.schedule),...(retryFromReviewId?{retryFromReviewId}:{})};
 };
 // Compute the only effect permitted in this lease from native evidence.
 // Neither history prose nor the model can choose a different task outcome.
@@ -166,15 +169,17 @@ const workspaceDraftIdentity = value => {
   if(localDraft&&(localDraft.basis.workspaceId!==value.workspaceId||localDraft.basis.runId!==value.runId))inputError();
   let recoveredOutcome;
   if(value.recoveredOutcome!==undefined){
-    object(value.recoveredOutcome,['plan','originalTurnId','mode','receipt']);
-    const {plan,originalTurnId,mode,receipt}=value.recoveredOutcome;
+    object(value.recoveredOutcome,['plan','originalTurnId','mode','receipt','saveTurnId']);
+    const {plan,originalTurnId,mode,receipt,saveTurnId}=value.recoveredOutcome;
     const selected=validateAssistantRecoveredOutcomePlan(plan),evidence=selected.evidence;
     if(!value.acceptedHead||evidence.acceptedHead!==value.acceptedHead||evidence.workspaceId!==value.workspaceId
       ||evidence.runId!==value.runId||!['local_draft','portable_draft'].includes(mode))inputError();
     const basis=mode==='local_draft'?validateAssistantLocalDraftBasis(receipt):validateAssistantPortableFinish(receipt);
     if(basis.workspaceId!==value.workspaceId||basis.runId!==value.runId
-      ||mode==='portable_draft'&&basis.draftHead!==value.acceptedHead)inputError();
-    recoveredOutcome={plan:selected,originalTurnId:uuid(originalTurnId),mode,receipt:basis};
+      ||mode==='portable_draft'&&basis.draftHead!==value.acceptedHead
+      ||Boolean(selected.retryFromReviewId)!==(saveTurnId!==undefined)||saveTurnId===originalTurnId)inputError();
+    recoveredOutcome={plan:selected,originalTurnId:uuid(originalTurnId),mode,receipt:basis,
+      ...(saveTurnId!==undefined?{saveTurnId:uuid(saveTurnId)}:{})};
   }
   return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),
     ...(value.acceptedHead===undefined?{}:{acceptedHead:value.acceptedHead}),
@@ -2355,14 +2360,26 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // A valid continuation result alone cannot establish this lineage.
         if(recovered){
           const saved=last?.workspaceDraft;
+          const {retryFromReviewId,...basePlan}=recovered.plan;
           const {deltaSha256:_delta,...localBasis}=saved?.localDraft?.basis??{};
           const priorReceipt=recovered.mode==='local_draft'
             ?saved?.localDraft&&localBasis:saved?.portableFinish;
           if(!row.scheduled||deliveryEvents(id).length||!latest||!last.started||last.passId!==passId
-            ||last.reviewId!==recovered.plan.saveReviewId||last.terminalMarkerId!==id
-            ||last.terminalTurnId!==recovered.originalTurnId||terminalTurnId===recovered.originalTurnId
-            ||expectedLeaseRevision!==last.expectedLeaseRevision+1
-            ||!priorReceipt||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
+            ||terminalTurnId===last.terminalTurnId||terminalTurnId===recovered.originalTurnId
+            ||expectedLeaseRevision!==last.expectedLeaseRevision+1)fail('ASSISTANT_INBOX_CONFLICT');
+          if(retryFromReviewId){
+            // Only the immediately preceding outcome-only reservation can be
+            // superseded. Keep the accepted save, predecessor start bit and
+            // all original effects immutable in the existing journal.
+            const previous=saved?.recoveredOutcome;
+            if(!previous||previous.plan.retryFromReviewId||last.reviewId!==retryFromReviewId
+              ||last.terminalMarkerId!==basePlan.saveReviewId||last.terminalTurnId!==recovered.saveTurnId
+              ||previous.originalTurnId!==recovered.originalTurnId||previous.mode!==recovered.mode
+              ||JSON.stringify(previous.receipt)!==JSON.stringify(recovered.receipt)
+              ||JSON.stringify(previous.plan)!==JSON.stringify(basePlan))fail('ASSISTANT_INBOX_CONFLICT');
+          }else if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==id
+            ||last.terminalTurnId!==recovered.originalTurnId||!priorReceipt
+            ||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
         }
         if(namedArchiveSettled&&(!last?.workspaceDraft?.namedArchive||!last.started||last.passId!==passId
           ||last.workspaceDraft.workspaceId!==namedArchiveSettled.workspaceId||last.workspaceDraft.runId!==namedArchiveSettled.runId))

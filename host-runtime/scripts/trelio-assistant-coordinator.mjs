@@ -8,6 +8,7 @@ import { assistantExecutionConfiguration, assistantWorkStateContext } from './tr
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
 import { randomUUID, createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 export class AssistantCoordinatorError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -1664,7 +1665,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||(!retained?.workspaceDraft||localFinalization)&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
     if(recoveredOutcome&&(!inbox.readDelivery(job.deliveryId).scheduled||job.events.length
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'
-      ||retained?.started&&(retained.reviewId!==recoveredOutcome.plan.saveReviewId
+      ||retained?.started&&(retained.reviewId!==(recoveredOutcome.plan.retryFromReviewId??recoveredOutcome.plan.saveReviewId)
         ||live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now())))return true;
     if(parentRead&&((parentRead.intermediateDraft
       ?terminalMarkerId!==job.deliveryId||job.events.some(event=>event.conversation_key)
@@ -1908,6 +1909,30 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       recoveredOutcome:{plan:{saveReviewId:continuation.reviewId,evidence,schedule},
         originalTurnId:selection.originalTurnId,mode:selection.mode,receipt:selection.receipt}}:null;
   };
+  const observePendingOutcomeConfirmation = async (job,pass,continuation,terminalTurnId,signal) => {
+    const draft=continuation.workspaceDraft, previous=draft.recoveredOutcome;
+    const {plan,originalTurnId,mode,receipt}=previous;
+    if(plan.retryFromReviewId||continuation.terminalMarkerId!==plan.saveReviewId
+      ||!inbox.readDelivery(job.deliveryId).scheduled||job.events.length
+      ||typeof client.readTaskRecoveredOutcomeEvidence!=='function')return null;
+    const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+    const live=await client.readTaskPass(locator,signal);lease();
+    if(live.state!=='review_required'||live.workMode!=='task'||Date.parse(live.leaseExpiresAt)>now()
+      ||live.leaseRevision!==continuation.expectedLeaseRevision+1||live.bindingId!==pass.bindingId
+      ||live.bindingRevision!==pass.bindingRevision||live.threadId!==pass.threadId||live.deliveryId!==pass.deliveryId)return null;
+    // Read the failed confirmation AND both original prerequisite turns. The
+    // expired native lease and missing outcome are checked again under CAS,
+    // so this successor cannot turn an ambiguous external write into replay.
+    const selection={deliveryId:job.deliveryId,originalTurnId,saveMarkerId:plan.saveReviewId,saveTurnId:continuation.terminalTurnId,
+      taskPass:locator,mode,receipt,retry:{plan,retryFromReviewId:continuation.reviewId,terminalTurnId}};
+    const result=await native.readDelivery(pass.threadId,continuation.reviewId,{signal,recoveredWorkspaceOutcome:selection});lease();
+    if(result.state!=='recovered_outcome_observed'||result.turnId!==terminalTurnId
+      ||!isDeepStrictEqual(result.evidence,plan.evidence))return null;
+    const schedule=await client.readTaskRecoveredOutcomeEvidence({...locator,expectedLeaseRevision:live.leaseRevision,...plan.evidence},signal);lease();
+    if(!isDeepStrictEqual(schedule,plan.schedule))return null;
+    return {...draft,recoveredOutcome:{...previous,saveTurnId:selection.saveTurnId,
+      plan:{...plan,retryFromReviewId:continuation.reviewId}}};
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -1957,10 +1982,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(error?.code!=='ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED')throw error;
         const savedDraft=continued?.workspaceDraft;
         if(saved&&savedDraft?.recoveredOutcome){
-          // A crash between review and native start resumes the same intent.
-          // Once started, only the normal immutable outcome read can settle.
-          return continued.started||result.turnId!==continued.terminalTurnId?true
-            :continueTerminalPass(job,{state:'recovered_outcome_ready',turnId:result.turnId,workspaceDraft:savedDraft},signal,marker);
+          // A crash before native start resumes the same intent. A started
+          // attempt can only continue from a positively observed preparation
+          // refusal and the still-pending native outcome of this SAME pass.
+          const workspaceDraft=continued.started
+            ?await observePendingOutcomeConfirmation(job,saved,continued,result.turnId,signal)
+            :result.turnId===continued.terminalTurnId?savedDraft:null;
+          return workspaceDraft
+            ?continueTerminalPass(job,{state:'recovered_outcome_ready',turnId:result.turnId,workspaceDraft},signal,marker)
+            :true;
         }
         if(saved&&continued?.started&&(savedDraft?.localDraft||savedDraft?.portableFinish)){
           const acceptedHead=await readWorkspaceSave(saved,savedDraft,marker,result.turnId,signal);

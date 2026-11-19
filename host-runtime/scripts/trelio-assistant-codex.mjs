@@ -2362,12 +2362,35 @@ export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,origi
     ...(releases.size?{historicalSkillReleases:[...releases.values()].sort((a,b)=>a.releaseId.localeCompare(b.releaseId))}:{})});}
   catch{return null;}
 };
+const matchesOutcomePreparationRefusal=(turn,{retryFromReviewId,terminalTurnId,plan,taskPass})=>{
+  if(turn?.id!==terminalTurnId||turn.status!=='completed'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length>16)return false;
+  const [root,...items]=turn.items;
+  if(root?.type!=='userMessage'||!Array.isArray(root.content)||root.content.length!==1
+    ||root.content[0]?.type!=='text'||typeof root.content[0].text!=='string'
+    ||!root.content[0].text.startsWith(assistantDeliveryMarker(retryFromReviewId)+'\n'))return false;
+  const calls=items.filter(item=>!['agentMessage','reasoning','sleep'].includes(item?.type)&&!completedTaskContextCompaction(item));
+  if(calls.length!==1)return false;
+  const call=calls[0], result=call.result?.structuredContent;
+  if(call.type!=='mcpToolCall'||call.server!=='trelio-assistant'||call.tool!=='complete_assistant_pass'
+    ||call.status!=='failed'||call.error!=null||!call.arguments||!exactDraftPass(call.arguments.taskPass,taskPass)
+    ||!result||Object.keys(result).join(',')!=='code'
+    ||!['ASSISTANT_MATERIAL_PREPARATION_DEADLINE','ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_FAILED'].includes(result.code))return false;
+  // Older signed runtimes projected a preparation deadline as the generic
+  // local workspace-arguments refusal. It has no standalone replay authority:
+  // the backend also requires the previous outcome-only lease to be expired,
+  // the same accepted evidence, and no committed native outcome.
+  const {taskPass:_scope,runtimeSessionProof:_proof,...input}=call.arguments;
+  return isDeepStrictEqual(input,assistantRecoveredOutcomeCompletion(plan,retryFromReviewId));
+};
 const readRecoveredOutcomeTurn=async(request,threadId,selection)=>{
-  const response=await request('thread/turns/list',{threadId,limit:2,sortDirection:'desc',itemsView:'full'});
-  if(!Array.isArray(response?.data)||response.data.length!==2)return {state:'uncertain'};
-  const [save,original]=response.data;
+  const retry=selection.retry,limit=retry?3:2;
+  const response=await request('thread/turns/list',{threadId,limit,sortDirection:'desc',itemsView:'full'});
+  if(!Array.isArray(response?.data)||response.data.length!==limit)return {state:'uncertain'};
+  if(retry&&!matchesOutcomePreparationRefusal(response.data[0],{...retry,taskPass:selection.taskPass}))return {state:'uncertain'};
+  const [save,original]=retry?response.data.slice(1):response.data;
   const evidence=inspectAssistantRecoveredOutcome({original,save},selection);
-  return evidence?{state:'recovered_outcome_observed',turnId:save.id,evidence}:{state:'uncertain'};
+  return evidence?{state:'recovered_outcome_observed',turnId:retry?.terminalTurnId??save.id,evidence}:{state:'uncertain'};
 };
 const readAcceptedNamedArchiveTurn=async(request,threadId,deliveryId,{taskPass,run})=>{
   const response=await request('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});
@@ -2511,7 +2534,7 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   return readNative(threadId, async (_thread, request) => {
     if(options.recoveredWorkspaceOutcome!==undefined){
       const selection=options.recoveredWorkspaceOutcome;
-      if(!selection||selection.saveMarkerId!==deliveryId)return {state:'uncertain'};
+      if(!selection||(selection.retry?.retryFromReviewId??selection.saveMarkerId)!==deliveryId)return {state:'uncertain'};
       return readRecoveredOutcomeTurn(request,threadId,selection);
     }
     if(options.acceptedPortableFinish!==undefined||options.acceptedLocalDraft!==undefined){
@@ -2933,12 +2956,14 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
     }
     if(workspaceDraft.recoveredOutcome){
       try{
-        const {plan,originalTurnId}=workspaceDraft.recoveredOutcome;
+        const {plan,originalTurnId,saveTurnId}=workspaceDraft.recoveredOutcome;
         const {originalDeliveryId}=options.workspaceDraftRecovery;
         const exact=assistantRecoveredOutcomeCompletion(plan,deliveryId);
         if(workStateContext.scheduled!==true||workStateContext.ownerQuestionIds!==undefined
           ||!UUID.test(originalDeliveryId??'')||originalDeliveryId===deliveryId||originalDeliveryId===terminalMarkerId
-          ||!UUID.test(originalTurnId??'')||originalTurnId===terminalTurnId||plan.saveReviewId!==terminalMarkerId
+          ||!UUID.test(originalTurnId??'')||originalTurnId===terminalTurnId
+          ||(plan.retryFromReviewId??plan.saveReviewId)!==terminalMarkerId
+          ||(plan.retryFromReviewId?(!UUID.test(saveTurnId??'')||saveTurnId===originalTurnId||saveTurnId===terminalTurnId):saveTurnId!==undefined)
           ||exact.workspaceId!==workspaceDraft.workspaceId||exact.acceptedRunId!==workspaceDraft.runId
           ||exact.workspaceHead!==workspaceDraft.acceptedHead
           ||workspaceDraft.finishPending!==undefined||workspaceDraft.localDraft||workspaceDraft.portableFinish)
@@ -3182,8 +3207,10 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // Re-read the complete original and save under the owned thread writer.
       // Verify the SAME projection before the host can renew this one-use lease.
       const current=await readRecoveredOutcomeTurn(request,threadId,{deliveryId:originalDeliveryId,
-        originalTurnId:recoveredOutcome.originalTurnId,saveMarkerId:terminalMarkerId,saveTurnId:terminalTurnId,
-        taskPass,mode:recoveredOutcome.mode,receipt:recoveredOutcome.receipt});
+        originalTurnId:recoveredOutcome.originalTurnId,saveMarkerId:recoveredOutcome.plan.saveReviewId,
+        saveTurnId:recoveredOutcome.saveTurnId??terminalTurnId,
+        taskPass,mode:recoveredOutcome.mode,receipt:recoveredOutcome.receipt,
+        ...(recoveredOutcome.plan.retryFromReviewId?{retry:{retryFromReviewId:terminalMarkerId,terminalTurnId,plan:recoveredOutcome.plan}}:{})});
       if(current.state!=='recovered_outcome_observed'||!isDeepStrictEqual(current.evidence,recoveredOutcome.plan.evidence))
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }else if(options.workspaceDraftRecovery){
