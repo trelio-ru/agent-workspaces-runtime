@@ -52,11 +52,22 @@ export function validateVisualAudioDiagnostic(value) {
   return { ...value };
 }
 
-// A browser refusal uses one fixed stage. Never return the destination URL,
-// headers or file bytes as diagnostics.
+// Preserve stage-only results from an older worker. A newer worker may give
+// its closed reason and, only for origin policy, a digest of the origin alone.
+const attachmentRuleRefusals = ['url_too_long', 'regex_unsupported'];
+const attachmentRefusalsByStage = {
+  initial_url: attachmentRuleRefusals,
+  redirect: ['invalid_location', 'invalid_destination', 'request_not_allowed',
+    'redirect_limit_reached', 'origin_not_allowed', ...attachmentRuleRefusals],
+  response_url: [],
+};
 export function validateVisualAttachmentDiagnostic(value) {
-  if (!exact(value, ['stage']) || !['initial_url', 'redirect', 'response_url'].includes(value.stage)) fail();
-  return { stage: value.stage };
+  if (!exact(value, ['stage', 'code', 'originSha256'])
+    || typeof value.stage !== 'string' || !Object.hasOwn(attachmentRefusalsByStage, value.stage)
+    || value.code !== undefined && !attachmentRefusalsByStage[value.stage].includes(value.code)
+    || value.originSha256 !== undefined && (value.code !== 'origin_not_allowed'
+      || typeof value.originSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(value.originSha256))) fail();
+  return { ...value };
 }
 
 // A document refusal separates failed native operations from a rejected

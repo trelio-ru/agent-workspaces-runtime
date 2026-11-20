@@ -9717,6 +9717,7 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
     inheritedEnvironment: {
       TRELIO_BROWSER_SESSION_MODULE_URL: "file:///forged.mjs",
       TRELIO_VISUAL_SESSION_MODULE_URL: "file:///forged-visual.mjs",
+      TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS: "1",
       TRELIO_BROWSER_SESSION_POLICY_JSON: '{"manualAssist":true}',
       TRELIO_BROWSER_SESSION_STARTED_AT: "1",
       TRELIO_BROWSER_SESSION_DEADLINE_AT: "2",
@@ -9726,6 +9727,13 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
 
   assert.match(environment.TRELIO_BROWSER_SESSION_MODULE_URL, /trelio-browser-session\.mjs$/u);
   assert.match(environment.TRELIO_VISUAL_SESSION_MODULE_URL, /trelio-visual-session\.mjs$/u);
+  assert.equal(environment.TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS, undefined);
+  const diagnosticEnvironment = buildAgentSkillRuntimeEnvironment({
+    artifact: resolution.artifact,
+    runtimeDirectory: "/verified/runtime",
+    executionContext: { ...executionContext, visualAttachmentDiagnostics: true },
+  });
+  assert.equal(diagnosticEnvironment.TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS, "1");
   assert.deepEqual(JSON.parse(environment.TRELIO_BROWSER_SESSION_POLICY_JSON), {
     apiVersion: 1,
     sessionClass: "protected-snapshot",

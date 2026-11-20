@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, webcrypto } from 'node:crypto';
 import { authenticateVisualBrowser, normalizeVisualAuthentication, visualAuthenticationFingerprint } from '../host-runtime/scripts/trelio-visual-session.mjs';
 const startWorker = (config, context) => {
   context.chrome.contentSettings ??= { notifications: { async set() {}, async get() { return { setting: 'block' }; } } };
@@ -876,9 +876,17 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
   let rules = [], continuations = 0;
   const cdn = 'https://files.download.test/export?sig=PRIVATE_REDIRECT_ID';
   const direct = 'https://files.direct.test/fixture.svg?sig=PRIVATE_FILE_ID';
+  const foreignCdn = cdn.replace('download.test', 'download.test.other');
+  const redirectLocations = {
+    'cdn-foreign': foreignCdn,
+    'cdn-file-scope': direct,
+    'cdn-invalid-destination': direct.replace('https://', 'https://PRIVATE_USER@'),
+    'cdn-invalid-location': 'https://[PRIVATE_MARKER',
+    'cdn-too-long': direct + 'x'.repeat(1536),
+  };
   let exactFileRequests = 0;
   const context = { URL, Date, TextEncoder, Uint8Array, performance, atob, btoa, setTimeout, clearTimeout,
-    crypto: { randomUUID }, chrome: {
+    crypto: { randomUUID, subtle: webcrypto.subtle }, chrome: {
       runtime: { id: 'fixture', onMessage: events },
       debugger: { onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
         async sendCommand(_source, method, args) {
@@ -930,7 +938,7 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
       declarativeNetRequest: {
         async getSessionRules() { return rules; },
         async updateSessionRules(update) { rules = update.addRules; },
-        async isRegexSupported() { return { isSupported: true }; },
+        async isRegexSupported() { return { isSupported: mode !== 'cdn-unsupported-regex' }; },
       },
       windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
       tabs: { onCreated: events, onRemoved: events,
@@ -961,7 +969,7 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
             queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Fetch.requestPaused', {
               requestId: redirect ? 'network-redirect' : 'guarded-original', frameId: 'main', resourceType: 'Document',
               request: { url: currentUrl, method: 'GET' }, responseStatusCode: redirect ? 307 : 200,
-              responseHeaders: redirect ? [{ name: 'Location', value: mode === 'cdn-foreign' ? cdn.replace('download.test', 'download.test.other') : mode === 'cdn-file-scope' ? direct : cdn }]
+              responseHeaders: redirect ? [{ name: 'Location', value: redirectLocations[mode] ?? cdn }]
                 : [{ name: 'Content-Type', value: 'application/octet-stream' }],
             }));
           }
@@ -999,7 +1007,10 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
     if (reason) {
       assert.equal(result.reason, reason);
       assert.equal(result.file, undefined);
-      if (mode === 'cdn-foreign') assert.equal(result.attachmentDiagnostic?.stage, 'redirect');
+      if (mode === 'cdn-foreign') assert.deepEqual(JSON.parse(JSON.stringify(result.attachmentDiagnostic)), {
+        stage: 'redirect', code: 'origin_not_allowed',
+        originSha256: createHash('sha256').update(new URL(foreignCdn).origin).digest('hex'),
+      });
     }
     else { assert.equal(result.state, 'ready', JSON.stringify({ mode, reason: result.reason, clicks, reads, routedCount: routed.length, stages })); assert.equal(result.file.dataBase64, 'AQID'); }
     assert.equal(stages.at(-1), 'Response', 'request-stage routing is revoked after every result/refusal');
@@ -1031,6 +1042,19 @@ test('one file-menu click routes only a fresh native GET and never queries a pau
   assert.equal(exactFileRequests, 3, 'a lookalike host was never requested');
   assert.equal(reads, 5, 'no inline or mismatched response body was read');
   assert.equal((await dispatch('navigate', { url: direct })).reason, 'navigation_blocked');
+  for (const [next, code] of [
+    ['cdn-invalid-location', 'invalid_location'], ['cdn-invalid-destination', 'invalid_destination'],
+    ['cdn-too-long', 'url_too_long'], ['cdn-unsupported-regex', 'regex_unsupported'],
+  ]) {
+    mode = next;
+    const frame = await dispatch('read-text');
+    const result = await dispatch('download-attachment', { frameId: frame.frameId, x: 10, y: 20 });
+    assert.equal(result.reason, 'navigation_blocked');
+    assert.deepEqual(JSON.parse(JSON.stringify(result.attachmentDiagnostic)), { stage: 'redirect', code });
+    assert.equal(rules.some(rule => rule.condition.tabIds), false);
+  }
+  assert.equal(continuations, 3, 'a refused redirect must never reach the destination');
+  assert.equal(reads, 5, 'diagnostics must not read a refused response body');
   assert.doesNotMatch(JSON.stringify(sent), /foreign\.test|original-click|PRIVATE/);
 });
 

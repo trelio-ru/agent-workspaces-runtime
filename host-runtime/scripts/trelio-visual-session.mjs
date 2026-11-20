@@ -416,7 +416,15 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
       if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
       if (Number.isInteger(owner.port) && owner.port > 0 && owner.port < 65536) {
         try {
-          if (operation !== 'disconnect') return await request(owner, operation, args);
+          if (operation !== 'disconnect') {
+            const result = await request(owner, operation, args);
+            if (result.attachmentDiagnostic && env.TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS !== '1') {
+              // A stale MCP parser knows only stage. Strip newer details
+              // after validating the worker response, without retrying it.
+              result.attachmentDiagnostic = { stage: result.attachmentDiagnostic.stage };
+            }
+            return result;
+          }
           await request(owner, 'close', {});
           for (let i = 0; i < 150; i++) {
             const next = await readVisualOwner(file);

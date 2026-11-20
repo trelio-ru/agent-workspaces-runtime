@@ -10440,10 +10440,15 @@ const runLocalProcess = async (executable, argumentsList, { cwd, signal, input, 
  */
 export const buildWorkspaceBridgeProcessArguments = (origin, argumentsList) => {
   const separatorIndex = argumentsList.indexOf("--");
+  // Negotiate the richer visual result only with a client that parses it.
+  // A fresh bridge can run under an older, long-lived MCP server after update.
+  const diagnosticOptions = argumentsList[0] === "skill" && argumentsList[1] === "run"
+    ? ["--visual-attachment-diagnostics"] : [];
   const bridgeArguments = separatorIndex === -1
     ? [...argumentsList, "--origin", origin]
     : [
         ...argumentsList.slice(0, separatorIndex),
+        ...diagnosticOptions,
         "--origin",
         origin,
         "--",

@@ -27,6 +27,18 @@ test('file-only destinations and diagnostic stages have a closed signed contract
     }), { code: 'VISUAL_RESULT_INVALID' });
     assert.throws(() => visualStatus('error', 'attachment_unsupported', { attachmentDiagnostic }), { code: 'VISUAL_RESULT_INVALID' });
   }
+  const attachmentDiagnostic = { stage: 'redirect', code: 'origin_not_allowed', originSha256: 'a'.repeat(64) };
+  const refusal = visualStatus('error', 'navigation_blocked', { attachmentDiagnostic });
+  assert.deepEqual(JSON.parse(visualMcpResult(parseVisualSkillOutput(JSON.stringify(refusal))).content[0].text).attachmentDiagnostic, attachmentDiagnostic);
+  for (const patch of [
+    { stage: 'initial_url' }, { stage: 'response_url' }, { stage: ['redirect'] }, { code: 'regex_unsupported' },
+    { code: 'PRIVATE_NATIVE_ERROR' }, { originSha256: 'https://synthetic.test/private' },
+    { origin: 'https://synthetic.test' },
+  ]) {
+    assert.throws(() => visualStatus('error', 'navigation_blocked', {
+      attachmentDiagnostic: { ...attachmentDiagnostic, ...patch },
+    }), { code: 'VISUAL_RESULT_INVALID' });
+  }
 });
 
 test('explicit unknown formats are stored as inert originals and legacy scopes cannot receive them', async t => {

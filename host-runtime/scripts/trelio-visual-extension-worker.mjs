@@ -141,11 +141,14 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const fileOnlyOrigin = url => url.protocol === 'https:' && !url.port && !url.username && !url.password
     && config.attachmentFilePolicy?.origins.includes(url.origin) === true;
   const filePathIsResource = url => /\.(?:js|mjs|cjs|css|json|map|xml|html?|xhtml|svg|wasm|exe|dll|dmg|sh|ps1|bat|cmd)$/iu.test(decodeURIComponent(url.pathname));
-  const attachmentNavigationBlocked = stage => Object.assign(Error('navigation_blocked'), { attachmentDiagnostic: { stage } });
+  const attachmentNavigationBlocked = (stage, detail) => Object.assign(
+    Error('navigation_blocked'), { attachmentDiagnostic: { stage, ...detail } },
+  );
   async function exactFileRuleUrl(url, stage) {
-    if (url.href.length > 1536 || !(await chrome.declarativeNetRequest.isRegexSupported({
+    if (url.href.length > 1536) throw attachmentNavigationBlocked(stage, { code: 'url_too_long' });
+    if (!(await chrome.declarativeNetRequest.isRegexSupported({
       regex: '^' + escapeRule(url.href) + '$', isCaseSensitive: true,
-    }))?.isSupported) throw attachmentNavigationBlocked(stage);
+    }))?.isSupported) throw attachmentNavigationBlocked(stage, { code: 'regex_unsupported' });
     return url.href;
   }
   const allowedNavigation = raw => {
@@ -522,19 +525,42 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   });
   async function prepareAttachmentRedirect(download, params, sourceUrl) {
     const locations = params.responseHeaders.filter(header => header.name.toLowerCase() === 'location');
-    if (locations.length !== 1 || typeof locations[0].value !== 'string' || !locations[0].value.trim()) throw attachmentNavigationBlocked('redirect');
+    if (locations.length !== 1 || typeof locations[0].value !== 'string' || !locations[0].value.trim()) {
+      throw attachmentNavigationBlocked('redirect', { code: 'invalid_location' });
+    }
     let target;
-    try { target = new URL(locations[0].value, sourceUrl); } catch { throw attachmentNavigationBlocked('redirect'); }
+    try { target = new URL(locations[0].value, sourceUrl); }
+    catch { throw attachmentNavigationBlocked('redirect', { code: 'invalid_location' }); }
     target.hash = '';
-    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw attachmentNavigationBlocked('redirect');
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) {
+      throw attachmentNavigationBlocked('redirect', { code: 'invalid_destination' });
+    }
     let downloadOnlyUrl = null;
     if (!allowed(target.href)) {
       // Trust only an actual browser redirect from the exact pending GET.
       // Ordinary navigation, audio and the cookie overlay retain their scope.
       const redirectDomain = (config.attachmentRedirectDomains || []).some(domain => target.hostname === domain
         || target.hostname.endsWith('.' + domain));
-      if (download.audioOnly || params.request?.method !== 'GET' || target.protocol !== 'https:' || target.port
-        || ++download.redirectCount > 4 || !(redirectDomain || fileOnlyOrigin(target))) throw attachmentNavigationBlocked('redirect');
+      if (download.audioOnly || params.request?.method !== 'GET') {
+        throw attachmentNavigationBlocked('redirect', { code: 'request_not_allowed' });
+      }
+      if (target.protocol !== 'https:' || target.port) {
+        throw attachmentNavigationBlocked('redirect', { code: 'invalid_destination' });
+      }
+      if (++download.redirectCount > 4) {
+        throw attachmentNavigationBlocked('redirect', { code: 'redirect_limit_reached' });
+      }
+      if (!redirectDomain && !fileOnlyOrigin(target)) {
+        // Enable comparison with a known service endpoint without exposing the
+        // target URL, identifier, or signed query. Hash only the canonical
+        // origin, and preserve the refusal even if diagnostics are unavailable.
+        const detail = { code: 'origin_not_allowed' };
+        try {
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(target.origin));
+          detail.originSha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+        } catch { /* The diagnostic never controls the network decision. */ }
+        throw attachmentNavigationBlocked('redirect', detail);
+      }
       downloadOnlyUrl = await exactFileRuleUrl(target, 'redirect');
     }
     if (pendingAttachment !== download || manual || authenticating || guardFailed || Date.now() >= download.until) throw Error('operation_failed');

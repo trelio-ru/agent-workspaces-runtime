@@ -192,6 +192,7 @@ test('working commands reset only their own idle clock after completion; explici
 test('two chats on one visual account address different workers and close only their own session', async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-two-chats-')));
   const start = Date.now(), hits = [[], []], servers = [];
+  const attachmentDiagnostic = { stage: 'redirect', code: 'origin_not_allowed', originSha256: 'b'.repeat(64) };
   const base = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-two-chats',
     TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(),
     TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({
@@ -206,8 +207,11 @@ test('two chats on one visual account address different workers and close only t
     const binding = visualSessionBinding(env);
     const server = http.createServer(async (request, response) => {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      hits[index].push(JSON.parse(Buffer.concat(chunks)).operation);
-      response.end(JSON.stringify(visualStatus('closed')));
+      const { operation } = JSON.parse(Buffer.concat(chunks));
+      hits[index].push(operation);
+      response.end(JSON.stringify(operation === 'download-attachment'
+        ? visualStatus('error', 'navigation_blocked', { attachmentDiagnostic })
+        : visualStatus('closed')));
     });
     servers.push(server); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const active = path.join(browserExecutionDirectory(path.join(directory, 'visual-browser', binding.scope), env), 'active');
@@ -215,7 +219,7 @@ test('two chats on one visual account address different workers and close only t
     await writePrivateJsonFile(path.join(active, 'owner.json'), { schemaVersion: 1, scope: binding.scope,
       bindingHash: binding.bindingHash, token: 'a'.repeat(64), pid: process.pid,
       executionOwner:binding.executionOwner,mailIdentity:{companyId:binding.companyId},
-      port: server.address().port, deadlineAt: binding.deadlineAt });
+      port: server.address().port, deadlineAt: binding.deadlineAt, attachmentDownloads: true });
   }
   const call = (index, operation) => runVisualSession({ origins: [`http://127.0.0.1:${servers[0].address().port}`], operation,
     env: environments[index], fixture: { directory } });
@@ -228,6 +232,15 @@ test('two chats on one visual account address different workers and close only t
   await closeVisualExecutionSessions({companyId:base.TRELIO_SKILL_COMPANY_ID,runtimeSessionId:environments[0].TRELIO_SKILL_RUNTIME_SESSION_ID,directory});
   assert.deepEqual(hits,[['close','close'],['status']],'native settlement closes only its observed execution owner');
   assert.equal(await fs.readFile(snapshot,'utf8'),'SYNTHETIC_ENCRYPTED_AUTH','cleanup never disconnects the saved account');
+  const download = diagnostics => runVisualSession({
+    origins: [`http://127.0.0.1:${servers[1].address().port}`],
+    operation: 'download-attachment', args: { frameId: randomUUID(), x: 20, y: 20 },
+    attachmentDownloads: true, fixture: { directory },
+    env: { ...environments[1], ...(diagnostics ? { TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS: '1' } : {}) },
+  });
+  assert.deepEqual((await download(false)).attachmentDiagnostic, { stage: 'redirect' });
+  assert.deepEqual((await download(true)).attachmentDiagnostic, attachmentDiagnostic);
+  assert.deepEqual(hits, [['close', 'close'], ['status', 'download-attachment', 'download-attachment']]);
 });
 
 test('an unsafe owner mutex root refuses before its operation without replacing the existing entry', async () => {

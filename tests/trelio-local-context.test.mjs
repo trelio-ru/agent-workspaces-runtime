@@ -703,6 +703,10 @@ test("bridge origin stays before child argv and the local handler uses the exact
     processArguments.slice(separatorIndex - 2, separatorIndex + 3),
     ["--origin", "https://trelio.example", "--", "/usr/bin/example", "--flag"],
   );
+  const skillArguments = buildWorkspaceBridgeProcessArguments("https://trelio.example",
+    ["skill", "run", "--", "download-attachment"]);
+  assert.deepEqual(skillArguments.slice(1), ["skill", "run", "--visual-attachment-diagnostics",
+    "--origin", "https://trelio.example", "--", "download-attachment"]);
 
   let captured = null;
   const result = await handleTrelioWorkspaceActionOperation(

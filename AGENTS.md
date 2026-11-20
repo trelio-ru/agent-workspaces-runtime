@@ -856,8 +856,10 @@ publication tooling также остаются вне этого публичн
   file-only origin for the direct GET. Site-declared unsupported formats use
   inert originals under a separate rollback-safe directory and the same quota.
   No new browsing, cookie or execution access. Closed navigation diagnostics
-  carry the refusal stage, never a URL. Zero-byte CSV needs explicit empty identity
-  attachment metadata. Signed document references project the top-frame ID and
+  carry the refusal stage and supported fixed codes. Only an origin-policy refusal
+  can carry SHA-256 of the canonical origin for comparison with an independently
+  known public endpoint. Never copy URL, path, headers or query. Zero-byte CSV
+  needs explicit empty identity attachment metadata. Signed document references project the top-frame ID and
   approved tab selector only. See the same visual contract.
   Embedded upload requires a signed direct same-origin picker pathname and
   pinned top editor reference, on the original native target and fresh frame.

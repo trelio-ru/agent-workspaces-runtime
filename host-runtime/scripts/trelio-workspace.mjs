@@ -9309,6 +9309,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
     TRELIO_BROWSER_SESSION_DEADLINE_AT: _staleBrowserSessionDeadlineAt,
     TRELIO_VISUAL_SESSION_MODULE_URL: _staleVisualSessionModuleUrl,
+    TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS: _staleVisualAttachmentDiagnostics,
     TRELIO_LOCAL_FORM_MODULE_URL: _staleLocalFormModuleUrl,
     TRELIO_LOCAL_FORM_NODE_EXECUTABLE: _staleLocalFormNode,
     TRELIO_BROWSER_MAIL_MODULE_URL: _staleBrowserMailModule,
@@ -9439,6 +9440,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
           // This path is from the verified host, never inherited environment.
           // The module rechecks protected-snapshot policy and account identity.
           TRELIO_VISUAL_SESSION_MODULE_URL: VISUAL_SESSION_MODULE_URL,
+          ...(executionContext.visualAttachmentDiagnostics === true
+            ? { TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS: "1" } : {}),
         }
       : {}),
     ...(browserSession
@@ -10442,6 +10445,7 @@ const skillCommand = async (
   }
   const executionContext = {
     origin, companyId, projectId, releaseId,
+    visualAttachmentDiagnostics: options["visual-attachment-diagnostics"] === true,
     // Resolve the requesting chat on every call, including cached admission.
     // A persistent MCP can serve several chats and its inherited environment is
     // neither current nor authoritative. The private hook binding carries only
