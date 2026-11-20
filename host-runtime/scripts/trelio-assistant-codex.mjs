@@ -2274,6 +2274,18 @@ const recoveredOutcomeSkillRead=(args,result,pass)=>{
   const p=args.parameters;
   if(!p||p.companyId!==pass.companyId||result?.operation!=='skill_run'||typeof result.stdout!=='string'
     ||Buffer.byteLength(result.stdout)>65_536||!Array.isArray(p.arguments))return null;
+  // A typed read binds the output bytes, but the continuation is outside
+  // stdout. For both signed and audited historic pages, verify that selector
+  // against the original action before accepting the read as settled.
+  let part;
+  try{
+    part=assistantSkillGuideSelection(p.arguments,p.guidePart);
+    if(part!==undefined){
+      const projected=projectAssistantSkillGuideResult({stdout:result.stdout},
+        {schemaVersion:1,operation:'skill_run',parameters:p},part);
+      if(!projected||!isDeepStrictEqual(projected.nextCall,result.nextCall))return null;
+    }
+  }catch{return null;}
   if(Object.hasOwn(result,'taskSkillRead'))
     return matchesAssistantTaskSkillRead(result.taskSkillRead,{scope:pass,parameters:p,stdout:result.stdout})?true:null;
   // The old envelope must still contain complete JSON. Package review decides
@@ -2281,12 +2293,7 @@ const recoveredOutcomeSkillRead=(args,result,pass)=>{
   let output;
   try{output=JSON.parse(result.stdout);}catch{return null;}
   try{
-    const part=assistantSkillGuideSelection(p.arguments,p.guidePart);
-    if(part!==undefined){
-      const projected=projectAssistantSkillGuideResult({stdout:result.stdout},
-        {schemaVersion:1,operation:'skill_run',parameters:p},part);
-      if(!projected||!isDeepStrictEqual(projected.nextCall,result.nextCall))return null;
-    }else if(output?.ok!==true)return null;
+    if(part===undefined&&output?.ok!==true)return null;
     if(parseAccountCommand(p.arguments)?.operation==='list'){
       return Array.isArray(output.accounts)&&Number.isSafeInteger(output.revision)?true:null;
     }
@@ -2358,7 +2365,12 @@ const inspectDeliveredProviderOutcome=(original,sourceMarkerId,taskPass,receipt,
         // effect. Host-owned guide pages/account metadata and audited reads
         // can precede that sequence, with their original read-only proof.
         if(!['reply','search','read','policy','signature','save-message'].includes(command)){
-          if(!success||!recoveredOutcomeSkillRead(args,value,taskPass))return null;
+          const read=success&&recoveredOutcomeSkillRead(args,value,taskPass);
+          // A legacy read has no signed pipe witness. Its immutable release
+          // must also be among the releases proved by the same retained
+          // draft, which the backend compares at reservation and renewal.
+          if(!read||read!==true&&!local.historicalSkillReleases?.some(release=>isDeepStrictEqual(release,read)))
+            return null;
           continue;
         }
         if(command==='save-message'&&!opened)return null;

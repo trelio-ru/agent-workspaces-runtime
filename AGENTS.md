@@ -206,6 +206,10 @@ publication tooling также остаются вне этого публичн
   Paged signed guide reads reuse the actual producer's page/next-call contract
   in recovery. Bound display text independently; exact page digest, old
   release/arguments and terminal nextCall still prove reads only.
+  Manifest-backed guides carry the existing task-read receipt without an
+  account or provider child. Retained legacy metadata reads use the same
+  audited release/command table as draft verification. For root delivery,
+  their release must match the native saved draft's checked release set.
   Test the whole native history through durable completion, disk reopen and
   the next fixed daily cycle; isolated classifier tests are insufficient.
   The same expired accepted witness permits signed maintenance under the

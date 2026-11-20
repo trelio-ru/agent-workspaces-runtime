@@ -10518,13 +10518,15 @@ const skillCommand = async (
     if (!relativePath) throw invalid();
     const file = artifactForCache.parsedPackage.files.find(entry => entry.path === relativePath);
     if (assistant) await verifyCurrentAssistantSkill();
-    process.stdout.write(`${JSON.stringify({
+    const stdout=`${JSON.stringify({
       schemaVersion: 1, part, count: guidePaths.length,
       nextGuidePart: part + 1 < guidePaths.length ? part + 1 : null,
       path: file.path, sha256: file.sha256, text: decodeSkillInstructionGuide(file.bytes),
-    })}\n`);
-    // A static guide is never evidence of successful provider/account I/O.
-    return;
+    })}\n`;
+    process.stdout.write(stdout);
+    // Bind this completed immutable read through the same signed pipe as any
+    // other read-only command. No provider or account executor was started.
+    return assistant ? taskEffectReceipt(stdout) : undefined;
   }
 
   let runtimeArguments = positional.slice(1);

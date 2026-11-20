@@ -1464,7 +1464,7 @@ test('an accepted local save can nominate only the exact observed outbound effec
   const readRoot=(history=root,author=assistantId)=>readAssistantCodexDelivery(threadId,saveMarkerId,{
     executable:process.execPath,environment:{},
     recoveredWorkspaceOutcome:{deliveryId,originalTurnId:root.id,saveMarkerId,saveTurnId:save.id,
-      taskPass,mode:'local_draft',receipt,sourceMarkerId:deliveryId,assistantId:author},
+      taskPass,mode:'local_draft',receipt,assistantId:author},
     spawnProcess:nativeRpc(request=>({
       result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[save,history]},
     })),
@@ -1476,6 +1476,52 @@ test('an accepted local save can nominate only the exact observed outbound effec
   assert.deepEqual(restored.rootDeliveryProof.artifact,artifact);
   assert.doesNotMatch(JSON.stringify(restored.evidence),/providerEffect|pathSha256|contentSha256|replyHeaderSha256/u);
   assert.deepEqual(await readRoot(root,randomUUID()),{state:'uncertain'});
+
+  // The original pass can read the entire signed guide and validate its mail
+  // connection before answering. Use the same page producer as the private
+  // worker, including the selected account and the last null continuation.
+  const legacyGuide=part=>{
+    const item=skill(['guides'],{});
+    const parameters=item.arguments.parameters;
+    if(part)parameters.guidePart=part;
+    const text='Synthetic guide part '+part;
+    item.result.structuredContent=projectAssistantSkillGuideResult({
+      schemaVersion:1,operation:'skill_run',stdout:JSON.stringify({
+        schemaVersion:1,part,count:2,nextGuidePart:part===0?1:null,
+        path:`instruction-guides/part-0${part+1}.md`,text,sha256:digest(text),
+      }),
+    },{schemaVersion:1,operation:'skill_run',parameters},part);
+    return item;
+  };
+  const rootWithMetadata=structuredClone(root);
+  rootWithMetadata.items.splice(1,0,legacyGuide(0),legacyGuide(1),skill(['doctor'],{ok:true}));
+  assert.deepEqual(await readRoot(rootWithMetadata),restored);
+  const withSignedPage=structuredClone(rootWithMetadata);
+  const modern=legacyGuide(0),modernParameters=modern.arguments.parameters;
+  Object.assign(modernParameters,{skillId:'unrelated-signed-skill',releaseId:randomUUID(),arguments:['guides']});
+  const {stdout:modernStdout}=modern.result.structuredContent;
+  const taskSkillRead=bindAssistantTaskSkillRead({schemaVersion:1,releaseId:modernParameters.releaseId,
+    packageSha256:digest('signed package'),outputSha256:digest(modernStdout)},
+    {scope:taskPass,parameters:modernParameters,stdout:modernStdout});
+  modern.result.structuredContent=projectAssistantSkillGuideResult({
+    schemaVersion:1,operation:'skill_run',stdout:modernStdout,taskSkillRead,
+  },{schemaVersion:1,operation:'skill_run',parameters:modernParameters},0);
+  withSignedPage.items.splice(1,0,modern);
+  assert.deepEqual(await readRoot(withSignedPage),restored);
+  modern.result.structuredContent.nextCall.arguments.parameters.arguments=['write'];
+  assert.deepEqual(await readRoot(withSignedPage),{state:'uncertain'});
+  for(const change of [
+    history=>{history.items[1].result.structuredContent.nextCall.arguments.parameters.guidePart=0;},
+    history=>{history.items[2].arguments.parameters.releaseId=randomUUID();},
+    history=>{history.items[2].result.structuredContent.stdout=JSON.stringify({
+      ...JSON.parse(history.items[2].result.structuredContent.stdout),text:'Changed page',
+    });},
+    history=>{history.items[3].arguments.parameters.arguments.push('--repair');},
+    history=>{history.items[3].result.structuredContent.stdout='{"ok":false}';},
+  ]){
+    const changed=structuredClone(rootWithMetadata);change(changed);
+    assert.deepEqual(await readRoot(changed),{state:'uncertain'});
+  }
   for(const intact of [false,true]){
     // Model input must follow the writer's fresh receipt and immutable-file
     // checks. A stale or missing accepted blob cannot even renew the lease.
@@ -1498,7 +1544,7 @@ test('an accepted local save can nominate only the exact observed outbound effec
       },
       beforeInvocation:async()=>{steps.push('renew');},startInvocation:()=>{steps.push('start');},
       readDelivery:async()=>++observations===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'native:accepted'},
-      spawnProcess:ownedRpc({threadId,cwd,priorTurn:[save,root],
+      spawnProcess:ownedRpc({threadId,cwd,priorTurn:[save,rootWithMetadata],
         executionPolicy:(request,base)=>{
           if(request.method!=='mcpServerStatus/list')return;
           base.result.data[0].tools={complete_assistant_pass:{name:'complete_assistant_pass'}};

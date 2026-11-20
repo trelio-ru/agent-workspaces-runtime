@@ -1205,6 +1205,38 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
     assert.equal(await fs.readFile(guideCalls,'utf8'),'ggg','closed native pass cannot read another cached page');
     assert.equal(guidePreparations,3,'revoked pass cannot use earlier encrypted preparation');
     live=true;
+    if(policyVersion===3){
+      // A manifest-backed guide delivers the same page from verified package
+      // bytes before account import. Its witness must survive both the
+      // protected request and parent response validation for every part.
+      await fs.writeFile(path.join(guideDirectory,'trelio-instruction-guides.json'),
+        JSON.stringify({schemaVersion:1,files:guidePaths}));
+      const staticRelease=randomUUID();
+      outgoingBytes=await engine.buildAgentSkillPackage({skillId:guideSkill,runtimeVersion:'1.0.0',
+        sourceDirectory:guideDirectory,entrypointPath:'main.mjs',interpreter:'node',
+        capabilities:['local-session','local-accounts-v1']});
+      outgoingDto.releaseId=staticRelease;
+      outgoingDto.packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({
+        companyId:pass.companyId,skillId:guideSkill,expectedReleaseId:staticRelease,artifactId:currentArtifact});
+      Object.assign(outgoingDto.artifact,{packageSha256:createHash('sha256').update(outgoingBytes).digest('hex'),
+        packageSizeBytes:outgoingBytes.length,packageSignature:sign(null,outgoingBytes,privateKey).toString('base64')});
+      const staticPlan=structuredClone(guidePlan);
+      Object.assign(staticPlan.localAction.parameters,{releaseId:staticRelease,arguments:['guides']});
+      let action=staticPlan.localAction;
+      for(const [part,text] of texts.entries()){
+        const page=await throughEncryptedWire({...staticPlan,localAction:action});
+        assert.deepEqual(JSON.parse(page.stdout),{schemaVersion:1,part,count:texts.length,
+          nextGuidePart:part+1<texts.length?part+1:null,path:guidePaths[part],text,
+          sha256:createHash('sha256').update(text).digest('hex')});
+        assert.deepEqual(page.taskSkillRead,{schemaVersion:1,releaseId:staticRelease,
+          packageSha256:outgoingDto.artifact.packageSha256,
+          outputSha256:createHash('sha256').update(page.stdout).digest('hex'),
+          requestSha256:assistantTaskSkillReadRequestDigest(staticPlan.scope,action.parameters)});
+        action=page.nextCall?.arguments??null;
+      }
+      assert.equal(action,null);
+      assert.equal(await fs.readFile(guideCalls,'utf8'),'ggg','static pages never start the provider');
+    }
     // The public executor's monitor boundary remains independent of task mode.
     await assert.rejects(engine.runMaterializedAgentSkill({captureOutput:true,captureMode:'assistant_task',runtimeArguments:['read']}),/MONITOR_INPUT_INVALID|private monitor/);
   }finally{globalThis.fetch=savedFetch;}

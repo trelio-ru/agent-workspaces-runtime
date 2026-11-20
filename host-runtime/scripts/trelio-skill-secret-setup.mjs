@@ -96,6 +96,20 @@ const historicalTelegramHistoryRead=(arguments_, accountId)=>{
   try{new Intl.DateTimeFormat('en',{timeZone:zone});return true;}catch{return false;}
 };
 
+const historicalEmailRelease = Object.freeze({skillId:'email-imap-smtp',
+  releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
+  packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'});
+
+// This immutable predecessor's account inventory and guide/diagnostic
+// commands were audited with its archive command. Reuse the observations
+// across recovery modes, but never classify its export as a read.
+const historicalEmailMetadataRead = (arguments_,accountId) => {
+  const [command,option]=arguments_;
+  if(accountId===null)return arguments_.length===2&&command==='account'&&option==='list';
+  return arguments_.length===1&&['guides','doctor','folders'].includes(command)
+    ||arguments_.length===2&&command==='policy'&&option==='show';
+};
+
 const historicalTaskSkillReads=[{
   skillId:'telegram-mtproto',releaseId:'8f0e4a2a-c63d-4aa2-958c-1fb2701c5c76',
   packageSha256:'ef85be194ef9a52c8ac20b497cd726a5487553884afd511f882be06901f8eaf0',
@@ -118,16 +132,14 @@ const historicalTaskSkillReads=[{
   // This release predates signed effect metadata. Native reconciliation
   // also checks the publication, package digest and revocation under lock.
   terminalOnly:true,accepts:historicalTelegramHistoryRead,
+},{
+  ...historicalEmailRelease,terminalOnly:true,accepts:historicalEmailMetadataRead,
 }];
 export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{providerArguments,accountId},{terminal=false}={})=>{
   const policy=historicalTaskSkillReads.find(row=>row.skillId===skillId&&row.releaseId===releaseId);
   if(!policy||policy.terminalOnly&&!terminal||!policy.accepts(providerArguments,accountId))return null;
   return {skillId,releaseId,packageSha256:policy.packageSha256};
 };
-
-const historicalEmailRelease = Object.freeze({skillId:'email-imap-smtp',
-  releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
-  packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'});
 
 /** Compatibility for one pre-receipt package in native draft preservation.
  * The live catalogue attests this immutable package and the server rechecks
@@ -142,9 +154,8 @@ export const reviewedHistoricalCheckpointSkill = ({skillId,releaseId},{providerA
   const release=historicalEmailRelease;
   if(skillId!==release.skillId||releaseId!==release.releaseId)return null;
   const [command,...tail]=providerArguments;
-  if(accountId===null)return command==='account'&&tail.length===1&&tail[0]==='list'?{release}:null;
-  if(['guides','doctor','folders'].includes(command))return tail.length===0?{release}:null;
-  if(command==='policy')return tail.length===1&&tail[0]==='show'?{release}:null;
+  if(historicalEmailMetadataRead(providerArguments,accountId))return {release};
+  if(accountId===null)return null;
   const options=command==='search'?['--folder','--limit','--since','--from','--subject']
     :command==='read'?['--folder','--uid']:command==='save-message'?['--folder','--uid','--output']:null;
   if(!options||tail.length!==2*(command==='search'?4:options.length))return null;

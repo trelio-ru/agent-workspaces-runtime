@@ -1008,6 +1008,16 @@ recomputed against the accepted bytes under the exclusive native writer.
 Unknown effects, a different marker, changed bytes or an incomplete ledger
 keep the delivery fenced.
 
+Manifest-backed guide pages carry the existing completed task-read witness
+for a verified public package. The protected worker binds the page bytes to
+the exact release, pass and requested part without starting the provider.
+Recovery also verifies the page and continuation using the normal producer's
+contract. A historical page, connection diagnosis or folder listing without
+a typed witness can count only through the audited immutable release and
+exact read-only command. Root settlement requires the same historical release
+in the checked saved-draft provenance. A read witness cannot replace the
+independent outbound receipt or verify an account session.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
 accepted head alongside the existing intent. The
