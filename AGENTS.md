@@ -790,6 +790,8 @@ publication tooling также остаются вне этого публичн
   Manual-completion fixtures preserve the original startup result and closed
   lifecycle evidence, stop their owned HTTP listener on abort and keep failed
   profiles; an isolated passing run never erases an unexplained hosted refusal.
+  The synthetic site acknowledges each phase transition from its owned server.
+  Observe the actual document requests and save count before cleanup.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
   crash не доказывает save/login. Native OS tests обязательны.
   macOS protected-session CLI/worker проверяет library-validation policy своего Node. При несовместимом
@@ -1736,6 +1738,8 @@ Exact legacy template bytes для распознавания при мигра�
   Tag проверяет plan, SHA, run/attempt и все обязательные результаты.
   Native visual npm fixture: wait for the child before bounded cleanup of
   the owned test tree. Keep behavior and persistent cleanup failures strict.
+  Short-wait Workspace open fixtures observe terminal state through the
+  original operation handle. Every poll keeps fresh native admission.
 - The Linux native browser gate normalizes official main/Azure/EC2 mirrorlist
   URLs to Ubuntu's primary HTTPS archive or the probed Linux Kernel Archives
   mirror for the same suite. Desktop and Chromium installs have separate

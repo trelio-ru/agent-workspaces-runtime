@@ -1136,15 +1136,16 @@ test('a slow own-Run opening survives a short caller wait, with one child and fr
   await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
   await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
   const plan=workspacePlan(),{workspaceId,runId}=plan.localAction.parameters;
-  let release,launches=0,admissions=0,deny=false;
+  let release,finishOpen,launches=0,admissions=0,deny=false;
   const child=new Promise(resolve=>{release=resolve;});
+  const finalReadback=new Promise(resolve=>{finishOpen=resolve;});
   const executor=await createAssistantWorkspaceExecutor({configDirectory:root,finishOptions:{waitMs:5},
     runPlan:async (raw,{signal})=>{
       launches++;assert.equal(raw.localAction.operation,'open');
       assert.equal(signal,undefined,'45-second request clock is not the child clock');
-      await child;return {schemaVersion:1,operation:'open',stdout:'exact opened result'};
+      await child;await finalReadback;return {schemaVersion:1,operation:'open',stdout:'exact opened result'};
     }});
-  t.after(async()=>{release();await executor.stop();await fs.rm(root,{recursive:true,force:true});});
+  t.after(async()=>{release();finishOpen();await executor.stop();await fs.rm(root,{recursive:true,force:true});});
   const proxy=await createForwardingAssistantMcp({configurationDirectory:root,createWorkspace:()=>executor,
     request:async raw=>{
       admissions++;
@@ -1166,11 +1167,27 @@ test('a slow own-Run opening survives a short caller wait, with one child and fr
   deny=false;
   await assert.rejects(executor.execute({...plan,scope:{...plan.scope,passId:randomUUID()},localAction:running.nextCall.arguments}),{code:'ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS'});
   await assert.rejects(executor.execute({...plan,localAction:{schemaVersion:1,operation:'heartbeat',parameters:{},runIdentity:{workspaceId,runId}}}),/ASSISTANT_WORKSPACE_OPEN_IN_PROGRESS/);
+  // A released child can still have local path validation and authority
+  // projection to finish. The five-millisecond caller wait is not a promise
+  // that this work finishes on the very next poll.
   release();
-  const opened=(await proxy.callTool(running.nextCall.tool,running.nextCall.arguments)).structuredContent;
+  let opened=(await proxy.callTool(running.nextCall.tool,running.nextCall.arguments)).structuredContent;
+  assert.equal(opened.state,'running');
+  assert.equal(opened.authorityReads,undefined);
+  assert.equal(admissions,3);
+  finishOpen();
+  const deadline=performance.now()+2000;
+  let polls=0;
+  while(opened.state==='running'&&performance.now()<deadline){
+    assert.equal(opened.operationId,running.operationId);
+    assert.deepEqual(opened.nextCall,running.nextCall);
+    assert.equal(launches,1);
+    opened=(await proxy.callTool(opened.nextCall.tool,opened.nextCall.arguments)).structuredContent;
+    assert.equal(admissions,3+ ++polls,'each status read has independent native admission');
+  }
   assert.equal(opened.state,'completed');assert.equal(opened.operation,'open');assert.equal(opened.operationId,running.operationId);
   assert.equal(opened.authorityReads.length,2);
-  assert.equal(launches,1);assert.equal(admissions,3);
+  assert.equal(launches,1);
 });
 
 test('stdio closes native skill admission before its one isolated child and keeps the two clocks independent',async t=>{

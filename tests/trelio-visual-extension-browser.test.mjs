@@ -1079,17 +1079,40 @@ test('signed manual completion closes only a stable authenticated document, save
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-manual-complete-')));
   let phase = 'password', snapshot, writes = 0, restored = false, window, failure;
   const diagnostics = [];
+  const phaseRequests = { password: 0, challenge: 0, success: 0 };
+  const pendingTransitions = new Set();
+  const advance = next => {
+    phase = next;
+    for (const response of pendingTransitions) response.writeHead(204).end();
+    pendingTransitions.clear();
+  };
   const server = http.createServer((request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    const transition = /^\/fixture-phase\?from=(password|challenge)$/u.exec(request.url);
+    if (transition) {
+      if (transition[1] !== phase) return response.writeHead(204).end();
+      pendingTransitions.add(response);
+      response.once('close', () => pendingTransitions.delete(response));
+      return;
+    }
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     if (request.url === '/after') {
       restored = Boolean(request.headers.cookie?.includes('fixture_completion=SYNTHETIC_SESSION'));
       response.end('<!doctype html><body>Hidden authenticated fixture</body>'); return;
     }
+    if (request.url !== '/login') return response.writeHead(404).end();
+    phaseRequests[phase]++;
     const challenge = phase === 'password' ? '<input type="password">' : phase === 'challenge' ? '<div role="dialog">Human challenge</div>' : '';
     if (phase === 'success') response.setHeader('Set-Cookie', 'fixture_completion=SYNTHETIC_SESSION; HttpOnly; SameSite=Strict; Path=/');
-    // Synthetic human progress is controlled only by this fixture's server.
-    // The production observer sends no clicks, values, navigation or submit.
-    response.end(`<!doctype html><body><nav id="account">Account</nav><main id="calendar">Calendar</main>${challenge}${phase === 'success' ? '' : '<script>setTimeout(()=>location.reload(),250)</script>'}</body>`);
+    // Drive one real document transition from the loopback server. Rapid
+    // page-timer reloads can leave the synthetic challenge in flight when
+    // the fixture advances. The production observer still sends no input.
+    const transitionScript = phase === 'success' ? '' : `<script>
+      fetch('/fixture-phase?from=${phase}').then(result => {
+        if (result.status === 204) location.reload();
+      });
+    </script>`;
+    response.end(`<!doctype html><body><nav id="account">Account</nav><main id="calendar">Calendar</main>${challenge}${transitionScript}</body>`);
   });
   const owned = ownFixtureHttpServer(server, t.signal);
   t.after(() => owned.stop());
@@ -1103,19 +1126,26 @@ test('signed manual completion closes only a stable authenticated document, save
     testWindowController: value => { window = value; }, testDiagnostics: value => diagnostics.push(value) });
   t.signal.addEventListener('abort', () => browser.abort(), { once: true });
   const sessionId = browser.sessionId;
+  let writesBeforeCleanup, runningBeforeCleanup;
   try {
     const setup = await browser.call('setup', { url: `${origin}/login` });
     assert.equal(setup.state, 'manual_input_required', JSON.stringify({ state: setup.state, reason: setup.reason, diagnostic: setup.diagnostic }));
     for (const next of ['password', 'challenge']) {
-      phase = next; await new Promise(resolve => setTimeout(resolve, 3000));
+      if (next !== phase) advance(next);
+      const loaded = Date.now() + 5000;
+      while (phaseRequests[next] === 0 && Date.now() < loaded)
+        await new Promise(resolve => setTimeout(resolve, 50));
+      assert.ok(phaseRequests[next] > 0, 'the real browser requested the selected fixture document');
+      await new Promise(resolve => setTimeout(resolve, 3000));
       assert.equal((await browser.call('status')).state, 'manual_input_required');
       assert.equal(window.running(), true); assert.equal(writes, 0);
       assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
     }
-    phase = 'success';
+    advance('success');
     const until = Date.now() + 25_000; let status;
     do { await new Promise(resolve => setTimeout(resolve, 100)); status = await browser.call('status'); }
     while (status.state === 'manual_input_required' && Date.now() < until);
+    assert.ok(phaseRequests.success > 0, 'the real browser requested the authenticated fixture document');
     assert.equal(status.state, 'saved_unverified');
     assert.equal(window.running(), false, 'the owned visible process has actually stopped');
     assert.equal(writes, 1, 'one stopped-profile save, without ready/chat input');
@@ -1127,9 +1157,13 @@ test('signed manual completion closes only a stable authenticated document, save
     // Observe only closed lifecycle stages from the original operation. Always
     // release the owned listener independently of a stuck browser queue, keep
     // the original assertion, and retain failed profiles for exact diagnosis.
+    writesBeforeCleanup = writes;
+    runningBeforeCleanup = window?.running();
     await owned.stop();
     try { await browser.close(); } catch (error) { failure ||= error; browser.abort(); }
     if (!failure) await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
-  if (failure) { failure.message += '; manual completion evidence: ' + JSON.stringify({ phase, writes, restored, diagnostics }); throw failure; }
+  if (failure) { failure.message += '; manual completion evidence: ' + JSON.stringify({
+    phase, phaseRequests, writesBeforeCleanup, runningBeforeCleanup, writes, restored, diagnostics,
+  }); throw failure; }
 });
