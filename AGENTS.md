@@ -708,6 +708,9 @@ publication tooling также остаются вне этого публичн
   Loopback transport permission отделён от origins/content matches; CSP connect
   ограничен exact private портом. Fixture log tails дают только закрытые счётчики;
   detached fixture сохраняет те же bounded stages в частный diagnostic-файл.
+  Each pending browser command belongs to its exact socket. Retired connections
+  cannot change readiness, auth or window state on a newer one. The native
+  fixture delays an old close into the restored browser's first capture.
   Both detached session/authentication fixtures preserve the original assertion,
   always close their synthetic listener/keyring handle, and never erase an active
   claim/profile. Assertions never print the bearer-bearing owner descriptor.

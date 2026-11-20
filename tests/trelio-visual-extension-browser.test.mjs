@@ -743,6 +743,78 @@ test('signed hidden presentation preserves auth and original lease through visib
   }
 });
 
+test('closing a retired extension connection cannot fail the restored browser’s first capture', {
+  skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 90_000,
+}, async t => {
+  const dependencies = await loadVisualDependencies({
+    root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false,
+  });
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-retired-socket-')));
+  const server = http.createServer((_req, response) => {
+    response.setHeader('Content-Type', 'text/html');
+    response.end('<!doctype html><title>Connection recovery fixture</title><body>Fixture</body>');
+  });
+  const listener = ownFixtureHttpServer(server, t.signal);
+  let browser, window, snapshot, writes = 0, generation = 0, previousClose, delivered = false;
+  const captures = [];
+  class OrderedSocketServer extends dependencies.WebSocketServer {
+    handleUpgrade(request, socket, head, callback) {
+      super.handleUpgrade(request, socket, head, ws => {
+        const current = ++generation, on = ws.on;
+        ws.on = function (event, receive) {
+          if (current === 1 && event === 'close') {
+            // The genuine close still runs WebSocketServer's own cleanup.
+            // Only the host's observation is delayed across the new launch.
+            return on.call(this, event, (...args) => { previousClose = () => receive.apply(this, args); });
+          }
+          if (current === 2 && event === 'message') {
+            return on.call(this, event, data => {
+              receive.call(this, data);
+              const stage = JSON.parse(data.toString());
+              if (stage.kind !== 'navigation_fixture_stage' || stage.phase !== 'compositor_capture' || !previousClose) return;
+              const close = previousClose;
+              previousClose = undefined;
+              delivered = true;
+              close();
+            });
+          }
+          return on.call(this, event, receive);
+        };
+        callback(ws);
+      });
+    }
+  }
+  try {
+    await listener.listen();
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    browser = new ExtensionVisualBrowser({
+      dependencies: { ...dependencies, WebSocketServer: OrderedSocketServer },
+      store: { directory, async read() { return snapshot; }, async prepare() {}, async write(value) {
+        snapshot = structuredClone(value); writes++;
+      }, close() {} },
+      policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin],
+      lease: { deadlineAt: Date.now() + 65_000 }, testHeadless: true,
+      testWindowController: value => { window = value; },
+      testDiagnostics: value => { if (value.stage === 'navigation_transport') captures.push(value.outcome); },
+    });
+    assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required');
+    await window.close().catch(() => {});
+    for (let i = 0; i < 100 && (await browser.call('status')).state !== 'saved_unverified'; i++)
+      await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal((await browser.call('status')).state, 'saved_unverified');
+    assert.equal(writes, 1);
+    const restored = await browser.call('navigate', { url: `${origin}/restored` });
+    assert.equal(delivered, true, 'the previous close reached the host during the real new capture');
+    assert.equal(restored.state, 'ready');
+    assert.deepEqual(captures, ['sent', 'reply_received'], 'no retry or second capture');
+    assert.equal(writes, 1);
+  } finally {
+    await browser?.close().catch(() => browser.abort());
+    await listener.stop();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test('manual window close and ready save once before unlocking images; crash preserves the previous snapshot', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-manual-')));

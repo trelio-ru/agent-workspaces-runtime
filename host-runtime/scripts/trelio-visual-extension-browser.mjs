@@ -520,20 +520,24 @@ export class ExtensionVisualBrowser {
     const token = crypto.randomBytes(32).toString('hex');
     const startupTrace = this.testDiagnostics ? createVisualStartupFixtureTrace() : undefined;
     this.#server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
-    this.#wss = new this.dependencies.WebSocketServer({ noServer: true, maxPayload: (this.attachmentDownloads || this.audioDownloads ? 28 : 3) * 1024 * 1024, handleProtocols: protocols => protocols.has('trelio-visual-v1') ? 'trelio-visual-v1' : false });
+    const transport = this.#wss = new this.dependencies.WebSocketServer({ noServer: true, maxPayload: (this.attachmentDownloads || this.audioDownloads ? 28 : 3) * 1024 * 1024, handleProtocols: protocols => protocols.has('trelio-visual-v1') ? 'trelio-visual-v1' : false });
     this.#server.on('upgrade', (req, socket, head) => {
       startupTrace?.mark('transport_upgrade');
       const protocols = String(req.headers['sec-websocket-protocol'] || '').split(',').map(v => v.trim());
       const candidate = protocols.find(value => /^[0-9a-f]{64}$/u.test(value));
       const validToken = candidate && crypto.timingSafeEqual(Buffer.from(token), Buffer.from(candidate));
-      if (req.url !== '/extension' || req.headers.origin !== `chrome-extension://${EXTENSION_ID}` || !validToken || this.#socket?.readyState === 1) { startupTrace?.mark('transport_rejected'); socket.destroy(); return; }
-      this.#wss.handleUpgrade(req, socket, head, ws => {
+      if (this.#wss !== transport || req.url !== '/extension' || req.headers.origin !== `chrome-extension://${EXTENSION_ID}` || !validToken || this.#socket?.readyState === 1) { startupTrace?.mark('transport_rejected'); socket.destroy(); return; }
+      transport.handleUpgrade(req, socket, head, ws => {
         this.#socket = ws;
         startupTrace?.mark('transport_connected');
         ws.on('message', data => {
+          // Window, readiness and auth events belong to the active connection.
+          // A manual close can deliver old frames after the restored window
+          // has started. Those frames must never change the new profile state.
+          if (this.#socket !== ws || this.#wss !== transport) return;
           let value; try { value = JSON.parse(data.toString()); } catch { ws.close(); return; }
           if (value.kind === 'startup_fixture_stage') {
-            if (this.policy.fixtureOnly && this.#socket === ws) startupTrace?.mark(value.phase);
+            if (this.policy.fixtureOnly) startupTrace?.mark(value.phase);
             return;
           }
           if (value.kind === 'auth_required' && !this.#authHandshake) {
@@ -543,6 +547,7 @@ export class ExtensionVisualBrowser {
             // visual result validator or MCP. A reconnect cannot restore stale
             // auth over a live human session: each worker asks exactly once.
             void this.#send('restore-session-auth', { cookies: this.#sessionCookies, replace: this.#replaceSessionCookies }).catch(error => {
+              if (this.#wss !== transport) return;
               this.#startupDiagnostic ||= visualStartupDiagnostic('extension_auth', 'storage_unavailable', error);
               this.#terminal ||= 'storage_unavailable'; this.#state = 'error';
             });
@@ -595,14 +600,14 @@ export class ExtensionVisualBrowser {
             // Attribute only to the original outstanding fixture navigation,
             // from its owned extension connection. Keep one value in RAM so
             // a healthy native action never contends with per-stage disk I/O.
-            const pending = this.policy.fixtureOnly && this.#socket === ws && typeof value.id === 'string'
+            const pending = this.policy.fixtureOnly && typeof value.id === 'string'
               ? this.#pending.get(value.id) : undefined;
             const phase = visualNavigationFixturePhase(value.phase);
-            if (phase) pending?.recordNavigationPhase?.(phase);
+            if (phase && pending?.socket === ws) pending.recordNavigationPhase?.(phase);
             return;
           }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
-          const pending = this.#pending.get(value.id); if (!pending) return;
+          const pending = this.#pending.get(value.id); if (pending?.socket !== ws) return;
           pending.reportNavigation?.(value.result?.state === 'error' ? 'extension_error' : 'reply_received');
           this.#pending.delete(value.id); clearTimeout(pending.timer); pending.resolve(value.result);
         });
@@ -618,6 +623,10 @@ export class ExtensionVisualBrowser {
             }
           }
           for (const [id, pending] of this.#pending) {
+            // A delayed close rejects only requests dispatched over this
+            // connection. In particular it cannot fail the first read on a
+            // relaunched browser or grant authority to replay either request.
+            if (pending.socket !== ws) continue;
             pending.reportNavigation?.('socket_closed');
             clearTimeout(pending.timer); pending.reject(fault('operation_failed')); this.#pending.delete(id);
           }
@@ -739,7 +748,8 @@ export class ExtensionVisualBrowser {
       ? outcome => this.testDiagnostics({ stage: 'navigation_transport', operation, outcome,
         ...(lastPhase && ['response_timeout', 'socket_closed', 'extension_error'].includes(outcome) ? { phase: lastPhase } : {}) })
       : undefined;
-    if (!this.#socket || this.#socket.readyState !== 1) {
+    const socket = this.#socket;
+    if (socket?.readyState !== 1) {
       reportNavigation?.('socket_unavailable');
       return Promise.reject(fault('operation_failed'));
     }
@@ -750,8 +760,8 @@ export class ExtensionVisualBrowser {
         reportNavigation?.('response_timeout');
         reject(fault('operation_failed'));
       }, 40_000);
-      this.#pending.set(id, { resolve, reject, timer, ...(reportNavigation ? { reportNavigation, recordNavigationPhase: phase => { lastPhase = phase; } } : {}) });
-      this.#socket.send(JSON.stringify({ id, operation, args }));
+      this.#pending.set(id, { socket, resolve, reject, timer, ...(reportNavigation ? { reportNavigation, recordNavigationPhase: phase => { lastPhase = phase; } } : {}) });
+      socket.send(JSON.stringify({ id, operation, args }));
       reportNavigation?.('sent');
     });
     // Only the existing localhost-fixture callback can observe these closed
@@ -823,8 +833,9 @@ export class ExtensionVisualBrowser {
     await this.#nativeDiagnostics();
     if (child.exitCode !== 0 || child.signalCode) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     this.#child = undefined;
-    this.#socket?.close(); this.#socket = undefined;
-    this.#wss?.close(); this.#server?.close(); this.#server = undefined;
+    const socket = this.#socket, transport = this.#wss, server = this.#server;
+    this.#socket = undefined; this.#wss = undefined; this.#server = undefined;
+    socket?.close(); transport?.close(); server?.close();
   }
   async #saveStopped() {
     if (!this.#profile) return;

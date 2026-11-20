@@ -462,6 +462,12 @@ exact extension Origin и случайный 256-bit token в private worker res
 Token не передаётся в argv, Chromium environment, MCP или logs. WS transport
 не является DevTools endpoint. Heartbeat и cleanup не стоят за зависшим input;
 переподключение не переигрывает предыдущую команду.
+Запрос привязан к тому WebSocket, через который отправлен. Запоздалый close
+завершает только запросы этого соединения. Кадры, состояние окна и снимок
+авторизации принимаются только от текущего соединения. Это сохраняет первый
+просмотр после сохранения и открытия собственного профиля при любом порядке
+доставки событий закрытия. Неопределённый результат прежней команды не
+считается выполненным, срок lease и ожидание запроса не продлеваются.
 Transport имеет отдельный loopback host permission, а CSP разрешает connect
 только к exact private порту. Это не добавляет localhost в navigation policy
 или content-script matches. Fixture native logs сворачиваются в закрытые
