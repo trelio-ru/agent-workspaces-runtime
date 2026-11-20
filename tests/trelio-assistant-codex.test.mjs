@@ -1431,6 +1431,105 @@ test('an accepted local save can nominate only the exact observed outbound effec
   const unrelated=structuredClone(polled);
   unrelated.items[3].arguments.parameters.finishOperationId=randomUUID();
   assert.deepEqual(await read(unrelated),{state:'uncertain'});
+  // An original scheduled turn can deliver before it opens its own Run.
+  // Its accepted SMTP receipt selects the direct Sent read. A settled
+  // native control enters the structural plan but the export proof stays
+  // inside the host.
+  const assistantId=randomUUID(),root=structuredClone(original);
+  const rootScope=assistantWorkStateContext({assistantId,...scope});
+  const rootPrompt=assistantNativePrompt(deliveryId,rootScope,{});
+  const control={controlId:randomUUID(),controlReceiptId:randomUUID(),controlRequestId:randomUUID()};
+  root.items=[
+    {type:'userMessage',content:[{type:'text',text:rootPrompt}]},
+    call('prepare_assistant_workspace_read',{workspaceId:run.workspaceId},{
+      prepared:true,mode:'read_only_accepted_workspace',workspace:{id:run.workspaceId,acceptedHead:receipt.baseHead},
+    }),
+    call('continue_assistant_workspace_action',{schemaVersion:1,operation:'inspect',parameters:{workspaceId:run.workspaceId}},
+      {schemaVersion:1,operation:'inspect',stdout:'Read-only accepted material'}),
+    skill(['read','--folder','INBOX','--uid','3'],{ok:true,folder:'INBOX',uid:'3',messageId:parent}),
+    skill(reply,{prepared:true,sent:false,plan,planSha256}),
+    skill([...reply,'--confirm','--expected-plan-sha256',planSha256],{
+      sent:true,smtpStatus:'accepted',messageId,refusedRecipients:[],planSha256,
+      sentCopy:{saved:true,verified:true,folder:'Sent',uid:'7'},
+    }),
+    sentRead,
+    call('update_task_control',{controlId:control.controlId,clientRequestId:control.controlRequestId,visibility:'shared'},{
+      schemaVersion:1,operation:'update_task_control',taskId:taskPass.taskId,
+      resultId:control.controlId,receiptId:control.controlReceiptId,
+    }),
+    original.items[1],action('open',run,pending),
+    action('status',openParameters,{schemaVersion:1,operation:'open',state:'completed',operationId:openHandle,stdout:'Opened Run'}),
+    original.items[9],
+  ];
+  const readRoot=(history=root,author=assistantId)=>readAssistantCodexDelivery(threadId,saveMarkerId,{
+    executable:process.execPath,environment:{},
+    recoveredWorkspaceOutcome:{deliveryId,originalTurnId:root.id,saveMarkerId,saveTurnId:save.id,
+      taskPass,mode:'local_draft',receipt,sourceMarkerId:deliveryId,assistantId:author},
+    spawnProcess:nativeRpc(request=>({
+      result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[save,history]},
+    })),
+  });
+  const restored=await readRoot();
+  assert.equal(restored.state,'recovered_outcome_observed');
+  assert.deepEqual(restored.evidence,{...run,acceptedHead:candidateHead,historicalSkillReleases:[release],
+    rootDelivery:{sourceMarkerId:deliveryId,sourceTurnId:root.id},nativeControlReceipts:[control]});
+  assert.deepEqual(restored.rootDeliveryProof.artifact,artifact);
+  assert.doesNotMatch(JSON.stringify(restored.evidence),/providerEffect|pathSha256|contentSha256|replyHeaderSha256/u);
+  assert.deepEqual(await readRoot(root,randomUUID()),{state:'uncertain'});
+  for(const intact of [false,true]){
+    // Model input must follow the writer's fresh receipt and immutable-file
+    // checks. A stale or missing accepted blob cannot even renew the lease.
+    const cwd=process.cwd(),reviewId=randomUUID(),steps=[];
+    const plan={saveReviewId:saveMarkerId,evidence:restored.evidence,schedule:{priorReceiptId:randomUUID(),
+      cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:null}};
+    let observations=0;
+    const attempt=runAssistantCodexPass({threadId,deliveryId:reviewId,cwd,taskContext:{assistantId,...scope},execution},{
+      executable:process.execPath,environment:{},requireAbsentMarker:true,
+      continuationReview:{priorTurnId:save.id,reviewId},
+      workspaceDraftRecovery:{terminalMarkerId:saveMarkerId,terminalTurnId:save.id,originalDeliveryId:deliveryId,taskPass,
+        workspaceDraft:{...run,acceptedHead:candidateHead,recoveredOutcome:{plan,originalTurnId:root.id,mode:'local_draft',receipt}}},
+      readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+      readExecutionAvailability:async()=>true,
+      verifyRootDelivery:async(evidence,proof)=>{
+        assert.deepEqual(evidence,restored.evidence);
+        assert.deepEqual(proof,restored.rootDeliveryProof);
+        steps.push('accepted_bytes');
+        return intact;
+      },
+      beforeInvocation:async()=>{steps.push('renew');},startInvocation:()=>{steps.push('start');},
+      readDelivery:async()=>++observations===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'native:accepted'},
+      spawnProcess:ownedRpc({threadId,cwd,priorTurn:[save,root],
+        executionPolicy:(request,base)=>{
+          if(request.method!=='mcpServerStatus/list')return;
+          base.result.data[0].tools={complete_assistant_pass:{name:'complete_assistant_pass'}};
+          return base;
+        },
+        onRequest:request=>{
+          if(request.method==='thread/resume')steps.push('writer');
+          if(request.method==='thread/turns/list'&&request.params.limit===2)steps.push('readboth');
+        },
+        onInput:text=>{
+          assert.match(text,/Call only complete_assistant_pass once/u);
+          assert.match(text,/"goalState":"active"/u);
+          assert.doesNotMatch(text,/dailyLocalTime|providerEffect|contentSha256|@example\.test/u);
+        },
+      }),
+    });
+    if(intact)assert.equal((await attempt).state,'completed');
+    else await assert.rejects(attempt,{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    assert.deepEqual(steps,intact?['writer','readboth','accepted_bytes','renew','start']:['writer','readboth','accepted_bytes']);
+  }
+  for(const change of [
+    history=>{history.items[5].result.structuredContent.stdout=JSON.stringify({sent:true,messageId});},
+    history=>{history.items[7].result.structuredContent.taskId=randomUUID();},
+    history=>{history.items[10].result.structuredContent.operationId=randomUUID();},
+    history=>{history.items[2].arguments.parameters.workspaceId=randomUUID();},
+    history=>{history.items[6].arguments.parameters.runtimeSessionId=randomUUID();},
+    history=>{history.items.splice(6,0,structuredClone(history.items[5]));},
+  ]){
+    const damaged=structuredClone(root);change(damaged);
+    assert.deepEqual(await readRoot(damaged),{state:'uncertain'});
+  }
   for(const change of [
     value=>value.items.splice(6,0,structuredClone(confirm)),
     value=>{value.items[8].result.structuredContent.stdout=JSON.stringify({folder:'Sent',uid:'7',messageId});},

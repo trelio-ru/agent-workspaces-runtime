@@ -1915,6 +1915,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       &&typeof save.acceptedHead==='string'&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(save.acceptedHead)
       &&(!portableFinish||save.acceptedHead===portableFinish.draftHead)?save.acceptedHead:null;
   };
+  const verifyRootProviderOutcome=async(pass,evidence,proof,signal)=>{
+    // This bridge receives only the private projection of the exact native
+    // history. Neither the backend lease nor SQLite receives provider hashes
+    // in the root evidence. The existing verifier still checks accepted bytes.
+    const root=evidence?.rootDelivery;
+    return root?.sourceMarkerId===pass.deliveryId&&proof?.kind==='outbound_delivery'
+      &&proof.sourceMarkerId===root.sourceMarkerId&&proof.sourceTurnId===root.sourceTurnId
+      &&await verifyRecoveredProviderOutcome?.(pass,{...evidence,providerEffect:proof},signal)===true;
+  };
   const observeRecoveredOutcome = async (job,pass,continuation,saveTurnId,acceptedHead,signal) => {
     if(!inbox.readDelivery(job.deliveryId).scheduled||job.events.length
       ||typeof client.readTaskRecoveredOutcomeEvidence!=='function')return null;
@@ -1932,7 +1941,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const {deltaSha256:_localDelta,historicalSkillReleases:_legacy,...basis}=localDraft?.basis??{};
     const selection={deliveryId:job.deliveryId,originalTurnId:continuation.terminalTurnId,saveMarkerId:continuation.reviewId,
       saveTurnId,taskPass:locator,mode:localDraft?'local_draft':'portable_draft',receipt:localDraft?basis:portableFinish,
-      ...(sourceMarkerId?{sourceMarkerId}:{})};
+      ...(sourceMarkerId?{sourceMarkerId}:localDraft&&verifyRecoveredProviderOutcome?{assistantId:identity.assistantId}:{})};
     const nativeResult=await native.readDelivery(pass.threadId,continuation.reviewId,{signal,recoveredWorkspaceOutcome:selection});lease();
     const evidence=nativeResult.evidence;
     if(nativeResult.state!=='recovered_outcome_observed'||nativeResult.turnId!==saveTurnId
@@ -1940,6 +1949,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||evidence.runId!==continuation.workspaceDraft.runId)return null;
     if(sourceMarkerId&&(!evidence.providerEffect||evidence.providerEffect.sourceMarkerId!==sourceMarkerId
       ||await verifyRecoveredProviderOutcome(pass,evidence,signal)!==true))return null;
+    if(evidence.rootDelivery){
+      const proof=nativeResult.rootDeliveryProof;
+      if(sourceMarkerId||!localDraft?.retainedArtifacts?.some(artifact=>isDeepStrictEqual(artifact,proof?.artifact))
+        ||!await verifyRootProviderOutcome(pass,evidence,proof,signal))return null;
+    }
     const schedule=await client.readTaskRecoveredOutcomeEvidence({...locator,expectedLeaseRevision:live.leaseRevision,...evidence},signal);lease();
     return schedule?{workspaceId:evidence.workspaceId,runId:evidence.runId,acceptedHead,
       recoveredOutcome:{plan:{saveReviewId:continuation.reviewId,evidence,schedule},
@@ -1959,12 +1973,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // Read the failed confirmation AND both original prerequisite turns. The
     // expired native lease and missing outcome are checked again under CAS,
     // so this successor cannot turn an ambiguous external write into replay.
+    const {rootDelivery,providerEffect}=plan.evidence;
     const selection={deliveryId:job.deliveryId,originalTurnId,saveMarkerId:plan.saveReviewId,saveTurnId:continuation.terminalTurnId,
-      taskPass:locator,mode,receipt,...(plan.evidence.providerEffect?{sourceMarkerId:plan.evidence.providerEffect.sourceMarkerId}:{}),
+      taskPass:locator,mode,receipt,...(providerEffect||rootDelivery?{sourceMarkerId:(providerEffect??rootDelivery).sourceMarkerId}:{}),
+      ...(rootDelivery?{assistantId:identity.assistantId}:{}),
       retry:{plan,retryFromReviewId:continuation.reviewId,terminalTurnId}};
     const result=await native.readDelivery(pass.threadId,continuation.reviewId,{signal,recoveredWorkspaceOutcome:selection});lease();
     if(result.state!=='recovered_outcome_observed'||result.turnId!==terminalTurnId
       ||!isDeepStrictEqual(result.evidence,plan.evidence))return null;
+    if(rootDelivery&&!await verifyRootProviderOutcome(pass,result.evidence,result.rootDeliveryProof,signal))return null;
     const schedule=await client.readTaskRecoveredOutcomeEvidence({...locator,expectedLeaseRevision:live.leaseRevision,...plan.evidence},signal);lease();
     if(!isDeepStrictEqual(schedule,plan.schedule))return null;
     return {...draft,recoveredOutcome:{...previous,saveTurnId:selection.saveTurnId,
@@ -2335,6 +2352,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             taskPass:{companyId:expectedPass.companyId,taskId:expectedPass.taskId,passId:expectedPass.passId},
             ...(continuation.workspaceDraft.recoveredOutcome?{originalDeliveryId:job.deliveryId}:{}),
           };
+          if(continuation.workspaceDraft?.recoveredOutcome?.plan.evidence.rootDelivery)
+            options.verifyRootDelivery=(evidence,proof,signal)=>verifyRootProviderOutcome(expectedPass,evidence,proof,signal);
           if(continuation.taskReadParent)options.taskReadRecovery={
             ...continuation.taskReadParent,terminalTurnId:continuation.terminalTurnId,terminalMarkerId:continuation.terminalMarkerId,
             taskPass:{companyId:expectedPass.companyId,taskId:expectedPass.taskId,passId:expectedPass.passId},

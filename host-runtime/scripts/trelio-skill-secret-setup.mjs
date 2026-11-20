@@ -175,12 +175,13 @@ export const reviewedHistoricalCheckpointSkill = ({skillId,releaseId},{providerA
 };
 
 /** Decode the reviewed predecessor of a typed outbound-delivery receipt.
- * Its preview was never an effect. Only the one exact attempted command and
- * a later independently selected/read Sent object can nominate a receipt.
+ * Its preview was never an effect. The exact attempt and an independently
+ * read Sent object must match. When the caller requires a positive reply,
+ * the signed command's verified Sent copy selects that object directly.
  * The archive still needs immutable-byte and reply-header verification in the
  * owning Run. Unsupported commands or additional attempts remain unresolved.
  */
-export const inspectHistoricalTaskDelivery = (calls,{scope,startedAt,completedAt}) => {
+export const inspectHistoricalTaskDelivery = (calls,{scope,startedAt,completedAt,requireAcceptedReply=false}) => {
   if(!Array.isArray(calls)||calls.length<5||calls.length>32
     ||!Number.isSafeInteger(startedAt)||startedAt<=0)return null;
   // Native interrupted turns can have no completedAt. Bound the receipt date
@@ -231,7 +232,7 @@ export const inspectHistoricalTaskDelivery = (calls,{scope,startedAt,completedAt
       if(Boolean(folder)===options.has('--special-use')||!/^\d{4}-\d{2}-\d{2}$/u.test(options.get('--since')??'')
         ||!/^([1-9]|[1-9][0-9]|100)$/u.test(options.get('--limit')??''))return null;
       // A timed-out audited SEARCH cannot have delivered another message.
-      if(!failure&&attempt&&options.get('--special-use')==='sent'&&accountId===preview?.accountId){
+      if(!requireAcceptedReply&&!failure&&attempt&&options.get('--special-use')==='sent'&&accountId===preview?.accountId){
         if(sent||!Array.isArray(result?.messages)||result.messages.length!==1||typeof result.folder!=='string')return null;
         sent={...result.messages[0],folder:result.folder};
       }
@@ -252,13 +253,30 @@ export const inspectHistoricalTaskDelivery = (calls,{scope,startedAt,completedAt
           ||!Array.isArray(plan.attachments)||plan.attachments.length)return null;
         preview={identity,accountId,plan,planSha256:result.planSha256};
       }else{
-        if(!preview||attempt||!failure||options.size!==5||preview.planSha256!==options.get('--expected-plan-sha256')
+        const hasExpectedReceipt=requireAcceptedReply?!failure:Boolean(failure);
+        if(!preview||attempt||!hasExpectedReceipt||options.size!==5
+          ||preview.planSha256!==options.get('--expected-plan-sha256')
           ||JSON.stringify(identity)!==JSON.stringify(preview.identity))return null;
+        if(requireAcceptedReply){
+          const copy=result?.sentCopy;
+          if(result?.sent!==true||result.smtpStatus!=='accepted'||result.planSha256!==preview.planSha256
+            ||!Array.isArray(result.refusedRecipients)||result.refusedRecipients.length
+            ||copy?.saved!==true||copy.verified!==true||typeof copy.folder!=='string'||!copy.folder
+            ||!/^<[^<>\s]{1,512}>$/u.test(result.messageId??'')||!/^[1-9][0-9]{0,9}$/u.test(copy.uid??''))return null;
+          sent={folder:copy.folder,uid:copy.uid,messageId:result.messageId};
+        }
         attempt=assistantTaskSkillReadRequestDigest(scope,parameters);
       }
       continue;
     }
-    if(failure||!attempt||!sent||accountId!==preview.accountId||folder!==sent.folder||uid!==sent.uid)return null;
+    if(failure)return null;
+    if(!attempt||!sent||accountId!==preview.accountId||folder!==sent.folder||uid!==sent.uid){
+      // The root can have ordinary incoming-mail reads before or after its
+      // confirmed send. Only the selected verified Sent UID is evidence.
+      if(requireAcceptedReply&&command==='read'
+        &&reviewedHistoricalCheckpointSkill(parameters,parsed,stdout))continue;
+      return null;
+    }
     if(command==='read'){
       const body=value=>value.replace(/\r\n/gu,'\n').replace(/\n$/u,'');
       const date=Date.parse(result?.date),{plan}=preview;

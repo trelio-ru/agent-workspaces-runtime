@@ -137,11 +137,31 @@ export const validateAssistantIntermediateDraft=value=>{
 /** The save and the task outcome are separate. Keep only the recorded
  * question/control locators or closed provider evidence, the accepted head
  * and package references. Goal text and schedules never come from history. */
+const settledControlLocator=value=>{
+  object(value,['controlId','controlRequestId','controlReceiptId']);
+  return {controlId:uuid(value.controlId),controlRequestId:uuid(value.controlRequestId),
+    controlReceiptId:uuid(value.controlReceiptId)};
+};
+
 export const validateAssistantRecoveredOutcomeEvidence=value=>{
-  object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases','providerEffect']);
+  object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases',
+    'providerEffect','rootDelivery','nativeControlReceipts']);
   if(!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead??''))inputError();
   const releases=historicalSkillReleaseReceipts(value.historicalSkillReleases);
   const run={workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),acceptedHead:value.acceptedHead};
+  if(value.rootDelivery!==undefined){
+    if(value.questionId!==undefined||value.questionRequestId!==undefined||value.control!==undefined||value.providerEffect!==undefined
+      ||!releases||!Array.isArray(value.nativeControlReceipts)||value.nativeControlReceipts.length>8)inputError();
+    const root=value.rootDelivery;
+    object(root,['sourceMarkerId','sourceTurnId']);
+    const controls=value.nativeControlReceipts.map(settledControlLocator);
+    if(new Set(controls.map(control=>control.controlReceiptId)).size!==controls.length)inputError();
+    // The root's provider verification stays in the native reader and is
+    // never copied into the shared lease plan or the model prompt.
+    return {...run,historicalSkillReleases:releases,
+      rootDelivery:{sourceMarkerId:uuid(root.sourceMarkerId),sourceTurnId:uuid(root.sourceTurnId)},nativeControlReceipts:controls};
+  }
+  if(value.nativeControlReceipts!==undefined)inputError();
   if(value.providerEffect!==undefined){
     if(value.questionId!==undefined||value.questionRequestId!==undefined||value.control!==undefined||!releases)inputError();
     const effect=value.providerEffect;
@@ -152,12 +172,7 @@ export const validateAssistantRecoveredOutcomeEvidence=value=>{
       attemptSha256:sha256(effect.attemptSha256),artifact:retainedDraftArtifacts([effect.artifact])[0],
       replyHeaderSha256:sha256(effect.replyHeaderSha256)}};
   }
-  let control;
-  if(value.control!==undefined){
-    object(value.control,['controlId','controlRequestId','controlReceiptId']);
-    control={controlId:uuid(value.control.controlId),controlRequestId:uuid(value.control.controlRequestId),
-      controlReceiptId:uuid(value.control.controlReceiptId)};
-  }
+  const control=value.control===undefined?undefined:settledControlLocator(value.control);
   return {...run,
     questionId:uuid(value.questionId),questionRequestId:uuid(value.questionRequestId),
     ...(control?{control}:{}),...(releases?{historicalSkillReleases:releases}:{})};
@@ -182,7 +197,7 @@ export const validateAssistantRecoveredOutcomePlan=value=>{
 export const assistantRecoveredOutcomeCompletion=(plan,reviewId)=>{
   const {evidence,schedule}=validateAssistantRecoveredOutcomePlan(plan);
   return {workspaceId:evidence.workspaceId,acceptedRunId:evidence.runId,workspaceHead:evidence.acceptedHead,
-    goalState:evidence.providerEffect?'active':'waiting_owner',noChange:false,clientRequestId:uuid(reviewId),cadence:schedule.cadence,timeZone:schedule.timeZone,
+    goalState:evidence.questionId?'waiting_owner':'active',noChange:false,clientRequestId:uuid(reviewId),cadence:schedule.cadence,timeZone:schedule.timeZone,
     ...(schedule.dailyLocalTime===null?{}:{dailyLocalTime:schedule.dailyLocalTime})};
 };
 // The same closed task read surface is used for the native executor
@@ -2405,7 +2420,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           const {deltaSha256:_delta,historicalSkillReleases:_legacy,...localBasis}=saved?.localDraft?.basis??{};
           const priorReceipt=recovered.mode==='local_draft'
             ?saved?.localDraft&&localBasis:saved?.portableFinish;
-          const effect=basePlan.evidence.providerEffect;
+          const {providerEffect:effect,rootDelivery}=basePlan.evidence;
           if(!row.scheduled||deliveryEvents(id).length||!latest||!last.started||last.passId!==passId
             ||terminalTurnId===last.terminalTurnId||terminalTurnId===recovered.originalTurnId
             ||expectedLeaseRevision!==last.expectedLeaseRevision+1)fail('ASSISTANT_INBOX_CONFLICT');
@@ -2420,9 +2435,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
               ||JSON.stringify(previous.receipt)!==JSON.stringify(recovered.receipt)
               ||JSON.stringify(previous.plan)!==JSON.stringify(basePlan))fail('ASSISTANT_INBOX_CONFLICT');
           }else{
-            if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==(effect?.sourceMarkerId??id)
+            if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==(effect?.sourceMarkerId??rootDelivery?.sourceMarkerId??id)
               ||last.terminalTurnId!==recovered.originalTurnId||!priorReceipt
               ||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
+            if(rootDelivery&&(latest.ordinal!==1||rootDelivery.sourceMarkerId!==id||rootDelivery.sourceTurnId!==last.terminalTurnId
+              ||!saved?.localDraft?.retainedArtifacts?.length))fail('ASSISTANT_INBOX_CONFLICT');
             if(effect){
               // The local save must be the successor of this exact resumed
               // intermediate draft. Retain both original native start fences.

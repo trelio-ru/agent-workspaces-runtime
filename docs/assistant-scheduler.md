@@ -994,6 +994,20 @@ the same pass. That v8 continuation confirms the recurring task as
 `active` with its existing schedule. It grants only completion, with no
 provider call, new Run, task status change or replay.
 
+For the first event-free scheduled turn, this same outcome-only continuation
+can carry a directly accepted outbound receipt from the original delivery.
+The host verifies the canonical scheduled marker, exact terminal turn,
+same-Run local save, the audited provider acceptance and its independent
+read-back. An exported file alone can be the verified local delta. Every
+native control write needs its exact committed receipt. The backend matches
+the complete operation ledger up to the save reservation and checks that no
+owner question was created. It binds the structural list and original native
+locators to the already accepted Run, release and previously committed
+schedule. The provider proof and export hashes remain inside the host and are
+recomputed against the accepted bytes under the exclusive native writer.
+Unknown effects, a different marker, changed bytes or an incomplete ledger
+keep the delivery fenced.
+
 Reserve one new marker in the existing indexed continuation journal. Persist
 only the exact Run and Workspace UUIDs and either the pending-finish bit or the
 accepted head alongside the existing intent. The

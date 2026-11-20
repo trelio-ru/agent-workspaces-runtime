@@ -245,6 +245,10 @@ publication tooling также остаются вне этого публичн
   audited provider evidence adapter separate from scheduler policy. Verify
   the immutable exported blob and reply binding twice, then confirm only
   the existing active cadence. No second provider action or unknown replay.
+  The original scheduled delivery can use the same positive receipt path.
+  Bind the original marker and accepted Run to the complete native control
+  receipt set. Recheck the accepted export under the writer; keep the provider
+  proof private to the host. Preserve the previously committed cadence.
   The accepted-material adapter separates its bounded local preparation from
   one ordinary-budget MCP dispatch. Cancellation before dispatch retains its
   closed stage, with no proof/lease extension or new attempt. Exercise the
