@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { decodeSkillInstructionGuide, readSignedSkillInstructionGuides } from "./trelio-agent-skill-budget.mjs";
 import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { rememberDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
@@ -29,7 +30,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand, assistantTaskArtifactFromOutput, matchesHistoricalReplyHeaders } from "./trelio-skill-secret-setup.mjs";
 import { browserControllerEnabled, parseBrowserControllerArguments, skillResourcePolicy, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
-import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
+import { ACCOUNT_CAPABILITY, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountSelectionError, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment, readCodexNavigationThreadId, buildDeepseekDesktopClientBundle } from "./trelio-codex-conversation.mjs";
 import {
@@ -8074,6 +8075,7 @@ export const parseAndValidateAgentSkillPackage = (
   // private publication (including local E2EE) and materialization. Backend
   // validation alone cannot inspect an encrypted company's package contents.
   skillResourcePolicy({ files: parsedFiles, capabilities });
+  const instructionGuidePaths = readSignedSkillInstructionGuides(parsedFiles, file => file.bytes);
 
   return {
     format: AGENT_SKILL_PACKAGE_FORMAT,
@@ -8086,6 +8088,7 @@ export const parseAndValidateAgentSkillPackage = (
     capabilities,
     browserSession,
     files: parsedFiles,
+    ...(instructionGuidePaths ? { instructionGuidePaths } : {}),
     packageSha256: crypto.createHash("sha256").update(packageBytes).digest("hex"),
     packageSizeBytes: packageBytes.byteLength,
   };
@@ -10405,7 +10408,12 @@ const skillCommand = async (
     runtimeDirectory = materialized.runtimeDirectory;
   }
 
-  const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
+  const providerArguments = positional.slice(1);
+  const guidePaths = artifactForCache.parsedPackage.instructionGuidePaths;
+  const guideArguments = guidePaths && artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
+    ? splitAccountArguments(providerArguments) : { providerArguments, accountId: null };
+  const readsSignedGuide = Boolean(guidePaths && guideArguments.providerArguments[0] === "guides");
+  const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, providerArguments);
   // Use the SAME host account selector; a selected account must stay bound on
   // every continuation, including when --local-account precedes the command.
   const controllerCommand = parseBrowserControllerArguments(
@@ -10490,6 +10498,35 @@ const skillCommand = async (
       outputSha256:crypto.createHash('sha256').update(stdout,'utf8').digest('hex')};
     return artifact?{taskSkillArtifact:{...binding,artifact}}:{taskSkillRead:binding};
   };
+  if (readsSignedGuide) {
+    // The release is already admitted, signature/consent checked and E2EE
+    // opened locally. Read only the selected signed Markdown bytes. Never run
+    // an account import, provider child, setup grant or filesystem path from
+    // argv. Legacy releases without the marker keep their normal account gate.
+    const invalid = () => Object.assign(new Error("Invalid signed guide page request."), { code: "SKILL_GUIDE_PART_INVALID" });
+    if (guideArguments.accountId || privateSecretSetup || humanInputSetup || setupCommand
+      || Object.keys(grantedEnvironment).length || grantedStdin !== null) throw invalid();
+    const [command, flag, index] = providerArguments;
+    let part = assistantGuidePart ?? 0;
+    if (command !== "guides") throw invalid();
+    if (providerArguments.length !== 1) {
+      if (assistant || providerArguments.length !== 3 || flag !== "--part"
+        || !/^(?:0|[1-9][0-9]?)$/u.test(index)) throw invalid();
+      part = Number(index);
+    }
+    const relativePath = guidePaths[part];
+    if (!relativePath) throw invalid();
+    const file = artifactForCache.parsedPackage.files.find(entry => entry.path === relativePath);
+    if (assistant) await verifyCurrentAssistantSkill();
+    process.stdout.write(`${JSON.stringify({
+      schemaVersion: 1, part, count: guidePaths.length,
+      nextGuidePart: part + 1 < guidePaths.length ? part + 1 : null,
+      path: file.path, sha256: file.sha256, text: decodeSkillInstructionGuide(file.bytes),
+    })}\n`);
+    // A static guide is never evidence of successful provider/account I/O.
+    return;
+  }
+
   let runtimeArguments = positional.slice(1);
   if (humanInputSetup) await profile.prepareHumanInputSkillSetupAccount({artifact:artifactForCache,runtimeDirectory,executionContext,humanInputCommand});
   if (artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)) {
@@ -21810,9 +21847,8 @@ if (isDirectModuleInvocation(import.meta.url) && process.argv[2] === "local-form
   runEntrypoint()
     .catch((error) => {
       const command = process.argv[2];
-      const accountSetupRequired = command === "skill" && error instanceof SkillAccountError
-        && error.code === ACCOUNT_SETUP_REQUIRED;
-      fail(formatBridgeCommandError(error, command), accountSetupRequired ? ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT : 1);
+      const accountSelectionFailed = command === "skill" && error instanceof SkillAccountSelectionError;
+      fail(formatBridgeCommandError(error, command), accountSelectionFailed ? ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT : 1);
     })
     .then(async () => {
       if (process.argv[2] !== "finish") return;

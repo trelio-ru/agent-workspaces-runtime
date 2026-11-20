@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
-import { normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
+import { AGENT_SKILL_GUIDES_MINIMUM_HOST, normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
@@ -2819,6 +2819,7 @@ const maximumStableVersion = (...versions) => versions.reduce(
 export const resolveAgentSkillPackageMinimumHostVersion = ({
   capabilities = [],
   resourcePolicy = null,
+  hasInstructionGuides = false,
   packageSizeBytes,
   requestedMinimum,
   encrypted = false,
@@ -2830,6 +2831,7 @@ export const resolveAgentSkillPackageMinimumHostVersion = ({
   const effectiveMinimum = maximumStableVersion(
     requestedMinimum,
     resourcePolicy ? "3.31.0" : AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
+    hasInstructionGuides ? AGENT_SKILL_GUIDES_MINIMUM_HOST : AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
     capabilities.includes(ACCOUNT_CAPABILITY)
       ? maximumStableVersion(packageContractMinimum, ACCOUNT_MINIMUM_HOST_VERSION) : packageContractMinimum,
   );
@@ -3027,6 +3029,7 @@ const normalizePublicationExecution = async ({
       packageSizeBytes: prepared.parsedPackage.packageSizeBytes,
       capabilities: prepared.parsedPackage.capabilities,
       resourcePolicy: skillResourcePolicy(prepared.parsedPackage),
+      hasInstructionGuides: Boolean(prepared.parsedPackage.instructionGuidePaths),
       requestedMinimum,
       encrypted,
     });

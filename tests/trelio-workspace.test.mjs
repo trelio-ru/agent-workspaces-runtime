@@ -10001,9 +10001,20 @@ test("only the bridge can emit the account setup refusal exit for a signed skill
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(source, { recursive: true });
   const refusal = "Ошибка: ACCOUNT_SETUP_REQUIRED\n";
+  const providerMarker = path.join(root, "provider-started");
+  const firstGuide = "# Первый шаг\nDo not start the provider.";
+  const secondGuide = "# Second page\n";
+  await mkdir(path.join(source, "instruction-guides"));
+  await writeFile(path.join(source, "trelio-instruction-guides.json"), JSON.stringify({
+    schemaVersion: 1, files: ["instruction-guides/part-01.md", "instruction-guides/part-02.md"],
+  }));
+  await writeFile(path.join(source, "instruction-guides/part-01.md"), firstGuide);
+  await writeFile(path.join(source, "instruction-guides/part-02.md"), secondGuide);
   // The signed provider can print the exact refusal and use the same numeric
   // exit. Once dispatched, its exit must still be wrapped as a provider error.
   await writeFile(path.join(source, "main.mjs"), `
+    import { writeFileSync } from "node:fs";
+    writeFileSync(${JSON.stringify(providerMarker)}, "provider started");
     if (process.argv[2] === "__trelio_accounts_import") {
       console.log(JSON.stringify({schemaVersion: 1, accounts: []}));
     } else {
@@ -10065,12 +10076,37 @@ test("only the bridge can emit the account setup refusal exit for a signed skill
       "--release", resolution.releaseId, "--", ...argv],
     { cwd: root, env: environment, encoding: "utf8", timeout: 10_000 });
 
+  // A fresh local catalogue has no account and hasn't even run import. Both
+  // pages must come from the signed bytes through the real bridge entrypoint.
+  const page = JSON.parse((await runSkill(companyId, "guides")).stdout);
+  assert.deepEqual(page, {
+    schemaVersion: 1, part: 0, count: 2, nextGuidePart: 1,
+    path: "instruction-guides/part-01.md",
+    sha256: createHash("sha256").update(firstGuide).digest("hex"),
+    text: firstGuide,
+  });
+  const second = JSON.parse((await runSkill(companyId, "guides", "--part", "1")).stdout);
+  assert.equal(second.text, secondGuide);
+  assert.equal(second.nextGuidePart, null);
+  await assert.rejects(runSkill(companyId, "guides", "--part", "2"), /Invalid signed guide page request/u);
+  await assert.rejects(runSkill("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "guides"), error => {
+    assert.doesNotMatch(error.stdout, /Первый шаг/u);
+    return true;
+  });
+  assert.equal(await stat(providerMarker).catch(() => null), null);
+
   const initial = JSON.parse((await runSkill(sourceCompanyId, "account", "list")).stdout);
+  assert.ok(await stat(providerMarker));
   const saved = JSON.parse((await runSkill(sourceCompanyId, "account", "create", "--name", "Fixture",
     "--expected-revision", String(initial.revision))).stdout);
   await assert.rejects(runSkill(companyId, "write"), { code: ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, stderr: refusal, stdout: "" });
+  await assert.rejects(runSkill(companyId, "write", "--local-account", saved.id), {
+    code: ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, stderr: "Ошибка: ACCOUNT_NOT_BOUND\n", stdout: "",
+  });
   const list = JSON.parse((await runSkill(companyId, "account", "list")).stdout);
   assert.deepEqual(list.accounts, [{ id: saved.id, name: "Fixture", comment: "", bound: false, default: false }]);
+  await assert.rejects(runSkill(companyId, "account", "default", "--id", saved.id,
+    "--expected-revision", String(list.revision)), { code: 1, stderr: "Ошибка: ACCOUNT_NOT_BOUND\n", stdout: "" });
   await runSkill(companyId, "account", "bind", "--id", saved.id, "--expected-revision", String(list.revision));
   await assert.rejects(runSkill(companyId, "write"), (error) => {
     assert.equal(error.code, 1);

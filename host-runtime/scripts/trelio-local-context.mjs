@@ -19,7 +19,7 @@ import { isTelegramExactRead, parseProcessDiagnostic, ProcessDiagnosticError,
 import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import { secretBrowserPreflightTimeoutMessage } from "./trelio-secret-browser-native.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
-import { ACCOUNT_SETUP_REQUIRED, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "./trelio-skill-accounts.mjs";
+import { ACCOUNT_SELECTION_FAILURES, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "./trelio-skill-accounts.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { LOCAL_PROPOSAL_FILES, prepareLocalProposalFiles, bindLocalProposalFilePreviews } from "./trelio-proposal-local-files.mjs";
@@ -11815,15 +11815,16 @@ const executeTrelioWorkspaceActionOperation = async (
     };
   } catch (error) {
     if (signal?.aborted) throw error;
-    if (invocation.operation === "skill_run" && error?.code === ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT
-      && error.stderr === `Ошибка: ${ACCOUNT_SETUP_REQUIRED}\n`) {
+    const accountSelectionFailure = invocation.operation === "skill_run" && error?.code === ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT
+      ? ACCOUNT_SELECTION_FAILURES.find(code => error.stderr === `Ошибка: ${code}\n`) : undefined;
+    if (accountSelectionFailure) {
       // Only the bridge can issue this exit status. A provider printing the
       // same line still fails through the normal provider-exit wrapper.
       // Reuse the validated scope and replace all original provider arguments:
       // the follow-up only lists accounts and never replays the failed action.
       const accountError = new TrelioLocalContextError(
-        ACCOUNT_SETUP_REQUIRED,
-        "В этой компании не привязан локальный аккаунт навыка. Выполните nextCall и проверьте, есть ли подходящая запись. Если она уже привязана, используйте её. Для выбранной пользователем записи с bound=false используйте account bind --id UUID --expected-revision N из свежего списка. Предлагайте создать аккаунт, только если подходящей записи нет. Проверяйте вход через навык.",
+        accountSelectionFailure,
+        "Не выбран доступный локальный аккаунт навыка. Выполните nextCall и проверьте записи. Используйте выбранный пользователем, default или единственный привязанный аккаунт. При неоднозначности уточните выбор. Bind/create требуют полномочий пользователя и revision из свежего списка. Проверяйте вход через навык.",
         {
           nextCall: {
             server: "trelio-remote-skills",

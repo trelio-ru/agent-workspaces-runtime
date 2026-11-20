@@ -3517,6 +3517,19 @@ text/media/errors сохраняются, нормализация идемпо�
 Мультитула и Harness в бюджете native exact task reads и страниц. Local
 text-only reads измеряют собственный envelope.
 
+## Чтение объявленных гайдов навыка
+
+С host 3.35.0 пакет может объявить порядок страниц в подписанном
+`trelio-instruction-guides.json`. Общий parser проверяет полное объявление
+при валидации пакета. После обычного admission, signature, device consent
+и локальной E2EE-расшифровки `guides` отдаёт part 0, `guides --part N` —
+конкретную следующую страницу. Host берёт Markdown из проверенных байтов
+пакета по объявленному пути, без импорта аккаунтов, процесса провайдера,
+checkout grants или доступа к браузеру и credentials. Managed pass сохраняет
+свой signed command policy и штатное paging. Чтение гайда не даёт witness
+рабочей операции. Релизы без объявления продолжают использовать обычную
+команду навыка и её account gate.
+
 ## Личные аккаунты навыков
 
 Signed capability `local-accounts-v1` (host 3.7.0+) требует `local-session` и
@@ -3562,8 +3575,9 @@ Create принимает name/comment и optional UUID; update – exact UUID �
 не authority и не место для секретов или закрытого company context.
 
 Если у обычного `skill_run` без явного selector нет привязанного аккаунта,
-host останавливает команду до запуска рабочей операции. Bridge возвращает
-`ACCOUNT_SETUP_REQUIRED` с отдельным кодом завершения, а local MCP добавляет
+host останавливает команду до запуска рабочей операции. Bridge сохраняет
+`ACCOUNT_SETUP_REQUIRED`, `ACCOUNT_SELECTION_REQUIRED` и `ACCOUNT_NOT_BOUND`
+для отказов именно на выборе аккаунта, а local MCP добавляет
 `details.nextCall` с готовым `account list` для того же company/project,
 skill/release и runtime session. Выполни этот вызов перед предложением создать
 аккаунт или войти заново. Если пользователь выбрал подходящую запись с

@@ -337,6 +337,14 @@ test("local MCP offers account discovery only for the bridge's own setup refusal
   assert.deepEqual(JSON.parse(JSON.parse(listed.content[0].text).stdout).accounts, [{ name: "Existing", bound: false }]);
   assert.deepEqual(invocations, [parameters.arguments, ["account", "list"]]);
 
+  for (const code of ["ACCOUNT_SELECTION_REQUIRED", "ACCOUNT_NOT_BOUND"]) {
+    stderr = `Ошибка: ${code}\n`;
+    const { result } = await call(envelope);
+    const next = JSON.parse(result.content[0].text);
+    assert.equal(next.code, code);
+    assert.deepEqual(next.details.nextCall, { server: "trelio-remote-skills", tool, arguments: nextArgs });
+  }
+
   // Neither provider output under the normal wrapper exit nor another failure
   // text paired with the reserved exit may acquire a trusted continuation.
   for (const [code, line] of [[1, refusal], [ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT, "OTHER_FAILURE\n"]]) {
@@ -432,6 +440,10 @@ test("in-process bridge transport errors retain closed diagnostics without repla
 });
 
 test("large private packages raise their exact runtime host floor", () => {
+  for (const encrypted of [false, true]) assert.equal(resolveAgentSkillPackageMinimumHostVersion({
+    packageSizeBytes: 1, requestedMinimum: "1.4.0", hostRuntimeVersion: "3.34.23", encrypted,
+    hasInstructionGuides: true,
+  }), "3.35.0");
   for (const encrypted of [false, true]) assert.equal(resolveAgentSkillPackageMinimumHostVersion({
     packageSizeBytes: 1, requestedMinimum: "1.4.0", hostRuntimeVersion: "3.6.2", encrypted,
     capabilities: ["local-session"], resourcePolicy: { schemaVersion: 1, scope: "account" },

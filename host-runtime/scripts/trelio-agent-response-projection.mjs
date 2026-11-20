@@ -1,4 +1,5 @@
 // Generated portable Trelio response contract. Do not edit by hand.
+import { AGENT_SKILL_GUIDES_FILE } from "./trelio-agent-skill-budget.mjs";
 import { createHash } from "node:crypto";
 export const MCP_RESPONSE_PROJECTION_VERSION = 4;
 /**
@@ -1649,9 +1650,47 @@ const projectBatch01Read = (toolName, payload, args) => {
             return payload;
     }
 };
+/** Host-owned execution order is separate from published skill Markdown and
+ * personal preferences. Derive it only from admitted release metadata, never
+ * from keywords in the provider's prose or from a default summary response. */
+const withSkillRuntimeOnboarding = (payload) => {
+    const execution = record(payload.runtimeExecution);
+    const action = record(execution?.localAction);
+    const skill = record(payload.skill);
+    const manifest = record(record(skill?.runtimeRelease)?.manifest);
+    if (!execution || !action || !skill)
+        return payload;
+    const signedGuides = Array.isArray(manifest?.files) && manifest.files.some((file) => record(file)?.path === AGENT_SKILL_GUIDES_FILE);
+    const localAccounts = stringArray(manifest?.capabilities).includes("local-accounts-v1")
+        || stringArray(record(skill.runtimeRequirements)?.capabilities).includes("local-accounts-v1");
+    if (!signedGuides && !localAccounts)
+        return payload;
+    const managed = action.server === "trelio-assistant";
+    return {
+        ...payload,
+        runtimeExecution: {
+            ...execution,
+            onboarding: {
+                ...(signedGuides ? { signedGuides: {
+                        firstArguments: ["guides"],
+                        instruction: managed
+                            ? "Read all signed guide pages via the returned nextCall before provider work. No account is required for these pages."
+                            : "Read all signed guide pages before provider work. Start with guides; use guides --part N for nextGuidePart until null. No account is required for these pages.",
+                    } } : {}),
+                ...(localAccounts ? { localAccount: {
+                        listArguments: ["account", "list"],
+                        instruction: managed
+                            ? "Use the managed account inventory and owner-approved setup route. Select a bound account before provider commands, including legacy guides."
+                            : "Before the first provider command in this scope (including legacy guides), list local accounts unless the exact bound account is already confirmed. Use the explicit choice, default or sole bound account. Ask on ambiguity. Create or bind with user authority. A failed list or transport timeout proves no account state.",
+                    } } : {}),
+            },
+        },
+    };
+};
 /** Preserve the existing explicit full mode and every unclassified response. */
 export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
-    const projected = projectMcpAgentPayloadBase(toolName, value, rawArguments);
+    const skillPayload = toolName === "get_agent_skill" ? record(value) : null;
+    const projected = projectMcpAgentPayloadBase(toolName, skillPayload ? withSkillRuntimeOnboarding(skillPayload) : value, rawArguments);
     const payload = record(projected);
     const args = record(rawArguments);
     if (!payload || (MCP_RESPONSE_DETAIL_TOOLS.has(toolName) && args?.responseDetail === "full")) {

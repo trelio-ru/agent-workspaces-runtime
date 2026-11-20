@@ -174,3 +174,63 @@ export const normalizeAgentSkillRoutingSummary = (value) => {
   }
   return normalized;
 };
+
+// Shared by publication validators and the local signed host. The marker is
+// itself an ordinary hashed package file, so existing package formats and
+// encrypted envelopes need no new fields.
+export const AGENT_SKILL_GUIDES_FILE = "trelio-instruction-guides.json";
+export const AGENT_SKILL_GUIDES_MINIMUM_HOST = "3.35.0";
+export const AGENT_SKILL_MAX_GUIDE_PARTS = 64;
+export const AGENT_SKILL_MAX_GUIDE_BYTES = 16 * 1024;
+
+const guidePathPattern = /^(?:(?:scripts\/)?instruction-guides\/part-[0-9]{2}\.md|references\/[a-zA-Z0-9_-]{1,96}\.md)$/u;
+const invalid = () => new Error("Invalid signed skill instruction guides declaration.");
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+export const decodeSkillInstructionGuide = (bytes) => strictUtf8.decode(bytes);
+
+/**
+ * Select only declared, portable Markdown files in the immutable package.
+ * readBytes reads an already verified package member, never a filesystem path
+ * or an output from a provider process. Encrypted callers can clear their
+ * temporary bytes after the synchronous reader returns.
+ * @template {{path: string, mode: number}} File
+ * @param {readonly File[]} files
+ * @param {(file: File) => Uint8Array} readBytes
+ * @returns {string[] | null}
+ */
+export const readSignedSkillInstructionGuides = (files, readBytes) => {
+  const marker = files.find(file => file.path === AGENT_SKILL_GUIDES_FILE);
+  if (!marker) return null;
+  const declarationBytes = readBytes(marker);
+  if (marker.mode !== 0o644 || declarationBytes.byteLength > 8 * 1024) throw invalid();
+  let declaration;
+  try {
+    declaration = JSON.parse(strictUtf8.decode(declarationBytes));
+  } catch {
+    throw invalid();
+  }
+  if (!declaration || typeof declaration !== "object" || Array.isArray(declaration)
+    || Object.keys(declaration).length !== 2 || declaration.schemaVersion !== 1
+    || !Array.isArray(declaration.files) || declaration.files.length < 1
+    || declaration.files.length > AGENT_SKILL_MAX_GUIDE_PARTS
+    || new Set(declaration.files).size !== declaration.files.length) throw invalid();
+
+  const byPath = new Map(files.map(file => [file.path, file]));
+  return declaration.files.map(relativePath => {
+    if (typeof relativePath !== "string" || !guidePathPattern.test(relativePath)) throw invalid();
+    const file = byPath.get(relativePath);
+    if (!file || file.mode !== 0o644) throw invalid();
+    const bytes = readBytes(file);
+    if (!bytes.byteLength || bytes.byteLength > AGENT_SKILL_MAX_GUIDE_BYTES) throw invalid();
+    // Control characters could inflate the paged JSON beyond the MCP output
+    // bound. Ordinary Markdown whitespace (tab, CR and LF) stays byte-exact.
+    if (bytes.some(byte => byte < 32 && byte !== 9 && byte !== 10 && byte !== 13)) throw invalid();
+    try {
+      strictUtf8.decode(bytes);
+    } catch {
+      throw invalid();
+    }
+    return relativePath;
+  });
+};

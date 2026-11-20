@@ -15,6 +15,9 @@ export const ACCOUNT_SETUP_REQUIRED = 'ACCOUNT_SETUP_REQUIRED';
 // Reserved for the bridge's own pre-dispatch refusal. Provider exits are
 // wrapped as process diagnostics and never become this outer exit status.
 export const ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT = 78;
+export const ACCOUNT_SELECTION_FAILURES = Object.freeze([
+  ACCOUNT_SETUP_REQUIRED, "ACCOUNT_SELECTION_REQUIRED", "ACCOUNT_NOT_BOUND",
+]);
 const MAX_BYTES = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -25,6 +28,11 @@ const requireThat = (condition, code) => { if (!condition) throw new SkillAccoun
 export class SkillAccountError extends Error {
   constructor(code) { super(code); this.name = 'SkillAccountError'; this.code = code; }
 }
+
+// Only a refusal at provider account selection can trigger the ordinary
+// read-only discovery continuation. Catalogue edits and import failures have
+// their own recovery and may never be mistaken for a rejected provider call.
+export class SkillAccountSelectionError extends SkillAccountError {}
 
 const ACCOUNT_COMMANDS = {
   list: 'account list',
@@ -498,8 +506,9 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
       await io.ensureDirectory(root);
       const state = await read(), current = binding(state);
       const selected = id || current.defaultAccountId || (current.accountIds.length === 1 ? current.accountIds[0] : null);
-      requireThat(selected, current.accountIds.length ? 'ACCOUNT_SELECTION_REQUIRED' : ACCOUNT_SETUP_REQUIRED);
-      requireThat(current.accountIds.includes(selected), 'ACCOUNT_NOT_BOUND');
+      if (!selected) throw new SkillAccountSelectionError(current.accountIds.length
+        ? "ACCOUNT_SELECTION_REQUIRED" : ACCOUNT_SETUP_REQUIRED);
+      if (!current.accountIds.includes(selected)) throw new SkillAccountSelectionError("ACCOUNT_NOT_BOUND");
       const account = find(state, selected);
       // Internal native-intent receipts never enter provider environment or
       // ordinary account list output. Keep the original public account shape.
