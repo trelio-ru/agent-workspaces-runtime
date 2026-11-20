@@ -21,6 +21,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { applyTrelioFolderOnboarding, prepareTrelioFolderOnboarding } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
 import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
 
 const TEST_AGENT_RULES_MARKDOWN = "# Platform rules\n\nUse exact typed actions.\n";
@@ -2574,19 +2575,16 @@ test("context sync retains object-cache references only for current pinned revis
   ], currentContexts), [currentObject]);
 });
 
-test("bridge open keeps a large parent context pointer-first and downloads zero object bytes", {
-  timeout: 15_000,
-}, async () => {
+const verifyOpenWithLazyParentContext = async ({ externalStorage }) => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-lazy-open-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
+  const environment = workspaceFixtureEnvironment(homeDirectory);
   const writableWorkspaceId = "44444444-4444-4444-8444-444444444444";
   const workingFolderDirectory = path.join(temporaryDirectory, "company-project");
-  const sessionDirectory = path.join(workingFolderDirectory, "session");
-  const rootDirectory = path.join(
-    workingFolderDirectory,
-    "workspaces",
-    writableWorkspaceId,
-  );
+  const sessionDirectory = externalStorage ? workingFolderDirectory : path.join(workingFolderDirectory, "session");
+  const defaultRoot = path.join(homeDirectory, "Trelio Workspaces", writableWorkspaceId);
+  const folderLocalRoot = path.join(workingFolderDirectory, "workspaces", writableWorkspaceId);
+  const rootDirectory = externalStorage ? defaultRoot : folderLocalRoot;
   const platformRulesRevisionId = "88888888-8888-4888-8888-888888888888";
   const platformRulesMarkdown = [
     "# Платформенные правила Agent Workspaces",
@@ -2773,18 +2771,45 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
   try {
     await mkdir(homeDirectory, { recursive: true });
     await mkdir(sessionDirectory, { recursive: true });
-    await writeFile(
-      path.join(workingFolderDirectory, "AGENTS.md"),
-      [
+    const instructions = path.join(workingFolderDirectory, "AGENTS.md");
+    let gitBefore;
+    const readGitFacts = async () => Promise.all([
+      runGit(workingFolderDirectory, ["for-each-ref"]).then(result => result.stdout),
+      runGit(workingFolderDirectory, ["cat-file", "--batch-all-objects", "--batch-check"]).then(result => result.stdout),
+      runGit(workingFolderDirectory, ["ls-files", "--stage", "-z"]).then(result => result.stdout),
+    ]);
+    if (externalStorage) {
+      await runGit(workingFolderDirectory, ["init"]);
+      const setup = await prepareTrelioFolderOnboarding({
+        folderPath: workingFolderDirectory,
+        company: { name: testCompany.name, slug: testCompany.slug },
+      });
+      await applyTrelioFolderOnboarding(setup.plan.apply.arguments.parameters);
+      const index = path.join(workingFolderDirectory, ".git", "fixture-index");
+      const snapshot = async (position) => {
+        const options = { env: { ...process.env, GIT_INDEX_FILE: index } };
+        await runGit(workingFolderDirectory, ["add", "--", "AGENTS.md", ".gitignore", "CLAUDE.md"], options);
+        const { stdout } = await runGit(workingFolderDirectory, ["write-tree"], options);
+        const ref = `refs/codex/turn-diffs/captures/${position}/123e4567-e89b-12d3-a456-426614174000/head`;
+        await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", ref, stdout.trim()]);
+        return ref;
+      };
+      const oldRef = await snapshot(1);
+      await writeFile(instructions, "# Personal rules\n\n" + await readFile(instructions, "utf8"));
+      await snapshot(2);
+      await rm(index);
+      await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", "-d", oldRef]);
+      gitBefore = await readGitFacts();
+    } else {
+      await writeFile(instructions, [
         "<!-- trelio-agent-workspaces:start -->",
         "## Trelio",
         "",
         "Папка привязана к компании «Bridge test company» (`bridge-test-company`).",
         "<!-- trelio-agent-workspaces:end -->",
         "",
-      ].join("\n"),
-      "utf8",
-    );
+      ].join("\n"), "utf8");
+    }
     await new Promise((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve);
@@ -2792,11 +2817,9 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
     const serverAddress = server.address();
     assert.ok(serverAddress && typeof serverAddress === "object");
     const origin = `http://127.0.0.1:${serverAddress.port}`;
-    await writeTestCredential(homeDirectory, origin);
+    await writeTestCredential(homeDirectory, origin, environment);
 
-    const opened = await execFileAsync(
-      process.execPath,
-      [
+    const open = (cwd) => execFileAsync(process.execPath, [
         bridgePath,
         "open",
         "--origin",
@@ -2807,27 +2830,38 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
       {
         // The command may run from a descendant shell. The nearest managed
         // onboarding binding, not the arbitrary cwd, owns `workspaces/`.
-        cwd: sessionDirectory,
+        cwd,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: homeDirectory },
+        env: environment,
       },
     );
+    if (externalStorage) {
+      // HOME is a sibling of the Codex folder, but may itself be a worktree.
+      // Refuse this destination before claiming a Run or writing the root.
+      await runGit(homeDirectory, ["init"]);
+      await assert.rejects(open(sessionDirectory), /каталог для рабочих копий Трелио находится внутри Git-репозитория/iu);
+      assert.ok(!seenUrls.some(url => url.endsWith("/runs")));
+      await assert.rejects(stat(path.dirname(defaultRoot)), { code: "ENOENT" });
+      await rm(path.join(homeDirectory, ".git"), { recursive: true });
+    }
+    const opened = await open(sessionDirectory);
 
     assert.equal(
       await realpath(opened.stdout.trim()),
       await realpath(path.join(rootDirectory, "workspace")),
     );
-    await assert.rejects(
-      stat(path.join(homeDirectory, "Trelio Workspaces", writableWorkspaceId)),
-      { code: "ENOENT" },
-      "a new onboarded Workspace must not fall back to the legacy global root",
-    );
+    if (externalStorage) {
+      await assert.rejects(stat(path.dirname(folderLocalRoot)), { code: "ENOENT" });
+      assert.deepEqual(await readGitFacts(), gitBefore);
+    } else {
+      await assert.rejects(stat(defaultRoot), { code: "ENOENT" });
+    }
     if (process.platform !== "win32") {
       assert.equal(
         (await stat(rootDirectory)).mode & 0o777,
         0o700,
-        "a folder-local root containing decrypted bytes stays owner-only",
+        "a newly materialized root containing decrypted bytes stays owner-only",
       );
     }
     assert.equal(
@@ -2871,7 +2905,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
       AGENT_WORKSPACE_WORKLOG_FORMAT_MARKDOWN,
     );
     assert.equal(
-      contextIndex.worklogFormat.path,
+      await realpath(contextIndex.worklogFormat.path),
       await realpath(path.join(rootDirectory, "context", "worklog-format.md")),
     );
     assert.match(AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN, /plan_my_agent_profile_update/u);
@@ -2912,30 +2946,14 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
       0,
     );
     await assert.rejects(
-      execFileAsync(
-        process.execPath,
-        [
-          bridgePath,
-          "open",
-          "--origin",
-          origin,
-          "--workspace",
-          writableWorkspaceId,
-        ],
-        {
-          cwd: temporaryDirectory,
-          encoding: "utf8",
-          timeout: 10_000,
-          env: { ...process.env, HOME: homeDirectory },
-        },
-      ),
+      open(temporaryDirectory),
       /незавершённый Agent Run/u,
-      "the private registry must reuse the first folder-local root outside its binding cwd",
+      "the bridge must reuse the first root outside its binding cwd",
     );
     assert.equal(
       compatibilityRequests,
-      3,
-      "the first open confirms a fresh SHA-256 and registered reuse needs one current preflight",
+      externalStorage ? 4 : 3,
+      "fresh compatibility is required for each open, including a rejected local destination",
     );
     assert.ifError(serverError);
   } finally {
@@ -2945,7 +2963,15 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
     }
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
-});
+};
+
+test("bridge open keeps a large parent context pointer-first and downloads zero object bytes", {
+  timeout: 15_000,
+}, () => verifyOpenWithLazyParentContext({ externalStorage: false }));
+
+test("bridge open materializes a new Workspace outside Codex Git after a snapshot is pruned", {
+  timeout: 15_000,
+}, () => verifyOpenWithLazyParentContext({ externalStorage: true }));
 
 test("open completes after an unrelated retention read stalls, without another claim", {
   timeout: 30_000,

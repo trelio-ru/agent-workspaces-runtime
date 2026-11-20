@@ -732,12 +732,14 @@ const inspectServiceGit = async ({
   // that one content-free object only when the complete inventory confirms
   // both its identity and size. Keep it out of the reachability set so this
   // exception cannot authorize an entry in a snapshot at a forbidden path.
+  // Return the orphan refusal separately so a caller can preserve the binding
+  // with external storage. Every other Git refusal still throws immediately.
   const orphanTree = objects.find(({ objectId, type, size }) => (
     type === "tree" && !reachable.has(objectId)
     && !(size === 0 && EMPTY_TREE_IDS.has(objectId))
   ));
   if (orphanTree) {
-    throw new FolderGitHistoryError(
+    return new FolderGitHistoryError(
       "orphan_tree",
       "The selected repository contains a Git tree unreachable from the validated Codex turn-diff refs.",
       "tree", orphanTree.objectId,
@@ -745,12 +747,13 @@ const inspectServiceGit = async ({
   }
   const orphanBlob = objects.find(({ objectId, type }) => type === "blob" && !reachable.has(objectId));
   if (orphanBlob) {
-    throw new FolderGitHistoryError(
+    return new FolderGitHistoryError(
       "orphan_blob",
       "The selected repository contains a Git blob without a validated path in the Codex turn-diff refs.",
       "blob", orphanBlob.objectId,
     );
   }
+  return null;
 };
 
 const inspectCodexMetadataDirectory = async (filesystem, rootPath, directory) => {
@@ -841,6 +844,8 @@ const inspectFolder = async ({
   filesystem = fs,
   execFileCommand = execFileAsync,
   gitResolver = resolveGitExecutable,
+  allowExternalWorkspaceStorage = false,
+  requireServiceGitIsolation = false,
 }) => {
   const requestedPath = normalizeAbsoluteFolder(folderPath);
   let rootStat;
@@ -889,6 +894,7 @@ const inspectFolder = async ({
     execFileCommand,
   );
   let serviceGit = false;
+  let orphanError = null;
   if (topLevel.ok) {
     const reportedPath = readGitPathOutput(topLevel.stdout);
     const topLevelPath = reportedPath
@@ -900,12 +906,13 @@ const inspectFolder = async ({
       );
     }
     serviceGit = true;
-    await inspectServiceGit({
+    orphanError = await inspectServiceGit({
       rootPath,
       gitPath: git.gitPath,
       filesystem,
       execFileCommand,
     });
+    if (orphanError && !allowExternalWorkspaceStorage) throw orphanError;
   } else {
     const gitDir = await runGit(git.gitPath, ["rev-parse", "--git-dir"], rootPath, execFileCommand);
     if (gitDir.ok) {
@@ -934,10 +941,16 @@ const inspectFolder = async ({
   // A pre-existing bridge directory is accepted only for a binding previously
   // activated by this runtime. We intentionally inspect only the root markers:
   // Workspace contents remain protected and outside onboarding classification.
-  if (serviceGit && rootEntries.hasWorkspacesDirectory) {
+  if (serviceGit && (rootEntries.hasWorkspacesDirectory || orphanError)) {
     const activeInstruction = override.exists
       ? override
       : await inspectOptionalRegularFile(filesystem, path.join(rootPath, "AGENTS.md"));
+    // An unreachable object never becomes a trusted Git object. Only the
+    // effective existing binding can keep working in external storage, after
+    // the repo topology, live refs, index and root entries have passed the
+    // same checks. Protect any older folder-local copies with the usual ignore
+    // proof even when all new copies will be placed elsewhere.
+    if (orphanError && !readManagedBinding(activeInstruction.text)) throw orphanError;
     const ignore = await inspectOptionalRegularFile(filesystem, path.join(rootPath, ".gitignore"));
     if (
       !exactManagedBlockPresent(activeInstruction.text, MANAGED_START, MANAGED_END)
@@ -949,6 +962,9 @@ const inspectFolder = async ({
       );
     }
   }
+  if (serviceGit && (orphanError || requireServiceGitIsolation)) {
+    await verifyServiceGitIgnore({ rootPath, gitPath: git.gitPath, execFileCommand });
+  }
   return {
     schemaVersion: TRELIO_FOLDER_ONBOARDING_SCHEMA_VERSION,
     status: override.exists ? "instruction_target_required" : "ready",
@@ -956,6 +972,7 @@ const inspectFolder = async ({
       path: rootPath,
       kind: serviceGit ? "service_git" : "ordinary",
       serviceGitPreserved: serviceGit,
+      ...(orphanError ? { workspaceStorage: "external" } : {}),
     },
     instructionTarget: override.exists ? null : "AGENTS.md",
     requiredDecision: override.exists ? {
@@ -965,6 +982,22 @@ const inspectFolder = async ({
     } : null,
     git: { executableReady: true, processPathReady: git.processPathReady === true },
   };
+};
+
+// Only the new implicit Workspace placement calls this. A normal working
+// folder does not start Git, and an existing local Run is resolved before this
+// check. Use the same isolated Git classifier as diagnostics and onboarding.
+export const needsExternalWorkspaceStorage = async (folderPath) => {
+  try {
+    await fs.lstat(path.join(folderPath, ".git"));
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  const { folder } = await inspectFolder({
+    folderPath, allowExternalWorkspaceStorage: true, requireServiceGitIsolation: true,
+  });
+  return folder.workspaceStorage === "external";
 };
 
 const buildClaudeText = (currentText, instructionTarget, preserveBytes = false) => {
@@ -1027,11 +1060,13 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
   if (!isTrelioFolderOnboardingClient(clientKind)) {
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Folder binding requires a supported exact client.");
   }
+  const refreshOnly = rawInput.userExplicitlyRequestedInstructionRefresh === true;
   const inspection = await inspectFolder({
     folderPath: rawInput.folderPath,
     filesystem,
     execFileCommand: dependencies.execFileCommand,
     gitResolver: dependencies.gitResolver,
+    allowExternalWorkspaceStorage: clientKind === "codex",
   });
   const binding = normalizeBinding(rawInput);
   if (rawInput.userExplicitlyRequestedInstructionRefresh === true && !binding) {
@@ -1065,16 +1100,16 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     filesystem,
     path.join(rootPath, instructionTarget),
   );
-  const refreshOnly = rawInput.userExplicitlyRequestedInstructionRefresh === true;
-  if (refreshOnly) {
-    // A verified existing binding authorizes replacing only its managed block.
-    // Unrelated root materials do not change that scope and are never read,
-    // moved or deleted. Git isolation, safe files, same-scope and CAS guards
-    // below remain mandatory; an unbound folder still needs dedicated setup.
+  const external = inspection.folder.workspaceStorage === "external";
+  const managedBlockOnly = refreshOnly || external;
+  if (managedBlockOnly) {
+    // Refresh and external-storage reconnect only update the existing managed
+    // block. Neither can establish another scope or rewrite the Git ignore
+    // rule. A fresh binding still requires completely classified Git.
     if (instructionSnapshot.exists && sha256(Buffer.from(instructionSnapshot.text, "utf8")) !== instructionSnapshot.sha256) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE", "Managed refresh requires a valid UTF-8 instruction file.");
     }
-    if (!isTrelioFolderOnboardingClient(rawInput.instructionRefreshClientKind)) {
+    if (refreshOnly && !isTrelioFolderOnboardingClient(rawInput.instructionRefreshClientKind)) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Instruction refresh requires a supported exact client.");
     }
     const existing = readManagedBinding(instructionSnapshot.text);
@@ -1082,7 +1117,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
       || (existing.project?.slug ?? null) !== (rawInput.project?.slug ?? null)) {
       throw new TrelioFolderOnboardingError(
         "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH",
-        "Diagnostics cannot create a binding or change its company/project scope.",
+        "Managed refresh or external storage reconnect cannot create a binding or change its company/project scope.",
       );
     }
   }
@@ -1098,19 +1133,19 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     ? await inspectOptionalRegularFile(filesystem, path.join(rootPath, ".gitignore"))
     : null;
   const managedBlock = buildManagedBindingBlock(binding);
-  const instructionText = refreshOnly ? replaceExistingManagedBlock(instructionSnapshot.text, managedBlock) : replaceManagedBlockAtEnd(
+  const instructionText = managedBlockOnly ? replaceExistingManagedBlock(instructionSnapshot.text, managedBlock) : replaceManagedBlockAtEnd(
     instructionSnapshot.text,
     managedBlock,
     MANAGED_START,
     MANAGED_END,
   );
-  const managesClaudeImport = refreshOnly ? clientKind === "claude-code"
-    : ["codex", "claude-code"].includes(clientKind);
+  const managesClaudeImport = !external && (refreshOnly ? clientKind === "claude-code"
+    : ["codex", "claude-code"].includes(clientKind));
   const claudeText = !managesClaudeImport
     ? claudeSnapshot.text
     : buildClaudeText(claudeSnapshot.text, instructionTarget, refreshOnly);
   const ignoreText = ignoreSnapshot
-    ? (refreshOnly ? ignoreSnapshot.text : replaceManagedBlockAtEnd(ignoreSnapshot.text, IGNORE_BLOCK, IGNORE_START, IGNORE_END))
+    ? (managedBlockOnly ? ignoreSnapshot.text : replaceManagedBlockAtEnd(ignoreSnapshot.text, IGNORE_BLOCK, IGNORE_START, IGNORE_END))
     : null;
   const changes = [
     buildFileChange(instructionTarget, instructionSnapshot, instructionText),
@@ -1122,6 +1157,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     schemaVersion: TRELIO_FOLDER_ONBOARDING_SCHEMA_VERSION,
     folderPath: rootPath,
     folderKind: inspection.folder.kind,
+    ...(inspection.folder.workspaceStorage ? { workspaceStorage: inspection.folder.workspaceStorage } : {}),
     instructionTarget,
     company: binding.company,
     project: binding.project,
@@ -1189,12 +1225,12 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Folder diagnostics accepts only the client-selected folderPath.");
   }
   const filesystem = dependencies.filesystem ?? fs;
-  const inspection = await inspectFolder({ folderPath: rawInput.folderPath, ...dependencies });
-  // Git isolation is a folder invariant shared by every supported client.
-  if (inspection.folder.serviceGitPreserved) {
-    const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
-    await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
-  }
+  const inspection = await inspectFolder({
+    folderPath: rawInput.folderPath,
+    ...dependencies,
+    allowExternalWorkspaceStorage: clientKind === "codex",
+    requireServiceGitIsolation: true,
+  });
   if (["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) && inspection.status === "instruction_target_required") {
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "This client loads AGENTS.md; an existing override needs an explicit target decision.");
   }
@@ -1213,7 +1249,7 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
   }, dependencies);
   return {
     status: state.plan.status === "already_configured" ? "ready" : "refresh_available",
-    folder: inspection.folder, instructionTarget,
+    folder: state.inspection.folder, instructionTarget,
     scope: { companySlug: binding.company.slug, ...(binding.project ? { projectSlug: binding.project.slug } : {}) },
     instructions: { status: state.plan.status === "already_configured" ? "current" : "outdated", templateSha256: sha256(state.plan.preview.managedBlock) },
     refresh: state.plan.apply ? {
@@ -1272,11 +1308,10 @@ const restoreWrittenFile = async (filesystem, rootPath, relativePath, fileState)
   return true;
 };
 
-const verifyServiceGitIsolation = async ({
+const verifyServiceGitIgnore = async ({
   rootPath,
   gitPath,
-  filesystem,
-  execFileCommand,
+  execFileCommand = execFileAsync,
 }) => {
   const ignored = await runGit(
     gitPath,
@@ -1314,7 +1349,6 @@ const verifyServiceGitIsolation = async ({
       "The service Git index already contains Workspace paths.",
     );
   }
-  await inspectServiceGit({ rootPath, gitPath, filesystem, execFileCommand });
 };
 
 export const applyTrelioFolderOnboarding = async (rawInput, dependencies = {}) => {
@@ -1372,12 +1406,22 @@ export const applyTrelioFolderOnboarding = async (rawInput, dependencies = {}) =
           "Standalone Git became unavailable before onboarding apply.",
         );
       }
-      await verifyServiceGitIsolation({
+      await verifyServiceGitIgnore({
         rootPath,
         gitPath: git.gitPath,
-        filesystem,
         execFileCommand: dependencies.execFileCommand,
       });
+      const orphanError = await inspectServiceGit({
+        rootPath, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand,
+      });
+      const external = state.inspection.folder.workspaceStorage === "external";
+      if (orphanError && !external) throw orphanError;
+      if (!orphanError && external) {
+        throw new TrelioFolderOnboardingError(
+          "TRELIO_FOLDER_ONBOARDING_PLAN_STALE",
+          "Git state changed while applying the reviewed external Workspace storage plan.",
+        );
+      }
     }
     for (const relativePath of [state.plan.instructionTarget, "CLAUDE.md"]) {
       const fileState = state.files[relativePath];
@@ -1388,7 +1432,8 @@ export const applyTrelioFolderOnboarding = async (rawInput, dependencies = {}) =
     }
 
     verified = await buildPlanState(rawInput, dependencies);
-    if (verified.plan?.status !== "already_configured") {
+    if (verified.plan?.status !== "already_configured"
+      || verified.inspection.folder.workspaceStorage !== state.inspection.folder.workspaceStorage) {
       throw new TrelioFolderOnboardingError(
         "TRELIO_FOLDER_ONBOARDING_VERIFY_FAILED",
         "Folder onboarding files did not match the reviewed plan after apply.",

@@ -99,6 +99,7 @@ import {
   GitPrerequisiteError,
   verifyGitRuntime,
 } from "./trelio-git.mjs";
+import { needsExternalWorkspaceStorage } from "./trelio-folder-onboarding.mjs";
 import {
   SecretBrowserFillError,
 } from "./trelio-secret-browser.mjs";
@@ -13610,12 +13611,14 @@ const resolveWorkspaceRootDirectory = async ({
 
   const workingFolderRoot = await findTrelioWorkingFolderRoot(startDirectory);
   if (workingFolderRoot) {
+    const folderLocalRoot = path.join(workingFolderRoot, WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME, workspaceId);
+    // Preserve even an unregistered folder-local copy for the normal recovery
+    // checks. An orphan in Codex Git only changes where a new copy is created.
+    if (!await pathEntryExists(folderLocalRoot) && await needsExternalWorkspaceStorage(workingFolderRoot)) {
+      return { rootDirectory: legacyPersistentRoot, layout: "external-storage", workingFolderRoot };
+    }
     return {
-      rootDirectory: path.join(
-        workingFolderRoot,
-        WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME,
-        workspaceId,
-      ),
+      rootDirectory: folderLocalRoot,
       layout: "working-folder",
       workingFolderRoot,
     };
@@ -13629,6 +13632,25 @@ const resolveWorkspaceRootDirectory = async ({
     layout: "legacy-default",
     workingFolderRoot: null,
   };
+};
+
+const ensureExternalWorkspaceStorageDirectory = async (workingFolderRoot) => {
+  const folderRoot = await fs.realpath(workingFolderRoot);
+  const homeRoot = await fs.realpath(path.dirname(LEGACY_DEFAULT_WORKSPACES_DIRECTORY));
+  const storageDirectory = path.join(homeRoot, path.basename(LEGACY_DEFAULT_WORKSPACES_DIRECTORY));
+  if (sameLocalPath(folderRoot, storageDirectory) || isLocalPathInside(folderRoot, storageDirectory)) {
+    throw new Error("Каталог для рабочих копий Трелио находится внутри привязанной Git-папки.");
+  }
+  // Check the physical home path as well as the destination. The default can
+  // itself be inside another repo or be a symlink back to the Codex folder.
+  for (let directory = storageDirectory;; directory = path.dirname(directory)) {
+    if (await pathEntryExists(path.join(directory, ".git"))) {
+      throw new Error("Каталог для рабочих копий Трелио находится внутри Git-репозитория.");
+    }
+    if (path.dirname(directory) === directory) break;
+  }
+  await ensurePrivateDirectory(storageDirectory);
+  return storageDirectory;
 };
 
 const ensureWorkingFolderWorkspacesDirectory = async (workingFolderRoot) => {
@@ -14237,6 +14259,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   // до появления Run, который bridge затем не сможет материализовать.
   if (rootResolution.layout === "working-folder") {
     await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
+  } else if (rootResolution.layout === "external-storage") {
+    await ensureExternalWorkspaceStorageDirectory(rootResolution.workingFolderRoot);
   }
   let rootDirectoryExists = false;
 
@@ -14865,10 +14889,21 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   }
 
   if (!rootDirectoryExists) {
-    if (rootResolution.layout === "working-folder" || parallelOpen) {
+    const externalStorage = rootResolution.layout === "external-storage";
+    if (externalStorage) {
+      const storageDirectory = await ensureExternalWorkspaceStorageDirectory(rootResolution.workingFolderRoot);
+      // Preserve the usual default path spelling for metadata and later
+      // lookup (for example /var vs /private/var). Check its physical parent
+      // before writing so an alias cannot redirect the new root into Git.
+      if (!sameLocalPath(storageDirectory, await fs.realpath(path.dirname(rootDirectory)))) {
+        throw new Error("Каталог для рабочих копий Трелио изменился во время открытия папки.");
+      }
+    } else if (rootResolution.layout === "working-folder" && !parallelOpen) {
       // Повторная проверка непосредственно перед mkdir закрывает обычную гонку
       // между network preflight и локальной материализацией.
-      if (!parallelOpen) await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
+      await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
+    }
+    if (externalStorage || rootResolution.layout === "working-folder" || parallelOpen) {
       // Parent уже проверен, поэтому exact non-recursive mkdir не последует по
       // внезапно появившемуся root-symlink и не присвоит существующий каталог.
       await fs.mkdir(rootDirectory, { mode: 0o700 });

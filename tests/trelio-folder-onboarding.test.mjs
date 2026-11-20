@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   TrelioFolderOnboardingError,
   applyTrelioFolderOnboarding,
+  needsExternalWorkspaceStorage,
   prepareTrelioFolderOnboarding,
   prepareTrelioFolderDiagnostic,
   projectFolderGitHistoryBlocker,
@@ -315,6 +316,68 @@ test("diagnostic service Git requires existing isolation and does not repair the
     { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
   assert.equal(await fs.readFile(path.join(root, ".gitignore"), "utf8"), "# Missing isolation\n");
   assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), agentsBefore);
+});
+
+test("a pruned Codex snapshot keeps an existing binding usable only with external Workspace storage", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const input = { folderPath: root, ...binding };
+  const prepared = await prepareTrelioFolderOnboarding(input);
+  await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+  const snapshot = async (position) => {
+    const ref = `refs/codex/turn-diffs/captures/${position}/123e4567-e89b-12d3-a456-426614174000/head`;
+    const tree = await writeTurnDiffTree(root, ".gitignore", "AGENTS.md", "CLAUDE.md");
+    await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, tree);
+    return ref;
+  };
+  const oldRef = await snapshot(1);
+  await makeTemplateOutdated(root);
+  const personalRule = "\nPersonal rule after managed instructions.\n";
+  const instructionPath = path.join(root, "AGENTS.md");
+  await fs.appendFile(instructionPath, personalRule);
+  await snapshot(2);
+  assert.equal(await needsExternalWorkspaceStorage(root), false);
+  await runGit(root, "-c", "core.longpaths=true", "update-ref", "-d", oldRef);
+  assert.equal(await needsExternalWorkspaceStorage(root), true);
+
+  const refsBefore = await runGit(root, "for-each-ref");
+  const objectsBefore = await runGit(root, "cat-file", "--batch-all-objects", "--batch-check");
+  const ignorePath = path.join(root, ".gitignore");
+  const ignoreBefore = await fs.readFile(ignorePath);
+  const diagnosed = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(diagnosed.status, "refresh_available");
+  assert.equal(diagnosed.folder.workspaceStorage, "external");
+  assert.deepEqual(diagnosed.scope, { companySlug: "test-company", projectSlug: "work-project" });
+  assert.deepEqual(diagnosed.refresh.changes.map(change => change.path), ["AGENTS.md"]);
+  const refresh = diagnosed.refresh.action.arguments.parameters;
+  assert.equal((await applyTrelioFolderOnboarding(refresh)).folder.workspaceStorage, "external");
+  assert.ok((await fs.readFile(instructionPath, "utf8")).endsWith(personalRule));
+  const current = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(current.status, "ready");
+  assert.equal(current.folder.workspaceStorage, "external");
+  assert.equal(current.refresh, null);
+  assert.equal((await runGit(root, "for-each-ref")).stdout, refsBefore.stdout);
+  assert.equal((await runGit(root, "cat-file", "--batch-all-objects", "--batch-check")).stdout, objectsBefore.stdout);
+  assert.deepEqual(await fs.readFile(ignorePath), ignoreBefore);
+  const reconnect = await prepareTrelioFolderOnboarding(input);
+  assert.equal(reconnect.plan.status, "already_configured");
+  assert.equal(reconnect.plan.apply, null);
+  await assert.rejects(prepareTrelioFolderOnboarding({
+    folderPath: root, company: { name: "Other company", slug: "other" },
+  }), { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "claude-code"),
+    { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
+
+  // The exact old ignore block alone is insufficient if a later negation
+  // includes a Workspace. An index entry also retains its independent fence.
+  await fs.appendFile(ignorePath, "\n!/workspaces/\n");
+  await assert.rejects(needsExternalWorkspaceStorage(root), { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
+  await fs.writeFile(ignorePath, ignoreBefore);
+  await runGit(root, "add", "--", "AGENTS.md");
+  await assert.rejects(needsExternalWorkspaceStorage(root), (error) => {
+    assert.equal(projectFolderGitHistoryBlocker(error)?.details.gitBlocker.reason, "remotes_or_index");
+    return true;
+  });
 });
 
 test("Cursor diagnostics require a real binding and preserve service Git isolation", async () => {
