@@ -932,25 +932,30 @@ const inspectFolder = async ({
       if (error?.code !== "ENOENT") throw error;
     }
   }
-  const rootEntries = await inspectRootEntries({ filesystem, rootPath, serviceGit });
-
   const override = await inspectOptionalRegularFile(
     filesystem,
     path.join(rootPath, "AGENTS.override.md"),
   );
+  const readActiveInstruction = async () => override.exists
+    ? override
+    : inspectOptionalRegularFile(filesystem, path.join(rootPath, "AGENTS.md"));
+  const orphanInstruction = orphanError ? await readActiveInstruction() : null;
+  // Only a current binding can use external storage. For an unbound folder
+  // preserve the original orphan diagnostic before unrelated root entries can
+  // replace it with a generic layout error.
+  if (orphanError && !readManagedBinding(orphanInstruction.text)) throw orphanError;
+
+  const rootEntries = await inspectRootEntries({ filesystem, rootPath, serviceGit });
   // A pre-existing bridge directory is accepted only for a binding previously
   // activated by this runtime. We intentionally inspect only the root markers:
   // Workspace contents remain protected and outside onboarding classification.
   if (serviceGit && (rootEntries.hasWorkspacesDirectory || orphanError)) {
-    const activeInstruction = override.exists
-      ? override
-      : await inspectOptionalRegularFile(filesystem, path.join(rootPath, "AGENTS.md"));
+    const activeInstruction = orphanInstruction ?? await readActiveInstruction();
     // An unreachable object never becomes a trusted Git object. Only the
     // effective existing binding can keep working in external storage, after
     // the repo topology, live refs, index and root entries have passed the
     // same checks. Protect any older folder-local copies with the usual ignore
     // proof even when all new copies will be placed elsewhere.
-    if (orphanError && !readManagedBinding(activeInstruction.text)) throw orphanError;
     const ignore = await inspectOptionalRegularFile(filesystem, path.join(rootPath, ".gitignore"));
     if (
       !exactManagedBlockPresent(activeInstruction.text, MANAGED_START, MANAGED_END)
