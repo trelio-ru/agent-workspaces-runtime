@@ -561,7 +561,10 @@ publication tooling также остаются вне этого публичн
   Discovery останавливается на HTTP(S) WebArea; Chrome также пропускает
   WebArea без URL и служебные страницы. `AXWindows`, main/focused и
   application roots разделяют прежний бюджет и дедупликацию native объектов.
-  Chrome запрашивает дерево через AXRole своего подписанного приложения.
+  После AXRole подписанного Chrome при отсутствии exact документа или native
+  нажатии в выбранном Chrome helper запрашивает AXEnhancedUserInterface до
+  любых действий формы. Повторное наблюдение всех разрешённых поверхностей
+  проверяет exact URL, уникальность и прежнюю идентичность найденного объекта.
   Закрытые stage/limit не разрешают fill retry.
   Native UIA fixture reports fixed startup stages only; its window timeout is
   not permission to relax production admission, deadlines or Windows assertions.

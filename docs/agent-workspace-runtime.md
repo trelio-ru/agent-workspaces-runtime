@@ -1106,11 +1106,24 @@ macOS discovery обходит native shell до границ HTTP(S) WebArea и
 для вложенной browser view. Application, `AXWindows`, main и focused roots
 обходятся вместе. Явный `AXWindows` учитывает окно, отсутствующее в AXChildren
 и main/focused. У подписанного Chrome сначала запрашивается AXRole приложения
-для штатной ленивой инициализации Accessibility. Фокус окна не меняется.
+для ленивой инициализации Accessibility. На macOS этот запрос может открыть
+только дерево окон. Базовое веб-дерево также может показывать кнопку без
+действия AXPress. Если exact документ ещё не виден, helper запрашивает
+`AXEnhancedUserInterface=true` у допущенных процессов Chrome. Если exact
+документ уже выбран в Chrome, запрос нужен для плана с activation или submit
+и направляется только его процессу. Helper выдерживает задержку Chromium,
+однократно повторяет ограниченный обход всех допущенных поверхностей и
+проверяет, что уже наблюдавшийся объект не сменился. Ответ AX на запрос режима
+может сообщить ошибку даже при активации дерева. Готовность определяют exact
+документ и обычные проверки полей и действий. Режим действует в процессе
+Chrome. Helper не отключает его, поскольку Chrome не выдаёт отдельного права
+на отключение запроса конкретного клиента Accessibility. Фокус окна не меняется.
 CF object identity устраняет повторные aliases/циклы, но разные документы с
 одним URL сохраняют ambiguity. Один прежний бюджет 12 000 уникальных узлов /
-12 секунд по monotonic clock включает обход и проверку metadata, без reset на
-каждом alias. Controls и explicit frame hops сохраняют отдельный bounded обход.
+12 секунд по monotonic clock на проход приложения включает обход и проверку
+metadata, без reset на каждом alias. Запрос режима и повторный проход входят
+в общий срок подготовки. Controls и explicit frame hops сохраняют отдельный
+bounded обход.
 При исчерпании helper возвращает прежний `reasonCode=timeout` и optional closed
 `diagnostic={stage,limit}`: stage только `document_discovery|frame_discovery|
 field_resolution|activation_resolution`, limit только `node_count|deadline`.

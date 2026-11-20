@@ -761,7 +761,9 @@ test("macOS production resolver binds explicit nested documents and rejects stal
     await fs.writeFile(main, code);
     const exec = promisify(execFile);
     await exec("/usr/bin/swiftc", [main, "-o", executable], { timeout: 45_000 });
-    const result = await exec(executable, [], { timeout: 30_000 });
+    // This fixture covers both the production missing-field grace and four
+    // debounced Chrome discovery passes. Keep the native waits in the fixture.
+    const result = await exec(executable, [], { timeout: 40_000 });
     assert.equal(result.stdout.trim(), "Native AX nested-document diagnostics passed");
     assert.equal(result.stderr, "");
   } finally {
@@ -928,7 +930,7 @@ test("macOS background window discovery never activates or raises the client", a
   const source = await fs.readFile(new URL("../host-runtime/scripts/native-secret-browser/SecretBrowser.swift", import.meta.url), "utf8");
   assert.match(source, /kAXMainWindowAttribute/u);
   assert.match(source, /kAXFocusedWindowAttribute/u);
-  assert.match(source, /Session\.applicationDocuments\(ax, chrome: identity\.0 == "com\.google\.Chrome"\)/u);
+  assert.match(source, /applicationDocuments\(source\.ax, chrome: source\.chrome\)/u);
   assert.doesNotMatch(source, /\.(?:activate|unhide|hide)\s*\(|kAXRaiseAction/u);
 });
 

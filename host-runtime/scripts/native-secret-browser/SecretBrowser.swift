@@ -278,6 +278,57 @@ final class Session {
         // two independent tabs at the same URL must remain ambiguous.
         return try documentCandidates(roots, chrome: chrome)
     }
+    static func selectDocument(_ sources: [(ax: AXUIElement, chrome: Bool)], step: Step, needsPress: Bool) throws -> (Int, AXUIElement) {
+        func discover() throws -> (match: (index: Int, document: AXUIElement)?, exposed: Bool) {
+            var found: (index: Int, document: AXUIElement)?
+            var exposed = false
+            for (index, source) in sources.enumerated() {
+                let documents = try applicationDocuments(source.ax, chrome: source.chrome)
+                exposed = exposed || !documents.isEmpty
+                for document in documents where matches(documentURL(document), step) {
+                    guard found == nil else { throw Stop.failed("field_ambiguous") }
+                    found = (index, document)
+                }
+            }
+            return (found, exposed)
+        }
+
+        let initial = try discover()
+        let chromeSources: [Int]
+        if let match = initial.match {
+            chromeSources = needsPress && sources[match.index].chrome ? [match.index] : []
+        } else {
+            chromeSources = sources.indices.filter { sources[$0].chrome }
+        }
+
+        var observed = initial
+        if !chromeSources.isEmpty {
+            // Chrome may expose only its shell after AXRole. Basic web AX can
+            // also expose a button without AXPress. Ask the admitted Chrome
+            // process for web accessibility before any page action or secret.
+            // Chromium can handle this signal while AppKit returns an error.
+            // Only the newly exposed exact document and controls prove readiness.
+            for index in chromeSources {
+                _ = AXUIElementSetAttributeValue(sources[index].ax, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            }
+            // Chromium debounces this request for two seconds. Re-scan all
+            // admitted surfaces once, so another copy is still ambiguous.
+            // There is no ownership token for this Chrome process-wide mode.
+            // Sending false could disable another assistive client's access.
+            Thread.sleep(forTimeInterval: 2.5)
+            observed = try discover()
+            if let prior = initial.match {
+                guard let current = observed.match, current.index == prior.index,
+                      CFEqual(current.document, prior.document) else { throw Stop.failed("target_url_changed") }
+            }
+        }
+        guard let match = observed.match else {
+            if !observed.exposed { throw Stop.unavailable("accessibility_unavailable") }
+            // Observing a different page does not prove that the target moved.
+            throw Stop.failed("target_document_unavailable")
+        }
+        return (match.index, match.document)
+    }
     static func boundDocument(_ root: AXUIElement, _ step: Step) throws -> (AXUIElement, [AXUIElement]) {
         var current = root
         var path = [root]
@@ -427,8 +478,7 @@ final class Session {
             identities.contains(where: { $0.0 == app.bundleIdentifier })
         }
         guard !applications.isEmpty else { throw Stop.unavailable("application_unavailable") }
-        var candidates: [(NSRunningApplication, AXUIElement, AXUIElement, SecRequirement)] = []
-        var exposedDocuments = 0
+        var verified: [(application: NSRunningApplication, ax: AXUIElement, requirement: SecRequirement, chrome: Bool)] = []
         for app in applications {
             guard let identity = identities.first(where: { $0.0 == app.bundleIdentifier }) else { throw Stop.failed("adapter_error") }
             var parsedRequirement: SecRequirement?
@@ -438,7 +488,8 @@ final class Session {
             guard Session.trust(app, requirement) else { throw Stop.failed("adapter_error") }
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(ax, 1)
-            if identity.0 == "com.google.Chrome" {
+            let chrome = identity.0 == "com.google.Chrome"
+            if chrome {
                 // Chrome lazily initializes native accessibility on AXRole
                 // reads of its application. Request that before enumerating
                 // windows. AXManualAccessibility is specific to Electron.
@@ -448,18 +499,12 @@ final class Session {
                 // already confirmed Accessibility permission for this helper.
                 AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             }
-            let docs = try Session.applicationDocuments(ax, chrome: identity.0 == "com.google.Chrome")
-            exposedDocuments += docs.count
-            for doc in docs where matches(documentURL(doc), steps[0]) { candidates.append((app, ax, doc, requirement)) }
+            verified.append((app, ax, requirement, chrome))
         }
-        if candidates.isEmpty {
-            if exposedDocuments == 0 { throw Stop.unavailable("accessibility_unavailable") }
-            // Chrome may only expose the selected tab's document. Seeing a
-            // different WebArea does not prove that the intended tab navigated.
-            throw Stop.failed("target_document_unavailable")
-        }
-        guard candidates.count == 1 else { throw Stop.failed("field_ambiguous") }
-        (application, appElement, rootDocument, requirement) = candidates[0]
+        let (selected, documentRoot) = try Session.selectDocument(verified.map { ($0.ax, $0.chrome) },
+            step: steps[0], needsPress: steps.contains { $0.activationId != nil || $0.submitId != nil })
+        let source = verified[selected]
+        (application, appElement, rootDocument, requirement) = (source.application, source.ax, documentRoot, source.requirement)
         guard let window = elementAttribute(rootDocument, kAXWindowAttribute) else { throw Stop.failed("adapter_error") }
         self.window = window
         // Pin the native view containing this single document, not the entire

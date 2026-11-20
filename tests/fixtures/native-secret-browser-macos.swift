@@ -23,6 +23,8 @@ final class FixtureElement: NSObject {
     var shown = true
     var enabled = true
     var writable = true
+    var pressable = true
+    var onEnhancedAccessibility: (() -> Void)?
     var forbidChildren = false
     var delayedChildren: (() -> [FixtureElement])?
     init(_ role: String, _ id: String? = nil) { self.role = role; self.id = id }
@@ -42,7 +44,7 @@ let kAXSecureTextFieldSubrole = "AXSecureTextField"
 let kAXButtonRole = "AXButton"
 let kAXPressAction = "AXPress"
 let kAXValueAttribute = "AXValue"
-enum FixtureResult { case success }
+enum FixtureResult { case success, unsupported }
 func text(_ element: AXUIElement, _ name: String) -> String? {
     if name == kAXRoleAttribute { return element.role }
     if name == kAXSubroleAttribute { return element.secure ? kAXSecureTextFieldSubrole : nil }
@@ -86,8 +88,19 @@ func belongs(_ element: AXUIElement, to document: AXUIElement) -> Bool {
     return false
 }
 func AXUIElementCopyActionNames(_ element: AXUIElement, _ actions: inout CFArray?) -> FixtureResult {
-    actions = [kAXPressAction] as CFArray
+    actions = (element.pressable ? [kAXPressAction] : ["AXShowMenu"]) as CFArray
     return .success
+}
+func AXUIElementSetAttributeValue(_ element: AXUIElement, _ name: CFString, _ value: CFTypeRef?) -> FixtureResult {
+    precondition(name as String == "AXEnhancedUserInterface" && value === kCFBooleanTrue)
+    precondition(element.role == "AXApplication")
+    guard let onEnhanced = element.onEnhancedAccessibility else {
+        preconditionFailure("Accessibility may only be requested on the expected Chrome surface")
+    }
+    onEnhanced()
+    // Chrome handles the request even when AppKit reports an unsupported AX
+    // write. Exact discovery after this request is the readiness check.
+    return .unsupported
 }
 func AXUIElementIsAttributeSettable(_ element: AXUIElement, _ name: CFString, _ writable: inout DarwinBoolean) -> FixtureResult {
     writable = DarwinBoolean(element.writable)
@@ -192,6 +205,68 @@ func expect(_ reason: String, _ operation: () throws -> Void) {
     do { try operation(); preconditionFailure("Expected refusal") }
     catch Stop.failed(let actual) { precondition(actual == reason, "Unexpected closed reason") }
     catch { preconditionFailure("Unexpected error") }
+}
+
+// Signed Chrome on macOS can start in a mode that exposes native windows
+// without any web document. No locator can bind until the web tree appears.
+let coldChrome = FixtureElement("AXApplication")
+let coldWindow = FixtureElement("AXWindow")
+coldChrome.windows = [coldWindow]
+let chromeForm = FixtureElement("AXWebArea")
+let chromeUrl = "https://bank.example.test/login"
+chromeForm.url = chromeUrl
+let chromeEdit = FixtureElement("AXTextField", "login")
+let chromeSubmit = FixtureElement("AXButton", "submit")
+chromeSubmit.pressable = false
+chromeForm.append(chromeEdit); chromeForm.append(chromeSubmit)
+let chromeStep = Step(targetOrigin: "https://bank.example.test",
+    targetUrlSha256: SHA256.hash(data: Data(chromeUrl.utf8)).map { String(format: "%02x", $0) }.joined(),
+    fields: [Field(fieldKey: "login", id: "login", passwordInput: nil)], activationId: nil, submitId: "submit")
+let emptyChromeRead = try Session.applicationDocuments(coldChrome, chrome: true)
+precondition(emptyChromeRead.isEmpty)
+var chromeRequests = 0
+coldChrome.onEnhancedAccessibility = {
+    chromeRequests += 1
+    coldWindow.append(chromeForm)
+}
+let coldSelection = try Session.selectDocument([(coldChrome, true)], step: chromeStep, needsPress: false)
+precondition(coldSelection.1 === chromeForm && chromeRequests == 1)
+let existingSelection = try Session.selectDocument([(coldChrome, true)], step: chromeStep, needsPress: false)
+precondition(existingSelection.1 === chromeForm && chromeRequests == 1)
+
+// Basic web AX also omits AXPress from a visible, enabled button. Complete
+// preparation can then prove press support on the same native objects.
+expect("submit_press_unavailable") { _ = try Session.controls(chromeForm, chromeStep) }
+coldChrome.onEnhancedAccessibility = { chromeRequests += 1; chromeSubmit.pressable = true }
+let pressSelection = try Session.selectDocument([(coldChrome, true)], step: chromeStep, needsPress: true)
+let pressControls = try Session.controls(pressSelection.1, chromeStep)
+precondition(chromeRequests == 2 && pressControls.0[0] === chromeEdit && pressControls.1 === chromeSubmit)
+
+// Leave unrelated Chrome peers alone when the exact target belongs to the
+// embedded browser. Do not replace a Chrome document that was already observed.
+let clientApp = FixtureElement("AXApplication")
+let clientDocument = FixtureElement("AXWebArea"); clientDocument.url = chromeUrl
+clientApp.append(clientDocument)
+let embeddedSelection = try Session.selectDocument([(FixtureElement("AXApplication"), true), (clientApp, false)],
+    step: chromeStep, needsPress: true)
+precondition(embeddedSelection.0 == 1 && embeddedSelection.1 === clientDocument)
+coldChrome.onEnhancedAccessibility = {
+    coldWindow.nodes = []
+    coldWindow.append(clientDocument)
+}
+expect("target_url_changed") {
+    _ = try Session.selectDocument([(coldChrome, true)], step: chromeStep, needsPress: true)
+}
+
+// A second exact document discovered after requesting accessibility must
+// still fence preparation. Switching modes never picks a first match.
+let siblingChrome = FixtureElement("AXApplication")
+let duplicateChromeDocument = FixtureElement("AXWebArea"); duplicateChromeDocument.url = chromeUrl
+coldWindow.nodes = []
+coldChrome.onEnhancedAccessibility = { coldWindow.append(chromeForm) }
+siblingChrome.onEnhancedAccessibility = { siblingChrome.append(duplicateChromeDocument) }
+expect("field_ambiguous") {
+    _ = try Session.selectDocument([(coldChrome, true), (siblingChrome, true)], step: chromeStep, needsPress: true)
 }
 
 // An id-less login modal may expose the phone only as a placeholder. Use the
