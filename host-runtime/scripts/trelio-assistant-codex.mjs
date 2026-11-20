@@ -11,7 +11,7 @@ import { sameLocalPath } from './trelio-local-path.mjs';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, ASSISTANT_TASK_MCP_READ_TOOLS, ASSISTANT_RECOVERED_OUTCOME_TOOLS,
   assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude,
-  validateAssistantLocalDraftBasis, validateAssistantDraftReplacementDigests, validateAssistantLocalDraftWitness,
+  validateAssistantLocalDraftBasis, validateAssistantLocalDraftFiles, validateAssistantLocalDraftWitness,
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRecoveredOutcomeEvidence,
   assistantWorkspaceCheckpointLocator, assistantRecoveredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
@@ -2631,9 +2631,11 @@ const inspectAssistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
     if(value?.state!=='draft_updated'||value.sha256!==digest(command.text))return null;
     replacements.set(digest(command.path),value.sha256);
   }
-  try{return {replacements:validateAssistantDraftReplacementDigests([...replacements].map(([pathSha256,contentSha256])=>
-    ({pathSha256,contentSha256})).sort((left,right)=>left.pathSha256.localeCompare(right.pathSha256))),
-    ...(artifacts.size?{retainedArtifacts:[...artifacts.values()].sort((a,b)=>a.pathSha256.localeCompare(b.pathSha256))}:{}),
+  try{return {...validateAssistantLocalDraftFiles({
+    replacements:[...replacements].map(([pathSha256,contentSha256])=>({pathSha256,contentSha256}))
+      .sort((left,right)=>left.pathSha256.localeCompare(right.pathSha256)),
+    retainedArtifacts:artifacts.size?[...artifacts.values()].sort((a,b)=>a.pathSha256.localeCompare(b.pathSha256)):undefined,
+  }),
     ...(releases.size?{historicalSkillReleases:[...releases.values()].sort((a,b)=>a.releaseId.localeCompare(b.releaseId))}:{})};}
   catch{return null;}
 };

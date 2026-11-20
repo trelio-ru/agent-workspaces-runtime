@@ -808,6 +808,9 @@ checkpoint locator and any audited historical release on its existing path.
 The local-delta save uses the same artifact shape for an export after the last
 portable checkpoint. Enumerate changes from the verified local Git anchor and
 match each actual absolute path digest, size and bytes under its own Run.
+An export can account for the entire delta, even before the first text
+replacement. The export receipt must be verified through the same journal and
+Git checks. An empty delta still cannot be saved through this path.
 The native reservation carries only the delta digest and any audited legacy
 release locator. Evidence for a file export settles that file only. Any
 unknown external action remains independent of this save.

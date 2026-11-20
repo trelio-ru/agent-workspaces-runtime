@@ -925,6 +925,15 @@ test('native local-draft read projects signed or audited file exports without se
       result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[history],nextCursor:null},
     }))});
   assert.deepEqual((await read(turn)).retainedArtifacts,[artifact]);
+  // An interrupted turn may export the only changed file before its first
+  // text edit. A positive artifact is sufficient for save-only recovery.
+  const exportOnly=structuredClone(turn);
+  exportOnly.items=exportOnly.items.filter(item=>item.arguments?.command?.action!=='replace');
+  assert.deepEqual(await read(exportOnly),{state:'interrupted_local_draft',turnId:turn.id,
+    replacements:[],retainedArtifacts:[artifact]});
+  const noMaterial=structuredClone(exportOnly);
+  noMaterial.items.pop();
+  assert.equal((await read(noMaterial)).state,'uncertain');
   const foreign=structuredClone(turn);
   foreign.items.at(-1).result.structuredContent.stdout+='changed bytes';
   assert.equal((await read(foreign)).state,'uncertain');

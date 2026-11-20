@@ -22,7 +22,7 @@ import { startLoadedCodexPluginPreservation, TrelioApiError, formatBridgeCommand
 import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
 import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft,
-  validateAssistantDraftReplacementDigests } from './trelio-assistant-inbox.mjs';
+  validateAssistantLocalDraftFiles } from './trelio-assistant-inbox.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
@@ -2140,7 +2140,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
           if(metadata.schemaVersion!==3||metadata.origin!==stableIdentity.origin||metadata.company?.id!==scope.companyId
             ||!sameLocalPath(metadata.workspaceDirectory??'',directory))return null;
           const verified=await common.verifyAssistantLocalDraft({metadata,basis,
-            replacements:validateAssistantDraftReplacementDigests(replacements),retainedArtifacts});
+            ...validateAssistantLocalDraftFiles({replacements,retainedArtifacts})});
           signal?.throwIfAborted();
           return await checkPass()?verified.deltaSha256:null;
         });

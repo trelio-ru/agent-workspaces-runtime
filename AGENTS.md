@@ -226,7 +226,9 @@ publication tooling также остаются вне этого публичн
   worklog. Promote the exact portable handoff with no external or task outcome.
   A signed file export can cover an additional local path using the existing
   artifact receipt and the actual Git delta. Recheck path digest, size and bytes
-  in the SAME private Run. Legacy receipt-free exports require the SAME audited
+  in the SAME private Run. A verified export may be the entire delta before
+  any text replacement. An empty or unexplained delta still refuses.
+  Legacy receipt-free exports require the SAME audited
   immutable release and fresh native provenance checks. Saving these files
   provides no evidence about any external operation in the turn.
   Save initiation and accepted read-back share the mode-specific prompt binding.

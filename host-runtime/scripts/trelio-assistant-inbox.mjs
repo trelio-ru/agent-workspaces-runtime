@@ -65,8 +65,8 @@ export const validateAssistantLocalDraft=value=>{
   return {...validateAssistantLocalDraftBasis(basis),deltaSha256:sha256(deltaSha256),
     ...(releases?{historicalSkillReleases:releases}:{})};
 };
-export const validateAssistantDraftReplacementDigests=value=>{
-  if(!Array.isArray(value)||!value.length||value.length>64)inputError();
+const draftReplacementDigests=(value,minimum)=>{
+  if(!Array.isArray(value)||value.length<minimum||value.length>64)inputError();
   const replacements=value.map(row=>{
     object(row,['pathSha256','contentSha256']);
     return {pathSha256:sha256(row.pathSha256),contentSha256:sha256(row.contentSha256)};
@@ -74,13 +74,22 @@ export const validateAssistantDraftReplacementDigests=value=>{
   if(new Set(replacements.map(row=>row.pathSha256)).size!==replacements.length)inputError();
   return replacements;
 };
+export const validateAssistantDraftReplacementDigests=value=>draftReplacementDigests(value,1);
+
+// A completed export can be the whole material delta. Allow zero text
+// replacements only alongside at least one validated artifact receipt. The
+// same Git anchor, path and byte checks still prove every changed file.
+export const validateAssistantLocalDraftFiles=({replacements,retainedArtifacts})=>{
+  const artifacts=retainedDraftArtifacts(retainedArtifacts);
+  return {replacements:draftReplacementDigests(replacements,artifacts?0:1),
+    ...(artifacts?{retainedArtifacts:artifacts}:{})};
+};
 export const validateAssistantLocalDraftWitness=value=>{
   object(value,['basis','replacements','retainedArtifacts']);
   const basis=validateAssistantLocalDraft(value.basis);
-  const artifacts=retainedDraftArtifacts(value.retainedArtifacts);
-  if(basis.historicalSkillReleases&&!artifacts)inputError();
-  return {basis,replacements:validateAssistantDraftReplacementDigests(value.replacements),
-    ...(artifacts?{retainedArtifacts:artifacts}:{})};
+  const files=validateAssistantLocalDraftFiles(value);
+  if(basis.historicalSkillReleases&&!files.retainedArtifacts)inputError();
+  return {basis,...files};
 };
 // Project an already validated intermediate witness onto the native locator.
 export const assistantWorkspaceCheckpointLocator=({workspaceId,runId,checkpointId,draftHead})=>

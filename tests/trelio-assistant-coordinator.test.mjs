@@ -3570,7 +3570,9 @@ for(const {local,settled,retry=false,provider=false} of [{local:false,settled:fa
   const run={workspaceId:randomUUID(),runId:randomUUID()},acceptedHead='a'.repeat(40);
   const basis={...run,baseHead:'b'.repeat(40),anchorHead:(provider?'f':'b').repeat(40),checkpointId:provider?randomUUID():null};
   const receipt=local?basis:{...run,checkpointId:randomUUID(),draftHead:acceptedHead};
-  const replacements=[{pathSha256:'c'.repeat(64),contentSha256:'d'.repeat(64)}],deltaSha256='e'.repeat(64);
+  // Retain an artifact-only delta in the provider case. Its journal witness
+  // must survive writer acquisition, acceptance and the later outcome read.
+  const replacements=provider?[]:[{pathSha256:'c'.repeat(64),contentSha256:'d'.repeat(64)}],deltaSha256='e'.repeat(64);
   const artifact={pathSha256:'1'.repeat(64),contentSha256:'2'.repeat(64),sizeBytes:154};
   const historicalSkillReleases=[{skillId:'email-imap-smtp',releaseId:randomUUID(),packageSha256:'3'.repeat(64)}];
   const savedLocalDraft={basis:{...basis,deltaSha256,...(provider?{historicalSkillReleases}:{})},replacements,
