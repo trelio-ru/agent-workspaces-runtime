@@ -70,6 +70,9 @@ export function createUtf16TextPolicy() {
 }
 export const { sliceUtf16CodePoints, readUtf16TextChunk } = createUtf16TextPolicy();
 
+// Unified and Workspace-file discovery share the expensive file matcher.
+// Keep their advertised and enforced per-call bound identical in both providers.
+export const MAX_CONTEXT_SEARCH_FORMULATIONS = 3;
 /**
  * Portable agent-search policy. The same patterns run in PostgreSQL and in the
  * encrypted local mirror; neither provider may substitute its own dictionary,

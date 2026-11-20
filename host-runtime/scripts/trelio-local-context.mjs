@@ -39,6 +39,7 @@ import {
 } from "./trelio-workspace-directory.mjs";
 import {
   buildContextSearchPreview,
+  MAX_CONTEXT_SEARCH_FORMULATIONS,
   buildContextPageListPreview,
   matchesContextListDocument,
   buildContextTaskListSearchText,
@@ -160,7 +161,7 @@ const MAX_CONTEXT_TASKS = 10_000;
 const MAX_CONTEXT_WORKSPACES = 2_000;
 const MAX_CONTEXT_DOCUMENTS = 20_000;
 const MIRROR_HYDRATION_RECORD_BATCH_SIZE = 250;
-const MAX_SEARCH_QUERIES = 5;
+const MAX_SECRET_SEARCH_QUERIES = 5;
 const MAX_SEARCH_RESULTS = 50;
 const DEFAULT_CONTEXT_SEARCH_RESULTS = 5;
 const MAX_PROPOSAL_BROWSER_MANIFEST_BYTES = 32 * 1024 * 1024;
@@ -4962,12 +4963,19 @@ const compactLocalSearchResult = (result) => Object.fromEntries(
   )),
 );
 
+const assertSearchFormulationCount = (queries, maximumQueries = MAX_CONTEXT_SEARCH_FORMULATIONS) => {
+  if (Array.isArray(queries) && queries.length > maximumQueries) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT",
+      `Search accepts at most ${maximumQueries} formulations per call. Refine the queries and try again.`);
+  }
+};
+
 export const searchCompanyContextMirror = (
   mirror,
   rawQueries,
   rawLimit = DEFAULT_CONTEXT_SEARCH_RESULTS,
   {
-    maximumQueries = MAX_SEARCH_QUERIES,
+    maximumQueries = MAX_CONTEXT_SEARCH_FORMULATIONS,
     maximumResults = MAX_SEARCH_RESULTS,
     documentTypes = null,
     documentPredicate = null,
@@ -4976,9 +4984,10 @@ export const searchCompanyContextMirror = (
     includeArchivedMeetings = false,
   } = {},
 ) => {
+  assertSearchFormulationCount(rawQueries, maximumQueries);
   const queries = normalizeContextSearchQueries((Array.isArray(rawQueries) ? rawQueries : [])
     .map((query) => normalizeBoundedString(query, "query", 500)))
-    .slice(0, maximumQueries).map((query) => [query, query.original]);
+    .map((query) => [query, query.original]);
   if (queries.length === 0) {
     throw new TrelioLocalContextError(
       "LOCAL_CONTEXT_INVALID_INPUT",
@@ -5092,6 +5101,7 @@ export const searchAgentSecretsFromMirror = (mirror, rawInput) => {
     {
       documentTypes: ["agent-secret"],
       includeMatchDetails: true,
+      maximumQueries: MAX_SECRET_SEARCH_QUERIES,
     },
   );
   const results = search.results.map((result) => {
@@ -9332,6 +9342,14 @@ export const handleTrelioLocalContextOperation = async (
   const companySlug = normalizeCompanySlug(rawInput?.companySlug);
   const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal });
   if (provider.nativeProvider) return provider.result;
+
+  // Older clients may still send the former bound. Reject before a cold index
+  // is built, even for a previously issued server-selected continuation.
+  if (operation === "native_read" && ["search", "search_agent_workspace_files"].includes(rawInput?.nativeTool)) {
+    assertSearchFormulationCount(rawInput?.arguments?.queries);
+  } else if (operation === "search" || operation === "search_workspace_files") {
+    assertSearchFormulationCount(rawInput?.queries);
+  }
 
   if (operation === "native_read") {
     const nativeTool = String(rawInput?.nativeTool || "").trim();

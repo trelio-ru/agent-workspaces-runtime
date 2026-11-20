@@ -1029,8 +1029,11 @@ publication tooling также остаются вне этого публичн
   до выбора inline/batch и не запускает rename из runtime. Границы и роль модели –
   [контракт exact read](docs/agent-workspace-runtime.md#выбор-scope).
 - Файловый поиск использует generated `trelio-workspace-text-chunks.mjs` из backend
-  pure module. Все formulations документа делят bounded file-local matcher;
-  rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
+  pure module.
+  `search` и `search_agent_workspace_files` отклоняют четвёртую формулировку
+  до подготовки зеркала по общей границе из generated context matching.
+  Все формулировки документа делят bounded file-local matcher.
+  Rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
   ranking генерируется backend `build-context-search-ranking.mjs`; проверяй `--check`.
   Task list due-state parity uses the [same generated predicates](docs/agent-workspace-runtime.md)
   and the hydrated status flag for deadline tracking.

@@ -1313,6 +1313,19 @@ test("local mirror search ranks structured and workspace context without remote 
   assert.equal(JSON.stringify(result).includes("remote"), false);
 });
 
+test("local unified and Workspace-file searches enforce three phrases per call", () => {
+  for (const tool of ["search", "search_agent_workspace_files"]) {
+    const first = ["релевантный поиск", "fencing token", "локальный индекс"];
+    assert.deepEqual(handleNativeLocalContextRead(mirror, tool, { queries: first }).queries, first);
+    assert.throws(() => handleNativeLocalContextRead(null, tool, { queries: [...first, first[0]] }), {
+      code: "LOCAL_CONTEXT_INVALID_INPUT",
+      message: /at most 3 formulations/u,
+    });
+    const refined = ["workspace", "архитектура индекса", "контекст задачи"];
+    assert.deepEqual(handleNativeLocalContextRead(mirror, tool, { queries: refined }).queries, refined);
+  }
+});
+
 test("backend search projections do not require full task or domain payloads", () => {
   const projectedMirror = structuredClone(mirror);
   projectedMirror.tasks = projectedMirror.tasks.map((task) => ({
@@ -3582,21 +3595,20 @@ test("archived contacts and registry rows require the same explicit native flags
     true,
   );
 
-  const ordinarySearch = searchCompanyContextMirror(
-    archiveMirror,
-    ["проверен", "скрытый", archivedValueOnly, "архивный контакт"],
-    10,
-  );
-  assert.equal(ordinarySearch.results.some((result) => (
+  const ordinaryResults = [
+    ...searchCompanyContextMirror(archiveMirror, ["проверен", "скрытый", archivedValueOnly], 10).results,
+    ...searchCompanyContextMirror(archiveMirror, ["архивный контакт"], 10).results,
+  ];
+  assert.equal(ordinaryResults.some((result) => (
     result.type === "registry" && result.matchedQueries.includes("проверен")
   )), true);
-  assert.equal(ordinarySearch.results.some((result) => (
+  assert.equal(ordinaryResults.some((result) => (
     result.type === "contact"
     || result.preview?.includes("Скрытый")
     || result.preview?.includes(archivedValueOnly)
   )), false);
   assert.equal(
-    ordinarySearch.results.some((result) => (
+    ordinaryResults.some((result) => (
       result.type === "registry" && result.matchedQueries.includes(archivedValueOnly)
     )),
     false,
