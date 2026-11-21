@@ -1943,7 +1943,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||live.bindingRevision!==pass.bindingRevision||live.threadId!==pass.threadId||live.deliveryId!==pass.deliveryId)return null;
     const {portableFinish,localDraft}=continuation.workspaceDraft;
     const sourceMarkerId=continuation.terminalMarkerId===job.deliveryId?undefined:continuation.terminalMarkerId;
-    if(sourceMarkerId&&(!localDraft||!verifyRecoveredProviderOutcome))return null;
+    if(sourceMarkerId&&!localDraft)return null;
     const {deltaSha256:_localDelta,historicalSkillReleases:_legacy,...basis}=localDraft?.basis??{};
     const selection={deliveryId:job.deliveryId,originalTurnId:continuation.terminalTurnId,saveMarkerId:continuation.reviewId,
       saveTurnId,taskPass:locator,mode:localDraft?'local_draft':'portable_draft',receipt:localDraft?basis:portableFinish,
@@ -1953,8 +1953,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(nativeResult.state!=='recovered_outcome_observed'||nativeResult.turnId!==saveTurnId
       ||evidence?.acceptedHead!==acceptedHead||evidence.workspaceId!==continuation.workspaceDraft.workspaceId
       ||evidence.runId!==continuation.workspaceDraft.runId)return null;
-    if(sourceMarkerId&&(!evidence.providerEffect||evidence.providerEffect.sourceMarkerId!==sourceMarkerId
-      ||await verifyRecoveredProviderOutcome(pass,evidence,signal)!==true))return null;
+    if(sourceMarkerId&&!evidence.localResult&&(!evidence.providerEffect||evidence.providerEffect.sourceMarkerId!==sourceMarkerId
+      ||await verifyRecoveredProviderOutcome?.(pass,evidence,signal)!==true))return null;
+    if(evidence.localResult&&(!localDraft||evidence.localResult.sourceMarkerId!==(sourceMarkerId??job.deliveryId)
+      ||evidence.localResult.sourceTurnId!==selection.originalTurnId
+      ||!isDeepStrictEqual(nativeResult.localResultArtifacts,localDraft.retainedArtifacts??[])
+      ||await verifyRecoveredProviderOutcome?.(pass,{...evidence,localResultArtifacts:nativeResult.localResultArtifacts},signal)!==true))
+      return null;
     if(evidence.rootDelivery){
       const proof=nativeResult.rootDeliveryProof;
       if(sourceMarkerId||!localDraft?.retainedArtifacts?.some(artifact=>isDeepStrictEqual(artifact,proof?.artifact))
@@ -2150,9 +2155,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
         workspaceDraft:{workspaceId:locators.workspaceId,runId:locators.runId,finishPending:true,retainedHandoff:proof}},signal,marker);
     }
+    // A successfully started read continuation can later make its own
+    // ordinary local edits. Use that turn's current Run, draft and bytes to
+    // select the one save, regardless of what originally admitted the read
+    // continuation. Neither its old witness nor this save grants task replay.
     if(saved&&job.kind==='task'&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&!job.events.length&&inbox.readDelivery(job.deliveryId).scheduled
-      &&(!continued||continued.started&&continued.taskReadParent?.intermediateDraft
+      &&(!continued||continued.started&&continued.taskReadParent
         ||!continued.started&&continued.workspaceDraft?.localDraft)
       &&typeof client.readTaskLocalDraftEvidence==='function'&&typeof inspectLocalDraft==='function'){
       const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
@@ -2360,6 +2369,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           };
           if(continuation.workspaceDraft?.recoveredOutcome?.plan.evidence.rootDelivery)
             options.verifyRootDelivery=(evidence,proof,signal)=>verifyRootProviderOutcome(expectedPass,evidence,proof,signal);
+          if(continuation.workspaceDraft?.recoveredOutcome?.plan.evidence.localResult)
+            options.verifyRecoveredLocalResult=(evidence,localResultArtifacts,signal)=>verifyRecoveredProviderOutcome?.(
+              expectedPass,{...evidence,localResultArtifacts},signal);
           if(continuation.taskReadParent)options.taskReadRecovery={
             ...continuation.taskReadParent,terminalTurnId:continuation.terminalTurnId,terminalMarkerId:continuation.terminalMarkerId,
             taskPass:{companyId:expectedPass.companyId,taskId:expectedPass.taskId,passId:expectedPass.passId},

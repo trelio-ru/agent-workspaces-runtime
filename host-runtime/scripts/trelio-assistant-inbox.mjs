@@ -145,21 +145,23 @@ const settledControlLocator=value=>{
 
 export const validateAssistantRecoveredOutcomeEvidence=value=>{
   object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases',
-    'providerEffect','rootDelivery','nativeControlReceipts']);
+    'providerEffect','rootDelivery','localResult','nativeControlReceipts']);
   if(!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.acceptedHead??''))inputError();
   const releases=historicalSkillReleaseReceipts(value.historicalSkillReleases);
   const run={workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),acceptedHead:value.acceptedHead};
-  if(value.rootDelivery!==undefined){
+  if(value.rootDelivery!==undefined||value.localResult!==undefined){
     if(value.questionId!==undefined||value.questionRequestId!==undefined||value.control!==undefined||value.providerEffect!==undefined
-      ||!releases||!Array.isArray(value.nativeControlReceipts)||value.nativeControlReceipts.length>8)inputError();
-    const root=value.rootDelivery;
-    object(root,['sourceMarkerId','sourceTurnId']);
+      ||value.rootDelivery!==undefined&&(value.localResult!==undefined||!releases)
+      ||!Array.isArray(value.nativeControlReceipts)||value.nativeControlReceipts.length>8)inputError();
+    const source=value.rootDelivery??value.localResult;
+    object(source,['sourceMarkerId','sourceTurnId']);
     const controls=value.nativeControlReceipts.map(settledControlLocator);
     if(new Set(controls.map(control=>control.controlReceiptId)).size!==controls.length)inputError();
-    // The root's provider verification stays in the native reader and is
-    // never copied into the shared lease plan or the model prompt.
-    return {...run,historicalSkillReleases:releases,
-      rootDelivery:{sourceMarkerId:uuid(root.sourceMarkerId),sourceTurnId:uuid(root.sourceTurnId)},nativeControlReceipts:controls};
+    // Provider/archive proof remains private to the native reader. The
+    // service receives the original identifiers and native receipts only.
+    return {...run,...(releases?{historicalSkillReleases:releases}:{}),
+      [value.rootDelivery!==undefined?'rootDelivery':'localResult']:{
+        sourceMarkerId:uuid(source.sourceMarkerId),sourceTurnId:uuid(source.sourceTurnId)},nativeControlReceipts:controls};
   }
   if(value.nativeControlReceipts!==undefined)inputError();
   if(value.providerEffect!==undefined){
@@ -2430,7 +2432,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           const {deltaSha256:_delta,historicalSkillReleases:_legacy,...localBasis}=saved?.localDraft?.basis??{};
           const priorReceipt=recovered.mode==='local_draft'
             ?saved?.localDraft&&localBasis:saved?.portableFinish;
-          const {providerEffect:effect,rootDelivery}=basePlan.evidence;
+          const {providerEffect:effect,rootDelivery,localResult}=basePlan.evidence;
           if(!row.scheduled||deliveryEvents(id).length||!latest||!last.started||last.passId!==passId
             ||terminalTurnId===last.terminalTurnId||terminalTurnId===recovered.originalTurnId
             ||expectedLeaseRevision!==last.expectedLeaseRevision+1)fail('ASSISTANT_INBOX_CONFLICT');
@@ -2445,11 +2447,25 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
               ||JSON.stringify(previous.receipt)!==JSON.stringify(recovered.receipt)
               ||JSON.stringify(previous.plan)!==JSON.stringify(basePlan))fail('ASSISTANT_INBOX_CONFLICT');
           }else{
-            if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==(effect?.sourceMarkerId??rootDelivery?.sourceMarkerId??id)
+            if(last.reviewId!==basePlan.saveReviewId||last.terminalMarkerId!==(effect?.sourceMarkerId??rootDelivery?.sourceMarkerId??localResult?.sourceMarkerId??id)
               ||last.terminalTurnId!==recovered.originalTurnId||!priorReceipt
               ||JSON.stringify(priorReceipt)!==JSON.stringify(recovered.receipt))fail('ASSISTANT_INBOX_CONFLICT');
             if(rootDelivery&&(latest.ordinal!==1||rootDelivery.sourceMarkerId!==id||rootDelivery.sourceTurnId!==last.terminalTurnId
               ||!saved?.localDraft?.retainedArtifacts?.length))fail('ASSISTANT_INBOX_CONFLICT');
+            if(localResult){
+              if(!saved?.localDraft||localResult.sourceTurnId!==last.terminalTurnId)fail('ASSISTANT_INBOX_CONFLICT');
+              if(localResult.sourceMarkerId===id){
+                if(latest.ordinal!==1)fail('ASSISTANT_INBOX_CONFLICT');
+              }else{
+                // A save cannot adopt a different continuation's history.
+                // Retain the original read-admission start bit before it.
+                const row=get('SELECT intent_json FROM assistant_pass_continuations WHERE delivery_id=? AND ordinal=?',id,latest.ordinal-1);
+                const source=row&&continuationIntent(JSON.parse(row.intent_json));
+                if(!source?.taskReadParent||!source.started||!source.resumed||source.passId!==passId
+                  ||source.reviewId!==localResult.sourceMarkerId||source.expectedLeaseRevision>=last.expectedLeaseRevision)
+                  fail('ASSISTANT_INBOX_CONFLICT');
+              }
+            }
             if(effect){
               // The local save must be the successor of this exact resumed
               // intermediate draft. Retain both original native start fences.

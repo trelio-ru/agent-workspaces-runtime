@@ -814,6 +814,16 @@ Git checks. An empty delta still cannot be saved through this path.
 The native reservation carries only the delta digest and any audited legacy
 release locator. Evidence for a file export settles that file only. Any
 unknown external action remains independent of this save.
+The same local-delta save can follow a started read continuation. It uses
+that turn's current canonical Run and exact draft anchor. For an interrupted
+finish, the full history must end in one positive validating response or
+poll for that same operation, followed by no further executable work.
+Validation progress does not prove where the child stopped. Verify the
+expired native Run and its missing final-draft marker, then compare the
+original draft anchor and matching file receipts under the existing finish
+lock. A later finish stage requires its independently committed portable
+witness. Save only the verified local files, with the restricted continuation
+and its unchanged business and source fences.
 The guide producer and recovery share the same page frame and continuation
 projection. A completed legacy page may include bounded display instructions
 and the original next selector or terminal null. Recovery verifies the page
@@ -830,6 +840,17 @@ exact head and Run. The native catalogue and signed argument check disallow
 opening, editing or submitting a Workspace in this mode. The outcome gate
 still verifies live acceptance and the assistant's own material. A confirmed
 pass may preserve an active or blocked task goal.
+
+An accepted save of a local delta can also settle the existing `active`
+cadence through the separate outcome-only v8 continuation. The original
+scheduled turn or its one read continuation must account for every operation
+with settled native controls, signed reads and exact accepted local exports.
+Re-read the accepted Git bytes, the complete original and save turns and
+their original start markers under the same native writer. The service
+independently verifies the exact save, any preceding read renewal, current
+accepted revision, all native operation receipts and the stored schedule.
+No provider content or local export witness leaves the host. An uncertain
+effect leaves the pass unresolved.
 
 Task-material completion has one fixed 60-second outer MCP budget so a cold
 read of accepted ciphertext, Git materialization and recipient checks can finish

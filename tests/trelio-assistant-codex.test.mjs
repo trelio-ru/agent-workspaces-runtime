@@ -899,6 +899,42 @@ test('local draft witness extracts only the exact native replacement bytes acros
   }
 });
 
+test('local draft recovery keeps the original pending finish bound to its Run before a final save is committed',()=>{
+  const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
+  const {workspaceId,runId}=workspaceDraft;
+  const basis={workspaceId,runId,baseHead:'d'.repeat(40),anchorHead:'e'.repeat(40),checkpointId:randomUUID()};
+  turn.items[0].content[0].text=assistantDeliveryMarker(terminalMarkerId)+'\nTRELIO_ASSISTANT_SCOPE '+JSON.stringify({
+    companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true,
+  });
+  const finish=turn.items.at(-1),response=finish.result.structuredContent;
+  response.progress={stage:'validating'};
+  const read=history=>assistantInterruptedLocalDraft(history,terminalMarkerId,taskPass,basis);
+  const replacement=turn.items.find(item=>item.arguments?.command?.action==='replace');
+  assert.deepEqual(read(turn),[{
+    pathSha256:createHash('sha256').update(replacement.arguments.command.path).digest('hex'),
+    contentSha256:replacement.result.structuredContent.sha256,
+  }]);
+  // A newer facade can keep polling the original handle during validation.
+  // The protected native and Git draft witnesses are still required separately.
+  const polled=structuredClone(turn);
+  polled.items.push({...structuredClone(finish),arguments:{taskPass,...response.nextCall.arguments}});
+  assert.deepEqual(read(polled),read(turn));
+  for(const change of [
+    value=>{value.items.at(-1).result.structuredContent.progress.stage='checkpoint';},
+    value=>{value.items.at(-1).result.structuredContent.state='completed';},
+    value=>{value.items.at(-1).arguments.parameters.taskOutcome='work_completed';},
+    value=>{value.items.at(-1).arguments.taskPass.passId=randomUUID();},
+    value=>{value.items.at(-1).result.structuredContent.nextCall.arguments.runIdentity.runId=randomUUID();},
+    value=>{value.items.push(structuredClone(value.items.at(-1)));},
+    value=>{value.items.push(structuredClone(value.items.at(-3)));},
+  ]){
+    const changed=structuredClone(turn);change(changed);
+    assert.equal(read(changed),null);
+  }
+  polled.items.at(-1).arguments.parameters.finishOperationId=randomUUID();
+  assert.equal(read(polled),null);
+});
+
 test('native local-draft read projects signed or audited file exports without settling any provider action',async()=>{
   const {turn,terminalMarkerId,taskPass,workspaceDraft}=pendingFinishHistory();
   const basis={workspaceId:workspaceDraft.workspaceId,runId:workspaceDraft.runId,baseHead:'d'.repeat(40),anchorHead:'d'.repeat(40),checkpointId:null};
@@ -1585,6 +1621,69 @@ test('an accepted local save can nominate only the exact observed outbound effec
   ]){
     const modified=structuredClone(original);change(modified);
     assert.deepEqual(await read(modified),{state:'uncertain'});
+  }
+});
+
+for(const legacy of [false,true])test(`read continuation settles saved work with verified local artifacts (legacy=${legacy})`,async()=>{
+  const {turn:save,deliveryId:saveMarkerId,taskPass,run,candidateHead}=archiveWithRefusedOpenPoll();
+  const scope={companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true};
+  const deliveryId=randomUUID(),sourceMarkerId=randomUUID(),threadId=randomUUID();
+  const receipt={...run,baseHead:'a'.repeat(40),anchorHead:'c'.repeat(40),checkpointId:randomUUID()};
+  const digest=text=>createHash('sha256').update(text).digest('hex');
+  const {assistantArtifactPathDigest}=await import('../host-runtime/scripts/trelio-local-path.mjs');
+  const destination=path.resolve('test-artifact-directory'),saved=path.join(destination,'message-7.eml');
+  const artifact={pathSha256:assistantArtifactPathDigest(saved),contentSha256:digest('test export'),sizeBytes:11};
+  const historical={skillId:'email-imap-smtp',releaseId:'a15e4540-4c58-42b4-b64e-d5c6a375445b',
+    packageSha256:'19d8bf1145b7e73b87adb452c7036db7787cee3e8f1560b4f20ac8dabdeba865'};
+  const release=legacy?historical:{skillId:'signed-local-export',releaseId:randomUUID(),packageSha256:digest('runtime package')};
+  const parameters={companyId:taskPass.companyId,skillId:release.skillId,releaseId:release.releaseId,
+    runtimeSessionId:randomUUID(),arguments:['--local-account',randomUUID(),'save-message','--folder','INBOX','--uid','7','--output',destination]};
+  const stdout=JSON.stringify({ok:true,saved,uid:'7',format:'message/rfc822',size:11,sha256:artifact.contentSha256});
+  const descriptor=bindAssistantTaskSkillArtifact({schemaVersion:1,releaseId:release.releaseId,packageSha256:release.packageSha256,
+    outputSha256:digest(stdout),artifact},{scope:taskPass,parameters,stdout});
+  assert.ok(descriptor);
+  const call=(tool,args,structuredContent)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:{...args,taskPass},result:{structuredContent}});
+  const action=(operation,parameters,result)=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...operation!=='skill_run'&&operation!=='open'?{runIdentity:run}:{}},result);
+  const control={controlId:randomUUID(),controlReceiptId:randomUUID(),controlRequestId:randomUUID()};
+  const finishOperationId=randomUUID();
+  const original={id:randomUUID(),status:'interrupted',items:[
+    {type:'userMessage',content:[{type:'text',text:assistantNativePrompt(sourceMarkerId,scope,{})}]},
+    call('prepare_assistant_workspace_run',run,{prepared:true,workspace:{id:run.workspaceId,companyId:taskPass.companyId,
+      scopeType:'task',taskId:taskPass.taskId},run:{id:run.runId}}),
+    action('open',run,{operation:'open'}),
+    action('skill_run',parameters,{schemaVersion:1,operation:'skill_run',stdout,...legacy?{}:{taskSkillArtifact:descriptor}}),
+    call('update_task_control',{clientRequestId:control.controlRequestId,controlId:control.controlId,visibility:'shared'},
+      {schemaVersion:1,operation:'update_task_control',taskId:taskPass.taskId,resultId:control.controlId,receiptId:control.controlReceiptId}),
+    call('get_assistant_operation_contract',{},{operation:'update_task_control'}),
+    call('use_assistant_workspace_files',{runIdentity:run,command:{action:'replace',path:'WORK.md',text:'Current result',
+      expectedSha256:null}},{state:'draft_updated',sha256:digest('Current result')}),
+    action('finish',{taskOutcome:'no_status_change'},{schemaVersion:1,operation:'finish',state:'running',operationId:finishOperationId,
+      progress:{stage:'validating'},nextCall:{tool:'continue_assistant_workspace_action',arguments:{
+        schemaVersion:1,operation:'status',runIdentity:run,parameters:{finishOperationId}}}}),
+  ]};
+  save.items[0].content[0].text=assistantNativePrompt(saveMarkerId,scope,{workspaceDraftRecovery:{workspaceDraft:{...run,localDraft:{basis:receipt}}}});
+  save.items[2].result.structuredContent.workspace={id:run.workspaceId,scopeType:'task',scopeKey:`task:${taskPass.taskId}`,
+    companyId:taskPass.companyId,taskId:taskPass.taskId};
+  const read=(history=original)=>readAssistantCodexDelivery(threadId,saveMarkerId,{executable:process.execPath,environment:{},
+    recoveredWorkspaceOutcome:{deliveryId,originalTurnId:original.id,saveMarkerId,saveTurnId:save.id,taskPass,
+      mode:'local_draft',receipt,sourceMarkerId},spawnProcess:nativeRpc(request=>({
+      result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[save,history]},
+    }))});
+  const observed=await read();
+  assert.deepEqual(observed.evidence,{...run,acceptedHead:candidateHead,...legacy?{historicalSkillReleases:[historical]}:{},
+    localResult:{sourceMarkerId,sourceTurnId:original.id},nativeControlReceipts:[control]});
+  assert.deepEqual(observed.localResultArtifacts,[artifact]);
+  assert.doesNotMatch(JSON.stringify(observed.evidence),/test-artifact-directory|pathSha256|contentSha256/u);
+  for(const change of [
+    value=>{value.items[3].arguments.parameters.arguments.push('--overwrite');},
+    value=>{value.items[3].result.structuredContent.stdout='{}';},
+    value=>{value.items[4].result.structuredContent.taskId=randomUUID();},
+    value=>{value.items.push(call('create_comment',{},{}));},
+  ]){
+    const changed=structuredClone(original);change(changed);
+    assert.deepEqual(await read(changed),{state:'uncertain'});
   }
 });
 

@@ -2404,6 +2404,7 @@ export const assistantAcceptedNamedArchive=(turn,deliveryId,taskPass,run)=>
 // report health. None can start a provider command or mutate a task even when
 // its response is a short-wait selector. Keep generic action multiplexers out.
 const recoveredOutcomeReads=new Set([...draftReads,'get_assistant_status','get_assistant_background_status',
+  'get_assistant_operation_contract',
   'get_agent_skill','get_agent_procedure','search_agent_guidance','search','fetch','prepare_assistant_workspace_read']);
 const recoveredOutcomeSkillRead=(args,result,pass)=>{
   const p=args.parameters;
@@ -2583,11 +2584,13 @@ export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,origi
     ||!['local_draft','portable_draft'].includes(mode)||!Array.isArray(original.items)||original.items.length>128)return null;
   const run=inspectAcceptedWorkspaceSave(save,saveMarkerId,taskPass,receipt,mode);
   if(!run)return null;
+  const originalMarker=sourceMarkerId??deliveryId;
   if(sourceMarkerId!==undefined&&sourceMarkerId!==deliveryId){
     if(mode!=='local_draft'||!UUID.test(sourceMarkerId)||sourceMarkerId===saveMarkerId)return null;
-    return inspectDeliveredProviderOutcome(original,sourceMarkerId,taskPass,receipt,run);
+    const delivered=inspectDeliveredProviderOutcome(original,sourceMarkerId,taskPass,receipt,run);
+    if(delivered)return delivered;
   }
-  if(mode==='local_draft'&&UUID.test(assistantId??'')){
+  if(mode==='local_draft'&&originalMarker===deliveryId&&UUID.test(assistantId??'')){
     const context=assistantWorkStateContext({assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true});
     if(original.items[0]?.content?.[0]?.text===assistantNativePrompt(deliveryId,context,{})){
       const root=inspectDeliveredProviderOutcome(original,deliveryId,taskPass,receipt,run,{root:true});
@@ -2595,11 +2598,13 @@ export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,origi
     }
   }
   if(sourceMarkerId===deliveryId)return null;
-  if(mode==='local_draft'&&!assistantInterruptedLocalDraft(original,deliveryId,taskPass,receipt)
+  const local=mode==='local_draft'?inspectAssistantInterruptedLocalDraft(original,originalMarker,taskPass,receipt):null;
+  if(mode==='local_draft'&&!local
     ||mode==='portable_draft'&&!matchesAssistantPortableFinishTurn(original,deliveryId,taskPass,receipt))return null;
   const releases=new Map();
+  const controls=[],artifacts=[];
   const browserVisit={origin:null,pending:false,closed:true};
-  let question,control,prepared=false,handle=null,finishStarted=false;
+  let question,prepared=false,handle=null,finishStarted=false;
   for(const item of original.items.slice(1)){
     if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
     const args=item?.arguments,result=item?.result?.structuredContent;
@@ -2621,15 +2626,32 @@ export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,origi
       if(finishStarted)return null;
       if(localDraftRefusal(item,'ASSISTANT_SKILL_COMMAND_UNAVAILABLE')&&Object.keys(result).join(',')==='code')continue;
       const read=success?recoveredOutcomeSkillRead(args,result,taskPass):null;
-      if(!read)return null;
-      if(read!==true)releases.set(read.releaseId,read);
+      if(read){
+        if(read!==true)releases.set(read.releaseId,read);
+        continue;
+      }
+      // An export is a local effect. Bind its candidate to this exact
+      // invocation and require an independent read of its accepted bytes.
+      if(!local||!success||!prepared||!args.parameters)return null;
+      const binding={scope:taskPass,parameters:args.parameters,stdout:result?.stdout};
+      const parsed=historicalTaskSkillArguments(args.parameters,result,taskPass);
+      const legacy=parsed&&reviewedHistoricalCheckpointSkill(args.parameters,parsed,result.stdout);
+      const artifact=matchesAssistantTaskSkillArtifact(result?.taskSkillArtifact,binding)
+        ?result.taskSkillArtifact.artifact:legacy?.artifact;
+      if(!artifact||!local.retainedArtifacts?.some(row=>isDeepStrictEqual(row,artifact)))return null;
+      if(legacy?.artifact)releases.set(legacy.release.releaseId,legacy.release);
+      artifacts.push(artifact);
       continue;
     }
     if(item.tool==='ask_assistant_owner'||item.tool==='update_task_control'){
       if(!success||finishStarted)return null;
       if(item.tool==='ask_assistant_owner'){
         if(question||!(question=committedQuestion(args,result)))return null;
-      }else if(control||!(control=committedControl(args,result,taskPass)))return null;
+      }else{
+        const control=committedControl(args,result,taskPass);
+        if(!control||controls.length>=8)return null;
+        controls.push(control);
+      }
       continue;
     }
     if(item.tool==='prepare_assistant_workspace_run'){
@@ -2652,26 +2674,38 @@ export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,origi
     }
     if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return null;
     const parameters=args.parameters??{};
-    if(args.operation==='status'&&Object.keys(parameters).length===0&&success)continue;
+    if(args.operation==='status'&&Object.keys(parameters).length===0
+      &&(success||local&&localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED')))continue;
     if(!prepared||!sameDraftRun(args.operation==='open'
       ?{workspaceId:parameters.workspaceId,runId:parameters.runId}:args.runIdentity,run))return null;
     if(args.operation==='open'&&success&&!finishStarted&&result?.operation==='open'){
       handle=observedWorkspacePollHandle(result,'open',run);
       if(result.state==='running'&&!handle)return null;
-    }else if(args.operation==='finish'&&success&&!finishStarted&&mode==='portable_draft'
+    }else if(args.operation==='finish'&&success&&!finishStarted
       &&parameters.taskOutcome==='no_status_change'&&result?.operation==='finish'){
       finishStarted=true;
       handle=observedWorkspacePollHandle(result,'finish',run);
       if(result.state==='running'&&!handle)return null;
     }else if(args.operation==='status'&&handle&&Object.keys(parameters).join(',')==='finishOperationId'
       &&parameters.finishOperationId===handle&&(success||localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED'))){
-      if(success&&result?.operationId!==handle)return null;
+      if(success&&(result?.operationId??observedWorkspacePollHandle(result,finishStarted?'finish':'open',run))!==handle)return null;
     }else if(!success||finishStarted||!(args.operation==='checkpoint'&&parameters.type==='draft'&&result?.operation==='checkpoint'
       ||args.operation==='heartbeat'&&Object.keys(parameters).length===0&&result?.operation==='heartbeat'))return null;
   }
-  if(!prepared||!question||!browserVisit.closed||browserVisit.pending)return null;
-  try{return {evidence:validateAssistantRecoveredOutcomeEvidence({...run,...question,...(control?{control}:{}),
-    ...(releases.size?{historicalSkillReleases:[...releases.values()].sort((a,b)=>a.releaseId.localeCompare(b.releaseId))}:{})})};}
+  if(!prepared||!browserVisit.closed||browserVisit.pending)return null;
+  const historicalSkillReleases=[...releases.values()].sort((a,b)=>a.releaseId.localeCompare(b.releaseId));
+  const releaseWitness=historicalSkillReleases.length?{historicalSkillReleases}:{};
+  try{
+    if(question){
+      if(sourceMarkerId!==undefined||artifacts.length||controls.length>1)return null;
+      return {evidence:validateAssistantRecoveredOutcomeEvidence({...run,...question,
+        ...(controls.length?{control:controls[0]}:{}),...releaseWitness})};
+    }
+    if(!local||!isDeepStrictEqual(local.historicalSkillReleases??[],historicalSkillReleases))return null;
+    return {evidence:validateAssistantRecoveredOutcomeEvidence({...run,
+      localResult:{sourceMarkerId:originalMarker,sourceTurnId:originalTurnId},nativeControlReceipts:controls,...releaseWitness}),
+      localResultArtifacts:artifacts.sort((a,b)=>a.pathSha256.localeCompare(b.pathSha256))};
+  }
   catch{return null;}
 };
 const matchesOutcomePreparationRefusal=(turn,{retryFromReviewId,terminalTurnId,plan,taskPass})=>{
@@ -2787,17 +2821,34 @@ const inspectAssistantInterruptedLocalDraft=(turn,deliveryId,pass,basis)=>{
     ||scope.sourceReferences!==undefined||scope.ownerQuestionIds!==undefined||scope.workMode==='discussion')return null;
 
   const replacements=new Map(),artifacts=new Map(),releases=new Map();
-  let prepared=false;
+  let prepared=false,finishHandle=null;
   for(const item of items){
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     const args=item?.arguments;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!args||Object.getPrototypeOf(args)!==Object.prototype
       ||!['completed','failed'].includes(item.status))return null;
-    // An attempted finish belongs to the separate final-save protocol. Never
-    // interpret a missing/failed reply as proof that its child did not save.
-    if(item.tool==='continue_assistant_workspace_action'&&args.operation==='finish')return null;
     const value=item.result?.structuredContent;
     const ok=item.status==='completed'&&item.error==null&&item.result?.isError!==true;
+    const workspaceAction=item.tool==='continue_assistant_workspace_action';
+    if(finishHandle||workspaceAction&&args.operation==='finish'){
+      // A positive validating response binds one original finish to the
+      // existing Run. It does not establish that the child stopped there.
+      // v7 admission separately requires native absence of a final draft and
+      // the unchanged local anchor and bytes under the private finish lock.
+      // This certifies a local save only; never replay the original finish.
+      if(!prepared||!workspaceAction||!ok||args.schemaVersion!==1||!exactDraftPass(args.taskPass,pass)
+        ||!sameDraftRun(args.runIdentity,selected)||value?.progress?.stage!=='validating')return null;
+      const handle=observedWorkspacePollHandle(value,'finish',selected);
+      if(!handle)return null;
+      if(finishHandle){
+        if(args.operation!=='status'||Object.keys(args.parameters??{}).join(',')!=='finishOperationId'
+          ||args.parameters.finishOperationId!==finishHandle||handle!==finishHandle)return null;
+      }else{
+        if(args.parameters?.taskOutcome!=='no_status_change')return null;
+        finishHandle=handle;
+      }
+      continue;
+    }
     if(item.tool==='prepare_assistant_workspace_run'&&ok){
       if(!exactDraftPass(args.taskPass,pass)||value?.prepared!==true||value.workspace?.scopeType!=='task'
         ||value.workspace.id!==selected.workspaceId||value.workspace.companyId!==pass.companyId
@@ -3612,14 +3663,15 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     });
     if(workspaceRecoveryMode==='recovered_outcome'){
       const {terminalMarkerId,terminalTurnId,taskPass,originalDeliveryId,workspaceDraft:{recoveredOutcome}}=options.workspaceDraftRecovery;
-      const {providerEffect,rootDelivery}=recoveredOutcome.plan.evidence;
+      const {providerEffect,rootDelivery,localResult}=recoveredOutcome.plan.evidence;
+      const sourceMarkerId=(providerEffect??rootDelivery??localResult)?.sourceMarkerId;
       // Re-read the complete original and save under the owned thread writer.
       // Verify the SAME projection before the host can renew this one-use lease.
       const current=await readRecoveredOutcomeTurn(request,threadId,{deliveryId:originalDeliveryId,
         originalTurnId:recoveredOutcome.originalTurnId,saveMarkerId:recoveredOutcome.plan.saveReviewId,
         saveTurnId:recoveredOutcome.saveTurnId??terminalTurnId,
         taskPass,mode:recoveredOutcome.mode,receipt:recoveredOutcome.receipt,
-        sourceMarkerId:(providerEffect??rootDelivery)?.sourceMarkerId,
+        sourceMarkerId:localResult&&sourceMarkerId===originalDeliveryId?undefined:sourceMarkerId,
         ...(rootDelivery?{assistantId:workStateContext.assistantUserId}:{}),
         ...(recoveredOutcome.plan.retryFromReviewId?{retry:{retryFromReviewId:terminalMarkerId,terminalTurnId,plan:recoveredOutcome.plan}}:{})});
       if(current.state!=='recovered_outcome_observed'||!isDeepStrictEqual(current.evidence,recoveredOutcome.plan.evidence))
@@ -3627,6 +3679,8 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // File bytes are rechecked while this exact native writer owns the
       // thread. The proof remains private, never part of the lease intent.
       if(rootDelivery&&await options.verifyRootDelivery?.(current.evidence,current.rootDeliveryProof,signal)!==true)
+        fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+      if(localResult&&await options.verifyRecoveredLocalResult?.(current.evidence,current.localResultArtifacts,signal)!==true)
         fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }else if(options.workspaceDraftRecovery){
       const {terminalMarkerId,terminalTurnId,taskPass,workspaceDraft}=options.workspaceDraftRecovery;

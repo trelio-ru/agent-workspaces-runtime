@@ -99,6 +99,12 @@ const historicalTelegramHistoryRead=(arguments_, accountId)=>{
 const historicalEmailRelease = Object.freeze({skillId:'email-imap-smtp',
   releaseId:'353b28f3-8c94-4d69-a287-5f66ae953484',
   packageSha256:'ef3374b49e7e5cc09330515fac6d97ec8579d64591da09726d89ad9610f238cb'});
+// Retained platform v2.9.3 (0b5a5a8698a41c9121a94b5315efbc18ccee3c14)
+// already attests reads. Its export uses read-only IMAP and exclusive file
+// creation but predates a signed local-artifact declaration for that command.
+const historicalEmailExportRelease = Object.freeze({skillId:'email-imap-smtp',
+  releaseId:'a15e4540-4c58-42b4-b64e-d5c6a375445b',
+  packageSha256:'19d8bf1145b7e73b87adb452c7036db7787cee3e8f1560b4f20ac8dabdeba865'});
 
 // This immutable predecessor's account inventory and guide/diagnostic
 // commands were audited with its archive command. Reuse the observations
@@ -151,9 +157,10 @@ export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{provid
  * the common verifier finds the same bytes in the selected draft or local delta.
  */
 export const reviewedHistoricalCheckpointSkill = ({skillId,releaseId},{providerArguments,accountId},stdout) => {
-  const release=historicalEmailRelease;
-  if(skillId!==release.skillId||releaseId!==release.releaseId)return null;
   const [command,...tail]=providerArguments;
+  const release=releaseId===historicalEmailExportRelease.releaseId&&command==='save-message'
+    ?historicalEmailExportRelease:historicalEmailRelease;
+  if(skillId!==release.skillId||releaseId!==release.releaseId)return null;
   if(historicalEmailMetadataRead(providerArguments,accountId))return {release};
   if(accountId===null)return null;
   const options=command==='search'?['--folder','--limit','--since','--from','--subject']

@@ -240,6 +240,16 @@ publication tooling также остаются вне этого публичн
   artifact receipt and the actual Git delta. Recheck path digest, size and bytes
   in the SAME private Run. A verified export may be the entire delta before
   any text replacement. An empty or unexplained delta still refuses.
+  Started read continuations use the same local-delta save. An original
+  validating finish handle is history evidence only. Recheck the expired
+  native Run, no final-draft marker and exact local delta under the finish
+  lock and owned writer. This save cannot repeat prior effects or settle the
+  business pass.
+  The outcome-only successor can confirm an active cadence from the exact
+  accepted save and complete original work history. Verify any local export
+  in the accepted Git tree under the same writer. Native control receipts,
+  the same-pass read predecessor and the prior schedule are independently
+  fenced. Keep file proof local; no provider replay or guessed outcome.
   Legacy receipt-free exports require the SAME audited
   immutable release and fresh native provenance checks. Saving these files
   provides no evidence about any external operation in the turn.

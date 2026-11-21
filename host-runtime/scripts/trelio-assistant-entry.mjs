@@ -2176,7 +2176,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     const verifyRecoveredProviderOutcome=(expected,evidence,signal)=>invoke(async(_live,host)=>{
       const common=await import('./trelio-workspace.mjs');
       const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
-      const {workspaceId,runId,acceptedHead,providerEffect}=evidence;
+      const {workspaceId,runId,acceptedHead,providerEffect,localResultArtifacts}=evidence;
       const current=async()=>{
         const observed=validateAssistantActivePass(await host.readActivePass(),stableIdentity);
         return Object.keys(observed).length===Object.keys(expected).length
@@ -2184,7 +2184,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       };
       try{
         signal?.throwIfAborted();
-        if(!providerEffect||!await current())return false;
+        if((!providerEffect&&!Array.isArray(localResultArtifacts))||!await current())return false;
         const scope={assistantUserId:expected.assistantId,deviceId:expected.deviceId,companyId:expected.companyId,taskId:expected.taskId};
         const root=await resolveAssistantWorkspaceRoot(host.configurationDirectory??configDirectory,
           {scope,runIdentity:{workspaceId,runId}},stableIdentity.origin);
@@ -2205,8 +2205,9 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
           if(!baseHead)return false;
           const options={cwd:directory,signal,timeout:10_000,env:{GIT_OPTIONAL_LOCKS:'0',GIT_NO_REPLACE_OBJECTS:'1'}};
           if((await common.runGit(['status','--porcelain=v1','--untracked-files=all'],options)).stdout)return false;
-          await common.verifyAssistantCheckpointArtifacts({workspaceDirectory:directory,baseHead,draftHead:acceptedHead,
-            artifacts:[providerEffect.artifact],replyHeaderSha256:providerEffect.replyHeaderSha256,signal});
+          const artifacts=providerEffect?[providerEffect.artifact]:localResultArtifacts;
+          if(artifacts.length)await common.verifyAssistantCheckpointArtifacts({workspaceDirectory:directory,baseHead,
+            draftHead:acceptedHead,artifacts,replyHeaderSha256:providerEffect?.replyHeaderSha256,signal});
           const head=(await common.runGit(['rev-parse','--verify','HEAD'],options)).stdout.trim();
           signal?.throwIfAborted();
           return head===acceptedHead&&baseHead===await read()&&await current();
