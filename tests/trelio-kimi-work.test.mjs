@@ -332,7 +332,9 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
     // A later chat with the same stale inventory can also receive and dispatch
     // the server's encrypted route through the distinct local MCP adapter.
     const encrypted = await initialCall("trelio_call_tool", { name: "get_agent_instructions", arguments: encryptedRead });
-    assert.deepEqual(encrypted.result.structuredContent, encryptedRoute);
+    assert.deepEqual(encrypted.result.structuredContent, {
+      ...encryptedRoute, providerSelection: { ...encryptedRoute.providerSelection, tool: "local" },
+    });
     const selection = encrypted.result.structuredContent.providerSelection;
     const localInput = structuredClone(selection.arguments);
     localInput.parameters.arguments = encryptedRead;
@@ -488,15 +490,152 @@ test("Kimi local dispatcher refuses nested browser fill before private I/O and c
     assert.equal(options.runtimeUpgradeRecovery, null);
     return { jsonrpc: "2.0", id: message.id, result: output({ saved: true }) };
   } });
-  for (const args of [{ parameters: { nativeTool: "prepare_agent_secret_browser_fill" } },
-    { operation: "secret_browser_fill" }, { parameters: { operation: "secret_browser_prepare" } }]) {
-    const refused = await handler(call("continue_trelio_local_action", args));
-    assert.equal(refused.result.isError, true);
+  for (const name of ["continue_trelio_local_action", "local", "ws"]) {
+    for (const args of [{ parameters: { nativeTool: "prepare_agent_secret_browser_fill" } },
+      { operation: "secret_browser_fill" }, { parameters: { operation: "secret_browser_prepare" } }]) {
+      const refused = await handler(call(name, args));
+      assert.equal(refused.result.isError, true);
+    }
   }
   assert.equal(calls, 0);
   await handler(call("continue_trelio_workspace_action", { operation: "status", runtimeSessionProof: { forged: true } }),
     { runtimeUpgradeRecovery() { throw new Error("must not switch to ordinary MCP"); } });
   assert.equal(calls, 1);
+});
+
+test("Kimi exposes stable local tools and redirects a misrouted browser-binding request without running it", async () => {
+  const server = "trelio-remote-skills";
+  const aliases = {
+    diag: "diagnose_trelio_installation",
+    local: "continue_trelio_local_action",
+    ws: "continue_trelio_workspace_action",
+    prop: "render_trelio_local_proposal",
+  };
+  const bridgeCall = { schemaVersion: 1, operation: "folder_onboarding_apply", parameters: { planHash: "exact" } };
+  const requiredAction = { code: "START_BRIDGE_PAIRING", call: {
+    toolName: aliases.ws, arguments: { schemaVersion: 1, operation: "login", parameters: {} },
+  } };
+  const diagnostic = {
+    plan: { apply: { toolName: aliases.ws, arguments: bridgeCall } },
+    workingFolder: { refresh: { action: { toolName: aliases.ws, arguments: bridgeCall } } },
+    requiredActions: [requiredAction],
+  };
+  const requests = [];
+  const local = createKimiLocalMcpHandler({ localMessage: async message => {
+    if (message.method === "tools/list") return { result: { tools: Object.values(aliases).map(name => ({
+      name, description: "Native tool", inputSchema: { type: "object", additionalProperties: false },
+    })) } };
+    requests.push(message.params);
+    return { result: { content: [{ type: "text", text: JSON.stringify(diagnostic) }] } };
+  } });
+  const catalogue = (await local({ jsonrpc: "2.0", id: 1, method: "tools/list" })).result.tools;
+  for (const [name, canonical] of Object.entries(aliases)) {
+    const tool = catalogue.find(entry => entry.name === name);
+    assert.ok(tool.description.includes(canonical));
+    assert.ok(`mcp__plugin-trelio-agent-workspaces_${server}__${name}`.length < 64);
+    assert.deepEqual(tool.inputSchema, catalogue.find(entry => entry.name === canonical).inputSchema);
+  }
+
+  const remote = createKimiMcpHandler({ connection: {
+    listTools: async () => assert.fail("Local discovery must never reach remote MCP"),
+    call: async () => assert.fail("Local dispatch must never reach remote MCP"),
+  } });
+  const args = { clientKind: "kimi-work", intent: "onboarding",
+    folderOnboarding: { companySlug: "fixture", confirmBrowser: true } };
+  for (const request of [
+    call(aliases.diag, args),
+    call("trelio_call_tool", { name: aliases.diag, arguments: args }),
+    call("trelio_find_tools", { query: aliases.diag }),
+  ]) {
+    const refused = (await remote(request)).result;
+    assert.equal(refused.isError, true);
+    assert.deepEqual(refused.structuredContent, { code: "TRELIO_KIMI_LOCAL_TOOL_REQUIRED", server, tool: "diag" });
+    assert.doesNotMatch(JSON.stringify(refused), /confirmBrowser|fixture/u);
+  }
+  assert.deepEqual(requests, []);
+  const result = (await local(call("diag", args))).result;
+  assert.deepEqual(requests, [{ name: aliases.diag, arguments: args }]);
+  assert.equal(result.structuredContent, undefined);
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    plan: { apply: { toolName: "ws", arguments: bridgeCall } },
+    workingFolder: { refresh: { action: { toolName: "ws", arguments: bridgeCall } } },
+    requiredActions: [{ ...requiredAction, call: { ...requiredAction.call, toolName: "ws" } }],
+  });
+});
+
+test("Kimi and MultiTool resolve remote and local continuations against their own catalogues", async () => {
+  const { createMultiToolConnection } = await import("../host-runtime/scripts/trelio-remote-mcp.mjs");
+  const server = "trelio-remote-skills";
+  const contextTool = "continue_trelio_local_action";
+  const workspaceTool = "continue_trelio_workspace_action";
+  const embedded = { server, tool: workspaceTool };
+  const context = { server, tool: contextTool, provider: "local_company_context",
+    arguments: { schemaVersion: 1, route: "context", parameters: { nativeTool: "get_task", arguments: { embedded } } } };
+  const download = { server, tool: workspaceTool,
+    arguments: { schemaVersion: 1, operation: "download_file", parameters: { filePath: "original.pdf" } } };
+  const upload = { server, tool: contextTool, schemaVersion: 1, route: "action",
+    parameters: { nativeTool: "upload_import_package" }, requiredParameters: ["localFilePath"] };
+  const skill = { runtimeExecution: { localAction: { ...download, arguments: { schemaVersion: 1, operation: "skill_run", parameters: {} } } } };
+  const fixtures = {
+    get_task: { code: "MCP_LOCAL_CONTEXT_REQUIRED", providerSelection: context, task: { contentProvider: embedded } },
+    get_agent_workspace_file: { bridge: { action: download } },
+    fetch: { materialize: download },
+    list_companies: { companies: [{ contentProvider: { server, tool: contextTool, provider: "local_company_context" } }] },
+    get_import_specification: { localUpload: upload },
+    get_agent_skill: skill,
+  };
+  const native = {
+    listTools: async () => Object.keys(fixtures).map(name => ({ name, inputSchema: { type: "object" } })),
+    call: async name => name === "get_task" ? {
+      ...output(fixtures[name]), content: [{ type: "text", text: `MCP_LOCAL_CONTEXT_REQUIRED: Continue through "${server}", "${contextTool}".` }],
+      isError: true,
+    } : output(fixtures[name]),
+  };
+  const localFixture = { nextCall: context, materialize: download };
+  const dispatches = [];
+  const local = ({ params }) => {
+    dispatches.push(params);
+    return { result: { content: [{ type: "text", text: JSON.stringify(localFixture) }] } };
+  };
+  for (const multiTool of [false, true]) {
+    const handler = createKimiMcpHandler({ multiTool, connection: multiTool
+      ? createMultiToolConnection({ native, local }) : native });
+    const expectedServer = multiTool ? "trelio" : server;
+    const expectedContextTool = multiTool ? contextTool : "local";
+    const expectedWorkspaceTool = multiTool ? workspaceTool : "ws";
+    // Compare both entry points. The generic dispatcher must never be asked
+    // to dispatch a remote request again to resolve a local result.
+    for (const mode of ["direct", "fallback"]) {
+      const ask = async name => (await handler(mode === "direct" ? call(name)
+        : call("trelio_call_tool", { name, arguments: {} }))).result;
+      const encrypted = await ask("get_task");
+      assert.equal(encrypted.isError, true);
+      assert.deepEqual(encrypted.structuredContent, { ...fixtures.get_task,
+        providerSelection: { ...context, server: expectedServer, tool: expectedContextTool } });
+      assert.ok(encrypted.content[0].text.includes(`"${expectedServer}", "${expectedContextTool}"`));
+      assert.deepEqual((await ask("get_agent_workspace_file")).structuredContent.bridge.action,
+        { ...download, server: expectedServer, tool: expectedWorkspaceTool });
+      assert.deepEqual((await ask("fetch")).structuredContent.materialize,
+        { ...download, server: expectedServer, tool: expectedWorkspaceTool });
+      assert.deepEqual((await ask("list_companies")).structuredContent.companies[0].contentProvider,
+        { ...fixtures.list_companies.companies[0].contentProvider, server: expectedServer, tool: expectedContextTool });
+      assert.deepEqual((await ask("get_import_specification")).structuredContent.localUpload,
+        { ...upload, server: expectedServer, tool: expectedContextTool });
+      const skillResult = await ask("get_agent_skill");
+      const skillPayload = skillResult.structuredContent ?? JSON.parse(skillResult.content[0].text);
+      assert.deepEqual(skillPayload.runtimeExecution.localAction,
+        { ...skill.runtimeExecution.localAction, server: expectedServer, tool: expectedWorkspaceTool });
+    }
+    const result = (await (multiTool ? handler : createKimiLocalMcpHandler({ localMessage: local }))(
+      call(expectedContextTool, context.arguments))).result;
+    assert.deepEqual(JSON.parse(result.content[0].text), {
+      nextCall: { ...context, server: expectedServer, tool: expectedContextTool },
+      materialize: { ...download, server: expectedServer, tool: expectedWorkspaceTool },
+    });
+  }
+  assert.deepEqual(dispatches, [false, true].map(() => ({ name: contextTool, arguments: context.arguments })));
+  assert.equal(fixtures.get_task.providerSelection.server, server);
+  assert.equal(fixtures.fetch.materialize.tool, workspaceTool);
 });
 
 test("Kimi bridge state never adopts a common Codex/Claude device or legacy OAuth credential", { timeout: 30_000 }, async t => {

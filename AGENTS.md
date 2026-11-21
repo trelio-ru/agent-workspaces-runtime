@@ -1979,6 +1979,10 @@ and the native plugin's own version for updates through Kimi Work.
 The initial tool list includes exact discovery and invocation alongside OAuth.
 Check live exact tool definitions and retain the same invocation guards for
 both routes, so a chat retaining its first list can complete its request after login.
+Kimi's short local tool aliases and MultiTool's single-server routes share a
+client-facing projection of typed protocol results. Cover original file delivery
+and encrypted continuations as well as open/inspect; preserve native arguments
+and all existing admission, scope and approval guards.
 The shared folder template keeps Kimi's MCP discovery/invocation and separate
 local continuation guidance across chats. Refresh existing blocks through the
 same folder plan, without dropping other clients' instructions.

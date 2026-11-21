@@ -4092,6 +4092,24 @@ Older servers may return a complete list, which the client intersects locally.
 MultiTool preserves the same authenticated gate for its local tool names.
 Both invocation paths share native authorization, argument handling and
 guarded decisions. A missing grant still requires browser OAuth.
+Kimi's local catalogue publishes `diag`, `local`, `ws` and `prop` for the
+existing diagnostic/setup, local dispatcher, Workspace bridge and local
+proposal handlers. These names fit the Kimi limit after the plugin and
+server prefixes. Canonical definitions remain available for cached legacy
+catalogues. Select the advertised name with Kimi's `select_tools` when
+the definition is deferred. Exact misrouted local names on the remote
+catalogue return `TRELIO_KIMI_LOCAL_TOOL_REQUIRED` with the local server
+and alias before any remote dispatch. The original arguments stay in
+the chat. Restart the client if it is still using the pre-update local
+catalogue.
+
+Kimi and MultiTool share a response projection for typed local actions in
+provider selections, Workspace replies, file delivery, import and skill
+execution, local context continuations and setup. It maps only protocol
+route fields at the client boundary. Action inputs, native selectors and
+admission remain under the original handlers. Other clients keep their
+existing route presentation.
+
 Protected read and saving remain
 `not_checked` until their independent evidence. Complete structuredContent and
 native media remain native MCP values; hidden App grants are never flattened
@@ -4327,8 +4345,11 @@ Keychain, pairing, реестр Run и encrypted device имеют собств�
 Компания применяет независимый opt-in в строгом режиме. Hooks, MCP Apps и
 browser-fill в этом клиенте не используются.
 
-Адаптер передаёт подготовленные open/inspect как отдельные инструменты с
-точными UUID, чтобы cwd чата не попадал в аргументы. Действие с дополнительными
+Локальные маршруты, доступные в этом клиенте, указывают на его единственный
+MCP `trelio`. Та же проекция применяется к выдаче оригиналов и
+зашифрованным локальным продолжениям, включая возвращённые локальным
+обработчиком follow-up действия. Адаптер передаёт подготовленные open/inspect
+как отдельные инструменты с точными UUID, чтобы cwd чата не попадал в аргументы. Действие с дополнительными
 аргументами для восстановления сохраняет исходный typed envelope. Open и
 inspect возвращают `authorityReadPlan` с локальными путями и последними
 строками двух файлов. Чат читает правила и профиль до EOF своим читателем.

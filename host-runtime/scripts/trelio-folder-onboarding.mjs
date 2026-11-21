@@ -425,7 +425,7 @@ const buildManagedBindingBlock = ({ company, project }) => {
     CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
     // Keep one shared template across clients: a Kimi refresh must not remove
     // Codex guidance or make another client rewrite the same managed block.
-    "Kimi Work: вызывай инструменты из MCP-каталога, без `system.invoke`. Если удалённого инструмента в чате нет, используй `trelio_find_tools` для его точной схемы и `trelio_call_tool` для вызова. Существующий OAuth переиспользуй. Возвращённые локальные действия выполняй через указанные MCP server/tool; если указан `nativeArgumentsTarget`, заполни только этот слот исходными аргументами.",
+    "Kimi Work: вызывай инструменты из MCP-каталога, без `system.invoke`. Если удалённого инструмента в чате нет, используй `trelio_find_tools` для его точной схемы и `trelio_call_tool` для вызова. Существующий OAuth переиспользуй. Для диагностики, настройки папки и привязки браузера используй `diag` на локальном `trelio-remote-skills`; возвращённые локальные действия выполняй через указанные MCP server/tool (`local`, `ws` или `prop`), при необходимости загрузив точное показанное Kimi имя через `select_tools`. Если указан `nativeArgumentsTarget`, заполни только этот слот исходными аргументами.",
     "",
     "Мультитул: используй MCP-сервер Trelio и действующий OAuth. Если нужный удалённый инструмент не виден, получи его точную схему через `trelio_find_tools` и вызови через `trelio_call_tool`. Локальные действия выполняй через возвращённые MCP server/tool и аргументы. После `open` или `inspect` прочитай оба файла из `authorityReadPlan` по порядку до EOF. Если план недоступен или один из файлов не удалось прочитать полностью, останови работу с папкой и укажи причину.",
     "",

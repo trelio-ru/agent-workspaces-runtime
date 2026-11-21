@@ -7900,6 +7900,102 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     deepseekHarnessPlugin: { name, inject, apply } };
 })();
 
+const DESKTOP_LOCAL_SERVER = "trelio-remote-skills";
+// Kimi prepends the plugin and server IDs to each tool name. These names
+// still fit without hashing. Keep the old definitions for cached catalogues.
+const KIMI_LOCAL_NAMES = Object.freeze({
+  diagnose_trelio_installation: "diag",
+  continue_trelio_local_action: "local",
+  continue_trelio_workspace_action: "ws",
+  render_trelio_local_proposal: "prop",
+});
+const KIMI_CANONICAL_LOCAL_NAMES = Object.freeze(Object.fromEntries(
+  Object.entries(KIMI_LOCAL_NAMES).map(([canonical, exposed]) => [exposed, canonical]),
+));
+const kimiLocalName = name => Object.hasOwn(KIMI_LOCAL_NAMES, name) ? KIMI_LOCAL_NAMES[name]
+  : Object.hasOwn(KIMI_CANONICAL_LOCAL_NAMES, name) ? name : undefined;
+const KIMI_LOCAL_INSTRUCTIONS = "Kimi Work local tools on trelio-remote-skills: use diag for diagnose_trelio_installation (including folder setup and browser binding), local for continue_trelio_local_action, ws for continue_trelio_workspace_action, and prop for render_trelio_local_proposal when listed. Load the exact advertised Kimi name with select_tools if deferred. The trelio_find_tools and trelio_call_tool tools on trelio cover the remote catalogue only. ";
+
+const projectResultField = (object, key, project) => {
+  if (!object || typeof object !== "object" || !Object.hasOwn(object, key)) return object;
+  const value = project(object[key]);
+  return value === object[key] ? object : { ...object, [key]: value };
+};
+const projectResultList = (list, project) => {
+  if (!Array.isArray(list)) return list;
+  const mapped = list.map(project);
+  return mapped.some((value, index) => value !== list[index]) ? mapped : list;
+};
+
+/** Project only reviewed response fields, after the native route is selected.
+ * The backend's descriptors remain canonical for admission and correlation.
+ * Never walk action arguments or domain content for route-like objects.
+ */
+const projectDesktopLocalResult = (result, client, { workspaceToolName = TRELIO_WORKSPACE_ACTION_TOOL.name, localTool } = {}) => {
+  const singleText = result?.content?.length === 1 && result.content[0]?.type === "text" ? result.content[0] : null;
+  let source = result?.structuredContent;
+  // The local doctor and older bridge/context results use a single JSON
+  // block. Limit this fallback to the existing local route-bearing handlers.
+  const textOnly = source === undefined && singleText
+    && [workspaceToolName, TRELIO_LOCAL_ACTION_TOOL.name, TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME].includes(localTool);
+  if (textOnly) {
+    try { source = JSON.parse(singleText.text); } catch { return result; }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return result;
+  const project = (action, nameField = "tool") => {
+    if (!action || (action.server !== DESKTOP_LOCAL_SERVER
+      && !(nameField === "toolName" && action.server === undefined))) return action;
+    const name = action[nameField];
+    if (client === "kimi-work") {
+      const alias = kimiLocalName(name);
+      return alias && alias !== name ? { ...action, [nameField]: alias } : action;
+    }
+    return client === "multitool" && action.server === DESKTOP_LOCAL_SERVER
+      && [workspaceToolName, TRELIO_LOCAL_ACTION_TOOL.name].includes(name) ? { ...action, server: "trelio" } : action;
+  };
+  let payload = source;
+  for (const key of ["providerSelection", "contentProvider", "materialize", "localUpload", "localAction", "nextCall"]) {
+    payload = projectResultField(payload, key, project);
+  }
+  payload = projectResultField(payload, "runtimeExecution", execution => projectResultField(execution, "localAction", project));
+  payload = projectResultField(payload, "companies", companies => projectResultList(companies,
+    company => projectResultField(company, "contentProvider", project)));
+  payload = projectResultField(payload, "bridge", bridge => {
+    const projected = projectResultField(bridge, "action", project);
+    return projectResultField(projected, "actions", actions => Object.keys(actions ?? {}).reduce(
+      (current, key) => projectResultField(current, key, project), actions));
+  });
+  if (client === "kimi-work") {
+    // These same-server actions have a toolName but no server field.
+    const implicit = action => project(action, "toolName");
+    payload = projectResultField(payload, "plan", plan => projectResultField(plan, "apply", implicit));
+    payload = projectResultField(payload, "workingFolder", folder => projectResultField(folder, "refresh",
+      refresh => projectResultField(refresh, "action", implicit)));
+    payload = projectResultField(payload, "requiredActions", actions => projectResultList(actions,
+      action => ["START_BRIDGE_PAIRING", "CONTINUE_BRIDGE_PAIRING"].includes(action?.code)
+        ? projectResultField(action, "call", implicit) : action));
+  }
+  if (payload === source) return result;
+  if (textOnly) return { ...result, content: [{ ...singleText, text: JSON.stringify(payload) }] };
+  const oldRoute = source.providerSelection;
+  const newRoute = payload.providerSelection;
+  const content = result.content?.map(block => {
+    if (block.type !== "text") return block;
+    // Keep the protocol's TextContent guidance in sync with its descriptor.
+    if (oldRoute && oldRoute !== newRoute && ["MCP_LOCAL_CONTEXT_REQUIRED", "MCP_LOCAL_BRIDGE_REQUIRED"].includes(source.code)
+      && block.text.startsWith(`${source.code}:`)) {
+      return { ...block, text: block.text.replaceAll(`"${oldRoute.server}"`, `"${newRoute.server}"`)
+        .replaceAll(`"${oldRoute.tool}"`, `"${newRoute.tool}"`) };
+    }
+    if (result.content.length !== 1 || !block.text.startsWith("{")) return block;
+    try {
+      if (isDeepStrictEqual(JSON.parse(block.text), source)) return { ...block, text: JSON.stringify(payload) };
+    } catch { /* Independent non-JSON text stays untouched. */ }
+    return block;
+  });
+  return { ...result, structuredContent: payload, content };
+};
+
 /** Kimi Work's stdio carrier shares the native OAuth/HTTP/session engine above.
  * Its separate, explicitly consented public profile is model-independent:
  * Kimi hooks, authored arguments and inherited Codex/Claude state never mint
@@ -7959,7 +8055,8 @@ export const createKimiMcpHandler = ({
     if (!tools.some(tool => tool.name === name)) throw unavailable();
     const args = structuredClone(input);
     for (const key of privateArgumentKeys) delete args[key];
-    const result = await connection.call(name, args, signal);
+    const nativeResult = await connection.call(name, args, signal);
+    const result = multiTool ? nativeResult : projectDesktopLocalResult(nativeResult, "kimi-work");
     // Keep native structured results and media, but never pass App metadata
     // through either invocation route.
     return { content: result.content, ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
@@ -7989,7 +8086,7 @@ export const createKimiMcpHandler = ({
   };
   const instructions = multiTool
     ? "This is the MultiTool OAuth channel for Trelio. Use clientKind=multitool for local diagnostics and folder onboarding. Call trelio_connect before protected reads. The company policy applies without hooks or model verification; never author runtimeSessionProof. Execute exact returned tools and arguments. After open or inspect, read every file in authorityReadPlan in order through EOF before continuing. Stop if the plan is unavailable. Local routes use this same MCP catalogue. For missing tools use trelio_find_tools and trelio_call_tool. MCP Apps and browser-fill are unavailable. "
-    : "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat: for missing direct tools, use trelio_find_tools to get the exact native schema and trelio_call_tool to invoke it. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. ";
+    : "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat. For missing remote tools use trelio_find_tools and trelio_call_tool. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. " + KIMI_LOCAL_INSTRUCTIONS;
   const handler = async (message, { signal, notifyClient } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
     const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
@@ -8032,6 +8129,14 @@ export const createKimiMcpHandler = ({
           || !isArgumentObject(input.arguments)) throw invalidInput();
         ({ name, arguments: args } = input);
       }
+      const localName = !multiTool && kimiLocalName(isFind ? query : name);
+      if (localName) {
+        const code = "TRELIO_KIMI_LOCAL_TOOL_REQUIRED";
+        return reply({ ...textResult(
+          `${code}: Use ${DESKTOP_LOCAL_SERVER}.${localName} through the Kimi catalogue (select_tools if deferred), with the original arguments.`,
+          { code, server: DESKTOP_LOCAL_SERVER, tool: localName },
+        ), isError: true });
+      }
       const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(async () => {
         if (isFind) return findNative(query, callSignal);
         if (!isToolName(name)) throw unavailable();
@@ -8067,7 +8172,7 @@ export const runKimiStdioHost = (options = {}) => {
   });
 };
 
-export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage } = {}) => async (message, options) => {
+export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage, kimiRoutes = true } = {}) => async (message, options) => {
   if (!message || message.jsonrpc !== "2.0") return null;
   const input = message.params?.arguments;
   // The shared dispatcher must not accidentally grant a browser fill through
@@ -8082,6 +8187,9 @@ export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage
   if (message.method === "resources/list") return { jsonrpc: "2.0", id: message.id, result: { resources: [] } };
   if (message.method === "resources/read") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "MCP Apps are unavailable in Kimi Work" } };
   const sanitized = structuredClone(message);
+  if (kimiRoutes && sanitized.method === "tools/call" && Object.hasOwn(KIMI_CANONICAL_LOCAL_NAMES, sanitized.params?.name)) {
+    sanitized.params.name = KIMI_CANONICAL_LOCAL_NAMES[sanitized.params.name];
+  }
   if (sanitized.method === "tools/call" && sanitized.params?.arguments) {
     for (const key of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) delete sanitized.params.arguments[key];
   }
@@ -8089,8 +8197,20 @@ export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage
   // Work profile's guards. An upgrade therefore keeps its exact refusal and
   // waits for a new signed-loader startup instead of switching profiles.
   const response = await localMessage(sanitized, { ...options, runtimeUpgradeRecovery: null });
-  if (message.method === "tools/list" && response?.result?.tools) response.result.tools = response.result.tools.filter(tool =>
-    !(tool._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app")));
+  if (kimiRoutes && message.method === "initialize" && response?.result) {
+    response.result.instructions = KIMI_LOCAL_INSTRUCTIONS + (response.result.instructions ?? "");
+  }
+  if (message.method === "tools/list" && response?.result?.tools) {
+    const native = response.result.tools.filter(tool =>
+      !(tool._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app")));
+    const aliases = kimiRoutes ? native.filter(tool => Object.hasOwn(KIMI_LOCAL_NAMES, tool.name)).map(tool => ({
+      ...tool, name: KIMI_LOCAL_NAMES[tool.name], description: `${tool.name}: ${tool.description ?? ""}`,
+    })) : [];
+    response.result.tools = [...aliases, ...native];
+  }
+  if (kimiRoutes && message.method === "tools/call" && response?.result) {
+    response.result = projectDesktopLocalResult(response.result, "kimi-work", { localTool: sanitized.params?.name });
+  }
   return response;
 };
 
@@ -8128,18 +8248,10 @@ const projectText = (result, nativeTool) => {
   return result;
 };
 
-const projectMultiToolBridgeServer = (action, workspaceToolName) =>
-  action?.tool === workspaceToolName && action.server === "trelio-remote-skills"
-    ? { ...action, server: "trelio" }
-    : action;
-
 const projectRoute = (action, operation, workspaceToolName) => {
-  // This client uses one stdio catalogue. Both the original and the specialized
-  // local continuation are carried by its managed mcp.trelio entry.
-  action = projectMultiToolBridgeServer(action, workspaceToolName);
   const route = multiToolRoutes[operation];
   const args = action?.arguments;
-  if (action?.tool !== workspaceToolName || !exactKeys(args, ["schemaVersion", "operation", "parameters"])
+  if (action?.tool !== workspaceToolName || action.server !== "trelio" || !exactKeys(args, ["schemaVersion", "operation", "parameters"])
     || args.schemaVersion !== 1 || args.operation !== operation || !exactKeys(args.parameters, route.fields)) {
     return action;
   }
@@ -8156,7 +8268,7 @@ const projectPreparation = (name, result, workspaceToolName) => {
   const bridge = value.bridge;
   if (name === "prepare_agent_workspace_run" && bridge.actions?.open) {
     const actions = Object.fromEntries(Object.entries(bridge.actions).map(([key, action]) => [
-      key, key === "open" ? projectRoute(action, "open", workspaceToolName) : projectMultiToolBridgeServer(action, workspaceToolName),
+      key, key === "open" ? projectRoute(action, "open", workspaceToolName) : action,
     ]));
     return { ...result, structuredContent: { ...value, bridge: { ...bridge, actions } } };
   }
@@ -8194,7 +8306,7 @@ const describeAuthorityFile = async (contextDirectory, name) => {
 
 export const createMultiToolConnection = ({
   native = createHarnessConnection({ nativeClient: "multitool" }),
-  local = createKimiLocalMcpHandler(),
+  local = createKimiLocalMcpHandler({ kimiRoutes: false }),
   origin = DEFAULT_ORIGIN,
   workspaceTool = TRELIO_WORKSPACE_ACTION_TOOL,
   resolveOpenedDirectory = resolveOpenedWorkspaceDirectory,
@@ -8214,7 +8326,7 @@ export const createMultiToolConnection = ({
       params: { name, arguments: args } }, { origin, signal,
       textCompatibility: name === TRELIO_LOCAL_ACTION_TOOL.name && args?.parameters?.nativeTool === "get_agent_skill" });
     if (!response?.result) throw multiToolUnavailable();
-    return response.result;
+    return projectDesktopLocalResult(response.result, "multitool", { workspaceToolName: workspaceTool.name, localTool: name });
   };
 
   const withAuthorityPlan = async (result, operation, parameters) => {
@@ -8282,7 +8394,8 @@ export const createMultiToolConnection = ({
       // The backend records the distinct OAuth attestation independently. Set
       // the presentation client label here so a default cannot imply Codex.
       const input = name === "prepare_agent_workspace_run" ? { ...args, clientKind: "multitool" } : args;
-      return projectText(projectPreparation(name, await native.call(name, input, signal), workspaceTool.name), name);
+      const result = projectDesktopLocalResult(await native.call(name, input, signal), "multitool", { workspaceToolName: workspaceTool.name });
+      return projectText(projectPreparation(name, result, workspaceTool.name), name);
     },
   };
 };
