@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "../host-runtime/scripts/trelio-component-versions.mjs";
-import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuations,
+import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuations, handleLocalMcpMessage,
   harnessToolName, observeHarnessRuntime, projectHarnessMcpResult, AGENT_SKILL_ROUTING_INSTRUCTIONS,
   remoteMcpHttpRequest, RemoteMcpHostError } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
@@ -107,6 +107,34 @@ test("native observation refuses missing request header; binary and hidden metad
   assert.ok(!JSON.stringify(projected).includes("private-binary"));
   assert.ok(!JSON.stringify(projected).includes("hidden-test"));
   assert.equal(harnessToolName("trelio", "x".repeat(100)).length, 64);
+});
+
+test("Harness browser confirmation selects the current native session through the local tool", async t => {
+  const ctx = new Context(); new Prompt(ctx, {}); new Tools(ctx);
+  t.after(() => ctx.fiber.dispose());
+  const calls = [];
+  await applyHarnessAdapter(ctx, {
+    connection: { listTools: async () => [], instructions: () => "" },
+    localMessage: handleLocalMcpMessage,
+    desktopNavigation: {
+      route: {},
+      confirmBrowser: async (companySlug, sessionId) => {
+        calls.push({ companySlug, sessionId });
+        return { connected: true };
+      },
+    },
+  });
+  const sessionId = "session-10000000-0000-4000-8000-000000000001";
+  const name = harnessToolName("trelio_remote_skills", "diagnose_trelio_installation");
+  const folderOnboarding = { companySlug: "fixture", confirmBrowser: true };
+  const execute = values => ctx.tools.execute({ name, callId: "confirm-browser", arguments: {
+    clientKind: "deepseek-harness", intent: "onboarding", folderOnboarding: values,
+  }, agent: agent(sessionId), signal: signal() });
+  assert.equal((await execute({ ...folderOnboarding, folderPath: "/foreign" })).isError, true);
+  assert.deepEqual(calls, [], "Model-supplied paths never reach the native browser setup");
+  const result = await execute(folderOnboarding);
+  assert.equal(result.isError, false);
+  assert.deepEqual(calls, [{ companySlug: "fixture", sessionId }]);
 });
 
 // A genuine raster goes through the published Harness registry AND its durable

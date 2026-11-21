@@ -33,6 +33,7 @@ publication tooling также остаются вне этого публичн
 ## Общие правила
 
 - [Claude Desktop Code Local navigation](docs/agent-workspace-runtime.md#claude-desktop-local-navigation) uses the private native tab record and a server-confirmed locator; engine IDs never substitute for Desktop tabs.
+- [Browser confirmation](docs/agent-workspace-runtime.md#codex-connection-wizard) opens after verified interactive setup. Native browser approval and loopback proof remain independent of folder registration.
 
 - Human encrypted-device setup follows [browser self-enrollment](docs/agent-workspace-runtime.md#self-device-enrollment): personal phrases stay in Trelio, own-device confirmation and bounded readiness reads; managed/existing-only profiles never open that flow.
 

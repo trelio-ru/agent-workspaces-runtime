@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId, createDeepseekDesktopNavigation, confirmDesktopBrowser } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId, createDeepseekDesktopNavigation, confirmDesktopBrowser, confirmManualCodexBrowser } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
@@ -25,7 +25,7 @@ test("browser confirmation uses only a local listener and sends its verifier to 
       assert.equal(token, "twb_fixture");
       const input = JSON.parse(request.body);
       if (!endpoint.endsWith("/finish")) {
-        assert.equal(input.provider, "codex");
+        assert.equal(input.provider, "mimo-desktop");
         ({ port, codeChallenge: challenge } = input);
         return { json: async () => ({ id }) };
       }
@@ -35,7 +35,7 @@ test("browser confirmation uses only a local listener and sends its verifier to 
       return { json: async () => ({ connected: true }) };
     },
   };
-  assert.deepEqual(await confirmDesktopBrowser("https://trelio.ru", { companySlug: "company-a", provider: "codex" }, {
+  assert.deepEqual(await confirmDesktopBrowser("https://trelio.ru", { companySlug: "company-a", provider: "mimo-desktop" }, {
     bridge,
     openBrowser: async url => {
       assert.equal(url, `https://trelio.ru/company-a/agent-work/?confirmComputer=${id}`);
@@ -370,6 +370,31 @@ test("wizard creates a chosen folder, preserves existing text, registers and rea
   assert.ok(!JSON.stringify(denied).includes("native private message"));
 });
 
+test("manual Codex setup verifies the exact managed folder before opening browser confirmation", async t => {
+  const fixture = await wizardFixture(t, true);
+  const folderPath = path.join(fixture.root, "manual-setup");
+  const child = path.join(folderPath, "nested");
+  await fs.mkdir(child, { recursive: true });
+  const instructions = path.join(folderPath, "AGENTS.md");
+  await fs.writeFile(instructions, canonical);
+  const input = { companySlug: "company-a", folderPath };
+  let confirmations = 0;
+  const dependencies = {
+    bridge: fixture.bridge,
+    confirmBrowser: async (_origin, scope) => {
+      assert.deepEqual(scope, { companySlug: "company-a", provider: "codex" });
+      assert.equal(fixture.puts, 1, "Folder registration precedes browser confirmation");
+      confirmations++;
+      return { connected: true };
+    },
+  };
+  await assert.rejects(confirmManualCodexBrowser(fixture.origin, { ...input, folderPath: child }, dependencies), /BINDING_UNCONFIRMED/u);
+  assert.equal(fixture.puts, 0);
+  assert.deepEqual(await confirmManualCodexBrowser(fixture.origin, input, dependencies), { connected: true });
+  assert.equal(confirmations, 1);
+  assert.equal(await fs.readFile(instructions, "utf8"), canonical);
+});
+
 test("browser confirmation rereads access after real challenge and loopback revocation failures", async t => {
   for (const phase of ["challenge", "finish"]) await t.test(phase, async t => {
     const fixture = await wizardFixture(t);
@@ -570,19 +595,23 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   const connect = messages.filter(message => message.method === "tools/call").at(-1);
   const submitted = await handleCodexConnectionAction(fixture.origin, structuredClone(connect.params.arguments), { bridge: fixture.bridge });
   receive({ jsonrpc: "2.0", id: connect.id, result: submitted });
-  await clicked;
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(elements.get("done").hidden, false);
-  assert.equal(elements.get("status").textContent, "Подключение проверено");
+  assert.match(elements.get("status").textContent, /Подтвердите привязку/u);
   assert.equal(fixture.puts, 1);
   assert.equal(elements.get("confirm-browser").hidden, false);
-  assert.equal(elements.get("connect").disabled, false);
-  const bindBrowser = elements.get("confirm-browser").onclick();
+  assert.equal(elements.get("confirm-browser").disabled, true);
   const bindRequest = messages.filter(message => message.method === "tools/call").at(-1);
+  assert.equal(bindRequest.params.arguments.action, "confirm_browser");
+  assert.notEqual(bindRequest.id, connect.id);
+  await elements.get("confirm-browser").onclick();
+  assert.equal(messages.filter(message => message.method === "tools/call").at(-1).id, bindRequest.id,
+    "The pending browser exchange prevents a duplicate confirmation");
   const bound = await handleCodexConnectionAction(fixture.origin, structuredClone(bindRequest.params.arguments), {
     bridge: fixture.bridge,
     confirmBrowser: async (_origin, input) => assert.equal(input.provider, "codex"),
   });
-  receive({ jsonrpc: "2.0", id: bindRequest.id, result: bound }); await bindBrowser;
+  receive({ jsonrpc: "2.0", id: bindRequest.id, result: bound }); await clicked;
   assert.equal(elements.get("confirm-browser").textContent, "Привязать другой браузер");
   const repeatBinding = elements.get("confirm-browser").onclick();
   const repeat = messages.filter(message => message.method === "tools/call").at(-1);
@@ -632,6 +661,7 @@ test("Harness navigation resolves the requested folder and exact saved session t
   let action;
   let canOpenFolder = true;
   let polls = 0;
+  const verifiedForBrowser = [];
   const bridge = {
     readExistingBridgeSessionToken: async () => token,
     request: async (_origin, _token, endpoint) => {
@@ -642,7 +672,15 @@ test("Harness navigation resolves the requested folder and exact saved session t
   };
   const navigation = createDeepseekDesktopNavigation({ origin, bridge,
     inspect: async directory => canOpenFolder ? folder(directory) : null,
-    register: async ({ folder }) => ({ registered: true, id: codexLaunchFolderId(token, origin, folder, "deepseek") }),
+    register: async ({ folder, readBack }) => {
+      if (readBack !== false) verifiedForBrowser.push(folder.folderPath);
+      return { registered: true, verified: readBack !== false, id: codexLaunchFolderId(token, origin, folder, "deepseek") };
+    },
+    confirm: async (_origin, input, { prepareFolder }) => {
+      assert.equal(input.provider, "deepseek");
+      await prepareFolder({ bridge, token });
+      return { connected: true };
+    },
   });
   const next = (site = "same-origin") => navigation.route.fetch(new Request(`https://host${navigation.route.path}`, {
     method: "POST", headers: { "x-trelio-desktop-navigation": "1", "sec-fetch-site": site },
@@ -662,4 +700,11 @@ test("Harness navigation resolves the requested folder and exact saved session t
   action = { kind: "resume", sessionId: "session-10000000-0000-4000-8000-000000000002" };
   assert.deepEqual(await (await next()).json(), { action: null }, "A foreign session cannot be opened or observed");
   assert.equal(navigation.hasSession(action.sessionId), false);
+  await assert.rejects(navigation.confirmBrowser("fixture", `session-${sessionId}`), /DESKTOP_BROWSER_FOLDER_UNAVAILABLE/u);
+  canOpenFolder = true;
+  await assert.rejects(navigation.confirmBrowser("different-company", `session-${sessionId}`), /DESKTOP_BROWSER_FOLDER_UNAVAILABLE/u);
+  await assert.rejects(navigation.confirmBrowser("fixture", action.sessionId), /DESKTOP_BROWSER_FOLDER_UNAVAILABLE/u);
+  assert.deepEqual(verifiedForBrowser, []);
+  assert.deepEqual(await navigation.confirmBrowser("fixture", `session-${sessionId}`), { connected: true });
+  assert.deepEqual(verifiedForBrowser, [second.directory], "Confirmation rechecks only the current native folder");
 });

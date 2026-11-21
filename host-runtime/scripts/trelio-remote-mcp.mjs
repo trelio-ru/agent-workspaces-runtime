@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -5813,6 +5813,7 @@ const handleToolCallWithoutSkillHints = async (
     workspaceActionOperation = handleTrelioWorkspaceActionOperation,
     codexThreadId = null,
     codexFolderSetupClient = false,
+    confirmHarnessBrowser = null,
     proposalOperation = handleTrelioLocalProposalOperation,
     proposalProviderSelectionRecorder = null,
     proposalCapabilityConfigDirectory,
@@ -6131,15 +6132,22 @@ const handleToolCallWithoutSkillHints = async (
     if (rawArguments?.intent === "onboarding" && rawArguments?.folderOnboarding?.confirmBrowser === true) {
       const { clientKind, folderOnboarding } = rawArguments;
       const providers = { codex: "codex", "claude-code": "claude", cursor: "cursor-grok", antigravity: "antigravity",
-        "deepseek-harness": "deepseek", "kimi-work": "kimi-work", multitool: "multitool" };
+        "deepseek-harness": "deepseek", "kimi-work": "kimi-work", multitool: "multitool", "mimo-desktop": "mimo-desktop" };
+      const registerCodexFolder = Object.hasOwn(folderOnboarding, "folderPath");
       if (!Object.hasOwn(providers, clientKind)
+        || (registerCodexFolder && (clientKind !== "codex" || !codexFolderSetupClient))
         || Object.keys(rawArguments).some(key => !["clientKind", "intent", "folderOnboarding"].includes(key))
-        || Object.keys(folderOnboarding).some(key => !["companySlug", "confirmBrowser"].includes(key))) {
+        || Object.keys(folderOnboarding).some(key => !["companySlug", "confirmBrowser", "folderPath"].includes(key))) {
         throw new RemoteMcpHostError("DESKTOP_BROWSER_CONFIRMATION_INVALID", "Недопустимый запрос на подтверждение компьютера.");
       }
       try {
-        return buildTextResult(await confirmDesktopBrowser(origin, { companySlug: folderOnboarding.companySlug,
-          provider: providers[clientKind] }, { signal }));
+        const { companySlug, folderPath } = folderOnboarding;
+        if (registerCodexFolder) return buildTextResult(await confirmManualCodexBrowser(origin, { companySlug, folderPath }, { signal }));
+        if (clientKind === "deepseek-harness" && confirmHarnessBrowser) {
+          return buildTextResult(await confirmHarnessBrowser(companySlug, signal));
+        }
+        const result = await confirmDesktopBrowser(origin, { companySlug, provider: providers[clientKind] }, { signal });
+        return buildTextResult(result);
       } catch (error) {
         const code = /^[A-Z][A-Z0-9_]{2,100}$/u.test(error?.code ?? "") ? error.code : "DESKTOP_BROWSER_CONFIRMATION_FAILED";
         throw new RemoteMcpHostError(code, "Привязка браузера не завершена. Попросите открыть страницу привязки заново в этом приложении.");
@@ -6787,6 +6795,7 @@ export const handleLocalMcpMessage = async (
     codexMcpRuntime = false,
     textCompatibility = false,
     requestClient = null,
+    confirmHarnessBrowser = null,
     codexLegacyMcpMigration = null,
     runtimeUpgradeRecovery = null,
     loadCatalogPermissions = loadLocalMcpCatalogPermissions,
@@ -6902,8 +6911,9 @@ export const handleLocalMcpMessage = async (
             : message.params?.arguments;
           return await callTool(origin, name, args,
             { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, textCompatibility, codexMcpRuntime,
-              requestClient, codexLegacyMcpMigration, ...(codexThreadId ? { codexThreadId } : {}),
-              ...(nativeCodex && message.params?.name === "open_codex_connection_wizard" ? { codexFolderSetupClient: true } : {}) });
+              requestClient, codexLegacyMcpMigration, confirmHarnessBrowser, ...(codexThreadId ? { codexThreadId } : {}),
+              ...(nativeCodex && (name === "open_codex_connection_wizard" || name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME)
+                ? { codexFolderSetupClient: true } : {}) });
         } catch (error) {
           // A verified pre-dispatch upgrade is the only safe automatic replay.
           // Recovery spends this SAME call budget; a stalled update must not
@@ -7891,7 +7901,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
             input = await prepare({ ...observed, desktop: desktopNavigation?.hasSession(observed.sessionId) === true,
               toolName: `mcp__${server}__${tool.name}`, input, signal: execution.signal });
           }
-          const result = await withPrivateProcessSession(() => call(input, execution.signal), execution.signal);
+          const result = await withPrivateProcessSession(() => call(input, execution.signal, execution), execution.signal);
           if (server === "trelio") continuations.remember(execution.agent, tool.name, raw, result);
           const value = projectHarnessMcpResult(result, server === "trelio" ? tool.name : input.parameters?.nativeTool);
           if (value.isError) throw fail("TRELIO_MCP_ERROR", value.content.map(block => block.text).join("\n"));
@@ -7907,9 +7917,13 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       if (disposed) return;
       const definitions = [
         ...remote.filter(publicTool).map(tool => definition(tool, "trelio", (input, callSignal) => connection.call(tool.name, input, callSignal))),
-        ...local.result.tools.filter(publicTool).map(tool => definition(tool, "trelio_remote_skills", async (input, callSignal) => {
+        ...local.result.tools.filter(publicTool).map(tool => definition(tool, "trelio_remote_skills", async (input, callSignal, execution) => {
+          const confirmHarnessBrowser = desktopNavigation && tool.name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME
+            ? (companySlug, signal) => desktopNavigation.confirmBrowser(companySlug, observeHarnessRuntime(execution).sessionId, signal)
+            : null;
           const reply = await localMessage({ jsonrpc: "2.0", id: 1, method: "tools/call",
             params: { name: tool.name, arguments: input } }, { origin: ORIGIN, signal: callSignal,
+            confirmHarnessBrowser,
             textCompatibility: tool.name === "continue_trelio_local_action" && input.parameters?.nativeTool === "get_agent_skill" });
           if (!reply?.result) throw fail("TRELIO_HARNESS_LOCAL_FAILED", "Локальный компонент Trelio отклонил вызов.");
           return reply.result;

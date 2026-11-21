@@ -476,7 +476,7 @@ export const CODEX_CONNECTION_ACTION = "codex_connection_app_action";
 // The verifier and bridge credential stay in the local process.
 export const confirmDesktopBrowser = async (origin, { companySlug, provider, runtimeSessionId }, dependencies = {}) => {
   if (!/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(companySlug)
-    || !["codex", "claude", "deepseek", "cursor-grok", "antigravity", "kimi-work", "multitool"].includes(provider)
+    || !["codex", "claude", "deepseek", "cursor-grok", "antigravity", "kimi-work", "multitool", "mimo-desktop"].includes(provider)
     || (runtimeSessionId !== undefined && !UUID.test(runtimeSessionId))) {
     throw wizardError("DESKTOP_BROWSER_CONFIRMATION_INVALID");
   }
@@ -485,6 +485,7 @@ export const confirmDesktopBrowser = async (origin, { companySlug, provider, run
   const signal = dependencies.signal ? AbortSignal.any([deadline, dependencies.signal]) : deadline;
   const token = await bridge.loadToken(origin, { signal });
   if (!token?.startsWith("twb_")) throw wizardError("CODEX_CONNECTION_PAIRING_REQUIRED");
+  await dependencies.prepareFolder?.({ bridge, token, signal });
   const verifier = crypto.randomBytes(32).toString("base64url");
   const codeChallenge = crypto.createHash("sha256").update(verifier).digest("base64url");
   const base = "/api/agent-workspaces/desktop-connections/challenges";
@@ -654,6 +655,34 @@ const liveWizardContext = async (origin, parameters, dependencies, signal, { all
 };
 const wizardBindingKey = (origin, token, context) => crypto.createHmac("sha256", token)
   .update(`${origin}\n${context.company.id}\n${context.memberId}`).digest("hex");
+
+/** Manual Codex setup doesn't open the picker. Register only its exact
+ * already-configured company root using the same paired route and read-back.
+ * No folder writes, ancestor selection, pairing or encryption enrollment here. */
+export const confirmManualCodexBrowser = async (origin, { companySlug, folderPath }, dependencies = {}) => {
+  if (!safeFolderPath(folderPath) || typeof companySlug !== "string" || !/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(companySlug)) {
+    throw wizardError("DESKTOP_BROWSER_CONFIRMATION_INVALID");
+  }
+  const { context, token, bridge } = await liveWizardContext(origin, { companySlug }, dependencies, dependencies.signal);
+  const folder = await inspectCodexLaunchFolder(folderPath, dependencies);
+  if (folder?.state !== "bound" || folder.folderPath !== path.resolve(folderPath)
+    || folder.company.slug !== companySlug || folder.project) {
+    throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+  }
+  const result = await (dependencies.register ?? registerAndVerifyCodexLaunchFolder)({
+    origin, token, folder, signal: dependencies.signal,
+  }, dependencies);
+  if (result?.verified !== true) throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
+  const current = await liveWizardContext(origin, { companySlug }, dependencies, dependencies.signal);
+  if (wizardBindingKey(origin, token, context) !== wizardBindingKey(origin, current.token, current.context)) {
+    throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
+  }
+  // Pin the already verified device for the challenge as well. Loading a new
+  // credential after registration could open a page for another account.
+  return (dependencies.confirmBrowser ?? confirmDesktopBrowser)(origin, { companySlug, provider: "codex" },
+    { ...dependencies, bridge: { ...bridge, loadToken: async () => token } });
+};
+
 const wizardResult = (capabilityToken, capability, state, mount = false) => ({
   content: [{ type: "text", text: state.stage === "ready"
     ? "Codex connection verified: the selected folder was registered in Trelio and read back."
@@ -953,6 +982,17 @@ async function action(kind, settings) {
     // A late response from a superseded card cannot restore an old connection.
     if (requestCap !== cap) return;
     render(result);
+    // Only the user's Connect click starts a browser exchange, and only
+    // after verified registration. Rendering or reopening a card never does.
+    // Keep the existing protected App action and its separate time budget.
+    if (kind === 'connect' && !result?.isError && result?.structuredContent?.verified === true
+      && result._meta?.['trelio/codexConnection']?.capabilityToken === requestCap) {
+      notice('Подтвердите привязку в открывшейся вкладке Trelio…', false);
+      result = await rpc('tools/call', {name:'codex_connection_app_action',
+        arguments:{capabilityToken:requestCap, action:'confirm_browser'}});
+      if (requestCap !== cap) return;
+      render(result);
+    }
     if (result && result.isError && !result._meta) {
       unconfirmed('Проверка не завершена. Повторно откройте мастер через агента');
     }
@@ -1012,9 +1052,10 @@ export const isDeepseekDesktopHost = () => ["darwin", "win32"].includes(process.
  * here; only the exact local workspace ID or session ID reaches the renderer. */
 export const createDeepseekDesktopNavigation = ({
   origin = "https://trelio.ru", bridge: injectedBridge, inspect = inspectCodexLaunchFolder,
-  register = registerAndVerifyCodexLaunchFolder,
+  register = registerAndVerifyCodexLaunchFolder, confirm = confirmDesktopBrowser,
 } = {}) => {
   let knownSessions = new Set();
+  let knownWorkspaces = [];
   let catalog;
   let active = false;
 
@@ -1036,6 +1077,7 @@ export const createDeepseekDesktopNavigation = ({
         || !Array.isArray(row.sessionIds) || row.sessionIds.length > 2000
         || row.sessionIds.some(id => typeof id !== "string" || !DEEPSEEK_NATIVE_SESSION_ID.test(id)))) return reply(null, 400);
       knownSessions = new Set(rows.flatMap(row => row.sessionIds));
+      knownWorkspaces = rows;
 
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(12_000)]);
       const bridge = injectedBridge ?? await import("./trelio-workspace.mjs");
@@ -1090,6 +1132,25 @@ export const createDeepseekDesktopNavigation = ({
   };
   return {
     hasSession: id => knownSessions.has(id),
+    // The polling catalogue can predate first setup by minutes. During
+    // explicit onboarding re-inspect only this native session's workspace.
+    // Neither the company slug nor a model-supplied path may select a folder.
+    confirmBrowser: (companySlug, sessionId, signal) => confirm(origin, { companySlug, provider: "deepseek" }, {
+      bridge: injectedBridge, signal,
+      prepareFolder: async ({ bridge, token, signal: confirmationSignal }) => {
+        const candidates = knownWorkspaces.filter(row => row.sessionIds.includes(sessionId));
+        if (candidates.length !== 1) throw wizardError("DESKTOP_BROWSER_FOLDER_UNAVAILABLE");
+        const [{ directory }] = candidates;
+        const folder = await inspect(directory, { bridge });
+        if (folder?.state !== "bound" || folder.folderPath !== directory || folder.company.slug !== companySlug) {
+          throw wizardError("DESKTOP_BROWSER_FOLDER_UNAVAILABLE");
+        }
+        const receipt = await register({
+          origin, token, folder, signal: confirmationSignal, provider: "deepseek",
+        }, { bridge });
+        if (receipt?.verified !== true) throw wizardError("DESKTOP_BROWSER_FOLDER_UNAVAILABLE");
+      },
+    }),
     route: { path: DEEPSEEK_DESKTOP_LOCAL_ROUTE, methods: ["POST"], requestBody: "buffered", fetch: fetchNavigation },
   };
 };
