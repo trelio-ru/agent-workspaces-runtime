@@ -1252,7 +1252,16 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
     ||Object.keys(scope).some(key=>!['schemaVersion','assistantUserId','companyId','taskId','workStatePath','scheduled'].includes(key))
     ||scope.schemaVersion!==1||scope.assistantUserId!==assistantId||scope.companyId!==taskPass.companyId||scope.taskId!==taskPass.taskId
     ||scope.workStatePath!==`assistants/${assistantId}/WORK.md`||scope.scheduled!==undefined&&scope.scheduled!==true)return false;
-  let taskReads=0,pages=0,catalogue=null,nextPage=0;
+  // Encrypted exact-task reads may retain the native URL coordinates as
+  // arguments. They are still the same task only when the native response
+  // echoes the locator AND identifies the pass's task UUID. A page must use
+  // the same locator; a caller-selected company or task list is insufficient.
+  const sameLocator=(value,expected)=>plainRecord(value)&&plainRecord(expected)
+    &&typeof expected.companySlug==='string'&&typeof expected.projectSlug==='string'
+    &&Number.isSafeInteger(expected.taskNumber)&&expected.taskNumber>0
+    &&value.companySlug===expected.companySlug&&value.projectSlug===expected.projectSlug
+    &&(value.taskNumber===expected.taskNumber||value.taskNumber===String(expected.taskNumber));
+  let taskReads=0,pages=0,catalogue=null,nextPage=0,locator=null;
   for(const item of items){
     if(['agentMessage','reasoning'].includes(item?.type))continue;
     const args=item?.arguments,content=item?.result?.content;
@@ -1276,8 +1285,11 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
     if(!exactDraftPass(args.taskPass,taskPass)||!args.runtimeSessionProof
       ||Object.getPrototypeOf(args.runtimeSessionProof)!==Object.prototype)return false;
     if(item.tool==='get_task'){
-      if(++taskReads!==1||keys!=='runtimeSessionProof,taskPass'||result.effectiveInstructions?.schemaVersion!==3
+      if(++taskReads!==1||result.effectiveInstructions?.schemaVersion!==3
         ||!Array.isArray(result.tasks)||result.tasks.length!==1||result.tasks[0]?.task?.id!==taskPass.taskId)return false;
+      locator=result.tasks[0].locator??null;
+      if(keys!=='runtimeSessionProof,taskPass'&&(keys!=='companySlug,projectSlug,runtimeSessionProof,taskNumber,taskPass'
+        ||!sameLocator(args,locator)))return false;
       const authority=result.effectiveInstructions;
       if(authority.status==='incomplete'){
         catalogue=authority.delivery?.catalogRevisionKey;
@@ -1292,7 +1304,11 @@ export const assistantInterruptedTaskRead=(turn,deliveryId,{taskPass,assistantId
           ||authority.layers.some((layer,index)=>layer?.key!==keys[index]||typeof layer.markdown!=='string'))return false;
       }else if(authority.status!=='complete')return false;
     }else if(item.tool==='get_task_instruction_page'){
-      if(taskReads!==1||++pages>20||keys!=='expectedCatalogRevisionKey,pageIndex,pageSize,runtimeSessionProof,taskPass'
+      const exactPageTarget=keys==='expectedCatalogRevisionKey,pageIndex,pageSize,runtimeSessionProof,taskPass'
+        ||keys==='expectedCatalogRevisionKey,pageIndex,pageSize,runtimeSessionProof,taskPass,tasks'
+          &&Array.isArray(args.tasks)&&args.tasks.length===1&&Object.keys(args.tasks[0]??{}).sort().join(',')==='companySlug,projectSlug,taskNumber'
+          &&sameLocator(args.tasks[0],locator);
+      if(taskReads!==1||++pages>20||!exactPageTarget
         ||result.schemaVersion!==3||!['instruction_page','instruction_page_batch'].includes(result.responseKind)
         ||catalogue===null||args.expectedCatalogRevisionKey!==catalogue||result.catalogRevisionKey!==catalogue
         ||!Number.isInteger(args.pageIndex)||args.pageIndex!==nextPage||result.pageIndex!==nextPage
@@ -1321,7 +1337,7 @@ const nativeTaskReadProof=(args,taskPass)=>exactDraftPass(args.taskPass,taskPass
  * again at renewal. Names or provider success alone are not evidence.
  * Keep every account argument and result in this bounded native reader.
  */
-export const assistantInterruptedTechnicalPrelude=(turn,deliveryId,{taskPass,assistantId}={})=>{
+const assistantInterruptedLegacyTechnicalPrelude=(turn,deliveryId,{taskPass,assistantId}={})=>{
   if(!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
     ||!Array.isArray(turn.items)||turn.items.length<5||turn.items.length>128)return null;
   const [original,...items]=turn.items;
@@ -1433,6 +1449,125 @@ export const assistantInterruptedTechnicalPrelude=(turn,deliveryId,{taskPass,ass
     return null;
   return validateAssistantTechnicalPrelude({kind:'local_skill_diagnostics_v1',...workspace,...skill});
 };
+
+// For a guide read, page selection changes only the bounded result projection;
+// the signed child receives the same command and provider arguments. A lost
+// page can inherit that read-only classification ONLY from the exact previous
+// typed witness and its checked nextCall. A command name or generic error
+// alone cannot establish this property for a legacy provider.
+const interruptedReadOnlyGuidePrelude=(turn,deliveryId,{taskPass,assistantId}={})=>{
+  if(!UUID.test(turn?.id??'')||turn.status!=='interrupted'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length<5||turn.items.length>128)return null;
+  const [original,...items]=turn.items;
+  const preflight=[original],releases=new Map();
+  const initialReads=new Set(['get_task','get_task_instruction_page','get_assistant_status','get_assistant_operation_contract']);
+  const metadataReads=new Set(['get_task_sections','get_trelio_tool_contract','get_agent_skill']);
+  let inspection=null,run=null,baseHead=null,openHandle=null,opened=false,nextGuide=null,interruptedGuide=false;
+  for(const item of items){
+    if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
+    const args=item?.arguments,value=item?.result?.structuredContent;
+    if(interruptedGuide||item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'
+      ||item.error!=null||!plainRecord(args))return null;
+    if(initialReads.has(item.tool)){preflight.push(item);continue;}
+    if(!nativeTaskReadProof(args,taskPass))return null;
+    const positive=item.status==='completed'&&item.result&&item.result.isError!==true&&!Object.hasOwn(value??{},'code');
+    if(metadataReads.has(item.tool)){
+      if(!positive)return null;
+      continue;
+    }
+    if(!plainRecord(value))return null;
+    if(item.tool==='prepare_assistant_workspace_read'){
+      if(!positive||inspection||run||value.prepared!==true||!UUID.test(args.workspaceId??'')
+        ||value.workspace?.id!==args.workspaceId)return null;
+      inspection=args.workspaceId;
+      continue;
+    }
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(!positive||run||value.prepared!==true||value.workspace?.scopeType!=='task'
+        ||value.workspace.companyId!==taskPass.companyId||value.workspace.taskId!==taskPass.taskId
+        ||inspection&&inspection!==value.workspace.id||args.workspaceId!==undefined&&args.workspaceId!==value.workspace.id
+        ||args.runId!==undefined&&args.runId!==value.run?.id||!UUID.test(args.clientRequestId??''))return null;
+      run={workspaceId:value.workspace.id,runId:value.run?.id};
+      baseHead=value.run?.baseHead;
+      if(![run.workspaceId,run.runId].every(id=>UUID.test(id??''))||!acceptedWorkspaceHead(baseHead)
+        ||!sameDraftRun(value.bridge?.actions?.open?.arguments?.parameters,run))return null;
+      continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'){
+      if(!positive||!opened||!sameDraftRun(args.runIdentity,run))return null;
+      try{if(!['read','list'].includes(parseAssistantRunFileCommand(args.command).action))return null;}
+      catch{return null;}
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1||!plainRecord(args.parameters))return null;
+    const {operation,parameters}=args;
+    if(operation==='inspect'){
+      if(!positive||run||!inspection||parameters.workspaceId!==inspection||args.runIdentity!==undefined
+        ||value.operation!=='inspect')return null;
+      continue;
+    }
+    if(!run)return null;
+    const completesOpen=value.operation==='open'&&Array.isArray(value.authorityReads)
+      &&value.authorityReads.length===ASSISTANT_PINNED_AUTHORITY_FILES.length
+      &&value.authorityReads.every((call,index)=>call?.tool==='use_assistant_workspace_files'
+        &&sameDraftRun(call.arguments?.runIdentity,run)&&call.arguments.command?.action==='read'
+        &&call.arguments.command.source==='authority'&&call.arguments.command.path===ASSISTANT_PINNED_AUTHORITY_FILES[index]);
+    if(operation==='open'){
+      if(!positive||opened||openHandle||!sameDraftRun(parameters,run))return null;
+      if(completesOpen)opened=true;
+      else if(!(openHandle=observedWorkspacePollHandle(value,'open',run)))return null;
+      continue;
+    }
+    if(operation==='status'){
+      if(!positive||!sameDraftRun(args.runIdentity,run))return null;
+      if(parameters.finishOperationId!==undefined){
+        if(opened||!openHandle||parameters.finishOperationId!==openHandle)return null;
+        if(completesOpen&&value.operationId===openHandle&&value.state==='completed')opened=true;
+        else if(observedWorkspacePollHandle(value,'open',run)!==openHandle)return null;
+      }else if(!opened||value.operation!=='status')return null;
+      continue;
+    }
+    if(operation!=='skill_run'||!opened||args.runIdentity!==undefined
+      ||Object.keys(args).sort().join(',')!=='operation,parameters,runtimeSessionProof,schemaVersion,taskPass'
+      ||!onlyKeys(parameters,['companyId','projectId','skillId','releaseId','runtimeSessionId','arguments','guidePart'])
+      ||parameters.companyId!==taskPass.companyId||!UUID.test(parameters.releaseId??'')
+      ||!UUID.test(parameters.runtimeSessionId??'')||!/^[a-z0-9][a-z0-9-]{0,63}$/u.test(parameters.skillId??'')
+      ||!Array.isArray(parameters.arguments)||parameters.arguments.length>32
+      ||parameters.arguments.some(arg=>typeof arg!=='string'||Buffer.byteLength(arg)>4096))return null;
+    const action={schemaVersion:1,operation,parameters};
+    let part,account;
+    try{part=assistantSkillGuideSelection(parameters.arguments,parameters.guidePart);account=parseAccountCommand(parameters.arguments);}
+    catch{return null;}
+    if(!positive){
+      if(part===undefined||item.status!=='failed'||item.result?.isError===false||Object.keys(value).join(',')!=='code'
+        ||value.code!=='TRELIO_WORKSPACE_ACTION_FAILED'||!nextGuide||!isDeepStrictEqual(action,nextGuide.arguments))return null;
+      interruptedGuide=true;
+      continue;
+    }
+    if(value.schemaVersion!==1||value.operation!==operation||Object.hasOwn(value,'taskSkillArtifact')
+      ||typeof value.stdout!=='string'||Buffer.byteLength(value.stdout)>64*1024
+      ||!matchesAssistantTaskSkillRead(value.taskSkillRead,{scope:taskPass,parameters,stdout:value.stdout}))return null;
+    if(part===undefined){
+      if(nextGuide||account?.operation!=='list')return null;
+    }else{
+      if(nextGuide?!isDeepStrictEqual(action,nextGuide.arguments):part!==0)return null;
+      const projected=projectAssistantSkillGuideResult({stdout:value.stdout},action,part);
+      if(!projected||!isDeepStrictEqual(projected.nextCall,value.nextCall))return null;
+      nextGuide=projected.nextCall;
+    }
+    const release={skillId:parameters.skillId,releaseId:parameters.releaseId,packageSha256:value.taskSkillRead.packageSha256};
+    const known=releases.get(release.releaseId);
+    if(known?!isDeepStrictEqual(known,release):releases.size>=8)return null;
+    releases.set(release.releaseId,release);
+  }
+  if(!interruptedGuide||!assistantInterruptedTaskRead({...turn,items:preflight},deliveryId,
+    {taskPass,assistantId,initialScheduled:true}))return null;
+  return validateAssistantTechnicalPrelude({kind:'read_only_skill_guides_v2',...run,baseHead,
+    historicalSkillReleases:[...releases.values()].sort((a,b)=>a.releaseId.localeCompare(b.releaseId))});
+};
+
+export const assistantInterruptedTechnicalPrelude=(...args)=>
+  assistantInterruptedLegacyTechnicalPrelude(...args)??interruptedReadOnlyGuidePrelude(...args);
 
 const draftReads=new Set(['get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract']);
 
@@ -3621,6 +3756,8 @@ export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
             ?'The exact original exports are present in this draft. Reuse them from the reopened Run and its retained history. Do not invoke those export commands again.\n':'')
         :prelude
         ? 'The interrupted invocation stopped while preparing work. Continue from the same canonical Workspace ID '+prelude.workspaceId+' and Run ID '+prelude.runId+'. Use a fresh native prepare/open of this exact Run and both returned pinned authority files. Reconcile the prior state before doing the next unfinished task step. Do not rerun the prior provider diagnosis, repeat an external action or open a replacement Run. The preserved technical state does not grant authority to send, publish or change anything.\\n'
+          +(prelude.kind==='read_only_skill_guides_v2'
+            ?'The prior signed guide read was incomplete. Read current skill instructions and finish the required guide using the current admitted continuation. Do not reuse a prior runtime session.\n':'')
         : options.taskReadRecovery
         ? 'The interrupted invocation had only completed Trelio reads. Earlier work may already have effects. Keep the original authorization and pending operation IDs. Reuse retained decisions as context, reread current authority where required, and continue with the next unfinished action after exact read-back. Do not re-execute previous commands or ask the owner to restore a technical session.\n':'';
       const recovery=options.continuationReview

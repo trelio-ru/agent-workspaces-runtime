@@ -262,6 +262,16 @@ export const ASSISTANT_WORKSPACE_ACCEPTED_TOOLS=Object.freeze([
 ]);
 export const ASSISTANT_RECOVERED_OUTCOME_TOOLS=Object.freeze(['complete_assistant_pass']);
 export const validateAssistantTechnicalPrelude=value=>{
+  if(value?.kind==='read_only_skill_guides_v2'){
+    object(value,['kind','workspaceId','runId','baseHead','historicalSkillReleases']);
+    const releases=historicalSkillReleaseReceipts(value.historicalSkillReleases);
+    if(!releases)inputError();
+    const {workspaceId,runId,baseHead}=validateAssistantLocalDraftBasis({
+      workspaceId:value.workspaceId,runId:value.runId,baseHead:value.baseHead,
+      anchorHead:value.baseHead,checkpointId:null,
+    });
+    return {kind:value.kind,workspaceId,runId,baseHead,historicalSkillReleases:releases};
+  }
   const fields=['kind','workspaceId','runId','skillId','releaseId','projectId'];
   object(value,fields);
   if(Object.keys(value).length!==fields.length||value.kind!=='local_skill_diagnostics_v1'||value.skillId!=='telegram-mtproto')

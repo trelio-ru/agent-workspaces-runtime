@@ -903,6 +903,24 @@ retained pass exposes no browser, provider, edit, new Run or completed-goal
 action. Its ordinary native material receipt can close the original pass and
 retain the unfinished goal for the regular next cycle.
 
+An event-free scheduled pass interrupted while reading signed skill guides
+can continue its already opened, unchanged canonical Run. The whole native
+turn must prove an ordinary task read, the completed exact open (including a
+settled poll when used), and only allowed metadata/file reads. A failed guide
+page must be the exact next call from the preceding verified signed read.
+The guide selector changes only the output page, so it cannot substitute new
+provider arguments, account or release. Account inventory requires its own
+signed read receipt. No provider action, file edit, draft or unresolved native
+operation can be certified by this witness.
+
+The existing v3 continuation carries the Run/base and immutable release
+references. The backend checks the expired opened Run, unchanged accepted
+base, current assignment and absent checkpoints/actions at review and renewal.
+The signed host independently checks clean local Git before review and again
+under the owned native writer. No intermediate draft or effect is fabricated.
+The original daily pass gets one new marker and can use its ordinary current
+authority from the first unfinished step.
+
 The recovery first reads the exact server Run lifecycle alongside local Git
 status. An accepted candidate is read back without reopening it. For an
 expired Run, the existing cross-process finish lock, private finish marker,

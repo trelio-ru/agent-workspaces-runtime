@@ -67,6 +67,7 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
   passHost = null, verifyRetainedLocalCheckpoint = null, inspectLocalDraft = null, verifyRecoveredProviderOutcome = null,
+  verifyReadOnlyPrelude = null,
   workspaceForIntake = null, readSourceMonitor = null,
   acknowledgeSource = null, verifyOwnerReply = null,
   deliverPreparedOwnerReply = null, verifyPreparedOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
@@ -1657,6 +1658,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const capacity=result.state==='failed'&&result.failure==='model_capacity';
     const workspaceDraft=['interrupted_workspace_draft','recovered_outcome_ready'].includes(result.state)?result.workspaceDraft:null;
     const parentRead=result.state==='interrupted_task_read'?result.taskReadParent:null;
+    const readOnlyPrelude=parentRead?.technicalPrelude?.kind==='read_only_skill_guides_v2'
+      ?parentRead.technicalPrelude:null;
     const archive=result.state==='named_archive_saved'?result.namedArchiveSettled:null;
     const ownedHistory=workspaceDraft||parentRead||archive;
     if(job.kind!=='task'||result.state!=='completed'&&!capacity&&!ownedHistory||!uuid.test(result.turnId??'')||!passHost?.continuePass)
@@ -1722,6 +1725,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||inbox.taskState(job.scope,job.taskId)?.state!=='accepted'))return true;
     const saveWithIndependentOutcomeCheck=workspaceDraft?.namedArchive||workspaceDraft?.retainedHandoff||independentSave||recoveredOutcome;
     if(parentRead||saveWithIndependentOutcomeCheck||archive||postArchive)await assertPendingOutcome(signal);
+    if(readOnlyPrelude&&await verifyReadOnlyPrelude?.(saved,readOnlyPrelude,signal)!==true)return true;
     // Do not consume another continuation intent/lease while the actual native
     // client has no usable hooks. Production reads its current task folder;
     // this is a budget/preflight witness only, not backend or observed proof.
@@ -1777,6 +1781,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Re-read under the same native writer. The server also checks this
       // absence in the existing renewal CAS; neither check replays work.
       if(parentRead||saveWithIndependentOutcomeCheck||archive||postArchive)await assertPendingOutcome(ownedSignal);
+      if(readOnlyPrelude&&await verifyReadOnlyPrelude?.(saved,readOnlyPrelude,ownedSignal)!==true)
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       // A generic pre-receipt checkpoint success never identifies its bytes
       // by itself. The same local Git witness must still hold under the writer.
       if(parentRead?.intermediateDraft?.retainedLocalCheckpoint

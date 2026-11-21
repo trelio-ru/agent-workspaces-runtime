@@ -16488,9 +16488,10 @@ const refuseAssistantRecovery = stage => {
   throw error;
 };
 
-const readAssistantRecoveryChanges = async (metadata, anchorHead) => {
+const readAssistantRecoveryChanges = async (metadata, anchorHead, signal) => {
   const directory = metadata.workspaceDirectory;
-  const gitOptions = { cwd: directory, env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" } };
+  const gitOptions = { cwd: directory, signal, env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "false" } };
   const [head, index] = await Promise.all([
     runGit(["rev-parse", "--verify", "HEAD"], gitOptions),
     runGit(["ls-files", "-v", "-z"], gitOptions),
@@ -16502,7 +16503,36 @@ const readAssistantRecoveryChanges = async (metadata, anchorHead) => {
   const hydrated = new Set((metadata.objects ?? []).map(object => object.filePath));
   if (index.stdout.split("\0").filter(Boolean).some(entry => !entry.startsWith("H ")
     && !(entry.startsWith("S ") && hydrated.has(entry.slice(2))))) refuseAssistantRecovery("index");
-  return { hydrated, changes: await getGitStatusEntries(directory, metadata.objects ?? []) };
+  return { hydrated, changes: await getGitStatusEntries(directory, metadata.objects ?? [], gitOptions) };
+};
+
+/** Read-only guide recovery may reopen the current native Run only if it has
+ * no local changes to reconcile. Older metadata can still name an inherited
+ * checkpoint, but only a current draft or candidate can materialize it.
+ * Reuse the full index/status checks, including hydrated object verification,
+ * and refuse any extra ignored material besides generated client controls. */
+export const verifyAssistantReadOnlyPrelude = async ({ metadata, witness, signal }) => {
+  if (metadata.scopeType !== "task" || metadata.runId !== witness.runId || metadata.workspaceId !== witness.workspaceId
+    || metadata.baseHead !== witness.baseHead || metadata.materializedHead !== witness.baseHead
+    || metadata.draftHead != null || metadata.candidateHead != null && metadata.candidateHead !== witness.baseHead
+    || metadata.terminalStatus || hasFinishRecoveryMarker(metadata)) refuseAssistantRecovery("identity");
+
+  const directory = metadata.workspaceDirectory;
+  // The parent is already a private Run directory. Git creates its own
+  // subdirectory mode and a read-only witness must not rewrite Windows ACLs.
+  const git = await fs.lstat(path.join(directory, ".git"));
+  if (!git.isDirectory() || git.isSymbolicLink()) refuseAssistantRecovery("index");
+  const { changes } = await readAssistantRecoveryChanges(metadata, witness.baseHead, signal);
+  if (changes.length) refuseAssistantRecovery("changes");
+  const ignored = await runGit(["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], {
+    cwd: directory, signal, env: { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" },
+  });
+  for (const control of ignored.stdout.split("\0").filter(Boolean)) {
+    if (control !== "AGENTS.md" && control !== "CLAUDE.md") refuseAssistantRecovery("ignored");
+    const stat = await fs.lstat(path.join(directory, control));
+    if (!stat.isFile() || stat.isSymbolicLink()) refuseAssistantRecovery("ignored");
+  }
+  signal?.throwIfAborted();
 };
 
 const verifyAssistantRecoveryFiles = async (directory, changes, hydrated, expectedHash, worklogPath) => {
@@ -17348,14 +17378,14 @@ const renderGitStatusEntry = ({ status: entryStatus, filePath }) => {
   return `${entryStatus} ${visiblePath}`;
 };
 
-const getGitStatusEntries = async (workspaceDirectory, knownObjects = []) => {
+const getGitStatusEntries = async (workspaceDirectory, knownObjects = [], gitOptions = {}) => {
   const result = await runGit([
     "status",
     "--porcelain=v1",
     "-z",
     "--untracked-files=all",
     "--no-renames",
-  ], { cwd: workspaceDirectory });
+  ], { ...gitOptions, cwd: workspaceDirectory });
   // NUL-delimited porcelain сохраняет exact path даже для пробелов, кавычек и
   // переводов строки. --no-renames оставляет одну запись на record, поэтому
   // model-facing text можно строить отдельно, не используя его как parser.

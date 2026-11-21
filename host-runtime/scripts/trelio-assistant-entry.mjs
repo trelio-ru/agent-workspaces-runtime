@@ -2131,6 +2131,17 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return await verifyAssistantRetainedLocalCheckpoint({
         config:host.configurationDirectory??configDirectory,identity:stableIdentity,pass:expected,witness,signal})&&await checkPass();
     });
+    const verifyReadOnlyPrelude=(expected,witness,signal)=>invoke(async(_live,host)=>{
+      const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+      const checkPass=async()=>{
+        const current=validateAssistantActivePass(await host.readActivePass(),stableIdentity);
+        return Object.keys(current).length===Object.keys(expected).length
+          &&Object.keys(expected).every(key=>current[key]===expected[key]);
+      };
+      if(!await checkPass())return false;
+      return await observeAssistantReadOnlyPrelude({
+        config:host.configurationDirectory??configDirectory,identity:stableIdentity,pass:expected,witness,signal})&&await checkPass();
+    });
     const inspectLocalDraft=(expected,basis,replacements,signal,retainedArtifacts)=>invoke(async(_live,host)=>{
       const common=await import('./trelio-workspace.mjs');
       const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
@@ -2247,7 +2258,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     });
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
-      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,inspectLocalDraft,verifyRecoveredProviderOutcome,
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,verifyRetainedLocalCheckpoint,inspectLocalDraft,verifyRecoveredProviderOutcome,verifyReadOnlyPrelude,
       readSourceMonitor,acknowledgeSource,verifyOwnerReply,
       deliverPreparedOwnerReply:dependencies.deliverPreparedOwnerReply??preparedReplyAction(false),
       verifyPreparedOwnerReply:dependencies.verifyPreparedOwnerReply??preparedReplyAction(true),
@@ -3754,6 +3765,33 @@ export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='htt
   if(!isAssistantWorkspaceRoot(root,base))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   const identity=await context.readOpenedWorkspaceRunIdentity(path.join(root,'workspace'),expectedOrigin);
   return identity.workspaceId===plan.runIdentity.workspaceId&&identity.runId===plan.runIdentity.runId?root:base;
+};
+
+// Verify the original local checkout without claiming it. The coordinator
+// repeats this under the owned App Server writer before the native renewal.
+// The canonical Run/accepted base and absent server effects are separate CAS
+// checks, so neither this private read nor a Git error changes task state.
+const observeAssistantReadOnlyPrelude=async({config,identity,pass,witness,signal})=>{
+  try{
+    signal?.throwIfAborted();
+    const common=await import('./trelio-workspace.mjs');
+    const runIdentity={workspaceId:witness.workspaceId,runId:witness.runId};
+    const scope={assistantUserId:pass.assistantId,deviceId:pass.deviceId,companyId:pass.companyId,taskId:pass.taskId};
+    const root=await resolveAssistantWorkspaceRoot(config,{scope,runIdentity},identity.origin);
+    const directory=path.join(root,'workspace');
+    await common.assertPrivatePathKind(root,'directory');
+    await common.assertPrivatePathKind(directory,'directory');
+    const read=async()=>{
+      const metadata=await common.readAssistantWorkspaceRunMetadata(root);
+      if(metadata.schemaVersion!==3||metadata.origin!==identity.origin||metadata.company?.id!==pass.companyId
+        ||!sameLocalPath(metadata.workspaceDirectory??'',directory))return null;
+      return metadata;
+    };
+    const before=await read();
+    if(!before)return false;
+    await common.verifyAssistantReadOnlyPrelude({metadata:before,witness,signal});
+    return canonicalJson(before)===canonicalJson(await read());
+  }catch{return false;}
 };
 /** Pre-receipt saves require a current independent local snapshot. A settled
  * operation, clean status or matching Run ID alone is insufficient. Use the

@@ -10,7 +10,7 @@ import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assis
 import { assistantTaskStorageDirectory, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { createAssistantRuntimeHost } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
-import { ensurePrivateDirectory, runGit, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { ensurePrivateDirectory, runGit, verifyAssistantReadOnlyPrelude, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 
 const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={}) => {
   if(ownsDatabase)t.after(()=>database.close());
@@ -3232,10 +3232,33 @@ for(const ending of ['completed','interrupted','receipt-appeared'])test(`one rea
     assert.equal(views,1);assert.equal(renewals,ending==='receipt-appeared'?0:1);assert.equal(attempts,2);
   }finally{await f.coordinator.close();}
 });
+test('read-only prelude verifies the unchanged real private Git checkout',async t=>{
+  const cwd=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'assistant-guide-tree-')));
+  t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
+  const git=args=>runGit(args,{cwd});
+  await git(['init']);
+  await fs.writeFile(path.join(cwd,'WORK.md'),'original work state\n');
+  await fs.writeFile(path.join(cwd,'.gitignore'),'/AGENTS.md\n/ignored.txt\n');
+  await git(['add','--all']);
+  await git(['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-m','fixture base']);
+  await fs.writeFile(path.join(cwd,'AGENTS.md'),'generated client control\n');
+  const baseHead=(await git(['rev-parse','HEAD'])).stdout.trim();
+  const witness={workspaceId:randomUUID(),runId:randomUUID(),baseHead};
+  const metadata={...witness,scopeType:'task',workspaceDirectory:cwd,materializedHead:baseHead};
+  const verify=()=>verifyAssistantReadOnlyPrelude({metadata,witness});
+  await verify();
+  await fs.writeFile(path.join(cwd,'ignored.txt'),'unexpected retained material\n');
+  await assert.rejects(verify(),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+  await fs.unlink(path.join(cwd,'ignored.txt'));
+  await git(['update-index','--assume-unchanged','WORK.md']);
+  await assert.rejects(verify(),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+  await git(['update-index','--no-assume-unchanged','WORK.md']);
+  await fs.writeFile(path.join(cwd,'WORK.md'),'uncommitted user result\n');
+  await assert.rejects(verify(),{code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED'});
+  assert.equal(await fs.readFile(path.join(cwd,'WORK.md'),'utf8'),'uncommitted user result\n');
+});
 
-
-
-for(const ending of ['completed','interrupted','unproven','lost-renewal','technical-prelude','retained-handoff'])
+for(const ending of ['completed','interrupted','unproven','lost-renewal','technical-prelude','read-only-guides','retained-handoff'])
   test('event-free scheduled original uses the same pass across restart ('+ending+')',async t=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-scheduled-recovery-'));
     const filename=path.join(directory,'queue.sqlite');
@@ -3245,7 +3268,10 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
     const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
     const originalTurn=randomUUID(),retryMarker=randomUUID();
     const retained=ending==='retained-handoff';
-    const technicalPrelude=retained||ending==='technical-prelude'?{kind:'local_skill_diagnostics_v1',
+    const readOnlyGuides=ending==='read-only-guides';
+    const technicalPrelude=readOnlyGuides?{kind:'read_only_skill_guides_v2',workspaceId:randomUUID(),runId:randomUUID(),
+      baseHead:'a'.repeat(40),historicalSkillReleases:[{skillId:'fixture-signed-guide',releaseId:randomUUID(),packageSha256:'b'.repeat(64)}]}
+      :retained||ending==='technical-prelude'?{kind:'local_skill_diagnostics_v1',
       workspaceId:randomUUID(),runId:randomUUID(),skillId:'telegram-mtproto',releaseId:randomUUID(),projectId:randomUUID()}:undefined;
     const interruptedTurn=randomUUID(),finishMarker=randomUUID();
     const oldProof=retained?{locators:{workspaceId:technicalPrelude.workspaceId,runId:technicalPrelude.runId,releaseId:technicalPrelude.releaseId,
@@ -3255,6 +3281,13 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
     const finishLocators=retained?{...oldProof.locators,checkpointId:randomUUID(),draftHead:'a'.repeat(40)}:null;
     let nativeEvidence=false,finishReviews=0,finishRenewals=0,finishStarts=0;
     let provisionedNotice=0,rootStarts=0,reviews=0,renewals=0,recoveryStarts=0;
+    let cleanBeforeReview=false,cleanUnderWriter=false,checkingInWriter=false,checkedUnderWriter=0;
+    if(readOnlyGuides)f.options.verifyReadOnlyPrelude=async(expected,witness)=>{
+      assert.deepEqual(expected,original);
+      assert.deepEqual(witness,technicalPrelude);
+      if(checkingInWriter){checkedUnderWriter++;return cleanUnderWriter;}
+      return cleanBeforeReview;
+    };
     f.authority.workMode='task';
     Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
     f.options.onBusinessConfirmed=async()=>{
@@ -3330,7 +3363,8 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         assert.equal(options.taskReadRecovery.initialScheduled,true);
         assert.equal(options.taskReadRecovery.terminalMarkerId,original.deliveryId);
         if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
-        await options.beforeInvocation();
+        checkingInWriter=true;
+        try{await options.beforeInvocation();}finally{checkingInWriter=false;}
         recoveryStarts++;
         if(ending==='interrupted'||retained){options.startInvocation();return {state:'uncertain'};}
       }else if(!successfulBasis&&!original){
@@ -3363,6 +3397,11 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         assert.equal(reviews,0);assert.equal(renewals,0);assert.equal(recoveryStarts,0);
         assert.equal(provisionedNotice,1);
         return;
+      }
+      if(readOnlyGuides){
+        assert.equal((await coordinator.workOnce()).state,'blocked');
+        assert.equal(reviews,0,'unverified local state cannot reserve a native continuation');
+        cleanBeforeReview=true;
       }
       await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       const readIntent=()=>createAssistantInbox({database,now:f.options.now}).readPassContinuation(original.deliveryId);
@@ -3397,6 +3436,14 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         assert.equal(provisionedNotice,1);
         assert.equal(f.activePass().deliveryId,original.deliveryId);
       }else{
+        if(readOnlyGuides){
+          // A positively identified change under the owned writer must stop
+          // before consuming the reservation or starting the new turn.
+          await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+          assert.equal(renewals,0);
+          assert.equal(readIntent().started,false);
+          cleanUnderWriter=true;
+        }
         if(ending==='lost-renewal'){
           await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
           assert.equal(readIntent().resumeAttempted,true);
@@ -3414,6 +3461,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         assert.equal(coordinator.status()[0].threadId,original.threadId);
       }
       assert.equal(readIntent().started,true);
+      if(readOnlyGuides)assert.ok(checkedUnderWriter>=2);
       assert.equal(rootStarts,1);assert.equal(reviews,1);assert.equal(renewals,1);assert.equal(recoveryStarts,1);
     }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
   });

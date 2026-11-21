@@ -3243,6 +3243,82 @@ for(const variant of ['exact','inline-authority','cached-authority','newer-turn'
     }
   });
 
+test('an interrupted guide page continues an opened Run only after its exact previous signed read',()=>{
+  const {turn,taskPass,terminalMarkerId}=interruptedTaskReadHistory();
+  const task={...taskContext,scheduled:true};
+  const run={workspaceId:randomUUID(),runId:randomUUID()};
+  const baseHead='a'.repeat(40),packageSha256='b'.repeat(64);
+  const selection={skillId:'fixture-signed-guide',releaseId:randomUUID(),projectId:randomUUID(),
+    companyId:task.companyId,runtimeSessionId:randomUUID()};
+  const proof={taskPass,runtimeSessionProof:{synthetic:true}};
+  const complete=(tool,args,structuredContent)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:{...proof,...args},result:{structuredContent}});
+  const local=(operation,parameters,value,runIdentity)=>complete('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...(runIdentity?{runIdentity}:{})},value);
+  const readResult=(parameters,stdout)=>({schemaVersion:1,operation:'skill_run',stdout,
+    taskSkillRead:bindAssistantTaskSkillRead({schemaVersion:1,releaseId:parameters.releaseId,packageSha256,
+      outputSha256:createHash('sha256').update(stdout).digest('hex')},{scope:taskPass,parameters,stdout})});
+  const nativeOpen={schemaVersion:1,operation:'open',state:'running',operationId:randomUUID()};
+  const parameters={finishOperationId:nativeOpen.operationId};
+  nativeOpen.nextCall={tool:'continue_assistant_workspace_action',
+    arguments:{schemaVersion:1,operation:'status',runIdentity:run,parameters}};
+  const authorityReads=['agent-instructions.md','user-profile.md'].map(path=>({tool:'use_assistant_workspace_files',
+    arguments:{runIdentity:run,command:{action:'read',source:'authority',path}}}));
+  const account={...selection,arguments:['account','list']};
+  const guide={...selection,arguments:['guides']};
+  const guideText='fixture signed instruction';
+  const stdout=JSON.stringify({schemaVersion:1,part:0,count:2,path:'instruction-guides/part-01.md',
+    sha256:createHash('sha256').update(guideText).digest('hex'),text:guideText,nextGuidePart:1});
+  const page=projectAssistantSkillGuideResult(readResult(guide,stdout),{schemaVersion:1,operation:'skill_run',parameters:guide},0);
+  const failed=local('skill_run',page.nextCall.arguments.parameters,{code:'TRELIO_WORKSPACE_ACTION_FAILED'});
+  failed.status='failed';
+  turn.items[0].content[0].text=assistantNativePrompt(terminalMarkerId,assistantWorkStateContext(task),{});
+  turn.items.push(
+    complete('prepare_assistant_workspace_read',{workspaceId:run.workspaceId},{prepared:true,workspace:{id:run.workspaceId}}),
+    local('inspect',{workspaceId:run.workspaceId},{operation:'inspect',schemaVersion:1}),
+    complete('prepare_assistant_workspace_run',{workspaceId:run.workspaceId,clientRequestId:randomUUID()},
+      {prepared:true,workspace:{id:run.workspaceId,scopeType:'task',taskId:task.taskId,companyId:task.companyId},
+        run:{id:run.runId,baseHead},bridge:{actions:{open:{arguments:{parameters:run}}}}}),
+    local('open',run,nativeOpen),
+    local('status',parameters,{operation:'open',schemaVersion:1,state:'completed',operationId:nativeOpen.operationId,authorityReads},run),
+    complete('use_assistant_workspace_files',{runIdentity:run,command:{action:'read',source:'authority',path:'agent-instructions.md'}},{}),
+    local('skill_run',account,readResult(account,JSON.stringify({ok:true,accounts:[],revision:1}))),
+    local('skill_run',guide,page),failed,{type:'reasoning'},
+  );
+  const witness={taskPass,assistantId:task.assistantId,initialScheduled:true};
+  // Real encrypted reads retain their canonical URL coordinates alongside
+  // the exact signed pass. This shape must match the returned task UUID and
+  // the same coordinates on every continuation page.
+  const locator={companySlug:'fixture-company',projectSlug:'fixture-project',taskNumber:1};
+  turn.items[2].arguments={...turn.items[2].arguments,...locator};
+  const taskRead=turn.items[2].result.content[0];
+  const document=JSON.parse(taskRead.text);
+  document.tasks[0].locator=locator;
+  taskRead.text=JSON.stringify(document);
+  turn.items[3].arguments.tasks=[locator];
+  assert.deepEqual(assistantInterruptedTechnicalPrelude(turn,terminalMarkerId,witness),{
+    kind:'read_only_skill_guides_v2',...run,baseHead,
+    historicalSkillReleases:[{skillId:selection.skillId,releaseId:selection.releaseId,packageSha256}],
+  });
+  for(const mutate of [
+    items=>{items.at(-2).arguments.parameters.releaseId=randomUUID();},
+    items=>{items.at(-2).arguments.parameters.arguments=['send'];},
+    items=>{items.at(-2).arguments.parameters.guidePart=2;},
+    items=>{items.at(-3).result.structuredContent.taskSkillRead.outputSha256='0'.repeat(64);},
+    items=>{items.at(-3).result.structuredContent.nextCall.arguments.parameters.runtimeSessionId=randomUUID();},
+    items=>{items.at(-5).arguments.command={action:'replace',path:'WORK.md',text:'unsaved'};},
+    items=>{items.at(-6).arguments.parameters.finishOperationId=randomUUID();},
+    items=>{items[2].arguments.projectSlug='another-project';},
+    items=>{items[3].arguments.tasks=[{...locator,taskNumber:2}];},
+    items=>{items.push(complete('create_comment',{},{}));},
+    items=>{items.splice(-3,1);},
+  ]){
+    const incompatible=structuredClone(turn);
+    mutate(incompatible.items);
+    assert.equal(assistantInterruptedTechnicalPrelude(incompatible,terminalMarkerId,witness),null);
+  }
+});
+
 test('an interrupted technical prelude matches the original native Run and historical release under the same writer',async()=>{
   const {turn,taskPass,terminalMarkerId,terminalTurnId}=interruptedTaskReadHistory();
   const task={...taskContext,scheduled:true};
