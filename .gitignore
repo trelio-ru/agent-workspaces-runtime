@@ -4,3 +4,4 @@ __pycache__/
 *.skillpkg
 node_modules/
 /host-runtime/scripts/native-private-process/bin/
+/host-runtime/scripts/native-private-process/.worker-stage-*/

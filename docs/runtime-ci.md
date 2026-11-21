@@ -44,6 +44,23 @@ the DeepSeek Harness fixture and the visual browser packages. Add a new nested
 npm test project together with the suites that consume it. Hosted native
 browser and OS setup still belong to their CI jobs.
 
+The signed-package hook suite needs the three Windows workers even when the
+hook itself runs on macOS or Linux. Before running any selected suites,
+the local gate validates the existing worker or prepares it from the official
+`windows-private-worker` artifact. Only a successful hosted Windows build from
+the canonical workflow and an ancestor of the verified main base qualifies.
+Both `PrivateProcess.cpp` and its build script must match the candidate bytes.
+The preflight checks GitHub's ZIP SHA-256 and the packaging validator checks the
+source SHA-256, all three binary digests and PE machine codes before publication.
+
+The verified archive is cached by those build inputs in the clone's common Git
+directory. A fresh worktree materializes its own ignored `bin/` and validates
+it again. A cold cache requires GitHub CLI read access and the system archive
+reader. A warm cache works offline. An existing invalid input or absence of a
+matching official build fails before the test suites. Ordinary integration
+only reads published artifacts. Release CI still builds and tests its own
+exact SHA and keeps the hosted native lanes.
+
 Root package changes check the tokenizer consumer. Script-definition changes also
 select the Git guard. Bootstrap, native and workflow inputs have their own
 explicit owners. Only actual Git transport/queue/hooks/attributes changes select
@@ -200,9 +217,9 @@ events locally and project only closed warning categories on failure. Its
 ordinary Git diagnostics guard remains strict; raw trace/paths/argv are never
 printed and the fixture removes that trace with its private temporary root.
 
-Both Linux/macOS jobs retain exact dependency checks and two byte-identical
+Both Linux/macOS release jobs retain exact dependency checks and two byte-identical
 unsigned package builds. The same deterministic Windows x64/ia32/arm64 artifact
-is built for every PR and consumed by the signed-chain/package fixtures. Test
+is built by the hosted release workflow and consumed by the signed-chain/package fixtures. Test
 selection is not permission to reuse stale native source/binaries or skip the
 ordinary release signature/policy/read-back chain.
 

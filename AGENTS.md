@@ -1736,6 +1736,8 @@ Exact legacy template bytes для распознавания при мигра�
 
 - Обычный локальный gate выбирает прямые suites и ближайшие проверяемые
   consumer boundaries по обоим exact Git snapshots: [контракт](docs/runtime-ci.md).
+  Signed-chain заранее подготавливает проверенный hosted Windows worker по
+  исходнику и build script. Общий Git cache не заменяет обязательную сборку релиза.
   Не заменяй реальные imports/fixtures совпадением префикса имени. Computed/native
   inputs требуют явного owner; неизвестный executable/fixture блокирует план
   до targeted coverage, без автоматического full или нерелевантного smoke.

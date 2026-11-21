@@ -3,6 +3,9 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {read} from './git-coordinator.mjs';
 import {readRuntimeCiPlan} from './runtime-ci-plan.mjs';
+import {prepareWindowsWorkerForLocalChecks} from './runtime-windows-worker-preflight.mjs';
+
+const signedChainSuite = 'tests/trelio-hook-signed-chain.test.mjs';
 
 const isTest = file => /^(?:scripts|tests)\/[^/]+\.test\.mjs$/u.test(file);
 const isJavaScript = file => /\.(?:mjs|js|cjs)$/u.test(file);
@@ -44,7 +47,7 @@ const owners = new Map([
   ...[...lockedTestPackages].flatMap(([directory, suites]) =>
     npmManifests.map(manifest => [`${directory}/${manifest}`, suites])),
   ['host-runtime/scripts/trelio-assistant-entry.mjs', ['tests/trelio-assistant-transport.test.mjs']],
-  ['scripts/build-host-runtime-package.mjs', ['tests/trelio-host-runtime-entry.test.mjs']],
+  ['scripts/build-host-runtime-package.mjs', ['tests/trelio-host-runtime-entry.test.mjs', signedChainSuite]],
   ['scripts/build-windows-private-worker.ps1', ['tests/trelio-windows-native-private.test.mjs']],
   ['.github/workflows/runtime-tests.yml', ['scripts/runtime-ci-plan.test.mjs', 'scripts/runtime-main-checks.test.mjs']],
   ['.github/scripts/run-windows-account-fixture.ps1', ['tests/trelio-skill-accounts.test.mjs']],
@@ -264,7 +267,7 @@ function run(executable, args, cwd) {
   if (result.error || result.status !== 0) throw Error(`Local check failed: ${executable} ${args.join(' ')}`);
 }
 
-function main([baseSha, headSha, ...extra]) {
+async function main([baseSha, headSha, ...extra]) {
   const cwd = process.cwd();
   if (extra.length || !/^[a-f0-9]{40}$/u.test(baseSha ?? '') || !/^[a-f0-9]{40}$/u.test(headSha ?? '')
     || read('git', ['rev-parse', 'refs/remotes/origin/main'], cwd) !== baseSha
@@ -275,6 +278,12 @@ function main([baseSha, headSha, ...extra]) {
   console.log(JSON.stringify({mainChecks: plan}));
   if (plan.tests.length || plan.dependencies || plan.coordination) run('npm', ['run', 'check:dependencies'], cwd);
   for (const file of plan.syntax) run(process.execPath, ['--check', file], cwd);
+  // Resolve the hosted packaging input before running any affected suites.
+  // Other focused plans do not need GitHub access or a populated bin directory.
+  if (plan.tests.includes(signedChainSuite)) {
+    const source = await prepareWindowsWorkerForLocalChecks(cwd, baseSha, headSha);
+    console.log('Windows private worker verified: ' + source);
+  }
   // Reconcile each selected package once before any suite runs. Reuse npm's
   // download cache, but rebuild node_modules from this candidate's lock rather
   // than accepting a warm tree that may still reflect the pre-rebase lock.
@@ -287,6 +296,5 @@ function main([baseSha, headSha, ...extra]) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { main(process.argv.slice(2)); }
-  catch (error) { console.error(error.message); process.exitCode = 1; }
+  main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

@@ -314,3 +314,25 @@ test('real main CLI stops at the first failing selected suite and refuses unknow
   assert.equal(marker('.dependencies-ran'), false);
   assert.doesNotMatch(incomplete.stdout, /Local main checks passed/u);
 });
+
+test('real main CLI checks the Windows worker before running any package-related suites', t => {
+  const {git, write, commit, marker, invoke} = mainCliFixture(t);
+  const worker = 'host-runtime/scripts/native-private-process';
+  write('.gitignore', 'node_modules/\n/' + worker + '/bin/\n');
+  write(worker + '/PrivateProcess.cpp', 'fixture source');
+  write(worker + '/bin/metadata.json', 'incomplete existing input');
+  write('scripts/build-host-runtime-package.mjs', 'export const format = 1;');
+  write('tests/a-first.test.mjs', "import '../scripts/build-host-runtime-package.mjs'; import fs from 'node:fs'; fs.writeFileSync('.first-ran', 'yes');");
+  // The actual hook suite loads the package builder through argv; the planner
+  // must account for this dynamic dependency even without a literal import.
+  write('tests/trelio-hook-signed-chain.test.mjs', "import fs from 'node:fs'; fs.writeFileSync('.hook-ran', 'yes');");
+  const base = commit();
+  git('update-ref', 'refs/remotes/origin/main', base);
+  write('scripts/build-host-runtime-package.mjs', 'export const format = 2;');
+  const result = invoke(base, commit());
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Existing Windows worker in bin\/ failed validation/u);
+  assert.equal(marker('.first-ran'), false);
+  assert.equal(marker('.hook-ran'), false);
+  assert.doesNotMatch(result.stdout, /Local main checks passed/u);
+});
