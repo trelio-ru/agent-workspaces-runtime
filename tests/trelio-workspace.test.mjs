@@ -140,6 +140,8 @@ import {
   findTrelioWorkingFolderRoot,
   formatBridgeCommandError,
   ensureBridgeCompatibility,
+  readDesktopComputerGroupKey,
+  readDesktopComputerName,
   normalizeAgentSkillPackagePath,
   normalizeAgentSkillBrowserSession,
   normalizeAgentSkillDeviceConsentChallenge,
@@ -12908,4 +12910,82 @@ test("incomplete Workspace recovery preserves pristine bytes and refuses hidden 
       await rm(partial,{recursive:true,force:true});
     }
   } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test("desktop names use system display names and a portable hostname fallback", async () => {
+  const calls = [];
+  const execFileCommand = async (file, args) => {
+    calls.push([file, args]);
+    return { stdout: file.endsWith("scutil") ? "MacBook Air — Дом\n" : "Рабочий Linux\n" };
+  };
+  assert.equal(await readDesktopComputerName({ platform: "darwin", hostname: "dhcp.lan", execFileCommand }), "MacBook Air — Дом");
+  assert.equal(await readDesktopComputerName({ platform: "linux", hostname: "linux.lan", execFileCommand }), "Рабочий Linux");
+  assert.equal(await readDesktopComputerName({ platform: "win32", hostname: "Studio-PC", execFileCommand }), "Studio-PC");
+  assert.deepEqual(calls, [
+    ["/usr/sbin/scutil", ["--get", "ComputerName"]],
+    ["/usr/bin/hostnamectl", ["--pretty"]],
+  ]);
+  const missingPrettyName = async () => { throw new Error("command unavailable"); };
+  assert.equal(await readDesktopComputerName({ platform: "linux", hostname: "linux.lan", execFileCommand: missingPrettyName }), "linux.lan");
+});
+
+test("concurrent desktop clients agree on a private installation identity scoped to the origin", async t => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "trelio-computer-group-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const installation = path.join(base, "one-computer");
+  const origin = "https://trelio.test";
+  const keys = await Promise.all(Array.from({ length: 8 }, () => readDesktopComputerGroupKey(origin, installation)));
+  assert.equal(new Set(keys).size, 1);
+  assert.match(keys[0], /^[0-9a-f]{64}$/u);
+  assert.notEqual(await readDesktopComputerGroupKey(origin, path.join(base, "another-computer")), keys[0]);
+  assert.notEqual(await readDesktopComputerGroupKey("https://other.test", installation), keys[0]);
+  assert.deepEqual(await readdir(installation), ["desktop-computer.json"]);
+});
+
+test("an existing bridge reports its computer during a supported handshake once per display name", async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "trelio-computer-report-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const token = "twb_synthetic_computer_fixture";
+  let currentName = null;
+  let reports = 0;
+  const server = createServer(async (incoming, response) => {
+    if (incoming.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401).end();
+      return;
+    }
+    if (incoming.method === "GET" && incoming.url === "/api/agent-workspaces/bridge-compatibility") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ ...buildTestBridgeCompatibility(incoming), desktopComputer: { name: currentName } }));
+      return;
+    }
+    if (incoming.method === "PUT" && incoming.url === "/api/agent-workspaces/bridge-session/computer") {
+      const bytes = [];
+      for await (const chunk of incoming) bytes.push(chunk);
+      const body = JSON.parse(Buffer.concat(bytes).toString("utf8"));
+      if (!/^[0-9a-f]{64}$/u.test(body.groupKey) || !body.name) {
+        response.writeHead(400).end();
+        return;
+      }
+      reports += 1;
+      currentName = body.name;
+      response.writeHead(204).end();
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const workspaceModule = pathToFileURL(bridgePath).href;
+  const script = `
+    import { ensureBridgeCompatibility } from ${JSON.stringify(workspaceModule)};
+    await ensureBridgeCompatibility(${JSON.stringify(origin)}, ${JSON.stringify(token)});
+    await ensureBridgeCompatibility(${JSON.stringify(origin)}, ${JSON.stringify(token)});
+  `;
+  await execFileAsync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, HOME: home, USERPROFILE: home, LOCALAPPDATA: path.join(home, "AppData", "Local"),
+      TRELIO_WORKSPACE_CLIENT_PROFILE: "multitool" },
+  });
+  assert.equal(reports, 1);
+  assert.ok(currentName);
 });

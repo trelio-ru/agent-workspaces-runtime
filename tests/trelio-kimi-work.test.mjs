@@ -757,7 +757,7 @@ test("Kimi bridge state never adopts a common Codex/Claude device or legacy OAut
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const moduleUrl = new URL("../host-runtime/scripts/trelio-workspace.mjs", import.meta.url).href;
   const source = `import assert from 'node:assert/strict'; import fs from 'node:fs/promises'; import path from 'node:path';
-    import { resolveWorkspaceBridgeConfigDirectory, workspaceBridgeCredentialAccount, workspaceBridgeClientEnvironment, loadToken } from ${JSON.stringify(moduleUrl)};
+    import { resolveWorkspaceBridgeConfigDirectory, workspaceBridgeCredentialAccount, workspaceBridgeClientEnvironment, loadToken, readDesktopComputerGroupKey } from ${JSON.stringify(moduleUrl)};
     const globalRoot = resolveWorkspaceBridgeConfigDirectory({ environment: { LOCALAPPDATA: process.env.LOCALAPPDATA, USERPROFILE: process.env.USERPROFILE } });
     const ownRoot = resolveWorkspaceBridgeConfigDirectory();
     assert.notEqual(ownRoot, globalRoot);
@@ -771,6 +771,9 @@ test("Kimi bridge state never adopts a common Codex/Claude device or legacy OAut
     const bytes=JSON.stringify({'https://trelio.ru':{accessToken:'synthetic-foreign-oauth',bridgeSessionToken:'synthetic-foreign-device'}});
     await fs.writeFile(file,bytes,{mode:0o600});
     assert.equal(await loadToken('https://trelio.ru'),null);
+    const sharedComputer = await readDesktopComputerGroupKey('https://trelio.ru');
+    assert.equal(sharedComputer, await readDesktopComputerGroupKey('https://trelio.ru', globalRoot));
+    assert.notEqual(sharedComputer, await readDesktopComputerGroupKey('https://trelio.ru', ownRoot));
     assert.equal(await fs.readFile(file,'utf8'),bytes);
     process.stdout.write('isolated');`;
   const result = await new Promise((resolve, reject) => {

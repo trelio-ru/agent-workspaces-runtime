@@ -5438,14 +5438,102 @@ export class BridgePairingRequiredError extends Error {
   }
 }
 
-const buildBridgeDeviceIdentity = () => ({
-  deviceName: sliceUtf16CodePoints(String(os.hostname() || "Local device").trim(), 0, 120),
+export const readDesktopComputerName = async ({
+  platform = process.platform,
+  hostname = os.hostname(),
+  execFileCommand = execFileAsync,
+  signal,
+} = {}) => {
+  const readableName = value => sliceUtf16CodePoints(
+    String(value ?? "").replace(/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, " ").trim(), 0, 120,
+  ).trim();
+  // macOS can advertise a DHCP hostname unrelated to the editable computer
+  // name. On Linux, systemd's pretty hostname is optional. Windows exposes
+  // its editable device name through the system hostname API.
+  const command = platform === "darwin" ? ["/usr/sbin/scutil", ["--get", "ComputerName"]]
+    : platform === "linux" ? ["/usr/bin/hostnamectl", ["--pretty"]] : null;
+  if (command) {
+    try {
+      const { stdout } = await execFileCommand(command[0], command[1], { signal, timeout: 500, maxBuffer: 4096 });
+      const name = readableName(stdout);
+      if (name) return name;
+    } catch {
+      // A system without a configured pretty name can still report its name.
+    }
+  }
+  return readableName(hostname) || "Компьютер";
+};
+
+export const readDesktopComputerGroupKey = async (
+  origin,
+  sharedDirectory = resolveWorkspaceBridgeConfigDirectory({
+    environment: { ...process.env, TRELIO_WORKSPACE_CLIENT_PROFILE: undefined },
+  }),
+) => {
+  await ensurePrivateDirectory(sharedDirectory);
+  const file = path.join(sharedDirectory, "desktop-computer.json");
+  const readSeed = async () => (await readPrivateJsonFile(file, { maximumBytes: 256, fatalUtf8: true })).seed;
+  let seed = await readSeed();
+  if (seed === undefined) {
+    // Kimi and MultiTool keep separate credentials, but use this one private
+    // file. Publish a complete file without replacing a concurrent winner.
+    const candidate = `${file}.${crypto.randomUUID()}.tmp`;
+    try {
+      await writePrivateJsonFile(candidate, { seed: crypto.randomBytes(32).toString("hex") });
+      try {
+        assertRuntimeHookBudget();
+        await fs.link(candidate, file);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+      seed = await readSeed();
+    } finally {
+      await fs.rm(candidate, { force: true }).catch(() => undefined);
+    }
+  }
+  if (typeof seed !== "string" || !/^[0-9a-f]{64}$/u.test(seed)) {
+    throw new Error("Некорректный локальный идентификатор компьютера Trelio.");
+  }
+  // Origin separation avoids linking installations across separate services.
+  // The shared seed and any OS hardware identifiers never go to the server.
+  return crypto.createHmac("sha256", Buffer.from(seed, "hex"))
+    .update(`trelio-desktop-computer-v1\0${normalizeOrigin(origin)}`)
+    .digest("hex");
+};
+
+const syncDesktopComputer = async (origin, token, metadata, signal) => {
+  if (!metadata || typeof token !== "string" || !token.startsWith("twb_") || signal?.aborted) return;
+  try {
+    // Backfill existing authenticated bridges during their normal handshake.
+    // Give auxiliary metadata its own deadline so a slow OS name, private
+    // directory or network cannot consume the caller's full transport budget.
+    await withTrelioCallBudget(async (metadataSignal) => {
+      const name = await readDesktopComputerName({ signal: metadataSignal });
+      metadataSignal.throwIfAborted();
+      if (name === metadata.name) return;
+      const groupKey = await readDesktopComputerGroupKey(origin);
+      await request(origin, token, "/api/agent-workspaces/bridge-session/computer", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ groupKey, name }),
+        signal: metadataSignal,
+        maximumErrorResponseBytes: 4096,
+      });
+    }, { signal, timeoutMs: 1_200 });
+  } catch {
+    // Desktop grouping is advisory. Network, local storage or rollout delays
+    // leave the original exact connection usable and retry on future contact.
+  }
+};
+
+const buildBridgeDeviceIdentity = async (signal) => ({
+  deviceName: await readDesktopComputerName({ signal }),
   platform: `${process.platform}/${process.arch}`.slice(0, 64),
 });
 
 const beginBridgePairing = async (origin, { signal } = {}) => {
   const { verifier, challenge } = createPkce();
-  const device = buildBridgeDeviceIdentity();
+  const device = await buildBridgeDeviceIdentity(signal);
   const response = await request(origin, null, "/api/agent-workspaces/bridge-pairings", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -13120,6 +13208,7 @@ export const ensureBridgeCompatibility = async (
     );
 
     if (compatibility.agentRules.status === "current") {
+      await syncDesktopComputer(origin, token, compatibility.desktopComputer, signal);
       return {
         ...compatibility,
         agentRules: activeAgentRules,

@@ -543,6 +543,16 @@ failure сохраняется; ACL и повтор rename ради его об�
 
 ## Запуск локального bridge
 
+Для списка «Работа с агентом» личные клиенты одного системного профиля
+используют общий owner-private случайный seed в корне настроек bridge.
+Ключ группировки привязан к origin. Изолированные credentials клиентов не
+переиспользуются. Новая версия backend объявляет поддержку в compatibility;
+каждый существующий bridge сообщает имя компьютера и ключ от своего имени.
+macOS использует ComputerName, Linux – pretty hostname при наличии, Windows –
+имя устройства. Ошибка чтения имени допускает системный hostname, а сбой
+отчёта оставляет bridge работоспособным и не требует повторной привязки.
+
+
 Local MCP facade запускает bundled bridge через текущий `process.execPath` и
 точный entrypoint загруженного плагина. Для Run-bound action с exact
 `runIdentity={workspaceId,runId}` runtime находит root в owner-private registry,
