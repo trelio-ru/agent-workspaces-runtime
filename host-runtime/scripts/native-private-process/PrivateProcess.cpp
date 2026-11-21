@@ -904,11 +904,22 @@ struct PackageServiceImage {
     const auto ended=end(session);requireServiceObservation(ended==ERROR_SUCCESS,"rm_end",ended);return result;
   }
 };
-bool packageServicePidPresent(DWORD pid) {
+bool packageServicePidPresent(DWORD pid,PCWSTR imageName=nullptr) {
   Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));require(snapshot.value!=INVALID_HANDLE_VALUE);
   PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);require(Process32FirstW(snapshot.value,&entry)!=FALSE);
-  do {if(entry.th32ProcessID==pid)return true;}while(Process32NextW(snapshot.value,&entry));
+  do {if(entry.th32ProcessID==pid)return !imageName||_wcsicmp(entry.szExeFile,imageName)==0;}
+  while(Process32NextW(snapshot.value,&entry));
   require(GetLastError()==ERROR_NO_MORE_FILES);return false;
+}
+void requireRegisteredRunningService(SC_HANDLE service,const SERVICE_STATUS_PROCESS& observed) {
+  // This pair of SCM reads and the process snapshot prove only that Windows
+  // reports its registered service running. Do not mint a process generation:
+  // this observation can suppress a redundant restoration start, but cannot
+  // target SCM stop or attest the loaded image, package version or GUI.
+  require(observed.dwCurrentState==SERVICE_RUNNING&&observed.dwProcessId>0);
+  require(packageServicePidPresent(observed.dwProcessId,L"codex-windows-sandbox-service.exe"));
+  const auto fresh=codexServiceStatus(service);
+  require(fresh.dwCurrentState==SERVICE_RUNNING&&fresh.dwProcessId==observed.dwProcessId);
 }
 struct PackageServiceProcess {
   DWORD pid;
@@ -985,14 +996,16 @@ int codexStagedPackage(std::string_view version) {
   codexServiceReply("staged");return 0;
 }
 int codexService(std::string_view operation,std::string_view expected={}) {
-  require(operation=="inspect"||operation=="stop"||operation=="start");
+  const bool restoration=operation=="restore-status";
+  require(operation=="inspect"||operation=="stop"||operation=="start"||restoration);
   const auto root=currentCodexPackagePath();require(!root.empty());
   ServiceHandle manager(OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT));require(manager.value);
   const DWORD access=SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS
     |(operation=="stop"?SERVICE_STOP:operation=="start"?SERVICE_START:0);
   ServiceHandle service(OpenServiceW(manager.value,L"CodexSandboxService.OpenAI.Codex",access));
   if(!service.value){
-    require(operation=="inspect"&&GetLastError()==ERROR_SERVICE_DOES_NOT_EXIST);
+    require((operation=="inspect"||restoration)&&GetLastError()==ERROR_SERVICE_DOES_NOT_EXIST);
+    if(restoration)require(_wcsicmp(currentCodexPackagePath().c_str(),root.c_str())==0);
     codexServiceReply("absent");return 0;
   }
   verifyCodexServiceConfiguration(service.value,root);
@@ -1007,9 +1020,21 @@ int codexService(std::string_view operation,std::string_view expected={}) {
     codexServiceReply("starting");return 0;
   }
   if(status.dwCurrentState==SERVICE_STOPPED){
-    require(operation=="inspect"&&status.dwProcessId==0);
+    require((operation=="inspect"||restoration)&&status.dwProcessId==0);
     PackageServiceImage image(root+L"\\app\\resources\\codex-windows-sandbox-service.exe");
     require(image.read().empty());codexServiceReply("stopped");return 0;
+  }
+  if(restoration){
+    // AppX can restore the service itself. An ordinary user may have SCM query
+    // rights while RmGetList denies access to the protected WindowsApps image.
+    // Use the fixed SCM/AppModel proof solely to observe that no start is due.
+    // All effect paths and the final independent Desktop probe remain strict.
+    verifyCurrentCodexServiceConfiguration(service.value,root);
+    if(status.dwCurrentState==SERVICE_START_PENDING||status.dwCurrentState==SERVICE_STOP_PENDING){
+      codexServiceReply("pending");return 0;
+    }
+    requireRegisteredRunningService(service.value,status);
+    codexServiceReply("registered_running");return 0;
   }
   require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
   PackageServiceProcess process(status.dwProcessId,root+L"\\app\\resources\\codex-windows-sandbox-service.exe",
@@ -1041,7 +1066,8 @@ int main(int argc, char* argv[]) {
       try{return codexStagedPackage(argv[2]);}
       catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}
     }
-    if((argc==2&&(std::string_view(argv[1])=="--codex-service-inspect"||std::string_view(argv[1])=="--codex-service-start"))
+    if((argc==2&&(std::string_view(argv[1])=="--codex-service-inspect"||std::string_view(argv[1])=="--codex-service-start"
+      ||std::string_view(argv[1])=="--codex-service-restore-status"))
       ||(argc==3&&std::string_view(argv[1])=="--codex-service-stop")){
       try{return codexService(std::string_view(argv[1]).substr(16),argc==3?std::string_view(argv[2]):std::string_view{});}
       catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}

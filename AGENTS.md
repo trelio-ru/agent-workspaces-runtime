@@ -1341,8 +1341,11 @@ publication tooling также остаются вне этого публичн
   normally stop only the exact OS-package-bound service after all Codex clients
   are absent, register the retained signed candidate by its already-staged full
   name once, then restore that service/GUI and verify the actual version/probe.
-  Service identity joins fresh SCM configuration/PID with Restart Manager's
-  exact-image FILE association, service short name and original creation time.
+  Service control identity joins fresh SCM configuration/PID with Restart
+  Manager's exact-image FILE association, service short name and original
+  creation time. Restoration has a separate read-only registered-running
+  observation without a generation so WindowsApps access denial cannot block
+  Desktop activation once SCM already reports the service running.
   The OS RM_UNIQUE_PROCESS generation is rechecked for admission/stop, never a
   bare PID or an opened LocalSystem process (including zero-access handles).
   Ordinary tasks never require process-query/SYNCHRONIZE rights. Stop completion

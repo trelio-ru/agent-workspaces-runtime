@@ -507,6 +507,7 @@ const serviceUpdateFixture=async()=>{
       f.effects.push('service_start');running=true;generation='501:20';
       return {state:'starting',generation:null};
     }
+    if(operation==='restore-status')return {state:running?'registered_running':'stopped',generation:null};
     return {state:running?'running':'stopped',generation:running?generation:null};
   };
   const register=async()=>{
@@ -587,6 +588,31 @@ test('lost full-name registration is never repeated and an unchanged native vers
   }
 });
 
+test('already restored registered service recovers an old journal when Restart Manager cannot read the image',async()=>{
+  const {f,service,register}=await serviceUpdateFixture();
+  let registered=false,restorationReadable=false,registrations=0;
+  f.options.register=async(...args)=>{
+    await register(...args);registered=true;registrations++;
+  };
+  f.options.service=async(operation,generation)=>{
+    if(!registered)return service(operation,generation);
+    if(operation==='inspect')throw Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});
+    assert.equal(operation,'restore-status','the registered running service must not receive another effect');
+    return {state:restorationReadable?'registered_running':'pending',generation:null};
+  };
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal(f.state.phase,'service_restoring');
+  assert.deepEqual(f.effects,['probe','close','service_stop','register']);
+
+  // A positive registered-service observation can settle the same old intent
+  // after the original wait expired. Time alone grants no new effect.
+  f.elapse(11*60_000);restorationReadable=true;
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'updated',version:'26.101.0.0'});
+  assert.equal(f.state.phase,'ready');assert.equal(registrations,1);
+  assert.deepEqual(f.effects,['probe','close','service_stop','register','start','probe']);
+});
+
 test('lost service restoration and GUI activation each have their own one-use intent',async()=>{
   for(const lost of ['service','gui'])for(const completed of [true,false]){
     const {f,service}=await serviceUpdateFixture();const desktop=f.options.desktop;let starts=0;
@@ -657,6 +683,15 @@ test('native service adapter checks admission before spawn and exposes only the 
   for(const result of [{schemaVersion:1,state:'running',generation:'500:10',raw:'private'},
     {schemaVersion:1,state:'running',generation:'private'}, {schemaVersion:1,state:'unavailable',generation:null}])
     await assert.rejects(runAssistantWindowsCodexService('inspect',null,{...options,runNative:async(_p,o)=>o.project(result)}));
+  const registered={schemaVersion:1,state:'registered_running',generation:null};
+  assert.deepEqual(await runAssistantWindowsCodexService('restore-status',null,{...options,runNative:async(_p,o)=>{
+    assert.deepEqual(o.nativeCommand.args,['--codex-service-restore-status']);
+    return o.project(registered);
+  }}),registered);
+  await assert.rejects(runAssistantWindowsCodexService('restore-status','500:10',options));
+  await assert.rejects(runAssistantWindowsCodexService('inspect',null,{...options,runNative:async(_p,o)=>o.project(registered)}));
+  await assert.rejects(runAssistantWindowsCodexService('restore-status',null,{...options,runNative:async(_p,o)=>
+    o.project({...registered,generation:'500:10'})}));
 });
 
 test('lost install reply reconciles only native version and reopens the SAME Desktop, never installs again',async()=>{

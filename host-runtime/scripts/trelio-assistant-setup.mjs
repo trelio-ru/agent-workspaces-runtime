@@ -1012,7 +1012,7 @@ export const runAssistantWindowsCodexService = async (operation,generation=null,
   signal,guard=async()=>{},runNative=runAssistantWindowsBackgroundNative,selectWorker}={})=>{
   const validArgument=operation==='stop'?/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u.test(generation??'')
     :operation==='staged'?CODEX_DESKTOP_VERSION.test(generation??''):generation===null;
-  if(!['inspect','stop','start','staged'].includes(operation)||!validArgument)
+  if(!['inspect','stop','start','staged','restore-status'].includes(operation)||!validArgument)
     fail('ASSISTANT_CODEX_UPDATE_FAILED');
   const worker=await (selectWorker??(async()=>{
     const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
@@ -1023,7 +1023,8 @@ export const runAssistantWindowsCodexService = async (operation,generation=null,
       :[`--codex-service-${operation}`,...(operation==='stop'?[generation]:[])]},
     project:value=>{
       if(!value||Object.keys(value).sort().join(',')!=='generation,schemaVersion,state'||value.schemaVersion!==1
-        ||!(operation==='staged'?['staged','absent']:['running','stopped','absent','starting']).includes(value.state)
+        ||!(operation==='staged'?['staged','absent']:operation==='restore-status'
+          ?['registered_running','stopped','absent','pending']:['running','stopped','absent','starting']).includes(value.state)
         ||(value.state==='running'?!/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u.test(value.generation??''):value.generation!==null)
         ||operation==='inspect'&&value.state==='starting'||operation==='stop'&&value.state!=='stopped'
         ||operation==='start'&&value.state!=='starting')fail('ASSISTANT_CODEX_UPDATE_FAILED');
@@ -1527,14 +1528,17 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
     await save({phase:'service_restoring'});
   }
   if(state.phase==='service_restoring'){
-    const active=await service('inspect');
-    if(!['running','stopped','absent'].includes(active.state))return awaitingService();
+    // Observe the service AppX may already have restarted. The status has no
+    // process generation and cannot be used to stop it. A STOPPED result still
+    // reaches the existing exact-image and one-use native StartService guard.
+    const active=await service('restore-status');
+    if(!['registered_running','stopped','absent'].includes(active.state))return awaitingService();
     await save({phase:'service_starting'});
     if(active.state==='stopped'){await guard();await service('start');}
   }
   if(state.phase==='service_starting'){
-    const active=await service('inspect');
-    if(!['running','absent'].includes(active.state))return awaitingService();
+    const active=await service('restore-status');
+    if(!['registered_running','absent'].includes(active.state))return awaitingService();
     const app=await desktop('inspect');
     await save({phase:'service_verifying'});
     if(app.state==='stopped'){await guard();await desktop('start');}

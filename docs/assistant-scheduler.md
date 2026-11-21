@@ -3248,10 +3248,18 @@ Record `service_restoring` and `service_starting` before restoring the service
 which was positively running at admission. Fresh native SCM/image binding uses
 whichever package Windows actually registered, including the healthy old
 package if registration failed. An absent service in the newly registered
-package needs no start. Never start a foreign/stale binary. A lost start result
-permits observation only, not a second start. Then `service_verifying` fences
-one registered GUI activation and the ordinary exact version/new generation/
-fresh hook/MCP/device probe. The same ten-minute activation bound remains.
+package needs no start. AppX may have already started its service even when
+the ordinary task cannot inventory the protected WindowsApps image through
+`RmGetList`. The fixed, read-only restoration status joins current-user AppModel
+and a freshly checked exact configuration with two matching running SCM reads
+and a live process snapshot. It returns `registered_running` without a generation.
+That evidence only skips another service start. It does not attest a process
+image, authorize a stop, or establish Desktop readiness. A stopped service
+still has to pass the exact-image check in both observation and native start.
+Pending states wait under the existing deadline, and a lost start result
+is observed without a second start. Then `service_verifying` fences one
+registered GUI activation and the ordinary exact version/new generation/fresh
+hook/MCP/device probe. The same ten-minute activation bound remains.
 
 Unknown close/stop/register/start phases remain durable and block new work;
 neither timeout, diagnostics nor a new runtime releases them. A definite healthy

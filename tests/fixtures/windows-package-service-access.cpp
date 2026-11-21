@@ -139,6 +139,18 @@ void exerciseFixture(std::string_view operation,std::string_view expected) {
   fixtureStage="old_process_rights_must_refuse";
   Handle denied(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,status.dwProcessId));
   require(!denied.value&&GetLastError()==ERROR_ACCESS_DENIED);
+  if(operation=="restore-status"){
+    fixtureStage="restoration_scm_read";
+    verifyCodexServiceConfiguration(service.value,root);
+    requireRegisteredRunningService(service.value,status);
+    // A process that disappeared before the SCM read-back cannot complete
+    // restoration. This test-only altered snapshot cannot target a stop.
+    auto stale=status;stale.dwProcessId=0;
+    bool refused=false;
+    try{requireRegisteredRunningService(service.value,stale);}catch(...){refused=true;}
+    require(refused);
+    codexServiceReply("registered_running");return;
+  }
   fixtureStage="bound_process";PackageServiceProcess process(status.dwProcessId,fixtureExecutable(),FixtureService);
   fixtureStage="scm_generation_recheck";
   verifyCodexServiceConfiguration(service.value,root);process.verify(codexServiceStatus(service.value).dwProcessId);
@@ -167,7 +179,7 @@ int main(int argc,char* argv[]) {
     require(argc==2||argc==3);const std::string_view command=argv[1];
     if(command=="prepare"&&argc==2){fixtureStage="prepare";prepareFixture();}
     else if(command=="cleanup"&&argc==2){fixtureStage="cleanup";cleanupFixture();}
-    else if((command=="inspect"||command=="start"||command=="refusals")&&argc==2){fixtureStage="ordinary_read";exerciseFixture(command,{});}
+    else if((command=="inspect"||command=="start"||command=="refusals"||command=="restore-status")&&argc==2){fixtureStage="ordinary_read";exerciseFixture(command,{});}
     else if(command=="stop"&&argc==3){fixtureStage="ordinary_stop";exerciseFixture(command,argv[2]);}
     else throw Failure{};
     return 0;
