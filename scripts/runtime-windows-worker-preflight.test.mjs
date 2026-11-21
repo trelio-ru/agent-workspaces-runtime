@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -63,32 +64,145 @@ test('a digest is insufficient without one exact artifact and successful hosted 
   assert.throws(() => locate(() => availableArtifacts()), /No verified hosted Windows worker/u);
 });
 
-test('a mismatched archive cannot leave a worktree payload or a cache entry', async t => {
+async function workerFixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-worker-preflight-'));
   t.after(() => fs.rm(root, {recursive: true, force: true}));
   const inputDirectory = path.join(root, 'host-runtime/scripts/native-private-process');
+  const sourcePath = path.join(inputDirectory, 'PrivateProcess.cpp');
+  const buildPath = path.join(root, 'scripts/build-windows-private-worker.ps1');
   await fs.mkdir(inputDirectory, {recursive: true});
-  await fs.writeFile(path.join(inputDirectory, 'PrivateProcess.cpp'), 'fixture');
-  await fs.mkdir(path.join(root, 'scripts'));
-  await fs.writeFile(path.join(root, 'scripts/build-windows-private-worker.ps1'), 'fixture');
+  await fs.writeFile(sourcePath, 'fixture');
+  await fs.mkdir(path.dirname(buildPath));
+  await fs.writeFile(buildPath, 'fixture');
   const git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=' + path.join(root, 'no-hooks'),
     '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', ...args], {cwd: root, encoding: 'utf8'}).trim();
   git('init', '-q');
-  git('add', '--all');
-  git('commit', '-qm', 'fixture');
-  const head = git('rev-parse', 'HEAD');
+  const commit = () => {
+    // The worker is ignored in the real repository. Commit only build inputs
+    // here so the fixture has the same Git identity across staging and retries.
+    git('add', '--', sourcePath, buildPath);
+    git('commit', '-qm', 'fixture');
+    return git('rev-parse', 'HEAD');
+  };
+  return {root, inputDirectory, sourcePath, buildPath, head: commit(), commit, git,
+    bin: path.join(inputDirectory, 'bin')};
+}
+
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
+async function workerArchive({root, sourcePath}, version) {
+  const directory = await fs.mkdtemp(path.join(root, '.git', 'archive-'));
+  const members = ['metadata.json'];
+  const binaries = {};
+  for (const [arch, machine] of Object.entries({x64: 0x8664, ia32: 0x14c, arm64: 0xaa64})) {
+    // Sufficient PE header bytes for the real packaging validator. The
+    // payload is synthetic and the test never starts it as a program.
+    const bytes = Buffer.alloc(80, version);
+    bytes.writeUInt16LE(0x5a4d, 0);
+    bytes.writeUInt32LE(64, 0x3c);
+    bytes.writeUInt32LE(0x4550, 64);
+    bytes.writeUInt16LE(machine, 68);
+    binaries[arch] = {sizeBytes: bytes.length, sha256: sha256(bytes)};
+    await fs.mkdir(path.join(directory, arch));
+    const member = arch + '/trelio-private-process.exe';
+    members.push(member);
+    await fs.writeFile(path.join(directory, member), bytes);
+  }
+  await fs.writeFile(path.join(directory, 'metadata.json'), JSON.stringify({
+    schemaVersion: 1, sourceSha256: sha256(await fs.readFile(sourcePath)), binaries,
+  }));
+  const archive = path.join(directory, 'worker.zip');
+  const windows = process.platform === 'win32';
+  const archiver = windows ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'zip';
+  execFileSync(archiver, [...(windows ? ['-a', '-cf'] : ['-q']), archive, ...members], {cwd: directory});
+  const bytes = await fs.readFile(archive);
+  return {locate: () => ({id: 71, digest: 'sha256:' + sha256(bytes)}), download: () => bytes};
+}
+
+test('a mismatched archive cannot leave a worktree payload or a cache entry', async t => {
+  const {root, inputDirectory, head, bin} = await workerFixture(t);
   await assert.rejects(prepareWindowsWorkerForLocalChecks(root, head, head, {
     locate: () => ({id: 71, digest}), download: () => Buffer.from('other archive'),
   }), /archive digest mismatch/u);
   assert.deepEqual(await fs.readdir(inputDirectory), ['PrivateProcess.cpp']);
   await assert.rejects(fs.stat(path.join(root, '.git/trelio-windows-worker-cache')), {code: 'ENOENT'});
 
-  const existing = path.join(inputDirectory, 'bin');
-  await fs.mkdir(existing);
-  const metadataPath = path.join(existing, 'metadata.json');
+  await fs.mkdir(bin);
+  const metadataPath = path.join(bin, 'metadata.json');
   await fs.writeFile(metadataPath, 'incomplete manual input');
   await assert.rejects(prepareWindowsWorkerForLocalChecks(root, head, head, {
     locate: () => assert.fail('Unknown existing input must not be replaced'),
   }), /Existing Windows worker in bin\/ failed validation/u);
   assert.equal(await fs.readFile(metadataPath, 'utf8'), 'incomplete manual input');
+});
+
+test('the local gate refreshes its own worker after either build input changes', async t => {
+  const fixture = await workerFixture(t);
+  const {root, bin, head, sourcePath, buildPath, commit, git} = fixture;
+  const executable = path.join(bin, 'x64', 'trelio-private-process.exe');
+  const receipt = path.join(bin, '.trelio-worker-preflight.json');
+  const offline = {locate: () => assert.fail('Unexpected remote lookup')};
+  assert.equal(await prepareWindowsWorkerForLocalChecks(root, head, head, await workerArchive(fixture, 1)), 'hosted');
+  assert.equal(await prepareWindowsWorkerForLocalChecks(root, head, head, offline), 'existing');
+  const initialReceipt = await fs.readFile(receipt, 'utf8');
+
+  // In a script-only change the old binaries still pass source validation.
+  // The commit's complete build inputs must still require a refresh.
+  await fs.appendFile(buildPath, '\nbuild change');
+  const scriptChanged = commit();
+  await assert.rejects(prepareWindowsWorkerForLocalChecks(root, scriptChanged, scriptChanged, {
+    locate: () => { throw Error('No matching official artifact'); },
+  }), /No matching official artifact/u);
+  assert.equal(await fs.readFile(receipt, 'utf8'), initialReceipt);
+  assert.equal((await fs.readFile(executable))[79], 1);
+  assert.equal(await prepareWindowsWorkerForLocalChecks(root, scriptChanged, scriptChanged,
+    await workerArchive(fixture, 2)), 'hosted');
+  assert.equal((await fs.readFile(executable))[79], 2);
+
+  await fs.appendFile(sourcePath, '\nsource change');
+  const sourceChanged = commit();
+  assert.equal(await prepareWindowsWorkerForLocalChecks(root, sourceChanged, sourceChanged,
+    await workerArchive(fixture, 3)), 'hosted');
+  assert.equal((await fs.readFile(executable))[79], 3);
+  git('checkout', '--quiet', '--detach', scriptChanged);
+  assert.equal(await prepareWindowsWorkerForLocalChecks(root, scriptChanged, scriptChanged, offline), 'cache');
+  assert.equal((await fs.readFile(executable))[79], 2);
+});
+
+test('refresh preserves files added to a previously managed worker', async t => {
+  const fixture = await workerFixture(t);
+  const {root, bin, head, buildPath, commit} = fixture;
+  await prepareWindowsWorkerForLocalChecks(root, head, head, await workerArchive(fixture, 1));
+  const localFile = path.join(bin, 'x64', 'local-notes.txt');
+  await fs.writeFile(localFile, 'user copy');
+  await fs.appendFile(buildPath, '\nnext version');
+  const next = commit();
+  await assert.rejects(prepareWindowsWorkerForLocalChecks(root, next, next, {
+    locate: () => assert.fail('Modified worker is user-owned'),
+  }), /changed outside preflight/u);
+  assert.equal(await fs.readFile(localFile, 'utf8'), 'user copy');
+});
+
+test('failed publication restores the previous verified directory', async t => {
+  const fixture = await workerFixture(t);
+  const {root, bin, head, buildPath, commit, inputDirectory} = fixture;
+  await prepareWindowsWorkerForLocalChecks(root, head, head, await workerArchive(fixture, 1));
+  const receipt = path.join(bin, '.trelio-worker-preflight.json');
+  const originalReceipt = await fs.readFile(receipt, 'utf8');
+  await fs.appendFile(buildPath, '\nnext version');
+  const next = commit();
+  const replacement = await workerArchive(fixture, 2);
+  const rename = fs.rename;
+  const mock = t.mock.method(fs, 'rename', (from, to) => {
+    if (to === bin && path.basename(from) === 'bin') throw Object.assign(Error('fixture publication failure'), {code: 'EIO'});
+    return rename(from, to);
+  });
+  try {
+    await assert.rejects(prepareWindowsWorkerForLocalChecks(root, next, next, replacement), /fixture publication failure/u);
+  } finally { mock.mock.restore(); }
+  assert.equal(await fs.readFile(receipt, 'utf8'), originalReceipt);
+  assert.deepEqual((await fs.readdir(inputDirectory)).sort(), ['PrivateProcess.cpp', 'bin']);
+  assert.equal(await prepareWindowsWorkerForLocalChecks(root, next, next, {
+    locate: () => assert.fail('The verified replacement ZIP should be cached'),
+  }), 'cache');
 });

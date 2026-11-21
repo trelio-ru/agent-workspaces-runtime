@@ -15,9 +15,11 @@ const sourceName = 'PrivateProcess.cpp';
 const inputs = [workerRootPath + '/' + sourceName, 'scripts/build-windows-private-worker.ps1'];
 const architectures = ['arm64', 'ia32', 'x64'];
 const files = ['metadata.json', ...architectures.map(arch => arch + '/trelio-private-process.exe')];
+const receiptName = '.trelio-worker-preflight.json';
 const maxArchive = 8 * 1024 * 1024;
 const isSha = value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
 const isDigest = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value);
+const isFingerprint = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 const isId = value => Number.isSafeInteger(value) && value > 0;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -87,6 +89,58 @@ async function present(file) {
   catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 
+async function readRegularFile(file, limit) {
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() || !stat.size || stat.size > limit) throw Error('Unexpected Windows worker file.');
+  return fs.readFile(file);
+}
+
+async function requireDirectoryContents(directory, expected) {
+  if (!(await fs.lstat(directory)).isDirectory()) throw Error('Unexpected Windows worker directory.');
+  const names = await fs.readdir(directory);
+  if (names.length !== expected.length || !expected.every(name => names.includes(name))) {
+    throw Error('Unexpected files in Windows worker directory.');
+  }
+}
+
+async function workerFingerprint(directory, withReceipt) {
+  // A receipt alone does not own files later added, edited or copied here.
+  // Check the complete layout and bytes before moving or removing a directory.
+  await requireDirectoryContents(directory, ['metadata.json', ...architectures, ...(withReceipt ? [receiptName] : [])]);
+  for (const arch of architectures) {
+    await requireDirectoryContents(path.join(directory, arch), ['trelio-private-process.exe']);
+  }
+  const fileDigests = await Promise.all(files.map(async file =>
+    sha256(await readRegularFile(path.join(directory, file), 2_000_000))));
+  return sha256(fileDigests.join('\n'));
+}
+
+async function readManagedWorker(directory, owner) {
+  const stat = await present(directory);
+  if (!stat?.isDirectory() || !await present(path.join(directory, receiptName))) return null;
+  try {
+    const receipt = JSON.parse(await readRegularFile(path.join(directory, receiptName), 512));
+    if (receipt?.version !== 1 || receipt.owner !== owner || !isFingerprint(receipt.key)
+      || receipt.fingerprint !== await workerFingerprint(directory, true)) {
+      throw Error('Windows worker receipt does not match this worktree and payload.');
+    }
+    return {key: receipt.key, fingerprint: receipt.fingerprint, dev: stat.dev, ino: stat.ino};
+  } catch (cause) {
+    throw Error('Managed Windows worker in bin/ changed outside preflight. Preserve it separately before retrying.', {cause});
+  }
+}
+
+const sameWorker = (actual, expected) => actual?.key === expected.key && actual.fingerprint === expected.fingerprint
+  && actual.dev === expected.dev && actual.ino === expected.ino;
+
+async function validateExistingWorker(sourceRoot) {
+  try { await validateWindowsPrivateWorker(sourceRoot); }
+  catch (cause) {
+    throw Error('Existing Windows worker in bin/ failed validation. Move it out of this worktree to prepare a verified copy.', {cause});
+  }
+  return 'existing';
+}
+
 function verifyArchive(zip, digest) {
   if (!isDigest(digest) || !zip.length || zip.length > maxArchive || 'sha256:' + sha256(zip) !== digest) {
     throw Error('Windows worker archive digest mismatch.');
@@ -143,17 +197,20 @@ export async function prepareWindowsWorkerForLocalChecks(cwd, baseSha, headSha,
   {locate = findHostedWindowsWorker, download = (root, artifact) => githubOutput(root, 'artifacts/' + artifact.id + '/zip')} = {}) {
   const sourceRoot = path.join(cwd, workerRootPath);
   const target = path.join(sourceRoot, 'bin');
-  if (await present(target)) {
-    // Existing content is reviewed by the same production validator. Do not
-    // replace an unrecognized, stale or partial drop left by a separate tool.
-    try { await validateWindowsPrivateWorker(sourceRoot); }
-    catch (error) {
-      throw Error('Existing Windows worker in bin/ failed validation. Move it out of this worktree to prepare a verified copy.', {cause: error});
-    }
-    return 'existing';
-  }
+  const existing = await present(target);
+  const marked = existing?.isDirectory() && await present(path.join(target, receiptName));
+  // Validate user-owned and legacy drops directly, even when Git or GitHub
+  // cannot resolve an artifact. Only the queue's own drop can be refreshed.
+  if (existing && !marked) return validateExistingWorker(sourceRoot);
+
   if (!isSha(baseSha) || !isSha(headSha)) throw Error('Invalid revisions for Windows worker preflight.');
   const key = inputRevision(cwd, headSha);
+  // The private Git directory is stable across rebases and distinct for linked
+  // worktrees. Copying a bin directory elsewhere cannot grant replacement.
+  const owner = sha256(await fs.realpath(read('git', ['rev-parse', '--absolute-git-dir'], cwd)));
+  const previous = marked ? await readManagedWorker(target, owner) : null;
+  if (marked && !previous) throw Error('Windows worker in bin/ changed while reading its receipt.');
+  if (previous?.key === key) return validateExistingWorker(sourceRoot);
   const gitDirectory = await fs.realpath(path.resolve(cwd, read('git', ['rev-parse', '--git-common-dir'], cwd)));
   const cacheParent = path.join(gitDirectory, 'trelio-windows-worker-cache');
   const cacheParentStat = await present(cacheParent);
@@ -172,6 +229,8 @@ export async function prepareWindowsWorkerForLocalChecks(cwd, baseSha, headSha,
   // Stage on the worktree's filesystem so publishing bin is atomic. Keep
   // this disposable directory ignored even if a local integration is killed.
   const staging = await fs.mkdtemp(path.join(sourceRoot, '.worker-stage-'));
+  const backup = path.join(staging, 'previous-bin');
+  let backupPending = false;
   try {
     const archive = path.join(staging, 'worker.zip');
     await fs.writeFile(archive, artifact.zip, {flag: 'wx', mode: 0o600});
@@ -179,6 +238,9 @@ export async function prepareWindowsWorkerForLocalChecks(cwd, baseSha, headSha,
     const binaryDirectory = path.join(staging, 'bin');
     await extractWorker(archive, binaryDirectory, cwd);
     await validateWindowsPrivateWorker(staging);
+    const fingerprint = await workerFingerprint(binaryDirectory, false);
+    await fs.writeFile(path.join(binaryDirectory, receiptName),
+      JSON.stringify({version: 1, owner, key, fingerprint}), {flag: 'wx', mode: 0o600});
 
     if (!cached) {
       await fs.mkdir(cacheParent, {recursive: true, mode: 0o700});
@@ -189,8 +251,40 @@ export async function prepareWindowsWorkerForLocalChecks(cwd, baseSha, headSha,
         await publishDirectory(cacheStage, cache);
       } finally { await fs.rm(cacheStage, {recursive: true, force: true}); }
     }
+    if (previous) {
+      // Finish candidate verification before moving the previous payload.
+      // Check identity on both sides of rename so a concurrent replacement
+      // is preserved even if it arrived between the check and the rename.
+      if (!sameWorker(await readManagedWorker(target, owner), previous)) {
+        throw Error('Windows worker in bin/ changed while its replacement was being prepared.');
+      }
+      await fs.rename(target, backup);
+      backupPending = true;
+      if (!sameWorker(await readManagedWorker(backup, owner), previous)) {
+        throw Error('Windows worker in bin/ changed while it was being moved.');
+      }
+    }
     await publishDirectory(binaryDirectory, target);
+    if ((await readManagedWorker(target, owner))?.key !== key) {
+      throw Error('Windows worker in bin/ was replaced concurrently.');
+    }
     await validateWindowsPrivateWorker(sourceRoot);
+    backupPending = false;
     return cached ? 'cache' : 'hosted';
-  } finally { await fs.rm(staging, {recursive: true, force: true}); }
+  } catch (cause) {
+    if (backupPending) {
+      // Never overwrite a newly arrived destination during rollback. Keep the
+      // moved directory available if a safe rollback is impossible.
+      try {
+        if (!await present(target)) {
+          await fs.rename(backup, target);
+          backupPending = false;
+        }
+      } catch { /* The backup still lives in this ignored staging directory. */ }
+      if (backupPending) throw Error('Windows worker refresh failed. The previous directory is preserved at ' + backup, {cause});
+    }
+    throw cause;
+  } finally {
+    if (!backupPending) await fs.rm(staging, {recursive: true, force: true});
+  }
 }

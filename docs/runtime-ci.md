@@ -55,11 +55,19 @@ source SHA-256, all three binary digests and PE machine codes before publication
 
 The verified archive is cached by those build inputs in the clone's common Git
 directory. A fresh worktree materializes its own ignored `bin/` and validates
-it again. A cold cache requires GitHub CLI read access and the system archive
-reader. A warm cache works offline. An existing invalid input or absence of a
-matching official build fails before the test suites. Ordinary integration
-only reads published artifacts. Release CI still builds and tests its own
-exact SHA and keeps the hosted native lanes.
+it again. The local receipt records the worktree, both build inputs and the
+digest of the complete payload. After a rebase changes either input, the gate
+verifies the replacement before moving its unchanged managed directory.
+A failed refresh restores that directory when the destination is free and
+preserves the backup when it cannot restore safely. Manual and older unmarked
+directories keep the existing validation and are never replaced. An altered
+managed directory also requires manual review.
+
+A cold cache requires GitHub CLI read access and the system archive reader.
+A warm cache works offline. Missing matching builds and invalid inputs fail
+before the test suites. Ordinary integration only reads published artifacts.
+The local receipt stays out of packages. Release CI still builds and tests
+its own exact SHA and keeps the hosted native lanes.
 
 Root package changes check the tokenizer consumer. Script-definition changes also
 select the Git guard. Bootstrap, native and workflow inputs have their own
