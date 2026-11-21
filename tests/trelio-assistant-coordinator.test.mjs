@@ -3281,12 +3281,50 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
     const finishLocators=retained?{...oldProof.locators,checkpointId:randomUUID(),draftHead:'a'.repeat(40)}:null;
     let nativeEvidence=false,finishReviews=0,finishRenewals=0,finishStarts=0;
     let provisionedNotice=0,rootStarts=0,reviews=0,renewals=0,recoveryStarts=0;
-    let cleanBeforeReview=false,cleanUnderWriter=false,checkingInWriter=false,checkedUnderWriter=0;
-    if(readOnlyGuides)f.options.verifyReadOnlyPrelude=async(expected,witness)=>{
-      assert.deepEqual(expected,original);
-      assert.deepEqual(witness,technicalPrelude);
-      if(checkingInWriter){checkedUnderWriter++;return cleanUnderWriter;}
-      return cleanBeforeReview;
+    let changedFile,changeUnderWriter=false;
+    if(readOnlyGuides){
+      // Enter the recovery through the production host, including the exact
+      // local Run lookup and its before/after metadata comparison. Stubbing
+      // the coordinator's verifier would hide an unconditional host refusal.
+      const root=path.join(assistantTaskStorageDirectory(directory,{...f.identity,companyId:f.companyId,taskId:f.taskId}),
+        'workspaces',technicalPrelude.workspaceId);
+      const cwd=path.join(root,'workspace');
+      await ensurePrivateDirectory(cwd);
+      await runGit(['init','--quiet'],{cwd});
+      await runGit(['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--allow-empty','--quiet','-m','base'],{cwd});
+      technicalPrelude.baseHead=(await runGit(['rev-parse','HEAD'],{cwd})).stdout.trim();
+      await writePrivateJsonFile(path.join(root,'.trelio-run.json'),{
+        schemaVersion:3,origin:f.identity.origin,scopeType:'task',company:{id:f.companyId},
+        workspaceId:technicalPrelude.workspaceId,runId:technicalPrelude.runId,workspaceDirectory:cwd,
+        baseHead:technicalPrelude.baseHead,materializedHead:technicalPrelude.baseHead,
+      });
+      changedFile=path.join(cwd,'unsaved.txt');
+      const {client}=f.options;
+      client.sourceAccounts=async()=>[];
+      client.sourceRoutes=async()=>[];
+      // This native pass has no final candidate, local edits or checkpoint.
+      client.readTaskPortableFinishEvidence=async()=>null;
+      client.readTaskLocalDraftEvidence=async()=>null;
+      client.readTaskIntermediateDraftEvidence=async()=>null;
+      client.readHealth=async()=>({code:'dispatch_review_required',revision:1});
+      client.reportHealth=async input=>{
+        assert.equal(input.clearedReason,'dispatch_review_required');
+        assert.equal(f.activePass(),null);
+        provisionedNotice++;
+      };
+    }
+    const openCoordinator=async()=>{
+      if(!readOnlyGuides)return createAssistantCoordinator({...f.options,database});
+      const host=await createAssistantRuntimeHost({context:async action=>action(f.options.client,{
+        ...f.options.passHost,readIdentity:async()=>f.identity,readActivation:async()=>null,withSetupLock:action=>action(),
+      }),dependencies:{directory,ensureDirectory:async()=>{},now:f.options.now,timeZone:'Europe/Moscow',native:f.options.native,
+        readHookReadiness:f.options.native.readPrerequisites,
+        openDatabase:async()=>({database,close:async()=>{}}),
+        readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,
+          authorizedByUserId:f.memberId,businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome',
+            'workspace_execution','owner_decisions','background_service']}}),
+      }});
+      return {...host.coordinator,close:()=>host.close()};
     };
     f.authority.workMode='task';
     Object.assign(f.continuation,{cadence:'daily',dailyLocalTime:'20:00'});
@@ -3346,6 +3384,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
       return {schemaVersion:technicalPrelude?3:2,state:renewals?'resumed':'approved',reviewId:retryMarker,invocationId:retryMarker,
         resumed:renewals?{leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
     };
+    if(readOnlyGuides)f.options.client.continueTaskPass=args=>f.options.passHost.continuePass(args,f.activePass());
     f.options.native.run=async(input,options)=>{
       if(retained&&options.workspaceDraftRecovery){
         assert.equal(input.deliveryId,finishMarker);
@@ -3363,8 +3402,9 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         assert.equal(options.taskReadRecovery.initialScheduled,true);
         assert.equal(options.taskReadRecovery.terminalMarkerId,original.deliveryId);
         if(!owned)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
-        checkingInWriter=true;
-        try{await options.beforeInvocation();}finally{checkingInWriter=false;}
+        if(changeUnderWriter)await fs.writeFile(changedFile,'local work appeared under the writer');
+        try{await options.beforeInvocation();}
+        finally{if(changeUnderWriter)await fs.unlink(changedFile);}
         recoveryStarts++;
         if(ending==='interrupted'||retained){options.startInvocation();return {state:'uncertain'};}
       }else if(!successfulBasis&&!original){
@@ -3378,7 +3418,7 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
       return ordinaryRun(input,options.taskReadRecovery?{...options,beforeInvocation:undefined}:options);
     };
     try{
-      await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+      await coordinator.close();coordinator=await openCoordinator();
       await coordinator.pollOnce();await coordinator.workOnce();
       f.events.push({id:randomUUID(),revision:'first',taskId:f.taskId,wake:true});
       f.advance(300001);await coordinator.pollOnce();await coordinator.workOnce();
@@ -3399,15 +3439,16 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         return;
       }
       if(readOnlyGuides){
+        await fs.writeFile(changedFile,'uncommitted local work');
         assert.equal((await coordinator.workOnce()).state,'blocked');
         assert.equal(reviews,0,'unverified local state cannot reserve a native continuation');
-        cleanBeforeReview=true;
+        await fs.unlink(changedFile);
       }
       await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       const readIntent=()=>createAssistantInbox({database,now:f.options.now}).readPassContinuation(original.deliveryId);
       assert.equal(renewals,0);assert.equal(readIntent().started,false);
       await coordinator.close();database.close();
-      database=new DatabaseSync(filename);coordinator=createAssistantCoordinator({...f.options,database});
+      database=new DatabaseSync(filename);coordinator=await openCoordinator();
       assert.deepEqual(readIntent().taskReadParent,{initialScheduled:true,...(technicalPrelude?{technicalPrelude}:{})});
       owned=true;
       if(retained){
@@ -3439,10 +3480,12 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         if(readOnlyGuides){
           // A positively identified change under the owned writer must stop
           // before consuming the reservation or starting the new turn.
+          // Change it after the preliminary read in this very invocation.
+          changeUnderWriter=true;
           await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
           assert.equal(renewals,0);
           assert.equal(readIntent().started,false);
-          cleanUnderWriter=true;
+          changeUnderWriter=false;
         }
         if(ending==='lost-renewal'){
           await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
@@ -3461,7 +3504,6 @@ for(const ending of ['completed','interrupted','unproven','lost-renewal','techni
         assert.equal(coordinator.status()[0].threadId,original.threadId);
       }
       assert.equal(readIntent().started,true);
-      if(readOnlyGuides)assert.ok(checkedUnderWriter>=2);
       assert.equal(rootStarts,1);assert.equal(reviews,1);assert.equal(renewals,1);assert.equal(recoveryStarts,1);
     }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
   });

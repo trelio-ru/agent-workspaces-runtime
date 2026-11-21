@@ -3790,7 +3790,9 @@ const observeAssistantReadOnlyPrelude=async({config,identity,pass,witness,signal
     const before=await read();
     if(!before)return false;
     await common.verifyAssistantReadOnlyPrelude({metadata:before,witness,signal});
-    return canonicalJson(before)===canonicalJson(await read());
+    // Both reads return private JSON metadata. Compare the complete parsed
+    // snapshots so an intervening Run change refuses before native renewal.
+    return isDeepStrictEqual(before,await read());
   }catch{return false;}
 };
 /** Pre-receipt saves require a current independent local snapshot. A settled

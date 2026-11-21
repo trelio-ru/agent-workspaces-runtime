@@ -218,6 +218,8 @@ publication tooling также остаются вне этого публичн
   their release must match the native saved draft's checked release set.
   Test the whole native history through durable completion, disk reopen and
   the next fixed daily cycle; isolated classifier tests are insufficient.
+  Exercise the real host's read-only Git and metadata verifier both before
+  reservation and under the writer. A changed checkout must refuse at either.
   The same expired accepted witness permits signed maintenance under the
   existing lease, without requiring a read-only-parent continuation.
   Legacy task handoff v4 attaches only to the original scheduled technical
