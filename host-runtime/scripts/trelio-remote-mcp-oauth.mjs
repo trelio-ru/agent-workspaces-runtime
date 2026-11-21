@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
-import { getDesktopOAuthProfile } from "./trelio-desktop-oauth-profiles.mjs";
+import { getDesktopOAuthProfile } from "./trelio-component-versions.mjs";
 import { openBrowser, browserOpenDiagnostics, renderLocalFormMessage, LOCAL_FORM_CSP } from "./trelio-workspace.mjs";
 
 const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;

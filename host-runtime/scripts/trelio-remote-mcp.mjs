@@ -62,7 +62,9 @@ import {
 } from "./trelio-codex-routing.mjs";
 import {
   HOST_RUNTIME_VERSION,
+  getDesktopOAuthProfile,
   getHostRuntimeVersion,
+  isDesktopOAuthInvocation,
 } from "./trelio-component-versions.mjs";
 
 import {
@@ -114,7 +116,6 @@ import {
   refreshRemoteMcpOAuth,
 } from "./trelio-remote-mcp-oauth.mjs";
 import { createRemoteMcpOAuthVault, remoteMcpOAuthSessionAccount } from "./trelio-remote-mcp-oauth-vault.mjs";
-import { getDesktopOAuthProfile, isDesktopOAuthInvocation } from "./trelio-desktop-oauth-profiles.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   buildCompanyEncryptedJsonMarker,

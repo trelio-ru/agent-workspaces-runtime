@@ -1768,6 +1768,9 @@ Exact legacy template bytes для распознавания при мигра�
   candidate один раз до первого теста. Общий npm cache допустим,
   `node_modules` разных worktree не объединяются. [Контракт](docs/runtime-ci.md).
 - Package builder проверяй двумя сборками одной версии и byte comparison.
+  The local gate exercises the actual signed hook chain on each addition or
+  removal in the builder's shared source layout. Keep the 100-file bound and
+  the behavior/consumer checks independent.
 - Search pacing parity executes the actual provider controllers from one immutable public revision; all CI lanes pin that same source, and controller names follow its declared API. Never skip parity or copy snippets after provider drift.
 - Cross-repository tests и `git:integrate` запускай с exact plugin root через
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; worker наследует эту переменную. Missing

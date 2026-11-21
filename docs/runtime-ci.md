@@ -53,6 +53,11 @@ Both `PrivateProcess.cpp` and its build script must match the candidate bytes.
 The preflight checks GitHub's ZIP SHA-256 and the packaging validator checks the
 source SHA-256, all three binary digests and PE machine codes before publication.
 
+Adding or removing a tracked member of the host runtime package also selects
+this signed chain during ordinary integration. It uses the builder's own file
+layout and catches the fixed 100-file bound before pushing main. The original
+unit and consumer suites still run, even when the package can be built.
+
 The verified archive is cached by those build inputs in the clone's common Git
 directory. A fresh worktree materializes its own ignored `bin/` and validates
 it again. The local receipt records the worktree, both build inputs and the

@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {read} from './git-coordinator.mjs';
 import {readRuntimeCiPlan} from './runtime-ci-plan.mjs';
 import {prepareWindowsWorkerForLocalChecks} from './runtime-windows-worker-preflight.mjs';
+import {isHostRuntimePackageInput} from './host-runtime-package-layout.mjs';
 
 const signedChainSuite = 'tests/trelio-hook-signed-chain.test.mjs';
 
@@ -48,6 +49,7 @@ const owners = new Map([
     npmManifests.map(manifest => [`${directory}/${manifest}`, suites])),
   ['host-runtime/scripts/trelio-assistant-entry.mjs', ['tests/trelio-assistant-transport.test.mjs']],
   ['scripts/build-host-runtime-package.mjs', ['tests/trelio-host-runtime-entry.test.mjs', signedChainSuite]],
+  ['scripts/host-runtime-package-layout.mjs', ['scripts/runtime-main-checks.test.mjs', signedChainSuite]],
   ['scripts/build-windows-private-worker.ps1', ['tests/trelio-windows-native-private.test.mjs']],
   ['.github/workflows/runtime-tests.yml', ['scripts/runtime-ci-plan.test.mjs', 'scripts/runtime-main-checks.test.mjs']],
   ['.github/scripts/run-windows-account-fixture.ps1', ['tests/trelio-skill-accounts.test.mjs']],
@@ -193,6 +195,14 @@ export function planMainChecks(paths, {before, after}) {
       if (file === 'package.json' && JSON.stringify(JSON.parse(before.get(file) ?? '{}').scripts)
         !== JSON.stringify(JSON.parse(after.get(file) ?? '{}').scripts)) coordination = true;
       continue;
+    }
+    // A literal import owner can pass while the installed distribution is
+    // already too large to sign. An added/deleted package member must also
+    // build and traverse the real signed hook chain before ordinary main.
+    // Keep the normal behavior/consumer tests independently mandatory.
+    if (isHostRuntimePackageInput(file) && before.has(file) !== after.has(file)
+      && !select(signedChainSuite, `package-inventory:${file}`)) {
+      unmapped.push(`${file}: packaged file inventory changed without the signed chain suite`);
     }
     if (!selectImpact(file)) unmapped.push(`${file}: no surviving test owner; add a focused test or reviewed owner mapping`);
   }

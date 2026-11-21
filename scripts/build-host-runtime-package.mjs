@@ -14,12 +14,12 @@ import { fileURLToPath } from "node:url";
 
 import { buildAgentSkillPackage } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { validateWindowsPrivateWorker } from "./validate-windows-private-worker.mjs";
+import {
+  hostRuntimeScripts, includesHostRuntimeScript, nativeSourceDirectories, visualDependencyFiles, windowsWorkerFiles,
+} from "./host-runtime-package-layout.mjs";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SCRIPT_SOURCE = path.join(REPOSITORY_ROOT, "host-runtime", "scripts");
-const EXCLUDED_SCRIPT_NAMES = new Set([
-  "report-context-budget.mjs",
-]);
+const SCRIPT_SOURCE = path.join(REPOSITORY_ROOT, hostRuntimeScripts);
 
 const parseArguments = (rawArguments) => {
   const values = {};
@@ -47,8 +47,7 @@ const copyRuntimeSource = async (stagingDirectory) => {
   await fs.mkdir(targetScripts, { recursive: true });
   // The hosted Windows build is an immutable input, validated against source
   // and each PE machine/hash before it enters the signed all-platform package.
-  for (const relative of ["PrivateProcess.cpp", "bin/metadata.json",
-    ...["x64", "ia32", "arm64"].map(arch => `bin/${arch}/trelio-private-process.exe`)]) {
+  for (const relative of windowsWorkerFiles) {
     const target = path.join(targetScripts, "native-private-process", relative);
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.copyFile(path.join(nativeRoot, relative), target);
@@ -58,14 +57,12 @@ const copyRuntimeSource = async (stagingDirectory) => {
   // files into its own managed cache. Never package developer node_modules.
   const visualDependencies = path.join(targetScripts, 'visual-browser-dependencies');
   await fs.mkdir(visualDependencies, { recursive: true });
-  for (const name of ['package.json', 'package-lock.json']) {
+  for (const name of visualDependencyFiles) {
     await fs.copyFile(path.join(SCRIPT_SOURCE, 'visual-browser-dependencies', name), path.join(visualDependencies, name));
   }
 
   for (const entry of entries) {
-    if (entry.isFile()
-      && (entry.name.endsWith(".mjs") || entry.name === "trelio-agent-diagnostics-contract.json")
-      && !EXCLUDED_SCRIPT_NAMES.has(entry.name)) {
+    if (entry.isFile() && includesHostRuntimeScript(entry.name)) {
       await fs.copyFile(
         path.join(SCRIPT_SOURCE, entry.name),
         path.join(targetScripts, entry.name),
@@ -73,20 +70,12 @@ const copyRuntimeSource = async (stagingDirectory) => {
     }
   }
 
-  // Native browser-fill helpers are source-reviewed runtime dependencies.
-  // They are compiled locally and never carry user credentials in the package.
-  await fs.cp(
-    path.join(SCRIPT_SOURCE, "native-secret-browser"),
-    path.join(targetScripts, "native-secret-browser"),
-    { recursive: true, errorOnExist: true },
-  );
-  // The Keychain helper is compiled locally from reviewed source so the bridge
-  // can pass the device-session over stdin/fd3 without argv, env or log output.
-  await fs.cp(
-    path.join(SCRIPT_SOURCE, "native-bridge-keychain"),
-    path.join(targetScripts, "native-bridge-keychain"),
-    { recursive: true, errorOnExist: true },
-  );
+  // The browser-fill and Keychain helpers are compiled locally from reviewed
+  // source. The package has no user values, device sessions or local binaries.
+  for (const directory of nativeSourceDirectories) {
+    await fs.cp(path.join(SCRIPT_SOURCE, directory), path.join(targetScripts, directory),
+      { recursive: true, errorOnExist: true });
+  }
 };
 
 const main = async () => {

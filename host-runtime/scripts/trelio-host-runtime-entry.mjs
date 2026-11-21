@@ -12,12 +12,10 @@ import { startMirrorCacheMaintenance } from "./trelio-mirror-retention.mjs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { requireTrelioComponentVersions } from "./trelio-component-versions.mjs";
+import { isDesktopOAuthInvocation, requireTrelioComponentVersions } from "./trelio-component-versions.mjs";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 import { RUNTIME_HOOK_START_TIME_ENV, resolveRuntimeHookStartedAt } from "./trelio-runtime-session-limits.mjs";
-
-import { isDesktopOAuthInvocation } from "./trelio-desktop-oauth-profiles.mjs";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const MODE_ENTRYPOINTS = Object.freeze({

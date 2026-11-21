@@ -20,7 +20,7 @@ import {
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
 
-import { getDesktopOAuthProfile } from "./trelio-desktop-oauth-profiles.mjs";
+import { getDesktopOAuthProfile } from "./trelio-component-versions.mjs";
 
 const KEYCHAIN_SERVICE = "ru.trelio.remote-mcp-oauth.v1";
 const MAX_SESSION_BYTES = 32 * 1024;

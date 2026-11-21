@@ -84,7 +84,9 @@ test('maintainer prose and ignore policy need only diff checks; changed tests ru
 });
 
 test('deletion and rename keep consumers from both pinned snapshots', () => {
-  const before = snapshot(source), after = snapshot({...source,
+  const signedChain = 'tests/trelio-hook-signed-chain.test.mjs';
+  const baseline = {...source, [signedChain]: '// The production package is built by the test process.'};
+  const before = snapshot(baseline), after = snapshot({...baseline,
     'host-runtime/scripts/replacement.mjs': 'export const value = 2;',
     [unit]: "import {value} from '../host-runtime/scripts/replacement.mjs';",
   });
@@ -92,7 +94,18 @@ test('deletion and rename keep consumers from both pinned snapshots', () => {
   // The surviving consumer still imports the deleted path; that failure must
   // be detected rather than disappearing with the candidate's dependency map.
   assert.deepEqual(plan([module, 'host-runtime/scripts/replacement.mjs', unit], before, after).tests,
-    [consumerTest, unit]);
+    [consumerTest, unit, signedChain]);
+});
+
+test('a tracked runtime package addition needs signed-chain proof even with a direct test', () => {
+  const signedChain = 'tests/trelio-hook-signed-chain.test.mjs';
+  const before = snapshot({[signedChain]: '// Builds and loads the real package.'});
+  const after = snapshot({...Object.fromEntries(before), [module]: source[module], [unit]: source[unit]});
+  const selected = plan([module, unit], before, after);
+  assert.deepEqual(selected.tests, [unit, signedChain]);
+  assert.deepEqual(selected.reasons[signedChain], [`package-inventory:${module}`]);
+  after.delete(signedChain);
+  assert.throws(() => plan([module, unit], before, after), /packaged file inventory changed without the signed chain suite/u);
 });
 
 test('removed tests require surviving replacement coverage, not unrelated smoke', () => {
@@ -156,6 +169,8 @@ test('real Git snapshots are bounded complete objects and preserve deleted/renam
   const commit = () => {git('add', '-A'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'); return git('rev-parse', 'HEAD');};
   git('init', '-q');
   for (const [file, text] of Object.entries(source)) write(file, text);
+  const signedChain = 'tests/trelio-hook-signed-chain.test.mjs';
+  write(signedChain, '// Builds the runtime distribution before checking the original hook.');
   write('tests/fixture.test.mjs', "readFile(new URL('./fixtures/old.json', import.meta.url));");
   write('tests/fixtures/old.json', '{}');
   const base = commit();
@@ -166,7 +181,7 @@ test('real Git snapshots are bounded complete objects and preserve deleted/renam
   const head = commit(), before = readMainCheckSnapshot(directory, base), after = readMainCheckSnapshot(directory, head);
   const {changedPaths} = readRuntimeCiPlan({repository: directory, baseSha: base, headSha: head});
   assert.ok(changedPaths.includes(module) && changedPaths.includes('host-runtime/scripts/replacement.mjs'));
-  assert.deepEqual(plan(changedPaths, before, after).tests, [consumerTest, 'tests/fixture.test.mjs', unit]);
+  assert.deepEqual(plan(changedPaths, before, after).tests, [consumerTest, 'tests/fixture.test.mjs', unit, signedChain]);
   const previous = process.env.GIT_TRACE;
   process.env.GIT_TRACE = '1';
   try { assert.throws(() => readMainCheckSnapshot(directory, head), /complete main-check snapshot/u); }
