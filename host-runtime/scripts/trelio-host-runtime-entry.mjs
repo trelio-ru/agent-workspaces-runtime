@@ -41,9 +41,12 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
   const kimiProfile = mode === "mcp" && argumentsAfterMode.length === 2
     && argumentsAfterMode[0] === "--kimi-work"
     && ["remote", "local"].includes(argumentsAfterMode[1]);
+  const mimoProfile = mode === "mcp" && argumentsAfterMode.length === 2
+    && argumentsAfterMode[0] === "--mimo-desktop"
+    && ["remote", "local"].includes(argumentsAfterMode[1]);
   const multiToolProfile = mode === "mcp" && argumentsAfterMode.length === 1
     && argumentsAfterMode[0] === "--multitool";
-  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !multiToolProfile && !codexProfile) {
+  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !mimoProfile && !multiToolProfile && !codexProfile) {
     throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED");
   }
 
@@ -68,7 +71,7 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
 
   return {
     mode,
-    ...(kimiProfile ? { profile: "kimi-work" } : multiToolProfile ? { profile: "multitool" } : {}),
+    ...(kimiProfile ? { profile: "kimi-work" } : mimoProfile ? { profile: "mimo-desktop" } : multiToolProfile ? { profile: "multitool" } : {}),
     entrypointPath: path.join(SCRIPT_DIRECTORY, entrypointName),
     arguments: argumentsAfterMode,
   };
@@ -83,6 +86,9 @@ const assertHostRuntimeNamespace = (invocation, environment) => {
   }
   if (invocation.profile === "multitool" && environment.TRELIO_WORKSPACE_CLIENT_PROFILE !== "multitool") {
     throw new Error("TRELIO_MULTITOOL_PROFILE_REQUIRED");
+  }
+  if (invocation.profile === "mimo-desktop" && environment.TRELIO_WORKSPACE_CLIENT_PROFILE !== "mimo-desktop") {
+    throw new Error("TRELIO_MIMO_PROFILE_REQUIRED");
   }
 };
 

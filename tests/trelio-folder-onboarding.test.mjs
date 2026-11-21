@@ -59,12 +59,12 @@ const binding = {
   project: { name: "Рабочий проект", slug: "work-project" },
 };
 
-for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"]) {
+for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"]) {
   test(`${clientKind} binds and refreshes the folder without replacing personal instructions`, async () => {
     const root = await makeRoot();
     const personal = "# Personal\n\nKeep my formatting.\n";
     await fs.writeFile(path.join(root, "AGENTS.md"), personal);
-    const native = ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind);
+    const native = ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(clientKind);
     const response = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
       clientKind, intent: "folder_onboarding", folderOnboarding: { folderPath: root, ...binding },
     });
@@ -95,6 +95,9 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
       assert.equal(codex.status, "ready");
       assert.equal(codex.instructions.templateSha256, healthy.instructions.templateSha256);
       await fs.writeFile(path.join(root, "AGENTS.md"), current.replace(`${guidance}\n`, ""));
+    } else if (clientKind === "mimo-desktop") {
+      assert.match(current, /Xiaomi MiMo Desktop:.*clientKind=mimo-desktop.*trelio-remote-skills/u);
+      await fs.writeFile(path.join(root, "AGENTS.md"), current.replace(/^Xiaomi MiMo Desktop:.*\n/mu, ""));
     } else if (clientKind === "multitool") {
       // Exercise the installed form of the old block and refresh through
       // the same diagnostic action a new MultiTool chat sees.

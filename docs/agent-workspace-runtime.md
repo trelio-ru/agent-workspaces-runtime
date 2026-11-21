@@ -4330,6 +4330,26 @@ read-back, scope/conflict/revocation, native picker vectors и App RPC lifecycle
 один прежний bounded initialize prefix (650 tokens), не повышая budgets прежних
 методов или обычного task Run. Полный HTML и private draft туда не входят.
 
+## Xiaomi MiMo Desktop
+
+`bridge mimo install` возвращает две готовые записи stdio для верхнеуровневого
+`mcp` в JSONC конфигурации MiMo Desktop на macOS. Путь из настроек самого
+приложения имеет приоритет над предлагаемым `~/.config/mimocode/mimocode.jsonc`.
+Установщик не меняет файл. Оба сервера запускаются через immutable bootstrap
+и тот же подписанный loader. Entrypoint и stdio проверяют точную пару
+`--mimo-desktop remote|local` и отдельную локальную namespace.
+
+Удалённый сервер переиспользует Kimi Work exact discovery/call и S256 со
+своим `trelio_mimo_desktop_agent_workspaces_v1`. Используется отдельная
+OAuth vault ячейка. Paired bridge, Run registry и E2EE device state используют
+`mimo-desktop` и не переиспользуют данные другого приложения. Оба процесса
+сохраняют полное task authority и ссылки на локальные продолжения в
+TextContent через общий single-copy projector. Локальный каталог MiMo использует
+полные имена инструментов из native маршрута. App-only инструменты и
+secret browser-fill закрыты прежними ограничениями. Диагностика и планы
+привязки папки проверяют `clientKind=mimo-desktop` и существующий `AGENTS.md`.
+Изоляция процессов и защищённый доступ проверяются раздельно.
+
 ## Мультитул
 
 `bridge multitool install` готовит неизменяемый bootstrap для локального MCP

@@ -1992,6 +1992,10 @@ The shared folder template keeps Kimi's MCP discovery/invocation and separate
 local continuation guidance across chats. Refresh existing blocks through the
 same folder plan, without dropping other clients' instructions.
 See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
+[Xiaomi MiMo Desktop](docs/agent-workspace-runtime.md#xiaomi-mimo-desktop)
+shares the guarded Kimi stdio transport. Its two JSONC entries use its own
+fixed OAuth client and private bridge namespace. The installer stages launchers
+only. Keep complete authority and local continuations in text delivery.
 [MultiTool](docs/agent-workspace-runtime.md#мультитул) uses the same signed loader
 and an independent OAuth/bridge namespace. The macOS installer returns one
 config entry. Exact open/inspect routes omit chat cwd; read the returned local

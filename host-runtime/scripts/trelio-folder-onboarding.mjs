@@ -23,7 +23,7 @@ const MAX_NAME_LENGTH = 200;
 const MAX_SLUG_LENGTH = 120;
 const MAX_INSTRUCTION_FILE_BYTES = 256 * 1024;
 const INSTRUCTION_FILES = new Set(["AGENTS.md", "AGENTS.override.md"]);
-const BINDING_CLIENTS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"]);
+const BINDING_CLIENTS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"]);
 // Share exact membership with the local action dispatcher so a reviewed plan
 // cannot be rejected by a second, stale client list before reaching the writer.
 // Keep the Set private: callers may check instruction-format support, never
@@ -426,6 +426,7 @@ const buildManagedBindingBlock = ({ company, project }) => {
     // Keep one shared template across clients: a Kimi refresh must not remove
     // Codex guidance or make another client rewrite the same managed block.
     "Kimi Work: вызывай инструменты из MCP-каталога, без `system.invoke`. Если удалённого инструмента в чате нет, используй `trelio_find_tools` для его точной схемы и `trelio_call_tool` для вызова. Существующий OAuth переиспользуй. Для диагностики, настройки папки и привязки браузера используй `diag` на локальном `trelio-remote-skills`; возвращённые локальные действия выполняй через указанные MCP server/tool (`local`, `ws` или `prop`), при необходимости загрузив точное показанное Kimi имя через `select_tools`. Если указан `nativeArgumentsTarget`, заполни только этот слот исходными аргументами.",
+    "Xiaomi MiMo Desktop: используй свой OAuth и clientKind=mimo-desktop. Для удалённых инструментов используй trelio, для диагностики и возвращённых локальных действий – trelio-remote-skills с полными именами инструментов.",
     "",
     "Мультитул: используй MCP-сервер Trelio и действующий OAuth. Если нужный удалённый инструмент не виден, получи его точную схему через `trelio_find_tools` и вызови через `trelio_call_tool`. Локальные действия выполняй через возвращённые MCP server/tool и аргументы. После `open` или `inspect` прочитай оба файла из `authorityReadPlan` по порядку до EOF. Если план недоступен или один из файлов не удалось прочитать полностью, останови работу с папкой и укажи причину.",
     "",
@@ -1082,7 +1083,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
   const requestedTarget = normalizeInstructionTarget(rawInput.instructionTarget);
   // AGENTS.override.md belongs to Codex's precedence rules. Native clients
   // load AGENTS.md, so never pretend that writing the override binds them.
-  if (["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind)
+  if (["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(clientKind)
     && (requestedTarget === "AGENTS.override.md" || inspection.status === "instruction_target_required")) {
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "This native client requires AGENTS.md; resolve the existing AGENTS.override.md before binding this shared folder.");
   }
@@ -1236,7 +1237,7 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
     allowExternalWorkspaceStorage: clientKind === "codex",
     requireServiceGitIsolation: true,
   });
-  if (["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) && inspection.status === "instruction_target_required") {
+  if (["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(clientKind) && inspection.status === "instruction_target_required") {
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "This client loads AGENTS.md; an existing override needs an explicit target decision.");
   }
   const instructionTarget = inspection.status === "instruction_target_required"

@@ -19,6 +19,7 @@ const CALLBACK_TIMEOUT_MS = 10 * 60 * 1_000;
 export const TRELIO_NATIVE_OAUTH_CLIENT_IDS = Object.freeze({
   codex: "trelio_agent_workspaces_v1",
   "kimi-work": "trelio_kimi_work_agent_workspaces_v1",
+  "mimo-desktop": "trelio_mimo_desktop_agent_workspaces_v1",
   multitool: "trelio_multitool_agent_workspaces_v1",
 });
 const TRELIO_NATIVE_OAUTH_RESOURCE = "https://trelio.ru/mcp";

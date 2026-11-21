@@ -6,10 +6,10 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
-import { buildKimiWorkBundle, installKimiWorkBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { buildKimiWorkBundle, installKimiWorkBundle, prepareMimoDesktopInstallation, workspaceBridgeCredentialAccount } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, remoteMcpHttpRequest, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { connectRemoteMcpOAuth } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { remoteMcpOAuthSessionAccount } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
@@ -25,7 +25,7 @@ const output = value => ({ content: [{ type: "text", text: "routing summary" }],
   _meta: { privateAppGrant: "must-never-be-serialized" } });
 
 test("all fixed native profiles negotiate gzip only for catalog reads", async () => {
-  for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness"]) {
+  for (const nativeClient of ["codex", "kimi-work", "multitool", "mimo-desktop", "deepseek-harness"]) {
     const methods = [];
     const connection = createHarnessConnection({ nativeClient, httpJson: async () => ({ body: metadata }),
       vault: { read: async () => ({ accessToken: "synthetic", expiresAt: Date.now() + 120_000 }) },
@@ -185,6 +185,7 @@ test("actual signed-runtime entry selects both Kimi carriers and rejects malform
 for (const { nativeClient, clientId } of [
   { nativeClient: "kimi-work", clientId: "trelio_kimi_work_agent_workspaces_v1" },
   { nativeClient: "multitool", clientId: "trelio_multitool_agent_workspaces_v1" },
+  { nativeClient: "mimo-desktop", clientId: "trelio_mimo_desktop_agent_workspaces_v1" },
 ]) {
   test(`${nativeClient} connects through the real S256/state/loopback OAuth engine and its own vault cell`, async () => {
     let credential, authorize, exchange, writes = 0, dcrCalls = 0;
@@ -216,7 +217,7 @@ for (const { nativeClient, clientId } of [
           result: payload.method === "initialize" ? { protocolVersion: "2025-03-26", instructions: "server authority" }
             : { tools: [] } } };
       } });
-    const handler = createKimiMcpHandler({ connection, multiTool: nativeClient === "multitool" });
+    const handler = createKimiMcpHandler({ connection, nativeClient, multiTool: nativeClient === "multitool" });
     const connected = await handler(call("trelio_connect"), { signal: signal() });
     assert.equal(connected.result.structuredContent.connected, true, JSON.stringify(connected.result));
     assert.equal(dcrCalls, 0); assert.equal(writes, 1);
@@ -228,11 +229,103 @@ for (const { nativeClient, clientId } of [
     assert.equal(writes, 1, "valid existing authorization is reused");
     const resolved = { remoteMcp: { configFingerprint: "synthetic" } };
     const account = remoteMcpOAuthSessionAccount(origin, resolved, "native", nativeClient);
-    for (const otherClient of ["kimi-work", "multitool", "deepseek-harness"].filter(client => client !== nativeClient)) {
+    for (const otherClient of ["kimi-work", "multitool", "mimo-desktop", "deepseek-harness"].filter(client => client !== nativeClient)) {
       assert.notEqual(account, remoteMcpOAuthSessionAccount(origin, resolved, "native", otherClient));
     }
   });
 }
+
+test("MiMo installer generates both JSONC entries and starts each through the signed runtime entry", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-mimo-entry-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const root = path.join(directory, "Trelio plugin");
+  await fs.mkdir(path.join(root, ".claude-plugin"), { recursive: true });
+  await fs.mkdir(path.join(root, "scripts"));
+  await fs.writeFile(path.join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "trelio-agent-workspaces" }));
+  const entry = new URL("../host-runtime/scripts/trelio-host-runtime-entry.mjs", import.meta.url).href;
+  // Only signature/download selection is stubbed. The generated command and
+  // both real stdio executables run on this process boundary.
+  await fs.writeFile(path.join(root, "scripts", "trelio-host-runtime-loader.mjs"),
+    'import { runHostRuntime } from ' + JSON.stringify(entry) + '; export const runHostRuntimeLoader = runHostRuntime;');
+  const options = { pluginRoot: root, homeDirectory: directory,
+    configDirectory: path.join(directory, "bridge"),
+    platform: "darwin" };
+  const [result, repeated] = await Promise.all([prepareMimoDesktopInstallation(options), prepareMimoDesktopInstallation(options)]);
+  assert.deepEqual(result, repeated);
+  assert.equal(result.installedInMimoDesktop, false);
+  assert.equal(result.configurationPath, path.join(directory, ".config", "mimocode", "mimocode.jsonc"));
+  await assert.rejects(fs.stat(result.configurationPath), { code: "ENOENT" });
+  assert.deepEqual(Object.keys(result.mcpServers), ["trelio", "trelio-remote-skills"]);
+  const env = { ...process.env,
+    HOME: directory, USERPROFILE: directory, LOCALAPPDATA: path.join(directory, "local"),
+    XDG_CACHE_HOME: path.join(directory, "cache"), CODEX_HOME: path.join(directory, "foreign-codex"),
+    TRELIO_PLUGIN_VERSION: "3.3.1", TRELIO_HOST_RUNTIME_VERSION: "3.36.0" };
+  const input = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-03-26" } }) + "\n";
+  for (const [name, server] of Object.entries(result.mcpServers)) {
+    assert.equal(server.type, "local");
+    assert.equal(server.enabled, true);
+    const [node, ...args] = server.command;
+    assert.equal(node, process.execPath);
+    const invoked = spawnSync(node, args, { env, input, encoding: "utf8", timeout: 20_000 });
+    assert.equal(invoked.status, 0, invoked.stderr);
+    const initialize = JSON.parse(invoked.stdout).result;
+    assert.equal(initialize.serverInfo.name, name === "trelio" ? "trelio-mimo-desktop" : name);
+  }
+  for (const script of ["trelio-host-runtime-entry.mjs", "trelio-remote-mcp.mjs"]) {
+    const executable = fileURLToPath(new URL("../host-runtime/scripts/" + script, import.meta.url));
+    const mode = script.includes("entry") ? ["mcp"] : [];
+    const foreign = { ...env, TRELIO_WORKSPACE_CLIENT_PROFILE: "kimi-work" };
+    const invoked = spawnSync(process.execPath, [executable, ...mode, "--mimo-desktop", "local"],
+      { env: foreign, input, encoding: "utf8", timeout: 20_000 });
+    assert.notEqual(invoked.status, 0);
+    assert.match(invoked.stderr, /TRELIO_MIMO_PROFILE_REQUIRED/u);
+    assert.equal(invoked.stdout, "");
+  }
+  assert.notEqual(workspaceBridgeCredentialAccount(origin, { TRELIO_WORKSPACE_CLIENT_PROFILE: "mimo-desktop" }),
+    workspaceBridgeCredentialAccount(origin, { TRELIO_WORKSPACE_CLIENT_PROFILE: "kimi-work" }));
+  const bootstrap = result.mcpServers.trelio.command[1];
+  await fs.appendFile(bootstrap, "// user change");
+  await assert.rejects(prepareMimoDesktopInstallation(options), /TRELIO_MIMO_BUNDLE_CHANGED/u);
+  assert.match(await fs.readFile(bootstrap, "utf8"), /user change$/u);
+  await assert.rejects(prepareMimoDesktopInstallation({ ...options, platform: "win32" }), /TRELIO_MIMO_MACOS_REQUIRED/u);
+  await assert.rejects(fs.stat(env.CODEX_HOME), { code: "ENOENT" });
+});
+
+test("MiMo projects exact remote authority and routes in MCP text while keeping the Kimi guards", async () => {
+  const tools = [{ name: "get_task", inputSchema: { properties: { runtimeSessionProof: {} } } },
+    { name: "prepare_agent_secret_browser_fill" },
+    { name: "app_only", _meta: { ui: { visibility: ["app"] } } }];
+  const authority = { effectiveInstructions: { markdown: "Exact task authority" },
+    bridge: { action: { server: "trelio-remote-skills", tool: "continue_trelio_workspace_action" } } };
+  const connection = { instructions: () => "", listTools: async () => tools,
+    call: async (name, args) => { assert.equal(name, "get_task"); assert.deepEqual(args, { taskNumber: 1 }); return output(authority); } };
+  const remote = createKimiMcpHandler({ nativeClient: "mimo-desktop", connection });
+  const result = await remote(call("trelio_call_tool", { name: "get_task", arguments: { taskNumber: 1, runtimeSessionProof: {} } }));
+  assert.ok(result.result.content.some(block => block.text.includes("Exact task authority")));
+  assert.deepEqual(result.result.structuredContent.bridge.action, authority.bridge.action,
+    "MiMo must receive the canonical local action, not Kimi's short alias");
+  assert.doesNotMatch(JSON.stringify(result), /privateAppGrant/u);
+  for (const name of ["prepare_agent_secret_browser_fill", "app_only"]) {
+    const denied = await remote(call(name));
+    assert.equal(denied.result.structuredContent.code, "TRELIO_MIMO_TOOL_UNAVAILABLE");
+  }
+  const local = createKimiLocalMcpHandler({ nativeClient: "mimo-desktop", localMessage: async (message, options) => {
+    assert.equal(options.textCompatibility, true);
+    assert.equal(options.runtimeUpgradeRecovery, null);
+    if (message.method === "tools/list") return { result: { tools: [
+      { name: "continue_trelio_workspace_action" },
+      { name: "app_only", _meta: { ui: { visibility: ["app"] } } },
+    ] } };
+    assert.equal(message.params.name, "continue_trelio_local_action");
+    return { result: output(authority) };
+  } });
+  const listed = await local({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  assert.deepEqual(listed.result.tools.map(tool => tool.name), ["continue_trelio_workspace_action"]);
+  await local(call("continue_trelio_local_action", { route: "context" }));
+  const denied = await local(call("continue_trelio_workspace_action", { operation: "secret_browser_fill" }));
+  assert.match(denied.result.content[0].text, /TRELIO_MIMO_UNSUPPORTED_OPERATION/u);
+});
 
 test("Kimi reads tasks in the first and later chats using a cached startup catalogue", async () => {
   const input = new PassThrough(), stream = new PassThrough();

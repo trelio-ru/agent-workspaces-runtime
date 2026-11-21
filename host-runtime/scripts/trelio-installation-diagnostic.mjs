@@ -49,7 +49,7 @@ const buildClaudeOAuthRecovery = () => ({
   ].join(" "),
 });
 
-const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"]);
+const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
 export class TrelioInstallationDiagnosticError extends Error {
@@ -223,6 +223,12 @@ const buildClientInspection = (clientKind, intent, requiredActions, codexMcpRunt
           proves: ["local_mcp_registration"],
           doesNotProve: ["oauth_bearer_usable", "safe_protected_read", "saving"],
         },
+      } : clientKind === "mimo-desktop" ? {
+        mcpInventory: {
+          surface: "Xiaomi MiMo Desktop → Plugins → Configure MCP Servers",
+          proves: ["remote_mcp_registration", "local_mcp_registration"],
+          doesNotProve: ["oauth_bearer_usable", "safe_protected_read", "saving"],
+        },
       } : ["cursor", "antigravity", "kimi-work"].includes(clientKind) ? {
         mcpInventory: {
           surface: clientKind === "kimi-work" ? "Kimi Work Plugins → Personal" : clientKind === "antigravity" ? "Antigravity Customizations" : "Cursor Plugins and MCP settings",
@@ -366,7 +372,7 @@ const buildLocalSummary = (local, clientKind) => ({
       ...(clientKind === "cursor" ? { cursorVersion: local.plugin?.manifests?.cursorVersion ?? null } : {}),
       ...(clientKind === "antigravity" ? { antigravityVersion: local.plugin?.manifests?.antigravityVersion ?? null } : {}),
     },
-    hooks: ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) ? { status: "not_applicable" } : {
+    hooks: ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(clientKind) ? { status: "not_applicable" } : {
       status: local.plugin?.hooks?.status ?? "unknown",
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
       toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
@@ -645,7 +651,7 @@ export const buildTrelioInstallationDiagnostic = ({
         successProves: "oauth_bearer_usable_for_current_client_process",
         ...(clientKind === "claude-code" ? { recovery: buildClaudeOAuthRecovery() } : {}),
       },
-      hook: codexMcpRuntime || ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
+      hook: codexMcpRuntime || ["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
         nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",

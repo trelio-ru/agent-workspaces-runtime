@@ -4149,7 +4149,7 @@ const LOCAL_TOOLS = [
       properties: {
         clientKind: {
           type: "string",
-          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"],
+          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"],
           description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
         },
         intent: {
@@ -6134,7 +6134,7 @@ const handleToolCallWithoutSkillHints = async (
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding", "readTarget"].includes(key))
-      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind)
+      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
@@ -6152,7 +6152,7 @@ const handleToolCallWithoutSkillHints = async (
       const prepared = await folderOnboardingPrepare({
         ...rawArguments.folderOnboarding,
         // Select native clients' file format without changing legacy plans.
-        ...(["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
+        ...(["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
       });
       return buildTextResult(prepared);
     }
@@ -6162,7 +6162,7 @@ const handleToolCallWithoutSkillHints = async (
       clientKind: rawArguments.clientKind,
       includeHookStartup: diagnostics
         && !codexMcpRuntime
-        && !["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool"].includes(rawArguments.clientKind),
+        && !["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(rawArguments.clientKind),
       signal: stageSignal,
     });
     const inspectLegacyCodex = async (stageSignal) => {
@@ -7543,14 +7543,17 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     connectOAuth = connectRemoteMcpOAuth, vault, nativeClient = "deepseek-harness", clientCapabilities = {},
     observeAccounts = observeSkillAccount,
   } = {}) => {
-    if (!["deepseek-harness", "kimi-work", "multitool", "codex"].includes(nativeClient)) {
+    if (!["deepseek-harness", "kimi-work", "mimo-desktop", "multitool", "codex"].includes(nativeClient)) {
       throw fail("TRELIO_NATIVE_CLIENT_INVALID", "Неизвестный native OAuth client.");
     }
     const isKimi = nativeClient === "kimi-work";
+    const isMimo = nativeClient === "mimo-desktop";
     const isMultiTool = nativeClient === "multitool";
     const isCodex = nativeClient === "codex";
     const publicProfile = isCodex
       ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS.codex, name: "Trelio – Codex", authRequired: "TRELIO_CODEX_AUTH_REQUIRED" }
+      : isMimo
+      ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS["mimo-desktop"], name: "Trelio – Xiaomi MiMo Desktop", authRequired: "TRELIO_MIMO_AUTH_REQUIRED" }
       : isMultiTool
       ? { id: TRELIO_NATIVE_OAUTH_CLIENT_IDS.multitool, name: "Trelio – Мультитул", authRequired: "TRELIO_MULTITOOL_AUTH_REQUIRED" }
       : isKimi
@@ -7996,17 +7999,20 @@ const projectDesktopLocalResult = (result, client, { workspaceToolName = TRELIO_
   return { ...result, structuredContent: payload, content };
 };
 
-/** Kimi Work's stdio carrier shares the native OAuth/HTTP/session engine above.
+/** Kimi Work and MiMo Desktop share the native OAuth/HTTP/session engine above.
  * Its separate, explicitly consented public profile is model-independent:
  * Kimi hooks, authored arguments and inherited Codex/Claude state never mint
  * runtime proofs. Object ACL, current company policy and the paired data plane
  * still run on the server for every operation, including downloads and saves.
  */
 export const createKimiMcpHandler = ({
-  connection = createHarnessConnection({ nativeClient: "kimi-work" }), multiTool = false,
+  nativeClient = "kimi-work", multiTool = false,
+  connection = createHarnessConnection({ nativeClient }),
 } = {}) => {
-  const clientLabel = multiTool ? "Мультитул" : "Kimi Work";
-  const authRequired = multiTool ? "TRELIO_MULTITOOL_AUTH_REQUIRED" : "TRELIO_KIMI_AUTH_REQUIRED";
+  const isMimo = nativeClient === "mimo-desktop";
+  const clientLabel = multiTool ? "Мультитул" : isMimo ? "Xiaomi MiMo Desktop" : "Kimi Work";
+  const errorPrefix = multiTool ? "TRELIO_MULTITOOL" : isMimo ? "TRELIO_MIMO" : "TRELIO_KIMI";
+  const authRequired = errorPrefix + "_AUTH_REQUIRED";
   const connectTool = { name: "trelio_connect", description:
     `Connect Trelio in ${clientLabel} using browser OAuth. If awaiting_authorization, show authorizationUrl and expiresAt, then call again after consent to check the same attempt. Set reauthorize only to replace a revoked or insufficient grant. Never supply codes or tokens.`,
     inputSchema: { type: "object", properties: { reauthorize: { type: "boolean" } }, additionalProperties: false } };
@@ -8027,8 +8033,8 @@ export const createKimiMcpHandler = ({
   const privateArgumentKeys = ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"];
   const authCodes = new Set([authRequired, "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"]);
   const isArgumentObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
-  const invalidInput = () => Object.assign(new Error(), { code: multiTool ? "TRELIO_MULTITOOL_INPUT_INVALID" : "TRELIO_KIMI_INPUT_INVALID" });
-  const unavailable = () => Object.assign(new Error(), { code: multiTool ? "TRELIO_MULTITOOL_TOOL_UNAVAILABLE" : "TRELIO_KIMI_TOOL_UNAVAILABLE" });
+  const invalidInput = () => Object.assign(new Error(), { code: errorPrefix + "_INPUT_INVALID" });
+  const unavailable = () => Object.assign(new Error(), { code: errorPrefix + "_TOOL_UNAVAILABLE" });
   const denied = tool => tool?.name === "prepare_agent_secret_browser_fill"
     || stableNames.has(tool?.name)
     || (tool?._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app"));
@@ -8056,11 +8062,17 @@ export const createKimiMcpHandler = ({
     const args = structuredClone(input);
     for (const key of privateArgumentKeys) delete args[key];
     const nativeResult = await connection.call(name, args, signal);
-    const result = multiTool ? nativeResult : projectDesktopLocalResult(nativeResult, "kimi-work");
+    // Short local tool names belong to Kimi's host constraints. MiMo's
+    // separate local catalogue exposes the canonical names returned by Trelio.
+    const result = multiTool || isMimo ? nativeResult : projectDesktopLocalResult(nativeResult, "kimi-work");
     // Keep native structured results and media, but never pass App metadata
     // through either invocation route.
-    return { content: result.content, ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+    const publicResult = { content: result.content,
+      ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
       ...(result.isError === true ? { isError: true } : {}) };
+    // MiMo's model can use TextContent even if the chat only shows the text
+    // projection. Use the existing single-copy delivery and size guards.
+    return isMimo ? deliverLocalMcpResult(publicResult, true, name) : publicResult;
   };
   const findNative = async (query, signal) => {
     const names = isToolName(query) && query !== searchName ? [query, searchName] : [searchName];
@@ -8068,7 +8080,7 @@ export const createKimiMcpHandler = ({
     const exact = tools.find(tool => tool.name === query);
     if (exact) {
       const value = { tool: publicTool(exact) };
-      return textResult(multiTool ? JSON.stringify(value) : `Native schema for ${exact.name} is in structuredContent.`, value);
+      return textResult(multiTool || isMimo ? JSON.stringify(value) : `Native schema for ${exact.name} is in structuredContent.`, value);
     }
     // The ranked search lacks App visibility metadata. Verify only its
     // bounded set of candidates against fresh definitions before exposing it.
@@ -8082,17 +8094,19 @@ export const createKimiMcpHandler = ({
     const visible = candidates.length ? await nativeCatalogue(signal, candidates) : [];
     const available = new Set(visible.map(tool => tool.name));
     const value = { tools: matches.filter(tool => available.has(tool?.name)) };
-    return textResult(multiTool ? JSON.stringify(value) : "Use an exact result name with trelio_find_tools to read its schema.", value);
+    return textResult(multiTool || isMimo ? JSON.stringify(value) : "Use an exact result name with trelio_find_tools to read its schema.", value);
   };
   const instructions = multiTool
     ? "This is the MultiTool OAuth channel for Trelio. Use clientKind=multitool for local diagnostics and folder onboarding. Call trelio_connect before protected reads. The company policy applies without hooks or model verification; never author runtimeSessionProof. Execute exact returned tools and arguments. After open or inspect, read every file in authorityReadPlan in order through EOF before continuing. Stop if the plan is unavailable. Local routes use this same MCP catalogue. For missing tools use trelio_find_tools and trelio_call_tool. MCP Apps and browser-fill are unavailable. "
+    : isMimo
+    ? "This is the Xiaomi MiMo Desktop OAuth channel. Use clientKind=mimo-desktop for diagnostics and folder onboarding. Company policy applies without hooks or model/effort verification. Never author runtimeSessionProof. Call trelio_connect if disconnected. If the current chat lacks direct tools, use trelio_find_tools and trelio_call_tool, then execute the exact returned local route through trelio-remote-skills. Fully read pinned authority before Workspace files. MCP Apps and secret browser-fill are unavailable. "
     : "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat. For missing remote tools use trelio_find_tools and trelio_call_tool. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. " + KIMI_LOCAL_INSTRUCTIONS;
   const handler = async (message, { signal, notifyClient } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
     const reply = result => ({ jsonrpc: "2.0", id: message.id, result });
     try {
       if (message.method === "initialize") return reply({ protocolVersion: message.params?.protocolVersion || REMOTE_MCP_PROTOCOL_VERSION,
-        serverInfo: { name: multiTool ? "trelio-multitool" : "trelio-kimi-work", version: getHostRuntimeVersion() },
+        serverInfo: { name: multiTool ? "trelio-multitool" : "trelio-" + nativeClient, version: getHostRuntimeVersion() },
         capabilities: { tools: { listChanged: true } }, instructions: instructions + connection.instructions() });
       if (message.method === "ping") return reply({});
       if (message.method === "tools/list") {
@@ -8144,7 +8158,7 @@ export const createKimiMcpHandler = ({
       }, callSignal), { signal });
       return reply(result);
     } catch (error) {
-      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : multiTool ? "TRELIO_MULTITOOL_CONNECTION_FAILED" : "TRELIO_KIMI_CONNECTION_FAILED";
+      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : errorPrefix + "_CONNECTION_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id,
         error: { code: -32000, message: code, data: { code } } };
       const reason = error instanceof RemoteMcpOAuthError ? error.message : code === authRequired
@@ -8172,7 +8186,12 @@ export const runKimiStdioHost = (options = {}) => {
   });
 };
 
-export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage, kimiRoutes = true } = {}) => async (message, options) => {
+export const createKimiLocalMcpHandler = ({
+  localMessage = handleLocalMcpMessage, nativeClient = "kimi-work", kimiRoutes = nativeClient === "kimi-work",
+} = {}) => async (message, options) => {
+  const isMimo = nativeClient === "mimo-desktop";
+  const clientLabel = isMimo ? "Xiaomi MiMo Desktop" : "Kimi Work";
+  const unsupportedCode = isMimo ? "TRELIO_MIMO_UNSUPPORTED_OPERATION" : "TRELIO_KIMI_UNSUPPORTED_OPERATION";
   if (!message || message.jsonrpc !== "2.0") return null;
   const input = message.params?.arguments;
   // The shared dispatcher must not accidentally grant a browser fill through
@@ -8182,10 +8201,10 @@ export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage
     || input?.parameters?.nativeTool === "prepare_agent_secret_browser_fill"
     || [input?.operation, input?.parameters?.operation].some(value => ["secret_browser_prepare", "secret_browser_fill"].includes(value)))) {
     return { jsonrpc: "2.0", id: message.id, result: { isError: true,
-      content: [{ type: "text", text: "TRELIO_KIMI_UNSUPPORTED_OPERATION: browser-fill недоступен в Kimi Work." }] } };
+      content: [{ type: "text", text: unsupportedCode + ": browser-fill недоступен в " + clientLabel + "." }] } };
   }
   if (message.method === "resources/list") return { jsonrpc: "2.0", id: message.id, result: { resources: [] } };
-  if (message.method === "resources/read") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "MCP Apps are unavailable in Kimi Work" } };
+  if (message.method === "resources/read") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "MCP Apps are unavailable in " + clientLabel } };
   const sanitized = structuredClone(message);
   if (kimiRoutes && sanitized.method === "tools/call" && Object.hasOwn(KIMI_CANONICAL_LOCAL_NAMES, sanitized.params?.name)) {
     sanitized.params.name = KIMI_CANONICAL_LOCAL_NAMES[sanitized.params.name];
@@ -8196,7 +8215,9 @@ export const createKimiLocalMcpHandler = ({ localMessage = handleLocalMcpMessage
   // The generic delegate starts the ordinary local MCP, which would lose this
   // Work profile's guards. An upgrade therefore keeps its exact refusal and
   // waits for a new signed-loader startup instead of switching profiles.
-  const response = await localMessage(sanitized, { ...options, runtimeUpgradeRecovery: null });
+  const response = await localMessage(sanitized, { ...options, runtimeUpgradeRecovery: null,
+    ...(isMimo ? { textCompatibility: true } : {}),
+  });
   if (kimiRoutes && message.method === "initialize" && response?.result) {
     response.result.instructions = KIMI_LOCAL_INSTRUCTIONS + (response.result.instructions ?? "");
   }
@@ -8219,6 +8240,21 @@ export const runKimiLocalStdioHost = (options = {}) => {
   return runStdioHost({ ...options,
   handleMessage: createKimiLocalMcpHandler(options),
   origin: DEFAULT_ORIGIN, migrateClientConfiguration: async () => null, preservePlugin: () => null,
+  });
+};
+
+export const runMimoDesktopStdioHost = ({ lane, ...options }) => {
+  const nativeClient = "mimo-desktop";
+  if (!["remote", "local"].includes(lane)
+    || workspaceBridgeClientEnvironment().TRELIO_WORKSPACE_CLIENT_PROFILE !== nativeClient) {
+    throw new Error("TRELIO_MIMO_PROFILE_REQUIRED");
+  }
+  // Both lanes share MiMo's private state. As in Kimi, keep any inherited
+  // Codex migration/preservation behavior out of this native startup.
+  const handleMessage = lane === "remote" ? createKimiMcpHandler({ ...options, nativeClient })
+    : createKimiLocalMcpHandler({ ...options, nativeClient });
+  return runStdioHost({ ...options, origin: DEFAULT_ORIGIN, handleMessage,
+    migrateClientConfiguration: async () => null, preservePlugin: () => null,
   });
 };
 
@@ -8784,6 +8820,7 @@ if (isDirectModuleInvocation(import.meta.url)) {
     : args.length === 2 && args[0] === "--codex" && ["remote", "local"].includes(args[1]) ? () => runCodexMcpStdioHost({ profile: args[1] })
       : args.length === 2 && args[0] === "--kimi-work" && args[1] === "remote" ? runKimiStdioHost
       : args.length === 2 && args[0] === "--kimi-work" && args[1] === "local" ? runKimiLocalStdioHost
+      : args.length === 2 && args[0] === "--mimo-desktop" && ["remote", "local"].includes(args[1]) ? () => runMimoDesktopStdioHost({ lane: args[1] })
         : args.length === 1 && args[0] === "--multitool" ? runMultiToolStdioHost
           : async () => { throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED"); };
   Promise.resolve().then(() => start()).catch((error) => {
