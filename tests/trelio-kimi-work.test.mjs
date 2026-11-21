@@ -327,6 +327,27 @@ test("MiMo projects exact remote authority and routes in MCP text while keeping 
   assert.match(denied.result.content[0].text, /TRELIO_MIMO_UNSUPPORTED_OPERATION/u);
 });
 
+test("MiMo returns its canonical local tool when a request is sent to the remote server", async () => {
+  let remoteCalls = 0;
+  const remote = createKimiMcpHandler({ nativeClient: "mimo-desktop", connection: {
+    listTools: async () => { remoteCalls++; return []; },
+    call: async () => { remoteCalls++; return output({}); },
+  } });
+  const name = "diagnose_trelio_installation";
+  const args = { clientKind: "mimo-desktop", intent: "diagnostics" };
+  for (const request of [call(name, args), call("trelio_find_tools", { query: name }),
+    call("trelio_call_tool", { name, arguments: args })]) {
+    const { result } = await remote(request);
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent, {
+      code: "TRELIO_MIMO_LOCAL_TOOL_REQUIRED", server: "trelio-remote-skills", tool: name,
+    });
+    assert.match(result.content[0].text, /trelio-remote-skills\.diagnose_trelio_installation/u);
+    assert.doesNotMatch(result.content[0].text, /Kimi|select_tools/u);
+  }
+  assert.equal(remoteCalls, 0, "Local arguments and lookups must stay off the remote MCP connection");
+});
+
 test("Kimi reads tasks in the first and later chats using a cached startup catalogue", async () => {
   const input = new PassThrough(), stream = new PassThrough();
   let connected = false, connects = 0, calls = 0, sequence = 0, pending = new Map(), lineBuffer = "";

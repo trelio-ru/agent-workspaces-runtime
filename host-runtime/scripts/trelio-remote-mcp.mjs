@@ -8099,7 +8099,7 @@ export const createKimiMcpHandler = ({
   const instructions = multiTool
     ? "This is the MultiTool OAuth channel for Trelio. Use clientKind=multitool for local diagnostics and folder onboarding. Call trelio_connect before protected reads. The company policy applies without hooks or model verification; never author runtimeSessionProof. Execute exact returned tools and arguments. After open or inspect, read every file in authorityReadPlan in order through EOF before continuing. Stop if the plan is unavailable. Local routes use this same MCP catalogue. For missing tools use trelio_find_tools and trelio_call_tool. MCP Apps and browser-fill are unavailable. "
     : isMimo
-    ? "This is the Xiaomi MiMo Desktop OAuth channel. Use clientKind=mimo-desktop for diagnostics and folder onboarding. Company policy applies without hooks or model/effort verification. Never author runtimeSessionProof. Call trelio_connect if disconnected. If the current chat lacks direct tools, use trelio_find_tools and trelio_call_tool, then execute the exact returned local route through trelio-remote-skills. Fully read pinned authority before Workspace files. MCP Apps and secret browser-fill are unavailable. "
+    ? "This is the Xiaomi MiMo Desktop OAuth channel. Use clientKind=mimo-desktop for diagnostics and folder onboarding. Company policy applies without hooks or model/effort verification. Never author runtimeSessionProof. Call trelio_connect if disconnected. Use trelio_find_tools and trelio_call_tool for missing remote tools. Use diagnose_trelio_installation and the exact returned local routes on trelio-remote-skills. Fully read pinned authority before Workspace files. MCP Apps and secret browser-fill are unavailable. "
     : "This is the Kimi Work OAuth channel. Use clientKind=kimi-work for local diagnostics and folder onboarding. Company client policy applies without model/effort verification or hooks. Never author runtimeSessionProof. OAUTH_CLIENT_DENIED needs an administrator decision. Call trelio_connect before using Trelio when disconnected. After connecting, continue the original request in the same chat. For missing remote tools use trelio_find_tools and trelio_call_tool. MCP Apps and secret browser-fill are unavailable; ordinary exact text decisions use their native guarded tools. " + KIMI_LOCAL_INSTRUCTIONS;
   const handler = async (message, { signal, notifyClient } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === undefined || message.id === null) return null;
@@ -8143,11 +8143,17 @@ export const createKimiMcpHandler = ({
           || !isArgumentObject(input.arguments)) throw invalidInput();
         ({ name, arguments: args } = input);
       }
-      const localName = !multiTool && kimiLocalName(isFind ? query : name);
-      if (localName) {
-        const code = "TRELIO_KIMI_LOCAL_TOOL_REQUIRED";
+      const requestedName = isFind ? query : name;
+      // MiMo shares the remote transport, but its local catalogue registers
+      // canonical names. A recovery hint must point to a tool it can load.
+      const localName = isMimo
+        ? (Object.hasOwn(KIMI_LOCAL_NAMES, requestedName) ? requestedName : undefined)
+        : kimiLocalName(requestedName);
+      if (!multiTool && localName) {
+        const code = errorPrefix + "_LOCAL_TOOL_REQUIRED";
+        const catalogue = isMimo ? "the MiMo local MCP catalogue" : "the Kimi catalogue (select_tools if deferred)";
         return reply({ ...textResult(
-          `${code}: Use ${DESKTOP_LOCAL_SERVER}.${localName} through the Kimi catalogue (select_tools if deferred), with the original arguments.`,
+          `${code}: Use ${DESKTOP_LOCAL_SERVER}.${localName} through ${catalogue}, with the original arguments.`,
           { code, server: DESKTOP_LOCAL_SERVER, tool: localName },
         ), isError: true });
       }

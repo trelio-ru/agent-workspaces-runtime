@@ -1996,6 +1996,8 @@ See [Kimi Work](docs/agent-workspace-runtime.md#kimi-work).
 shares the guarded Kimi stdio transport. Its two JSONC entries use its own
 fixed OAuth client and private bridge namespace. The installer stages launchers
 only. Keep complete authority and local continuations in text delivery.
+MiMo uses canonical local tool names in returned routes and wrong-server
+recovery; Kimi's short aliases belong to Kimi only.
 [MultiTool](docs/agent-workspace-runtime.md#мультитул) uses the same signed loader
 and an independent OAuth/bridge namespace. The macOS installer returns one
 config entry. Exact open/inspect routes omit chat cwd; read the returned local
