@@ -1078,8 +1078,10 @@ export const createDeepseekDesktopNavigation = ({
       if (local?.state !== "bound" || codexLaunchFolderId(token, origin, local, "deepseek") !== action.folderId) return reply(null);
       const taskUrl = new URL(action.taskPath, origin);
       if (taskUrl.origin !== origin) return reply(null);
+      // Match the web task launcher format. Harness already has the native
+      // plugin loaded here. The final newline leaves room for the user's request.
       return reply({ kind: "start", workspaceId: selected.workspaceId,
-        prompt: `Изучи задачу в Trelio через Trelio Agent Workspaces: ${taskUrl.href}` });
+        prompt: `Trelio Agent Workspaces ${taskUrl.href}\n` });
     } catch {
       return reply(null, 503);
     } finally {

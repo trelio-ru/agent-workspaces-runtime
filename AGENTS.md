@@ -1967,7 +1967,7 @@ See [native provision recovery](docs/assistant-scheduler.md#native-invocation).
 
 
 Native DeepSeek Harness connection принадлежит host runtime; его bootstrap,
-compatibility range, exact qualification fixture и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-connection). Desktop navigation включается в новом native bundle и использует owner-only Host route.
+compatibility range, exact qualification fixture и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-connection). Desktop navigation включается в новом native bundle, использует owner-only Host route и общий формат черновика запуска из задачи.
 MCP images use the SAME native attachment store and current-route image admission,
 with bounded canonical input, cancellation and route-change fences. Render only
 durable byte-free references; never base64 text, a second file cache or operation
