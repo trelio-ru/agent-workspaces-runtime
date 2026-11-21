@@ -5931,22 +5931,29 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
     });
     assert.deepEqual(servers["trelio-remote-skills"], localMcp);
   }
-  // Claude requires an explicit remote transport and its plugin-root variable
-  // for bundled executables. Otherwise `claude mcp list` silently skips the
-  // HTTP server and spawns the local launcher from the user's project folder.
-  assert.deepEqual(claudeMcpManifest.mcpServers.trelio, {
-    type: "http",
-    url: "https://trelio.ru/mcp",
-    oauth: {
-      clientId: "trelio_agent_workspaces_v1",
-    },
-  });
-  assert.deepEqual(claudeMcpManifest.mcpServers["trelio-remote-skills"], {
+  const claudeLocalMcp = {
     type: "stdio",
     command: "${CLAUDE_PLUGIN_ROOT}/scripts/launch-trelio-node",
     args: ["${CLAUDE_PLUGIN_ROOT}/scripts/trelio-host-runtime-loader.mjs", "mcp"],
     cwd: "${CLAUDE_PLUGIN_ROOT}",
-  });
+  };
+  assert.deepEqual(Object.keys(claudeMcpManifest.mcpServers).sort(), ["trelio", "trelio-remote-skills"]);
+  assert.deepEqual(claudeMcpManifest.mcpServers["trelio-remote-skills"], claudeLocalMcp);
+  // The signed runtime ships before the shell. Both generations must keep
+  // their exact server name and transport with no change to the local lane.
+  const claudeRemote = claudeMcpManifest.mcpServers.trelio;
+  if (claudeRemote.type === "stdio") {
+    assert.deepEqual(claudeRemote, {
+      ...claudeLocalMcp,
+      args: [...claudeLocalMcp.args, "--desktop-oauth", "claude-code"],
+    });
+  } else {
+    assert.deepEqual(claudeRemote, {
+      type: "http",
+      url: "https://trelio.ru/mcp",
+      oauth: { clientId: "trelio_agent_workspaces_v1" },
+    });
+  }
 
   const posixLauncher = await stat(path.join(
     pluginDirectory,
@@ -6283,12 +6290,27 @@ test("Claude OAuth recovery keeps the plugin-qualified MCP server name", async (
   const exactLogin = /claude mcp login plugin:trelio-agent-workspaces:trelio/u;
   const unqualifiedLogin = /claude mcp login trelio(?:\s|`)/u;
 
-  for (const instructions of [diagnosticsSkill, onboardingSkill, ...publicInstructions]) {
+  const manifest = JSON.parse(await readFile(path.join(pluginDirectory, ".mcp.json"), "utf8"));
+  const localOAuth = manifest.mcpServers.trelio.type === "stdio";
+  for (const instructions of publicInstructions) {
+    assert.doesNotMatch(instructions, unqualifiedLogin);
+    // Public setup follows the configured transport; the CLI login stays
+    // documented only in recovery for older HTTP registrations.
+    if (localOAuth) {
+      assert.match(instructions, /`trelio_connect` на сервере `plugin:trelio-agent-workspaces:trelio`/u);
+      assert.match(instructions, /`list_companies` в этом же чате/u);
+      assert.doesNotMatch(instructions, exactLogin);
+    } else {
+      assert.match(instructions, exactLogin);
+    }
+  }
+  if (localOAuth) {
+    assert.match(diagnosticsSkill, /Прежняя HTTP-регистрация/u);
+    assert.match(onboardingSkill, /подтверждённых прежних HTTP-регистраций/u);
+  }
+  for (const instructions of [diagnosticsSkill, onboardingSkill]) {
     assert.match(instructions, exactLogin);
     assert.doesNotMatch(instructions, unqualifiedLogin);
-  }
-
-  for (const instructions of [diagnosticsSkill, onboardingSkill]) {
     assert.match(instructions, /`Connected`/u);
     assert.match(instructions, /`list_companies`/u);
     assert.match(instructions, /запусти новую `claude` из той же (?:точной\s+рабочей )?папки/u);
