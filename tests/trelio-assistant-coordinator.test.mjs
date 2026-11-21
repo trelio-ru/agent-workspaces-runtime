@@ -3683,6 +3683,7 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
   const sourceMarkerId=randomUUID(),initialRevision=readContinuation?2:provider?1:0;
   const outcomeMarker=randomUUID(),outcomeTurn=randomUUID(),priorReceiptId=randomUUID();
   const retryMarker=randomUUID(),retryTurn=randomUUID();
+  let changedHandoffObservation=false,retainedHandoffReads=0;
   let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0,saveReads=0,outcomeObservations=0;
   let writerBusy=true,confirmed=false,outcomeReviews=0,outcomeRenewals=0,outcomeStarts=0,retryStarts=0;
   const questionId=randomUUID(),questionRequestId=randomUUID();
@@ -3740,6 +3741,13 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
         return {state:'completed',turnId:outcomeTurn,receipt:`codex:${original.threadId}:${outcomeTurn}`};
       }
       if(id===(hasCheckpoint?sourceMarkerId:original?.deliveryId)){
+        if(options.interruptedWorkspaceDraft?.retainedHandoff){
+          assert.equal(readContinuation,true);
+          retainedHandoffReads++;
+          // An absent older proof is normal. An observed different turn is
+          // independent uncertainty and cannot select another save mode.
+          return changedHandoffObservation?{state:'uncertain',turnId:retryTurn}:{state:'uncertain'};
+        }
         if(options.interruptedWorkspaceDraft?.localDraftBasis){
           assert.deepEqual(options.interruptedWorkspaceDraft.localDraftBasis,basis);
           return {state:'interrupted_local_draft',turnId:originalTurn,replacements,
@@ -3850,7 +3858,8 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
       const inbox=createAssistantInbox({database,now:f.options.now});
       const prior=inbox.preparePassContinuation(original.deliveryId,{passId:original.passId,expectedLeaseRevision:0,
         terminalTurnId:randomUUID(),terminalMarkerId:original.deliveryId,prerequisiteKey:'b'.repeat(64),
-        taskReadParent:readContinuation?{initialScheduled:true}
+        taskReadParent:readContinuation?{initialScheduled:true,technicalPrelude:{kind:'read_only_skill_guides_v2',
+          ...run,baseHead:basis.baseHead,historicalSkillReleases}}
           :{intermediateDraft:{...run,checkpointId:basis.checkpointId,draftHead:basis.anchorHead}}});
       inbox.updatePassContinuation(original.deliveryId,prior.clientRequestId,
         {reviewId:sourceMarkerId,resumeAttempted:true,resumed:true,started:true});
@@ -3860,7 +3869,14 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.equal(reviews,0);
     admitted=true;
+    if(readContinuation){
+      changedHandoffObservation=true;
+      assert.equal((await coordinator.workOnce()).state,'blocked');
+      assert.deepEqual([inspectCount,reviews,renewals,starts],[0,0,0,0],'a changed turn cannot select the local draft');
+      changedHandoffObservation=false;
+    }
     assert.equal((await coordinator.workOnce()).state,'blocked');
+    if(readContinuation)assert.equal(retainedHandoffReads,3,'an unreserved absent handoff can give way to a separately proved save');
     assert.equal(saveReads,1,'recovery reads the accepted Run after its one save');
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.equal(saveReads,2,'the next cycle rereads the same native receipt without another save');

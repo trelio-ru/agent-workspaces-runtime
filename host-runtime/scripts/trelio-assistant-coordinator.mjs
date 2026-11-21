@@ -2132,28 +2132,34 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
       const candidate=await native.readDelivery(threadId,marker,{signal,
         interruptedWorkspaceDraft:{...pass,retainedHandoff:true}});lease();
-      if(candidate.state!=='interrupted_retained_handoff'||candidate.turnId!==result.turnId)return true;
-      const observed=validateAssistantRetainedHandoff(candidate.proof,{selected:false});
       const existing=continued.workspaceDraft?.retainedHandoff;
-      const live=await client.readTaskPass(pass,signal);lease();
-      if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
-        ||live.deliveryId!==saved.deliveryId||live.state==='closed')return true;
-      if(!existing&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now()))return true;
-      // Before any new marker, require independent native grant/checkpoint
-      // evidence. An already reserved continuation keeps its own read-back
-      // route after an ambiguous renewal, without requesting a second one.
-      if(existing){
-        const {checkpointId,draftHead,...previous}=existing.locators;
-        if(JSON.stringify(previous)!==JSON.stringify(observed.locators))return true;
+      if(candidate.state==='interrupted_retained_handoff'&&candidate.turnId===result.turnId){
+        const observed=validateAssistantRetainedHandoff(candidate.proof,{selected:false});
+        const live=await client.readTaskPass(pass,signal);lease();
+        if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
+          ||live.deliveryId!==saved.deliveryId||live.state==='closed')return true;
+        if(!existing&&(live.state!=='review_required'||Date.parse(live.leaseExpiresAt)>now()))return true;
+        // Before any new marker, require independent native grant/checkpoint
+        // evidence. An already reserved continuation keeps its own read-back
+        // route after an ambiguous renewal, without requesting a second one.
+        if(existing){
+          const {checkpointId,draftHead,...previous}=existing.locators;
+          if(JSON.stringify(previous)!==JSON.stringify(observed.locators))return true;
+        }
+        const locators=existing?.locators??await client.readTaskRetainedFinishEvidence({
+          ...pass,expectedLeaseRevision:live.leaseRevision,locators:observed.locators},signal);
+        lease();
+        if(!locators)return true;
+        const proof=validateAssistantRetainedHandoff({...observed,locators});
+        if(existing&&JSON.stringify(existing)!==JSON.stringify(proof))return true;
+        return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
+          workspaceDraft:{workspaceId:locators.workspaceId,runId:locators.runId,finishPending:true,retainedHandoff:proof}},signal,marker);
       }
-      const locators=existing?.locators??await client.readTaskRetainedFinishEvidence({
-        ...pass,expectedLeaseRevision:live.leaseRevision,locators:observed.locators},signal);
-      lease();
-      if(!locators)return true;
-      const proof=validateAssistantRetainedHandoff({...observed,locators});
-      if(existing&&JSON.stringify(existing)!==JSON.stringify(proof))return true;
-      return continueTerminalPass(job,{state:'interrupted_workspace_draft',turnId:candidate.turnId,
-        workspaceDraft:{workspaceId:locators.workspaceId,runId:locators.runId,finishPending:true,retainedHandoff:proof}},signal,marker);
+      // A speculative observation of legacy recovery is not a reservation.
+      // No matching legacy proof leaves the next independently fenced save
+      // eligible. A retained selection, changed turn or conflicting native
+      // state still refuses; none authorizes switching an existing attempt.
+      if(existing||candidate.state!=='uncertain'||candidate.turnId!==undefined&&candidate.turnId!==result.turnId)return true;
     }
     // A successfully started read continuation can later make its own
     // ordinary local edits. Use that turn's current Run, draft and bytes to

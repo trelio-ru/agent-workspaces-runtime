@@ -240,7 +240,9 @@ publication tooling также остаются вне этого публичн
   artifact receipt and the actual Git delta. Recheck path digest, size and bytes
   in the SAME private Run. A verified export may be the entire delta before
   any text replacement. An empty or unexplained delta still refuses.
-  Started read continuations use the same local-delta save. An original
+  Started read continuations use the same local-delta save. An unreserved
+  absence of legacy handoff proof allows an independent local-delta check;
+  changed native evidence and reserved modes remain fenced. An original
   validating finish handle is history evidence only. Recheck the expired
   native Run, no final-draft marker and exact local delta under the finish
   lock and owned writer. This save cannot repeat prior effects or settle the

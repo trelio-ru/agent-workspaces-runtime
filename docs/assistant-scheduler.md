@@ -976,7 +976,11 @@ operation or business completion is admitted. Acceptance requires the exact
 current Run and matching clean local/native status. Saving material does not
 resolve any unknown external operation or consume its receipt, queue item or
 scheduled cycle. The historical v4 recovery remains for older drafts without
-the final-draft marker.
+the final-draft marker. A retained marker's recovery mode is fixed. Without a
+reservation, observing no legacy handoff proof leaves the same original turn
+eligible for its independently verified local draft. A conflicting state or an
+observed different turn stops selection. The alternate mode still checks the
+same native turn, current Run and original receipts before any reservation.
 
 A still-local delta uses the same save-only flow. The backend certifies the
 original base or the latest portable draft of the same expired Run. The
