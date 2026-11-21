@@ -813,6 +813,30 @@ Optional failure не меняет proof и сохраняет нейтраль�
 или Workspace mutation; видимое `fetch failed` само по себе не доказывает
 10-секундный timeout или потерянный process descriptor.
 
+### OAuth в Claude, Cursor и Antigravity
+
+Подписанный entrypoint принимает закрытый профиль `mcp --desktop-oauth`
+для `claude-code`, `cursor` или `antigravity`. Штатный сервер `trelio`
+выдаёт `trelio_connect` до входа. Он использует общий browser opener, один
+S256 callback и собственную ячейку OS vault, затем обновляет каталог той же
+сессии. Профиль выбирает shell, не аргумент MCP. Vendor OAuth stores сохраняются.
+
+Claude использует прежний hook-гейт: подписанный PreToolUse proof проходит
+в неизменный метод backend под тем же namespace. Bootstrap-вызовы входа и
+проверки каталога не создают proof. Refusal от backend остаётся исходным.
+Cursor и Antigravity используют свои loopback public IDs с прежней компанией
+политикой; model-authored proof отбрасывается. Tool schemas, ресурсы MCP Apps
+и backend approvals остаются на исходном сервере. Для клиента с form
+elicitation host передаёт не более одной формы на вызов через исходный SSE
+tool stream. Ответ возвращается на исходную MCP session без повтора tool call.
+URL-формы и запросы credentials не пересылаются. Старые HTTP registrations
+продолжают работать со своими OAuth grants.
+
+Rollout: сначала совместимый backend и подписанный runtime, затем shell с
+новой регистрацией. Автотесты браузерной передачи/loopback используют
+локальные фикстуры. Отдельный smoke в установленных приложениях подтверждает
+открытие браузера и повторное чтение без повторной авторизации.
+
 ### Системное открытие браузера
 
 `openBrowser` на Windows запускает exact системный Windows PowerShell без profile

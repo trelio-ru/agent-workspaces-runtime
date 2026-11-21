@@ -91,6 +91,9 @@ const DISCOVERY_TOOLS = new Set([
   "get_task_create_meta", "get_my_context", "resolve_user", "review_outgoing_message",
   "resolve_company_member", "resolve_status", "get_task_move_options",
   "list_notifications",
+  // These are fixed client-side controls. They neither make a protected
+  // business call nor have a remote admission target for a minted proof.
+  "trelio_connect", "trelio_retry_catalog",
 ]);
 const RECOVERY_TOOLS = new Set([
   "approve_agent_workspace_bridge_pairing",

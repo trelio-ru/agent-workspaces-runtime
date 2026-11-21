@@ -128,7 +128,8 @@ test("OAuth callback timeout closes the listener without exchanging a code", asy
   await assertListenerClosed(callback);
 });
 
-for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness"]) {
+for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness", "mimo-desktop",
+  "claude-code", "cursor", "antigravity"]) {
   test(`${nativeClient}: manual fallback survives the tool result and resumes the exact OAuth attempt`, async t => {
     let stored, authorization, opens = 0, exchanges = 0, writes = 0;
     let releaseToken;

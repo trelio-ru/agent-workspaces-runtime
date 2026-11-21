@@ -1562,6 +1562,11 @@ Exact legacy template bytes для распознавания при мигра�
   direct transcript recovery не распознаёт exec. Legacy hooks и assistant
   execution сохраняют свой прямой маршрут. Диагностика проверяет доступные
   маршруты текущего чата. [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
+- OAuth Claude, Cursor и Antigravity использует закрытый signed launcher profile
+  по [контракту](docs/agent-workspace-runtime.md#oauth-в-claude-cursor-и-antigravity).
+  Claude сохраняет проверку hook proof на exact remote tool. Cursor и Antigravity
+  сохраняют свои company policies. Form relay живёт только на исходном MCP
+  tool stream и не принимает URL/credential elicitation.
 - Диагностика Claude Code Local возвращает точную проверку статуса OAuth и
   штатный запуск браузера агентом при подтверждённом запросе на подключение.
   [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).

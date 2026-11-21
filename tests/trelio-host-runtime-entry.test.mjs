@@ -56,6 +56,16 @@ test("host runtime keeps one stable three-mode entrypoint", () => {
   assert.throws(() => resolveHostRuntimeInvocation(["unknown"]), /bridge, hook/u);
 });
 
+test("desktop OAuth startup accepts only the three assigned native selectors", () => {
+  for (const client of ["claude-code", "cursor", "antigravity"]) {
+    assert.deepEqual(resolveHostRuntimeInvocation(["mcp", "--desktop-oauth", client]).arguments, ["--desktop-oauth", client]);
+  }
+  for (const args of [["mcp", "--desktop-oauth"], ["mcp", "--desktop-oauth", "codex"],
+    ["mcp", "--desktop-oauth", "constructor"], ["mcp", "--desktop-oauth", "cursor", "local"]]) {
+    assert.throws(() => resolveHostRuntimeInvocation(args), /TRELIO_MCP_ARGUMENTS_UNSUPPORTED/);
+  }
+});
+
 test("assistant bridge profile selects its own entrypoint and rejects unknown commands before spawn", () => {
   for (const command of ["mcp", "hook", "request", "background", "background-install", "background-status", "background-start", "background-remove"]) {
     const invocation = resolveHostRuntimeInvocation(["bridge", "assistant", command]);

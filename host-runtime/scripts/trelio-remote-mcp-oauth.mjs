@@ -8,6 +8,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
+import { getDesktopOAuthProfile } from "./trelio-desktop-oauth-profiles.mjs";
 import { openBrowser, browserOpenDiagnostics, renderLocalFormMessage, LOCAL_FORM_CSP } from "./trelio-workspace.mjs";
 
 const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;
@@ -20,6 +21,8 @@ export const TRELIO_NATIVE_OAUTH_CLIENT_IDS = Object.freeze({
   codex: "trelio_agent_workspaces_v1",
   "kimi-work": "trelio_kimi_work_agent_workspaces_v1",
   "mimo-desktop": "trelio_mimo_desktop_agent_workspaces_v1",
+  cursor: getDesktopOAuthProfile("cursor").id,
+  antigravity: getDesktopOAuthProfile("antigravity").id,
   multitool: "trelio_multitool_agent_workspaces_v1",
 });
 const TRELIO_NATIVE_OAUTH_RESOURCE = "https://trelio.ru/mcp";

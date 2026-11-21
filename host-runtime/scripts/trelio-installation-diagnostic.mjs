@@ -39,11 +39,13 @@ const CLAUDE_TRELIO_LOGIN_COMMAND = `claude mcp login ${CLAUDE_TRELIO_MCP_SERVER
 // PTY wraps the exact native command and keeps OAuth URLs out of tool output.
 const buildClaudeOAuthRecovery = () => ({
   serverName: CLAUDE_TRELIO_MCP_SERVER,
+  connectTool: "trelio_connect",
   inventoryCommand: "claude mcp list",
   loginCommand: CLAUDE_TRELIO_LOGIN_COMMAND,
   macosBashCommand: `/usr/bin/script -q /dev/null ${CLAUDE_TRELIO_LOGIN_COMMAND} </dev/null >/dev/null 2>&1`,
   instructions: [
-    "Для Claude Code Local, если list_companies недоступен или вернул ошибку входа, сам проверь inventoryCommand из выбранной постоянной папки текущей сессии. Отсутствие инструмента не доказывает, что нужен вход.",
+    "Проверь list_companies. Если доступен trelio_connect точного сервера и он требует входа, вызови этот MCP-инструмент в текущем чате. Он сам откроет браузер и дождётся callback.",
+    "Если trelio_connect недоступен, проверь inventoryCommand в выбранной папке. Применяй команды ниже только к подтверждённой прежней HTTP-регистрации. Отсутствие инструмента или работающий stdio сами по себе не доказывают состояние OAuth.",
     "Если пользователь попросил подключение или восстановление и точный сервер показывает Needs authentication, а OAuth ещё не запущен, сам запусти его один раз из этой папки через доступный Claude CLI. На macOS из Bash выполни macosBashCommand, на Windows запусти loginCommand в локальной консоли с ожиданием завершения. Если доступный CLI найден по абсолютному пути, используй его вместо claude. Пользователь только входит в браузере и подтверждает доступ. Не поручай ему запуск команды и не передавай OAuth URL, callback, коды или токены в чат.",
     "После завершения повтори list_companies в текущем чате. Если сервер Connected, а инструмент всё ещё отсутствует, продолжи в новой локальной сессии с той же папкой без повторного входа. Если CLI недоступен, не видит сервер или запуск запрещён, сообщи наблюдённую причину и укажи штатное окно подключения выбранного сервера в Claude Desktop.",
   ].join(" "),

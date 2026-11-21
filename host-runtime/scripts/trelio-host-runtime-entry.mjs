@@ -17,6 +17,8 @@ import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 import { RUNTIME_HOOK_START_TIME_ENV, resolveRuntimeHookStartedAt } from "./trelio-runtime-session-limits.mjs";
 
+import { isDesktopOAuthInvocation } from "./trelio-desktop-oauth-profiles.mjs";
+
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const MODE_ENTRYPOINTS = Object.freeze({
   bridge: "trelio-workspace.mjs",
@@ -46,7 +48,8 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
     && ["remote", "local"].includes(argumentsAfterMode[1]);
   const multiToolProfile = mode === "mcp" && argumentsAfterMode.length === 1
     && argumentsAfterMode[0] === "--multitool";
-  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !mimoProfile && !multiToolProfile && !codexProfile) {
+  if (mode === "mcp" && argumentsAfterMode.length && !kimiProfile && !mimoProfile && !multiToolProfile && !codexProfile
+    && !isDesktopOAuthInvocation(argumentsAfterMode)) {
     throw new Error("TRELIO_MCP_ARGUMENTS_UNSUPPORTED");
   }
 

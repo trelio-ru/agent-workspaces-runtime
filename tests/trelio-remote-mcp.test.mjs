@@ -3686,6 +3686,8 @@ test("Claude installation diagnostic routes a confirmed OAuth challenge to agent
     const { recovery } = oauth;
     assert.deepEqual(recovery, bootstrap.clientRecoveryByKind.claudeCode);
     assert.equal(recovery.serverName, "plugin:trelio-agent-workspaces:trelio");
+    assert.equal(recovery.connectTool, "trelio_connect");
+    assert.match(recovery.instructions, /прежней HTTP-регистрации/iu);
     assert.equal(recovery.inventoryCommand, "claude mcp list");
     assert.equal(recovery.loginCommand, "claude mcp login plugin:trelio-agent-workspaces:trelio");
     assert.equal(recovery.macosBashCommand,

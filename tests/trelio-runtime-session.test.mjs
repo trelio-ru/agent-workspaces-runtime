@@ -684,6 +684,8 @@ test("hook protects context and mutation but leaves discovery and recovery open"
     tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
     tool_input: { nativeTool: "invalid/tool", arguments: {} },
   }), null);
+  assert.equal(isProtectedTrelioToolName("trelio_connect"), false);
+  assert.equal(isProtectedTrelioToolName("trelio_retry_catalog"), false);
   assert.equal(isProtectedTrelioToolName("get_task"), true);
   assert.equal(isProtectedTrelioToolName("get_tasks"), true);
   assert.equal(isProtectedTrelioToolName("create_task"), true);

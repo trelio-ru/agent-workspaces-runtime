@@ -20,6 +20,8 @@ import {
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
 
+import { getDesktopOAuthProfile } from "./trelio-desktop-oauth-profiles.mjs";
+
 const KEYCHAIN_SERVICE = "ru.trelio.remote-mcp-oauth.v1";
 const MAX_SESSION_BYTES = 32 * 1024;
 
@@ -30,7 +32,7 @@ export const remoteMcpOAuthSessionAccount = (origin, resolved, namespace = null,
     // Native Trelio OAuth precedes company selection. Give it a dedicated
     // global client cell; never invent company/member/skill IDs or borrow an
     // external provider credential. The host chooses this closed discriminator.
-    ...(["deepseek-harness", "kimi-work", "mimo-desktop", "multitool", "codex"].includes(nativeClient) ? { nativeClient } : {
+    ...(["deepseek-harness", "kimi-work", "mimo-desktop", "multitool", "codex"].includes(nativeClient) || getDesktopOAuthProfile(nativeClient) ? { nativeClient } : {
       companyId: resolved.localIdentity.companyId,
       memberId: resolved.localIdentity.memberId,
       skillId: resolved.localIdentity.skillId,

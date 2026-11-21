@@ -3,7 +3,7 @@ import test from "node:test";
 import http from "node:http";
 import { PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
-import { createCodexMcpHandler, createHarnessConnection, handleLocalMcpMessage, handleToolCall, remoteMcpHttpRequest,
+import { createCodexMcpHandler, createDesktopOAuthMcpHandler, createHarnessConnection, handleLocalMcpMessage, handleToolCall, remoteMcpHttpRequest,
   RemoteMcpHostError, runCodexMcpStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -853,4 +853,103 @@ test("unknown native codes retain only UNKNOWN plus the existing collector gap",
     assert.equal(batches.find(sample => sample.tool === "search").outcomes[0].code, "UNKNOWN");
     assert.doesNotMatch(JSON.stringify(batches), /PRIVATE/);
   } finally { reporter.close(); }
+});
+
+test("desktop OAuth leaves approvals, Apps and exact Claude hook proof with the original tool", async () => {
+  for (const nativeClient of ["claude-code", "cursor", "antigravity"]) {
+    const forwarded = [];
+    const tool = { name: "get_task", description: "Approved PreToolUse hook", _meta: { ui: { resourceUri: "ui://fixture" } } };
+    const admissionFailure = { isError: true, structuredContent: { code: "TRELIO_RUNTIME_HOOK_REQUIRED", reason: "missing" } };
+    const handler = createDesktopOAuthMcpHandler(nativeClient, {
+      connect: caps => {
+        assert.deepEqual(caps, { extensions: { "io.modelcontextprotocol/ui": {} } });
+        return {
+          listTools: async () => [tool],
+          readResource: async uri => ({ contents: [{ uri }] }),
+          call: async (name, args) => { forwarded.push({ name, args }); return admissionFailure; },
+        };
+      },
+      prepare: () => assert.fail("these clients cannot mint Codex proof"),
+    });
+    const context = { clientInfo: { name: nativeClient }, clientCapabilities: { extensions: { "io.modelcontextprotocol/ui": {} } } };
+    await handler(frame("initialize"), context);
+    assert.deepEqual((await handler(frame("tools/list"), context)).result.tools[0], tool);
+    for (const proof of [undefined, "synthetic-hook-proof"]) {
+      const result = await handler(frame("tools/call", { name: tool.name,
+        arguments: { taskNumber: 42, runtimeSessionProof: proof, knownInstructionKey: "model-authored" } }), context);
+      assert.deepEqual(result.result, admissionFailure);
+    }
+    assert.deepEqual(forwarded, [
+      { name: "get_task", args: { taskNumber: 42 } },
+      { name: "get_task", args: { taskNumber: 42, ...(nativeClient === "claude-code"
+        ? { runtimeSessionProof: "synthetic-hook-proof" } : {}) } },
+    ]);
+    assert.deepEqual((await handler(frame("resources/read", { uri: "ui://fixture" }), context)).result,
+      { contents: [{ uri: "ui://fixture" }] });
+  }
+});
+
+test("desktop OAuth transport preserves an exact form request on the original SSE tool stream", async t => {
+  let pending;
+  let formMode = "form";
+  const sessionId = "desktop-fixture";
+  const decision = [];
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    assert.equal(request.headers.authorization, "Bearer fixture-bearer");
+    if (payload.method !== "initialize") assert.equal(request.headers["mcp-session-id"], sessionId);
+    if (payload.method === "tools/call") {
+      response.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": sessionId });
+      pending = { id: payload.id, response };
+      // An identical ID in the opposite direction is legal. It cannot serve
+      // as the result for this call, nor deliver a second decision.
+      response.write("data: " + JSON.stringify({ jsonrpc: "2.0", id: payload.id, method: "elicitation/create",
+        params: { mode: formMode, message: "Exact fixture approval", ...(formMode === "url" ? { url: "https://example.test" } : {}) } }) + "\n\n");
+    } else if (payload.method === "initialize") {
+      assert.deepEqual(payload.params.capabilities, { elicitation: { form: {} } });
+      response.writeHead(200, { "content-type": "application/json", "mcp-session-id": sessionId });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { protocolVersion: "2025-03-26" } }));
+    } else if (payload.method === "tools/list") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { tools: [{ name: "render_task_proposals" }] } }));
+    } else if (payload.method === "notifications/initialized") {
+      response.writeHead(202).end();
+    } else {
+      assert.equal(payload.id, pending.id);
+      decision.push(payload.result ?? payload.error);
+      response.writeHead(202).end();
+      pending.response.end("data: " + JSON.stringify({ jsonrpc: "2.0", id: pending.id,
+        result: { content: [{ type: "text", text: "proposal fixture" }] } }) + "\n\n");
+    }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const endpoint = new URL(`http://127.0.0.1:${server.address().port}/mcp`);
+  const handler = createDesktopOAuthMcpHandler("claude-code", {
+    connect: clientCapabilities => createHarnessConnection({ nativeClient: "claude-code", clientCapabilities,
+      vault: { read: async () => ({ accessToken: "fixture-bearer", expiresAt: Date.now() + 10_000 }) },
+      httpJson: async () => ({ body: { issuer: "https://trelio.ru", scopes_supported: ["mcp:read"] } }),
+      httpRequest: (request, options) => remoteMcpHttpRequest(request, { ...options,
+        resolveEndpoint: async () => ({ endpoint, address: "127.0.0.1", family: 4 }) }),
+    }),
+  });
+  const context = { clientInfo: { name: "claude-code" }, clientCapabilities: { elicitation: {} },
+    requestClient: async (method, params) => {
+      assert.equal(method, "elicitation/create");
+      assert.equal(params.message, "Exact fixture approval");
+      assert.equal(params.mode, "form");
+      return { action: "accept", content: { decision: "dismiss" } };
+    },
+  };
+  await handler(frame("initialize"), context);
+  const call = async () => (await handler(frame("tools/call", { name: "render_task_proposals" }), context)).result;
+  assert.equal((await call()).content[0].text, "proposal fixture");
+  formMode = "url";
+  assert.equal((await call()).content[0].text, "proposal fixture");
+  assert.deepEqual(decision, [
+    { action: "accept", content: { decision: "dismiss" } },
+    { code: -32601, message: "Only MCP form elicitation is supported." },
+  ]);
 });

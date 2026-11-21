@@ -10,7 +10,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { buildKimiWorkBundle, installKimiWorkBundle, prepareMimoDesktopInstallation, workspaceBridgeCredentialAccount } from "../host-runtime/scripts/trelio-workspace.mjs";
-import { createHarnessConnection, createKimiMcpHandler, createKimiLocalMcpHandler, remoteMcpHttpRequest, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { createHarnessConnection, createDesktopOAuthMcpHandler, createKimiMcpHandler, createKimiLocalMcpHandler, remoteMcpHttpRequest, runKimiStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { connectRemoteMcpOAuth } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { remoteMcpOAuthSessionAccount } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
@@ -186,6 +186,9 @@ for (const { nativeClient, clientId } of [
   { nativeClient: "kimi-work", clientId: "trelio_kimi_work_agent_workspaces_v1" },
   { nativeClient: "multitool", clientId: "trelio_multitool_agent_workspaces_v1" },
   { nativeClient: "mimo-desktop", clientId: "trelio_mimo_desktop_agent_workspaces_v1" },
+  { nativeClient: "claude-code", clientId: "trelio_agent_workspaces_v1" },
+  { nativeClient: "cursor", clientId: "trelio_cursor_local_agent_workspaces_v1" },
+  { nativeClient: "antigravity", clientId: "trelio_antigravity_local_agent_workspaces_v1" },
 ]) {
   test(`${nativeClient} connects through the real S256/state/loopback OAuth engine and its own vault cell`, async () => {
     let credential, authorize, exchange, writes = 0, dcrCalls = 0;
@@ -215,11 +218,29 @@ for (const { nativeClient, clientId } of [
         if (!payload.id) return { body: null };
         return { sessionId: "synthetic-mcp", message: { jsonrpc: "2.0", id: payload.id,
           result: payload.method === "initialize" ? { protocolVersion: "2025-03-26", instructions: "server authority" }
-            : { tools: [] } } };
+            : payload.method === "tools/list" ? { tools: [{ name: "list_companies", inputSchema: { type: "object" } }] }
+              : { content: [{ type: "text", text: "synthetic company catalogue" }] } } };
       } });
-    const handler = createKimiMcpHandler({ connection, nativeClient, multiTool: nativeClient === "multitool" });
-    const connected = await handler(call("trelio_connect"), { signal: signal() });
-    assert.equal(connected.result.structuredContent.connected, true, JSON.stringify(connected.result));
+    const desktop = ["claude-code", "cursor", "antigravity"].includes(nativeClient);
+    const handler = desktop ? createDesktopOAuthMcpHandler(nativeClient, { connect: () => connection })
+      : createKimiMcpHandler({ connection, nativeClient, multiTool: nativeClient === "multitool" });
+    if (desktop) {
+      const initialize = await handler({ jsonrpc: "2.0", id: 1, method: "initialize" });
+      assert.match(initialize.result.instructions, /trelio_connect/);
+      const listed = await handler({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+      assert.deepEqual(listed.result.tools.map(tool => tool.name), ["trelio_connect"]);
+    }
+    const notifications = [];
+    const connected = await handler(call("trelio_connect"), {
+      signal: signal(), notifyClient: async message => notifications.push(message.method),
+    });
+    assert.deepEqual(notifications, ["notifications/tools/list_changed"]);
+    const result = connected.result.structuredContent ?? JSON.parse(connected.result.content[0].text);
+    assert.equal(result.connected, true, JSON.stringify(connected.result));
+    if (desktop) {
+      const read = await handler(call("list_companies"), { signal: signal() });
+      assert.equal(read.result.content[0].text, "synthetic company catalogue");
+    }
     assert.equal(dcrCalls, 0); assert.equal(writes, 1);
     assert.equal(exchange.get("client_id"), clientId);
     assert.equal(exchange.get("resource"), `${origin}/mcp`);
@@ -229,7 +250,8 @@ for (const { nativeClient, clientId } of [
     assert.equal(writes, 1, "valid existing authorization is reused");
     const resolved = { remoteMcp: { configFingerprint: "synthetic" } };
     const account = remoteMcpOAuthSessionAccount(origin, resolved, "native", nativeClient);
-    for (const otherClient of ["kimi-work", "multitool", "mimo-desktop", "deepseek-harness"].filter(client => client !== nativeClient)) {
+    for (const otherClient of ["codex", "kimi-work", "multitool", "mimo-desktop", "deepseek-harness",
+      "claude-code", "cursor", "antigravity"].filter(client => client !== nativeClient)) {
       assert.notEqual(account, remoteMcpOAuthSessionAccount(origin, resolved, "native", otherClient));
     }
   });
