@@ -1646,6 +1646,8 @@ Exact legacy template bytes для распознавания при мигра�
   Контракт – [поиск](docs/agent-workspace-runtime.md#поиск-и-отдельный-файл).
 - Production runtime source меняется только вместе с targeted tests и актуальным
   контрактом. Generated package вручную не редактируется и не коммитится.
+- Размер изменённого корневого контекста проверяется для exact candidate до
+  encrypted publication: [совместимость и повтор finish](docs/agent-workspace-runtime.md#workspace-context-size).
 - Optional proposal `preparationRef` подставляет только structural CAS fields:
   [контракт](docs/agent-workspace-runtime.md#подстановка-служебных-полей-предложений).
   Stale требует нового чтения, без auto-refresh/save; legacy fields сохраняются.

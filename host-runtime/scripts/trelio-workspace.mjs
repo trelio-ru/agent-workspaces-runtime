@@ -190,6 +190,8 @@ const LOADED_CODEX_PLUGIN_DIRECTORY = process.env.TRELIO_PLUGIN_ROOT
     );
 export const WORKSPACE_CONTEXT_FILE_NAME = "WORKSPACE_CONTEXT.md";
 export const LEGACY_WORKSPACE_CONTEXT_FILE_NAME = "PROJECT_CONTEXT.md";
+const WORKSPACE_CONTEXT_WARNING_BYTES = 64 * 1024;
+const WORKSPACE_CONTEXT_MAX_BYTES = 128 * 1024;
 // Keep the generated workspace contract deliberately small. Scenario-specific
 // procedures belong to the worker skill references and are loaded only when
 // their route is actually needed; this file carries only immutable Run safety.
@@ -11041,6 +11043,32 @@ const readGitTreeEntry = async (workspaceDirectory, revision, filePath, options 
   return { mode, objectType, objectId };
 };
 
+// The server cannot read encrypted Git trees. Check the exact committed
+// candidate locally, including promotion of a previously saved draft. The
+// blob comparison preserves historical oversized context during unrelated edits.
+export const readEncryptedWorkspaceContextWarning = async (workspaceDirectory, baseHead, candidateHead) => {
+  const [base, candidate] = await Promise.all([
+    readGitTreeEntry(workspaceDirectory, baseHead, WORKSPACE_CONTEXT_FILE_NAME),
+    readGitTreeEntry(workspaceDirectory, candidateHead, WORKSPACE_CONTEXT_FILE_NAME),
+  ]);
+  if (candidate?.objectType !== "blob" || candidate.objectId === base?.objectId) return null;
+
+  const { stdout } = await runGit(["cat-file", "-s", candidate.objectId], { cwd: workspaceDirectory });
+  const sizeBytes = Number(stdout.trim());
+  if (!/^\d+$/u.test(stdout.trim()) || !Number.isSafeInteger(sizeBytes)) {
+    throw new Error("Git вернул некорректный размер WORKSPACE_CONTEXT.md.");
+  }
+  if (sizeBytes < WORKSPACE_CONTEXT_WARNING_BYTES) return null;
+
+  const warning = `${WORKSPACE_CONTEXT_FILE_NAME}: ${sizeBytes} байт из ${WORKSPACE_CONTEXT_MAX_BYTES}. `
+    + "Перенесите выгрузки, длинные таблицы и подробности в отдельные файлы папки. "
+    + "В корне оставьте краткие выводы, относительные ссылки и пояснения, когда их открывать.";
+  if (sizeBytes > WORKSPACE_CONTEXT_MAX_BYTES) {
+    throw new Error(`WORKSPACE_CONTEXT_TOO_LARGE: ${warning} Затем повторите сохранение в том же Run.`);
+  }
+  return warning;
+};
+
 const isExactLegacyWorkspaceMetadataRemoval = async ({
   workspaceDirectory,
   baseHead,
@@ -19040,8 +19068,12 @@ const submit = async (options, checkpointHead, retainedTaskHandoff, portableFini
   let browserProjectionId = null;
   let encryptedDerivedArtifactInventory = null;
   let encryptedDerivedArtifactManifests = [];
+  let encryptedContextWarning = null;
 
   if (companyEncryption) {
+    encryptedContextWarning = await readEncryptedWorkspaceContextWarning(
+      metadata.workspaceDirectory, metadata.baseHead, head,
+    );
     const preparedDerivedArtifacts = await prepareEncryptedDerivedArtifactInventory({
       metadata: submissionMetadata,
       companyEncryption,
@@ -19191,6 +19223,9 @@ const submit = async (options, checkpointHead, retainedTaskHandoff, portableFini
         ? "Зашифрованный draft принят без повторной отправки полного snapshot.\n"
         : "Зашифрованный результат записан в папку в Трелио.\n",
     );
+    if (encryptedContextWarning) {
+      process.stdout.write(`Предупреждение: ${encryptedContextWarning}\n`);
+    }
     if (encryptedDerivedArtifactManifests.length > 0) {
       process.stdout.write("Производные артефакты для проверки человеком:\n");
       for (const [index, manifest] of encryptedDerivedArtifactManifests.entries()) {
@@ -19246,6 +19281,9 @@ const submit = async (options, checkpointHead, retainedTaskHandoff, portableFini
       process.stdout.write("Результат записан в папку в Трелио.\n");
       process.stdout.write("Статус: принят автоматически.\n");
       process.stdout.write("Проверки структуры, безопасности и актуальности базовой версии пройдены.\n");
+      for (const warning of result.validation?.warnings ?? []) {
+        process.stdout.write(`Предупреждение: ${warning}\n`);
+      }
       if (result.taskStatusTransition?.state === "applied") {
         process.stdout.write(
           `Статус задачи: ${result.taskStatusTransition.fromStatusName} -> `

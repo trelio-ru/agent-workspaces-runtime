@@ -98,6 +98,7 @@ import {
   TrelioApiError,
   WINDOWS_PRIVATE_ACL_SCRIPT,
   assertEncryptedCandidateSafe,
+  readEncryptedWorkspaceContextWarning,
   assertMaterializedWorkspaceFileTypes,
   assertPristineIncompleteWorkspaceRoots,
   applyAgentRulesHandshake,
@@ -12207,6 +12208,46 @@ test("encrypted candidate accepts only removal of initial legacy workspace metad
     );
   } finally {
     await rm(workspaceDirectory, { recursive: true, force: true });
+  }
+});
+
+test("encrypted candidate warns and refuses only changed context in the committed tree", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-encrypted-context-size-"));
+
+  try {
+    await runGit(directory, ["init", "--initial-branch=main"]);
+    await runGit(directory, ["config", "user.name", "Trelio Test"]);
+    await runGit(directory, ["config", "user.email", "trelio@example.test"]);
+    const contextPath = path.join(directory, WORKSPACE_CONTEXT_FILE_NAME);
+    const commitTree = async () => {
+      await runGit(directory, ["add", "--all"]);
+      await runGit(directory, ["commit", "-m", "Context size fixture"]);
+      return (await runGit(directory, ["rev-parse", "HEAD"])).stdout.trim();
+    };
+    await writeFile(contextPath, "я".repeat(65_537), "utf8");
+    const base = await commitTree();
+    await writeFile(path.join(directory, "result.md"), "Сохранённый результат", "utf8");
+    const unchanged = await commitTree();
+    assert.equal(await readEncryptedWorkspaceContextWarning(directory, base, unchanged), null);
+
+    for (const size of [65_535, 65_536, 131_072]) {
+      await writeFile(contextPath, "я".repeat(Math.floor(size / 2)) + "x".repeat(size % 2), "utf8");
+      const head = await commitTree();
+      const warning = await readEncryptedWorkspaceContextWarning(directory, base, head);
+      if (size < 65_536) assert.equal(warning, null);
+      else assert.match(warning, new RegExp(`${size} байт из 131072`, "u"));
+    }
+
+    await writeFile(contextPath, "я".repeat(65_536) + "x", "utf8");
+    const rejected = await commitTree();
+    // A short unstaged edit cannot turn the oversized commit into a valid
+    // submission; the retry must actually prepare a new candidate.
+    await writeFile(contextPath, "[Подробности](result.md)", "utf8");
+    await assert.rejects(readEncryptedWorkspaceContextWarning(directory, base, rejected),
+      /WORKSPACE_CONTEXT_TOO_LARGE:.*131073 байт из 131072.*том же Run/u);
+    assert.equal(await readEncryptedWorkspaceContextWarning(directory, base, await commitTree()), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
