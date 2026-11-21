@@ -17,11 +17,11 @@ import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 import { syntheticDocx } from './fixtures/visual-docx.mjs';
 import vm from 'node:vm';
 
-test('native managed Secret binds the original HTTPS tab, masks credentials and permits exactly one reviewed click',
+test('native managed Secret binds the observed HTTPS document after a redirect and permits one reviewed click',
   { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
     const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-native-secret-')));
     const keyFile = path.join(directory, 'fixture.key'), certFile = path.join(directory, 'fixture.pem');
-    let browser, listener, controlListener;
+    let browser, listener, redirectListener, controlListener;
     t.signal.addEventListener('abort', () => browser?.abort(), { once: true });
     const value = 'fixture-value-' + randomUUID(), received = [];
     try {
@@ -49,13 +49,23 @@ test('native managed Secret binds the original HTTPS tab, masks credentials and 
           </form>`);
       });
       listener = ownFixtureHttpServer(server, t.signal); await listener.listen();
-      const origin = `https://127.0.0.1:${server.address().port}`, targetUrl = origin + '/login';
+      const origin = `https://127.0.0.1:${server.address().port}`;
+      const targetUrl = origin + '/login?flow=fixture-only';
+      // A distinct HTTPS port is a distinct origin. The form's origin has
+      // to be selected independently of the managed profile's launch site.
+      const redirect = https.createServer({ key, cert }, (_request, response) => {
+        response.writeHead(302, { Location: targetUrl });
+        response.end();
+      });
+      redirectListener = ownFixtureHttpServer(redirect, t.signal); await redirectListener.listen();
+      const siteOrigin = `https://127.0.0.1:${redirect.address().port}`;
+      const entryUrl = siteOrigin + '/entry';
       const dependencies = await loadVisualDependencies({
         root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
       const store = { directory, async read() {}, async prepare() {}, async write() {}, close() {} };
-      browser = new ExtensionVisualBrowser({ dependencies, store, origins: [origin], observationMode: 'text',
+      browser = new ExtensionVisualBrowser({ dependencies, store, origins: [siteOrigin], observationMode: 'text',
         presentation: 'hidden', externalNavigation: true,
-        policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+        policy: createVisualOriginPolicy({ origins: [siteOrigin], externalNavigation: true, allowLoopback: true }),
         lease: { deadlineAt: Date.now() + 100_000 },
         testTlsSpki: createHash('sha256').update(spki).digest('base64') });
       browser.enableAssistantBrowserSecrets();
@@ -67,18 +77,68 @@ test('native managed Secret binds the original HTTPS tab, masks credentials and 
         method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
         body: JSON.stringify(body),
       });
-      const view = await browser.call('navigate', { url: targetUrl });
+      let view = await browser.call('navigate', { url: entryUrl });
       assert.equal(view.state, 'ready', view.reason);
       assert.equal(await browser.call('secret-browser-bind', { targetUrl }).then(result => result.reason), 'invalid_input');
-      const [{ x, y }] = view.controls.filter(control => control.role === 'button' && control.label === 'Continue');
-      const targetUrlSha256 = createHash('sha256').update(targetUrl).digest('hex');
-      const context = { deliveryMode: 'browser', executable: 'trelio-workspace', fieldKeys: ['login'],
-        targetOrigin: origin, targetUrlSha256, browserSteps: [{ targetOrigin: origin, targetUrlSha256,
-          fields: [{ fieldKey: 'login', accessibleName: 'Account' }] }] };
-      const plan = { operation: 'prepare', context, targetUrl };
+      const planFor = url => {
+        const targetOrigin = new URL(url).origin;
+        const targetUrlSha256 = createHash('sha256').update(url).digest('hex');
+        return { operation: 'prepare', targetUrl: url, context: { deliveryMode: 'browser', executable: 'trelio-workspace',
+          fieldKeys: ['login'], targetOrigin, targetUrlSha256, browserSteps: [{ targetOrigin, targetUrlSha256,
+            fields: [{ fieldKey: 'login', accessibleName: 'Account' }] }] } };
+      };
+      // The initial URL is a valid grant target, but it is no longer the
+      // actual document. No Secret may be requested for this stale plan.
+      assert.deepEqual(await request(planFor(entryUrl)).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
+      assert.deepEqual(received, []);
+      const plan = planFor(targetUrl);
+      const locator = { operation: 'observe', sessionId: view.sessionId, frameId: view.frameId, expectedOrigin: origin };
+      assert.equal((await request(locator, { origin })).status, 403);
+      assert.equal((await browser.call('secret-browser-observe', locator)).reason, 'invalid_input');
+      assert.deepEqual(await request({ ...locator, expectedOrigin: null }).then(response => response.json()),
+        { state: 'located', targetOrigin: origin });
+      const observed = await request(locator).then(response => response.json());
+      assert.match(observed.observedFrameSha256, /^[a-f0-9]{64}$/u);
+      assert.deepEqual(observed, {
+        state: 'observed', targetOrigin: origin, targetUrlSha256: plan.context.targetUrlSha256,
+        observedFrameSha256: observed.observedFrameSha256,
+      });
+      assert.deepEqual(await request({ ...locator, expectedOrigin: siteOrigin }).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_origin_changed' });
+      assert.deepEqual(await request({ ...locator, sessionId: randomUUID() }).then(response => response.json()),
+        { state: 'refused', reasonCode: 'browser_unavailable' });
+      assert.deepEqual(await request({ ...locator, frameId: randomUUID() }).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
       assert.equal((await request(plan, { origin })).status, 403, 'an ordinary web origin cannot open the private lane');
       assert.equal((await request(plan, { authorization: 'Bearer wrong' })).status, 403, 'only the original worker owner has the capability');
-      const prepared = await request(plan).then(response => response.json());
+      const observation = { sessionId: view.sessionId, frameId: view.frameId };
+      const wrong = { operation: 'prepare', observation, context: planFor(origin + '/wrong-path').context };
+      assert.deepEqual(await request(wrong).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
+      // The trusted path can prepare against the observed digest without
+      // putting the redirected URL into the calling plan or loopback result.
+      const { state: _state, ...observedTarget } = observed;
+      const context = { ...plan.context,
+        browserSteps: [{ ...plan.context.browserSteps[0], ...observedTarget }] };
+      // A full navigate to the same URL preserves the digest but replaces
+      // the document. The old observation must be unusable even here.
+      view = await browser.call('navigate', { url: entryUrl });
+      assert.equal(view.state, 'ready', view.reason);
+      assert.notEqual(view.frameId, observation.frameId);
+      assert.deepEqual(await request({ operation: 'prepare', context, observation }).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
+      const currentObservation = { sessionId: view.sessionId, frameId: view.frameId };
+      assert.deepEqual(await request({ operation: 'prepare', context, observation: currentObservation }).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
+      assert.deepEqual(await request({ ...plan, context }).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
+      const current = await request({ ...locator, frameId: view.frameId }).then(response => response.json());
+      assert.equal(current.targetUrlSha256, observed.targetUrlSha256);
+      assert.notEqual(current.observedFrameSha256, observed.observedFrameSha256);
+      assert.deepEqual(received, []);
+      const freshContext = { ...context, browserSteps: [{ ...context.browserSteps[0], observedFrameSha256: current.observedFrameSha256 }] };
+      const prepared = await request({ operation: 'prepare', context: freshContext, observation: currentObservation }).then(response => response.json());
       assert.equal(prepared.state, 'ready', prepared.reasonCode);
       const { handle } = prepared;
       const fill = { operation: 'fill', handle, secretValues: { login: value } };
@@ -88,14 +148,17 @@ test('native managed Secret binds the original HTTPS tab, masks credentials and 
       assert.equal((await browser.call('read-text')).reason, 'manual_control_active');
       assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
       assert.deepEqual(received, []);
+      const [{ x, y }] = view.controls.filter(control => control.role === 'button' && control.label === 'Continue');
       const input = { frameId: view.frameId, x, y };
       const clicked = await browser.call('click', input);
       assert.equal(clicked.state, 'ready', clicked.reason);
       assert.match(clicked.text, /VERIFIED ORIGINAL SUBMISSION/u);
+      assert.deepEqual(await request(locator).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
       assert.equal((await browser.call('click', input)).reason, 'stale_frame');
       assert.deepEqual(received, [true]);
     } finally {
-      await controlListener?.stop(); await listener?.stop(); await browser?.close().catch(() => browser.abort());
+      await controlListener?.stop(); await redirectListener?.stop(); await listener?.stop(); await browser?.close().catch(() => browser.abort());
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   });

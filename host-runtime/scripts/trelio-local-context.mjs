@@ -10833,7 +10833,7 @@ const buildWorkspaceCheckpointActionArguments = (operation, parameters) => {
  * to a fixed option position. Model-visible values can therefore never choose
  * an executable, add an undeclared bridge flag, or introduce shell syntax.
  */
-export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
+export const buildTrelioWorkspaceActionInvocation = (rawInput, { managedBrowserFill = false } = {}) => {
   if (rawInput?.schemaVersion !== TRELIO_WORKSPACE_ACTION_SCHEMA_VERSION) {
     throw new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
@@ -11138,14 +11138,13 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
       }),
     ];
   } else if (operation === "secret_browser_fill") {
-    assertWorkspaceActionKeys(parameters, new Set(["grantId", "targetUrl", "browser"]));
+    assertWorkspaceActionKeys(parameters, new Set(managedBrowserFill ? ["grantId"] : ["grantId", "targetUrl", "browser"]));
     argumentsList = [
       "secret",
       "browser-fill",
       "--grant",
       normalizeWorkspaceActionUuid(parameters.grantId, "parameters.grantId"),
-      "--target",
-      normalizeWorkspaceActionHttpsUrl(parameters.targetUrl, "parameters.targetUrl"),
+      ...(managedBrowserFill ? [] : ["--target", normalizeWorkspaceActionHttpsUrl(parameters.targetUrl, "parameters.targetUrl")]),
     ];
     if (parameters.browser !== undefined) {
       if (!["auto", "embedded", "chrome"].includes(parameters.browser)) {
@@ -11637,7 +11636,7 @@ const workspaceFinishOperations = createWorkspaceFinishOperations({
 });
 
 export const handleTrelioWorkspaceActionOperation = async (origin, rawInput, options = {}) => {
-  const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
+  const invocation = buildTrelioWorkspaceActionInvocation(rawInput, { managedBrowserFill: options.managedBrowserFill });
   // Keep injected compatibility executors synchronous unless their test opts
   // into the production manager explicitly. Native checkpoint stdin is never
   // retained by this registry or written to a progress file.
@@ -11693,9 +11692,10 @@ const executeTrelioWorkspaceActionOperation = async (
     resolveRunRootDirectory = resolveRegisteredWorkspaceRootDirectory,
     selectOpenRecovery,
     codexThreadId = null,
+    managedBrowserFill = false,
   } = {},
 ) => {
-  const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
+  const invocation = buildTrelioWorkspaceActionInvocation(rawInput, { managedBrowserFill });
   if (invocation.operation === TRELIO_FOLDER_ONBOARDING_OPERATION) {
     return folderOnboardingApply(invocation.parameters);
   }

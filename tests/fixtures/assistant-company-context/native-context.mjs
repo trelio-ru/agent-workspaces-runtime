@@ -41,12 +41,28 @@ export const openNativeCompanyScenario=async(configuration,{sourcePackage}={})=>
   const preparedReplyConfirmFaults={attempts:0,lostCommitted:false};
   globalThis.fetch=async(input,options={})=>{
     const selected=new URL(input instanceof Request?input.url:input);
+    // The optional browser composition also owns one authenticated loopback
+    // control listener. Preserve its real host-private request exactly. The
+    // fixture never opens a second port, arbitrary route or remote origin.
+    if(process.env.TRELIO_TEST_ASSISTANT_OBSERVED_BROWSER==='1'&&selected.protocol==='http:'
+      &&selected.hostname==='127.0.0.1'&&selected.pathname==='/secret-browser'&&!selected.search&&!selected.hash
+      &&!selected.username&&!selected.password&&options.method==='POST'&&options.redirect==='error'){
+      const port=await fs.readFile(path.join(root,'synthetic-browser-port'),'utf8');
+      assert.match(port,/^[1-9][0-9]{0,4}$/u);
+      assert.equal(selected.port,port);
+      return originalFetch(input,options);
+    }
     assert.ok(SAME_ORIGINS.has(selected.origin),'fixture cannot contact an external origin');
     // Keep the actual production path/query/body/headers. The synthetic native
     // server independently checks these, recipient/pass/proof and ciphertext
     // bindings. Only the network destination changes to its owned loopback.
     const target=new URL(selected.pathname+selected.search,server);
     const response=await originalFetch(target,{...options,redirect:'error',headers:new Headers(options.headers)});
+    if(process.env.TRELIO_TEST_ASSISTANT_OBSERVED_BROWSER==='1'
+      &&/^\/api\/agent-secrets\/checkout-grants\/[0-9a-f-]{36}\/(browser-fill-context|consume|browser-fill-outcome)$/u.test(selected.pathname)){
+      const operation=selected.pathname.split('/').at(-1);
+      await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation,status:response.status})+'\n');
+    }
     if(configuration.losePreparedReplyPrepare&&selected.pathname==='/api/digital-assistants/runtime/source-skills/intake/reply-delivery/prepare'
       &&options.method==='POST'){
       preparedReplyFaults.attempts++;

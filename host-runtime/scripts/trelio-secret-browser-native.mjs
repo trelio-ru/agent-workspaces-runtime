@@ -166,6 +166,7 @@ export const browserFillBinding = (context) => {
     || !Array.isArray(context.fieldKeys) || context.fieldKeys.length < 1
     || context.fieldKeys.some((key) => !/^[a-z][a-z0-9_]{0,63}$/u.test(key))
     || new Set(context.fieldKeys).size !== context.fieldKeys.length
+    || context.holder !== undefined && context.holder !== 'assistant'
     || !/^[0-9a-f]{64}$/u.test(context.targetUrlSha256 || "")) {
     throw new SecretBrowserFillError("Некорректный browser-fill context.");
   }
@@ -180,6 +181,14 @@ export const browserFillBinding = (context) => {
       || !/^[0-9a-f]{64}$/u.test(step.targetUrlSha256 || "")
       || !Array.isArray(step.fields) || !step.fields.length) {
       throw new SecretBrowserFillError("Некорректный browser step.");
+    }
+    // This witness is meaningful only for one top-level managed document.
+    // Preserve it across preflight/consume equality and keep marked plans
+    // out of native tab selection and separate Chrome profiles.
+    const { observedFrameSha256 } = step;
+    if (observedFrameSha256 !== undefined && (typeof observedFrameSha256 !== 'string'
+      || !/^[0-9a-f]{64}$/u.test(observedFrameSha256) || steps.length !== 1 || step.frames || step.activationSelector)) {
+      throw new SecretBrowserFillError("Invalid managed browser observation.");
     }
     const fields = step.fields.map(({ fieldKey, selector, accessibleName }) => {
       if (!context.fieldKeys.includes(fieldKey) || seen.has(fieldKey)) {
@@ -209,6 +218,7 @@ export const browserFillBinding = (context) => {
     return {
       targetOrigin: step.targetOrigin,
       targetUrlSha256: step.targetUrlSha256,
+      ...(observedFrameSha256 === undefined ? {} : { observedFrameSha256 }),
       ...(frames ? { frames } : {}),
       fields,
       ...(step.activationSelector
@@ -225,6 +235,7 @@ export const browserFillBinding = (context) => {
     grantId: context.grantId, runId: context.runId, secretVersion: context.secretVersion,
     deliveryMode: context.deliveryMode, executable: context.executable,
     fieldKeys: context.fieldKeys, clientFamily: context.clientFamily ?? null,
+    ...(context.holder === 'assistant' ? { holder: 'assistant' } : {}),
     targetOrigin: context.targetOrigin, targetUrlSha256: context.targetUrlSha256,
     browserSteps: normalized,
   };
@@ -431,6 +442,9 @@ const prepareSecretBrowserSessionInternal = async ({
     // native selection for an independently opened browser.
     const managed = await prepareManaged({ context, targetUrl });
     if (managed) return managed;
+  }
+  if (context?.browserSteps?.some(step => step.observedFrameSha256 !== undefined)) {
+    throw new SecretBrowserFillError("The original managed browser observation is required.", "browser_unavailable");
   }
   let channel = null;
   // New grants never change surface. In particular, missing native metadata is

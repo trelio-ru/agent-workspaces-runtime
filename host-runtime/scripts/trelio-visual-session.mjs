@@ -169,17 +169,30 @@ async function requestVisualSecret(owner, body, signal) {
   return JSON.parse(result);
 }
 
+/** Resolve a value-free locator without interpreting a redirected URL as
+ * consent. The browser's storage origin and the intended form origin can
+ * differ. Neither may carry a path, credentials, query or fragment. */
+export function normalizeAssistantManagedVisualObservation(value, { originOnly = false } = {}) {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).sort().join(',') !== (originOnly ? 'frameId,sessionId,siteOrigin' : 'frameId,sessionId,siteOrigin,targetOrigin')
+    || !uuid.test(value.sessionId ?? '') || !uuid.test(value.frameId ?? '')) throw Error('VISUAL_IDENTITY_INVALID');
+  for (const origin of originOnly ? [value.siteOrigin] : [value.siteOrigin, value.targetOrigin]) {
+    if (typeof origin !== 'string' || origin.length > 512) throw Error('VISUAL_IDENTITY_INVALID');
+    const url = new URL(origin);
+    if (url.protocol !== 'https:' || url.origin !== origin) throw Error('VISUAL_IDENTITY_INVALID');
+  }
+  return { sessionId: value.sessionId, frameId: value.frameId, siteOrigin: value.siteOrigin,
+    ...(originOnly ? {} : { targetOrigin: value.targetOrigin }) };
+}
+
 /** Locate only the original managed browser of the observed task execution.
  * A provider worker, another session or a human browser is never eligible.
- * These paths hold the existing loopback capability. The grant and values
- * remain in memory and are neither passed to a child nor written to the owner file.
+ * These paths hold the existing loopback capability. A managed observation
+ * selects the same site entry used at launch. Legacy fills still reject
+ * ambiguity across the execution's windows.
  */
-export async function prepareAssistantManagedVisualSecret({ identity, runtimeSessionId, context, targetUrl,
-  signal, directory = resolveWorkspaceBridgeConfigDirectory() }) {
-  const { SecretBrowserFillError, isSecretBrowserFillReason } = await import('./trelio-secret-browser.mjs');
-  const { browserFillBinding } = await import('./trelio-secret-browser-native.mjs');
-  const unavailable = () => new SecretBrowserFillError('Не удалось подтвердить исходную managed-вкладку.', 'browser_unavailable');
-  const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(40_000)]) : AbortSignal.timeout(40_000);
+async function selectAssistantManagedVisualSecretOwner({ identity, runtimeSessionId, siteOrigin: selectedSite,
+  deadline, directory, unavailable }) {
   if (!uuid.test(runtimeSessionId ?? '') || !uuid.test(identity?.companyId ?? '')) throw unavailable();
   const executionOwner = browserExecutionOwner({ TRELIO_SKILL_RUNTIME_SESSION_ID: runtimeSessionId });
   const root = path.join(directory, 'visual-browser');
@@ -187,12 +200,15 @@ export async function prepareAssistantManagedVisualSecret({ identity, runtimeSes
     if (error.code === 'ENOENT') return null;
     throw unavailable();
   }
+  const selectedScope = selectedSite === undefined ? null : visualStorageScope({ origin: identity.origin,
+    skillId: 'assistant-browser', accountId: assistantVisualBrowserAccountId(identity, selectedSite) });
   const entries = await fs.readdir(root, { withFileTypes: true });
   if (entries.length > 1024) throw unavailable();
   let selected = null;
   for (const entry of entries) {
     deadline.throwIfAborted();
-    if (!entry.isDirectory() || !/^[a-f0-9]{64}$/u.test(entry.name)) continue;
+    if (!entry.isDirectory() || !/^[a-f0-9]{64}$/u.test(entry.name)
+      || selectedScope !== null && entry.name !== selectedScope) continue;
     const account = path.join(root, entry.name);
     const session = path.join(account, 'sessions', executionOwner);
     try {
@@ -200,7 +216,8 @@ export async function prepareAssistantManagedVisualSecret({ identity, runtimeSes
         await assertPrivatePathKind(value, 'directory');
       const owner = await readVisualOwner(path.join(session, 'active', 'owner.json'));
       const siteOrigin = owner.origins?.length === 1 ? owner.origins[0] : null;
-      if (typeof siteOrigin !== 'string' || owner.mailIdentity?.origin !== identity.origin
+      if (typeof siteOrigin !== 'string' || selectedSite !== undefined && siteOrigin !== selectedSite
+        || owner.mailIdentity?.origin !== identity.origin
         || owner.mailIdentity.companyId !== identity.companyId || owner.executionOwner !== executionOwner
         || owner.presentation !== 'hidden' || owner.externalNavigation !== true
         || visualStorageScope({ origin: identity.origin, skillId: 'assistant-browser',
@@ -216,9 +233,56 @@ export async function prepareAssistantManagedVisualSecret({ identity, runtimeSes
       if (error.code !== 'ENOENT') throw unavailable();
     }
   }
+  return selected;
+}
+
+/** Obtain only the native digest of the just-observed document. This
+ * operation performs no Secret read, grant preparation, or user input. */
+export async function observeAssistantManagedVisualTarget({ identity, runtimeSessionId, observation, signal,
+  directory = resolveWorkspaceBridgeConfigDirectory(), originOnly = false }) {
+  const { SecretBrowserFillError, isSecretBrowserFillReason } = await import('./trelio-secret-browser.mjs');
+  const selected = normalizeAssistantManagedVisualObservation(observation, { originOnly });
+  const unavailable = () => new SecretBrowserFillError('Не удалось подтвердить текущую managed-вкладку.', 'browser_unavailable');
+  const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000);
+  const owner = await selectAssistantManagedVisualSecretOwner({ identity, runtimeSessionId, siteOrigin: selected.siteOrigin,
+    deadline, directory, unavailable });
+  if (!owner) throw unavailable();
+  const result = await requestVisualSecret(owner, { operation: 'observe', sessionId: selected.sessionId,
+    frameId: selected.frameId, expectedOrigin: originOnly ? null : selected.targetOrigin }, deadline).catch(() => { throw unavailable(); });
+  if (originOnly && result?.state === 'located' && Object.keys(result).sort().join(',') === 'state,targetOrigin') {
+    // Report only native origin as page metadata; the next preparation still
+    // needs an independently intended origin and a fresh exact frame check.
+    const { targetOrigin } = normalizeAssistantManagedVisualObservation({ ...selected, targetOrigin: result.targetOrigin });
+    return { targetOrigin };
+  }
+  if (originOnly || result?.state !== 'observed' || Object.keys(result).sort().join(',') !== 'observedFrameSha256,state,targetOrigin,targetUrlSha256'
+    || result.targetOrigin !== selected.targetOrigin || !/^[a-f0-9]{64}$/u.test(result.targetUrlSha256 ?? '')
+    || !/^[a-f0-9]{64}$/u.test(result.observedFrameSha256 ?? ''))
+    throw new SecretBrowserFillError('Не удалось подтвердить адрес наблюдаемой формы.',
+      isSecretBrowserFillReason(result?.reasonCode) ? result.reasonCode : 'adapter_error');
+  return { targetOrigin: result.targetOrigin, targetUrlSha256: result.targetUrlSha256, observedFrameSha256: result.observedFrameSha256 };
+}
+
+/** Prepare a previously issued grant. The observed route must stay on the
+ * same managed worker; a missing or stale one cannot open a fallback browser.
+ * Grant and values remain private to memory and authenticated local pipes. */
+export async function prepareAssistantManagedVisualSecret({ identity, runtimeSessionId, context, targetUrl,
+  observation, signal, directory = resolveWorkspaceBridgeConfigDirectory() }) {
+  const { SecretBrowserFillError, isSecretBrowserFillReason } = await import('./trelio-secret-browser.mjs');
+  const { browserFillBinding } = await import('./trelio-secret-browser-native.mjs');
+  const unavailable = () => new SecretBrowserFillError('Не удалось подтвердить исходную managed-вкладку.', 'browser_unavailable');
+  const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(40_000)]) : AbortSignal.timeout(40_000);
+  const observed = observation === undefined ? null : normalizeAssistantManagedVisualObservation(observation);
+  if (observed && targetUrl !== undefined) throw unavailable();
+  const selected = await selectAssistantManagedVisualSecretOwner({ identity, runtimeSessionId, siteOrigin: observed?.siteOrigin,
+    deadline, directory, unavailable });
+  if (!selected && observed) throw unavailable();
   if (!selected) return null;
   const binding = browserFillBinding(context);
-  const prepared = await requestVisualSecret(selected, { operation: 'prepare', context: binding, targetUrl }, deadline)
+  if (observed && binding.targetOrigin !== observed.targetOrigin)
+    throw new SecretBrowserFillError('Наблюдаемый origin не совпадает с grant.', 'target_origin_changed');
+  const target = observed ? { observation: { sessionId: observed.sessionId, frameId: observed.frameId } } : { targetUrl };
+  const prepared = await requestVisualSecret(selected, { operation: 'prepare', context: binding, ...target }, deadline)
     .catch(() => { throw unavailable(); });
   if (prepared?.state !== 'ready' || !uuid.test(prepared.handle ?? '')
     || Object.keys(prepared).sort().join(',') !== 'handle,state')

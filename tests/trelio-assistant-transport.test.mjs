@@ -2360,6 +2360,121 @@ test('encrypted private browser signs normalized native targets and keeps full U
   await assert.rejects(invoke(auth),/ENCRYPTED_CONTENT_REQUIRED/);assert.equal(calls,3);
 });
 
+test('observed browser plans carry native document proof through plain and encrypted assistant calls', async t => {
+  const {withAssistantEncryptedWorkspaceArguments,validateAssistantWorkspacePlan,executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {assistantVisualBrowserAccountId,createVisualControlServer,visualSessionBinding}=await import('../host-runtime/scripts/trelio-visual-session.mjs');
+  const {browserExecutionDirectory}=await import('../host-runtime/scripts/trelio-browser-session.mjs');
+  const {writePrivateJsonFile}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const {ownFixtureHttpServer}=await import('./fixtures/visual-owned-http.mjs');
+  const f=await workspaceProfileFixture();
+  const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'observed-task-browser-')));
+  f.host.configurationDirectory=root;
+  const observation={siteOrigin:'https://entry.test',targetOrigin:'https://identity.test',sessionId:randomUUID(),frameId:randomUUID()};
+  const target={targetOrigin:observation.targetOrigin,
+    targetUrlSha256:createHash('sha256').update('https://identity.test/form?token=fixture').digest('hex'),
+    observedFrameSha256:'a'.repeat(64)};
+  let browserReads=0, mode='plain', refuse=false, sends=0;
+  const token=randomBytes(32).toString('hex');
+  const control=createVisualControlServer({token,dispatch:()=>assert.fail('no visual input'),secretDispatch(message){
+    browserReads++;
+    assert.deepEqual(message,{operation:'observe',sessionId:observation.sessionId,frameId:observation.frameId,expectedOrigin:observation.targetOrigin});
+    return refuse?{state:'refused',reasonCode:'target_url_changed'}:{state:'observed',...target};
+  }});
+  const listener=ownFixtureHttpServer(control,t.signal);
+  t.after(async()=>{await listener.stop();await fs.rm(root,{recursive:true,force:true});});
+  await listener.listen();
+  const now=Date.now(), memberId=randomUUID(), ownerIdentity={...f.identity,companyId:f.pass.companyId};
+  const runtimeSessionId=f.runtime.state.runtimeSessionId;
+  const env={TRELIO_ORIGIN:f.identity.origin,TRELIO_SKILL_ID:'assistant-browser',
+    TRELIO_SKILL_ACCOUNT_JSON:JSON.stringify({id:assistantVisualBrowserAccountId(ownerIdentity,observation.siteOrigin)}),
+    TRELIO_SKILL_COMPANY_ID:f.pass.companyId,TRELIO_SKILL_MEMBER_ID:memberId,TRELIO_SKILL_RUNTIME_SESSION_ID:runtimeSessionId,
+    TRELIO_BROWSER_SESSION_POLICY_JSON:JSON.stringify({apiVersion:1,sessionClass:'protected-snapshot',manualAssist:true,leaseMs:120000}),
+    TRELIO_BROWSER_SESSION_STARTED_AT:String(now),TRELIO_BROWSER_SESSION_DEADLINE_AT:String(now+120000)};
+  const binding=visualSessionBinding(env);
+  const active=path.join(browserExecutionDirectory(path.join(root,'visual-browser',binding.scope),env),'active');
+  await fs.mkdir(active,{recursive:true,mode:0o700});
+  await writePrivateJsonFile(path.join(active,'owner.json'),{schemaVersion:1,token,pid:process.pid,scope:binding.scope,
+    bindingHash:binding.bindingHash,port:control.address().port,deadlineAt:binding.deadlineAt,executionOwner:binding.executionOwner,
+    origins:[observation.siteOrigin],presentation:'hidden',externalNavigation:true,assistantBrowserSecrets:true,
+    mailIdentity:{origin:f.identity.origin,companyId:f.pass.companyId,memberId}});
+  f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:mode}];
+  await resolveAssistantCompanyEncryptionDevice({identity:f.identity,companyId:f.pass.companyId,store:f.store,
+    lockDirectory:path.join(root,'encryption-locks'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+  const runIdentity={runId:randomUUID(),workspaceId:randomUUID()},grantId=randomUUID(),secretId=randomUUID();
+  const scope={companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId};
+  const prepare={schemaVersion:1,operation:'secret_browser_prepare',parameters:{runId:runIdentity.runId,secretId,
+    steps:[{observation,fields:[{fieldKey:'password',selector:'#password'}]}]}};
+  const invoke=args=>withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},async wire=>{
+    sends++;
+    assert.doesNotMatch(JSON.stringify(wire),/frameId|siteOrigin|targetUrl"|observation|fixture/u);
+    const {encryptedPlan,...parameters}=wire.parameters;
+    assert.equal(Boolean(encryptedPlan),mode==='encrypted');
+    if(wire.operation==='secret_browser_prepare')assert.deepEqual(parameters.steps,[{fields:[{fieldKey:'password',selector:'#password'}],...target}]);
+    else assert.deepEqual(parameters,{grantId,...target});
+    const action={schemaVersion:1,operation:'secret_browser_fill',runIdentity,parameters:{grantId,...target}};
+    const value=wire.operation==='secret_browser_prepare'
+      ?{prepared:true,grant:{id:grantId,secretId,workspaceId:runIdentity.workspaceId,browserSteps:[target]},bridge:{action:{arguments:action}}}
+      :{prepared:true,scope,localAction:action};
+    return {content:[],structuredContent:value};
+  },{withProfile:action=>action(f.profile)});
+  const dispatcher=await import('../host-runtime/scripts/trelio-local-context.mjs');
+  let invocationCount=0;
+  for(mode of ['plain','encrypted']){
+    const prepared=await invoke(prepare);
+    assert.equal(prepared.isError,undefined,JSON.stringify(prepared.structuredContent));
+    const next=prepared.structuredContent.bridge.action.arguments;
+    assert.deepEqual(next.parameters,{grantId,observation});
+    assert.doesNotMatch(JSON.stringify(prepared),/targetUrlSha256|observedFrameSha256|browserSteps/u);
+    const reply=await invoke(next),execution=await validateAssistantWorkspacePlan(reply.structuredContent);
+    assert.deepEqual(execution.localAction.parameters,{grantId,observation,observedFrameSha256:target.observedFrameSha256});
+    assert.deepEqual(execution.invocation.argumentsList,['secret','browser-fill','--grant',grantId]);
+    // Exercise the actual assistant worker and common dispatcher, which
+    // rebuilds its argv after validating the private plan. Only the final
+    // browser consumes the grant, so this boundary test stops at runBridge.
+    const worker=await executeAssistantWorkspacePlan(reply.structuredContent,{
+      expectedOrigin:f.identity.origin,
+      withProfile:async(action,options)=>{
+        assert.deepEqual(options.secretBrowserFill,{...runIdentity,grantId,observation,observedFrameSha256:target.observedFrameSha256});
+        return action({identity:f.identity,host:f.host,store:f.store,prepareWorkspaceRun:async()=>null});
+      },
+      loadCommon:async()=>({requireToken:async()=>({}),request:async()=>({run:{id:runIdentity.runId,workspaceId:runIdentity.workspaceId}}),
+        readBoundedResponseBuffer:async response=>Buffer.from(JSON.stringify(response)),ensurePrivateDirectory:async()=>{}}),
+      loadContext:async()=>({readOpenedWorkspaceRunIdentity:async()=>runIdentity,
+        handleTrelioWorkspaceActionOperation:(origin,action,options)=>dispatcher.handleTrelioWorkspaceActionOperation(origin,action,
+          {...options,runBridge:async(_origin,argv,runOptions)=>{
+            invocationCount++;assert.deepEqual(argv,['secret','browser-fill','--grant',grantId]);
+            assert.equal(runOptions.input,undefined);
+            return {stdout:'synthetic final executor boundary'};
+          }})}),
+    });
+    assert.equal(worker.stdout,'synthetic final executor boundary');
+  }
+  assert.deepEqual([browserReads,sends,invocationCount],[4,4,2]);
+  const mixed=structuredClone(prepare);mixed.parameters.steps[0].targetUrl='https://identity.test/form';
+  const invalid=await invoke(mixed);
+  assert.equal(invalid.structuredContent.code,'ASSISTANT_MCP_INPUT_INVALID');
+  assert.deepEqual([browserReads,sends],[4,4]);
+  refuse=true;
+  const closed=await invoke(prepare);
+  assert.deepEqual(closed.structuredContent,{code:'SECRET_BROWSER_PREFLIGHT_FAILED',stage:'preflight',
+    reasonCode:'target_url_changed',secretRequested:false,grantConsumedByAttempt:false});
+  assert.deepEqual([browserReads,sends],[5,4]);
+  const bound=await workspaceProfileFixture({secretBrowserFill:{...runIdentity,grantId,observation,observedFrameSha256:target.observedFrameSha256}});
+  const handle=await bound.profile.requireToken(bound.identity.origin),base=`/api/agent-secrets/checkout-grants/${grantId}`;
+  const header='x-trelio-agent-secret-observed-frame-sha256';
+  for(const [suffix,method,body,expected] of [
+    [`/browser-fill-context?runId=${runIdentity.runId}`,'GET',undefined,target.observedFrameSha256],
+    ['/consume','POST',{runId:runIdentity.runId},target.observedFrameSha256],
+    ['/browser-fill-outcome','POST',{runId:runIdentity.runId,outcome:'succeeded'},null],
+  ]){
+    const request=await bound.profile.prepareRequest({origin:bound.identity.origin,token:handle,pathname:base+suffix,
+      options:{method,headers:{[header]:'caller cannot choose this binding'},...(body?{body:JSON.stringify(body)}:{})},
+      buildHeaders:(_value,headers)=>new Headers(headers)});
+    assert.equal(request.headers.get(header),expected);
+  }
+});
+
 test('content mode never falls back to plain on missing inventory, transition, stale pass or changed identity',async()=>{
   const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture();let rows=[],sent=0,afterInventory=()=>{};

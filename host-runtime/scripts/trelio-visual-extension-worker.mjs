@@ -27,6 +27,9 @@ export function visualDocumentResponsePolicy(status, headers) {
 export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget, documentPolicy) {
   const requestPacing = createPacing();
   const tabBudget = createTabBudget();
+  const secretBrowserOperations = new Set([
+    'secret-browser-observe', 'secret-browser-bind', 'secret-browser-native', 'secret-browser-release',
+  ]);
   let observedFrameId, nextNavigationGeneration = 0;
   const navigationGenerations = new Map();
   function navigationGeneration(tabId) {
@@ -889,9 +892,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     return execution.value;
   }
   async function executeWithDialogs(op, args, navigationStage) {
-    if (['heartbeat', 'close-windows', 'restore-session-auth', 'snapshot-session-auth', 'manual',
-      'secret-browser-bind', 'secret-browser-native', 'secret-browser-release'].includes(op)) {
-      if (op !== 'secret-browser-release' && op.startsWith('secret-browser-') && pendingExecution && !pendingExecution.settled)
+    if (['heartbeat', 'close-windows', 'restore-session-auth', 'snapshot-session-auth', 'manual'].includes(op)
+      || secretBrowserOperations.has(op)) {
+      if (op !== 'secret-browser-release' && secretBrowserOperations.has(op) && pendingExecution && !pendingExecution.settled)
         throw Error('stale_frame');
       return execute(op, args);
     }
@@ -1091,11 +1094,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
-    if (['secret-browser-bind', 'secret-browser-native', 'secret-browser-release'].includes(op)) {
+    if (secretBrowserOperations.has(op)) {
       // This lane is reached only from the signed worker's private Secret
       // admission. None of these operations is in visual MCP's command API.
       if (config.assistantBrowserSecrets !== true
-        || !/^[0-9a-f-]{36}$/u.test(args.handle ?? '')) throw Error('invalid_input');
+        || op !== 'secret-browser-observe' && !/^[0-9a-f-]{36}$/u.test(args.handle ?? '')) throw Error('invalid_input');
       if (op === 'secret-browser-release') {
         if (Object.keys(args).sort().join(',') !== 'allowFollowingClick,handle'
           || typeof args.allowFollowingClick !== 'boolean' || protectedSecretTab?.handle !== args.handle)
@@ -1114,16 +1117,47 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       const main = frameTree?.frame;
       if (!main?.id || !main.loaderId || generation !== navigationGeneration(tab.id)
         || new URL(tab.url).href !== new URL(main.url).href) throw Error('stale_frame');
+      const observed = frame;
+      const currentObservation = () => observed && frame === observed && observedFrameId === observed.frameId
+        && observed.tabId === tab.id && observed.generation === navigationGeneration(tab.id)
+        && Date.now() - observed.at <= 60_000 && !isSecretDocumentMasked(tab.id, main.loaderId)
+        && observed.mainFrameId === main.id && observed.loaderId === main.loaderId;
+      const keys = Object.keys(args).sort().join(',');
+      const observing = op === 'secret-browser-observe';
+      const bindObserved = op === 'secret-browser-bind' && keys === 'expiry,frameId,handle,targetOrigin,targetUrlSha256';
+      if (observing || bindObserved) {
+        if (observing && keys !== 'expectedOrigin,frameId' || protectedSecretTab)
+          throw Error('invalid_input');
+        if (!currentObservation() || observed.frameId !== args.frameId) throw Error('stale_frame');
+        // Navigation policy alone does not choose a credential destination.
+        // Compare the explicitly selected HTTPS origin, then hash the actual
+        // committed URL in the native worker. Its path/query never leave it.
+        const target = new URL(main.url);
+        const originOnly = observing && args.expectedOrigin === null;
+        if (!originOnly && target.origin !== (observing ? args.expectedOrigin : args.targetOrigin) || target.protocol !== 'https:'
+          || target.username || target.password || target.href.length > 2048)
+          return { state: 'refused', reasonCode: 'target_origin_changed' };
+        const digest = originOnly ? null : await crypto.subtle.digest('SHA-256', new TextEncoder().encode(target.href));
+        const after = await selected();
+        if (!currentObservation() || after.id !== tab.id || new URL(after.url).href !== target.href
+          || manual || authenticating || currentDialog() || Date.now() >= config.deadlineAt
+          || documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('stale_frame');
+        if (originOnly) return { state: 'located', targetOrigin: target.origin };
+        const targetUrlSha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+        // The read identifies a document only. On the later binding call the
+        // SAME frame must match the digest pinned by the independently issued
+        // grant. Never reinterpret a new page as the earlier observation.
+        if (observing) return { state: 'observed', targetOrigin: target.origin, targetUrlSha256 };
+        if (targetUrlSha256 !== args.targetUrlSha256) throw Error('stale_frame');
+      }
       if (op === 'secret-browser-bind') {
-        if (protectedSecretTab || Object.keys(args).sort().join(',') !== 'expiry,handle,targetUrl'
+        const url = new URL(main.url).href;
+        if (protectedSecretTab || !bindObserved && (keys !== 'expiry,handle,targetUrl' || args.targetUrl !== url)
           || !Number.isSafeInteger(args.expiry) || args.expiry <= Date.now()
           || args.expiry > Math.min(Date.now() + 38_000, config.deadlineAt)
-          || !frame || observedFrameId !== frame.frameId || frame.tabId !== tab.id || frame.generation !== generation
-          || Date.now() - frame.at > 60_000 || isSecretDocumentMasked(tab.id, main.loaderId)
-          || frame.mainFrameId !== main.id || frame.loaderId !== main.loaderId
-          || args.targetUrl !== new URL(main.url).href) throw Error('stale_frame');
+          || !currentObservation()) throw Error('stale_frame');
         protectedSecretTab = { handle: args.handle, tabId: tab.id, generation, frameId: main.id,
-          loaderId: main.loaderId, url: args.targetUrl, observation: frame, expiry: args.expiry };
+          loaderId: main.loaderId, url, observation: observed, expiry: args.expiry };
         return { state: 'bound' };
       }
       const binding = protectedSecretTab;

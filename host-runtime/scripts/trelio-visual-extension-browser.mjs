@@ -20,6 +20,14 @@ import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartu
 import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
 import { acquireBrowserMailLock } from './trelio-browser-session.mjs';
 
+// The native grant can carry one digest for the original visual document.
+// A second observation at the same URL gets a different frame ID. Include
+// the session so the binding also dies with this instance of the browser.
+const secretBrowserObservationSha256 = (sessionId, frameId, { targetOrigin, targetUrlSha256 }) =>
+  crypto.createHash('sha256').update(JSON.stringify([
+    'trelio-managed-secret-document/v1', sessionId, frameId, targetOrigin, targetUrlSha256,
+  ])).digest('hex');
+
 /** Reduce a lifecycle failure BEFORE invoking any fixture callback. Some
  * in-process fixtures serialize that callback directly; forwarding a native
  * Error would leak its enumerable path/syscall fields even if the detached
@@ -422,21 +430,55 @@ export class ExtensionVisualBrowser {
       if (!this.#assistantBrowserSecrets || this.#manual || this.#closed || !this.#extensionReady
         || this.#terminal || this.lease.deadlineAt <= Date.now() || !message || typeof message !== 'object')
         return { state: 'refused', reasonCode: 'browser_unavailable' };
-      if (message.operation === 'prepare' && keys === 'context,operation,targetUrl') {
+      if (message.operation === 'observe' && keys === 'expectedOrigin,frameId,operation,sessionId') {
+        // This is the existing host-private control channel, never a visual
+        // command. A stale/foreign window must not expose even an origin/hash.
+        if (reservation || message.sessionId !== this.sessionId
+          || !/^[0-9a-f-]{36}$/u.test(message.frameId ?? '')
+          || message.expectedOrigin !== null && (typeof message.expectedOrigin !== 'string' || message.expectedOrigin.length > 512))
+          return { state: 'refused', reasonCode: 'browser_unavailable' };
+        const result = await this.#send('secret-browser-observe', {
+          frameId: message.frameId, expectedOrigin: message.expectedOrigin,
+        });
+        if (message.expectedOrigin === null && result?.state === 'located'
+          && Object.keys(result).sort().join(',') === 'state,targetOrigin' && typeof result.targetOrigin === 'string') return result;
+        if (result?.state === 'observed' && Object.keys(result).sort().join(',') === 'state,targetOrigin,targetUrlSha256'
+          && result.targetOrigin === message.expectedOrigin && /^[a-f0-9]{64}$/u.test(result.targetUrlSha256 ?? ''))
+          return { ...result, observedFrameSha256: secretBrowserObservationSha256(this.sessionId, message.frameId, result) };
+        return { state: 'refused', reasonCode: result?.reason === 'stale_frame' ? 'target_url_changed'
+          : result?.reasonCode === 'target_origin_changed' ? 'target_origin_changed' : 'browser_unavailable' };
+      }
+      const observedPlan = keys === 'context,observation,operation';
+      if (message.operation === 'prepare' && (keys === 'context,operation,targetUrl' || observedPlan)) {
         if (reservation?.expiry <= Date.now()) await this.#releaseSecretReservation(reservation, false);
         if (this.#secretReservation) return { state: 'refused', reasonCode: 'browser_unavailable' };
+        const observation = message.observation;
+        if (observedPlan && (!observation || Object.keys(observation).sort().join(',') !== 'frameId,sessionId'
+          || observation.sessionId !== this.sessionId || !/^[0-9a-f-]{36}$/u.test(observation.frameId ?? '')))
+          return { state: 'refused', reasonCode: 'browser_unavailable' };
         const binding = browserFillBinding(message.context);
         // Managed fields currently bind the original top document. Frames and
         // preflight activation need a separate document-owned transition proof.
         if (binding.browserSteps.length !== 1 || binding.browserSteps[0].frames?.length
           || binding.browserSteps[0].activationSelector)
           return { state: 'refused', reasonCode: 'field_selector_invalid' };
+        const { observedFrameSha256 } = binding.browserSteps[0];
+        // An observed grant cannot be moved to a fresher observation with
+        // the same URL, nor downgraded to the legacy URL-only binding.
+        if (observedPlan ? observedFrameSha256 !== secretBrowserObservationSha256(this.sessionId, observation.frameId, binding)
+          : observedFrameSha256 !== undefined)
+          return { state: 'refused', reasonCode: 'target_url_changed' };
         const { normalizeSecretBrowserTarget } = await import('./trelio-secret-browser.mjs');
-        const targetUrl = normalizeSecretBrowserTarget(message.targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+        // An observed plan supplies no URL. The native grant still binds the
+        // exact origin/hash and the worker rechecks this specific frame.
+        const target = observedPlan ? { frameId: observation.frameId, targetOrigin: binding.targetOrigin,
+          targetUrlSha256: binding.targetUrlSha256 }
+          : { targetUrl: normalizeSecretBrowserTarget(message.targetUrl, binding.targetOrigin, binding.targetUrlSha256) };
         const handle = crypto.randomUUID();
         const expiry = Math.min(Date.now() + 38_000, this.lease.deadlineAt);
-        const bound = await this.#send('secret-browser-bind', { handle, targetUrl, expiry });
-        if (bound?.state !== 'bound') return { state: 'refused', reasonCode: 'target_url_changed' };
+        const bound = await this.#send('secret-browser-bind', { handle, ...target, expiry });
+        if (bound?.state !== 'bound') return { state: 'refused', reasonCode: bound?.reasonCode === 'target_origin_changed'
+          ? 'target_origin_changed' : 'target_url_changed' };
         const current = { handle, expiry, used: false, fieldOnly: !binding.browserSteps[0].submitSelector };
         this.#secretReservation = current;
         try {
@@ -450,7 +492,7 @@ export class ExtensionVisualBrowser {
             return reply.result;
           } };
           current.controller = await prepareSecretBrowserControllerForExistingTab({
-            client, targetId: 'managed-tab', sessionId: 'managed-tab', targetUrl, steps: binding.browserSteps,
+            client, targetId: 'managed-tab', sessionId: 'managed-tab', steps: binding.browserSteps,
             fillTimeoutMs: Math.max(1, expiry - Date.now()),
           });
           return { state: 'ready', handle };

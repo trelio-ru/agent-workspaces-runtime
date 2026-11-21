@@ -969,7 +969,7 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
 export const materializeAssistantBrowser = async ({identity,host,store,result,arguments:args,signal,
   admissionStartedAt,run,now=Date.now,monotonic=()=>performance.now()}) => {
   const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
-  const {assistantVisualBrowserAccountId,runVisualSession}=await import('./trelio-visual-session.mjs');
+  const {assistantVisualBrowserAccountId,observeAssistantManagedVisualTarget,runVisualSession}=await import('./trelio-visual-session.mjs');
   const {DEFAULT_LEASE_MS}=await import('./trelio-browser-session.mjs');
   const pass=validateAssistantActivePass(await host.readActivePass(),identity),grant=result.structuredContent;
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -1022,7 +1022,20 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
   // policy, never a model flag or a fallback from another live presentation.
   const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,presentation:'hidden',
     ...(grant.readOnly?{}:{assistantBrowserSecrets:true}),operation,args:input,env:environment});
-  return visualMcpResult(visual);
+  const viewed=visualMcpResult(visual);
+  if(!grant.readOnly&&visual.state==='ready'&&visual.sessionId&&visual.frameId){
+    // Only the exact managed observation can supply the form origin. Keep
+    // URL path/query and hashes off the model-facing visual result. Missing
+    // or stale optional metadata leaves the original observation intact.
+    const located=await observeAssistantManagedVisualTarget({identity:{...identity,companyId:pass.companyId},
+      runtimeSessionId:grant.runtimeSessionId,directory:host.configurationDirectory,signal,originOnly:true,
+      observation:{sessionId:visual.sessionId,frameId:visual.frameId,siteOrigin:site.origin}}).catch(()=>null);
+    signal?.throwIfAborted();
+    if(located&&JSON.stringify(await host.readActivePass())===JSON.stringify(pass))
+      viewed.structuredContent={browserObservation:{sessionId:visual.sessionId,frameId:visual.frameId,
+        siteOrigin:site.origin,observedOrigin:located.targetOrigin}};
+  }
+  return viewed;
 };
 
 /** Schema discovery before enrollment needs no credential/private worker.
@@ -3215,8 +3228,18 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
     || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
     || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
     || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
-  if(action.operation==='secret_browser_fill' && (!action.parameters
-    || Object.keys(action.parameters).sort().join(',')!=='grantId,targetUrl'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  let managedBrowserFill=false;
+  if(action.operation==='secret_browser_fill'){
+    const keys=Object.keys(action.parameters??{}).sort().join(',');
+    managedBrowserFill=keys==='grantId,observation,observedFrameSha256';
+    if(!managedBrowserFill&&keys!=='grantId,targetUrl')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    if(managedBrowserFill){
+      if(!/^[0-9a-f]{64}$/u.test(action.parameters.observedFrameSha256??'')
+        ||Object.keys(action.runIdentity??{}).sort().join(',')!=='runId,workspaceId')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+      const {normalizeAssistantManagedVisualObservation}=await import('./trelio-visual-session.mjs');
+      normalizeAssistantManagedVisualObservation(action.parameters.observation);
+    }
+  }
   if(action.operation==='secret_skill_run' && (!action.parameters
     || Object.keys(action.parameters).sort().join(',')!=='companySlug,environmentVariable,fieldKey,grantId,skill'
     || typeof action.parameters.companySlug!=='string' || !/^[a-z0-9][a-z0-9_-]{0,159}$/u.test(action.parameters.companySlug)
@@ -3247,7 +3270,11 @@ export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https:
     return {...snapshot,runIdentity:action.runIdentity,invocation:null};
   }
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
-  const invocation=buildTrelioWorkspaceActionInvocation(assistantSkillActionWithoutGuidePart(action));
+  // The verified worker profile carries the observation privately. CLI argv
+  // selects the existing grant action only; it never carries frame/hash data.
+  const invocation=managedBrowserFill
+    ?buildTrelioWorkspaceActionInvocation({...action,parameters:{grantId:action.parameters.grantId}},{managedBrowserFill:true})
+    :buildTrelioWorkspaceActionInvocation(assistantSkillActionWithoutGuidePart(action));
   if(action.operation==='skill_run'){
     if(action.runIdentity!==undefined || action.parameters.companyId!==snapshot.scope.companyId
       || !new RegExp(UUID,'u').test(action.parameters.runtimeSessionId??'')
@@ -3317,7 +3344,20 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     if(Object.keys(metadata).some(key=>!['operation','includeCoverage'].includes(key))
       ||metadata.operation!==undefined&&(typeof metadata.operation!=='string'||!/^[a-z][a-z0-9_]{0,99}$/u.test(metadata.operation))
       ||metadata.includeCoverage!==undefined&&metadata.includeCoverage!==true)fail('ASSISTANT_MCP_INPUT_INVALID');
-    return send(metadata);
+    const result=await send(metadata);
+    if(metadata.operation!=='secret_browser_prepare'||result?.isError)return result;
+    const key='trelio/assistant-observed-browser-preparation';
+    const schema=result?._meta?.[key], contract=result?.structuredContent;
+    if(schema===undefined)return result;
+    // Only the native server's on-demand contract can advertise the optional
+    // route. Older hosts see only the original model-facing schema; an older
+    // backend continues to serve the existing exact-URL route.
+    if(!schema||typeof schema!=='object'||Array.isArray(schema)
+      ||contract?.schemaVersion!==1||contract.operation!==metadata.operation
+      ||contract.executionTool!=='continue_assistant_workspace_action')fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    const {[key]:_observed,...remainingMetadata}=result._meta;
+    return {...result,_meta:remainingMetadata,structuredContent:{...contract,inputSchema:schema,
+      description:'Read the empty form. For a managed browser use browserObservation sessionId, frameId and siteOrigin. Supply targetOrigin only when the observedOrigin matches the independently intended HTTPS login destination. The host derives the exact URL binding. Other browser transports use exact targetUrl. Copy the returned fill action unchanged. A fresh grant never authorizes replay of an uncertain fill.'}};
   }
   if (['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)) {
     // Live native schema was checked before this local composition. All three
@@ -3388,6 +3428,11 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
  */
 export const withAssistantCompanyContentArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,companyContextRead=false}={})=>{
+  const browserOperation=name==='continue_assistant_workspace_action'
+    && ['secret_browser_prepare','secret_browser_fill'].includes(args?.operation);
+  const observedBrowserCall=browserOperation && (args.operation==='secret_browser_prepare'
+    ? Array.isArray(args.parameters?.steps)&&args.parameters.steps.some(step=>step&&Object.hasOwn(step,'observation'))
+    : args.parameters&&Object.hasOwn(args.parameters,'observation'));
   if(!ASSISTANT_MCP_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   if(name==='review_outgoing_message'){
     // A review prompt needs no company content or attestation on the wire.
@@ -3533,35 +3578,58 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       && ['inspect','open','status','heartbeat'].includes(args.operation))return send(args);
   return withProfile(async({readCompanyContentMode,preparePrivateSkillArguments,preparePrivateBrowserArguments,preparePrivateCardArguments})=>{
     if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-    if(await readCompanyContentMode(signal)!=='plain'){
-      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_browser_prepare','secret_browser_fill','secret_create','secret_generate','secret_company_create','secret_input'].includes(args.operation)
-        && (args.schemaVersion!==1||Object.keys(args).some(key=>!['schemaVersion','operation','parameters','runIdentity','taskPass','runtimeSessionProof'].includes(key))
-          ||!['secret_browser_fill','secret_generate','secret_company_create','secret_input'].includes(args.operation)&&args.runIdentity!==undefined))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_browser_prepare','secret_browser_fill','secret_create','secret_generate','secret_company_create','secret_input'].includes(args.operation))privateEnvelope();
+    const encrypted=await readCompanyContentMode(signal)!=='plain';
+    if(browserOperation&&(encrypted||observedBrowserCall)){
+      privateEnvelope();
+      if(typeof preparePrivateBrowserArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      let local;
+      try{local=await preparePrivateBrowserArguments(args,signal,{encrypted});}
+      catch(error){
+        if(!observedBrowserCall||!(error instanceof SecretBrowserFillError)||!isSecretBrowserFillReason(error.reasonCode))throw error;
+        // The browser read ended before native grant preparation or fill
+        // dispatch. This proves only this attempt and supplies no replay grant.
+        return {isError:true,content:[{type:'text',text:'The observed managed form is no longer available for this plan. Inspect the current form and the original attempt outcome before continuing.'}],
+          structuredContent:{code:secretBrowserPreflightFailure,stage:'preflight',reasonCode:error.reasonCode,
+            secretRequested:false,grantConsumedByAttempt:false}};
+      }
+      signal?.throwIfAborted();const result=await send({...args,parameters:local.parameters});
+      if(result?.isError)return result;
+      const preparing=args.operation==='secret_browser_prepare';
+      const value=structuredClone(result.structuredContent);
+      const action=preparing?value?.bridge?.action?.arguments:value?.localAction;
+      const target=action?.parameters;
+      const expectedTarget=local.observation?'grantId,observedFrameSha256,targetOrigin,targetUrlSha256':'grantId,targetOrigin,targetUrlSha256';
+      if(!action||action.schemaVersion!==1||action.operation!=='secret_browser_fill'||!target
+        ||Object.keys(target).sort().join(',')!==expectedTarget
+        ||target.targetOrigin!==local.target.targetOrigin||target.targetUrlSha256!==local.target.targetUrlSha256
+        ||target.observedFrameSha256!==local.target.observedFrameSha256
+        ||preparing&&(target.grantId!==value.grant?.id||value.grant.secretId!==args.parameters.secretId
+          ||action.runIdentity?.runId!==args.parameters.runId||action.runIdentity?.workspaceId!==value.grant.workspaceId)
+        ||!preparing&&(target.grantId!==args.parameters.grantId
+          ||action.runIdentity?.runId!==args.runIdentity.runId||action.runIdentity.workspaceId!==args.runIdentity.workspaceId))
+        throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');
+      if(local.observation){
+        // Only the actual local worker receives the host-derived digest. The
+        // model gets the original value-free observation that it must copy.
+        action.parameters={grantId:target.grantId,observation:local.observation,
+          ...(preparing?{}:{observedFrameSha256:target.observedFrameSha256})};
+        if(preparing){
+          const {browserSteps:_privateSteps,...publicGrant}=value.grant;
+          value.grant=publicGrant;
+        }
+      }else action.parameters={grantId:target.grantId,targetUrl:local.targetUrl};
+      return {...result,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+    }
+    if(encrypted){
+      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_create','secret_generate','secret_company_create','secret_input'].includes(args.operation)){
+        privateEnvelope();
+        if(['secret_skill_prepare','secret_create'].includes(args.operation)&&args.runIdentity!==undefined)
+          throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      }
       if(name==='continue_assistant_workspace_action'&&['secret_create','secret_generate','secret_company_create','secret_input'].includes(args.operation)){
         if(typeof preparePrivateCardArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
         const parameters=await preparePrivateCardArguments(args,signal);signal?.throwIfAborted();
         return send({...args,parameters});
-      }
-      if(name==='continue_assistant_workspace_action'&&['secret_browser_prepare','secret_browser_fill'].includes(args.operation)){
-        if(typeof preparePrivateBrowserArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-        const local=await preparePrivateBrowserArguments(args,signal);
-        signal?.throwIfAborted();const result=await send({...args,parameters:local.parameters});
-        if(result?.isError)return result;
-        const value=structuredClone(result.structuredContent),action=args.operation==='secret_browser_prepare'
-          ?value?.bridge?.action?.arguments:value?.localAction;
-        const target=action?.parameters;
-        if(!action||action.schemaVersion!==1||action.operation!=='secret_browser_fill'||!target
-          ||Object.keys(target).sort().join(',')!=='grantId,targetOrigin,targetUrlSha256'
-          ||target.targetOrigin!==local.target.targetOrigin||target.targetUrlSha256!==local.target.targetUrlSha256
-          ||args.operation==='secret_browser_prepare'&&(target.grantId!==value.grant?.id||value.grant.secretId!==args.parameters.secretId
-            ||action.runIdentity?.runId!==args.parameters.runId||action.runIdentity?.workspaceId!==value.grant.workspaceId)
-          ||args.operation==='secret_browser_fill'&&(target.grantId!==args.parameters.grantId
-            ||JSON.stringify(action.runIdentity)!==JSON.stringify(args.runIdentity)))throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');
-        action.parameters={grantId:target.grantId,targetUrl:local.targetUrl};
-        // Original full URL is restored ONLY in the private local result. The
-        // native grant/browser will match its exact SHA again before filling.
-        return {...result,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
       }
       if(name==='continue_assistant_workspace_action'&&args.operation==='secret_skill_prepare'){
         if(typeof preparePrivateSkillArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -4417,7 +4485,10 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     })();
     let nativeReason,nativeHealthCause,nativeCommandPolicyCause,nativeBrowserPreflight,taskSkillRead,taskSkillArtifact,taskDraftCheckpoint;
     try {
-      const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,assistantSkillActionWithoutGuidePart(action),{
+      const managedBrowserFill=action.operation==='secret_browser_fill'&&action.parameters.observation!==undefined;
+      const dispatched=managedBrowserFill?{...action,parameters:{grantId:action.parameters.grantId}}:assistantSkillActionWithoutGuidePart(action);
+      const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,dispatched,{
+      ...(managedBrowserFill?{managedBrowserFill:true}:{}),
       resolveRunRootDirectory:async()=>root,
       selectOpenRecovery:opening&&!interruptedFinish?async error=>{
         const d=error.details,base=assistantWorkspaceRoot(config,plan,expectedOrigin);
@@ -4577,7 +4648,9 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     ...(plan.localAction.operation==='skill_run'?{taskSkillExecution:true}:{}),
     workspaceRun:['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation)?plan.runIdentity:null,
     secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
-    ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null,
+    ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity,
+      ...(plan.localAction.parameters.observation?{observation:plan.localAction.parameters.observation,
+        observedFrameSha256:plan.localAction.parameters.observedFrameSha256}:{})}:null,
     secretSkill:plan.localAction.operation==='secret_skill_run'
       ? {...plan.localAction.parameters,...plan.runIdentity}:null,
     secretGeneration:['secret_generate','secret_company_create','secret_input'].includes(plan.localAction.operation)?{...plan.localAction.parameters,workspaceId:plan.runIdentity.workspaceId}:null});

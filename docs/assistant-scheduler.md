@@ -4059,7 +4059,10 @@ operations under the observed task pass:
 - `secret_browser_prepare`, `parameters={secretId,runId,steps}`: the ordinary
   native browser-step validators and active own task Run. Read the empty form
   first. Copy the returned bridge action unchanged; preparation reads no value
-  into MCP and never chooses a human flag or arbitrary executable.
+  into MCP and never chooses a human flag or arbitrary executable. When the
+  native on-demand contract advertises managed observations, one top-level
+  step can select the exact `sessionId`, `frameId`, launch `siteOrigin` and
+  independently intended HTTPS `targetOrigin` under `observation`.
 - `secret_create`, `parameters={clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,metadata}`:
   apply only the exact persisted `create_private_secret` owner classification
   requested through `request_assistant_action`. Metadata uses native shared
@@ -4069,8 +4072,9 @@ operations under the observed task pass:
   an existing card cannot be adopted. This is metadata, not a local command or
   permission to create a website account, generate/store values or import a
   company credential. Copy all original fields and request ID unchanged.
-- Returned `secret_browser_fill`: fixed grantId/targetUrl and Run identity. The
-  SAME isolated Workspace worker invokes the existing browser-fill command.
+- Returned `secret_browser_fill`: fixed grantId, exact URL or original
+  observation, and Run identity. The SAME isolated Workspace worker invokes
+  the existing browser-fill command. Observed targets stay out of CLI argv.
 - Native `get_agent_skill` advertises private authentication templates only from
   the SAME signed `trelio-secret-setup.json` v2 with `purpose=authenticate`.
   `secret_skill_prepare` returns exact `secret_skill_run` with original native
@@ -4141,7 +4145,46 @@ same hidden browser, exact URL/hash, native frame/loader and isolated field
 controller. One top-document step with exact selectors or a unique native
 accessible name is supported. An incompatible worker, stale frame, iframe or
 activation request fails before consume. The private endpoint has no visual
-command alias. It returns only a short-lived handle or a closed refusal.
+command alias. Fill preparation returns a short-lived handle or a closed refusal.
+
+The managed worker can also obtain a value-free origin/hash from the committed
+top document behind a specific session and observation. The caller pins the
+intended HTTPS form origin independently of the browser's launch-site origin.
+The renderer's URL path and query stay in the worker. The worker checks the
+same observed frame, native loader, navigation generation and current tab
+again after hashing. An old observation fails after another navigation to the
+same URL. A plan bound to an observed document retains the session/frame digest
+in the exact step across preflight and consume. A replacement document or a
+URL-only fallback cannot use that plan. Local evidence grants no checkout and
+leaves native Run and one-use grant checks mandatory for delivery.
+
+The managed task's visual result can report only the origin of that exact
+ready observation. This reports where the browser landed. The selected
+credential destination still needs to match the independently intended login
+origin. On-demand metadata negotiates the host-only normalized shape without
+changing the older public schema. Preparation and native fill compare the
+same observed digest in plain and encrypted companies. Encrypted companies
+retain the same managed signature and current recipient checks. Context and
+consume require the original digest through the verified invocation profile;
+the model sees just the original observation and the one-use continuation.
+An own personal keyring card retains its native holder in both the protected
+context and consume result. Decode that keyring value only inside the same
+assistant worker. The Workspace's E2EE mode still requires the encrypted
+decoder for company cards. Mode or holder changes refuse before browser input.
+
+To exercise both working source trees together on macOS, install their locked
+dependencies (including the runtime visual-browser dependencies) and seed a
+private test cache with the Chromium build pinned by the runtime lockfile.
+From the backend checkout, run the existing Workspace system fixture with
+`TRELIO_TEST_ASSISTANT_RUNTIME_ROOT` pointing to the runtime checkout,
+`TRELIO_TEST_ASSISTANT_OBSERVED_BROWSER=1` and
+`TRELIO_TEST_ASSISTANT_NATIVE_BROWSER_HOME="$HOME"`. Use the same pinned
+Telegram fixture and Python as the standard question-system runner, then run
+`npm run test:digital-assistants:integration -- --workspace-system`. The
+browser uses a disposable profile and an HTTPS form on loopback. The test
+requires one form submission, a settled native grant receipt, accepted
+Workspace read-back and the next daily schedule. It needs no published
+package, production task or account.
 
 The worker masks the document before any setter can receive values. A lost
 response and same-document navigation retain that mask for text, image and

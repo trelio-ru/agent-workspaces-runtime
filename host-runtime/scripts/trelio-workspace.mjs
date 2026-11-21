@@ -20283,8 +20283,8 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
     throw new Error("Поддерживается команда `trelio-workspace secret browser-fill --grant UUID --target HTTPS_URL`.");
   }
   const grantId = requireUuid(options.grant, "grant");
-  const targetUrl = String(options.target || "");
-  if (!targetUrl || Array.isArray(options.target)) {
+  const targetUrl = options.target === undefined ? undefined : String(options.target);
+  if (Array.isArray(options.target) || targetUrl === "") {
     throw new Error("Для browser-fill требуется один exact --target HTTPS_URL.");
   }
   if (!metadata.runId) {
@@ -20295,6 +20295,11 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
   if(profile && typeof profile.resolveSecretBrowserStorage!=='function')denyWorkspaceExecutionProfile();
   const browserStorage=profile ? await profile.resolveSecretBrowserStorage({configDirectory:CONFIG_DIRECTORY,grantId,runId:metadata.runId})
     : {directory:path.join(SECRET_BROWSER_DIRECTORY,'native'),profileDirectory:SECRET_BROWSER_PROFILE_DIRECTORY};
+  // An omitted URL is valid only in the already-verified managed task
+  // profile. Old callers and the ordinary CLI still need their exact URL.
+  if (browserStorage.observed ? targetUrl !== undefined || options.browser !== undefined : targetUrl === undefined) {
+    throw new Error("Browser-fill target does not match the protected browser profile.");
+  }
   const browserMode = normalizeSecretBrowserMode(options.browser);
   onPreflightPhase("grant_context");
   let browserContext;
@@ -20325,13 +20330,16 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
     ensurePrivateDirectory,
     onPreflightPhase,
   });
-  return { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId: metadata.runId };
+  // The native grant context attests an own personal card independently of
+  // Workspace encryption. Company cards keep the fail-closed E2EE decoder.
+  const ownKeyringCard = profile?.kind === 'digital_assistant' && browserContext.holder === 'assistant';
+  return { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId: metadata.runId, ownKeyringCard };
 };
 
 const executeSecretBrowserFill = async (options, positional) => {
   // The inner deadline is exclusively value-free. Await its successful
   // completion before there is any path to atomically spend the grant.
-  const { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId } =
+  const { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId, ownKeyringCard } =
     await withSecretBrowserPreflight((onPreflightPhase) => withRun((context) =>
       prepareSecretBrowserFillAction(options, positional, onPreflightPhase, context)));
   try {
@@ -20364,7 +20372,10 @@ const executeSecretBrowserFill = async (options, positional) => {
     let outcomeReported = false;
     try {
       assertBrowserFillBindingUnchanged(browserContext, payload);
-      const secretValues = await resolveCheckoutSecretValues(payload, companyEncryption);
+      if (ownKeyringCard && payload.storageMode !== 'trelio') {
+        throw new SecretBrowserFillError('The personal browser grant changed its storage mode.');
+      }
+      const secretValues = await resolveCheckoutSecretValues(payload, ownKeyringCard ? null : companyEncryption);
       // The prepared session already owns the checked URL, fields and
       // profile. Delivery supplies only the values from the one-use grant.
       const result = await browserSession.fill({ secretValues });

@@ -44,6 +44,7 @@ export const isAssistantBrowserPlanInputError=error=>error instanceof AssistantB
  * or model-owned normalized/signature form is introduced. Full URLs stay local. */
 export const normalizeAssistantPrivateBrowserArguments=async args=>{
   const {normalizeSecretBrowserGrantTarget,normalizeSecretBrowserFieldSelector}=await import('./trelio-secret-browser.mjs');
+  const {normalizeAssistantManagedVisualObservation}=await import('./trelio-visual-session.mjs');
   const invalid=()=>{throw new AssistantBrowserPlanInputError();};
   try{
     if(!object(args)||args.schemaVersion!==1
@@ -51,16 +52,24 @@ export const normalizeAssistantPrivateBrowserArguments=async args=>{
       ||args.operation==='secret_browser_prepare'&&Object.hasOwn(args,'runIdentity'))throw new AssistantBrowserPlanInputError();
     const parameters=args.parameters;
     if(!object(parameters)||Object.hasOwn(parameters,'encryptedPlan'))invalid();
-    let selected,first;
+    let selected,first,observation;
     if(args.operation==='secret_browser_prepare'){
       if(Object.keys(parameters).sort().join(',')!=='runId,secretId,steps'||!UUID.test(parameters.runId??'')||!UUID.test(parameters.secretId??'')
         ||!Array.isArray(parameters.steps)||parameters.steps.length<1||parameters.steps.length>10)invalid();
       const seen=new Set();
       const steps=parameters.steps.map((step,index)=>{
-        if(!object(step)||Object.keys(step).some(key=>!['targetUrl','frames','fields','activationSelector','submitSelector'].includes(key))
+        if(!object(step)||Object.keys(step).some(key=>!['targetUrl','observation','frames','fields','activationSelector','submitSelector'].includes(key))
           ||!Array.isArray(step.fields)||!step.fields.length||step.fields.length>50
           ||index<parameters.steps.length-1&&step.submitSelector===undefined)invalid();
-        const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(step.targetUrl);first??=targetUrl;
+        let target={};
+        if(Object.hasOwn(step,'observation')){
+          if(parameters.steps.length!==1||['targetUrl','frames','activationSelector'].some(key=>Object.hasOwn(step,key)))invalid();
+          observation=normalizeAssistantManagedVisualObservation(step.observation);
+        }else{
+          const {targetUrl,...binding}=normalizeSecretBrowserGrantTarget(step.targetUrl);
+          first??=targetUrl;
+          target=binding;
+        }
         const fields=step.fields.map(field=>{
           if(!object(field)||!['accessibleName,fieldKey','fieldKey,selector'].includes(Object.keys(field).sort().join(','))
             ||!/^[a-z][a-z0-9_]{0,63}$/u.test(field.fieldKey??'')||seen.has(field.fieldKey))invalid();
@@ -82,13 +91,20 @@ export const normalizeAssistantPrivateBrowserArguments=async args=>{
       });
       selected={schemaVersion:1,operation:args.operation,parameters:{secretId:parameters.secretId,runId:parameters.runId,steps}};
     }else if(args.operation==='secret_browser_fill'){
-      if(Object.keys(parameters).sort().join(',')!=='grantId,targetUrl'||!UUID.test(parameters.grantId??'')
+      const keys=Object.keys(parameters).sort().join(',');
+      if(!['grantId,targetUrl','grantId,observation'].includes(keys)||!UUID.test(parameters.grantId??'')
         ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
         ||Object.values(args.runIdentity).some(value=>!UUID.test(value??'')))invalid();
-      const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(parameters.targetUrl);first=targetUrl;
+      let target={};
+      if(keys==='grantId,observation')observation=normalizeAssistantManagedVisualObservation(parameters.observation);
+      else{
+        const {targetUrl,...binding}=normalizeSecretBrowserGrantTarget(parameters.targetUrl);
+        first=targetUrl;
+        target=binding;
+      }
       selected={schemaVersion:1,operation:args.operation,runIdentity:structuredClone(args.runIdentity),parameters:{grantId:parameters.grantId,...target}};
     }else invalid();
-    return {selected,first};
+    return {selected,first,observation};
   }catch{throw new AssistantBrowserPlanInputError();}
 };
 
@@ -1347,10 +1363,18 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   // A native plan narrows this invocation to ONE prepared private grant.
   // Structural IDs alone do not authorize it: every HTTP request still repeats
   // the native grant/holder/pass/device/Run checks before value delivery.
-  if(secretBrowserFill!==null && (!object(secretBrowserFill)
-    || Object.keys(secretBrowserFill).sort().join(',')!=='grantId,runId,workspaceId'
-    || Object.values(secretBrowserFill).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-  const privateFill=secretBrowserFill===null?null:Object.freeze({...secretBrowserFill});
+  let privateFill=null;
+  if(secretBrowserFill!==null){
+    if(!object(secretBrowserFill)||!['grantId,runId,workspaceId','grantId,observation,observedFrameSha256,runId,workspaceId']
+      .includes(Object.keys(secretBrowserFill).sort().join(','))
+      ||['grantId','runId','workspaceId'].some(key=>!uuid.test(secretBrowserFill[key]??'')))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    const {observation,observedFrameSha256,...ids}=secretBrowserFill;
+    if(Object.hasOwn(secretBrowserFill,'observation')){
+      if(typeof observedFrameSha256!=='string'||!/^[a-f0-9]{64}$/u.test(observedFrameSha256))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      const {normalizeAssistantManagedVisualObservation}=await import('./trelio-visual-session.mjs');
+      privateFill=Object.freeze({...ids,observedFrameSha256,observation:Object.freeze(normalizeAssistantManagedVisualObservation(observation))});
+    }else privateFill=Object.freeze(ids);
+  }
   const companyGeneration=secretGeneration?.holder==='company';
   const privateInput=secretGeneration?.holder==='assistant';
   const newCreation=companyGeneration||privateInput;
@@ -1426,6 +1450,16 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         :['passId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key]))
       || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     if(accountSetup)setupLeaseExpiresAt=setupLeaseExpiresAt?Math.min(setupLeaseExpiresAt,Date.parse(live.leaseExpiresAt)):Date.parse(live.leaseExpiresAt);
+  };
+  // The same protected slot identifies the browser owner during both the
+  // value-free observation and the actual preflight. A replaced or ended
+  // registration cannot move a grant to an unrelated execution.
+  const readBrowserRuntimeSession=async()=>{
+    const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+    if(!record || record.pending || record.ended || record.threadId!==pass.threadId
+      || !uuid.test(record.state?.runtimeSessionId??'') || !(Date.parse(record.state.expiresAt)>now()))
+      fail('ASSISTANT_RUNTIME_SESSION_INVALID');
+    return record.state.runtimeSessionId;
   };
   await assertIdentity();
   // This opaque handle cannot reveal a credential through native metadata or
@@ -1634,7 +1668,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await assertLivePass(signal);
       return {parameters:selected,...inspected};
     },
-    async preparePrivateBrowserArguments(args,signal){
+    async preparePrivateBrowserArguments(args,signal,{encrypted=true}={}){
       const crypto=await import('./trelio-company-encryption.mjs');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
       const current=()=>assertLivePass(signal);
@@ -1647,15 +1681,30 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         if(args.operation==='secret_browser_fill'&&isAssistantBrowserPlanInputError(error))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
         throw error;
       }
-      const {selected,first}=normalized;
+      const {selected,first,observation}=normalized;
       await current();
+      if(observation){
+        if(ownerReadOrigin)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        const runtimeSessionId=await readBrowserRuntimeSession();
+        const {observeAssistantManagedVisualTarget}=await import('./trelio-visual-session.mjs');
+        const target=await observeAssistantManagedVisualTarget({identity:{...identity,companyId:pass.companyId},
+          runtimeSessionId,observation,signal,directory:host.configurationDirectory});
+        await current();
+        if(await readBrowserRuntimeSession()!==runtimeSessionId)fail('ASSISTANT_RUNTIME_SESSION_INVALID');
+        Object.assign(selected.parameters.steps?.[0]??selected.parameters,target);
+      }
+      const target=selected.parameters.steps?.[0]??selected.parameters;
+      if(!encrypted){
+        if(!observation)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        return {parameters:selected.parameters,observation,target};
+      }
       const device=await resolveAssistantCompanyEncryptionDevice({identity,companyId:pass.companyId,store,lockDirectory,
         assertCurrent:current,allowCreate:false,lock});
       const signature=await crypto.signCompanyEncryptionRecord(device.privateKeys.signingPrivateKey,{protocol:'assistant-managed-content/v1',
         phase:'publication',companyId:pass.companyId,target:{kind:'task',pass:locator},nativeTool:'continue_assistant_workspace_action',arguments:selected});
       await current();
       return {parameters:{...selected.parameters,encryptedPlan:{schemaVersion:1,fingerprint:device.fingerprint,signature}},
-        targetUrl:first,target:selected.parameters.steps?.[0]??selected.parameters};
+        ...(observation?{observation}:{targetUrl:first}),target};
     },
     async preparePrivateCardArguments(args,signal){
       const p=args.parameters,current=()=>assertLivePass(signal);
@@ -2008,30 +2057,23 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       const root=path.join(assistantTaskStorageDirectory(configDirectory,{...identity,companyId:pass.companyId,taskId:pass.taskId}),'secret-browser');
       const prepareManaged=async ({context,targetUrl})=>{
         await assertLivePass();
-        const runtimeSlot={origin:identity.origin,kind:'runtime',id:pass.passId};
-        const readRuntime=async()=>{
-          const record=await store.get(runtimeSlot);
-          if(!record || record.pending || record.ended || record.threadId!==pass.threadId
-            || !uuid.test(record.state?.runtimeSessionId??'') || !(Date.parse(record.state.expiresAt)>now()))
-            fail('ASSISTANT_RUNTIME_SESSION_INVALID');
-          return record.state.runtimeSessionId;
-        };
-        const runtimeSessionId=await readRuntime();
+        const runtimeSessionId=await readBrowserRuntimeSession();
         const {prepareAssistantManagedVisualSecret}=await import('./trelio-visual-session.mjs');
         const prepared=await prepareAssistantManagedVisualSecret({
-          identity:{...identity,companyId:pass.companyId},runtimeSessionId,context,targetUrl,
+          identity:{...identity,companyId:pass.companyId},runtimeSessionId,context,targetUrl,observation:privateFill.observation,
           signal:invocationSignal,directory:configDirectory,
         });
         try {
           await assertLivePass();
-          if(await readRuntime()!==runtimeSessionId)fail('ASSISTANT_RUNTIME_SESSION_INVALID');
+          if(await readBrowserRuntimeSession()!==runtimeSessionId)fail('ASSISTANT_RUNTIME_SESSION_INVALID');
           return prepared;
         } catch(error) {
           await prepared?.close();
           throw error;
         }
       };
-      return {directory:path.join(root,'native'),profileDirectory:path.join(root,'profile'),prepareManaged};
+      return {directory:path.join(root,'native'),profileDirectory:path.join(root,'profile'),prepareManaged,
+        observed:privateFill.observation!==undefined};
     },
     async resolveInspectionDirectory(configDirectory){
       configDirectory=host.configurationDirectory??configDirectory;
@@ -2352,6 +2394,10 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       const headers=buildHeaders(null,options.headers??{});
       headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
       headers.delete('x-trelio-assistant-secret-checkout');
+      const observedFrameHeader='x-trelio-agent-secret-observed-frame-sha256';
+      headers.delete(observedFrameHeader);
+      if(privateFill?.observedFrameSha256&&['assistant_secret_browser_context','assistant_secret_browser_consume'].includes(route.proofTool))
+        headers.set(observedFrameHeader,privateFill.observedFrameSha256);
       headers.delete(ASSISTANT_WORKSPACE_RECIPIENT_HEADER);
       if(attachmentEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,attachmentEncryption.runtime.device.id);
       if(companyReadEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,companyReadEncryption.runtime.device.id);

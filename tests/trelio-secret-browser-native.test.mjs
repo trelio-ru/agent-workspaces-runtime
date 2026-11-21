@@ -966,6 +966,24 @@ test("consume must preserve every binding including application, submit control,
     assert.throws(() => assertBrowserFillBindingUnchanged(context, candidate));
   }
 });
+test("a grant for an observed document keeps its frame binding and never opens a fallback browser", async () => {
+  const marked = structuredClone(context);
+  marked.browserSteps[0].observedFrameSha256 = "a".repeat(64);
+  const changed = structuredClone(marked);
+  changed.browserSteps[0].observedFrameSha256 = "b".repeat(64);
+  assert.throws(() => assertBrowserFillBindingUnchanged(marked, changed));
+  assert.throws(() => assertBrowserFillBindingUnchanged(marked, context));
+  assert.throws(() => assertBrowserFillBindingUnchanged(marked, { ...marked, holder: 'assistant' }));
+  assert.throws(() => assertBrowserFillBindingUnchanged({ ...marked, holder: 'assistant' }, marked));
+  assert.throws(() => browserFillBinding({ ...marked, holder: 'company' }));
+  const f = fixture();
+  for (const mode of ["auto", "embedded", "chrome"]) {
+    await assert.rejects(prepareSecretBrowserSession({ ...f.args, context: marked, mode, prepareManaged: async () => null }),
+      { reasonCode: "browser_unavailable" });
+  }
+  assert.equal(f.builds, 0);
+  assert.equal(f.chromeCalls, 0);
+});
 test("different URL, duplicate target ids and missing fields fail before any native process", async () => {
   const f = fixture();
   await assert.rejects(prepareSecretBrowserSession({ ...f.args, targetUrl: targetUrl + "changed" }));

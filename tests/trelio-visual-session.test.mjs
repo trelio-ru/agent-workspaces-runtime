@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import { runVisualSession, withVisualOwnerFileLock, readVisualOwner,
   publishVisualWorkerOwner, visualSessionBinding, createVisualIdleSupervisor,
   VISUAL_IDLE_TIMEOUT_MS, closeVisualExecutionSessions, assistantVisualBrowserAccountId,
-  createVisualControlServer, prepareAssistantManagedVisualSecret } from '../host-runtime/scripts/trelio-visual-session.mjs';
+  createVisualControlServer, observeAssistantManagedVisualTarget, prepareAssistantManagedVisualSecret } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { browserExecutionDirectory } from '../host-runtime/scripts/trelio-browser-session.mjs';
 import { visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
@@ -24,10 +24,26 @@ test('protected browser selection keeps the original assistant, device, company 
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-secret-owner-')));
   const identity = { origin: 'https://trelio.test', assistantId: randomUUID(), deviceId: randomUUID(), companyId: randomUUID() };
   const runtimeSessionId = randomUUID(), memberId = randomUUID(), handle = randomUUID(), token = 'a'.repeat(64);
+  const sessionId = randomUUID(), frameId = randomUUID();
+  const redirectOrigin = 'https://login.form.test';
+  const redirectHash = createHash('sha256').update(redirectOrigin + '/account?fixture=1').digest('hex');
+  const observedFrameSha256 = 'e'.repeat(64);
   const operations = [];
   const control = createVisualControlServer({ token, dispatch: async () => assert.fail('public dispatch'), secretDispatch(message) {
     operations.push(message.operation);
-    if (message.operation === 'prepare') return { state: 'ready', handle };
+    if (message.operation === 'observe') {
+      assert.deepEqual(message, { operation: 'observe', sessionId, frameId, expectedOrigin: redirectOrigin });
+      return { state: 'observed', targetOrigin: redirectOrigin, targetUrlSha256: redirectHash, observedFrameSha256 };
+    }
+    if (message.operation === 'prepare') {
+      if (message.observation) {
+        assert.deepEqual(message.observation, { sessionId, frameId });
+        assert.equal(Object.hasOwn(message, 'targetUrl'), false);
+        assert.equal(message.context.targetUrlSha256, redirectHash);
+        assert.equal(message.context.browserSteps[0].observedFrameSha256, observedFrameSha256);
+      }
+      return { state: 'ready', handle };
+    }
     assert.equal(message.handle, handle);
     return message.operation === 'fill' ? { outcome: 'succeeded' } : { state: 'released' };
   } });
@@ -74,6 +90,22 @@ test('protected browser selection keeps the original assistant, device, company 
   await installOwner('https://other.form.test');
   await assert.rejects(prepareAssistantManagedVisualSecret(input), { reasonCode: 'browser_unavailable' });
   assert.deepEqual(operations, ['prepare', 'fill', 'release'], 'ambiguous ownership cannot try several browsers');
+
+  const observation = { sessionId, frameId, siteOrigin: targetOrigin, targetOrigin: redirectOrigin };
+  const lookup = { identity, runtimeSessionId, observation, directory };
+  await assert.rejects(observeAssistantManagedVisualTarget({ ...lookup, runtimeSessionId: randomUUID() }),
+    { reasonCode: 'browser_unavailable' });
+  await assert.rejects(observeAssistantManagedVisualTarget({ ...lookup, observation: { ...observation, targetOrigin: redirectOrigin + '/path' } }),
+    /VISUAL_IDENTITY_INVALID/u);
+  const target = await observeAssistantManagedVisualTarget(lookup);
+  assert.deepEqual(target, { targetOrigin: redirectOrigin, targetUrlSha256: redirectHash, observedFrameSha256 });
+  await assert.rejects(prepareAssistantManagedVisualSecret({ ...lookup, context: input.context }),
+    { reasonCode: 'target_origin_changed' });
+  const context = { ...input.context, targetOrigin: target.targetOrigin, targetUrlSha256: target.targetUrlSha256,
+    browserSteps: [{ ...input.context.browserSteps[0], ...target }] };
+  const bound = await prepareAssistantManagedVisualSecret({ ...lookup, context });
+  await bound.close();
+  assert.deepEqual(operations, ['prepare', 'fill', 'release', 'observe', 'prepare', 'release']);
 });
 
 test('presentation validation precedes identity/storage and an old worker cannot silently become hidden', async t => {
