@@ -533,7 +533,7 @@ test('accepted continuation changes the recurring cadence and a completed goal s
   plan=f.coordinator.status()[0];assert.equal(plan.state,'active');assert.equal(plan.threadId,thread);assert.equal(f.counts().provisions,1);
 });
 
-test('crash after SQLite completion but before protected journal release recovers without another launch', async t=>{
+test('crash after SQLite completion releases only the same backend receipt without native history', async t=>{
   const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
   const release=f.options.passHost.releasePass;let crash=true;
   f.options.passHost.releasePass=async receipt=>{if(crash){crash=false;throw new Error('synthetic journal release lost');}return release(receipt);};
@@ -542,8 +542,24 @@ test('crash after SQLite completion but before protected journal release recover
   assert.equal(f.database.prepare('select processed from assistant_inbox_events').get().processed,1);
   assert.ok(f.activePass());assert.equal(f.counts().runs,1);
   await f.coordinator.close();
+  const readOutcome=f.options.client.readBusinessOutcome;
+  let replaceReceipt=true;
+  f.options.client.readBusinessOutcome=async input=>{
+    const outcome=await readOutcome(input);
+    return replaceReceipt?{...outcome,receiptId:randomUUID()}:outcome;
+  };
+  f.options.native.readDelivery=async()=>assert.fail('the durable completion already contains the native receipt');
   const next=createAssistantCoordinator(f.options);
-  assert.equal(await next.workOnce(),null);assert.equal(f.activePass(),null);assert.equal(f.counts().runs,1);await next.close();
+  try{
+    const saved=f.activePass(),schedule=next.status();
+    await assert.rejects(next.workOnce(),{code:'ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED'});
+    assert.deepEqual(f.activePass(),saved);
+    replaceReceipt=false;
+    assert.equal(await next.workOnce(),null);
+    assert.equal(f.activePass(),null);
+    assert.equal(f.counts().runs,1);
+    assert.deepEqual(next.status(),schedule,'release does not apply the completed delivery twice');
+  }finally{await next.close();}
 });
 
 test('lost server pass-claim response repeats only that exact claim before the durable native-start boundary', async t=>{
@@ -634,7 +650,7 @@ test('a lost native response is reconciled in the same chat after host restart, 
   assert.equal(f.database.prepare("SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1").get().n,1);
 });
 
-test('two overdue cycles settle after a lost response and run once each on their original cadence',async t=>{
+for(const failure of ['backend response','local key release'])test(`two overdue cycles recover after lost ${failure} on their original cadence`,async t=>{
   const f=fixture(t);
   const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};
   f.options.client.tasks=async()=>({bindings:[f.authority,second],nextCursor:null});
@@ -657,6 +673,8 @@ test('two overdue cycles settle after a lost response and run once each on their
   // first worker. The receiver independently deduplicates each original pass.
   const attempts=[],accepted=new Map();
   const backendOutcome=f.options.client.readBusinessOutcome;
+  const release=f.options.passHost.releasePass,readDelivery=f.options.native.readDelivery;
+  let releaseInterrupted=false;
   f.options.client.readBusinessOutcome=async input=>{
     assert.equal(accepted.get(input.deliveryId)?.taskId,input.taskId);
     return backendOutcome(input);
@@ -671,9 +689,25 @@ test('two overdue cycles settle after a lost response and run once each on their
     accepted.set(input.deliveryId,{taskId:plan.taskId});
     const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
     f.deliveries.set(input.deliveryId,result);
-    if(attempts.length===1)throw Error('response lost after acceptance');
+    if(attempts.length===1&&failure==='backend response')throw Error('response lost after acceptance');
     return result;
   };
+  if(failure==='local key release'){
+    f.options.passHost.releasePass=async outcome=>{
+      if(!releaseInterrupted){
+        releaseInterrupted=true;
+        throw Error('process lost after local commit');
+      }
+      return release(outcome);
+    };
+    f.options.native.readDelivery=async(threadId,deliveryId,options)=>{
+      // The first task's durable completion must be enough for the second one
+      // to run, even when the original conversation can no longer be read.
+      if(releaseInterrupted&&deliveryId===accepted.keys().next().value)
+        assert.fail('the first task must not read completed chat history again');
+      return readDelivery(threadId,deliveryId,options);
+    };
+  }
   await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
   assert.equal(f.activePass().taskId,plans[0].taskId);
   await f.coordinator.close();
@@ -2168,7 +2202,7 @@ test('a committed interrupted task settles the same journal across loss, reopen 
     await coordinator.close();database.close();database=new DatabaseSync(file);
     loseRelease=false;coordinator=createAssistantCoordinator({...f.options,database});
     await coordinator.workOnce();
-    assert.equal(f.activePass(),null);assert.equal(health,1);assert.equal(observations,4);assert.equal(f.counts().runs,1);
+    assert.equal(f.activePass(),null);assert.equal(health,1);assert.equal(observations,3);assert.equal(f.counts().runs,1);
     const next=coordinator.status()[0];
     assert.equal(next.threadId,interrupted.threadId);assert.equal(next.nextRunAt,Date.parse('2026-01-01T17:00:00Z'));
     f.advance(next.nextRunAt-f.options.now());await coordinator.workOnce();await coordinator.workOnce();

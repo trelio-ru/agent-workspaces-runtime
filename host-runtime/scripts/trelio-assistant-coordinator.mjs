@@ -2007,14 +2007,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(row.taskId!==pass.taskId || row.scope.companyId!==pass.companyId || row.scope.assistantId!==identity.assistantId
         || row.kind!=='task') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
       if(row.state==='complete') {
-        const continued=inbox.readPassContinuation(pass.deliveryId);
-        const marker=continued?(continued.started?continued.reviewId:continued.terminalMarkerId):pass.deliveryId;
-        const nativeResult=await native.readDelivery(pass.threadId,marker,{signal});lease();
-        const closed=nativeResult.state==='completed'?null:await observeCommittedTaskOutcome(row,pass.threadId,marker,nativeResult,signal);
-        const nativeReceipt=nativeResult.state==='completed'?nativeResult.receipt:closed?.receipt;
-        if(!nativeReceipt) fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
-        const result=await completedReceipt(row,pass.threadId,nativeReceipt,signal,closed?.receiptId);
-        if(row.receipt!==result.receipt) fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+        // The SQLite completion was committed only after native read-back and
+        // the exact backend outcome. A crash before local key removal does not
+        // require observing the old turn or applying that transaction twice.
+        // Keep the existing receipt format and validate its scope again with
+        // the live backend before releasing the protected pass.
+        const [kind,businessId,...nativeParts]=typeof row.receipt==='string'?row.receipt.split(':'):[];
+        if(kind!=='assistant'||!uuid.test(businessId??'')) fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+        const result=await completedReceipt(row,pass.threadId,nativeParts.join(':'),signal,businessId);
         await passHost.releasePass(result.outcome);
         await businessConfirmed();
       }

@@ -14,6 +14,42 @@ DB lifecycle, source polling and backend projection are wired by the host-only
 business MCP admission and supported Windows readiness still gate unattended
 activation. No existing pilot or human-plugin session is silently migrated.
 
+### Moving recovery to operation receipts
+
+An ordinary Trelio agent starts from a user-selected task, reads its effective
+authority, and uses `prepare_agent_workspace_run` to open or reclaim its own
+Run. The task assistant starts from a due assignment or routed event and
+uses `prepare_assistant_workspace_run` under its own device/pass grant.
+Both routes use the common Workspace engine to checkpoint, fence the next
+writer and accept the exact candidate against the accepted base. Both read
+back the canonical revision. A scheduled assignment also has a separate
+outcome receipt to settle its delivery and update its cadence.
+
+The dispatcher owns timing and exclusive launch. Backend admission owns the
+assistant identity, binding, task permissions, encryption recipient and
+durable owner decisions. These differ from an ordinary interactive launch.
+Reconstructing Run and tool outcomes from conversational order duplicates
+evidence already held by the corresponding operation.
+
+The target recovery contract has three owners. The dispatcher holds the device
+and pass fences, selects due work and establishes that the previous writer can
+no longer use its authority. Run recovery and the next task step belong to the
+agent, using current task rules, its retained draft and the accepted result.
+Workspace, domain mutations and provider adapters reconcile their own receipts.
+An outbound operation with unknown status keeps its original attempt fenced
+while unrelated work can proceed once the writer has been safely released.
+
+Move the confirmed boundaries first, using existing journals. After the SQLite
+completion commit the dispatcher now releases from the stored completion and
+the fresh exact backend receipt. Next, pending passes need a native writer
+handover and task-scoped operation read-back. Only then can new passes stop using
+whole-turn classifiers for saved drafts, provider reads and recovered outcomes.
+Admit the new path only when both backend and runtime support the fenced
+handover and the retained pass can prove its own operation state. Keep the
+legacy classifiers for existing unsettled passes without that evidence.
+Missing records never prove an operation was not attempted. A native reader
+reporting an interrupted status is insufficient evidence of writer release.
+
 ### Pre-native reservation recovery
 
 An expired reservation remains review-only unless the SAME trusted coordinator
@@ -658,8 +694,7 @@ the coordinator can select the receipt from the full latest native turn under
 its existing lease. Require the original invocation marker and exact pass,
 no unfinished item and no executable successor. Independently read the same
 receipt from the closed backend pass. An interrupted turn or final prose by
-itself is still uncertain. This path also permits fenced signed maintenance
-and can resume pass release after local commit without another native turn.
+itself is still uncertain. This path also permits fenced signed maintenance.
 Continuation, inbox processing, completion timestamps and next-run are committed
 inside the same SQLite transaction. Ordinary changed cadence resets its anchor
 to this completion; unchanged cadence preserves its calendar anchor. A fixed
@@ -679,11 +714,13 @@ active goal. Native task `done` permits reconciliation of the original pass,
 never a new launch, even if its binding revision advanced during completion.
 
 The protected host journal and local signing key are released only after SQLite
-commit. If the host crashes between that commit and release, it verifies the
-same completed local delivery, native turn and backend receipt and then releases
-without another launch. If SQLite rolls back, the same receipt is applied again
-atomically with no model replay. Missing/revoked/unverifiable evidence retains
-the existing fence and requires review. Timeout does not free a server pass.
+commit. If the host crashes between commit and release, the completed local
+delivery retains the verified native receipt. The coordinator rechecks the exact
+backend receipt against that delivery and releases the journal without reading
+the native turn again or applying the schedule twice. If SQLite rolls back, the
+same receipt is applied again atomically with no model replay. Missing, revoked
+or unverifiable evidence retains the existing fence and requires review.
+Timeout does not free a server pass.
 
 Long work renews the same live backend lease by CAS near expiry, independently
 from the local delivery heartbeat. Closed receipts do not renew or acquire new
