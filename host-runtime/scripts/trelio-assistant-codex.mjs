@@ -1,5 +1,6 @@
 /** Native Codex adapter: exact IDs, stdio-only prompts, no transcript cache. */
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { setTimeout as wait } from 'node:timers/promises';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -3588,6 +3589,57 @@ const sameDesktopConfiguration = (thread, execution, cwd) => {
   if(thread.model!==execution.modelId||thread.reasoningEffort!==execution.effortLevel)
     fail('ASSISTANT_CODEX_MODEL_UNAVAILABLE');
 };
+const requireEmptyThreadQueue = async (request,threadId) => {
+  const queued=await request('thread/queue/list',{threadId});
+  if(!Array.isArray(queued?.data)||queued.data.length||queued.nextCursor!==null)
+    fail('ASSISTANT_CODEX_THREAD_BUSY');
+};
+const acquireAssistantThreadWriter = async (request,{threadId,cwd,config,execution}) => {
+  const thread=(await request('thread/read',{threadId,includeTurns:false}))?.thread;
+  if(thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+  if(execution)sameDesktopConfiguration(thread,execution,cwd);
+  else if(thread.cwd!==cwd)fail('ASSISTANT_CODEX_WORKSPACE_MISMATCH');
+  // An unrelated App Server can report notLoaded while the first one owns
+  // the writer. Only resume's native exclusive claim proves that it is free.
+  if(thread.status?.type!=='notLoaded'||thread.canAcceptDirectInput!=null)
+    fail('ASSISTANT_CODEX_THREAD_BUSY');
+  await requireEmptyThreadQueue(request,threadId);
+  const resumed=await request('thread/resume',{threadId,cwd,excludeTurns:true,config,
+    approvalPolicy:'never',sandbox:'read-only'});
+  if(resumed?.thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+};
+
+/** Verify the original writer is gone before settling an already committed
+ * pass. Acquire and release a tool-free native writer, with no model turn,
+ * history inspection, or task authorization. A successful RPC alone is not
+ * enough: the observer's own process must also exit within the same budget. */
+export const readAssistantCodexWriterReleased = async (threadId,cwd,options={}) => {
+  threadId=id(threadId);
+  if(typeof cwd!=='string'||!path.isAbsolute(cwd))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  const deadline=AbortSignal.timeout(15_000);
+  const signal=options.signal?AbortSignal.any([options.signal,deadline]):deadline;
+  let actual;
+  try{actual=await fs.realpath(cwd);}catch{fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE');}
+  const spawnProcess=options.spawnProcess??spawn;
+  let closed;
+  await readNative(null,async(_unused,request)=>{
+    await verifyAssistantExecutionFeatures(request);
+    const configuration=await request('config/read',{includeLayers:false,cwd:actual});
+    const config=assistantCodexExecutionOverrides(configuration?.config);
+    // No plugin or standalone MCP is needed to hold the native writer.
+    // These overrides are invocation-local and never enable user settings.
+    for(const plugin of Object.values(config.plugins))plugin.enabled=false;
+    await acquireAssistantThreadWriter(request,{threadId,cwd:actual,config});
+    await requireEmptyThreadQueue(request,threadId);
+  },{...options,signal,readTimeoutMs:15_000,nativeCwd:actual,controlledExecution:true,desktopOperation:true,
+    spawnProcess:(...args)=>{
+      const child=spawnProcess(...args);
+      closed=once(child,'close',{signal}).then(()=>true,()=>false);
+      return child;
+    }});
+  if(!await closed||signal.aborted)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+  return true;
+};
 const startNativeInvocation = (options, threadId, deliveryId) => {
   try{
     const result=options.startInvocation({threadId,deliveryId});
@@ -3632,20 +3684,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     const configuration=await request('config/read',{includeLayers:false,cwd});
     const config=assistantCodexExecutionOverrides(configuration?.config,workspaceRecoveryMode);
     if(!newProvision){
-      const read=await request('thread/read',{threadId,includeTurns:false}),thread=read?.thread;
-      if(thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-      sameDesktopConfiguration(thread,execution,cwd);
-      // A person may open this persistent chat in Desktop. That does not
-      // authorize stealing its writer or replacing its active turn. An absent
-      // runtime-status field is unsupported, not an idle ownership certificate.
-      if(thread.status?.type!=='notLoaded'||thread.canAcceptDirectInput!=null)
-        fail('ASSISTANT_CODEX_THREAD_BUSY');
-      const queued=await request('thread/queue/list',{threadId});
-      if(!Array.isArray(queued?.data)||queued.data.length||queued.nextCursor!==null)
-        fail('ASSISTANT_CODEX_THREAD_BUSY');
-      const resumed=await request('thread/resume',{threadId,cwd,excludeTurns:true,config,
-        approvalPolicy:'never',sandbox:'read-only'});
-      if(resumed?.thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+      await acquireAssistantThreadWriter(request,{threadId,cwd,config,execution});
     }else{
       // Preserve the original creation fence and UUID-before-turn journal.
       // Native configuration is scoped to this process/thread; no user setting

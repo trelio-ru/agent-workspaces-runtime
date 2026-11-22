@@ -650,7 +650,7 @@ test('a lost native response is reconciled in the same chat after host restart, 
   assert.equal(f.database.prepare("SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1").get().n,1);
 });
 
-for(const failure of ['backend response','local key release'])test(`two overdue cycles recover after lost ${failure} on their original cadence`,async t=>{
+for(const failure of ['backend response','local key release','completion tool response'])test(`two overdue cycles recover after lost ${failure} on their original cadence`,async t=>{
   const f=fixture(t);
   const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};
   f.options.client.tasks=async()=>({bindings:[f.authority,second],nextCursor:null});
@@ -674,10 +674,11 @@ for(const failure of ['backend response','local key release'])test(`two overdue 
   const attempts=[],accepted=new Map();
   const backendOutcome=f.options.client.readBusinessOutcome;
   const release=f.options.passHost.releasePass,readDelivery=f.options.native.readDelivery;
-  let releaseInterrupted=false;
+  let releaseInterrupted=false,writerAvailable=false,writerChecks=0,changeReceiptAfterProbe=false;
   f.options.client.readBusinessOutcome=async input=>{
     assert.equal(accepted.get(input.deliveryId)?.taskId,input.taskId);
-    return backendOutcome(input);
+    const receipt=await backendOutcome(input);
+    return changeReceiptAfterProbe&&writerChecks===2?{...receipt,receiptId:randomUUID()}:receipt;
   };
   f.options.native.run=async(input,options)=>{
     const plan=plans.find(plan=>plan.taskId===input.taskContext.taskId);
@@ -687,11 +688,31 @@ for(const failure of ['backend response','local key release'])test(`two overdue 
     options.startInvocation();
     attempts.push(input.taskContext.taskId);
     accepted.set(input.deliveryId,{taskId:plan.taskId});
+    if(attempts.length===1&&failure==='completion tool response'){
+      // The only persisted turn information is the original marker and ID.
+      // The backend has committed, but the tool's own response is unavailable.
+      f.deliveries.set(input.deliveryId,{state:'uncertain',turnId:randomUUID()});
+      throw Error('tool response lost after commit');
+    }
     const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
     f.deliveries.set(input.deliveryId,result);
     if(attempts.length===1&&failure==='backend response')throw Error('response lost after acceptance');
     return result;
   };
+  if(failure==='completion tool response'){
+    f.options.native.readDelivery=async(threadId,deliveryId,options)=>{
+      assert.ok(!options?.committedTaskOutcome,'the coordinator never reinterprets the old tool calls');
+      return readDelivery(threadId,deliveryId,options);
+    };
+    f.options.native.readWriterReleased=async(threadId,cwd)=>{
+      assert.equal(threadId,plans[0].threadId);
+      assert.equal(cwd,process.cwd());
+      assert.equal(accepted.get(f.activePass().deliveryId)?.taskId,plans[0].taskId);
+      writerChecks++;
+      if(!writerAvailable)throw Object.assign(Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      return true;
+    };
+  }
   if(failure==='local key release'){
     f.options.passHost.releasePass=async outcome=>{
       if(!releaseInterrupted){
@@ -714,7 +735,23 @@ for(const failure of ['backend response','local key release'])test(`two overdue 
 
   const restarted=createAssistantCoordinator(f.options);
   try{
+    if(failure==='completion tool response'){
+      await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      assert.deepEqual(attempts,[plans[0].taskId]);
+      assert.equal(f.activePass().taskId,plans[0].taskId);
+      writerAvailable=true;
+      changeReceiptAfterProbe=true;
+      await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED'});
+      assert.deepEqual(attempts,[plans[0].taskId]);
+      assert.equal(f.activePass().taskId,plans[0].taskId);
+      changeReceiptAfterProbe=false;
+      assert.equal(await restarted.updateRuntimeAtBoundary(async()=>{
+        assert.deepEqual(attempts,[plans[0].taskId]);
+        assert.equal(f.activePass().taskId,plans[0].taskId,'code maintenance cannot settle the pass');
+      }),true);
+    }
     await restarted.workOnce();
+    if(failure==='completion tool response')assert.equal(writerChecks,4);
     assert.deepEqual(attempts,plans.map(plan=>plan.taskId));
     assert.equal(f.activePass(),null);
     assert.equal(accepted.size,2);

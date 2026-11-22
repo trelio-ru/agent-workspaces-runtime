@@ -39,11 +39,14 @@ Workspace, domain mutations and provider adapters reconcile their own receipts.
 An outbound operation with unknown status keeps its original attempt fenced
 while unrelated work can proceed once the writer has been safely released.
 
-Move the confirmed boundaries first, using existing journals. After the SQLite
-completion commit the dispatcher now releases from the stored completion and
-the fresh exact backend receipt. Next, pending passes need a native writer
-handover and task-scoped operation read-back. Only then can new passes stop using
-whole-turn classifiers for saved drafts, provider reads and recovered outcomes.
+Move the confirmed boundaries first, using existing journals. The dispatcher
+can now settle a backend-confirmed outcome when the completion tool response
+is missing from an interrupted turn. It verifies writer release through a
+tool-free native claim of the exact thread, then rechecks the receipt. After
+the SQLite completion commit it uses the local completion and a fresh backend
+read. Pending passes still need a native writer handover and task-scoped
+operation read-back before new passes can stop using whole-turn classifiers for
+saved drafts, provider reads and recovered outcomes.
 Admit the new path only when both backend and runtime support the fenced
 handover and the retained pass can prove its own operation state. Keep the
 legacy classifiers for existing unsettled passes without that evidence.
@@ -688,13 +691,24 @@ goalState=cancelled/ownerDecisionId. Only that assistant's goal/cadence stops;
 archive/status are independent. Archived tasks, like done tasks, permit only
 existing own canonical Run settlement and original outcome reconciliation.
 
-Positive native read-back and the exact backend receipt must both exist.
-If Codex is interrupted after the successful `complete_assistant_pass` response,
-the coordinator can select the receipt from the full latest native turn under
-its existing lease. Require the original invocation marker and exact pass,
-no unfinished item and no executable successor. Independently read the same
-receipt from the closed backend pass. An interrupted turn or final prose by
-itself is still uncertain. This path also permits fenced signed maintenance.
+Positive evidence of an ended invocation and the exact backend receipt must
+both exist. Ordinary completion has native read-back. For an interrupted
+original marker with a committed receipt, the production coordinator checks
+the same task folder, an empty native queue, successful exclusive
+`thread/resume` with all plugins and MCP servers disabled, an empty queue under
+that writer, and close of its own tool-free observer. It then confirms the same
+receipt again and settles the delivery. Only the marker and turn ID are used
+from the native summary. Activity, pending input, an ambiguous RPC, or an
+unclosed observer retain the fence. Neither a stored interrupted status nor
+the receipt alone establishes exclusive writer release.
+
+Fenced signed maintenance uses the same proof without settling the delivery
+or releasing the protected pass. An adapter without a writer check retains
+legacy receipt selection. It requires the full latest native turn, the final
+successful typed call, the exact original marker and pass, no unfinished item
+or executable successor, and independent confirmation by the closed backend
+pass. An attempted renewal with an unknown new-start result still blocks both
+routes.
 Continuation, inbox processing, completion timestamps and next-run are committed
 inside the same SQLite transaction. Ordinary changed cadence resets its anchor
 to this completion; unchanged cadence preserves its calendar anchor. A fixed

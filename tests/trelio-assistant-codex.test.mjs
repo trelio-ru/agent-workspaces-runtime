@@ -9,7 +9,8 @@ import path from 'node:path';
 import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
   ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
-import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft,
+  readAssistantCodexWriterReleased } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
@@ -220,6 +221,53 @@ const ownedRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onT
   },executionPolicy);
   return (...args)=>{const child=rpc(...args);children.push(child);return child;};
 };
+
+test('writer release requires the native claim, an empty queue and the observer close',async()=>{
+  const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  let queues=0,resumes=0,notifyKill;
+  const killed=new Promise(resolve=>{notifyKill=resolve;});
+  const rpc=nativeRpc(request=>{
+    if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,status:{type:'notLoaded'},canAcceptDirectInput:null}}};
+    if(request.method==='thread/queue/list'){queues++;return {result:{data:[],nextCursor:null}};}
+    assert.equal(request.method,'thread/resume','ownership does not inspect a turn or send model input');
+    resumes++;
+    assert.equal(request.params.excludeTurns,true);
+    assert.ok(Object.values(request.params.config.plugins).every(plugin=>plugin.enabled===false));
+    assert.ok(Object.values(request.params.config.mcp_servers).every(server=>server.enabled===false));
+    return {result:{thread:{id:threadId}}};
+  });
+  const controller=new AbortController();
+  const read=readAssistantCodexWriterReleased(threadId,cwd,{executable:process.execPath,environment:{},signal:controller.signal,
+    spawnProcess:(...args)=>{
+      const child=rpc(...args);
+      const kill=child.kill.bind(child);
+      child.kill=(...parameters)=>{kill(...parameters);notifyKill(child);};
+      return child;
+    }});
+  try{
+    let settled=false;void read.then(()=>{settled=true;},()=>{settled=true;});
+    const child=await killed;
+    await Promise.resolve();
+    assert.equal(settled,false);
+    assert.equal(queues,2);
+    assert.equal(resumes,1);
+    child.emit('close',null,'SIGKILL');
+    assert.equal(await read,true);
+  }finally{controller.abort();}
+});
+
+test('writer release refuses queued input appearing during acquisition',async()=>{
+  const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  let queues=0;
+  await assert.rejects(readAssistantCodexWriterReleased(threadId,cwd,{executable:process.execPath,environment:{},
+    spawnProcess:nativeRpc(request=>{
+      if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,status:{type:'notLoaded'},canAcceptDirectInput:null}}};
+      if(request.method==='thread/queue/list')return {result:{data:++queues===1?[]:[{}],nextCursor:null}};
+      assert.equal(request.method,'thread/resume');
+      return {result:{thread:{id:threadId}}};
+    })}),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+  assert.equal(queues,2);
+});
 
 test('actual native hook inventory gates trusted definitions, never installation or another plugin',async()=>{
   const cwd=process.cwd();let reads=0;

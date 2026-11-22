@@ -2058,7 +2058,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   let coordinator,closed=false;
   try {
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
-      readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
+      readDelivery:nativeRuntime.readAssistantCodexDelivery,readWriterReleased:nativeRuntime.readAssistantCodexWriterReleased,
+      readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
       readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply,
       readUnmaterializedTriage:nativeRuntime.readAssistantUnmaterializedTriage,
       readUnmaterializedTaskProvision:nativeRuntime.readAssistantUnmaterializedProvision,

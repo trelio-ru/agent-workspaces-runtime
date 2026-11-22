@@ -639,8 +639,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       taskId:job.taskId,bindingId:pass.bindingId,bindingRevision:pass.bindingRevision,deliveryId:job.deliveryId,threadId};
     return {pass,expected};
   };
-  const completedReceipt = async (job,threadId,nativeReceipt,signal,expectedReceiptId) => {
-    if(job.kind==='provision') return {receipt:nativeReceipt,outcome:null};
+  const observeTaskOutcome = async (job,threadId,signal) => {
     const {expected}=await completionScope(job,threadId);
     // A native turn can end while waiting for a reply, on a tool denial, or
     // before any Workspace save. Only a trusted live backend outcome for this
@@ -650,6 +649,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     try { outcome=validateAssistantPassOutcome(await client.readBusinessOutcome(expected,signal),expected); }
     catch { fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED'); }
     lease();
+    return outcome;
+  };
+  const completedReceipt = async (job,threadId,nativeReceipt,signal,expectedReceiptId) => {
+    if(job.kind==='provision') return {receipt:nativeReceipt,outcome:null};
+    const outcome=await observeTaskOutcome(job,threadId,signal);
     const nativeParts=typeof nativeReceipt==='string'?nativeReceipt.split(':'):[];
     if(outcome.state!=='confirmed'||expectedReceiptId!==undefined&&outcome.receiptId!==expectedReceiptId
       || nativeParts.length!==3 || nativeParts[0]!=='codex' || nativeParts[1]!==threadId || !uuid.test(nativeParts[2])) {
@@ -659,10 +663,22 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const observeCommittedTaskOutcome = async (job,threadId,marker,turn,signal) => {
     if(job.kind!=='task'||turn.state!=='uncertain'||!uuid.test(turn.turnId??''))return null;
+    if(typeof native.readWriterReleased==='function'){
+      const outcome=await observeTaskOutcome(job,threadId,signal);
+      if(outcome.state!=='confirmed')return null;
+      // The backend closed this exact pass and revoked its signing sessions.
+      // Prove that no old native turn is still executing. Its structural ID
+      // labels the journal receipt; tool output and call order supply no
+      // settlement authority. Both callers subsequently recheck the receipt.
+      const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+      if(await native.readWriterReleased(threadId,cwd,{signal})!==true)
+        fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
+      lease();
+      return {receiptId:outcome.receiptId,receipt:`codex:${threadId}:${turn.turnId}`};
+    }
     const {pass,expected}=await completionScope(job,threadId);
-    // First select the exact successful call under the existing local lease.
-    // Its receipt is only a candidate until independently confirmed by the
-    // backend. No RPC reads the receipt for arbitrary interrupted work.
+    // Older adapters can positively identify only the exact successful call.
+    // That receipt remains a candidate until confirmed by the backend.
     const observed=await native.readDelivery(threadId,marker,{signal,committedTaskOutcome:{
       turnId:turn.turnId,taskPass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},expected}});
     lease();

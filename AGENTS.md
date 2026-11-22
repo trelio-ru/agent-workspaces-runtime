@@ -1850,7 +1850,16 @@ Exact legacy template bytes для распознавания при мигра�
   refusal of its exact open-status poll before finish; native handle/Run/pass
   and later clean accepted-head evidence remain mandatory. No failed write or
   unknown result qualifies. [Contract](docs/assistant-scheduler.md#interrupted-named-archive-finish).
-- Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. Post-commit release reuses the verified receipt in the completed delivery and requires fresh exact backend confirmation, without re-reading the chat. A latest interrupted native turn may settle only its final successful typed completion call, with exact original marker, pass, receipt, no executable successor and independent current backend confirmation. The same evidence permits signed maintenance, without a new turn, write replay or authorization expansion. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery). Fixed daily clocks use negotiated v2 receipts and keep their wall time across late passes.
+- Assistant pass completion requires the exact backend receipt. Ordinary
+  completion uses native read-back. An interrupted marker with a closed pass
+  verifies the exact native writer release through exclusive tool-free resume,
+  empty queue and observer close before rechecking the receipt. No tool
+  history, timeout or native status alone proves writer release. Schedule and
+  inbox commit together. Post-commit release reuses that journal receipt and
+  fresh exact backend confirmation. Signed maintenance can use the same
+  writer proof without settling the delivery. Only adapters without a writer
+  check use the legacy whole-turn receipt. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery).
+  Fixed daily clocks use negotiated v2 receipts and keep wall time across late passes.
   SELECT-only dispatch summaries accept scheduler v1/v2's unchanged task/source
   projection. Test actual daily completion, health boundary, read-only SQLite
   reopen and the next scheduled cycle; unknown schema and retained uncertainty

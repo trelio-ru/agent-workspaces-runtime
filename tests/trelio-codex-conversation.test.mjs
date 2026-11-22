@@ -21,7 +21,7 @@ import {readCodexAssistantMarketplaceSource} from '../host-runtime/scripts/treli
 import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import http from 'node:http';
 import {randomUUID} from 'node:crypto';
-import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,readAssistantCodexDelivery,
+import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,readAssistantCodexDelivery,readAssistantCodexWriterReleased,
  readAssistantCodexMetadata,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 
@@ -353,10 +353,16 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   const resumed=await first.request(2,'thread/resume',{threadId,cwd:root,excludeTurns:true});
   assert.equal(resumed.result?.thread?.id,threadId);
   const requestsBefore=modelRequests;
+  await assert.rejects(readAssistantCodexWriterReleased(threadId,root,options),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
   await assert.rejects(runAssistantCodexPass(passInput,options),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
   assert.equal(starts,1,'a competing writer cannot spend another invocation');
   assert.equal(modelRequests,requestsBefore,'a competing writer cannot send a model request');
  } finally {await first.close();}
+ await awaitRpcClose();
+ const beforeWriterRead={modelRequests,foreignInitializations,allowedCalls,allowedInitializations:allowedClientNames.length};
+ assert.equal(await readAssistantCodexWriterReleased(threadId,root,options),true);
+ assert.deepEqual({modelRequests,foreignInitializations,allowedCalls,allowedInitializations:allowedClientNames.length},beforeWriterRead,
+  'observing a released writer starts no model or tool invocation');
  // The ordinary native client above can connect its own foreign tools. The
  // assistant execution below must independently deny those same tools.
  foreignRequests=0;foreignInitializations=0;foreignPhases.length=0;
