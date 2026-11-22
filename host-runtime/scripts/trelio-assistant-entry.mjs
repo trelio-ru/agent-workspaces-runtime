@@ -790,7 +790,12 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const identity=client.identity;
     const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
-    const sourceReads=encryptedCompanyContext||sourceAttachment||sourceWorkspaceFile||sourceRegistryDocument||(await host.readActivePass())?.kind==='source_intake'?null:await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
+    const separateRead=encryptedCompanyContext||sourceAttachment||sourceWorkspaceFile||sourceRegistryDocument;
+    const pass=separateRead?null:await host.readActivePass();
+    // A retired session uses the common exact task and Run readers without
+    // composing the provider/inbox adapter, which its profile rejects.
+    const sourceReads=separateRead||pass?.kind==='source_intake'||pass?.retiredPass?null
+      :await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
     const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,

@@ -2242,6 +2242,36 @@ test('trusted Workspace context retains attachment reader and isolates actual ac
 });
 
 
+test('the trusted retired Workspace profile resolves encrypted mode without a provider source adapter',async()=>{
+  const {withProductionAssistantWorkspace}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const identity={schemaVersion:1,origin:'https://assistant-qa.example.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const run={workspaceId:randomUUID(),runId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),
+    taskId:randomUUID(),passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:2,
+    retiredPass:{writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:3,run:{...run,draftHead:'a'.repeat(40)}}};
+  const host={configurationDirectory:path.join(os.tmpdir(),'qa-retired-profile'),
+    readIdentity:async()=>identity,readActivePass:async()=>pass};
+  const client={identity,companies:async()=>[{companyId:pass.companyId,encryptionState:'encrypted'}],
+    readTaskPass:async locator=>{
+      assert.deepEqual(locator,{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId});
+      return {...pass,state:'closed',workMode:'task',leaseRevision:3,leaseExpiresAt:new Date(0).toISOString()};
+    }};
+  const context=action=>action(client,host,{});
+  await withProductionAssistantWorkspace(async current=>{
+    assert.equal(await current.readCompanyContentMode(),'encrypted');
+  },{context});
+  await withProductionAssistantWorkspace(async ()=>{
+    const profile=common.currentWorkspaceExecutionProfile();
+    await assert.rejects(profile.prepareSkillBodyRead({
+      artifact:{skillId:'email-imap-smtp'},runtimeArguments:['read-reference'],
+    }),{code:'ASSISTANT_SOURCE_READ_REQUIRED'});
+  },{context,workspaceRun:run});
+  await assert.rejects(withProductionAssistantWorkspace(()=>assert.fail('foreign Run enabled'),{
+    context,workspaceRun:{...run,runId:randomUUID()},
+  }),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+});
+
 test('supervisor reports retained unknown dispatch returned by recovery without misreporting policy/owner waiting',async()=>{
   const controller=new AbortController();let cycles=0,waits=0;const reports=[];
   const identity={assistantId:randomUUID(),deviceId:randomUUID()};

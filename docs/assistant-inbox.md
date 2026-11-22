@@ -201,7 +201,9 @@ A separate v33 bit records the first native inspection start. Its chat marker
 reuses the retirement receipt UUID. The scheduler visits this bounded work
 after independent due tasks and verifies the original binding, current model,
 closed pass and device before the owned native writer can start a read or
-draft-only turn. The original delivery, schedule and provider operation remain
+draft-only turn. The common encrypted task and Run readers use the protected
+retired profile without loading a provider source adapter. The original delivery,
+schedule and provider operation remain
 unchanged. On restart, the trusted host proves the writer has released before
 clearing its protected inspection key. A consumed marker does not launch again
 after a lost native response. The first inspection start commits v33 with the bit.
