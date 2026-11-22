@@ -970,8 +970,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       original_thread_id TEXT NOT NULL, marker_id TEXT NOT NULL UNIQUE,
       started INTEGER NOT NULL CHECK(started IN (0,1)), thread_id TEXT
     )`);
-    if(versions[0]?.version>=32&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_retired_task_writers'"))
-      fail('ASSISTANT_INBOX_CONFLICT');
+    if(versions[0]?.version>=32&&['assistant_retired_task_writers','assistant_task_writer_retirement_attempts']
+      .some(name=>!get("SELECT name FROM sqlite_master WHERE type='table' AND name=?",name)))fail('ASSISTANT_INBOX_CONFLICT');
     // Keep the original delivery/slots/uncertainty intact. This journal cell
     // records only server retirement and the subsequent protected-key release.
     db.exec(`CREATE TABLE IF NOT EXISTS assistant_retired_task_writers (
@@ -979,8 +979,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       receipt_id TEXT NOT NULL UNIQUE, receipt_json TEXT NOT NULL,
       released INTEGER NOT NULL DEFAULT 0 CHECK(released IN (0,1))
     )`);
-    // An empty additive table remains compatible with v31. Fence older
-    // workers only when this journal commits its first actual retirement.
+    db.exec(`CREATE TABLE IF NOT EXISTS assistant_task_writer_retirement_attempts (
+      delivery_id TEXT PRIMARY KEY REFERENCES assistant_inbox_deliveries(delivery_id) ON DELETE RESTRICT,
+      pass_id TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE, lease_revision INTEGER NOT NULL CHECK(lease_revision>=0)
+    )`);
+    // Empty additive tables remain compatible with v31. Fence older workers
+    // before the first request can leave the device.
     if(versions.length)run('UPDATE assistant_inbox_meta SET version=?',Math.max(31,versions[0].version));
     else run('INSERT INTO assistant_inbox_meta(version) VALUES (31)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
@@ -1103,9 +1107,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       ||receipt.assistantId!==scope.assistantId||receipt.deviceId!==scope.bindingId)fail('ASSISTANT_INBOX_CONFLICT');
     return Object.freeze({receipt,released:recorded.released===1});
   };
+  const readWriterRetirementAttempt = row => {
+    const attempt=get('SELECT pass_id,request_id,lease_revision FROM assistant_task_writer_retirement_attempts WHERE delivery_id=?',row.delivery_id);
+    if(!attempt)return null;
+    if(row.kind!=='task'||row.state!=='uncertain'||row.native_started!==1||row.external_receipt!==null)
+      fail('ASSISTANT_INBOX_CONFLICT');
+    return Object.freeze({passId:uuid(attempt.pass_id),clientRequestId:uuid(attempt.request_id),
+      leaseRevision:integer(attempt.lease_revision,0,2_147_483_647)});
+  };
   const mutableDelivery = id => {
     const row=delivery(id);
-    if(readRetiredWriter(row))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+    if(readRetiredWriter(row)||readWriterRetirementAttempt(row))fail('ASSISTANT_INBOX_STALE_DELIVERY');
     return row;
   };
   const isTaskWriterRetired = taskId => Boolean(get(`SELECT 1 FROM assistant_retired_task_writers w
@@ -2679,6 +2691,24 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run('UPDATE assistant_task_provision_recoveries SET thread_id=? WHERE delivery_id=?',threadId,id);
       });
     },
+    /** Persist before native HTTP. Even an unsuccessful or lost request
+     * may have closed the server pass. A second attempt is never authorized
+     * by the local clock or by an eligible/empty read response. */
+    startTaskWriterRetirement(id,{passId,clientRequestId,leaseRevision}) {
+      passId=uuid(passId);clientRequestId=uuid(clientRequestId);
+      leaseRevision=integer(leaseRevision,0,2_147_483_647);
+      return transaction(()=>{
+        recoverExpired();
+        const row=mutableDelivery(id);
+        if(row.kind!=='task'||row.state!=='uncertain'||row.native_started!==1||row.expires_at>time())
+          fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run('INSERT INTO assistant_task_writer_retirement_attempts VALUES (?,?,?,?)',row.delivery_id,passId,clientRequestId,leaseRevision);
+        run('UPDATE assistant_inbox_meta SET version=32 WHERE version=31');
+      });
+    },
+    readTaskWriterRetirementAttempt(id) {
+      return readWriterRetirementAttempt(delivery(id));
+    },
     /** Only a trusted native reader calls this after confirming the exact
      * server retirement receipt. A timeout or absent native turn is not a
      * receipt. Recording it does not yet release the device-wide writer slot. */
@@ -2689,6 +2719,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       return transaction(()=>{
         recoverExpired();
         const row=delivery(receipt.deliveryId);
+        const attempt=readWriterRetirementAttempt(row);
+        if(attempt&&(attempt.passId!==receipt.passId||attempt.leaseRevision!==receipt.leaseRevision))
+          fail('ASSISTANT_INBOX_CONFLICT');
         const existing=readRetiredWriter(row);
         if(existing){
           if(JSON.stringify(existing.receipt)!==JSON.stringify(receipt))fail('ASSISTANT_INBOX_CONFLICT');

@@ -15,7 +15,7 @@ import { assistantSourceProcessingReferences, assistantConversationKeyMatches, a
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
   validateAssistantLocalDraftBasis, validateAssistantLocalDraft, validateAssistantRecoveredOutcomeEvidence,
   validateAssistantRecoveredOutcomePlan, validateAssistantRecoveredOutcomeSchedule,
-  ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
+  validateAssistantTaskWriterRetirement, ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -459,7 +459,8 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['poll',['POST','/runtime/notifications/poll']], ['ack',['POST','/runtime/notifications/ack']],
     ['report',['POST','/runtime/schedule']],
     ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
-    ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']], ['registerRuntime',['POST','/runtime/session/register']],
+    ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']],
+    ['passWriterRetirement',['POST','/runtime/task-pass/writer-retirement']], ['registerRuntime',['POST','/runtime/session/register']],
     ['endRuntime',['POST','/runtime/session/end']],
     ['intakeRejectedTriageIgnoreRead',['POST','/runtime/source-skills/intake/triage-ignore/read']],
     ['intakeRejectedTriageIgnoreReconcile',['POST','/runtime/source-skills/intake/triage-ignore/reconcile']],
@@ -2912,6 +2913,34 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
   if (!store || typeof store.get !== 'function' || typeof http !== 'function') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const call = async (operation, body, signal) => http(operation, body,
     await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store }), signal);
+  const taskWriterRetirement=async(input,action,signal)=>{
+    const locators=['companyId','taskId','passId','bindingId','deliveryId','threadId','clientRequestId'];
+    const scope={...Object.fromEntries(locators.map(key=>[key,id(input[key])])),
+      bindingRevision:revision(input.bindingRevision),leaseRevision:revision(input.leaseRevision)};
+    let value;
+    try{value=await call('passWriterRetirement',{...scope,action},signal);}
+    catch(error){
+      // Capability probing is an exact read against this endpoint. Current
+      // ownership/ACL denials and every attempted retirement remain errors.
+      if(action==='read'&&error instanceof AssistantTransportError&&error.status===404&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
+      throw error;
+    }
+    if(value.schemaVersion!==1||value.clientRequestId!==scope.clientRequestId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    if(action==='read'&&value.state==='eligible'){
+      if(Object.keys(value).sort().join(',')!=='clientRequestId,schemaVersion,scope,state'||!object(value.scope)
+        ||Object.keys(value.scope).sort().join(',')!==Object.keys(scope).filter(key=>key!=='clientRequestId').sort().join(',')
+        ||Object.entries(value.scope).some(([key,field])=>field!==scope[key]))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return Object.freeze({state:'eligible'});
+    }
+    if(value.state!=='retired'||Object.keys(value).sort().join(',')!=='clientRequestId,receipt,schemaVersion,state')
+      fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    let receipt;
+    try{receipt=validateAssistantTaskWriterRetirement(value.receipt);}
+    catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+    if(receipt.assistantId!==assistantId||receipt.deviceId!==deviceId||Object.entries(scope)
+      .some(([key,field])=>key!=='clientRequestId'&&receipt[key]!==field))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    return Object.freeze({state:'retired',receipt});
+  };
   const materialBasis=basis=>{
     if(basis===null)return null;
     if(!object(basis)||Object.keys(basis).sort().join(',')!=='receiptId,workspaceHead,workspaceId'
@@ -3148,6 +3177,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),includeMaterialBasis:true},signal);
       if(value.passId!==input.passId || value.state!=='leased' || !Object.hasOwn(value,'materialBasis'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return materialBasis(value.materialBasis);
+    },
+    async readTaskWriterRetirement(input,signal){
+      return taskWriterRetirement(input,'read',signal);
+    },
+    async retireTaskWriter(input,signal){
+      return taskWriterRetirement(input,'retire',signal);
     },
     async readTaskRecoveryContext(input,signal){
       const expectedLeaseRevision=revision(input.expectedLeaseRevision);

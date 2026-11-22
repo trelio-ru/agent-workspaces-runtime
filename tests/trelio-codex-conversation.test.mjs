@@ -22,7 +22,7 @@ import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-
 import http from 'node:http';
 import {randomUUID} from 'node:crypto';
 import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,readAssistantCodexDelivery,readAssistantCodexWriterReleased,
- readAssistantCodexMetadata,runAssistantCodexPass} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+ readAssistantCodexMetadata,runAssistantCodexPass,withAssistantCodexWriter} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -361,6 +361,13 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  await awaitRpcClose();
  const beforeWriterRead={modelRequests,foreignInitializations,allowedCalls,allowedInitializations:allowedClientNames.length};
  assert.equal(await readAssistantCodexWriterReleased(threadId,root,options),true);
+ await awaitRpcClose();
+ const held=await withAssistantCodexWriter(threadId,root,async signal=>{
+  await assert.rejects(readAssistantCodexWriterReleased(threadId,root,{...options,signal}),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+  assert.equal(signal.aborted,false);
+  return 'served inside native writer';
+ },options);
+ assert.equal(held,'served inside native writer');
  assert.deepEqual({modelRequests,foreignInitializations,allowedCalls,allowedInitializations:allowedClientNames.length},beforeWriterRead,
   'observing a released writer starts no model or tool invocation');
  // The ordinary native client above can connect its own foreign tools. The

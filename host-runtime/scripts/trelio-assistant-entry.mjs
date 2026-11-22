@@ -2044,7 +2044,20 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     if(value===null) fail('ASSISTANT_HOST_NOT_CONFIGURED');
     return value.value;
   };
-  const client={identity:stableIdentity,readTaskRecoveryContext:(...args)=>invoke(live=>live.readTaskRecoveryContext?.(...args)??null),
+  const client={identity:stableIdentity,
+    readTaskWriterRetirement:(...args)=>invoke(live=>live.readTaskWriterRetirement?.(...args)??null),
+    retireTaskWriter:(scope,signal)=>invoke((live,host)=>host.withSetupLock(async()=>{
+      // Pairing/rebind cannot cross the original device/pass CAS. This path
+      // retires existing authority and never asks for a new admission.
+      signal?.throwIfAborted();
+      const active=await host.readActivePass();
+      if(!active||active.kind==='source_intake'||['assistantId','deviceId','companyId','taskId','passId',
+        'bindingId','bindingRevision','threadId','deliveryId'].some(key=>active[key]!==scope[key]))
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      signal?.throwIfAborted();
+      return live.retireTaskWriter(scope,signal);
+    })),
+    readTaskRecoveryContext:(...args)=>invoke(live=>live.readTaskRecoveryContext?.(...args)??null),
     ...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
     ['claimTaskHost','beginTaskPass','beginSourceIntake','reconcileAnsweredSourceIntake','prepareOwnerReplyDelivery'].includes(name))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
@@ -2060,6 +2073,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   try {
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
       readDelivery:nativeRuntime.readAssistantCodexDelivery,readWriterReleased:nativeRuntime.readAssistantCodexWriterReleased,
+      withWriter:nativeRuntime.withAssistantCodexWriter,
       readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
       readPreparedOwnerReply:nativeRuntime.readAssistantCodexPreparedOwnerReply,
       readUnmaterializedTriage:nativeRuntime.readAssistantUnmaterializedTriage,
@@ -2100,6 +2114,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return proxy.callTool('get_assistant_status',{},signal);
     }));
     const passHost=Object.fromEntries(['readActivePass','activatePass','releasePass'].map(name=>[name,(...args)=>invoke((_client,host)=>host[name](...args))]));
+    passHost.releaseRetiredTaskPass=receipt=>invoke((_live,host)=>host.withSetupLock(()=>host.releaseRetiredTaskPass(receipt)));
     passHost.recoverPass=(input,expectedPass,signal)=>invoke(async(live,host)=>{
       // Pairing/rebind and recovery share the existing setup mutex. Never use
       // a pre-lock host getter as proof of the current protected pass identity.

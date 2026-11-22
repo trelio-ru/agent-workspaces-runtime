@@ -10,7 +10,7 @@ import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, ass
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
   ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft,
-  readAssistantCodexWriterReleased } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+  readAssistantCodexWriterReleased,withAssistantCodexWriter } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
@@ -255,6 +255,46 @@ test('writer release requires the native claim, an empty queue and the observer 
     assert.equal(await read,true);
   }finally{controller.abort();}
 });
+
+for(const stopped of [false,true])test(`writer remains owned until the host authority callback settles (stopped=${stopped})`,async t=>{
+  const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  let queues=0,child,notifyAction,resolveAction,observedSignal,heldDuringAction;
+  const entered=new Promise(resolve=>{notifyAction=resolve;});
+  const pending=new Promise(resolve=>{resolveAction=resolve;});
+  t.after(()=>resolveAction(null));
+  const rpc=nativeRpc(request=>{
+    if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,status:{type:'notLoaded'},canAcceptDirectInput:null}}};
+    if(request.method==='thread/queue/list'){queues++;return {result:{data:[],nextCursor:null}};}
+    assert.equal(request.method,'thread/resume');
+    assert.ok(!Object.values(request.params.config.plugins).some(plugin=>plugin.enabled));
+    return {result:{thread:{id:threadId}}};
+  });
+  const callback=withAssistantCodexWriter(threadId,cwd,async signal=>{
+    observedSignal=signal;heldDuringAction=!child.killed;notifyAction();
+    return pending;
+  },{executable:process.execPath,environment:{},spawnProcess:(...args)=>{
+    child=rpc(...args);
+    const kill=child.kill.bind(child);
+    child.kill=(...params)=>{kill(...params);queueMicrotask(()=>child.emit('close',null,'SIGKILL'));};
+    return child;
+  }});
+  const result=callback.catch(error=>error);
+  await entered;
+  assert.equal(queues,2);
+  assert.equal(heldDuringAction,true);
+  assert.ok(!child.killed);
+  assert.equal(observedSignal.aborted,false);
+  if(stopped){
+    child.emit('exit',1,null);
+    assert.equal(observedSignal.aborted,true);
+    assert.equal((await result).code,'ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    resolveAction('late-response');
+  }else{
+    resolveAction('returned receipt');
+    assert.equal(await result,'returned receipt');
+  }
+});
+
 
 test('writer release refuses queued input appearing during acquisition',async()=>{
   const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());

@@ -2047,6 +2047,50 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     inbox.releaseRetiredTaskWriter(job.deliveryId,receipt);
     return true;
   };
+  const finishWriterRetirement = async (job,saved,response,signal) => {
+    if(response?.state!=='retired')return false;
+    inbox.recordRetiredTaskWriter(saved,response.receipt);
+    await releaseRetiredWriter(job,saved,signal);
+    return true;
+  };
+  const recoverWriterRetirement = async (job,saved,attempt,signal) => {
+    if(!saved||saved.passId!==attempt.passId||saved.deliveryId!==job.deliveryId||typeof client.readTaskWriterRetirement!=='function')
+      fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    const response=await client.readTaskWriterRetirement({...saved,...attempt},signal);
+    lease();signal.throwIfAborted();
+    // This flag never opens a second invocation. A server which still sees
+    // an eligible pass may be observing a request whose result is unknown.
+    return !await finishWriterRetirement(job,saved,response,signal);
+  };
+  const retireInterruptedWriter = async (job,saved,threadId,signal) => {
+    if(saved?.deliveryId!==job.deliveryId||saved.threadId!==threadId||job.kind!=='task'
+      ||typeof native.withWriter!=='function'||typeof client.readTaskWriterRetirement!=='function'
+      ||typeof client.retireTaskWriter!=='function'||typeof passHost.releaseRetiredTaskPass!=='function')return false;
+    const live=await client.readTaskPass({companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId},signal);
+    lease();signal.throwIfAborted();
+    if(live?.state!=='review_required'||live.workMode!=='task'||!(Date.parse(live.leaseExpiresAt)<=now())
+      ||['passId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>live[key]!==saved[key]))return false;
+    const scope={...saved,leaseRevision:live.leaseRevision,clientRequestId:randomUUID()};
+    if((await client.readTaskWriterRetirement(scope,signal))?.state!=='eligible')return false;
+    const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+    lease();signal.throwIfAborted();
+    const response=await native.withWriter(threadId,cwd,async writerSignal=>{
+      await verifyCurrentWriterRetirement(job,saved,scope,writerSignal);
+      // Hold the exclusive native writer through the server CAS. If either
+      // the process or HTTP is lost after this point, reopen by exact read.
+      inbox.startTaskWriterRetirement(job.deliveryId,scope);
+      return client.retireTaskWriter(scope,writerSignal);
+    },{signal});
+    lease();signal.throwIfAborted();
+    return finishWriterRetirement(job,saved,response,signal);
+  };
+  const verifyCurrentWriterRetirement = async (job,saved,scope,signal) => {
+    const read=await client.readTaskWriterRetirement(scope,signal);
+    lease();signal.throwIfAborted();
+    if(read?.state!=='eligible'||!isDeepStrictEqual(await passHost.readActivePass(),saved)
+      ||inbox.readPassContinuation(job.deliveryId)!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    lease();signal.throwIfAborted();
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -2071,6 +2115,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     const [job]=inbox.incompleteDeliveries(); if(!job) return false;
     if(!saved&&await releaseRetiredWriter(job,null,signal))return false;
+    const retiring=inbox.readTaskWriterRetirementAttempt(job.deliveryId);
+    if(retiring)return recoverWriterRetirement(job,saved,retiring,signal);
     if(job.state==='leased') return true;
     if(!job.nativeStarted) {
       // Only the host/pass claim is uncertain. The persisted native-start bit proves
@@ -2339,6 +2385,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return continueTerminalPass(job,result,signal,marker);
     if(result.state==='failed'&&result.failure==='model_capacity'&&job.kind==='provision'&&uuid.test(result.turnId??''))
       return continueCapacityProvision(job,result,signal,marker);
+    if(!continued&&result.state==='uncertain'&&await retireInterruptedWriter(job,saved,threadId,signal))return false;
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };

@@ -740,6 +740,78 @@ test(`retired writer preserves the original task and admits an independent overd
   }finally{await restarted.close();}
 });
 
+for(const committed of [true,false])
+test(`retirement lost its HTTP reply and only the original device receipt can release it (committed=${committed})`,async t=>{
+  const f=fixture(t);f.authority.workMode='task';
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-writer-retirement-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
+  f.failNative(true);
+  f.events.push({id:randomUUID(),revision:'writer-retire',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  const saved=f.activePass(),pass=f.passes.get(saved.deliveryId);
+  f.advance(21*60_000);pass.state='review_required';
+  f.options.native.readDelivery=async()=>({state:'uncertain'});
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  let retained,receipt,attempts=0,reads=0,writer=false,setupLocked=false;
+  f.options.native.withWriter=async(thread,cwd,action,{signal})=>{
+    assert.equal(thread,saved.threadId);
+    assert.equal(cwd,path.join(assistantTaskStorageDirectory(directory,{...f.identity,companyId:f.companyId,taskId:f.taskId}),'chat'));
+    writer=true;
+    try{return await action(signal);}finally{writer=false;}
+  };
+  f.options.client.readTaskWriterRetirement=async input=>{
+    reads++;
+    if(retained)assert.deepEqual(input,retained);
+    else retained=structuredClone(input);
+    return receipt?{state:'retired',receipt}:{state:'eligible'};
+  };
+  f.options.client.retireTaskWriter=async input=>{
+    assert.ok(writer&&setupLocked);assert.equal(++attempts,1);assert.deepEqual(input,retained);
+    const journaled=inbox.readTaskWriterRetirementAttempt(saved.deliveryId);
+    assert.deepEqual(journaled,{passId:saved.passId,leaseRevision:pass.leaseRevision,clientRequestId:input.clientRequestId});
+    if(committed){
+      pass.state='closed';
+      receipt={...saved,state:'retired',leaseRevision:pass.leaseRevision,receiptId:randomUUID()};
+    }
+    throw Object.assign(new Error('lost reply'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  };
+  const release=f.options.passHost.releasePass;
+  f.options.passHost.releaseRetiredTaskPass=async value=>{
+    assert.deepEqual(value,receipt);assert.ok(setupLocked&&!writer);return release(value);
+  };
+  await f.coordinator.close();
+  const openHost=()=>createAssistantRuntimeHost({context:async action=>action(f.options.client,{
+    ...f.options.passHost,readIdentity:async()=>f.identity,readActivation:async()=>null,withSetupLock:async action=>{
+      assert.equal(setupLocked,false);
+      setupLocked=true;
+      try{return await action();}finally{setupLocked=false;}
+    },
+  }),dependencies:{directory,ensureDirectory:async()=>{},now:f.options.now,timeZone:'UTC',native:f.options.native,
+    openDatabase:async()=>({database:f.database,close:async()=>{}}),
+    readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,
+      authorizedByUserId:f.memberId,businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome',
+        'workspace_execution','owner_decisions','background_service']}}),
+  }});
+  let host=await openHost();
+  await assert.rejects(host.coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  assert.equal(attempts,1);assert.equal(reads,2);assert.deepEqual(f.activePass(),saved);
+  const before=f.counts();
+  f.options.native.readDelivery=async()=>assert.fail('an attempted retirement only reads its exact HTTP receipt');
+  await host.close();host=await openHost();
+  try{
+    await host.coordinator.workOnce();await host.coordinator.workOnce();
+    assert.equal(attempts,1);
+    assert.equal(f.activePass()===null,committed);
+    assert.equal(inbox.readRetiredTaskWriter(saved.deliveryId)?.released??false,committed);
+    assert.equal(inbox.readDelivery(saved.deliveryId).state,'uncertain');
+    assert.deepEqual(f.counts(),before);
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+  }finally{await host.close();}
+});
+
+
 for(const failure of ['backend response','local key release','completion tool response'])test(`two overdue cycles recover after lost ${failure} on their original cadence`,async t=>{
   const f=fixture(t);
   const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};

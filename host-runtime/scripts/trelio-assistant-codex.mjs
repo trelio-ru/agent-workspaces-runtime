@@ -3614,20 +3614,20 @@ const acquireAssistantThreadWriter = async (request,{threadId,cwd,config,executi
   if(resumed?.thread?.id!==threadId)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
 };
 
-/** Verify the original writer is gone before settling an already committed
- * pass. Acquire and release a tool-free native writer, with no model turn,
- * history inspection, or task authorization. A successful RPC alone is not
- * enough: the observer's own process must also exit within the same budget. */
-export const readAssistantCodexWriterReleased = async (threadId,cwd,options={}) => {
+/** Hold the exact tool-free native writer across a host-side authority check.
+ * Only the owning worker can supply the callback. No turn, history, plugin or
+ * task tool is opened here. Losing this process aborts the callback's signal.
+ * Only exact backend read-back can settle a possibly committed request. */
+export const withAssistantCodexWriter = async (threadId,cwd,action,options={}) => {
   threadId=id(threadId);
-  if(typeof cwd!=='string'||!path.isAbsolute(cwd))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  if(typeof cwd!=='string'||!path.isAbsolute(cwd)||typeof action!=='function')fail('ASSISTANT_CODEX_INVALID_INPUT');
   const deadline=AbortSignal.timeout(15_000);
   const signal=options.signal?AbortSignal.any([options.signal,deadline]):deadline;
   let actual;
   try{actual=await fs.realpath(cwd);}catch{fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE');}
   const spawnProcess=options.spawnProcess??spawn;
   let closed;
-  await readNative(null,async(_unused,request)=>{
+  const result=await readNative(null,async(_unused,request,_watchTerminal,writerSignal)=>{
     await verifyAssistantExecutionFeatures(request);
     const configuration=await request('config/read',{includeLayers:false,cwd:actual});
     const config=assistantCodexExecutionOverrides(configuration?.config);
@@ -3636,6 +3636,10 @@ export const readAssistantCodexWriterReleased = async (threadId,cwd,options={}) 
     for(const plugin of Object.values(config.plugins))plugin.enabled=false;
     await acquireAssistantThreadWriter(request,{threadId,cwd:actual,config});
     await requireEmptyThreadQueue(request,threadId);
+    writerSignal.throwIfAborted();
+    const value=await action(writerSignal);
+    writerSignal.throwIfAborted();
+    return value;
   },{...options,signal,readTimeoutMs:15_000,nativeCwd:actual,controlledExecution:true,desktopOperation:true,
     spawnProcess:(...args)=>{
       const child=spawnProcess(...args);
@@ -3643,8 +3647,12 @@ export const readAssistantCodexWriterReleased = async (threadId,cwd,options={}) 
       return child;
     }});
   if(!await closed||signal.aborted)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-  return true;
+  return result;
 };
+// An RPC result alone cannot prove that a previous writer released. Match
+// the same native claim, empty queue and owned child exit as an authority check.
+export const readAssistantCodexWriterReleased = (threadId,cwd,options)=>
+  withAssistantCodexWriter(threadId,cwd,()=>true,options);
 const startNativeInvocation = (options, threadId, deliveryId) => {
   try{
     const result=options.startInvocation({threadId,deliveryId});

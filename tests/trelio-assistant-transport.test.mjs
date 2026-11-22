@@ -1387,6 +1387,44 @@ test('checkpoint evidence uses one fixed native read and keeps intermediate and 
   assert.equal(calls,9,'neither selector retries or falls back to the other stage');
 });
 
+test('writer retirement uses one fixed device route and checks the exact original scope and receipt',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});
+  const input={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID(),bindingId:randomUUID(),
+    deliveryId:randomUUID(),threadId:randomUUID(),clientRequestId:randomUUID(),bindingRevision:4,leaseRevision:3};
+  const {clientRequestId,...scope}=input;
+  const eligible={schemaVersion:1,clientRequestId,state:'eligible',scope};
+  const receipt={schemaVersion:1,state:'retired',receiptId:randomUUID(),assistantId,deviceId,...scope};
+  const confirmed={schemaVersion:1,clientRequestId,state:'retired',receipt};
+  let value=eligible,status=200,action='read',calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;
+    assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/writer-retirement');
+    assert.equal(options.method,'POST');
+    assert.deepEqual(JSON.parse(options.body),{...input,action});
+    return Response.json(value,{status});
+  }})});
+  assert.deepEqual(await client.readTaskWriterRetirement(input),{state:'eligible'});
+  value=confirmed;
+  assert.deepEqual(await client.readTaskWriterRetirement(input),{state:'retired',receipt});
+  action='retire';
+  assert.deepEqual(await client.retireTaskWriter(input),{state:'retired',receipt});
+  for(const altered of [eligible,{...confirmed,clientRequestId:randomUUID()},
+    {...confirmed,receipt:{...receipt,deviceId:randomUUID()}},
+    {...confirmed,receipt:{...receipt,leaseRevision:2}},
+    {...confirmed,receipt:{...receipt,providerResult:'private'}}]){
+    value=altered;
+    await assert.rejects(client.retireTaskWriter(input),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  }
+  action='read';status=404;value={};
+  assert.equal(await client.readTaskWriterRetirement(input),null);
+  status=403;
+  await assert.rejects(client.readTaskWriterRetirement(input),error=>error.status===403);
+  action='retire';status=404;
+  await assert.rejects(client.retireTaskWriter(input),error=>error.status===404);
+  assert.equal(calls,11,'the transport never retries an attempted write or switches routes');
+});
+
 test('recovery context is a partial native observation of the original expired task pass',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});
