@@ -198,12 +198,17 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
         return output(rowOf(exact));
       });
     },
-    nextDue(excludeCompanyIds = []) {
-      if (!Array.isArray(excludeCompanyIds) || excludeCompanyIds.length > 256) invalid();
-      const excluded = [...new Set(excludeCompanyIds.map(id))];
-      // Keep due timestamps/cycles intact while other companies continue.
-      const exclusion = excluded.length ? ` AND json_extract(scope_json,'$.companyId') NOT IN (${excluded.map(()=>'?').join(',')})` : '';
-      return output(get(`SELECT * FROM assistant_schedule_tasks WHERE state='active' AND next_run_at<=?${exclusion} ORDER BY next_run_at,task_key LIMIT 1`, timestamp(now()),...excluded));
+    nextDue(excludeCompanyIds = [], excludeTaskIds = []) {
+      if (!Array.isArray(excludeCompanyIds) || excludeCompanyIds.length > 256
+        || !Array.isArray(excludeTaskIds) || excludeTaskIds.length > 10_000) invalid();
+      const companies = [...new Set(excludeCompanyIds.map(id))], tasks = [...new Set(excludeTaskIds.map(id))];
+      // Keep the original due time. Excluding an uncertain task allocates
+      // nothing and never changes its cadence or last successful completion.
+      const exclusion = (column, values) => values.length ? ` AND json_extract(scope_json,'$.${column}') NOT IN
+        (SELECT value FROM json_each(?))` : '';
+      return output(get(`SELECT * FROM assistant_schedule_tasks WHERE state='active' AND next_run_at<=?
+        ${exclusion('companyId',companies)}${exclusion('taskId',tasks)} ORDER BY next_run_at,task_key LIMIT 1`,
+      timestamp(now()),...[companies,tasks].filter(values=>values.length).map(values=>JSON.stringify(values))));
     },
     setState(scope, { state, expectedRevision }) {
       if (!['active','paused','done','revoked'].includes(state) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) invalid();

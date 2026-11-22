@@ -8,6 +8,7 @@ import { detectAgentRuntimeAttestation } from './trelio-runtime-attestation.mjs'
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from './trelio-context-recovery.mjs';
 import { runtimeHookSignal, assertRuntimeHookBudget } from './trelio-hook-private-session.mjs';
+import { validateAssistantTaskWriterRetirement } from './trelio-assistant-inbox.mjs';
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const fail=code=>{throw Object.assign(new Error(code),{code});};
@@ -495,7 +496,20 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       if(!old)await store.put(slot,next);
       return next;
     },
-    // Only a positive, exact backend outcome allows the host to release its
+    /** A separate exact server retirement releases only the protected task
+     * writer. The caller rechecks that the server still refuses the old pass
+     * before removing its key. The original delivery stays unresolved. */
+    async releaseRetiredTaskPass(receipt){
+      const identity=await readIdentity();if(!identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
+      const confirmed=validateAssistantTaskWriterRetirement(receipt);
+      const slot={origin:identity.origin,kind:'pass',id:identity.deviceId};
+      const pass=validateAssistantActivePass(await store.get(slot),identity);
+      if(pass.kind==='source_intake'||['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision',
+        'passId','deliveryId','threadId'].some(key=>confirmed[key]!==pass[key]))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      await store.remove({origin:identity.origin,kind:'runtime',id:pass.passId});
+      await store.remove(slot);
+    },
+    // Only a positive, exact backend outcome allows the host to complete its
     // active journal. Timeout/CLI exit/file existence cannot call this path.
     async releasePass(outcome){
       const identity=await readIdentity();if(!identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');

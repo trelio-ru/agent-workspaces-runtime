@@ -168,6 +168,29 @@ ordinary comments versus wake events, scheduled passes, owner-pending tasks,
 read acknowledgement, revocation and uncertain external dispatch. It does not
 claim a live Telegram/Trelio/Codex end-to-end run.
 
+## Retired task writer (schema v32)
+
+The private journal can retain a server-confirmed writer retirement for the
+original task, pass, binding and delivery. The original delivery remains
+uncertain with its native-start bit, source slots, cursor and schedule intact.
+No business outcome, processed slot, ACK or successful cadence update comes
+from retirement.
+
+The host records the exact native receipt before removing its protected pass
+and runtime key. Under the coordinator lease, it reads the same closed server
+pass and revision, then releases its local device slot. If the worker stops
+after key removal, the next worker checks the same closed pass before committing
+the local release. A changed or unavailable server pass leaves the device
+blocked.
+
+Only after both steps can events or a due cycle for a different task start.
+An event for the retired task cannot select another delivery. Its original
+schedule stays due and is skipped when selecting an independent cycle. The
+ordinary completion and continuation writers reject the retired delivery.
+Existing uncertain rows receive no synthetic retirement during migration.
+The first native retirement receipt and the v32 marker commit atomically;
+an empty table stays compatible with v31.
+
 ## External ACK attempts (schema v5)
 
 The same private event journal adds an `ack_started` bit, original attempt

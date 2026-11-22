@@ -2021,6 +2021,32 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return {...draft,recoveredOutcome:{...previous,saveTurnId:selection.saveTurnId,
       plan:{...plan,retryFromReviewId:continuation.reviewId}}};
   };
+  const releaseRetiredWriter = async (job,saved,signal) => {
+    if(job.kind!=='task')return false;
+    const recorded=inbox.readRetiredTaskWriter(job.deliveryId);
+    if(!recorded)return false;
+    const {receipt,released}=recorded,plan=findSchedule(job.scope,job.taskId);
+    if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
+      ||receipt.assistantId!==identity.assistantId||receipt.deviceId!==identity.deviceId||job.scope.origin!==identity.origin
+      ||plan?.threadId!==receipt.threadId||saved&&['companyId','taskId','passId','bindingId','bindingRevision','deliveryId','threadId']
+        .some(key=>saved[key]!==receipt[key]))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    if(released&&!saved)return true;
+    // The persisted positive retirement is separate from the business
+    // outcome. Recheck the exact server fence before clearing the old key.
+    // An outage or changed pass keeps the device blocked, including after
+    // a crash that removed the key before marking this SQLite cell released.
+    const live=await client.readTaskPass({companyId:receipt.companyId,taskId:receipt.taskId,passId:receipt.passId},signal);
+    lease();signal.throwIfAborted();
+    if(live?.state!=='closed'||['passId','bindingId','bindingRevision','deliveryId','threadId','leaseRevision']
+      .some(key=>live[key]!==receipt[key])||!isDeepStrictEqual(await passHost.readActivePass(),saved))
+      fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    lease();signal.throwIfAborted();
+    if(saved)await passHost.releaseRetiredTaskPass(receipt);
+    lease();signal.throwIfAborted();
+    if(await passHost.readActivePass()!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    inbox.releaseRetiredTaskWriter(job.deliveryId,receipt);
+    return true;
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -2029,6 +2055,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const row=inbox.readDelivery(pass.deliveryId);
       if(row.taskId!==pass.taskId || row.scope.companyId!==pass.companyId || row.scope.assistantId!==identity.assistantId
         || row.kind!=='task') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      if(await releaseRetiredWriter(row,saved,signal))return false;
       if(row.state==='complete') {
         // The SQLite completion was committed only after native read-back and
         // the exact backend outcome. A crash before local key removal does not
@@ -2043,6 +2070,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }
     }
     const [job]=inbox.incompleteDeliveries(); if(!job) return false;
+    if(!saved&&await releaseRetiredWriter(job,null,signal))return false;
     if(job.state==='leased') return true;
     if(!job.nativeStarted) {
       // Only the host/pass claim is uncertain. The persisted native-start bit proves
@@ -2614,7 +2642,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(job===null) break;
       }
       for(let attempt=0;attempt<=256;attempt++) {
-        const due=schedule.nextDue([...blockedCompanies]);
+        const due=schedule.nextDue([...blockedCompanies],inbox.retiredTaskIds());
         if(!due) break;
         const job=await claim({scheduledTask:{scope:due.source,taskId:due.taskId}});
         if(job) return perform(job,signal);

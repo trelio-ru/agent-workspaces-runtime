@@ -650,6 +650,96 @@ test('a lost native response is reconciled in the same chat after host restart, 
   assert.equal(f.database.prepare("SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1").get().n,1);
 });
 
+
+for(const failure of ['none','closed_receipt_mismatch','key_removal_response_lost'])
+test(`retired writer preserves the original task and admits an independent overdue task after restart (${failure})`,async t=>{
+  const f=fixture(t),second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};
+  f.options.client.tasks=async()=>({bindings:[f.authority,second],nextCursor:null});
+  f.options.client.task=async(companyId,taskId)=>{
+    assert.equal(companyId,f.companyId);
+    const binding=taskId===f.taskId?f.authority:second;
+    assert.equal(binding.taskId,taskId);
+    return {...binding,execution:f.execution};
+  };
+  await f.coordinator.pollOnce();
+  await f.coordinator.workOnce();f.advance(60_000);await f.coordinator.workOnce();
+  const plans=f.coordinator.status().sort((a,b)=>a.nextRunAt-b.nextRunAt);
+  assert.equal(plans.length,2);
+  f.advance(2*60*60_000);
+  const starts=[],readDelivery=f.options.native.readDelivery,readOutcome=f.options.client.readBusinessOutcome,readPass=f.options.client.readTaskPass;
+  f.options.native.run=async(input,options)=>{
+    starts.push(input.taskContext.taskId);
+    options.startInvocation();
+    if(starts.length===1)throw new Error('the provider response may have been lost');
+    assert.equal(input.taskContext.taskId,plans[1].taskId);
+    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+    f.deliveries.set(input.deliveryId,result);
+    return result;
+  };
+  f.options.client.readBusinessOutcome=async input=>{
+    if(input.taskId===plans[0].taskId)return {schemaVersion:1,state:'pending'};
+    return readOutcome(input);
+  };
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  f.options.native.readDelivery=async(thread,id,options)=>{
+    assert.notEqual(thread,plans[0].threadId,'a positively retired task never reads or starts the old native history');
+    return readDelivery(thread,id,options);
+  };
+  const pass=f.activePass(),identity={...pass};delete identity.schemaVersion;
+  const old=f.passes.get(pass.deliveryId);
+  assert.equal(pass.taskId,plans[0].taskId);
+  f.advance(21*60_000);
+  const current=await readPass({passId:pass.passId});
+  Object.assign(current,{state:'closed'});
+  assert.equal(current,old);
+  const receipt={...identity,schemaVersion:1,state:'retired',leaseRevision:old.leaseRevision,receiptId:randomUUID()};
+  let inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  assert.throws(()=>inbox.recordRetiredTaskWriter(pass,{...receipt,deliveryId:randomUUID()}),/CONFLICT/);
+  assert.throws(()=>inbox.recordRetiredTaskWriter(pass,{...receipt,body:'private'}),/INVALID_INPUT/);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,31);
+  assert.equal(inbox.recordRetiredTaskWriter(pass,receipt).released,false);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,32);
+  assert.throws(()=>inbox.preparePassContinuation(pass.deliveryId,{passId:pass.passId,expectedLeaseRevision:0,
+    terminalTurnId:randomUUID(),terminalMarkerId:pass.deliveryId}),/STALE_DELIVERY/);
+  assert.throws(()=>inbox.releaseRetiredTaskWriter(pass.deliveryId,{...receipt,receiptId:randomUUID()}),/CONFLICT/);
+  assert.equal(await inbox.claimDelivery({scheduledTask:{scope:plans[1].source,taskId:plans[1].taskId},
+    authorize:async()=>assert.fail('recording alone cannot free the writer')}),null);
+  const original=f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(pass.deliveryId);
+  const release=f.options.passHost.releasePass;let lost=failure==='key_removal_response_lost',changed=failure==='closed_receipt_mismatch';
+  f.options.passHost.releaseRetiredTaskPass=async value=>{
+    assert.deepEqual(value,receipt);
+    await release(value);
+    if(lost){lost=false;throw Object.assign(new Error('process interrupted after key removal'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
+  };
+  f.options.client.readTaskPass=async input=>{
+    const value=await readPass(input);
+    return changed&&input.passId===pass.passId?{...value,leaseRevision:value.leaseRevision+1}:value;
+  };
+  await f.coordinator.close();
+  let restarted=createAssistantCoordinator(f.options);
+  try{
+    if(lost||changed){
+      await assert.rejects(restarted.workOnce(),{code:failure==='key_removal_response_lost'
+        ?'ASSISTANT_TRANSPORT_UNAVAILABLE':'ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED'});
+      assert.deepEqual(starts,[plans[0].taskId]);
+      assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).released,false);
+      changed=false;
+      await restarted.close();restarted=createAssistantCoordinator(f.options);
+    }
+    await restarted.workOnce();
+    assert.deepEqual(starts,plans.map(plan=>plan.taskId));
+    assert.equal(f.activePass(),null);
+    inbox=createAssistantInbox({database:f.database,now:f.options.now});
+    assert.deepEqual(inbox.readRetiredTaskWriter(pass.deliveryId),{receipt,released:true});
+    assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(pass.deliveryId),original);
+    assert.equal(restarted.status().find(plan=>plan.taskId===pass.taskId).nextRunAt,plans[0].nextRunAt);
+    assert.ok(restarted.status().find(plan=>plan.taskId===plans[1].taskId).lastCompletedAt>0);
+    assert.equal(await inbox.claimDelivery({scheduledTask:{scope:plans[0].source,taskId:pass.taskId},authorize:async()=>false}),null);
+    assert.throws(()=>inbox.completeDelivery(pass.deliveryId,'forged'),/STALE_DELIVERY/);
+    assert.equal(await restarted.workOnce(),null);
+  }finally{await restarted.close();}
+});
+
 for(const failure of ['backend response','local key release','completion tool response'])test(`two overdue cycles recover after lost ${failure} on their original cadence`,async t=>{
   const f=fixture(t);
   const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};

@@ -1362,6 +1362,7 @@ publication tooling также остаются вне этого публичн
   factory's fresh identity/private-context forwarding. Exercise that factory,
   real HTTP codec and SQLite restart together; direct coordinator injection
   alone cannot prove the background recovery path is connected.
+- An exact retired task writer in inbox v32 frees the device after native closed-pass read-back and protected key removal. The original task still retains its delivery, due time and no-replay fence. No outcome or ACK is inferred. See [inbox](docs/assistant-inbox.md#retired-task-writer-schema-v32).
 - Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
   New leased task invocations sample their original native lease once (max 30m),
   including preflight, rather than the shorter 15m observer default. Renewals never
