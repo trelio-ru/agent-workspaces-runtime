@@ -2125,15 +2125,28 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           workspaceDraft:{workspaceId:portableFinish.workspaceId,runId:portableFinish.runId,finishPending:true,portableFinish}},signal,marker);
       }
     }
+    let unavailableLegacyHandoff;
     if(saved&&job.kind==='task'&&continued&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&!job.events.length&&inbox.readDelivery(job.deliveryId).scheduled
       &&(continued.started&&continued.taskReadParent?.initialScheduled&&continued.taskReadParent.technicalPrelude
         ||!continued.started&&continued.workspaceDraft?.retainedHandoff)){
       const pass={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId};
-      const candidate=await native.readDelivery(threadId,marker,{signal,
-        interruptedWorkspaceDraft:{...pass,retainedHandoff:true}});lease();
       const existing=continued.workspaceDraft?.retainedHandoff;
-      if(candidate.state==='interrupted_retained_handoff'&&candidate.turnId===result.turnId){
+      let candidate;
+      try{
+        candidate=await native.readDelivery(threadId,marker,{signal,
+          interruptedWorkspaceDraft:{...pass,retainedHandoff:true}});
+      }catch(error){
+        if(existing||error?.code!=='ASSISTANT_CODEX_READ_UNAVAILABLE')throw error;
+        signal.throwIfAborted();
+        // This was only a speculative observation. Its failure can neither
+        // select a legacy handoff nor invalidate a positive, independent
+        // local-delta proof for the same turn. Keep the original failure if
+        // that check cannot authorize the exact save.
+        unavailableLegacyHandoff=error;
+      }
+      lease();
+      if(candidate?.state==='interrupted_retained_handoff'&&candidate.turnId===result.turnId){
         const observed=validateAssistantRetainedHandoff(candidate.proof,{selected:false});
         const live=await client.readTaskPass(pass,signal);lease();
         if(live.bindingId!==saved.bindingId||live.bindingRevision!==saved.bindingRevision||live.threadId!==saved.threadId
@@ -2159,7 +2172,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // No matching legacy proof leaves the next independently fenced save
       // eligible. A retained selection, changed turn or conflicting native
       // state still refuses; none authorizes switching an existing attempt.
-      if(existing||candidate.state!=='uncertain'||candidate.turnId!==undefined&&candidate.turnId!==result.turnId)return true;
+      if(candidate&&(existing||candidate.state!=='uncertain'||candidate.turnId!==undefined&&candidate.turnId!==result.turnId))return true;
     }
     // A successfully started read continuation can later make its own
     // ordinary local edits. Use that turn's current Run, draft and bytes to
@@ -2198,6 +2211,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(retained)return true;
       }
     }
+    if(unavailableLegacyHandoff)throw unavailableLegacyHandoff;
     if(saved&&job.kind==='task'&&result.state==='uncertain'&&uuid.test(result.turnId??'')
       &&marker===job.deliveryId&&(!continued||continued.taskReadParent?.intermediateDraft&&!continued.started)
       &&!job.events.some(event=>event.conversation_key)&&typeof client.readTaskIntermediateDraftEvidence==='function'){

@@ -3683,7 +3683,7 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
   const sourceMarkerId=randomUUID(),initialRevision=readContinuation?2:provider?1:0;
   const outcomeMarker=randomUUID(),outcomeTurn=randomUUID(),priorReceiptId=randomUUID();
   const retryMarker=randomUUID(),retryTurn=randomUUID();
-  let changedHandoffObservation=false,retainedHandoffReads=0;
+  let handoffObservation='missing',retainedHandoffReads=0;
   let original,admitted=false,completedSave=false,reviews=0,renewals=0,starts=0,saveReads=0,outcomeObservations=0;
   let writerBusy=true,confirmed=false,outcomeReviews=0,outcomeRenewals=0,outcomeStarts=0,retryStarts=0;
   const questionId=randomUUID(),questionRequestId=randomUUID();
@@ -3746,7 +3746,9 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
           retainedHandoffReads++;
           // An absent older proof is normal. An observed different turn is
           // independent uncertainty and cannot select another save mode.
-          return changedHandoffObservation?{state:'uncertain',turnId:retryTurn}:{state:'uncertain'};
+          if(handoffObservation==='unavailable')
+            throw Object.assign(new Error('read unavailable'),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+          return handoffObservation==='changed_turn'?{state:'uncertain',turnId:retryTurn}:{state:'uncertain'};
         }
         if(options.interruptedWorkspaceDraft?.localDraftBasis){
           assert.deepEqual(options.interruptedWorkspaceDraft.localDraftBasis,basis);
@@ -3868,15 +3870,22 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
     f.advance(21*60_000);pass.state='review_required';
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.equal(reviews,0);
+    if(readContinuation){
+      handoffObservation='unavailable';
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+      assert.deepEqual([inspectCount,reviews,renewals,starts],[0,0,0,0],'a failed read alone cannot select a save');
+    }
     admitted=true;
     if(readContinuation){
-      changedHandoffObservation=true;
+      handoffObservation='changed_turn';
       assert.equal((await coordinator.workOnce()).state,'blocked');
       assert.deepEqual([inspectCount,reviews,renewals,starts],[0,0,0,0],'a changed turn cannot select the local draft');
-      changedHandoffObservation=false;
+      // This is the obsolete handoff reader, not the independent local-delta
+      // reader. Its transport failure proves nothing about either operation.
+      handoffObservation='unavailable';
     }
     assert.equal((await coordinator.workOnce()).state,'blocked');
-    if(readContinuation)assert.equal(retainedHandoffReads,3,'an unreserved absent handoff can give way to a separately proved save');
+    if(readContinuation)assert.equal(retainedHandoffReads,4,'an unavailable legacy reader can give way to a separately proved save');
     assert.equal(saveReads,1,'recovery reads the accepted Run after its one save');
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.equal(saveReads,2,'the next cycle rereads the same native receipt without another save');

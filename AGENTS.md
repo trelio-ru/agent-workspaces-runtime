@@ -241,7 +241,8 @@ publication tooling также остаются вне этого публичн
   in the SAME private Run. A verified export may be the entire delta before
   any text replacement. An empty or unexplained delta still refuses.
   Started read continuations use the same local-delta save. An unreserved
-  absence of legacy handoff proof allows an independent local-delta check;
+  absence of legacy handoff proof or a read-only transport failure allows an
+  independent local-delta check for that same turn;
   changed native evidence and reserved modes remain fenced. An original
   validating finish handle is history evidence only. Recheck the expired
   native Run, no final-draft marker and exact local delta under the finish
