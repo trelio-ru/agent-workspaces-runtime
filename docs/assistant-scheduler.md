@@ -282,9 +282,12 @@ the next justified action/wake. Keep one compact current business state and the
 minimum exact recovery references; shared facts stay only in canonical material.
 Do not duplicate tool output, old error/UI inventories or diagnostic history in
 WORK.md, shared context and handoff. An unchanged blocker or review timestamp
-alone uses accepted state/noChange without another Run/worklog. New answers,
-decisions, changed blockers and deliverables remain substantive saves. Save with the common Workspace Run/CAS; this is
-ordinary company task data, not AGENTS, a local transcript or new authority. The
+alone uses accepted state/noChange without another Run/worklog. Supply the
+current accepted head and omit acceptedRunId for noChange. The host returns a
+correctable input refusal before protected reads or native completion when a
+Run ID accompanies noChange=true. New answers, decisions, changed blockers and
+deliverables remain substantive saves. Save ordinary company task data with
+the common Workspace Run and its existing revision check. The
 coordinator does not read/cache the Markdown or store goal text in SQLite.
 
 An ordinary full-task pass rechecks a retained technical blocker through the

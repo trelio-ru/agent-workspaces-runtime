@@ -1240,6 +1240,8 @@ publication tooling также остаются вне этого публичн
   SAME readonly inspector and observed signer. Never send/persist own WORK.md
   body/path/plaintext hash or treat a model witness as authority. Native
   acceptance/retraction/noChange/head/recipient guards remain independent.
+  noChange supplies the current accepted head and omits acceptedRunId. Reject
+  the incompatible fields locally before protected material reads or completion.
   Managed setup uses that SAME registration/read-back, OS store and local scope
   opening/TRELIOE1 self-test; key_verified grants no content execution. See
   [identity ownership](docs/assistant-scheduler.md#managed-encryption-identity-ownership).

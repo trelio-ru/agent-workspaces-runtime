@@ -3710,6 +3710,13 @@ export const withAssistantEncryptedMaterial = async ({args,signal},send,
   }
   if(Object.hasOwn(args,'encryptedMaterialWitness') || !new RegExp(UUID,'u').test(args.workspaceId??'')
     || !/^[0-9a-f]{40,64}$/u.test(args.workspaceHead??'') || typeof args.noChange!=='boolean')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  if(args.noChange&&Object.hasOwn(args,'acceptedRunId')){
+    // The native receipt already identifies the earlier accepted Run. A Run
+    // ID in the new request explicitly accompanies newly accepted material.
+    // Explain the incompatible fields before loading any protected evidence.
+    return {isError:true,content:[{type:'text',text:'For noChange=true, omit acceptedRunId. Use the verified Workspace and accepted head and keep the previous goal state, cadence, time zone and any fixed daily time. If this pass saved a new result, verify its acceptance and report it with noChange=false and that acceptedRunId.'}],
+      structuredContent:{code:'ASSISTANT_MCP_INPUT_INVALID',recovery:{beforeDispatch:true,omitFields:['acceptedRunId']}}};
+  }
   return withProfile(async({identity,host,client,store,prepareWorkspaceMaterial})=>{
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
     const pass=validateAssistantActivePass(await host.readActivePass(),identity);

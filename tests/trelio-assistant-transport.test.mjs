@@ -1332,6 +1332,31 @@ test('discussion completion forwards its exact native reply without opening any 
   await assert.rejects(withAssistantEncryptedMaterial({args:ordinary},send,isolated),/PLAN_INVALID/);
 });
 
+test('unchanged accepted material rejects an explicit Run ID before protected reads or completion',async()=>{
+  const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const name='complete_assistant_pass';
+  const unchanged={workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),noChange:true};
+  const result=await withAssistantEncryptedWorkspaceArguments({name,args:{...unchanged,acceptedRunId:randomUUID()}},
+    ()=>assert.fail('invalid completion reached native'),{
+      withProfile:()=>assert.fail('incompatible fields opened a protected profile'),
+      loadCommon:()=>assert.fail('incompatible fields loaded a material inspector'),
+    });
+  assert.equal(result.isError,true);
+  assert.deepEqual(result.structuredContent,{code:'ASSISTANT_MCP_INPUT_INVALID',
+    recovery:{beforeDispatch:true,omitFields:['acceptedRunId']}});
+  assert.match(result.content[0].text,/For noChange=true, omit acceptedRunId/u);
+
+  const profile=await workspaceProfileFixture();
+  let completions=0;
+  const resultAfterCorrection=await withAssistantEncryptedWorkspaceArguments({name,args:unchanged},async wire=>{
+    completions++;
+    assert.deepEqual(wire,unchanged);
+    return {state:'confirmed'};
+  },{withProfile:action=>action({...profile,prepareWorkspaceMaterial:async()=>false})});
+  assert.equal(resultAfterCorrection.state,'confirmed');
+  assert.equal(completions,1,'the host forwards only the agent’s corrected call');
+});
+
 test('fresh company execution state is projected without accepting local defaults or private metadata',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),taskId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'v'.repeat(43)}`,expiresAt:1});
