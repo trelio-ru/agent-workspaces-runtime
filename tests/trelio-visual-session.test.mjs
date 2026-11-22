@@ -149,6 +149,9 @@ test('presentation validation precedes identity/storage and an old worker cannot
   assert.equal(calls, 0, 'mode mismatch must not dispatch any browser operation');
   assert.equal((await invoke('status', 'hidden')).state, 'closed', 'the original owner can still inspect/close safely');
   assert.equal((await invoke('navigate', 'windowed')).state, 'closed', 'omitted legacy presentation stays windowed');
+  assert.equal((await runVisualSession({ origins: [origin], externalNavigation: true,
+    operation: 'navigate', args: { url: origin }, env, fixture: { directory } })).reason, 'observation_mode_mismatch',
+  'an explicit switch still cannot change a running legacy browser');
   await writePrivateJsonFile(file, { ...legacy, presentation: 'hidden' });
   assert.equal((await invoke('navigate', 'windowed')).reason, 'observation_mode_mismatch');
   assert.equal((await readVisualOwner(file)).deadlineAt, binding.deadlineAt, 'presentation never renews the original lease');
@@ -535,10 +538,50 @@ test('all signing and version discovery shares one non-sliding deadline', () => 
   assert.equal(probes, 1);
 });
 
-test('detached worker keeps its original lease and encrypted storage across short calls', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000 }, async () => {
+test('detached worker keeps its original lease and encrypted storage across short calls', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000 }, async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-worker-test-')));
   let invalidDocumentRequests = 0;
+  const externalNavigations = [];
+  const externalPdf = Buffer.from('%PDF-1.7\nSynthetic external original\n%%EOF\n');
+  const upload = Promise.withResolvers();
+  const external = http.createServer(async (req, res) => {
+    if (['/direct', '/redirected'].includes(req.url)) externalNavigations.push(req.url);
+    if (req.url === '/original') {
+      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment' });
+      res.end(externalPdf);
+      return;
+    }
+    if (req.url === '/upload' && req.method === 'POST') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      upload.resolve(Buffer.concat(chunks));
+      res.end('ok');
+      return;
+    }
+    res.setHeader('Content-Type', 'text/html');
+    res.end(`<!doctype html><p>External visual fixture</p>
+      <button style="position:absolute;left:30px;top:100px;width:160px;height:50px"
+        onclick="document.querySelector('input').click()">Attach file</button>
+      <input type="file" hidden onchange="fetch('/upload',{method:'POST',body:this.files[0]})">`);
+  });
+  await new Promise(resolve => external.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    external.closeAllConnections();
+    await new Promise(resolve => external.close(resolve));
+  });
+  const externalOrigin = `http://127.0.0.1:${external.address().port}`;
   const server = http.createServer((req, res) => {
+    if (req.url === '/download-page') {
+      res.setHeader('Content-Type', 'text/html');
+      res.end(`<!doctype html><a href="${externalOrigin}/original"
+        style="position:absolute;left:30px;top:50px;width:160px;height:50px">Download PDF</a>`);
+      return;
+    }
+    if (req.url === '/redirect-external') {
+      res.writeHead(302, { Location: externalOrigin + '/redirected' });
+      res.end();
+      return;
+    }
     if (req.url === '/non-document') {
       invalidDocumentRequests++;
       res.setHeader('Content-Type', 'application/json');
@@ -552,7 +595,9 @@ test('detached worker keeps its original lease and encrypted storage across shor
   const origin = `http://127.0.0.1:${server.address().port}`;
   const start = Date.now();
   const env = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-visual-fixture', TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(), TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({ apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 150_000 }), TRELIO_BROWSER_SESSION_STARTED_AT: String(start), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(start + 150_000) };
-  const call = (operation, args = {}) => runVisualSession({ origins: [origin], externalNavigation: true, operation, args, env, fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } });
+  const supportedFiles = { attachmentDownloads: true, fileUploads: true };
+  const call = (operation, args = {}) => runVisualSession({ origins: [origin], ...supportedFiles,
+    operation, args, env, fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } });
   const scope = visualStorageScope({ origin: 'https://example.test', skillId: env.TRELIO_SKILL_ID, accountId: JSON.parse(env.TRELIO_SKILL_ACCOUNT_JSON).id });
   const { AsyncEntry } = await loadVisualDependencies();
   const store = new ProtectedVisualStore({ directory, scope, AsyncEntry });
@@ -577,14 +622,36 @@ test('detached worker keeps its original lease and encrypted storage across shor
     assert.equal((await call('ready')).state, 'saved_unverified');
     const frame = await call('navigate', { url: origin });
     assert.equal(frame.state, 'ready', JSON.stringify({ reason: frame.reason, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') })); assert.ok(frame.image);
-    assert.equal((await runVisualSession({ origins: [origin], externalNavigation: false,
+    assert.equal((await runVisualSession({ origins: [origin], ...supportedFiles, externalNavigation: false,
       operation: 'navigate', args: { url: origin }, env,
       fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } })).reason,
-      'observation_mode_mismatch', 'a live worker cannot silently acquire broader navigation');
+      'observation_mode_mismatch', 'a live worker cannot change its pinned navigation mode');
     const next = await call('scroll', { frameId: frame.frameId, x: 300, y: 300, deltaY: 500 });
     assert.equal(next.state, 'ready', JSON.stringify({ next, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') }));
     assert.equal(next.scroll.up, true);
     assert.equal((await call('scroll', { frameId: frame.frameId, x: 300, y: 300, deltaY: 500 })).reason, 'stale_frame');
+    assert.equal((await call('navigate', { url: externalOrigin + '/direct' })).state, 'ready');
+    const redirected = await call('navigate', { url: origin + '/redirect-external' });
+    assert.equal(redirected.state, 'ready');
+    assert.deepEqual(externalNavigations, ['/direct', '/redirected']);
+    // The provider declares only the first origin. Use its ordinary link to
+    // fetch an original from the second origin, with no additional CDN scope.
+    const filePage = await call('navigate', { url: origin + '/download-page' });
+    assert.equal(filePage.state, 'ready');
+    const downloaded = await call('download-attachment', { frameId: filePage.frameId, x: 100, y: 75 });
+    assert.equal(downloaded.state, 'ready', downloaded.reason);
+    assert.deepEqual(await fs.readFile(downloaded.filePath), externalPdf);
+    const uploadPage = await call('navigate', { url: externalOrigin + '/file-picker' });
+    assert.equal(uploadPage.state, 'ready');
+    const uploaded = await call('upload-files', { frameId: uploadPage.frameId, x: 100, y: 125, files: [downloaded.filePath] });
+    assert.equal(uploaded.state, 'ready', uploaded.reason);
+    let uploadTimeout;
+    try {
+      const received = await Promise.race([upload.promise, new Promise((_, reject) => {
+        uploadTimeout = setTimeout(() => reject(new Error('Synthetic upload did not reach the second origin.')), 5000);
+      })]);
+      assert.deepEqual(received, externalPdf);
+    } finally { clearTimeout(uploadTimeout); }
     assert.equal((await call('close')).state, 'closed');
     // Close is acknowledged before its bounded cleanup, so wait for the exact
     // claim to disappear before removing this synthetic key and directory.

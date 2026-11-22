@@ -876,9 +876,11 @@ publication tooling также остаются вне этого публичн
   Capture/input не активируют app; native foreground test проверяет это без
   возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
   popups/iframes. Source probes не входят в package и не являются fallback.
-- Внешние HTTP(S)-ссылки могут быть разрешены signed `externalNavigation` по
-  [visual contract](docs/visual-browser.md#внешние-ссылки). Host/worker/DNR/content
-  adapters применяют один owner-pinned выбор; default прежних providers сохранён.
+- Визуальный браузер по умолчанию открывает HTTP(S)-ссылки и редиректы и
+  применяет тот же режим к штатным файловым командам публичных и приватных
+  навыков. Явные signed legacy значения `externalNavigation` поддерживаются.
+  Default действует при новом запуске; режим живого owner сохраняется.
+  [Visual contract](docs/visual-browser.md#внешние-ссылки).
   Cookie overlay по умолчанию сохраняет exact scopes. Signed profileAuthentication
   вместе с externalNavigation сохраняет все auth cookies изолированного профиля
   без списка SSO; protected credential delivery сохраняет exact scopes.

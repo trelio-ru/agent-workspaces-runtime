@@ -326,6 +326,11 @@ visual `presentation: hidden` использует [свой контракт](v
 Отдельная setup-вкладка допустима в этом же процессе. API/SDK flow не требует
 фиктивного браузера; штатные OAuth/QR/passkey handoff сохраняются.
 
+Стандарт для визуальных браузерных навыков, включая приватные навыки компании –
+обычные HTTP(S)-переходы и доступные в навыке файловые операции через Chromium
+Trelio на рабочих сайтах. Выбор адресов для входа и начальной страницы следует
+сценарию сервиса. См. [контракт браузера](visual-browser.md#внешние-ссылки).
+
 Browser skill объявляет в signed package optional `browserSession` descriptor:
 `apiVersion=1`, один из классов `messenger-profile`, `protected-snapshot` или
 `delegated-ephemeral`, absolute `leaseMs` и `manualAssist`. Descriptor требует

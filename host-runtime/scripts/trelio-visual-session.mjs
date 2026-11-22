@@ -386,7 +386,11 @@ export function normalizeVisualManualCompletion(value, { origins, fixtureOnly = 
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], externalNavigation = false, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], externalNavigation: requestedExternalNavigation, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture }) {
+  // New browser owners use the existing full web mode, including ordinary
+  // links, redirects and the browser's attachment commands. An explicit
+  // policy from an older signed caller remains a choice for that caller.
+  const externalNavigation = requestedExternalNavigation === undefined ? true : requestedExternalNavigation;
   if (typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation) return visualStatus('error', 'invalid_input');
   if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || !semanticControls && operation === 'read-text'
     && ['controlQuery', 'controlOffset'].some(key => Object.hasOwn(args || {}, key))) return visualStatus('error', 'invalid_input');
@@ -412,7 +416,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
   const binding = visualSessionBinding(env);
   if (typeof assistantBrowserSecrets !== 'boolean'
     || assistantBrowserSecrets && (binding.skillId !== 'assistant-browser' || !binding.executionOwner
-    || presentation !== 'hidden' || !externalNavigation || authentication))
+    || presentation !== 'hidden' || requestedExternalNavigation !== true || authentication))
     return visualStatus('error', 'invalid_input');
   const policy = createVisualOriginPolicy({ origins, domains, externalNavigation, allowLoopback: Boolean(fixture) });
   authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
@@ -474,7 +478,11 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
       // Upgrading a provider may reuse its saved auth but must not silently
       // reuse an older live worker with a different content-disclosure mode.
       // Cleanup/status remain available so the exact owner can finish it safely.
-      if (((owner.externalNavigation === true) !== externalNavigation || (owner.profileAuthentication === true) !== profileAuthentication || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.referenceRoutes || []) !== JSON.stringify(referenceRoutes) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || JSON.stringify(owner.attachmentRedirectDomains || []) !== JSON.stringify(attachmentRedirectDomains) || JSON.stringify(owner.attachmentFilePolicy ?? null) !== JSON.stringify(attachmentFilePolicy) || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads || JSON.stringify(owner.fileUploadPickerPaths || []) !== JSON.stringify(fileUploadPickerPaths)) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+      // The new default takes effect on the next browser launch. An omitted
+      // setting must let an already-running owner finish under its own policy.
+      const navigationChanged = requestedExternalNavigation !== undefined
+        && (owner.externalNavigation === true) !== externalNavigation;
+      if ((navigationChanged || (owner.profileAuthentication === true) !== profileAuthentication || (owner.observationMode || 'image') !== observationMode || (owner.presentation || 'windowed') !== presentation || (owner.semanticControls === true) !== semanticControls || JSON.stringify(owner.fieldCheckPolicy || null) !== JSON.stringify(fieldCheckPolicy) || JSON.stringify(owner.referenceRoutes || []) !== JSON.stringify(referenceRoutes) || JSON.stringify(owner.manualCompletion || null) !== JSON.stringify(manualCompletion) || (owner.attachmentDownloads === true) !== attachmentDownloads || JSON.stringify(owner.attachmentRedirectDomains || []) !== JSON.stringify(attachmentRedirectDomains) || JSON.stringify(owner.attachmentFilePolicy ?? null) !== JSON.stringify(attachmentFilePolicy) || (owner.audioDownloads === true) !== audioDownloads || (owner.fileUploads === true) !== fileUploads || JSON.stringify(owner.fileUploadPickerPaths || []) !== JSON.stringify(fileUploadPickerPaths)) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
       // Do not slide the original deadline when another CLI invocation arrives.
       if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');

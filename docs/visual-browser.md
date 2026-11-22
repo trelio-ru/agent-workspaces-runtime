@@ -1,7 +1,7 @@
 # Визуальный браузер Agent Skills
 
 API v1 принадлежит generic host. Signed provider задаёт
-HTTPS origins/domains, optional externalNavigation, начальный адрес и явный observationMode; binary, профиль, ключ и executable
+HTTPS origins/domains, начальный адрес и явный observationMode; binary, профиль, ключ и executable
 выбирает host. Source не означает stable release или завершённую native-проверку.
 
 ## Выбор представления и восстановление UI
@@ -383,13 +383,13 @@ hash, DOM или selector. Authentication/manual/password/OTP gates сохран
 Это не универсальное разрешение читать формы: provider не выводит policy/checks
 в model argv и допускает только известные значения поручения в своих recipes.
 
-При signed `externalNavigation: true` видимый hit-tested HTML anchor может
+В обычном HTTP(S)-режиме видимый hit-tested HTML anchor может
 дополнительно вернуть `control.url`: точный HTTP(S) адрес для передачи обычному
 браузеру, цитирования или выбора другого подходящего инструмента. Это общий
 примитив ссылки, без распознавания Google/других сайтов и их меню. URL не
 сокращается, не переписывается и не запрашивается по сети при чтении. У кнопок,
 полей, скрытых узлов и ссылок в редактируемом содержимом этого поля нет.
-Default image mode и text providers без external opt-in сохраняют прежний DTO.
+Image mode и явно ограниченный режим сохраняют прежний DTO.
 
 Общий self-contained URL validator применяется в isolated reader и повторно
 на private HTTP/MCP границе. Он исключает userinfo, специальные схемы,
@@ -643,22 +643,24 @@ restore профиля; он включён в прежние visual OS lanes. �
 
 ### Внешние ссылки
 
-`VISUAL_EXTERNAL_NAVIGATION_API = trelio.visual-external-navigation/v1` подтверждает
-signed `runVisualSession({ externalNavigation: true })`. В этом режиме обычные
-HTTP(S)-страницы, ссылки и redirect не ограничены исходными origins/domains.
-Host policy, native DNR и content-script matches используют один выбор; одного
-разрешения в provider matcher недостаточно. Флаг не принимается из обычных
-CLI/MCP arguments и по умолчанию остаётся false для прежних providers.
+`runVisualSession` по умолчанию открывает HTTP(S)-страницы и переходы по ссылкам
+и редиректам в публичных и приватных навыках. Тот же режим действует для
+загрузки и скачивания файлов через штатные команды, если навык их предоставляет.
+Навигация, наблюдение и файловые операции используют один режим браузера.
+`VISUAL_EXTERNAL_NAVIGATION_API = trelio.visual-external-navigation/v1`
+также поддерживает прежние явные значения `externalNavigation` из signed
+source. Обычные CLI/MCP arguments режимом не управляют.
 
-Выбор закреплён в private owner вместе с observation/download mode. Живой worker
-с другим значением не переиспользуется для чтения или input; обычный close
-сохраняет авторизацию. Это не требует удаления snapshot или повторного setup.
+Режим закрепляется при запуске браузера. Новое значение по умолчанию применяется
+к следующему запуску. Уже открытый браузер завершает работу со своим режимом,
+если навык не указал другой явно. Обычный close сохраняет авторизацию для
+следующего запуска.
 По умолчанию explicit origins/domains ограничивают private session-cookie overlay;
 только exact origins signed recipe разрешают protected credential delivery.
 Внешний сайт не получает Dodo/другие provider credentials из-за одного перехода.
 
 `VISUAL_PROFILE_AUTH_API = trelio.visual-profile-auth/v1` добавляет signed
-`profileAuthentication: true` вместе с `externalNavigation: true`. В этом
+`profileAuthentication: true` в обычном HTTP(S)-режиме. В этом
 режиме session-cookie overlay сохраняет все домены собственного изолированного
 профиля, включая неизвестные заранее SSO/родительские/CHIPS cookies. Постоянные
 cookies и остальные auth stores по-прежнему сохраняются native archive.
@@ -667,7 +669,8 @@ cookies и остальные auth stores по-прежнему сохраняю
 наблюдение и ввод в этой фазе закрыты; перед рабочей фазой document guards
 возвращаются. Флаг закреплён в owner; смена режима
 требует обычного close/save и продолжения того же account snapshot. Старые
-снимки читаются без сброса входа. Default прежних providers сохраняется.
+снимки читаются без сброса входа. Полный перенос session cookie включается
+явно.
 Profile scope не открывает чужие профили, model-visible cookies или доставку
 защищённых credentials на новый origin.
 
@@ -805,8 +808,9 @@ bounds; hidden/disabled/aria-disabled и поля
 сохраняют прежние ограничения. Метка меню сама не разрешает edit/share/input.
 
 Browser сам делает один authenticated main-document GET по выбранной ссылке.
-Каждый redirect следует той же signed navigation policy: origins/domains
-либо явному externalNavigation. Только exact pending main frame
+Каждый redirect использует тот же HTTP(S)-режим, что и переходы по ссылкам.
+При явном legacy `externalNavigation: false` действуют signed origins/domains.
+Только exact pending main frame
 получает временное исключение из attachment DNR rule; subframes, другие вкладки
 и обычные navigate/click сохраняют запрет. Fetch stream читает лишь этот ответ,
 не HTML/JS/JSON/XML/SVG, XHR, subresources или arbitrary URL. MIME и bounded
