@@ -1425,7 +1425,7 @@ test('writer retirement uses one fixed device route and checks the exact origina
   assert.equal(calls,11,'the transport never retries an attempted write or switches routes');
 });
 
-test('recovery context is a partial native observation of the original expired task pass',async()=>{
+test('recovery context selects the original expired or retired pass without inferring an outcome',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});
   const locator={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
@@ -1439,10 +1439,11 @@ test('recovery context is a partial native observation of the original expired t
   materialBasis:{receiptId:randomUUID(),workspaceHead:'b'.repeat(40),workspaceId:checkpoint.workspaceId},
   operations:{coverage:'partial',receipts:[receipt],hasMore:false}};
   const projection={passId:locator.passId,...binding,leaseRevision:2,state:'review_required',workMode:'task',businessReady:false};
-  let value={...projection,recoveryContext:context},status=200;
+  let value={...projection,recoveryContext:context},status=200,expectedSelector={expectedLeaseRevision:2},calls=0;
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;
     assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/read');
-    assert.deepEqual(JSON.parse(options.body),{...locator,recoveryContext:{expectedLeaseRevision:2}});
+    assert.deepEqual(JSON.parse(options.body),{...locator,recoveryContext:expectedSelector});
     return Response.json(value,{status});
   }})});
   assert.deepEqual(await client.readTaskRecoveryContext(input),context);
@@ -1462,6 +1463,28 @@ test('recovery context is a partial native observation of the original expired t
   assert.equal(await client.readTaskRecoveryContext(input),null);
   status=403;
   await assert.rejects(client.readTaskRecoveryContext(input),error=>error.status===403);
+  const writerRetirement={...locator,...binding,schemaVersion:1,state:'retired',
+    receiptId:randomUUID(),assistantId,deviceId,leaseRevision:2};
+  const readRetired={...input,writerRetirement};
+  const beforeDenied=calls;
+  for(const mismatch of [{deviceId:randomUUID()},{assistantId:randomUUID()},{taskId:randomUUID()},
+    {deliveryId:randomUUID()},{bindingRevision:2},{leaseRevision:1},{state:'eligible'}]){
+    await assert.rejects(client.readTaskRecoveryContext({...readRetired,writerRetirement:{...writerRetirement,...mismatch}}),
+      {code:'ASSISTANT_TRANSPORT_INVALID_INPUT'});
+  }
+  assert.equal(calls,beforeDenied,'foreign scope never gets an HTTP read');
+  expectedSelector={expectedLeaseRevision:2,writerRetirementReceiptId:writerRetirement.receiptId};
+  status=200;value={...projection,state:'closed',recoveryContext:context};
+  assert.deepEqual(await client.readTaskRecoveryContext(readRetired),context);
+  for(const corrupt of [{...value,state:'review_required'},{...value,businessReady:true},
+    {...value,recoveryContext:null},{...value,leaseRevision:3}]){
+    value=corrupt;
+    await assert.rejects(client.readTaskRecoveryContext(readRetired),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  }
+  status=400;value={};
+  assert.equal(await client.readTaskRecoveryContext(readRetired),null,'an older backend may lack this exact selector');
+  status=409;
+  await assert.rejects(client.readTaskRecoveryContext(readRetired),error=>error.status===409);
 });
 
 test('an intermediate draft reservation requires its own exact native receipt',async()=>{

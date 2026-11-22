@@ -56,6 +56,10 @@ operation receipts at one expired lease revision. The signed client validates
 its pass, binding, delivery and thread, and rejects inconsistent or mixed draft
 anchors. Coverage remains partial. External effects and historical operations
 without pass provenance still have their own reconciliation rules.
+For a retired pass, the same read sends the original retirement receipt ID.
+The client verifies the receipt against the device and original scope before
+HTTP and requires a closed response with the same lease revision. A rejected
+or unsupported selector leaves recovery unavailable.
 Admit the new path only when both backend and runtime support the fenced
 handover and the retained pass can prove its own operation state. Keep the
 legacy classifiers for existing unsettled passes without that evidence.

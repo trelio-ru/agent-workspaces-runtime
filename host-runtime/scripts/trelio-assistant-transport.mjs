@@ -3190,6 +3190,22 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         recoveryContext:{expectedLeaseRevision}};
       const expected={passId:body.passId,bindingId:id(input.bindingId),bindingRevision:revision(input.bindingRevision),
         deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
+      let expectedState='review_required';
+      if(input.writerRetirement!==undefined){
+        let receipt;
+        try{receipt=validateAssistantTaskWriterRetirement(input.writerRetirement);}
+        catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+        // Only the original protected receipt selects the closed-pass view.
+        // Lease, delivery and device still identify exactly one historical
+        // read. Opening another pass requires separate native admission.
+        if(receipt.assistantId!==assistantId||receipt.deviceId!==deviceId
+          ||receipt.companyId!==body.companyId||receipt.taskId!==body.taskId
+          ||receipt.leaseRevision!==expectedLeaseRevision
+          ||Object.entries(expected).some(([key,field])=>receipt[key]!==field))
+          fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+        body.recoveryContext.writerRetirementReceiptId=receipt.receiptId;
+        expectedState='closed';
+      }
       let value;
       try{value=await call('passRead',body,signal);}
       catch(error){
@@ -3199,8 +3215,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if(!object(value)||Object.entries(expected).some(([key,field])=>value[key]!==field)
         ||!Object.hasOwn(value,'recoveryContext'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const context=value.recoveryContext;
-      if(context===null)return null;
-      if(value.state!=='review_required'||value.leaseRevision!==expectedLeaseRevision||value.workMode!=='task'||value.businessReady!==false
+      if(context===null&&expectedState==='review_required')return null;
+      if(value.state!==expectedState||value.leaseRevision!==expectedLeaseRevision||value.workMode!=='task'||value.businessReady!==false
         ||!object(context)||Object.keys(context).sort().join(',')!=='draftEvidence,materialBasis,operations,schemaVersion'
         ||context.schemaVersion!==1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       let draftEvidence=null;
