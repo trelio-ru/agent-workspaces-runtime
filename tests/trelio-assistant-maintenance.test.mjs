@@ -650,6 +650,52 @@ test('a stopped Desktop leaves terminal service recovery idle before rechecking 
   }
 });
 
+test('an unavailable sandbox service observation preserves the failed installer and leaves the scheduler runnable',async()=>{
+  const {f}=await serviceUpdateFixture();
+  const failed=structuredClone(f.state);
+  const calls=[];
+  f.options.service=async operation=>{
+    assert.equal(operation,'inspect','a refused service read supplies no service control authority');
+    calls.push('inspect_service');
+    throw Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});
+  };
+  f.options.prepare=async()=>assert.fail('unknown service state cannot authorize the legacy Desktop restart');
+  const result=await runAssistantBackgroundTick({
+    pluginMaintenance:async()=>({state:'disabled'}),
+    codexMaintenance:()=>maintainAssistantCodexDesktop(f.options),
+    createHost:async()=>({coordinator:{
+      pollOnce:async()=>{calls.push('poll');},
+      workOnce:async()=>{calls.push('dispatch');return null;},
+      dispatchStatus:async()=>({state:'idle'}),
+    },reportDispatchFailure:async error=>{calls.push(error.code);},close:async()=>{}}),
+  });
+  assert.equal(result.state,'idle');
+  assert.deepEqual(calls,['inspect_service','ASSISTANT_CODEX_UPDATE_FAILED','poll','dispatch']);
+  assert.deepEqual(f.state,failed);
+  assert.deepEqual(f.effects,[]);
+});
+
+test('an unavailable service read cannot hide a changed guard or release an in-progress recovery',async()=>{
+  const unavailable=Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});
+  const revoked=await serviceUpdateFixture();
+  let inspected=false;
+  revoked.f.options.guard=async()=>{
+    if(inspected)throw Object.assign(Error(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  };
+  revoked.f.options.service=async()=>{inspected=true;throw unavailable;};
+  await assert.rejects(maintainAssistantCodexDesktop(revoked.f.options),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  assert.deepEqual(revoked.f.effects,[]);
+
+  const inProgress=await serviceUpdateFixture();
+  const {f}=inProgress;
+  await maintainAssistantCodexDesktop(f.options);
+  assert.equal(f.state.phase,'service_closing');
+  f.options.service=async()=>{throw unavailable;};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});
+  assert.equal(f.state.phase,'service_stopping');
+  assert.deepEqual(f.effects,['probe','close']);
+});
+
 test('a changed Desktop generation during package verification cannot start service recovery',async()=>{
   const {f}=await serviceUpdateFixture();
   const failed=structuredClone(f.state);

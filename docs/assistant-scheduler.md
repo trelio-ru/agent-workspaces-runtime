@@ -3321,6 +3321,11 @@ A terminal `failed` or `registration_failed` receipt can enter ONE independent
 service recovery only after fresh retained MSIX signature/digest/identity/version
 verification, native current-user package/service identity, a healthy new GUI
 generation, native hook/MCP/device readiness and the SAME idle/setup guards.
+If the initial native SCM inspection returns `ASSISTANT_BACKGROUND_UNAVAILABLE`,
+recheck the live guards, keep the recorded installation failure, and allow
+ordinary polling and task dispatch. An unavailable inspection authorizes
+neither service recovery nor a GUI-only restart. A previously journaled stop
+or registration continues to require its own exact native read-back.
 Check the GUI before revalidating the staged MSIX. A stopped or unchanged GUI
 leaves ordinary polling available with the original failure recorded. After
 validating the package signature and confirming through

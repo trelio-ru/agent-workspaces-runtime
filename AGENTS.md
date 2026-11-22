@@ -1387,6 +1387,9 @@ publication tooling также остаются вне этого публичн
   recovery receipt in the SAME journal. Check for a fresh GUI generation
   before revalidating the retained MSIX and recheck that generation before
   recovery. A stopped or unchanged GUI leaves ordinary task polling available.
+  A refused initial SCM read in a terminal journal also leaves polling
+  available after rechecking live guards. Preserve the failure and admit
+  neither service recovery nor a GUI-only restart from that observation.
   Close a healthy new GUI generation,
   normally stop only the exact OS-package-bound service after all Codex clients
   are absent, register the retained signed candidate by its already-staged full

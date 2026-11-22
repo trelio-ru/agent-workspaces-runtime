@@ -1484,8 +1484,17 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
   // uncertain close/install/start phases cannot acquire this new effect path.
   if(service&&register&&['failed','registration_failed'].includes(state.phase)&&state.serviceGeneration==null
     &&compareCodexDesktopVersions(current.version,state.targetVersion)<0&&state.sha256!==null){
-    const active=await service('inspect');
-    if(active.state==='running'){
+    let active;
+    try{active=await service('inspect');}
+    catch(error){
+      if(error?.code!=='ASSISTANT_BACKGROUND_UNAVAILABLE')throw error;
+      // No new recovery intent exists in this terminal journal. A refused
+      // SCM observation grants neither a service stop nor a GUI-only restart.
+      // Keep the recorded failure and let the scheduler poll with live guards.
+      await guard();
+      serviceBlocksRestart=true;
+    }
+    if(active?.state==='running'){
       serviceBlocksRestart=true;
       // Terminal failure permits ordinary tasks. A stopped or unchanged GUI
       // cannot qualify for separate service recovery, so skip the potentially
