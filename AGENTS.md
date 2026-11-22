@@ -1384,7 +1384,10 @@ publication tooling также остаются вне этого публичн
   checks. It never repeats the MSIX Add-AppxPackage -Path, an uncertain original close or a
   lost activation; registration_failed exhausts that candidate's restart.
   A positively identified packaged sandbox service has ONE independent SCM
-  recovery receipt in the SAME journal. Close a healthy new GUI generation,
+  recovery receipt in the SAME journal. Check for a fresh GUI generation
+  before revalidating the retained MSIX and recheck that generation before
+  recovery. A stopped or unchanged GUI leaves ordinary task polling available.
+  Close a healthy new GUI generation,
   normally stop only the exact OS-package-bound service after all Codex clients
   are absent, register the retained signed candidate by its already-staged full
   name once, then restore that service/GUI and verify the actual version/probe.

@@ -3321,8 +3321,12 @@ A terminal `failed` or `registration_failed` receipt can enter ONE independent
 service recovery only after fresh retained MSIX signature/digest/identity/version
 verification, native current-user package/service identity, a healthy new GUI
 generation, native hook/MCP/device readiness and the SAME idle/setup guards.
-Before any GUI/service effect, `GetStagedPackagePathByFullName` must positively
-confirm that exact candidate is already staged. Its full name retains the
+Check the GUI before revalidating the staged MSIX. A stopped or unchanged GUI
+leaves ordinary polling available with the original failure recorded. After
+validating the package signature and confirming through
+`GetStagedPackagePathByFullName` that the exact candidate is already staged,
+recheck the same GUI generation before any GUI or service effect. The
+candidate's full name retains the
 OS-selected current family/architecture/publisher and changes only the validated
 four-part version; no staged path is exposed or accepted from a caller. A missing
 stage preserves the healthy app/service and ordinary newer-candidate discovery.

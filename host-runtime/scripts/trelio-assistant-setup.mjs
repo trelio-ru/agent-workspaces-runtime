@@ -1487,17 +1487,25 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
     const active=await service('inspect');
     if(active.state==='running'){
       serviceBlocksRestart=true;
-      const retained=await prepare(state.sha256);
-      if(retained.version!==state.targetVersion||retained.architecture!==current.architecture)codexUpdateFail();
-      const staged=await service('staged',state.targetVersion);
-      if(!['staged','absent'].includes(staged.state))codexUpdateFail();
-      if(staged.state==='staged'){
-        const app=await desktop('inspect');
-        if(app.state==='running'&&app.generation!==state.desktopGeneration){
-          await guard();await probe();
-          await save({phase:'service_closing',desktopGeneration:app.generation,serviceGeneration:active.generation,checkedAt:now()});
-          await guard();await desktop('close',app.generation);
-          return {state:'activating',blockBusiness:true};
+      // Terminal failure permits ordinary tasks. A stopped or unchanged GUI
+      // cannot qualify for separate service recovery, so skip the potentially
+      // long signature/package checks before polling and claiming due work.
+      const candidate=await desktop('inspect');
+      if(candidate.state==='running'&&candidate.generation!==state.desktopGeneration){
+        const retained=await prepare(state.sha256);
+        if(retained.version!==state.targetVersion||retained.architecture!==current.architecture)codexUpdateFail();
+        const staged=await service('staged',state.targetVersion);
+        if(!['staged','absent'].includes(staged.state))codexUpdateFail();
+        if(staged.state==='staged'){
+          // Signature and staging checks may outlive the observed GUI. The
+          // recovery still requires the same fresh generation before closing.
+          const app=await desktop('inspect');
+          if(app.state==='running'&&app.generation===candidate.generation){
+            await guard();await probe();
+            await save({phase:'service_closing',desktopGeneration:app.generation,serviceGeneration:active.generation,checkedAt:now()});
+            await guard();await desktop('close',app.generation);
+            return {state:'activating',blockBusiness:true};
+          }
         }
       }
     }

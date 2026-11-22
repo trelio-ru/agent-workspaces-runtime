@@ -631,6 +631,40 @@ test('lost service restoration and GUI activation each have their own one-use in
   }
 });
 
+test('a stopped Desktop leaves terminal service recovery idle before rechecking the staged package',async()=>{
+  const {f,service}=await serviceUpdateFixture();
+  const failed=structuredClone(f.state);
+  f.options.desktop=async operation=>{
+    assert.equal(operation,'inspect');
+    return {state:'stopped',generation:null};
+  };
+  f.options.service=(operation,generation)=>{
+    assert.equal(operation,'inspect','only inspect the service while the GUI is stopped');
+    return service(operation,generation);
+  };
+  f.options.prepare=async()=>assert.fail('a stopped GUI cannot authorize slow package verification');
+  for(let tick=0;tick<2;tick++){
+    assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'current',failedVersion:'26.101.0.0'});
+    assert.deepEqual(f.state,failed);
+    assert.deepEqual(f.effects,[]);
+  }
+});
+
+test('a changed Desktop generation during package verification cannot start service recovery',async()=>{
+  const {f}=await serviceUpdateFixture();
+  const failed=structuredClone(f.state);
+  const oldDesktop=await f.options.desktop('inspect');
+  let reads=0;
+  f.options.desktop=async operation=>{
+    assert.equal(operation,'inspect','the newly observed GUI has no close authorization');
+    return ++reads===1?oldDesktop:{state:'running',generation:'104:1'};
+  };
+  assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'current',failedVersion:'26.101.0.0'});
+  assert.equal(reads,2);
+  assert.deepEqual(f.state,failed);
+  assert.deepEqual(f.effects,[]);
+});
+
 test('service recovery refuses replaced artifacts, malformed service generations, failed readiness and late busy admission before effects',async()=>{
   for(const refusal of ['artifact','generation','probe','guard']){
     const {f}=await serviceUpdateFixture();
