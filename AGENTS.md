@@ -1325,6 +1325,10 @@ publication tooling также остаются вне этого публичн
   Supporting task creation uses the SAME proxy/native creator with independent
   project ACL and exact disclosure/absence decisions; no inherited pass/chat/route or sender proof.
 
+- A committed task pass settles from its exact backend receipt and native
+  writer release before reading chat history. Persist the original delivery,
+  never invent a turn UUID. After local commit, repeat only the exact receipt
+  read before releasing the retained pass. See [scheduler recovery](docs/assistant-scheduler.md#moving-recovery-to-operation-receipts).
 - Terminal continuation: SAME pass/ledger, native trusted-hook preflight and
   indexed history. Every task continuation reserves its marker before
   preflight, renews only under the exclusive native writer and requires live

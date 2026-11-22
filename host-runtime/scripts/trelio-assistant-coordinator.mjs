@@ -655,27 +655,38 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(job.kind==='provision') return {receipt:nativeReceipt,outcome:null};
     const outcome=await observeTaskOutcome(job,threadId,signal);
     const nativeParts=typeof nativeReceipt==='string'?nativeReceipt.split(':'):[];
+    const nativeWitnessMatches=nativeParts.length===3&&nativeParts[1]===threadId
+      &&(nativeParts[0]==='codex'&&uuid.test(nativeParts[2])
+        ||nativeParts[0]==='codex-writer-released'&&nativeParts[2]===job.deliveryId);
     if(outcome.state!=='confirmed'||expectedReceiptId!==undefined&&outcome.receiptId!==expectedReceiptId
-      || nativeParts.length!==3 || nativeParts[0]!=='codex' || nativeParts[1]!==threadId || !uuid.test(nativeParts[2])) {
+      ||!nativeWitnessMatches) {
       fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
     }
     return {receipt:`assistant:${outcome.receiptId}:${nativeReceipt}`,outcome};
   };
-  const observeCommittedTaskOutcome = async (job,threadId,marker,turn,signal) => {
-    if(job.kind!=='task'||turn.state!=='uncertain'||!uuid.test(turn.turnId??''))return null;
-    if(typeof native.readWriterReleased==='function'){
-      const outcome=await observeTaskOutcome(job,threadId,signal);
-      if(outcome.state!=='confirmed')return null;
-      // The backend closed this exact pass and revoked its signing sessions.
-      // Prove that no old native turn is still executing. Its structural ID
-      // labels the journal receipt; tool output and call order supply no
-      // settlement authority. Both callers subsequently recheck the receipt.
-      const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
-      if(await native.readWriterReleased(threadId,cwd,{signal})!==true)
-        fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
-      lease();
-      return {receiptId:outcome.receiptId,receipt:`codex:${threadId}:${turn.turnId}`};
+  const observeReleasedTaskOutcome = async (job,threadId,signal) => {
+    if(typeof native.readWriterReleased!=='function')return null;
+    let outcome;
+    try{outcome=await observeTaskOutcome(job,threadId,signal);}
+    catch(error){
+      // An unavailable outcome leaves the existing pending recovery path in
+      // charge. Only a positive matching receipt can enter writer settlement.
+      if(error?.code!=='ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED')throw error;
+      return null;
     }
+    if(outcome.state!=='confirmed')return null;
+    // The backend closed this exact pass and revoked its signing sessions.
+    // The exclusive probe also proves that its native writer has released
+    // the thread. Persist the original delivery, without inventing a turn ID.
+    const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+    signal.throwIfAborted();
+    if(await native.readWriterReleased(threadId,cwd,{signal})!==true)
+      fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
+    lease();signal.throwIfAborted();
+    return {receiptId:outcome.receiptId,receipt:`codex-writer-released:${threadId}:${job.deliveryId}`};
+  };
+  const observeLegacyCommittedTaskOutcome = async (job,threadId,marker,turn,signal) => {
+    if(typeof native.readWriterReleased==='function'||turn.state!=='uncertain'||!uuid.test(turn.turnId??''))return null;
     const {pass,expected}=await completionScope(job,threadId);
     // Older adapters can positively identify only the exact successful call.
     // That receipt remains a candidate until confirmed by the backend.
@@ -2045,6 +2056,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const recovery=job.kind==='provision'?inbox.readTaskProvisionRecovery(job.deliveryId):null;
     if(recovery?.intent?.started)return recoverTaskProvision(job,recovery.intent,signal);
     const continued=inbox.readPassContinuation(job.deliveryId);
+    const maySettleCommitted=saved&&job.kind==='task'&&(!continued||continued.started||!continued.resumeAttempted&&!continued.resumed);
+    if(maySettleCommitted){
+      const closed=await observeReleasedTaskOutcome(job,threadId,signal);
+      if(closed){
+        await commitCompletion(job,threadId,closed.receipt,signal,closed.receiptId);
+        notices.clear();
+        return false;
+      }
+    }
     const marker=continued?(continued.started?continued.reviewId:continued.terminalMarkerId):job.deliveryId;
     let result;
     try{result=await native.readDelivery(threadId,marker,{signal,...(job.kind==='provision'?{provision:true}:{})});}
@@ -2097,9 +2117,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       notices.clear();
       return false;
     }
-    if(saved&&job.kind==='task'&&(!continued||continued.started||!continued.resumeAttempted&&!continued.resumed)
-      &&result.state==='uncertain'&&uuid.test(result.turnId??'')){
-      const closed=await observeCommittedTaskOutcome(job,threadId,marker,result,signal);
+    if(maySettleCommitted){
+      const closed=await observeLegacyCommittedTaskOutcome(job,threadId,marker,result,signal);
       if(closed){
         await commitCompletion(job,threadId,closed.receipt,signal,closed.receiptId);
         notices.clear();
@@ -2618,7 +2637,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(typeof update!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
       if(closed||active||polling)return false;
       // A retained pass is not itself a running process. Keep the SAME private
-      // coordinator lease while checking its exact current native marker and
+      // coordinator lease while checking its native outcome or marker and
       // downloading the signed update. No new turn, journal reset, outcome or
       // health-clear is authorized by this code-maintenance boundary.
       active=(async()=>{
@@ -2655,11 +2674,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // Never mistake the old completed marker for that newer invocation.
         if(intent&&!intent.started&&(intent.resumeAttempted||intent.resumed))return false;
         const marker=intent?(intent.started?intent.reviewId:intent.terminalMarkerId):pass.deliveryId;
-        const terminal=await native.readDelivery(pass.threadId,marker,{signal});lease();
-        if(!uuid.test(terminal.turnId??''))return false;
-        const closed=await observeCommittedTaskOutcome(row,pass.threadId,marker,terminal,signal);
+        let closed=await observeReleasedTaskOutcome(row,pass.threadId,signal);
+        const terminal=closed?null:await native.readDelivery(pass.threadId,marker,{signal});lease();
+        if(terminal){
+          if(!uuid.test(terminal.turnId??''))return false;
+          closed=await observeLegacyCommittedTaskOutcome(row,pass.threadId,marker,terminal,signal);
+        }
         if(closed)await completedReceipt(row,pass.threadId,closed.receipt,signal,closed.receiptId);
-        if(terminal.state!=='completed'&&!closed){
+        if(!closed&&terminal?.state!=='completed'){
           // Code maintenance after a positively classified interrupted save
           // still holds the coordinator and read-backs. It cannot renew the
           // pass, start Codex, settle the Run or clear a dispatch notice.

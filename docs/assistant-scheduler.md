@@ -40,11 +40,14 @@ An outbound operation with unknown status keeps its original attempt fenced
 while unrelated work can proceed once the writer has been safely released.
 
 Move the confirmed boundaries first, using existing journals. The dispatcher
-can now settle a backend-confirmed outcome when the completion tool response
-is missing from an interrupted turn. It verifies writer release through a
-tool-free native claim of the exact thread, then rechecks the receipt. After
-the SQLite completion commit it uses the local completion and a fresh backend
-read. Pending passes still need a native writer handover and task-scoped
+checks the exact backend outcome before opening old native history. A confirmed
+outcome can settle after a tool-free claim and release of the exact thread,
+even when the original turn UUID is unavailable. The dispatcher rechecks the
+same receipt after the probe and records the original thread and delivery in
+SQLite. Signed maintenance uses the same proof to verify a safe update boundary.
+Once SQLite records completion, the dispatcher uses that row and a fresh backend
+read to release the protected pass. Prior turn-based receipts remain readable.
+Pending passes still need a native writer handover and task-scoped
 operation read-back before new passes can stop using whole-turn classifiers for
 saved drafts, provider reads and recovered outcomes.
 Admit the new path only when both backend and runtime support the fenced

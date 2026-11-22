@@ -674,7 +674,7 @@ for(const failure of ['backend response','local key release','completion tool re
   const attempts=[],accepted=new Map();
   const backendOutcome=f.options.client.readBusinessOutcome;
   const release=f.options.passHost.releasePass,readDelivery=f.options.native.readDelivery;
-  let releaseInterrupted=false,writerAvailable=false,writerChecks=0,changeReceiptAfterProbe=false;
+  let releaseInterrupted=false,writerAvailable=false,writerChecks=0,changeReceiptAfterProbe=false,loseSettledKeyRelease=false;
   f.options.client.readBusinessOutcome=async input=>{
     assert.equal(accepted.get(input.deliveryId)?.taskId,input.taskId);
     const receipt=await backendOutcome(input);
@@ -689,9 +689,8 @@ for(const failure of ['backend response','local key release','completion tool re
     attempts.push(input.taskContext.taskId);
     accepted.set(input.deliveryId,{taskId:plan.taskId});
     if(attempts.length===1&&failure==='completion tool response'){
-      // The only persisted turn information is the original marker and ID.
-      // The backend has committed, but the tool's own response is unavailable.
-      f.deliveries.set(input.deliveryId,{state:'uncertain',turnId:randomUUID()});
+      // The backend has committed. Codex can no longer supply the first turn
+      // or even its UUID, but it can still verify the exact thread's writer.
       throw Error('tool response lost after commit');
     }
     const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
@@ -701,7 +700,7 @@ for(const failure of ['backend response','local key release','completion tool re
   };
   if(failure==='completion tool response'){
     f.options.native.readDelivery=async(threadId,deliveryId,options)=>{
-      assert.ok(!options?.committedTaskOutcome,'the coordinator never reinterprets the old tool calls');
+      assert.notEqual(deliveryId,accepted.keys().next().value,'settlement must work without opening the old history');
       return readDelivery(threadId,deliveryId,options);
     };
     f.options.native.readWriterReleased=async(threadId,cwd)=>{
@@ -711,6 +710,10 @@ for(const failure of ['backend response','local key release','completion tool re
       writerChecks++;
       if(!writerAvailable)throw Object.assign(Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       return true;
+    };
+    f.options.passHost.releasePass=async outcome=>{
+      if(loseSettledKeyRelease)throw Object.assign(Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+      return release(outcome);
     };
   }
   if(failure==='local key release'){
@@ -733,7 +736,7 @@ for(const failure of ['backend response','local key release','completion tool re
   assert.equal(f.activePass().taskId,plans[0].taskId);
   await f.coordinator.close();
 
-  const restarted=createAssistantCoordinator(f.options);
+  let restarted=createAssistantCoordinator(f.options);
   try{
     if(failure==='completion tool response'){
       await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
@@ -749,6 +752,16 @@ for(const failure of ['backend response','local key release','completion tool re
         assert.deepEqual(attempts,[plans[0].taskId]);
         assert.equal(f.activePass().taskId,plans[0].taskId,'code maintenance cannot settle the pass');
       }),true);
+      loseSettledKeyRelease=true;
+      await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+      const {deliveryId,threadId}=f.activePass();
+      assert.equal(writerChecks,4);
+      assert.equal(f.database.prepare('SELECT state FROM assistant_inbox_deliveries WHERE delivery_id=?').get(deliveryId).state,'complete');
+      const receipt=f.database.prepare('SELECT external_receipt FROM assistant_inbox_deliveries WHERE delivery_id=?').get(deliveryId).external_receipt;
+      assert.ok(receipt.endsWith(`codex-writer-released:${threadId}:${deliveryId}`));
+      await restarted.close();
+      loseSettledKeyRelease=false;
+      restarted=createAssistantCoordinator(f.options);
     }
     await restarted.workOnce();
     if(failure==='completion tool response')assert.equal(writerChecks,4);
