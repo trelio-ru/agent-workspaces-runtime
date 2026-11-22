@@ -3046,8 +3046,9 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       else {
         // The current worker verifies an idle terminal boundary under the
         // existing SQLite lease. A completed retained pass must not deadlock
-        // the very signed update which repairs its recovery flow. Active,
-        // unknown and unstarted continuations remain pinned and untouched.
+        // the very signed update which repairs its recovery flow. An expired
+        // task with a released native writer also permits maintenance. Its
+        // unresolved delivery, draft and operation receipts stay untouched.
         const runtime=await createRuntimeHost();
         try{await runtime.coordinator.updateRuntimeAtBoundary(()=>upgradeRuntime({timeoutMs:30_000}));}
         finally{await runtime.close();}

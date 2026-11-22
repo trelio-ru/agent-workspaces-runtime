@@ -2757,6 +2757,63 @@ for(const state of ['completed','running','uncertain','failed','missing_turn','r
   }finally{await f.coordinator.close();}
 });
 
+for(const scenario of ['released','busy','no_release','foreign_pass','renewed_during_probe','renewed_during_update','live_lease'])
+  test(`an expired task uses the exact native writer for signed maintenance (${scenario})`,async t=>{
+    const f=fixture(t);f.authority.workMode='task';
+    f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
+    f.events.push({id:randomUUID(),revision:'writer-claim',taskId:f.taskId,wake:true});
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+    const pass=f.activePass(),nativePass=f.passes.get(pass.deliveryId);
+    if(scenario!=='live_lease'){f.advance(21*60_000);nativePass.state='review_required';}
+    const before=f.database.prepare('SELECT * FROM assistant_inbox_deliveries').all(),status=f.coordinator.status();
+    const counts=f.counts(),read=f.options.client.readTaskPass,renew=()=>{
+      nativePass.leaseRevision++;nativePass.state='leased';
+      nativePass.leaseExpiresAt=new Date(f.options.now()+1_200_000).toISOString();
+    };
+    let reads=0,probes=0,updates=0;
+    f.options.client.readTaskPass=async input=>{
+      reads++;
+      assert.deepEqual(input,{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId});
+      return {...await read(input),...(scenario==='foreign_pass'?{deliveryId:randomUUID()}:{})};
+    };
+    f.options.client.renewTaskPass=async()=>assert.fail('maintenance never renews the pass');
+    f.options.native.readDelivery=async()=>{
+      assert.equal(scenario,'live_lease','the stopped writer needs no old history');
+      return {state:'uncertain'};
+    };
+    f.options.native.readWriterReleased=async(threadId,cwd)=>{
+      probes++;
+      assert.equal(threadId,pass.threadId);assert.equal(cwd,process.cwd());
+      const other=createAssistantCoordinator(f.options);
+      try{await assert.rejects(other.workOnce(),{code:'ASSISTANT_COORDINATOR_BUSY'});}
+      finally{await other.close();}
+      if(scenario==='busy')throw Object.assign(new Error('writer is busy'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      if(scenario==='renewed_during_probe')renew();
+      return scenario!=='no_release';
+    };
+    try{
+      const update=()=>f.coordinator.updateRuntimeAtBoundary(async()=>{
+        updates++;
+        assert.equal(await f.coordinator.workOnce(),null);
+        if(scenario==='renewed_during_update')renew();
+      });
+      if(scenario==='busy')await assert.rejects(update(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      else if(['foreign_pass','renewed_during_probe','renewed_during_update'].includes(scenario))
+        await assert.rejects(update(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+      else assert.equal(await update(),scenario==='released');
+      assert.equal(probes,['foreign_pass','live_lease'].includes(scenario)?0:1);
+      assert.equal(updates,['released','renewed_during_update'].includes(scenario)?1:0);
+      if(scenario==='released')assert.equal(reads,3,'verify the same expired lease after claim and after download');
+      assert.deepEqual(f.activePass(),pass);
+      assert.deepEqual(f.coordinator.status(),status);
+      assert.deepEqual(f.counts(),counts);
+      assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries').all(),before);
+      assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+    }finally{await f.coordinator.close();}
+  });
+
+
 test('retained update boundary refuses a renewed continuation with an unknown start',async t=>{
   const f=fixture(t);f.options.client.readBusinessOutcome=async()=>{throw new Error('no outcome');};
   f.events.push({id:randomUUID(),revision:'update-boundary',taskId:f.taskId,wake:true});

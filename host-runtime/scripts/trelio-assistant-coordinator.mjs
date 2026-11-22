@@ -2655,9 +2655,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(typeof update!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
       if(closed||active||polling)return false;
       // A retained pass is not itself a running process. Keep the SAME private
-      // coordinator lease while checking its native outcome or marker and
-      // downloading the signed update. No new turn, journal reset, outcome or
-      // health-clear is authorized by this code-maintenance boundary.
+      // coordinator lease while checking the former writer and downloading
+      // the signed update. The pass, delivery and their operation fences stay
+      // in place until ordinary reconciliation proves their outcomes.
       active=(async()=>{
         lease();signal=combinedSignal(signal);
         const saved=passHost?await passHost.readActivePass():null;
@@ -2691,8 +2691,47 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // A lease renewal with an unknown new-start result stays read only.
         // Never mistake the old completed marker for that newer invocation.
         if(intent&&!intent.started&&(intent.resumeAttempted||intent.resumed))return false;
+        const unchanged=async()=>{
+          lease();signal.throwIfAborted();
+          if(!isDeepStrictEqual(await passHost.readActivePass(),saved)
+            ||!isDeepStrictEqual(inbox.readPassContinuation(pass.deliveryId),intent)
+            ||!isDeepStrictEqual(inbox.readDelivery(pass.deliveryId),row)
+            ||!isDeepStrictEqual(findSchedule(row.scope,pass.taskId),plan))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          lease();signal.throwIfAborted();
+        };
         const marker=intent?(intent.started?intent.reviewId:intent.terminalMarkerId):pass.deliveryId;
         let closed=await observeReleasedTaskOutcome(row,pass.threadId,signal);
+        if(!closed&&typeof native.readWriterReleased==='function'&&['started','uncertain'].includes(row.state)){
+          const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+          const readPass=async()=>{
+            const live=await client.readTaskPass(locator,signal);
+            await unchanged();
+            if(!live||['passId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>live[key]!==pass[key]))
+              fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            return live;
+          };
+          const live=await readPass();
+          const expiry=Date.parse(live.leaseExpiresAt);
+          if(!Number.isFinite(expiry)||!Number.isSafeInteger(live.leaseRevision)||live.leaseRevision<0)
+            fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          if(live.state==='review_required'&&live.workMode==='task'&&expiry<=now()){
+            // Expiry stops assistant tool admission on the server. Independently
+            // acquire and release the exact native writer without tools or a
+            // model turn. This authorizes only signed code maintenance, including
+            // when the interrupted turn cannot be classified at all.
+            const cwd=await workspaceForTask(scopeFor(row.scope,pass.taskId));
+            await unchanged();
+            if(await native.readWriterReleased(pass.threadId,cwd,{signal})!==true)return false;
+            const requireExpired=async()=>{
+              const current=await readPass();
+              if(current.state!==live.state||current.workMode!==live.workMode
+                ||current.leaseRevision!==live.leaseRevision||current.leaseExpiresAt!==live.leaseExpiresAt)
+                fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            };
+            await requireExpired();await update();await requireExpired();
+            return true;
+          }
+        }
         const terminal=closed?null:await native.readDelivery(pass.threadId,marker,{signal});lease();
         if(terminal){
           if(!uuid.test(terminal.turnId??''))return false;
@@ -2721,15 +2760,6 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               &&witness.workspaceDraft.finishPending!==true&&witness.workspaceDraft.namedArchive!==true;
           if(witness.state!=='interrupted_workspace_draft'||witness.turnId!==terminal.turnId||!eligible)return false;
         }
-        const unchanged=async()=>{
-          lease();
-          if(JSON.stringify(await passHost.readActivePass())!==JSON.stringify(saved)
-            ||JSON.stringify(inbox.readPassContinuation(pass.deliveryId))!==JSON.stringify(intent)
-            ||JSON.stringify(inbox.readDelivery(pass.deliveryId))!==JSON.stringify(row)
-            ||JSON.stringify(findSchedule(row.scope,pass.taskId))!==JSON.stringify(plan))
-            fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-          if(signal.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
-        };
         await unchanged();await update();await unchanged();return true;
       })();
       try{return await active;}finally{active=null;}

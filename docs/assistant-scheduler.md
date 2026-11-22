@@ -155,14 +155,17 @@ Only ordinary exact business outcome/native receipt completes original events,
 advances schedule or clears health. No new model tool, shell ABI, executor, vault,
 queue or pass-close shortcut exists. Old supervisors select the current signed
 worker between ticks without a Codex restart.
-A retained pass does not block its own repair update indefinitely. Health may
-load the signed update only after the SAME private coordinator lease fences work
-and the exact currently journaled native marker has positive completed/turn-ID
-evidence. A pending renewed/unknown start, running/failed/ambiguous history or
-changed identity/journal refuses. For a taskless intake, the exact ORIGINAL
-completed/failed marker with a real turn UUID also permits only this code update,
-under the SAME lease and unchanged protected pass/source/journal snapshot. A
-running or ambiguous intake still refuses; this never settles its outcome.
+A retained pass does not block its own repair update indefinitely. Health holds
+the same private coordinator lease while preparing the signed update. It can
+verify a finished task by its outcome and native writer release, or use the
+legacy terminal-marker evidence. For an expired task pass with an unresolved
+outcome, a tool-free native process must acquire the exact task chat writer,
+verify its empty queue, and exit. The live backend pass and local schedule,
+delivery, continuation and protected identity must still match before and after
+the update. No turn history is required for this path. A busy writer, unmatched
+pass or unknown continuation start keeps the fence. For taskless intake, the
+exact original completed or failed marker and real turn UUID still determine
+the maintenance boundary.
 Downloading preserves every pass/start/history
 bit and never clears business health; the next worker independently selects the
 verified package. No model invocation, Codex restart or owner question occurs.
