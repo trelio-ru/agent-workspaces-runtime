@@ -94,6 +94,9 @@ publication tooling также остаются вне этого публичн
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
+  Retired task inspection uses the original chat/receipt and a separate
+  one-use start bit. Only exact task reads and a pinned draft checkpoint can
+  run there. Provider effects stay held; an independent task may proceed.
 
 - Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login. Local setup/status resolve native company UUID/slug references; a sole company is selected in code, without browser/UUID questions. See the local-first scheduler contract.
   Ordinary owner chat uses the complete scoped catalogue and SAME published

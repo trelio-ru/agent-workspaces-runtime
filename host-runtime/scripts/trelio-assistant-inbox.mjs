@@ -598,7 +598,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // dispatch diagnostics unavailable and prevents its health recovery. This
     // does not admit old schedule executors, interpret clocks or migrate state;
     // unknown/multiple versions and all retained uncertainty still fail closed.
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -703,7 +703,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -983,6 +983,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       delivery_id TEXT PRIMARY KEY REFERENCES assistant_inbox_deliveries(delivery_id) ON DELETE RESTRICT,
       pass_id TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE, lease_revision INTEGER NOT NULL CHECK(lease_revision>=0)
     )`);
+    const retiredColumns=all('PRAGMA table_info(assistant_retired_task_writers)').map(column=>column.name);
+    if(versions[0]?.version>=33&&!retiredColumns.includes('inspection_started')) fail('ASSISTANT_INBOX_CONFLICT');
+    if(!retiredColumns.includes('inspection_started'))db.exec(`ALTER TABLE assistant_retired_task_writers
+      ADD COLUMN inspection_started INTEGER NOT NULL DEFAULT 0 CHECK(inspection_started IN (0,1))`);
     // Empty additive tables remain compatible with v31. Fence older workers
     // before the first request can leave the device.
     if(versions.length)run('UPDATE assistant_inbox_meta SET version=?',Math.max(31,versions[0].version));
@@ -2748,6 +2752,26 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const retired=readRetiredWriter(delivery(id));
         if(!retired||JSON.stringify(retired.receipt)!==JSON.stringify(receipt))fail('ASSISTANT_INBOX_CONFLICT');
         if(!retired.released)run('UPDATE assistant_retired_task_writers SET released=1 WHERE delivery_id=?',id);
+      });
+    },
+    pendingRetiredTaskInspections() {
+      return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
+        JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
+        WHERE w.released=1 AND w.inspection_started=0 ORDER BY d.expires_at,w.delivery_id LIMIT 16`)
+        .map(row=>this.readDelivery(row.delivery_id));
+    },
+    startRetiredTaskInspection(id,value) {
+      const receipt=validateAssistantTaskWriterRetirement(value);
+      return transaction(()=>{
+        const retired=readRetiredWriter(delivery(id));
+        if(!retired?.released||JSON.stringify(retired.receipt)!==JSON.stringify(receipt))fail('ASSISTANT_INBOX_CONFLICT');
+        // The retirement receipt already provides a unique marker. This bit
+        // is the only new state: record it before turn/start, even if the reply
+        // never arrives. The original delivery and provider fences are untouched.
+        const updated=run(`UPDATE assistant_retired_task_writers SET inspection_started=1
+          WHERE delivery_id=? AND inspection_started=0`,id);
+        if(Number(updated.changes)!==1)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run('UPDATE assistant_inbox_meta SET version=33 WHERE version=32');
       });
     },
     retiredTaskIds() {

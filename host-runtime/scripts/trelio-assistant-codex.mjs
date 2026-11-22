@@ -15,6 +15,7 @@ import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, AS
   validateAssistantLocalDraftBasis, validateAssistantLocalDraftFiles, validateAssistantLocalDraftWitness,
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRecoveredOutcomeEvidence,
   assistantWorkspaceCheckpointLocator, assistantRecoveredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
+import { ASSISTANT_RETIRED_TASK_READ_TOOLS, ASSISTANT_RETIRED_TASK_TOOLS, validateAssistantRetiredPass } from './trelio-assistant-hook.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
@@ -55,9 +56,11 @@ export const assistantCodexExecutionArguments = () => ['app-server','--listen','
  * disabled; the sole permitted server must come from the verified assistant
  * plugin. A user server with the same name must never impersonate that plugin.
  * No config file, enabled setting or native hook trust is changed on disk. */
-const workspaceRecoveryTools=mode=>mode==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS:mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS
+const workspaceRecoveryTools=mode=>mode==='retired_draft'?ASSISTANT_RETIRED_TASK_TOOLS:mode==='retired_read'?ASSISTANT_RETIRED_TASK_READ_TOOLS
+  :mode==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS:mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS
   :mode==='named_archive'?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
-const workspaceRecoveryModeFor=options=>options.workspaceDraftRecovery?.workspaceDraft?.recoveredOutcome!==undefined?'recovered_outcome'
+const workspaceRecoveryModeFor=options=>options.retiredPass?options.retiredPass.run?'retired_draft':'retired_read'
+  :options.workspaceDraftRecovery?.workspaceDraft?.recoveredOutcome!==undefined?'recovered_outcome'
   :options.workspaceDraftRecovery?.workspaceDraft?.namedArchive===true
   ||options.workspaceDraftRecovery?.workspaceDraft?.portableFinish!==undefined
   ||options.workspaceDraftRecovery?.workspaceDraft?.localDraft!==undefined?'named_archive'
@@ -144,7 +147,8 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
   // positive readiness; verify required tools after the live connection.
   if([null,'notStarted','starting'].includes(server.runtimeStatus))return false;
   if(server.runtimeStatus!=='connected'
-    ||(workspaceDraftRecovery==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS
+    ||(workspaceDraftRecovery==='retired_draft'||workspaceDraftRecovery==='retired_read'?workspaceRecoveryTools(workspaceDraftRecovery)
+      :workspaceDraftRecovery==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS
       :workspaceDraftRecovery==='accepted'?['get_assistant_status','complete_assistant_pass']:
       workspaceDraftRecovery?['get_assistant_status','prepare_assistant_workspace_run','continue_assistant_workspace_action',
         'use_assistant_workspace_files',...(workspaceDraftRecovery==='named_archive'?[]:['complete_assistant_pass'])]
@@ -3383,6 +3387,15 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   const workStateContext = intakeContext===undefined?assistantWorkStateContext(taskContext):assistantIntakeContext(intakeContext);
   execution = assistantExecutionConfiguration(execution);
   const workspaceRecoveryMode=workspaceRecoveryModeFor(options);
+  if(options.retiredPass!==undefined) {
+    const profile=validateAssistantRetiredPass(options.retiredPass);
+    if (profile.writerRetirementReceiptId!==deliveryId||intakeContext!==undefined
+      ||workStateContext.workMode==='discussion'||workStateContext.sourceReferences!==undefined
+      ||workStateContext.ownerQuestionIds!==undefined||options.workspaceDraftRecovery!==undefined
+      ||options.taskReadRecovery!==undefined||options.namedArchiveResume!==undefined||options.continuationReview!==undefined
+      ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
+      fail('ASSISTANT_CODEX_INVALID_INPUT');
+  }
   if(options.workspaceDraftRecovery){
     const {terminalMarkerId,terminalTurnId,workspaceDraft,taskPass}=options.workspaceDraftRecovery;
     if(intakeContext!==undefined||workStateContext.workMode==='discussion'||workStateContext.sourceReferences!==undefined
@@ -3785,13 +3798,16 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     }
     const workflow=options.readinessProbe===true?null
       :await (options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
+    const developerInstructions=options.retiredPass
+      ? `${workflow}\n\nThe native task writer has been retired. This inspection may read only its original task and checkpoint the pinned draft when one is provided. A draft checkpoint is the save boundary for this turn. The earlier provider effect must remain on hold pending independent evidence.`
+      : workflow;
     const run=async text=>{
       // Only this owned server sends the model input. Desktop's queue has no
       // tool-policy parameter and is never an alternative executor/fallback.
       const terminal=watchTerminal(threadId);
       const started=await request('turn/start',{threadId,model:execution.modelId,effort:execution.effortLevel,
         approvalPolicy:'never',sandboxPolicy:{type:'readOnly',networkAccess:false},environments:[],
-        collaborationMode:{mode:'default',settings:{model:execution.modelId,reasoning_effort:execution.effortLevel,developer_instructions:workflow}},
+        collaborationMode:{mode:'default',settings:{model:execution.modelId,reasoning_effort:execution.effortLevel,developer_instructions:developerInstructions}},
         input:[{type:'text',text,text_elements:[]}]});
       const completed=await terminal;
       if(started?.turn?.id===completed.turnId&&completed.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');
@@ -3815,6 +3831,14 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
 };
 
 export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
+      if(options.retiredPass) {
+        const run=options.retiredPass.run;
+        const draft=run
+          ? `The exact existing Run is workspaceId=${run.workspaceId}, runId=${run.runId}, with original draft head ${run.draftHead}. Use its native open and read both pinned authority files before editing. Preserve useful verified progress with a draft checkpoint.`
+          : 'Read the original task through the exact task tools and identify what can be established from the current state.';
+        return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nContinue the original work in this chat. The former writer is stopped and the original operation outcome remains unresolved. Read the current task, choose useful independent work within the available tools, and record what still needs reconciliation. ${draft} Keep the original provider operation on hold.\n`;
+      }
+
       if(options.workspaceDraftRecovery){
         const {workspaceDraft}=options.workspaceDraftRecovery;
         if(workspaceDraft.recoveredOutcome){

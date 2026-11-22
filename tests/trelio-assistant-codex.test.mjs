@@ -2219,6 +2219,23 @@ test('scoped overrides preserve disabled hooks and never copy user configuration
   }
 });
 
+test('a retired task can only read the original task or checkpoint its pinned draft',()=>{
+  const plugin='trelio-digital-assistant@trelio-digital-assistants';
+  const configuration={plugins:{[plugin]:{enabled:true}}};
+  const tools=mode=>assistantCodexExecutionOverrides(configuration,mode)
+    .plugins[plugin].mcp_servers['trelio-assistant'].enabled_tools;
+  assert.deepEqual(tools('retired_read'),['get_task','get_task_sections','get_task_instruction_page','get_trelio_tool_contract']);
+  assert.deepEqual(tools('retired_draft'),[...tools('retired_read'),'prepare_assistant_workspace_run',
+    'continue_assistant_workspace_action','use_assistant_workspace_files']);
+  const marker=randomUUID(),run={workspaceId:randomUUID(),runId:randomUUID(),draftHead:'a'.repeat(40)};
+  const prompt=assistantNativePrompt(marker,assistantWorkStateContext(taskContext),{
+    retiredPass:{writerRetirementReceiptId:marker,expectedLeaseRevision:0,run},
+  });
+  assert.match(prompt,new RegExp(run.runId,'u'));
+  assert.match(prompt,/draft checkpoint/);
+  assert.doesNotMatch(prompt,/complete_assistant_pass|use_assistant_skill|use_assistant_browser/);
+});
+
 test('unverifiable native tool policy refuses before spending the pass invocation',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID();let starts=0,turns=0;
   const options={executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),

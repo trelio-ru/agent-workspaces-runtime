@@ -74,6 +74,34 @@ test('lost registration survives hook restart with the same pending key; refresh
   const saved=[...f.store.values.values()][0];
   assert.equal(saved.state.observation.effortLevel,'max');assert.ok(!saved.pending);
 });
+test('retirement signs only the permitted native reads and the pinned draft after registration loss',async()=>{
+  const f=fixture();
+  const retiredPass={writerRetirementReceiptId:crypto.randomUUID(),expectedLeaseRevision:7,
+    run:{workspaceId:crypto.randomUUID(),runId:crypto.randomUUID(),draftHead:'a'.repeat(40)}};
+  f.setActive({...f.pass,retiredPass});
+  f.client.readTaskPass=async()=>({...f.pass,state:'closed',workMode:'task',leaseRevision:7,leaseExpiresAt:new Date(0).toISOString()});
+  const register=f.client.registerRuntime;
+  f.client.registerRuntime=async input=>{
+    assert.deepEqual(input.retiredPass,retiredPass);
+    assert.equal(input.previousRuntimeSessionId,undefined);
+    return {...await register(input),retiredInspection:true};
+  };
+  const event=args=>({...f.event(),tool_input:args});
+  await assert.rejects(f.hook(event({}), 'create_comment'),/CAPABILITY_UNAVAILABLE/);
+  await assert.rejects(f.hook(event({operation:'finish',runIdentity:retiredPass.run}), 'continue_assistant_workspace_action'),/CAPABILITY_UNAVAILABLE/);
+  assert.equal(f.calls(),0);
+  f.lose();
+  await assert.rejects(f.hook(event({}), 'get_task'),error=>error.code==='ASSISTANT_TRANSPORT_UNAVAILABLE');
+  verifyProof(f,await f.hook(event({}), 'get_task'),'get_task');
+  const {workspaceId,runId}=retiredPass.run;
+  verifyProof(f,await f.hook(event({operation:'checkpoint',runIdentity:{workspaceId,runId},
+    parameters:{type:'draft'}}), 'continue_assistant_workspace_action'),'continue_assistant_workspace_action');
+  assert.equal(f.records.size,1);
+  assert.equal(f.calls(),2);
+  await f.hook({hook_event_name:'SessionEnd',session_id:f.pass.threadId});
+  await assert.rejects(f.hook(event({}), 'get_task'),/PASS_REVIEW_REQUIRED/);
+});
+
 test('native SessionEnd does not clear a pass or claim business completion',async()=>{
   const f=fixture();await f.hook(f.event(),'get_assistant_task');
   await f.hook({hook_event_name:'SessionEnd',session_id:f.pass.threadId});

@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { setTimeout as waitForTimer } from 'node:timers/promises';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
-import { validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
+import { matchesAssistantRetiredPass, validateAssistantRetiredPass, validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
@@ -582,8 +582,8 @@ export const readAssistantCompanyContentMode=async({identity,host,client,signal}
       || JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))
       fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     const live=intake?await client.readSourceIntake(locator,signal):await client.readTaskPass(locator,signal);
-    if(live.state!=='leased'||live.threadId!==pass.threadId||!Number.isFinite(Date.parse(live.leaseExpiresAt))
-      || Date.parse(live.leaseExpiresAt)<=Date.now()
+    if((pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=Date.now())
+      ||live.threadId!==pass.threadId||!Number.isFinite(Date.parse(live.leaseExpiresAt))
       || (intake ? live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
         : ['passId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])))
@@ -1356,6 +1356,10 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     descriptor:encryptedTaskRead,identity,pass});
   const companyRead=encryptedCompanyContext===null?null:await validateAssistantEncryptedCompanyRead({
     descriptor:encryptedCompanyContext,identity,pass});
+  if(pass.retiredPass && ([sourceReads,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,
+    encryptedInspection,encryptedSkillRead,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup]
+    .some(Boolean) || workspaceRun && (workspaceRun.workspaceId!==pass.retiredPass.run?.workspaceId
+      ||workspaceRun.runId!==pass.retiredPass.run?.runId))) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   // An intake may compose only this shared READ cell (or privacy metadata
   // preflight). It never inherits the task profile's skill/Secret/Run routes.
   if(ownerReadOrigin && (pass.intakeKind==='route_existing' || [sourceReads,encryptedTaskRead,sourceAttachment,
@@ -1445,11 +1449,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     await assertIdentity();
     const live=ownerReadOrigin?await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal)
       :await client.readTaskPass(locator,signal);
-    if(live.state!=='leased'||live.threadId!==pass.threadId
+    if((pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=now())
+      ||live.threadId!==pass.threadId
       ||(ownerReadOrigin?live.kind==='route_existing'||live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
         ||(companyRead||plainSourceFile)&&(!live.ownerPrivateRead||!live.readConfirmed)
         :['passId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key]))
-      || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      || !Number.isFinite(Date.parse(live.leaseExpiresAt))) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     if(accountSetup)setupLeaseExpiresAt=setupLeaseExpiresAt?Math.min(setupLeaseExpiresAt,Date.parse(live.leaseExpiresAt)):Date.parse(live.leaseExpiresAt);
   };
   // The same protected slot identifies the browser owner during both the
@@ -2971,6 +2976,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
   };
 
   const registerObservedRuntime=async(input,signal,intake=false)=>{
+      const retiredPass=input.retiredPass===undefined?null:validateAssistantRetiredPass(input.retiredPass);
+      if(retiredPass&&(intake||input.previousRuntimeSessionId!==undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
         || input.observation.source!=='codex_hook' || input.observation.evidenceLevel!=='local_observed'
         || !/^[a-z0-9._:+/-]{1,255}$/iu.test(input.observation.modelId??'')
@@ -2978,16 +2985,18 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         || !Number.isFinite(Date.parse(input.observation.observedAt)) || !/^[A-Za-z0-9_-]{40,256}$/u.test(input.publicKeySpki??'')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call(intake?'intakeRegister':'registerRuntime',{companyId:id(input.companyId),...(intake?{sourceId:id(input.sourceId),intakeId:id(input.intakeId)}:{taskId:id(input.taskId),passId:id(input.passId)}),
         clientSessionId:id(input.clientSessionId),observation:input.observation,publicKeySpki:input.publicKeySpki,
-        ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{})},signal);
+        ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{}),
+        ...(retiredPass?{retiredPass}:{})},signal);
       if(value.schemaVersion!==1 || value.passId!==(intake?input.intakeId:input.passId) || value.conversation?.conversationId!==input.clientSessionId
         || value.conversation?.provider!=='codex' || value.conversation?.openProtocol!=='codex-thread-v1'
         || !Number.isFinite(Date.parse(value.expiresAt)) || value.runtimeRefreshSupported!==true
-        || !object(value.observation)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        || !object(value.observation) || Boolean(retiredPass)!==(value.retiredInspection===true)
+        ||retiredPass&&value.businessReady!==false) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       for(const key of ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'])
         if(value.observation[key]!==input.observation[key]) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {schemaVersion:1,passId:id(value.passId),runtimeSessionId:id(value.runtimeSessionId),expiresAt:isoTimestamp(value.expiresAt),
         observation:Object.fromEntries(['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source','observedAt'].map(key=>[key,key==='observedAt'?isoTimestamp(value.observation[key]):value.observation[key]])),
-        runtimeRefreshSupported:true};
+        runtimeRefreshSupported:true,...(retiredPass?{retiredInspection:true}:{})};
   };
   return {
     identity: Object.freeze({ origin, assistantId, deviceId }),

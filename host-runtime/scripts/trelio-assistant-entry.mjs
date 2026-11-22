@@ -3012,8 +3012,8 @@ const assertWorkspaceDraftRecoveryCall=async({name,arguments:args},draft)=>{
     &&(args.processedSourceReferences===undefined||Array.isArray(args.processedSourceReferences)&&args.processedSourceReferences.length===0);
   if(!permitted)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
 };
-const readProductionWorkspaceDraftRecovery=async(identity,host)=>{
-  const active=await host.readActivePass();
+const readProductionWorkspaceDraftRecovery=async(identity,host,active=undefined)=>{
+  if(active===undefined)active=await host.readActivePass();
   if(!active||active.kind==='source_intake')return null;
   const [{validateAssistantActivePass},{openAssistantDatabase},{readAssistantWorkspaceDraftRecovery},common]=await Promise.all([
     import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-private.mjs'),
@@ -3129,9 +3129,15 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   if(sourceSetup&&(interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
   if(request.operation==='call' && !sourceSetup && !localConnection && !localSkill && !encryptionSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
+    const retired=await host.readActivePass?.();
+    const retiredProfile=retired?.retiredPass;
+    const retiredTools=retiredProfile?await import('./trelio-assistant-hook.mjs'):null;
     if(request.operation==='call'){
-      const draft=await readDraftRecovery(client.identity,host);
-      if(draft)await assertWorkspaceDraftRecoveryCall(request,draft);
+      if(retiredTools)retiredTools.assertAssistantRetiredPassTool(retiredProfile,request.name,request.arguments);
+      else {
+        const draft=await readDraftRecovery(client.identity,host,retired);
+        if(draft)await assertWorkspaceDraftRecoveryCall(request,draft);
+      }
     }
     const current=await client.readHealth();
     const blocked=assistantHealthCompatibility(current,versions());
@@ -3210,7 +3216,13 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
         const status={...result.structuredContent,companies};
         result={...result,structuredContent:status,content:[{type:'text',text:JSON.stringify(status)}]};
       }
-      if(request.operation==='list')result=assistantWorkerToolCatalogue(result);
+      if(request.operation==='list'){
+        result=assistantWorkerToolCatalogue(result);
+        if(retiredTools) {
+          const allowed=retiredProfile.run?retiredTools.ASSISTANT_RETIRED_TASK_TOOLS:retiredTools.ASSISTANT_RETIRED_TASK_READ_TOOLS;
+          result=result.filter(tool=>allowed.includes(tool.name));
+        }
+      }
       const code=result?.isError?assistantHealthFailure(result.structuredContent):null;
       if(code)await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code}).catch(()=>undefined);
       if(!result?.isError) {
@@ -4417,6 +4429,13 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
     const active=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(active.retiredPass){
+      const { assertAssistantRetiredPassTool }=await import('./trelio-assistant-hook.mjs');
+      const { operation,parameters }=plan.localAction;
+      assertAssistantRetiredPassTool(active.retiredPass,'continue_assistant_workspace_action',{
+        operation,runIdentity:plan.runIdentity,parameters:operation==='open'?plan.runIdentity:parameters,
+      });
+    }
     if(identity.origin!==expectedOrigin || identity.assistantId!==plan.scope.assistantUserId || identity.deviceId!==plan.scope.deviceId
       || ['companyId','taskId','passId'].some(key=>active[key]!==plan.scope[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     // A profile HTTP read consumes its own observed one-use proof and native
@@ -4451,7 +4470,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     let root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin))
       :inspecting?assistantWorkspaceRoot(config,plan,expectedOrigin):await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin);
     let directory=path.join(root,'workspace');
-    const pending=runLifecycle?await readDraftRecovery(identity,host):null;
+    const pending=runLifecycle&&!active.retiredPass?await readDraftRecovery(identity,host,active):null;
     const interruptedFinish=pending?.finishPending===true;
     const portableFinish=pending?.portableFinish;
     const localDraftRecovery=pending?.localDraft;

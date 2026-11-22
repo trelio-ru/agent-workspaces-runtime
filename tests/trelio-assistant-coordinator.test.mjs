@@ -690,7 +690,7 @@ test(`retired writer preserves the original task and admits an independent overd
   assert.equal(pass.taskId,plans[0].taskId);
   f.advance(21*60_000);
   const current=await readPass({passId:pass.passId});
-  Object.assign(current,{state:'closed'});
+  Object.assign(current,{state:'closed',workMode:'task'});
   assert.equal(current,old);
   const receipt={...identity,schemaVersion:1,state:'retired',leaseRevision:old.leaseRevision,receiptId:randomUUID()};
   let inbox=createAssistantInbox({database:f.database,now:f.options.now});
@@ -737,6 +737,35 @@ test(`retired writer preserves the original task and admits an independent overd
     assert.equal(await inbox.claimDelivery({scheduledTask:{scope:plans[0].source,taskId:pass.taskId},authorize:async()=>false}),null);
     assert.throws(()=>inbox.completeDelivery(pass.deliveryId,'forged'),/STALE_DELIVERY/);
     assert.equal(await restarted.workOnce(),null);
+    if(failure!=='none')return;
+
+    const run={workspaceId:randomUUID(),runId:randomUUID(),draftHead:'a'.repeat(40)};
+    f.options.client.readTaskRecoveryContext=async input=>{
+      assert.deepEqual(input.writerRetirement,receipt);
+      return {draftEvidence:{intermediateDraft:run}};
+    };
+    f.options.native.readWriterReleased=async threadId=>threadId===pass.threadId;
+    let inspections=0;
+    f.options.native.run=async(input,options)=>{
+      inspections++;
+      assert.equal(input.threadId,pass.threadId);
+      assert.equal(input.deliveryId,receipt.receiptId);
+      assert.deepEqual(options.retiredPass.run,run);
+      assert.deepEqual(f.activePass().retiredPass,options.retiredPass);
+      await options.beforeInvocation(options.signal);
+      options.startInvocation({threadId:input.threadId,deliveryId:input.deliveryId});
+      // A lost completion response spends only the inspection marker.
+      throw new Error('native response lost');
+    };
+    await assert.rejects(restarted.workOnce());
+    assert.equal(f.activePass(),null);
+    await restarted.close();
+    restarted=createAssistantCoordinator(f.options);
+    assert.equal(await restarted.workOnce(),null);
+    assert.equal(inspections,1);
+    assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,33);
+    assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(pass.deliveryId),original);
+    assert.equal(restarted.status().find(plan=>plan.taskId===pass.taskId).nextRunAt,plans[0].nextRunAt);
   }finally{await restarted.close();}
 });
 

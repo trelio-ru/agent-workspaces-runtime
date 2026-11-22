@@ -6,7 +6,7 @@ import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliv
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
-import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
+import { matchesAssistantRetiredPass, validateAssistantActivePass } from './trelio-assistant-hook.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -2091,6 +2091,87 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ||inbox.readPassContinuation(job.deliveryId)!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
     lease();signal.throwIfAborted();
   };
+  const releaseRetiredInspection = async (job,pass,signal) => {
+    const recorded=inbox.readRetiredTaskWriter(job.deliveryId);
+    if(!recorded?.released||recorded.receipt.receiptId!==pass.retiredPass.writerRetirementReceiptId
+      ||typeof native.readWriterReleased!=='function')fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+    lease();signal.throwIfAborted();
+    // Even a crashed or timed-out inspection can still have a native writer.
+    // Clear its signing slot only after confirming ownership is free.
+    if(await native.readWriterReleased(pass.threadId,cwd,{signal})!==true) return false;
+    lease();signal.throwIfAborted();
+    if(!isDeepStrictEqual(await passHost.readActivePass(),pass))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    await passHost.releaseRetiredTaskPass(recorded.receipt);
+    return true;
+  };
+  const inspectRetiredTask = async signal => {
+    if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
+      ||typeof native.readWriterReleased!=='function'||typeof client.readTaskRecoveryContext!=='function')return null;
+    for(const job of inbox.pendingRetiredTaskInspections()) {
+      signal.throwIfAborted();lease();
+      if(blockedCompanies.has(job.scope.companyId))continue;
+      const {receipt}=inbox.readRetiredTaskWriter(job.deliveryId);
+      if(findSchedule(job.scope,job.taskId)?.threadId!==receipt.threadId)continue;
+      const locator={companyId:receipt.companyId,taskId:job.taskId,passId:receipt.passId};
+      const observeExecution=async currentSignal=>{
+        const task=await client.task(locator.companyId,locator.taskId,currentSignal);
+        lease();currentSignal.throwIfAborted();
+        if(task.state!=='accepted'||task.id!==receipt.bindingId||task.revision!==receipt.bindingRevision
+          ||task.hostState==='other_device'||task.execution?.state!=='ready')return null;
+        return assistantExecutionConfiguration(task.execution.configuration);
+      };
+      let execution,context;
+      try {
+        execution=await observeExecution(signal);
+        if(!execution)continue;
+        context=await client.readTaskRecoveryContext({...receipt,expectedLeaseRevision:receipt.leaseRevision,
+          writerRetirement:receipt},signal);
+      } catch(error) {
+        signal.throwIfAborted();
+        emit(errorCode(error));
+        continue;
+      }
+      if(!context)continue;
+      const draft=context.draftEvidence?.intermediateDraft;
+      const retiredPass={writerRetirementReceiptId:receipt.receiptId,expectedLeaseRevision:receipt.leaseRevision,
+        ...(draft?{run:{workspaceId:draft.workspaceId,runId:draft.runId,draftHead:draft.draftHead}}:{})};
+      const pass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+        ...locator,deliveryId:receipt.deliveryId,threadId:receipt.threadId,bindingId:receipt.bindingId,
+        bindingRevision:receipt.bindingRevision,retiredPass},identity);
+      const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+      lease();signal.throwIfAborted();
+      if(await passHost.readActivePass()!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      await passHost.activatePass(pass);
+      let result;
+      try {
+        result=await native.run({threadId:pass.threadId,deliveryId:receipt.receiptId,cwd,execution,
+          taskContext:{assistantId:identity.assistantId,companyId:pass.companyId,taskId:pass.taskId}},{
+          signal,retiredPass,requireAbsentMarker:true,
+          beforeInvocation:async ownedSignal=>{
+            const current=await observeExecution(ownedSignal);
+            const live=await client.readTaskPass(locator,ownedSignal);
+            lease();ownedSignal.throwIfAborted();
+            if(!isDeepStrictEqual(current,execution)||!matchesAssistantRetiredPass(pass,live)
+              ||!isDeepStrictEqual(await passHost.readActivePass(),pass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          },
+          startInvocation:({threadId,deliveryId})=>{
+            lease();signal.throwIfAborted();
+            if(threadId!==pass.threadId||deliveryId!==receipt.receiptId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            inbox.startRetiredTaskInspection(job.deliveryId,receipt);
+          },
+        });
+      } finally {
+        if(!signal.aborted&&!await releaseRetiredInspection(job,pass,signal))
+          fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      }
+      // Native termination is only observation of the technical turn. It
+      // never reads a business receipt or advances the old schedule.
+      if(result.state!=='completed')fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
+      return {state:'retired_inspection',kind:'task'};
+    }
+    return null;
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -2099,6 +2180,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const row=inbox.readDelivery(pass.deliveryId);
       if(row.taskId!==pass.taskId || row.scope.companyId!==pass.companyId || row.scope.assistantId!==identity.assistantId
         || row.kind!=='task') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      if(pass.retiredPass)return !await releaseRetiredInspection(row,pass,signal);
       if(await releaseRetiredWriter(row,saved,signal))return false;
       if(row.state==='complete') {
         // The SQLite completion was committed only after native read-back and
@@ -2695,7 +2777,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(job) return perform(job,signal);
         if(job===null) break;
       }
-      return null;
+      return inspectRetiredTask(signal);
     })();
     try { return await active; } catch(error) { throw safeError(error); } finally { active=null; }
   };

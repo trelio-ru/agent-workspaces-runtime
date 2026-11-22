@@ -197,6 +197,15 @@ ordinary completion and continuation writers reject the retired delivery.
 Existing uncertain rows receive no synthetic retirement during migration.
 The first native retirement attempt and the v32 marker commit atomically;
 the empty additive tables stay compatible with v31.
+A separate v33 bit records the first native inspection start. Its chat marker
+reuses the retirement receipt UUID. The scheduler visits this bounded work
+after independent due tasks and verifies the original binding, current model,
+closed pass and device before the owned native writer can start a read or
+draft-only turn. The original delivery, schedule and provider operation remain
+unchanged. On restart, the trusted host proves the writer has released before
+clearing its protected inspection key. A consumed marker does not launch again
+after a lost native response. The first inspection start commits v33 with the bit.
+
 
 ## External ACK attempts (schema v5)
 
