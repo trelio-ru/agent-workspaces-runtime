@@ -3019,6 +3019,7 @@ const readProductionWorkspaceDraftRecovery=async(identity,host,active=undefined)
     import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-private.mjs'),
     import('./trelio-assistant-inbox.mjs'),import('./trelio-workspace.mjs')]);
   const pass=validateAssistantActivePass(active,identity);
+  if(pass.retiredPass)return {retiredPass:pass.retiredPass};
   const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime',pass.assistantId.toLowerCase(),pass.deviceId.toLowerCase());
   // Never create/migrate the inbox from a business tool. Authority and the
   // model surface remain tied to the SAME protected pass and journal.
@@ -3129,15 +3130,12 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   if(sourceSetup&&(interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
   if(request.operation==='call' && !sourceSetup && !localConnection && !localSkill && !encryptionSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
-    const retired=await host.readActivePass?.();
-    const retiredProfile=retired?.retiredPass;
-    const retiredTools=retiredProfile?await import('./trelio-assistant-hook.mjs'):null;
     if(request.operation==='call'){
-      if(retiredTools)retiredTools.assertAssistantRetiredPassTool(retiredProfile,request.name,request.arguments);
-      else {
-        const draft=await readDraftRecovery(client.identity,host,retired);
-        if(draft)await assertWorkspaceDraftRecoveryCall(request,draft);
-      }
+      const draft=await readDraftRecovery(client.identity,host);
+      if(draft?.retiredPass){
+        const {assertAssistantRetiredPassTool}=await import('./trelio-assistant-hook.mjs');
+        assertAssistantRetiredPassTool(draft.retiredPass,request.name,request.arguments);
+      }else if(draft)await assertWorkspaceDraftRecoveryCall(request,draft);
     }
     const current=await client.readHealth();
     const blocked=assistantHealthCompatibility(current,versions());
@@ -3216,13 +3214,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
         const status={...result.structuredContent,companies};
         result={...result,structuredContent:status,content:[{type:'text',text:JSON.stringify(status)}]};
       }
-      if(request.operation==='list'){
-        result=assistantWorkerToolCatalogue(result);
-        if(retiredTools) {
-          const allowed=retiredProfile.run?retiredTools.ASSISTANT_RETIRED_TASK_TOOLS:retiredTools.ASSISTANT_RETIRED_TASK_READ_TOOLS;
-          result=result.filter(tool=>allowed.includes(tool.name));
-        }
-      }
+      if(request.operation==='list')result=assistantWorkerToolCatalogue(result);
       const code=result?.isError?assistantHealthFailure(result.structuredContent):null;
       if(code)await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code}).catch(()=>undefined);
       if(!result?.isError) {
