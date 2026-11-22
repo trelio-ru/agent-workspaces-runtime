@@ -50,6 +50,12 @@ read to release the protected pass. Prior turn-based receipts remain readable.
 Pending passes still need a native writer handover and task-scoped
 operation read-back before new passes can stop using whole-turn classifiers for
 saved drafts, provider reads and recovered outcomes.
+The optional device `task-pass/read` recovery context selects the prior accepted
+material, the retained Run's checkpoint and explicitly pass-bound native
+operation receipts at one expired lease revision. The signed client validates
+its pass, binding, delivery and thread, and rejects inconsistent or mixed draft
+anchors. Coverage remains partial. External effects and historical operations
+without pass provenance still have their own reconciliation rules.
 Admit the new path only when both backend and runtime support the fenced
 handover and the retained pass can prove its own operation state. Keep the
 legacy classifiers for existing unsettled passes without that evidence.

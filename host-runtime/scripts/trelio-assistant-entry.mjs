@@ -2044,7 +2044,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     if(value===null) fail('ASSISTANT_HOST_NOT_CONFIGURED');
     return value.value;
   };
-  const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
+  const client={identity:stableIdentity,readTaskRecoveryContext:(...args)=>invoke(live=>live.readTaskRecoveryContext?.(...args)??null),
+    ...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
     ['claimTaskHost','beginTaskPass','beginSourceIntake','reconcileAnsweredSourceIntake','prepareOwnerReplyDelivery'].includes(name))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
   const configDirectory=dependencies.configurationDirectory??dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();

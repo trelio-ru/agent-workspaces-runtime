@@ -2912,6 +2912,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
   if (!store || typeof store.get !== 'function' || typeof http !== 'function') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const call = async (operation, body, signal) => http(operation, body,
     await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store }), signal);
+  const materialBasis=basis=>{
+    if(basis===null)return null;
+    if(!object(basis)||Object.keys(basis).sort().join(',')!=='receiptId,workspaceHead,workspaceId'
+      || !/^[0-9a-f]{40,64}$/u.test(basis.workspaceHead??''))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    return Object.freeze({receiptId:id(basis.receiptId),workspaceId:id(basis.workspaceId),workspaceHead:basis.workspaceHead});
+  };
 
   // Both stage-specific selectors carry the same structural checkpoint.
   // A server without the strict additive selector gives no evidence. An
@@ -3141,11 +3147,60 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async readTaskMaterialBasis(input,signal){
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),includeMaterialBasis:true},signal);
       if(value.passId!==input.passId || value.state!=='leased' || !Object.hasOwn(value,'materialBasis'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      if(value.materialBasis===null)return null;
-      const basis=value.materialBasis;
-      if(!object(basis)||Object.keys(basis).sort().join(',')!=='receiptId,workspaceHead,workspaceId'
-        || !/^[0-9a-f]{40,64}$/u.test(basis.workspaceHead??''))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return Object.freeze({receiptId:id(basis.receiptId),workspaceId:id(basis.workspaceId),workspaceHead:basis.workspaceHead});
+      return materialBasis(value.materialBasis);
+    },
+    async readTaskRecoveryContext(input,signal){
+      const expectedLeaseRevision=revision(input.expectedLeaseRevision);
+      const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
+        recoveryContext:{expectedLeaseRevision}};
+      const expected={passId:body.passId,bindingId:id(input.bindingId),bindingRevision:revision(input.bindingRevision),
+        deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
+      let value;
+      try{value=await call('passRead',body,signal);}
+      catch(error){
+        if(error instanceof AssistantTransportError&&error.status===400&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
+        throw error;
+      }
+      if(!object(value)||Object.entries(expected).some(([key,field])=>value[key]!==field)
+        ||!Object.hasOwn(value,'recoveryContext'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const context=value.recoveryContext;
+      if(context===null)return null;
+      if(value.state!=='review_required'||value.leaseRevision!==expectedLeaseRevision||value.workMode!=='task'||value.businessReady!==false
+        ||!object(context)||Object.keys(context).sort().join(',')!=='draftEvidence,materialBasis,operations,schemaVersion'
+        ||context.schemaVersion!==1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      let draftEvidence=null;
+      if(context.draftEvidence!==null){
+        const draft=context.draftEvidence;
+        if(!object(draft)||Object.keys(draft).sort().join(',')!=='intermediateDraft,localDraft,portableFinish')
+          fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        let localDraft,intermediateDraft,portableFinish;
+        try{
+          localDraft=draft.localDraft===null?null:validateAssistantLocalDraftBasis(draft.localDraft);
+          intermediateDraft=draft.intermediateDraft===null?null:validateAssistantWorkspaceCheckpoint(draft.intermediateDraft);
+          portableFinish=draft.portableFinish===null?null:validateAssistantWorkspaceCheckpoint(draft.portableFinish);
+        }catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+        // A single native snapshot can contain a draft and its local anchor,
+        // or a final checkpoint. Refuse mixed Runs or incompatible heads.
+        if(portableFinish&&(localDraft||intermediateDraft)
+          ||intermediateDraft&&(!localDraft
+            ||['workspaceId','runId','checkpointId'].some(key=>intermediateDraft[key]!==localDraft[key])
+            ||intermediateDraft.draftHead!==localDraft.anchorHead)
+          ||localDraft&&!intermediateDraft&&(localDraft.checkpointId!==null||localDraft.anchorHead!==localDraft.baseHead))
+          fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        draftEvidence=Object.freeze({localDraft,intermediateDraft,portableFinish});
+      }
+      const operations=context.operations;
+      if(!object(operations)||Object.keys(operations).sort().join(',')!=='coverage,hasMore,receipts'||operations.coverage!=='partial'
+        ||typeof operations.hasMore!=='boolean'||!Array.isArray(operations.receipts)||operations.receipts.length>32
+        ||operations.hasMore&&operations.receipts.length!==32)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const receipts=operations.receipts.map(row=>{
+        if(!object(row)||Object.keys(row).sort().join(',')!=='clientRequestId,operation,receiptId'
+          ||typeof row.operation!=='string'||!(/^[a-z][a-z0-9_]{0,62}$/u.test(row.operation)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        return Object.freeze({receiptId:id(row.receiptId),clientRequestId:id(row.clientRequestId),operation:row.operation});
+      });
+      if(new Set(receipts.map(row=>row.receiptId)).size!==receipts.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return Object.freeze({schemaVersion:1,draftEvidence,materialBasis:materialBasis(context.materialBasis),
+        operations:Object.freeze({coverage:'partial',receipts:Object.freeze(receipts),hasMore:operations.hasMore})});
     },
     async readTaskRetainedFinishEvidence(input,signal){
       let locators;

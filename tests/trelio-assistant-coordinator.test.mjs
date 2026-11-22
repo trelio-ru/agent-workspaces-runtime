@@ -3732,9 +3732,15 @@ for(const retained of [false,true])test(`intermediate checkpoint resumes the ori
   native.readPrerequisites=async()=>({fingerprint:'b'.repeat(64)});
   client.readBusinessOutcome=async args=>businessComplete?readOutcome(args):{schemaVersion:1,state:'pending'};
   client.readTaskIntermediateDraftEvidence=async args=>{
+    assert.equal(retained,false,'a supported context supplies the checkpoint without a second native selector');
     assert.equal(args.passId,original.passId);
     assert.equal(args.expectedLeaseRevision,0);
     return checkpoint;
+  };
+  if(retained)client.readTaskRecoveryContext=async args=>{
+    const {companyId,taskId,passId,bindingId,bindingRevision,deliveryId,threadId}=original;
+    assert.deepEqual(args,{companyId,taskId,passId,bindingId,bindingRevision,deliveryId,threadId,expectedLeaseRevision:0});
+    return {draftEvidence:{intermediateDraft:checkpoint}};
   };
   native.readDelivery=async(thread,id,{interruptedWorkspaceDraft}={})=>{
     assert.equal(thread,original.threadId);
@@ -3900,6 +3906,7 @@ for(const {local,settled,retry=false,provider=false,rootDelivery=false,readConti
       assert.equal(args.expectedLeaseRevision,initialRevision);
       return admitted?receipt:null;
     };
+    if(!local)client.readTaskRecoveryContext=async()=>assert.fail('a final checkpoint keeps its separate terminal-task selector');
     native.readDelivery=async(_thread,id,options={})=>{
       if(id===outcomeMarker){
         assert.ok(confirmed||retry&&outcomeStarts===1);

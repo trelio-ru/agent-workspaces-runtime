@@ -1387,6 +1387,45 @@ test('checkpoint evidence uses one fixed native read and keeps intermediate and 
   assert.equal(calls,9,'neither selector retries or falls back to the other stage');
 });
 
+test('recovery context is a partial native observation of the original expired task pass',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});
+  const locator={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const binding={threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+  const input={...locator,...binding,expectedLeaseRevision:2};
+  const checkpoint={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40)};
+  const {draftHead,...anchor}=checkpoint;
+  const receipt={receiptId:randomUUID(),clientRequestId:randomUUID(),operation:'update_task_urgency'};
+  const context={schemaVersion:1,draftEvidence:{intermediateDraft:checkpoint,
+    localDraft:{...anchor,anchorHead:draftHead,baseHead:'b'.repeat(40)},portableFinish:null},
+  materialBasis:{receiptId:randomUUID(),workspaceHead:'b'.repeat(40),workspaceId:checkpoint.workspaceId},
+  operations:{coverage:'partial',receipts:[receipt],hasMore:false}};
+  const projection={passId:locator.passId,...binding,leaseRevision:2,state:'review_required',workMode:'task',businessReady:false};
+  let value={...projection,recoveryContext:context},status=200;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/read');
+    assert.deepEqual(JSON.parse(options.body),{...locator,recoveryContext:{expectedLeaseRevision:2}});
+    return Response.json(value,{status});
+  }})});
+  assert.deepEqual(await client.readTaskRecoveryContext(input),context);
+  for(const corrupt of [
+    {...value,threadId:randomUUID()},
+    {...value,leaseRevision:1},
+    {...value,state:'leased'},
+    {...value,recoveryContext:{...context,operations:{...context.operations,coverage:'complete'}}},
+    {...value,recoveryContext:{...context,operations:{...context.operations,receipts:[receipt,receipt]}}},
+    {...value,recoveryContext:{...context,draftEvidence:{...context.draftEvidence,portableFinish:checkpoint}}},
+    {...value,recoveryContext:{...context,draftEvidence:{...context.draftEvidence,localDraft:{...context.draftEvidence.localDraft,runId:randomUUID()}}}},
+  ]){
+    value=corrupt;
+    await assert.rejects(client.readTaskRecoveryContext(input),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  }
+  status=400;value={};
+  assert.equal(await client.readTaskRecoveryContext(input),null);
+  status=403;
+  await assert.rejects(client.readTaskRecoveryContext(input),error=>error.status===403);
+});
+
 test('an intermediate draft reservation requires its own exact native receipt',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'i'.repeat(43)}`,expiresAt:1});

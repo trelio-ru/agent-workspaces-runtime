@@ -2066,6 +2066,22 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }
     }
     const marker=continued?(continued.started?continued.reviewId:continued.terminalMarkerId):job.deliveryId;
+    let observedDraftScope,observedRecoveryContext;
+    const readRecoveryDraft=async (kind,legacy,pass,live)=>{
+      const locator={...pass,expectedLeaseRevision:live.leaseRevision};
+      if(typeof client.readTaskRecoveryContext==='function'){
+        const key=`${pass.passId}:${live.leaseRevision}`;
+        if(key!==observedDraftScope){
+          observedRecoveryContext=await client.readTaskRecoveryContext({...locator,bindingId:live.bindingId,
+            bindingRevision:live.bindingRevision,deliveryId:live.deliveryId,threadId:live.threadId},signal);
+          lease();observedDraftScope=key;
+        }
+        // Keep one coherent snapshot for this observation. It locates a draft
+        // only. The original native and renewal fences still select any write.
+        if(observedRecoveryContext)return observedRecoveryContext.draftEvidence?.[kind]??null;
+      }
+      return legacy(locator,signal);
+    };
     let result;
     try{result=await native.readDelivery(threadId,marker,{signal,...(job.kind==='provision'?{provision:true}:{})});}
     catch(error){
@@ -2146,6 +2162,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         ||live.deliveryId!==saved.deliveryId||live.state==='closed')return true;
       let portableFinish=continued?.workspaceDraft?.portableFinish;
       if(!portableFinish&&live.state==='review_required'&&Date.parse(live.leaseExpiresAt)<=now()){
+        // Finalizing an already opened Run has its separate terminal-task
+        // authority. The ordinary recovery context requires an accepted task.
         portableFinish=await client.readTaskPortableFinishEvidence({...pass,expectedLeaseRevision:live.leaseRevision},signal);
         lease();
       }
@@ -2221,7 +2239,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const retained=continued?.workspaceDraft?.localDraft;
       const {deltaSha256:previousHash,historicalSkillReleases:previousReleases,...previousBasis}=retained?.basis??{};
       const localDraftBasis=retained?previousBasis:live.state==='review_required'&&Date.parse(live.leaseExpiresAt)<=now()
-        ?await client.readTaskLocalDraftEvidence({...pass,expectedLeaseRevision:live.leaseRevision},signal):null;
+        ?await readRecoveryDraft('localDraft',client.readTaskLocalDraftEvidence,pass,live):null;
       lease();
       if(localDraftBasis){
         const candidate=await native.readDelivery(threadId,marker,{signal,interruptedWorkspaceDraft:{...pass,localDraftBasis}});
@@ -2252,7 +2270,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         ||live.deliveryId!==saved.deliveryId||live.state==='closed'||live.workMode!=='task')return true;
       let checkpoint=continued?.taskReadParent?.intermediateDraft;
       if(!checkpoint&&live.state==='review_required'&&Date.parse(live.leaseExpiresAt)<=now()){
-        checkpoint=await client.readTaskIntermediateDraftEvidence({...pass,expectedLeaseRevision:live.leaseRevision},signal);lease();
+        checkpoint=await readRecoveryDraft('intermediateDraft',client.readTaskIntermediateDraftEvidence,pass,live);lease();
       }
       if(checkpoint){
         const workStateContext=assistantWorkStateContext(taskContextForJob(job,live.workMode));

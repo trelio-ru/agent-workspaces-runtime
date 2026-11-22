@@ -1329,6 +1329,9 @@ publication tooling также остаются вне этого публичн
   writer release before reading chat history. Persist the original delivery,
   never invent a turn UUID. After local commit, repeat only the exact receipt
   read before releasing the retained pass. See [scheduler recovery](docs/assistant-scheduler.md#moving-recovery-to-operation-receipts).
+- Expired task recovery may read one exact native context for intermediate
+  draft and local anchor selection. This partial observation grants no replay
+  or renewal. Final checkpoint settlement keeps its terminal-task selector.
 - Terminal continuation: SAME pass/ledger, native trusted-hook preflight and
   indexed history. Every task continuation reserves its marker before
   preflight, renews only under the exclusive native writer and requires live
