@@ -1108,8 +1108,8 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
       assert.equal(assistantInterruptedTaskCheckpoint(changed,terminalMarkerId,proof),false);
     }
     const cwd=await fs.realpath(process.cwd());
-    for(const variant of ['exact','busy','late-effect']){
-      const deliveryId=randomUUID(),steps=[],latest=structuredClone(originalTurn);
+    for(const variant of ['exact','busy','late-effect','writer-exit']){
+      const deliveryId=randomUUID(),steps=[],children=[],latest=structuredClone(originalTurn);
       let starts=0,reads=0;
       if(variant==='late-effect')latest.items.push(add('create_comment',{},{}));
       const attempt=()=>runAssistantCodexPass({threadId,deliveryId,cwd,execution,
@@ -1119,10 +1119,14 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
         continuationReview:{priorTurnId:turn.id,reviewId:deliveryId},
         readMetadata:async()=>({threadId,cwd}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
         readExecutionAvailability:async()=>true,
-        beforeInvocation:async()=>{steps.push('renew');},
+        beforeInvocation:async signal=>{
+          if(variant==='writer-exit')children.at(-1).emit('exit',1,null);
+          signal.throwIfAborted();
+          steps.push('renew');
+        },
         startInvocation:()=>{starts++;},
         readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',receipt:'fixture:completed'},
-        spawnProcess:ownedRpc({threadId,cwd,priorTurn:[latest],
+        spawnProcess:ownedRpc({threadId,cwd,priorTurn:[latest],children,
           resumeError:variant==='busy'?{code:-32600,message:'thread '+threadId+' already has an active writer'}:undefined,
           onRequest:req=>{
             if(req.method==='thread/resume')steps.push('writer');

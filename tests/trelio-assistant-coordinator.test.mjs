@@ -2349,18 +2349,26 @@ for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResum
   const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
   const ordinaryOutcome=f.options.client.readBusinessOutcome,ordinaryRun=f.options.native.run;
   let confirmed=false,ownerState='approved',reviewId=null,reviewCalls=0,resumes=0,health=0,newRuns=0,lose=lostResume,legacy=legacyPending;
+  let writerBusy=false,ownsWriter=false,expireWriterDuringRead=false;
+  let writerDeadline;
   f.options.onBusinessConfirmed=()=>{health++;};
   f.options.client.readBusinessOutcome=async input=>{
     if(!confirmed)throw Object.assign(new Error('no business receipt'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
     return ordinaryOutcome(input);
   };
-  f.options.native.readDelivery=async(_thread,id,options)=>f.deliveries.get(id)
-    ??{state:'uncertain',...(options?.requireAbsentMarker?{markerEvidence:'absent'}:{})};
+  f.options.native.readDelivery=async(_thread,id,options)=>{
+    if(expireWriterDuringRead&&writerDeadline&&options?.signal===writerDeadline.signal)writerDeadline.abort();
+    return f.deliveries.get(id)??{state:'uncertain',...(options?.requireAbsentMarker?{markerEvidence:'absent'}:{})};
+  };
   f.options.native.run=async(input,options)=>{
     if(options.continuationReview){
-      newRuns++;assert.equal(options.requireAbsentMarker,true);assert.equal(input.threadId,f.activePass().threadId);
+      assert.equal(options.requireAbsentMarker,true);assert.equal(input.threadId,f.activePass().threadId);
       assert.equal(input.deliveryId,reviewId);assert.notEqual(input.deliveryId,f.activePass().deliveryId);
-      await options.beforeInvocation();confirmed=true;
+      if(writerBusy)throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      ownsWriter=true;
+      writerDeadline=new AbortController();
+      try{await options.beforeInvocation(writerDeadline.signal);}finally{ownsWriter=false;writerDeadline=undefined;}
+      newRuns++;confirmed=true;
     }
     const {sourceReferences,...taskContext}=input.taskContext;
     if(sourceReferences)assert.equal(sourceReferences[0].eventId,'message:123:99');
@@ -2371,6 +2379,7 @@ for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResum
     assert.equal(input.automatic,true,'technical recovery needs no new human decision');
     if(input.continuation==='review'){reviewCalls++;reviewId??=randomUUID();legacy=false;}
     if(input.continuation==='resume'){
+      assert.equal(ownsWriter,true,'renewal requires the exclusive native writer');
       resumes++;assert.equal(ownerState,'approved');assert.equal(pass.leaseRevision,input.expectedLeaseRevision);
       Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(Date.parse(pass.leaseExpiresAt)+3600000).toISOString()});
       ownerState='resumed';if(lose){lose=false;throw Object.assign(new Error('lost exact response'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
@@ -2415,6 +2424,22 @@ for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResum
           terminalMarkerId:pass.deliveryId,reviewId,resumeAttempted:false,resumed:false,started:false}]),pass.deliveryId);
     }
     await reopen();
+    if(!legacyPending&&!lostResume&&!terminalTask){
+      writerBusy=true;
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      writerBusy=false;
+      // The App Server may lose its writer while the terminal marker is read.
+      // A late successful read cannot authorize a renewal after cancellation.
+      expireWriterDuringRead=true;
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_UNAVAILABLE'});
+      expireWriterDuringRead=false;
+      const inbox=createAssistantInbox({database,now:f.options.now});
+      assert.equal(inbox.readPassContinuation(original.deliveryId).resumeAttempted,false);
+      assert.equal(inbox.readPassContinuation(original.deliveryId).started,false);
+      assert.equal(pass.leaseRevision,0);
+      assert.equal(resumes,0);
+      assert.equal(f.counts().runs,1);
+    }
     if(lostResume){await assert.rejects(coordinator.workOnce(),/TRANSPORT_UNAVAILABLE/);await reopen();}
     await coordinator.workOnce();
     assert.equal(newRuns,1);assert.equal(resumes,1);assert.equal(reviewCalls,1);assert.equal(f.counts().runs,2);
@@ -2643,7 +2668,7 @@ for(const lostResume of [false,true])test(`fixed native hooks recover all twenty
   f.options.native.readDelivery=async(_thread,marker,options)=>f.deliveries.get(marker)
     ??{state:'uncertain',...(options?.requireAbsentMarker?{markerEvidence:'absent'}:{})};
   f.options.native.run=async(input,options)=>{
-    if(options.continuationReview){newRuns++;assert.equal(input.deliveryId,reviewId);await options.beforeInvocation();confirmed=true;}
+    if(options.continuationReview){assert.equal(input.deliveryId,reviewId);await options.beforeInvocation();newRuns++;confirmed=true;}
     const result=await ordinaryRun(input,options);result.turnId=result.receipt.split(':')[2];return result;
   };
   f.options.passHost.continuePass=async(input,expected)=>{

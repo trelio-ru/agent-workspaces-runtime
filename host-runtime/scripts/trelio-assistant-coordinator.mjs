@@ -1688,12 +1688,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     const saved=validateAssistantActivePass(await passHost.readActivePass(),identity);
     const same=value=>value&&Object.keys(value).length===Object.keys(saved).length&&Object.keys(saved).every(key=>value[key]===saved[key]);
-    const recheck=async()=>{
+    const recheck=async (ownedSignal=signal)=>{
       lease();
+      ownedSignal.throwIfAborted();
       if(saved.deliveryId!==job.deliveryId||saved.taskId!==job.taskId||saved.companyId!==job.scope.companyId
         ||!same(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       let execution;
-      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{job,allowTaskDone:!parentRead&&!workspaceDraft?.namedArchive&&!archive,captureExecution:value=>{execution=value;}}))
+      if(!await authorize({scope:job.scope,taskId:job.taskId},ownedSignal,{job,allowTaskDone:!parentRead&&!workspaceDraft?.namedArchive&&!archive,captureExecution:value=>{execution=value;}}))
         fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       return assistantExecutionConfiguration(execution);
     };
@@ -1812,12 +1813,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(recoveredOutcome?.plan.evidence.providerEffect
         &&await verifyRecoveredProviderOutcome?.(saved,recoveredOutcome.plan.evidence,ownedSignal)!==true)
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      lease();ownedSignal.throwIfAborted();
       if(review.state==='approved'&&!intent.resumeAttempted){
         // Persist before HTTP. A lost response is resolved ONLY by the read
         // branch; it cannot repeat the renewal or native model invocation.
         intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumeAttempted:true});
         review=await passHost.continuePass({...request,automatic:true,continuation:'resume',reviewId:intent.reviewId},saved,ownedSignal);
-        lease();await recheck();
+        lease();await recheck(ownedSignal);
         validateVersion();
       }
       if(review.state!=='resumed')return null;
@@ -1829,20 +1831,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(!intent.resumed)intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumed:true});
       return intent;
     };
-    if(ownedHistory){
-      if(review.state!=='resumed'&&(review.state!=='approved'||intent.resumeAttempted))return true;
-      if(await native.ready(identity,signal)!==true)fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
-      // Review reserves a marker only. The pass remains expired until the
-      // isolated native server owns the thread and verifies the exact draft
-      // history again. Only that server can cross the existing start CAS.
-      const result=await perform(job,signal,intent,resume);
-      // Keep this worker on its restricted save boundary. The next ordinary
-      // tick must obtain a fresh native accepted read-back before continuing.
-      return result.state==='archive_settlement'||result.state==='portable_finish_settlement';
-    }
-    if(!await resume(signal))return true;
+    if(review.state!=='resumed'&&(review.state!=='approved'||intent.resumeAttempted))return true;
     if(await native.ready(identity,signal)!==true)fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
-    await perform(job,signal,intent);return false;
+    // Review reserves a marker only. Both ordinary and restricted recoveries
+    // renew inside the existing before-start callback of the exclusive
+    // App Server writer. A busy chat cannot spend the renewal or start bit.
+    const continuationResult=await perform(job,signal,intent,resume);
+    // A restricted save still needs accepted read-back on its next tick.
+    return continuationResult.state==='archive_settlement'||continuationResult.state==='portable_finish_settlement';
   };
   const continueCapacityProvision = async (job,result,signal,marker) => {
     const waiting=inbox.observeModelCapacity(job.deliveryId,{turnId:result.turnId,markerId:marker});
@@ -2281,7 +2277,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };
-  const perform = async (job,signal,continuation=null,resumeOwnedHistory=null) => {
+  const perform = async (job,signal,continuation=null,resumeOwnedPass=null) => {
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     let checking=false,started=false,taskPass=null,observationTimer=null,failureStage='native_claim';
@@ -2307,6 +2303,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
       if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:Boolean(continuation),captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const options={signal:combined,startInvocation:()=>{lease();
+        if(continuation&&job.kind==='task'&&!taskPass)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         if(continuation)inbox.updatePassContinuation(job.deliveryId,continuation.clientRequestId,{started:true},{allowTaskDone:!continuation.taskReadParent&&!continuation.workspaceDraft?.namedArchive&&!continuation.namedArchiveSettled});
         else inbox.startDelivery(job.deliveryId);
         started=true;failureStage='native_started';}};
@@ -2373,7 +2370,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           observationTimer=setTimeout(()=>controller.abort(),remaining);observationTimer.unref?.();
           return remaining;
         };
-        if(!recovering){
+        if(continuation){
+          // Bound the whole App Server including preflight. The shorter live
+          // lease is sampled once after renewal, while it owns the writer.
+          options.passTimeoutMs=30*60_000;
+        }else if(!recovering){
           // A NEW ordinary task has the same potentially twenty-minute company
           // preparation as owner intake. The native adapter's fifteen-minute
           // default previously abandoned its reader while the GUI still worked.
@@ -2383,11 +2384,6 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           // An expired zero-start recovery keeps its separate existing path:
           // this does not renew an old pass or grant another model invocation.
           options.passTimeoutMs=observePassUntil(admitted.leaseExpiresAt);
-        }else if(continuation&&(continuation.taskReadParent||continuation.workspaceDraft||continuation.namedArchiveSettled)){
-          // History-qualified work gets the real renewed pass window, not the
-          // adapter's preflight timeout. This separate finite ceiling bounds
-          // the entire owning App Server, including the pre-renewal reads.
-          options.passTimeoutMs=30*60_000;
         }
         const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
           passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);
@@ -2416,35 +2412,33 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             archive:continuation.namedArchiveSettled,terminalTurnId:continuation.terminalTurnId,terminalMarkerId:continuation.terminalMarkerId,
             taskPass:{companyId:expectedPass.companyId,taskId:expectedPass.taskId,passId:expectedPass.passId},
           };
-          options.beforeInvocation=async()=>{
+          options.beforeInvocation=async (ownedSignal=combined)=>{
             lease();
+            ownedSignal.throwIfAborted();
             if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
             const prior=inbox.readPassContinuation(job.deliveryId);
             if(JSON.stringify(prior)!==JSON.stringify(continuation)||prior.started)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-            // The previously completed marker is already frozen in this intent.
-            // Re-read the native turn by its parent marker immediately before
-            // launching the reviewed child; no claimed turn ID alone suffices.
-            if(continuation.workspaceDraft||continuation.taskReadParent||continuation.namedArchiveSettled){
-              // executeNativePass has already repeated its whole-history
-              // check under the exclusive App Server writer. The original
-              // lease is never renewed just because stored history exists.
-              if(typeof resumeOwnedHistory!=='function'||!await resumeOwnedHistory(combined))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-            }else{
-              const terminal=await native.readDelivery(plan.threadId,continuation.terminalMarkerId,{signal:combined});lease();
+            // The native process repeats restricted history checks. For
+            // ordinary recovery, recheck the original terminal marker here
+            // under that same writer, before issuing the renewal.
+            if(!continuation.workspaceDraft&&!continuation.taskReadParent&&!continuation.namedArchiveSettled){
+              const terminal=await native.readDelivery(plan.threadId,continuation.terminalMarkerId,{signal:ownedSignal});lease();
               if((continuation.capacity?terminal.state!=='failed'||terminal.failure!=='model_capacity':terminal.state!=='completed')
                 ||terminal.turnId!==prior.terminalTurnId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
             }
-            const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:expectedPass.passId},combined);
+            ownedSignal.throwIfAborted();
+            if(typeof resumeOwnedPass!=='function'||!await resumeOwnedPass(ownedSignal))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:expectedPass.passId},ownedSignal);
             if(live.state!=='leased'||live.leaseRevision<continuation.expectedLeaseRevision+1||Date.parse(live.leaseExpiresAt)<=now()
               ||live.bindingId!==expectedPass.bindingId||live.bindingRevision!==expectedPass.bindingRevision
               ||live.threadId!==expectedPass.threadId||live.deliveryId!==expectedPass.deliveryId
               ||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-            if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:!continuation.taskReadParent&&!continuation.workspaceDraft?.namedArchive&&!continuation.namedArchiveSettled,captureExecution:value=>{
+            if(!await authorize({scope:job.scope,taskId:job.taskId},ownedSignal,{job,allowTaskDone:!continuation.taskReadParent&&!continuation.workspaceDraft?.namedArchive&&!continuation.namedArchiveSettled,captureExecution:value=>{
               if(JSON.stringify(assistantExecutionConfiguration(value))!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
             }}))fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
             if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');lease();
-            if(recovering&&(continuation.taskReadParent||continuation.workspaceDraft||continuation.namedArchiveSettled))
-              observePassUntil(live.leaseExpiresAt);
+            ownedSignal.throwIfAborted();
+            observePassUntil(live.leaseExpiresAt);
             taskPass=expectedPass;
           };
         }else if(recovering){

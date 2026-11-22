@@ -81,11 +81,19 @@ Native ledger v2 freezes the original terminal turn, protected pass, binding,
 model pair and SQLite lease; it returns a NEW independent invocation marker,
 without a human question or notification for this technical recovery.
 
-The original pass/delivery/chat and all operation history survive. Resume renews
-that pass once by CAS; an uncertain response permits read only. SQLite schema13
-retains structural continuation history in the same delivery, preserving schema12
-recovery JSON and the original native-start bit. Each marker has its own monotonic
-start flag committed before spawn. No transcript, prompt, reply or claimed
+The original pass/delivery/chat and all operation history survive. Both ordinary
+and restricted continuations renew that pass once by CAS only inside the
+before-start callback of the exclusive native App Server writer. Review reserves
+the marker; a competing writer leaves the lease and both invocation bits
+untouched. Persist the renewal attempt before the request. If its response is
+lost, read that same review receipt on restart. A new native invocation still
+requires a fresh writer claim and live admission. The native preflight and turn
+share one outer bound, and the actual turn also observes the once-sampled live
+lease. Child exit or timeout cancels pending host checks before renewal or start.
+SQLite schema13 retains structural continuation history in the same
+delivery, preserving schema12 recovery JSON and the original native-start bit.
+Each marker has its own monotonic start flag committed before the model turn.
+No transcript, prompt, reply or claimed
 business result is journaled. Before launch the host repeats positive terminal
 read-back, protected identity/pass, fresh ACL/model/lease and full negative new
 marker coverage. Unknown/running/generically failed/ambiguous history and unknown new starts

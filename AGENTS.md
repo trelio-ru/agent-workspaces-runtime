@@ -1325,7 +1325,17 @@ publication tooling также остаются вне этого публичн
   Supporting task creation uses the SAME proxy/native creator with independent
   project ACL and exact disclosure/absence decisions; no inherited pass/chat/route or sender proof.
 
-- Terminal continuation: SAME pass/ledger, native trusted-hook preflight and indexed history. Twenty attempts per actual hook/signed-worker fingerprint still bound generic completion repair. Native failed model-capacity turns use separate unlimited paced continuations (1/5/15/30 minutes), SAME chat/pass and schema19 episode clock; no quota/network/prose inference or uncertain-action replay. Empty READY retries keep their original provision/thread. Health v3 notifies after fifteen minutes and preserves independent latches. See scheduler contract.
+- Terminal continuation: SAME pass/ledger, native trusted-hook preflight and
+  indexed history. Every task continuation reserves its marker before
+  preflight, renews only under the exclusive native writer and requires live
+  authority before crossing the start fence. A lost renewal permits read-back
+  of that receipt. Twenty attempts per actual hook/signed-worker fingerprint
+  still bound generic completion repair. Native failed model-capacity turns
+  use separate unlimited paced continuations (1/5/15/30 minutes), SAME
+  chat/pass and schema19 episode clock; no quota/network/prose inference or
+  uncertain-action replay. Empty READY retries keep their original
+  provision/thread. Health v3 notifies after fifteen minutes and preserves
+  independent latches. [Scheduler contract](docs/assistant-scheduler.md#automatic-terminal-continuation).
   Native browser attachment recovery stays in eligible task/owner handoffs only;
   see [observation recovery](docs/assistant-scheduler.md#native-browser-observation-recovery).
   Never turn a tab failure into new login, provider bypass or uncertain input replay.

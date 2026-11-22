@@ -327,16 +327,21 @@ const readNative = async (threadId, project, options = {}) => {
   options={...options,signal:options.signal?AbortSignal.any([options.signal,deadline]):deadline};
   const { executable, env, spawnProcess } = await context(options);
   return new Promise((resolve, reject) => {
+    const session = new AbortController();
     let child, timer, done = false, pending = '', bytes = 0, requestId = 1;
     let waiting = null,terminalWaiting=null;
     const finish = (error, value) => {
       if (done) return; done = true; clearTimeout(timer); options.signal?.removeEventListener('abort', abort);
+      const cause = new AssistantCodexError(error??'ASSISTANT_CODEX_READ_UNAVAILABLE');
+      // A projection awaiting host I/O may have no outstanding RPC when the
+      // child exits. Cancel its writer-bound callback before it can continue.
+      session.abort(cause);
       const outstanding=waiting;waiting=null;
       const terminal=terminalWaiting;terminalWaiting=null;
       child?.stdin.destroy(); child?.stdout.destroy(); child?.kill('SIGKILL');
-      outstanding?.no(new AssistantCodexError(error??'ASSISTANT_CODEX_READ_UNAVAILABLE'));
-      terminal?.no(new AssistantCodexError(error??'ASSISTANT_CODEX_READ_UNAVAILABLE'));
-      if (error) reject(new AssistantCodexError(error)); else resolve(value);
+      outstanding?.no(cause);
+      terminal?.no(cause);
+      if (error) reject(cause); else resolve(value);
     };
     const abort = () => finish(options.desktopOperation===true?'ASSISTANT_CODEX_DELIVERY_UNCERTAIN':'ASSISTANT_CODEX_READ_UNAVAILABLE');
     const request = (method, params) => new Promise((yes, no) => {
@@ -415,7 +420,7 @@ const readNative = async (threadId, project, options = {}) => {
         if (done) return;
         child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`);
         if (threadId === null) {
-          const value = await project(null, request,watchTerminal);
+          const value = await project(null, request,watchTerminal,session.signal);
           if (!done) finish(null, value);
           return;
         }
@@ -3669,17 +3674,18 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       throw error;
     }
   };
-  const beforeStart=async()=>{
+  const beforeStart=async ownedSignal=>{
+    if(ownedSignal.aborted)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     if(options.beforeInvocation!==undefined){
       if(typeof options.beforeInvocation!=='function')fail('ASSISTANT_CODEX_INVALID_INPUT');
-      try{await options.beforeInvocation();}
+      try{await options.beforeInvocation(ownedSignal);}
       catch(error){renewalFailure=error;throw error;}
     }
-    if(signal.aborted)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    if(ownedSignal.aborted)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     startNativeInvocation(options,threadId,deliveryId);
   };
   const newProvision=options.readinessProbe===true&&threadId===null;
-  await ownedSession(async(_unused,request,watchTerminal)=>{
+  await ownedSession(async(_unused,request,watchTerminal,ownedSignal)=>{
     await verifyAssistantExecutionFeatures(request);
     const configuration=await request('config/read',{includeLayers:false,cwd});
     const config=assistantCodexExecutionOverrides(configuration?.config,workspaceRecoveryMode);
@@ -3689,7 +3695,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // Preserve the original creation fence and UUID-before-turn journal.
       // Native configuration is scoped to this process/thread; no user setting
       // or plugin/hook enablement is persisted or silently approved.
-      await beforeStart();
+      await beforeStart(ownedSignal);
       const created=await request('thread/start',{cwd,model:execution.modelId,ephemeral:false,
         allowProviderModelFallback:false,approvalPolicy:'never',sandbox:'read-only',
         environments:[],selectedCapabilityRoots:[],config});
@@ -3791,7 +3797,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       if(prepared.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       const verified=await waitForNativeTurn(request,threadId,marker,signal);
       if(verified.turnId!==prepared.turnId||verified.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
-    }else if(!newProvision)await beforeStart();
+    }else if(!newProvision)await beforeStart(ownedSignal);
     // Ordinary provision retains its second empty READY and receipt ABI. The
     // isolated recovery uses only its new marker; neither sends task input.
     await run(assistantNativePrompt(deliveryId,workStateContext,options));
