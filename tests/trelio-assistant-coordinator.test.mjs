@@ -634,6 +634,67 @@ test('a lost native response is reconciled in the same chat after host restart, 
   assert.equal(f.database.prepare("SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1").get().n,1);
 });
 
+test('two overdue cycles settle after a lost response and run once each on their original cadence',async t=>{
+  const f=fixture(t);
+  const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};
+  f.options.client.tasks=async()=>({bindings:[f.authority,second],nextCursor:null});
+  f.options.client.task=async(companyId,taskId)=>{
+    assert.equal(companyId,f.companyId);
+    const binding=taskId===f.taskId?f.authority:second;
+    assert.equal(taskId,binding.taskId);
+    return {...binding,execution:f.execution};
+  };
+  await f.coordinator.pollOnce();
+  await f.coordinator.workOnce();
+  f.advance(60_000);
+  await f.coordinator.workOnce();
+  const plans=f.coordinator.status().sort((left,right)=>left.nextRunAt-right.nextRunAt);
+  assert.equal(plans.length,2);
+  const interval=30*60_000;
+  f.advance(3*interval+1234);
+
+  // Model and source adapters are synthetic, but these receipts outlive the
+  // first worker. The receiver independently deduplicates each original pass.
+  const attempts=[],accepted=new Map();
+  const backendOutcome=f.options.client.readBusinessOutcome;
+  f.options.client.readBusinessOutcome=async input=>{
+    assert.equal(accepted.get(input.deliveryId)?.taskId,input.taskId);
+    return backendOutcome(input);
+  };
+  f.options.native.run=async(input,options)=>{
+    const plan=plans.find(plan=>plan.taskId===input.taskContext.taskId);
+    assert.equal(input.threadId,plan.threadId);
+    assert.equal(input.taskContext.scheduled,true);
+    assert.ok(!accepted.has(input.deliveryId));
+    options.startInvocation();
+    attempts.push(input.taskContext.taskId);
+    accepted.set(input.deliveryId,{taskId:plan.taskId});
+    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+    f.deliveries.set(input.deliveryId,result);
+    if(attempts.length===1)throw Error('response lost after acceptance');
+    return result;
+  };
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  assert.equal(f.activePass().taskId,plans[0].taskId);
+  await f.coordinator.close();
+
+  const restarted=createAssistantCoordinator(f.options);
+  try{
+    await restarted.workOnce();
+    assert.deepEqual(attempts,plans.map(plan=>plan.taskId));
+    assert.equal(f.activePass(),null);
+    assert.equal(accepted.size,2);
+    for(const before of plans){
+      const after=restarted.status().find(plan=>plan.taskId===before.taskId);
+      assert.equal(after.threadId,before.threadId);
+      assert.ok(after.nextRunAt>f.options.now()&&after.nextRunAt<=f.options.now()+interval);
+      assert.equal((after.nextRunAt-before.nextRunAt)%interval,0,'keep the original schedule anchor');
+    }
+    assert.equal(await restarted.workOnce(),null);
+    assert.equal(attempts.length,2,'missed intervals do not create repeated passes');
+  }finally{await restarted.close();}
+});
+
 test('an unknown native provision blocks duplicate chats even when the ID response was lost', async t=>{
   const f=fixture(t);f.options.native.provision=async(_input,options)=>{options.startInvocation();throw new Error('lost first ID');};
   await f.coordinator.pollOnce();await assert.rejects(f.coordinator.workOnce(),/DELIVERY_UNCERTAIN/);
