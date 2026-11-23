@@ -2935,9 +2935,15 @@ ACL/OAuth/hook-отказ не заменяется советом перекл�
 поэтому dispatch, выбор matching branch и выполнение client action остаются
 текущему клиенту. Повтор doctor вместо этого шага не является восстановлением.
 
-`userOptions` строится runtime: при exact requiredAction с
-`restartRequired=true` остаётся только полный выход, а toggle получает
-`state=not_applicable`. Это сохраняет обязательный process restart для direct
+В обычном ответе `userOptions` перечисляет возможные варианты.
+`sameThreadFallback` и `restartAlternative` получают
+`state=requires_client_evidence` до подтверждённого наблюдения в целевом чате.
+Успешное чтение завершает эту ветку. Ошибка браузера или тайм-аут публичной
+проверки сами по себе не активируют ни один вариант. При exact requiredAction
+с `restartRequired=true` остаётся только полный выход с
+`state=follow_required_action`, а toggle получает `state=not_applicable`.
+Полный выход выполняется на этапе, указанном в requiredAction.
+Это сохраняет обязательный process restart для direct
 routing/config repair или несовместимого owner. Переключение не заменяет
 подтверждение Hooks, не исправляет ACL/OAuth и не является универсальным
 объяснением недоступности tools. Уже выполненный restart не повторяется без

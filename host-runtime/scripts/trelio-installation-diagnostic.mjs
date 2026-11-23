@@ -135,6 +135,9 @@ const requireEnum = (value, allowed, fieldName) => {
  * editing config from this separate stdio host would not perform that reload.
  * Keep the UI step with the client/user, preserve the same chat and schedules,
  * and never present toggling as a substitute for a required process restart.
+ * The option names are stable, but the local doctor cannot confirm a failure
+ * in the owning chat. Keep the option states conditional on client evidence
+ * unless an exact diagnostic action already specifies a restart.
  * Archive is excluded entirely: it can delete a chat's associated automation.
  */
 const buildCodexMcpRecoveryInspection = (restartRequired, codexMcpRuntime = false) => ({
@@ -151,9 +154,12 @@ const buildCodexMcpRecoveryInspection = (restartRequired, codexMcpRuntime = fals
     accepted: [codexMcpRuntime ? "tool_absent_from_available_current_turn_routes" : "direct_schema_absent_in_current_turn",
       "diagnosed_stale_or_failed_mcp_connection"],
     insufficient: [codexMcpRuntime ? "one_route_unavailable" : "empty_nested_ALL_TOOLS", "public_probe_timeout", "cli_inventory"],
-    instructions: codexMcpRuntime
-      ? "Проверь доступные маршруты текущего хода: direct и Code Mode. Если один не показывает инструмент, проверь другой, когда он есть. При доступном инструменте выполни обычное чтение. Разбери точный ACL/OAuth/runtime-отказ по коду."
-      : "Сначала проверь реально доступную direct schema текущего хода. Отсутствие только в ALL_TOOLS не является отсутствием инструмента. Если direct schema отсутствует даже при server ready, предложи восстановление выдачи tools; не приписывай серверу тайм-аут и не требуй ещё один doctor. Наличие schema ведёт к обычному direct read; его ACL/OAuth/hook-отказ разбирается по точному коду, а не через toggle.",
+    instructions: [
+      codexMcpRuntime
+        ? "Проверь доступные маршруты текущего хода: direct и Code Mode. Если один не показывает инструмент, проверь другой, когда он есть. При доступном инструменте выполни обычное чтение. Разбери точный ACL/OAuth/runtime-отказ по коду."
+        : "Сначала проверь реально доступную direct schema текущего хода. Отсутствие только в ALL_TOOLS не является отсутствием инструмента. Если direct schema отсутствует даже при server ready, предложи восстановление выдачи tools; не приписывай серверу тайм-аут и не требуй ещё один doctor. Наличие schema ведёт к обычному direct read; его ACL/OAuth/hook-отказ разбирается по точному коду, а не через toggle.",
+      "Предлагай варианты восстановления только после наблюдения из списка evidence.accepted. Успешное чтение завершает эту ветку. Тайм-аут публичной проверки и ошибка браузера сами по себе не подтверждают сбой MCP. Отдельный обязательный restart выполняется на этапе, указанном в requiredAction.",
+    ].join(" "),
   },
   preferred: {
     method: "config/mcpServer/reload",
@@ -164,12 +170,13 @@ const buildCodexMcpRecoveryInspection = (restartRequired, codexMcpRuntime = fals
   },
   sameThreadFallback: {
     method: "toggle_trelio_plugin",
-    state: restartRequired ? "not_applicable" : "client_action_required",
+    state: restartRequired ? "not_applicable" : "requires_client_evidence",
     automatic: false,
     instructions: `При ${codexMcpRuntime ? "наблюдаемом отсутствии инструмента на доступных маршрутах текущего хода" : "наблюдаемом отсутствии direct schema в текущем ходе"} либо подтверждённом зависшем/неудачном MCP startup предложи два варианта: выключить и включить сам плагин Trelio Agent Workspaces в настройках Codex/ChatGPT → Плагины либо полностью выйти из приложения и открыть его снова. Сначала предложи переключение плагина как вариант без полного выхода. Нужен переключатель всего плагина, не отдельного MCP-сервера; дождись выключения, затем включения и вернись в прежний чат. Шаг выполняет пользователь либо доступный штатный client tool; local runtime не автоматизирует UI и не редактирует config ради имитации reload. Если переключателя нет или проверка после переключения не прошла, используй полный выход. Exact requiredAction с restartRequired=true требует полного выхода: переключение его не заменяет. Не удаляй/переустанавливай плагин, не меняй OAuth, pairing или hook trust.`,
   },
   restartAlternative: {
     method: "fully_quit_and_reopen_application",
+    state: restartRequired ? "follow_required_action" : "requires_client_evidence",
     automatic: false,
     instructions: `Полностью завершить Codex/ChatGPT обычной командой выхода, открыть заново и вернуться в тот же чат. Закрытие окна или создание нового чата в прежнем процессе не являются полным выходом. Предложи этот вариант при ${codexMcpRuntime ? "отсутствии инструмента на доступных маршрутах" : "наблюдаемом отсутствии direct schema"}, подтверждённом stale/failed MCP либо обязательном process restart; не повторяй уже выполненный restart без нового evidence и не завершай процессы автоматически.`,
   },

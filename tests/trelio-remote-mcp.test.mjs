@@ -3572,7 +3572,7 @@ test("Codex diagnostics keep direct model tool exposure unverified despite ready
   assert.equal(payload.requiredActions.length, 0, "Expected direct routing does not authorize config or credential repair.");
 });
 
-test("Codex recovery offers plugin toggle or full exit without archive or executable client actions", async () => {
+test("Codex recovery keeps plugin toggle and full exit conditional on client evidence", async () => {
   const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
     clientKind: "codex", intent: "diagnostics",
   }, {
@@ -3601,11 +3601,12 @@ test("Codex recovery offers plugin toggle or full exit without archive or execut
   assert.match(recovery.evidence.instructions, /даже при server ready/u);
   const fallback = recovery.sameThreadFallback;
   assert.equal(fallback.method, "toggle_trelio_plugin");
-  assert.equal(fallback.state, "client_action_required");
+  assert.equal(fallback.state, "requires_client_evidence");
   assert.equal(fallback.automatic, false);
   assert.match(fallback.instructions, /сам плагин Trelio Agent Workspaces/u);
   assert.match(fallback.instructions, /не отдельного MCP-сервера/u);
   assert.equal(recovery.restartAlternative.method, "fully_quit_and_reopen_application");
+  assert.equal(recovery.restartAlternative.state, "requires_client_evidence");
   assert.equal(recovery.restartAlternative.automatic, false);
   assert.match(recovery.restartAlternative.instructions, /Закрытие окна/u);
   assert.match(recovery.verification.instructions, /не выдачу инструментов модели/u);
@@ -3730,6 +3731,7 @@ test("missing direct routing is diagnosed from the real config and offered as a 
     assert.deepEqual(payload.clientInspection.mcpRecovery.userOptions, ["fully_quit_and_reopen_application"]);
     assert.equal(payload.clientInspection.mcpRecovery.sameThreadFallback.state, "not_applicable",
       "A plugin toggle cannot replace the required process restart after a routing repair.");
+    assert.equal(payload.clientInspection.mcpRecovery.restartAlternative.state, "follow_required_action");
     assert.match(action.plan.verification, /вернитесь в этот же чат/u);
     assert.equal(payload.readiness.checks.oauth, "not_checked");
     assert.equal(payload.readiness.checks.protectedContext, "not_checked");

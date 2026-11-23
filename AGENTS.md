@@ -448,8 +448,9 @@ publication tooling также остаются вне этого публичн
   или repair. Onboarding и обычные вызовы сохраняют свой лимит.
   CLI bootstrap возвращает тот же read/recovery plan, без clientKind из env.
   Наблюдаемое отсутствие инструмента на применимых маршрутах или stale/failed MCP:
-  предложи переключить сам плагин либо полностью выйти из приложения;
-  exact required restart не заменяется toggle. Archive не recovery. См. тот же контракт.
+  предложи переключить сам плагин либо полностью выйти из приложения. До
+  наблюдения оба варианта получают `requires_client_evidence`. Exact restart
+  следует своему requiredAction, архивирование не применяется. См. тот же контракт.
 - Диагностика сохранённых Codex hooks читает только пользовательский config
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
   включает hook; дисковый снимок не является effective state App Server.

@@ -573,7 +573,10 @@ test("new Codex diagnostics route the read to stdio without checking or changing
   assert.match(report.liveVerification.read.instructions, /Code Mode/u);
   assert.equal(report.clientInspection.toolExposure.invocation, "direct_or_code_mode");
   assert.deepEqual(report.clientInspection.toolExposure.checks, ["tool_available_on_current_route", "safe_read_result"]);
-  assert.match(report.clientInspection.mcpRecovery.evidence.instructions, /direct и Code Mode/u);
+  const recovery = report.clientInspection.mcpRecovery;
+  assert.match(recovery.evidence.instructions, /direct и Code Mode/u);
+  assert.equal(recovery.sameThreadFallback.state, "requires_client_evidence");
+  assert.equal(recovery.restartAlternative.state, "requires_client_evidence");
   assert.equal(report.liveVerification.hook.state, "not_applicable");
   assert.equal(report.clientInspection.hookDispatch, undefined);
   assert.deepEqual(report.requiredActions, []);
@@ -684,6 +687,10 @@ test("legacy routing and public service deadlines preserve confirmed local diagn
   assert.deepEqual(report.requiredActions.map(({ code }) => code), ["INSTALL_STANDALONE_GIT"]);
   assert.equal(report.readiness.checks.publicService, "not_checked");
   assert.equal(report.liveVerification.read.nextCall, null);
+  const recovery = report.clientInspection.mcpRecovery;
+  assert.equal(recovery.evidence.state, "not_checked");
+  assert.equal(recovery.sameThreadFallback.state, "requires_client_evidence");
+  assert.equal(recovery.restartAlternative.state, "requires_client_evidence");
   waitingHookConfig.resolve({ status: "ready" });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(routingPlans, 0, "an expired hook inspection must not start a routing plan");
