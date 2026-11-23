@@ -3026,6 +3026,12 @@ template, существующая active override имеет приоритет
 содержит exact existing `folder_onboarding_apply` action с текущим planHash,
 `userExplicitlyRequestedInstructionRefresh=true` и `instructionRefreshClientKind`.
 
+Setup и refresh формируют один и тот же блок для всех клиентов. В нём Codex
+stdio MCP проверяет прямой маршрут и Code Mode до вывода о недоступности
+инструмента. Прямой вызов обязателен только для подтверждённых прежних
+регистраций с `PreToolUse`. Освежение заменяет прежнюю безусловную инструкцию
+direct-only через тот же CAS и не зависит от клиента, который его выполняет.
+
 Диагностический запрос разрешает этот refresh, если пользователь не запретил
 changes. Агент объясняет delta и выполняет returned action unchanged только после
 successful protected read прежней exact области. Apply заново классифицирует root,

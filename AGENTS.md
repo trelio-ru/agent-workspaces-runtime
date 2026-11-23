@@ -411,8 +411,11 @@ publication tooling также остаются вне этого публичн
   [диагностика](docs/agent-workspace-runtime.md#readiness-diagnostics).
   Пустой nested `ALL_TOOLS` не доказывает недоступность direct tools;
   бюджетные подсказки bundled skill относятся только к доступным nested tools.
-  Missing direct schema сразу направляет в read-only диагностику по этому
-  контракту; исправление предлагается по evidence с сохранением approval.
+  Для Codex stdio MCP проверь direct и Code Mode до вывода о недоступности.
+  Missing direct schema сразу направляет в read-only диагностику только на
+  прежнем hook-маршруте. Общий folder template описывает оба маршрута, setup и
+  refresh используют одинаковые bytes, прежний direct-only блок заменяется по
+  CAS. Исправление предлагается по evidence с сохранением approval.
   Diagnostic read plan выбирает exact следующий native read, но держит результат
   not_checked до client response; request target не меняет folder scope.
   Public availability/recovery измеряется bounded anonymous probes; doctor
@@ -421,7 +424,7 @@ publication tooling также остаются вне этого публичн
   сохраняет законченные проверки и отмечает тайм-ауты без вывода о готовности
   или repair. Onboarding и обычные вызовы сохраняют свой лимит.
   CLI bootstrap возвращает тот же read/recovery plan, без clientKind из env.
-  Наблюдаемое отсутствие direct schema даже при ready или stale/failed MCP:
+  Наблюдаемое отсутствие инструмента на применимых маршрутах или stale/failed MCP:
   предложи переключить сам плагин либо полностью выйти из приложения;
   exact required restart не заменяется toggle. Archive не recovery. См. тот же контракт.
 - Диагностика сохранённых Codex hooks читает только пользовательский config

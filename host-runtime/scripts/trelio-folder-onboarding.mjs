@@ -5,7 +5,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { sameLocalPath } from "./trelio-local-path.mjs";
-import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS } from "./trelio-codex-routing.mjs";
+import {
+  CODEX_RUNTIME_LOCAL_NAMESPACE,
+  CODEX_RUNTIME_REMOTE_NAMESPACE,
+  CODEX_TRELIO_DIRECT_TOOL_NAMESPACES,
+} from "./trelio-codex-routing.mjs";
 
 import {
   GIT_DISABLED_GLOBAL_CONFIG_PATH,
@@ -422,9 +426,14 @@ const buildManagedBindingBlock = ({ company, project }) => {
     "",
     "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio выполняются только в локальной папке, которую выдал bridge.",
     "",
-    CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
-    // Keep one shared template across clients: a Kimi refresh must not remove
-    // Codex guidance or make another client rewrite the same managed block.
+    // The managed file outlives a chat and can be refreshed by another client.
+    // Describe both Codex registrations; only a legacy hook call needs direct
+    // dispatch. A shared template also prevents different clients from rewriting it.
+    `Codex с новым MCP: маршруту Trelio \`trelio\` соответствует \`${CODEX_RUNTIME_REMOTE_NAMESPACE}\`, маршруту \`trelio-remote-skills\` – \`${CODEX_RUNTIME_LOCAL_NAMESPACE}\`. `
+      + "Вызывай точный инструмент прямо или через Code Mode. Если одного маршрута не видно, используй другой доступный маршрут текущего хода. "
+      + "Отсутствие инструмента проверяй на всех доступных маршрутах до объявления сбоя и перехода к read-only `trelio-diagnostics`. "
+      + "В Code Mode передавай серверное продолжение с исходными аргументами без изменений.",
+    `Прежний Codex с hooks: при подтверждённой регистрации с PreToolUse вызывай \`${CODEX_TRELIO_DIRECT_TOOL_NAMESPACES[0]}\` и \`${CODEX_TRELIO_DIRECT_TOOL_NAMESPACES[1]}\` только напрямую. Если новый MCP доступен, используй его.`,
     "Kimi Work: вызывай инструменты из MCP-каталога, без `system.invoke`. Если удалённого инструмента в чате нет, используй `trelio_find_tools` для его точной схемы и `trelio_call_tool` для вызова. Существующий OAuth переиспользуй. Для диагностики, настройки папки и привязки браузера используй `diag` на локальном `trelio-remote-skills`; возвращённые локальные действия выполняй через указанные MCP server/tool (`local`, `ws` или `prop`), при необходимости загрузив точное показанное Kimi имя через `select_tools`. Если указан `nativeArgumentsTarget`, заполни только этот слот исходными аргументами.",
     "Xiaomi MiMo Desktop: используй свой OAuth и clientKind=mimo-desktop. Для удалённых инструментов используй trelio, для диагностики и возвращённых локальных действий – trelio-remote-skills с полными именами инструментов.",
     "",

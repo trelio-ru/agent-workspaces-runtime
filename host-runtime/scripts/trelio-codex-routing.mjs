@@ -20,7 +20,7 @@ export const CODEX_RUNTIME_ROUTING_INSTRUCTIONS =
 // The namespaces are deliberately excluded from nested Code Mode dispatch so
 // the client can run PreToolUse before every protected call. ALL_TOOLS is an
 // inventory of nested-call capabilities, not evidence of model tool exposure.
-// Keep this explanation shared by initialize, diagnostics and folder binding:
+// Keep this legacy explanation shared by initialize and diagnostics:
 // an older bundled skill's output-budget advice must not reverse that routing.
 // The runtime cannot observe model tool exposure before a call reaches it.
 // Missing direct schema therefore needs a client-side diagnostic transition,

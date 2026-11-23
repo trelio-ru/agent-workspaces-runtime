@@ -237,9 +237,14 @@ test("legacy scope parsing rejects mixed, duplicated and malformed declarations 
   }
 });
 
-test("diagnostic refresh preserves personal instructions byte for byte and is idempotent", async () => {
+test("diagnostic refresh replaces the published direct-only rule and preserves personal bytes", async () => {
   const root = await configuredRoot();
-  const { current, outdated } = await makeTemplateOutdated(root);
+  const current = await fs.readFile(path.join(root, "AGENTS.md"), "utf8");
+  // This was written by the signed runtime even when the client used the
+  // new stdio MCP. Fresh setup and refresh must agree on the replacement.
+  const directOnlyRule = "Codex: direct mcp__trelio.get_task вне functions.exec; ALL_TOOLS ≠ direct inventory, ready/CLI ≠ tools модели. Нет direct schema – сразу read-only trelio-diagnostics.";
+  const outdated = current.replace(/^Codex(?: с новым MCP)?: .+(?:\nПрежний Codex с hooks: .+)?$/mu, directOnlyRule);
+  assert.ok(outdated !== current, "the published rule must differ from the generated block");
   const prefix = "# Personal  \r\n\r\n";
   const suffix = "\r\n\r\nKeep this rule  \r\n";
   await fs.writeFile(path.join(root, "AGENTS.md"), prefix + outdated + suffix);
@@ -259,6 +264,9 @@ test("diagnostic refresh preserves personal instructions byte for byte and is id
   assert.equal(repeated.status, "ready");
   assert.equal(repeated.instructions.status, "current");
   assert.equal(repeated.refresh, null);
+  const otherClient = await prepareTrelioFolderDiagnostic({ folderPath: root }, "claude-code");
+  assert.equal(otherClient.instructions.templateSha256, repeated.instructions.templateSha256);
+  assert.equal(otherClient.refresh, null);
 });
 
 test("diagnostics refresh the existing active override without changing the base file", async () => {
@@ -476,10 +484,12 @@ test("an active AGENTS.override.md requires an explicit target decision", async 
   });
   assert.equal(prepared.plan.instructionTarget, "AGENTS.override.md");
   assert.match(prepared.plan.preview.managedBlock, /Тестовая компания/u);
-  assert.match(prepared.plan.preview.managedBlock, /direct mcp__trelio\.get_task/u);
-  assert.match(prepared.plan.preview.managedBlock, /ALL_TOOLS ≠ direct inventory/u);
-  assert.match(prepared.plan.preview.managedBlock, /ready\/CLI ≠ tools модели/u);
-  assert.match(prepared.plan.preview.managedBlock, /Нет direct schema – сразу read-only trelio-diagnostics/u);
+  const managedBlock = prepared.plan.preview.managedBlock;
+  const runtimeRule = managedBlock.match(/^Codex с новым MCP: .+$/mu)?.[0] ?? "";
+  assert.match(runtimeRule, /trelio.*mcp__trelio_runtime.*trelio-remote-skills.*mcp__trelio_runtime_local/u);
+  assert.match(runtimeRule, /прямо или через Code Mode.*на всех доступных маршрутах.*trelio-diagnostics/u);
+  assert.match(managedBlock, /^Прежний Codex с hooks: .*mcp__trelio.*mcp__trelio_remote_skills.*только напрямую/mu);
+  assert.doesNotMatch(managedBlock, /Нет direct schema – сразу read-only trelio-diagnostics/u);
 });
 
 test("service Git is preserved and bridge paths are proven ignored", async () => {
