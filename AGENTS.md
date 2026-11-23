@@ -436,6 +436,9 @@ publication tooling также остаются вне этого публичн
   не является hook identity. Некорректный распознанный action отклоняется до
   регистрации, а допустимые local templates без nativeTool сохраняют свой ABI.
   Статическая совместимость matcher не доказывает dispatch или trust клиента.
+- `request_user_approval` относится к discovery в hook и Codex MCP.
+  Backend проверяет человеческий OAuth и принимает только `skillId` и `action`.
+  Runtime оставляет эти аргументы без добавления proof.
 - Codex direct routing и выдача инструментов текущей модели проверяются отдельно:
   [диагностика](docs/agent-workspace-runtime.md#readiness-diagnostics).
   Пустой nested `ALL_TOOLS` не доказывает недоступность direct tools;

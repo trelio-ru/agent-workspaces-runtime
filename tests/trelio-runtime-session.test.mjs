@@ -697,6 +697,20 @@ test("hook protects context and mutation but leaves discovery and recovery open"
   assert.equal(isProtectedTrelioToolName("approve_agent_workspace_bridge_pairing"), false);
 });
 
+test("the shared hook leaves human approval arguments unchanged", async () => {
+  const result = await runHook({
+    hook_event_name: "PreToolUse",
+    session_id: "019f9fcd-899a-72b3-91f6-fdf3134381bb",
+    tool_name: "mcp__trelio__request_user_approval",
+    tool_input: { skillId: "yandex-search", action: "captcha.solve" },
+  });
+
+  // An update would add fields the backend's closed two-field schema rejects.
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, "");
+});
+
 test("active hook formatting reserves the missing-proof code for Trelio", () => {
   const contradictoryError = new Error("hook already ran, but an inner layer reused the server code");
   contradictoryError.code = "TRELIO_RUNTIME_HOOK_REQUIRED";
