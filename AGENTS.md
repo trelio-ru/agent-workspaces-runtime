@@ -1836,7 +1836,10 @@ Exact legacy template bytes для распознавания при мигра�
   consumer boundaries по обоим exact Git snapshots: [контракт](docs/runtime-ci.md).
   Signed-chain заранее подготавливает проверенный hosted Windows worker по
   исходнику и build script. После rebase обновляй только неизменённый worker
-  с receipt этого worktree. Общий Git cache не заменяет обязательную сборку релиза.
+  с receipt этого worktree. The compiled package-service fixture and its
+  PowerShell carrier both select the native private suite in the local plan.
+  Hosted execution under the disposable Windows account stays mandatory.
+  Общий Git cache не заменяет обязательную сборку релиза.
   Не заменяй реальные imports/fixtures совпадением префикса имени. Computed/native
   inputs требуют явного owner; неизвестный executable/fixture блокирует план
   до targeted coverage, без автоматического full или нерелевантного smoke.

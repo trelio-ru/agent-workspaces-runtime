@@ -56,6 +56,10 @@ const owners = new Map([
   ['.github/scripts/run-windows-acl-standard-user.ps1', ['tests/trelio-windows-native-private.test.mjs']],
   ['.github/scripts/run-windows-codex-mcp-fixture.ps1', ['tests/trelio-codex-mcp.test.mjs', 'tests/trelio-codex-conversation.test.mjs']],
   ['.github/scripts/run-windows-package-service-fixture.ps1', ['tests/trelio-windows-native-private.test.mjs']],
+  // The hosted PowerShell carrier compiles this C++ file and passes its
+  // controller to the native suite through an environment variable. That
+  // executable dependency cannot be inferred from the suite's JS imports.
+  ['tests/fixtures/windows-package-service-access.cpp', ['tests/trelio-windows-native-private.test.mjs']],
   ['scripts/bootstrap-worktree-dependencies.sh', ['scripts/bootstrap-worktree-dependencies.test.sh']],
   ['scripts/bootstrap-worktree-dependencies.test.sh', ['scripts/bootstrap-worktree-dependencies.test.sh']],
 ]);

@@ -145,6 +145,16 @@ test('native mapping is portable boundary selection, never evidence of native OS
   assert.throws(() => plan([native], snapshot({[native]: null})), /no surviving test owner/u);
 });
 
+test('the hosted package service fixture selects its native controller suite', () => {
+  const fixture = 'tests/fixtures/windows-package-service-access.cpp';
+  const suite = 'tests/trelio-windows-native-private.test.mjs';
+  const files = snapshot({[fixture]: null, [suite]: 'run(process.env.TRELIO_WINDOWS_PACKAGE_SERVICE_FIXTURE);'});
+  const result = plan([fixture], files);
+  assert.deepEqual(result.tests, [suite]);
+  assert.deepEqual(result.reasons[suite], [`direct:${fixture}`]);
+  assert.throws(() => plan([fixture], snapshot({[fixture]: null})), /no surviving test owner/u);
+});
+
 test('workflow edits select planner contracts, while Git transport runs its composite once', () => {
   const files = snapshot({
     'scripts/runtime-ci-plan.test.mjs': 'test();', 'scripts/runtime-main-checks.test.mjs': 'test();',
