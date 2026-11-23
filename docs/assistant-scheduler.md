@@ -4550,12 +4550,14 @@ The protected pass discriminator chooses the execution session, never model
 arguments. Header alone supplies no native authority; strict original
 schema/proof/device/source checks remain in each handler.
 
-Desktop caches a chat catalogue before the first intake. Model discovery
-therefore unions its normal presentation profile with exactly the two intake
-definitions read from that SAME native source view, even before pass activation.
-Execution still selects only the active pass view: advertised task methods cannot
-run in a taskless intake, and intake methods cannot run under a task pass. Both
-metadata reads share one original deadline and never invoke a business tool.
+Desktop caches a chat catalogue before the first intake. The ordinary task
+catalogue retains the two native intake definitions before pass activation.
+The coordinator activates a verified private intake before the owned Codex
+connection, which then lists the complete ordinary native company read
+catalogue with the same intake definitions. That initial catalogue includes
+task-only search and exact task reads. Each native definition comes from the
+same scoped service and the connection keeps one deadline for metadata.
+Execution always rechecks the live pass and the native object permissions.
 The same two-name policy also crosses facade/current-worker dispatch; a metadata
 listing alone is not a successful executable tool. A real serial stdio regression
 exercises context and reply through that worker, managed argument seam and native

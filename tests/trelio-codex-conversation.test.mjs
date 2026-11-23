@@ -767,8 +767,8 @@ test('actual Codex migrates an existing combined main to independent hooks witho
  assert.equal((await migrateHumanCodexHookComponent({...options,migrationDirectory:path.join(root,'fresh-migration')})).status,'disabled');
  });
 
-test('actual Codex initial MCP inventory includes company discovery and accepts lossless local schema definitions without a model turn',
- {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:60000},async t=>{
+test('actual Codex loads the native catalogue for the current task or private intake without a model turn',
+ {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
  const executable=process.env.TRELIO_TEST_CODEX_CLI;
  assert.ok(path.isAbsolute(executable));
  const {root,remove}=await createNativeCodexFixtureDirectory(executable,'initial-discovery-',5);
@@ -787,47 +787,61 @@ const scalar={type:'string',format:'uuid',pattern:'^[a-f0-9-]{36}$',description:
 const schema={type:'object',properties:Object.fromEntries(Array.from({length:20},(_,i)=>['field'+i,scalar])),additionalProperties:false};
 const definition=name=>({name,description:'Synthetic native tool',inputSchema:schema});
 const native=['get_assistant_status','get_task','create_comment','complete_assistant_pass','update_task_title','create_task','prepare_assistant_workspace_run','continue_assistant_workspace_action'].map(definition);
-const make=()=>createAssistantMcpClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential:'tda_'+'s'.repeat(43),expiresAt:1})},
+// Model an already activated verified private intake before the owned Codex
+// connection. The ordinary task view keeps its native task-shaped schemas.
+const readActivePass=async()=>process.argv[2]==='owner'?{kind:'source_intake',intakeKind:'owner'}:null;
+const make=()=>createAssistantMcpClient({origin,assistantId,deviceId,readActivePass,store:{get:async()=>({assistantId,deviceId,credential:'tda_'+'s'.repeat(43),expiresAt:1})},
  httpRequest:async input=>{const reply=result=>({sessionId:'synthetic',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
  if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
  if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
  if(input.payload.method!=='tools/list')throw Error('NO_TOOL_CALL_OR_MODEL_ALLOWED');
  const view=input.config.headers['x-trelio-assistant-capability-profile'];
  return reply({tools:view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake'].map(definition)
- :view==='company_context'?['get_assistant_status','search','fetch','get_trelio_tool_contract'].map(definition):native});}});
+ :view==='company_context'?['get_assistant_status','search','search_tasks','fetch','get_trelio_tool_contract','list_projects','get_registry'].map(definition):native});}});
 await runAssistantSetupMcp({createMcp:async()=>make(),preservePlugin:()=>null});
 `);
- const home=path.join(root,'codex');await fs.mkdir(home);
- await fs.writeFile(path.join(home,'config.toml'),`[mcp_servers.synthetic_assistant]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(server)}]\nstartup_timeout_sec = 20\n`);
- const environment=buildCodexEnvironment({...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:home,
-  APPDATA:path.join(root,'AppData'),LOCALAPPDATA:path.join(root,'Local')});
- const observed=await new Promise((resolve,reject)=>{
-  const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,shell:false,windowsHide:true,stdio:['pipe','pipe','ignore']});
-  let pending='',bytes=0,sequence=0,waiting=null,done=false;
-  const finish=(reason,value)=>{if(done)return;done=true;clearTimeout(timer);
-   const cleanup=setTimeout(()=>child.kill(),2000);cleanup.unref();
-   child.once('close',()=>{clearTimeout(cleanup);reason?reject(new Error(reason)):resolve(value);});child.stdin.end();child.stdout.resume();};
-  const timer=setTimeout(()=>finish('closed initial MCP inventory timeout'),40000);
-  const request=(method,params)=>new Promise(yes=>{waiting={id:++sequence,yes};child.stdin.write(JSON.stringify({id:sequence,method,params})+'\n');});
-  child.once('error',()=>finish('closed initial MCP launch failure'));
-  child.stdin.on('error',()=>finish('closed initial MCP input failure'));
-  child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{if(done)return;bytes+=Buffer.byteLength(chunk);pending+=chunk;
-   if(bytes>8*1024*1024)return finish('closed initial MCP output bound');
-   let at;while(!done&&(at=pending.indexOf('\n'))>=0){let message;try{message=JSON.parse(pending.slice(0,at));}catch{return finish('closed initial MCP invalid JSON');}
-    pending=pending.slice(at+1);if(waiting&&message.id===waiting.id){const q=waiting;waiting=null;if(message.error)return finish('closed initial MCP RPC failure');q.yes(message.result);}}});
-  child.once('close',()=>{if(!done){done=true;clearTimeout(timer);reject(new Error('closed initial MCP early exit'));}});
-  void(async()=>{await request('initialize',{clientInfo:{name:'trelio_initial_inventory_fixture',version:'1.0.0'}});
-   child.stdin.write(JSON.stringify({method:'initialized'})+'\n');
-   const result=await request('mcpServerStatus/list',{serverName:'synthetic_assistant',detail:'toolsAndAuthOnly',limit:10});
-   const row=result?.data?.find(item=>item.name==='synthetic_assistant');
-   if(!row||row.toolsError)return finish('closed initial MCP catalogue failure '+(String(row?.toolsError??'').match(/ASSISTANT_[A-Z_]+/)?.[0]??'unclassified'));
-   finish(null,row.tools);
-  })().catch(()=>finish('closed initial MCP protocol failure'));
- });
- for(const name of ['search','fetch','get_trelio_tool_contract','get_task','create_comment','get_assistant_intake_context','resolve_assistant_intake'])
-  assert.ok(Object.hasOwn(observed,name),`${name} must exist in the INITIAL native client catalogue, without a status call`);
- assert.ok(observed.search.inputSchema.$defs,'native client accepted the actual projected local definitions');
- assert.ok(observed.search.inputSchema.properties.field0.$ref);
+ const inventory=async scope=>{
+  const home=path.join(root,'codex-'+scope);await fs.mkdir(home);
+  await fs.writeFile(path.join(home,'config.toml'),`[mcp_servers.synthetic_assistant]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(server)}, ${JSON.stringify(scope)}]\nstartup_timeout_sec = 20\n`);
+  const environment=buildCodexEnvironment({...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:home,
+   APPDATA:path.join(root,'AppData'),LOCALAPPDATA:path.join(root,'Local')});
+  return new Promise((resolve,reject)=>{
+   const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,shell:false,windowsHide:true,stdio:['pipe','pipe','ignore']});
+   let pending='',bytes=0,sequence=0,waiting=null,done=false;
+   const finish=(reason,value)=>{if(done)return;done=true;clearTimeout(timer);
+    const cleanup=setTimeout(()=>child.kill(),2000);cleanup.unref();
+    child.once('close',()=>{clearTimeout(cleanup);reason?reject(new Error(reason)):resolve(value);});child.stdin.end();child.stdout.resume();};
+   const timer=setTimeout(()=>finish('closed initial MCP inventory timeout'),40000);
+   const request=(method,params)=>new Promise(yes=>{waiting={id:++sequence,yes};child.stdin.write(JSON.stringify({id:sequence,method,params})+'\n');});
+   child.once('error',()=>finish('closed initial MCP launch failure'));
+   child.stdin.on('error',()=>finish('closed initial MCP input failure'));
+   child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{if(done)return;bytes+=Buffer.byteLength(chunk);pending+=chunk;
+    if(bytes>8*1024*1024)return finish('closed initial MCP output bound');
+    let at;while(!done&&(at=pending.indexOf('\n'))>=0){let message;try{message=JSON.parse(pending.slice(0,at));}catch{return finish('closed initial MCP invalid JSON');}
+     pending=pending.slice(at+1);if(waiting&&message.id===waiting.id){const q=waiting;waiting=null;if(message.error)return finish('closed initial MCP RPC failure');q.yes(message.result);}}});
+   child.once('close',()=>{if(!done){done=true;clearTimeout(timer);reject(new Error('closed initial MCP early exit'));}});
+   void(async()=>{await request('initialize',{clientInfo:{name:'trelio_initial_inventory_fixture',version:'1.0.0'}});
+    child.stdin.write(JSON.stringify({method:'initialized'})+'\n');
+    const result=await request('mcpServerStatus/list',{serverName:'synthetic_assistant',detail:'toolsAndAuthOnly',limit:10});
+    const row=result?.data?.find(item=>item.name==='synthetic_assistant');
+    if(!row||row.toolsError)return finish('closed initial MCP catalogue failure '+(String(row?.toolsError??'').match(/ASSISTANT_[A-Z_]+/)?.[0]??'unclassified'));
+    finish(null,row.tools);
+   })().catch(()=>finish('closed initial MCP protocol failure'));
+  });
+ };
+ const [task,owner]=await Promise.all([inventory('task'),inventory('owner')]);
+ const shared=['get_assistant_status','get_trelio_tool_contract','get_assistant_intake_context','resolve_assistant_intake'];
+ const companyReads=['search','search_tasks','fetch','list_projects','get_registry'];
+ for(const name of [...shared,'get_task','create_comment','complete_assistant_pass'])
+  assert.ok(Object.hasOwn(task,name),`${name} must exist in the first task catalogue`);
+ for(const name of [...shared,...companyReads])
+  assert.ok(Object.hasOwn(owner,name),`${name} must exist in the first private intake catalogue, without a status call`);
+ for(const name of companyReads)assert.equal(Object.hasOwn(task,name),false);
+ for(const name of ['create_comment','complete_assistant_pass'])assert.equal(Object.hasOwn(owner,name),false);
+ for(const schema of [task.get_task.inputSchema,owner.search_tasks.inputSchema]){
+  assert.ok(schema.$defs,'native client accepted the actual projected local definitions');
+  assert.ok(schema.properties.field0.$ref);
+ }
 });
 
 test('Windows Codex process environment retains only canonical public CMD discovery variables', () => {

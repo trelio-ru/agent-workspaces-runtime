@@ -79,7 +79,18 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
         if(request.method==='DELETE'||body?.method==='notifications/initialized'){response.statusCode=204;response.end();return;}
         const reply=result=>json(response,{jsonrpc:'2.0',id:body.id,result});
         if(body.method==='initialize'){reply({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'synthetic native backend',version:'1'}});return;}
-        if(body.method==='tools/list'){reply({tools});return;}
+        if(body.method==='tools/list'){
+          // The same definition only belongs to its native presentation.
+          // Status is shared by both; a task/default session cannot accidentally
+          // make the private company's catalogue test pass.
+          const profile=request.headers['x-trelio-assistant-capability-profile'];
+          const selectedTools=tools.filter(({name})=>{
+            if(name==='get_assistant_status')return true;
+            const intakeTool=name==='get_assistant_intake_context'||name==='resolve_assistant_intake';
+            return profile==='source_intake'?intakeTool:profile==='company_context'&&!intakeTool;
+          });
+          reply({tools:selectedTools});return;
+        }
         assert.equal(body.method,'tools/call');
         const {name,arguments:args}=body.params;lastNativeTool=name;
         if(name==='get_assistant_status'){reply({content:[],structuredContent:{companyContextRead:true,presentationProfile:'company_context'}});return;}

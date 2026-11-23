@@ -320,7 +320,7 @@ publication tooling также остаются вне этого публичн
   Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.
   Fresh native input inventory checks closed fields/container types BEFORE managed staging;
   generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
-  V2 company reads use SAME native schemas/ACL/mirror/exact/files; genuine task or private-owner intake origin, never fake task/Run. Initial discovery includes native search/fetch/contract alongside task/intake tools, without a mid-turn catalogue dependency. Exact repeated scalar schemas may share tool-local definitions only when lossless and smaller; retain native validation and 65 536-byte bounds. Complete production
+  V2 company reads use SAME native schemas/ACL/mirror/exact/files; genuine task or private-owner intake origin, never fake task/Run. The first owned private intake connection receives the complete existing native company read catalogue alongside the intake pair, without a handpicked task-side discovery list or a mid-turn catalogue dependency. The task view preserves its ordinary task schemas and the native metadata contract. The real Codex test verifies both initial inventories and lossless projected schemas. Exact repeated scalar schemas may share tool-local definitions only when lossless and smaller; retain native validation and 65 536-byte bounds. Complete production
   acceptance includes real attachment materializers. Still-oversized catalogues
   may share exact repeated containers through that SAME ref-free vocabulary
   proof and reachable tool-local definitions, never truncation or larger bounds. See the company-context scheduler contract.

@@ -203,17 +203,15 @@ for(const scenario of [
     const locator={companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId};
     const call=(name,args)=>send('tools/call',{name,arguments:{...args,intakePass:locator,runtimeSessionProof:buildRuntimeSessionProof({state,toolName:name})}});
     if(scenario.taskOnlyRefinement){
-      // This is a separate genuinely admitted native read, not a third full
-      // preparation or a replay of the failed search. Existing facades already
-      // support the company_context view; no Desktop/MCP restart is required.
+      // The facade's first list uses the already-active intake and the
+      // worker's ordinary native company catalogue. No status call is needed
+      // to discover or execute the authorised encrypted task-only read.
       const initialCatalogue=await send('tools/list');
-      const description=initialCatalogue.result.tools.find(tool=>tool.name==='search').description;
-      assert.ok(description.startsWith('Synthetic native company search'));
-      assert.match(description,/search_tasks/,'existing facades discover the current worker fallback through normal native metadata');
-      const selected=await call('get_assistant_status',{view:'company_context'});
-      assert.equal(selected.result.isError,undefined);
-      const catalogue=await send('tools/list');
-      assert.ok(catalogue.result.tools.some(tool=>tool.name==='search_tasks'));
+      const definitions=new Map(initialCatalogue.result.tools.map(tool=>[tool.name,tool.description]));
+      assert.equal(definitions.get('search'),'Synthetic native company search');
+      assert.equal(definitions.get('search_tasks'),'Synthetic native task refinement');
+      assert.equal(definitions.get('get_task_activity'),'Synthetic current discussion');
+      assert.ok(definitions.has('resolve_assistant_intake'));
       const result=await call('search_tasks',{companySlugs:['synthetic'],queries:['weekend']});
       assert.equal(result.result?.isError,undefined,JSON.stringify(result.result));
       assert.match(JSON.stringify(result.result.structuredContent.tasks),/Synthetic weekend journey/);
