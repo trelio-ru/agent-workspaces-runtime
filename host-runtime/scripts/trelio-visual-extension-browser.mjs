@@ -19,6 +19,7 @@ import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
 import { acquireBrowserMailLock } from './trelio-browser-session.mjs';
+import { windowsPrivateWorkerOptions } from './trelio-hook-private-session.mjs';
 
 // The native grant can carry one digest for the original visual document.
 // A second observation at the same URL gets a different frame ID. Include
@@ -132,11 +133,16 @@ export function visualNativeCompositorSwitches(platform, headless) {
  * The original exit/close deadline and profile save/disposal checks stay strict.
  * This child is a headed GUI application, not a console helper. On Windows,
  * windowsHide passes STARTF_USESHOWWINDOW/SW_HIDE to Chromium and can leave its
- * window as an unpainted white surface even during explicit manual login.
- * Keep the GUI's normal startup presentation; ignored stdio already avoids
- * diagnostic pipes and does not require hiding the browser window.
+ * window as an unpainted white surface even during manual login. Use the signed
+ * native worker for a visible, inactive first window on Windows. It waits for
+ * the browser process itself and has no browser-inherited stdio.
  */
-export function spawnVisualBrowserProcess(executable, args, env) {
+export function spawnVisualBrowserProcess(executable, args, env, { headless = false } = {}) {
+  if (process.platform === 'win32' && !headless) {
+    const worker = windowsPrivateWorkerOptions();
+    return spawn(worker.executable, ['--visual-browser-inactive', executable, ...args],
+      { env, stdio: 'ignore', windowsHide: true });
+  }
   return spawn(executable, args, { env, stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false });
 }
 
@@ -556,7 +562,8 @@ export class ExtensionVisualBrowser {
     this.#profile = path.join(this.#directory, 'profile');
     await restoreVisualProfile(snapshot, this.#profile);
     this.#startupStage = 'profile_prepare';
-    await prepareVisualProfileStartup(this.#profile);
+    const inactiveWindowsStartup = process.platform === 'win32' && !this.#headless;
+    await prepareVisualProfileStartup(this.#profile, { inactiveWindowsStartup });
     this.#startupStage = 'extension_prepare';
     const extension = path.join(this.#directory, 'extension'); await prepareVisualPrivateDirectory(extension);
     const token = crypto.randomBytes(32).toString('hex');
@@ -723,8 +730,8 @@ export class ExtensionVisualBrowser {
     // on the background-only lifetime/lazy activation of a windowless app.
     // The extension installs policy before navigating it; the provider URL and
     // private transport token never enter the process command line. Only the
-    // public constant bootstrap URL may do so. Startup
-    // may focus this owned window once, as agreed for visible workflows.
+    // public constant bootstrap URL may do so. Windows presents that window
+    // without activation through the signed native launcher.
     // The extension privately navigates the internal new-tab surface after
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
@@ -732,7 +739,10 @@ export class ExtensionVisualBrowser {
     startupTrace?.mark('browser_spawn');
     const fixtureTlsFlags = this.#fixtureTlsSpki
       ? [`--ignore-certificate-errors-spki-list=${this.#fixtureTlsSpki}`] : [];
-    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativeCompositorSwitches(process.platform, this.#headless), '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...fixtureTlsFlags, ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment());
+    // --window-size can activate the first Windows window despite the
+    // native show flag. Let Chromium use its normal profile bounds.
+    const startupSize = inactiveWindowsStartup ? [] : ['--window-size=1440,1000'];
+    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativeCompositorSwitches(process.platform, this.#headless), '--restore-last-session', ...startupSize, ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...fixtureTlsFlags, ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment(), { headless: this.#headless });
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
     // Reduce only the existing bounded private log, without adding a native
@@ -915,10 +925,9 @@ export class ExtensionVisualBrowser {
     }
   }
   async #presentManualWindow() {
-    // The extension handshake confirms transport only. On Windows it can
-    // reuse the bootstrap tab in a window behind Codex. Use the same native
-    // handoff for cold setup and explicit re-show, and report its failure
-    // without releasing the manual input gate or opening a second browser.
+    // The extension handshake confirms transport only. Cold setup and re-show
+    // both signal the owned login window without activating it. A failed
+    // handoff keeps the manual input gate and does not open a second browser.
     const reply = await this.#send('manual').catch(() => null);
     if (this.#finishing) return this.#finishing;
     if (!this.#manual || this.#terminal || this.#closed) return this.#status();

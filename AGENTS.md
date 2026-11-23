@@ -667,9 +667,10 @@ publication tooling также остаются вне этого публичн
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
   Signed presentation по умолчанию windowed; hidden opt-in, owner pinning и
   видимый human setup сохраняют исходную lease и stop/save-before-relaunch.
-  Manual setup and explicit show request focus once and confirm the same
-  owned window is visible. Global desktop focus can move; native failure keeps
-  the manual gate and content private.
+  macOS and Windows visible startup preserve OS foreground, including manual
+  setup. Setup/show-login signal the same owned window without requesting
+  focus or restoring minimized state. Native failure keeps the manual gate
+  and content private.
   Signed manualCompletion reuses the SAME manual stop/save gate after two stable
   readonly exact-origin/document observations; blockers/unknown/expiry never
   authorize close, input, credential access or lease renewal. Default remains off.
@@ -734,9 +735,11 @@ publication tooling также остаются вне этого публичн
   без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
   Windows/Linux startup использует внутреннюю new-tab вкладку без URL в argv;
   background-only lifetime без окна применяется только к macOS.
-  GUI Chromium запускается без native `SW_HIDE` (`windowsHide: false`), иначе
-  Windows может показать белую поверхность. Не переносить console-hide policy
-  на общий GUI launcher; native startup-info regression и ignored stdio обязательны.
+  Видимый Windows Chromium получает `SW_SHOWNOACTIVATE` от signed worker.
+  Chromium использует размер окна из профиля, сохранённый maximized сбрасывается
+  при восстановлении временного профиля. Worker ждёт exact browser
+  exit и владеет дочерним Job Object. Native startup-info, OS foreground
+  regression и ignored browser stdio обязательны.
   Startup-info fixture импортирует Utility по fixed PSHOME без module discovery;
   его closed stage diagnostics не продлевают 30s bound и не заменяют Win32 assertions.
   Новый owned профиль заранее получает обычный continue-session preference;
@@ -883,8 +886,8 @@ publication tooling также остаются вне этого публичн
   Никакие auth values не входят в worker.js. Локальный isolated link router
   читает href exact trusted click для same-tab navigation,
   не выдаёт модели DOM/код и не принимает произвольные scripts/selectors.
-  Capture/input не активируют app; native foreground test проверяет это без
-  возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
+  Capture/input не активируют app; native foreground tests следят за событиями
+  со старта на macOS и Windows без возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
   popups/iframes. Source probes не входят в package и не являются fallback.
 - Визуальный браузер по умолчанию открывает HTTP(S)-ссылки и редиректы и
   применяет тот же режим к штатным файловым командам публичных и приватных

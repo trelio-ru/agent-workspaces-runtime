@@ -33,9 +33,9 @@ test('signed hidden presentation never hides human setup or changes the legacy w
   assert.throws(() => visualBrowserHeadless('hidden', 'false'), { code: 'invalid_input' });
 });
 
-test('GUI browser launch does not send native Windows SW_HIDE startup presentation', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
+test('GUI browser launch sends native Windows SW_SHOWNOACTIVATE startup presentation', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   // Read the actual CreateProcess startup contract inside a real native child.
-  // This catches windowsHide:true without mocking spawn or adding a public
+  // This catches direct and SW_HIDE launches without mocking spawn or adding a public
   // production test override. It is independent of Chromium's extension hello:
   // a live extension/renderer does not prove that its OS window is painted.
   // Only two numeric Win32 fields from our synthetic child reach the fixture.
@@ -78,7 +78,7 @@ public static class VisualGuiStartup {
   // Match the existing native scheduler fixture's fixed-PSHOME import rather
   // than scanning user/installed modules on the first Add-Type/ConvertTo-Json.
   // Cold command discovery has already cost 22–35s on hosted ARM64. Keep this
-  // test's original 30s bound and the real GetStartupInfo/SW_HIDE assertion;
+  // test's original 30s bound and the real GetStartupInfo assertion;
   // a timeout reports only the last closed stage, never paths or native prose.
   const executable = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const child = spawnVisualBrowserProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], process.env);
@@ -94,7 +94,8 @@ public static class VisualGuiStartup {
     assert.equal(code, 0); assert.equal(signal, null);
     const [flags, show] = JSON.parse(await fs.readFile(receipt, 'utf8'));
     assert.equal(Number.isInteger(flags) && Number.isInteger(show), true);
-    assert.equal(Boolean(flags & 0x00000001) && show === 0, false, 'headed GUI child must not inherit STARTF_USESHOWWINDOW/SW_HIDE');
+    assert.equal(Boolean(flags & 0x00000001), true, 'headed child must receive STARTF_USESHOWWINDOW');
+    assert.equal(show, 4, 'headed child must receive SW_SHOWNOACTIVATE');
     assert.equal(child.stdin, null); assert.equal(child.stdout, null); assert.equal(child.stderr, null);
   } finally {
     t.signal.removeEventListener('abort', abort);

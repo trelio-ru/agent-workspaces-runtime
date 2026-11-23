@@ -1255,29 +1255,16 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // surfaces does not enable model-facing popup/DOM extraction.
       const tab = (await chrome.tabs.query({})).filter(tab => allowed(tab.url)).at(-1);
       if (!tab || !ownedWindows.has(tab.windowId)) throw Error('session_closed');
-      const before = await chrome.windows.get(tab.windowId);
       activeStartup();
-      if (before.state === 'minimized') await chrome.windows.update(tab.windowId, { state: 'normal' });
+      // Select the login tab inside its own window. Restoring a minimized
+      // window can activate it on Windows, so leave the window's state alone
+      // and use the dedicated attention API, which preserves desktop focus.
+      if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
       activeStartup();
-      await chrome.tabs.update(tab.id, { active: true });
+      const window = await chrome.windows.update(tab.windowId, { drawAttention: true });
       activeStartup();
-      await chrome.windows.update(tab.windowId, { focused: true });
-      // Restoring the owned window is a stable property of this handoff.
-      // Desktop focus is global and another valid window can acquire it
-      // immediately after the OS acknowledged our one activation request.
-      // Verify visibility under the same lease without competing for focus.
-      const until = Math.min(config.deadlineAt, Date.now() + 1500);
-      do {
-        activeStartup();
-        const window = await chrome.windows.get(tab.windowId);
-        activeStartup();
-        if (window.id !== tab.windowId || !ownedWindows.has(tab.windowId)) throw Error('session_closed');
-        if (['normal', 'maximized', 'fullscreen', 'locked-fullscreen'].includes(window.state)) {
-          return { state: 'manual_input_required' };
-        }
-        await pause(50);
-      } while (Date.now() < until);
-      throw Error('operation_failed');
+      if (window.id !== tab.windowId || !ownedWindows.has(tab.windowId)) throw Error('session_closed');
+      return { state: 'manual_input_required' };
     }
     if (op === 'ready') { manual = false; frame = undefined; await installRules(); return { state: 'saved_unverified' }; }
     if (op === 'close-windows' || (op === 'fixture-close-windows' && config.fixtureOnly)) {
@@ -1706,8 +1693,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       let initial;
       if (blank) initial = blank;
       else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
-      else if (!windows.length) initial = (await chrome.windows.create({ url: 'about:blank', focused: manual, width: 1440, height: 1000 })).tabs?.[0];
-      else initial = await chrome.tabs.create({ url: 'about:blank', active: manual });
+      else if (!windows.length) initial = (await chrome.windows.create({ url: 'about:blank', focused: false, width: 1440, height: 1000 })).tabs?.[0];
+      else initial = await chrome.tabs.create({ url: 'about:blank', active: false });
       // An extension wake page or Chrome's privileged new-tab target cannot
       // be attached like an ordinary document. Commit an owned inert
       // about:blank first; this performs no HTTP and leaves DNR fully strict.

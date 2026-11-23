@@ -24,8 +24,8 @@ const directories = new Set(['Default/Local Storage', 'Default/LocalStorage', 'D
  * setting only `allowed` does not actually enforce this isolation. Persistent
  * callers keep their prior startup behavior: only visual snapshots need the
  * new-profile session-restore preference for native session cookies. */
-export async function prepareVisualProfileStartup(directory, { restoreSessionOnFirstLaunch = true } = {}) {
-  if (typeof restoreSessionOnFirstLaunch !== 'boolean') throw invalid();
+export async function prepareVisualProfileStartup(directory, { restoreSessionOnFirstLaunch = true, inactiveWindowsStartup = false } = {}) {
+  if (typeof restoreSessionOnFirstLaunch !== 'boolean' || typeof inactiveWindowsStartup !== 'boolean') throw invalid();
   const target = path.join(directory, 'Default');
   await prepareVisualPrivateDirectory(target);
   const preferences = path.join(target, 'Preferences');
@@ -41,8 +41,16 @@ export async function prepareVisualProfileStartup(directory, { restoreSessionOnF
     const value = await readPrivateJsonFile(preferences, { maximumBytes: 4 * 1024 * 1024 });
     if (!value || typeof value !== 'object' || Array.isArray(value)
       || value.signin !== undefined && (!value.signin || typeof value.signin !== 'object' || Array.isArray(value.signin))) throw invalid();
-    if (value.signin?.allowed !== false || value.signin?.allowed_on_next_startup !== false) await writePrivateJsonFile(preferences,
-      { ...value, signin: { ...value.signin, allowed: false, allowed_on_next_startup: false } });
+    // Chromium explicitly activates an initially maximized window on Windows,
+    // overriding STARTUPINFO. Keep the saved bounds but restore into a normal
+    // window so Chromium can use the launcher's non-activating show mode.
+    const placement = value.browser?.window_placement;
+    const resetMaximized = inactiveWindowsStartup && placement?.maximized === true;
+    if (resetMaximized) placement.maximized = false;
+    if (resetMaximized || value.signin?.allowed !== false || value.signin?.allowed_on_next_startup !== false) {
+      await writePrivateJsonFile(preferences,
+        { ...value, signin: { ...value.signin, allowed: false, allowed_on_next_startup: false } });
+    }
   }
 }
 

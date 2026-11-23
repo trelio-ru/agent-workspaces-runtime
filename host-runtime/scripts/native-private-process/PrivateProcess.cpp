@@ -23,6 +23,8 @@
 #include <stdexcept>
 #include <cstdint>
 
+#pragma comment(lib, "shell32.lib")
+
 namespace {
 constexpr size_t MaxValue = 1024 * 1024;
 constexpr size_t MaxLine = 1400000;
@@ -1060,8 +1062,67 @@ int codexService(std::string_view operation,std::string_view expected={}) {
   codexServiceReply("stopped");return 0;
 }
 
+// CreateProcessW expects a writable command line and the executable as a
+// separate path. Quote the already parsed UTF-16 arguments with the same rules
+// as the Windows argv parser, including backslashes before quotes and at EOF.
+void appendBrowserArgument(std::wstring& command, std::wstring_view argument) {
+  if (!command.empty()) command += L' ';
+  command += L'"';
+  size_t backslashes = 0;
+  for (const wchar_t ch : argument) {
+    if (ch == L'\\') { ++backslashes; continue; }
+    command.append(backslashes * (ch == L'"' ? 2 : 1) + (ch == L'"'), L'\\');
+    command += ch;
+    backslashes = 0;
+  }
+  command.append(backslashes * 2, L'\\');
+  command += L'"';
+}
+
+int launchInactiveVisualBrowser() {
+  int count = 0;
+  Local arguments{CommandLineToArgvW(GetCommandLineW(), &count)};
+  require(arguments.value && count >= 3);
+  const auto words = static_cast<wchar_t**>(arguments.value);
+  std::wstring command;
+  for (int i = 2; i < count; ++i) appendBrowserArgument(command, words[i]);
+
+  // Give the Chromium process its initial presentation before any HWND
+  // exists. SW_SHOWNOACTIVATE keeps the window paintable and click-activatable.
+  // The proxy holds an exact process handle and mirrors Chromium's exit code.
+  // A forced stop of the proxy also stops its own Chromium tree. Assign the
+  // suspended process first so it cannot start helpers outside that ownership.
+  Handle job(CreateJobObjectW(nullptr, nullptr));
+  require(job.value);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  require(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
+    &limits, sizeof(limits)) != FALSE);
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = SW_SHOWNOACTIVATE;
+  PROCESS_INFORMATION child{};
+  require(CreateProcessW(words[2], command.data(), nullptr, nullptr, FALSE,
+    CREATE_SUSPENDED, nullptr, nullptr, &startup, &child) != FALSE);
+  Handle process(child.hProcess), thread(child.hThread);
+  if (!AssignProcessToJobObject(job.value, process.value) || ResumeThread(thread.value) == DWORD(-1)) {
+    TerminateProcess(process.value, 1);
+    WaitForSingleObject(process.value, INFINITE);
+    return 1;
+  }
+  require(WaitForSingleObject(process.value, INFINITE) == WAIT_OBJECT_0);
+  DWORD code = 0;
+  require(GetExitCodeProcess(process.value, &code) != FALSE);
+  return static_cast<int>(code);
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 1) {
+    if (argc >= 3 && std::string_view(argv[1]) == "--visual-browser-inactive") {
+      try { return launchInactiveVisualBrowser(); }
+      catch (...) { return 1; }
+    }
     if(argc==3&&std::string_view(argv[1])=="--codex-package-staged"){
       try{return codexStagedPackage(argv[2]);}
       catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}

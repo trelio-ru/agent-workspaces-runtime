@@ -32,14 +32,12 @@ PNG, ввод и safeguards остаются теми же. Это не native S
 owner/session identity и исходной lease. Ошибка stop/persist блокирует переход;
 неизвестное browser input не повторяется. Перезапуск переносит сохранённую
 авторизацию, а не произвольный несохранённый черновик/transaction: до setup
-необходимо установить исход предыдущих бизнес-действий. `show-login` показывает
-уже открытый ручной setup, не является автоматическим новым входом.
-На старте и при `show-login` runtime выбирает вкладку своего профиля,
-восстанавливает свёрнутое окно и один раз запрашивает его активацию. Проверяет,
-что то же окно развернулось перед `manual_input_required`. Фокус рабочего
-стола может сразу перейти к другому окну. Если своё окно не удалось показать,
-возвращает ошибку. Режим ручного ввода и его защита сохраняются до
-явного повторного показа, завершения или закрытия окна.
+необходимо установить исход предыдущих бизнес-действий. При `setup` и
+`show-login` runtime выбирает вкладку входа в своём окне и подаёт сигнал
+`drawAttention`. Фокус переходит к окну, когда его выбирает пользователь.
+Пользователь разворачивает свёрнутое окно через Dock или панель задач.
+`manual_input_required` подтверждает наличие той же сессии и сохраняет
+защиту ручного ввода. Ошибка передачи управления оставляет эту защиту включённой.
 После human `ready`/window-close прежний save gate сохраняет профиль до снятия
 блокировки снимков; следующая явно порученная navigate работает скрыто.
 
@@ -438,11 +436,12 @@ Opera/Chrome и пользовательские профили автомати
 
 По умолчанию Chromium запускается как обычный headed browser с собственным
 приватным профилем; signed hidden presentation описан выше.
-GUI child запускается с `windowsHide: false`: на Windows `SW_HIDE` в native
-startup info может оставить белую поверхность вместо нормального окна Chromium,
-включая ручной вход. Это общий launcher визуальных навыков для обычных
-пользователей и ассистентов. Его stdio остаётся `ignore`; console helpers,
-lease, закрытие и сохранение профиля сохраняют прежние ограничения.
+На Windows подписанный native worker запускает видимый Chromium с
+`STARTF_USESHOWWINDOW/SW_SHOWNOACTIVATE`. Он удерживает точный process handle,
+возвращает exit code браузера и через собственный Job Object завершает его
+дерево при аварийной остановке launcher. Chromium не наследует stdio worker.
+Видимый macOS Chromium начинает без окна, а расширение создаёт его с
+`focused: false`. Ручной вход использует тот же неактивный показ.
 Нет Puppeteer launch, remote-debugging port/pipe, `--enable-automation`,
 AutomationControlled override или fingerprint spoof. MV3 extension использует
 внутренний `chrome.debugger`: только фиксированные Page raster/layout/MIME
@@ -500,8 +499,10 @@ loopback endpoint, transport token или credentials. Статический se
 preference: Chromium игнорирует restore switch у нового Profile. Эта настройка
 сама по себе не гарантирует сохранение session cookies на Windows; для них
 предусмотрен описанный ниже private overlay.
-У восстановленного профиля существующие Preferences не перезаписываются.
-Это настройка lifecycle профиля, без чтения/перезаписи website cookies.
+Видимый Windows startup исключает `--window-size` и сбрасывает сохранённое
+состояние максимизации во временной копии Preferences. Оба параметра могут
+перебить нативный режим неактивного показа. Chromium использует обычный размер
+из профиля. Остальные настройки профиля и website cookies сохраняются.
 Затем extension ставит navigation policy
 и переводит owned вкладку на начальный адрес. Readiness означает отдельный hello
 после обоих этапов, а не только открытый socket. В synthetic native tests
@@ -687,8 +688,9 @@ Native fixture проверяет target=_blank на другой origin, HTTP r
 
 Обычные clicks/keys/text/scroll/capture не активируют OS app и не восстанавливают
 другую программу для маскировки перехвата. Scheduling flags поддерживают
-compositor/input в перекрытом окне. Один startup focus допустим только в
-согласованном visible workflow; ручной `show-login` явно показывает своё окно.
+compositor/input в перекрытом окне. Видимые окна, которые создаёт сам runtime
+на macOS и Windows, открываются без активации. `show-login` подаёт сигнал
+принадлежащему сессии окну.
 Fixed renderer focus emulation retains visual-state commits independently of
 OS visibility during the owned work phase. It never calls bringToFront,
 activates a tab, restores a minimized window or changes another application.
@@ -1293,11 +1295,11 @@ Watchdog может завершить только созданный теку�
 
 Pure tests: result/MCP projection, loopback auth, AEAD, profile traversal и bounds.
 Windows regression читает настоящие `GetStartupInfoW` flags внутри собственного
-native child общего GUI launcher и запрещает `STARTF_USESHOWWINDOW/SW_HIDE`;
-готовность extension сама по себе не доказывает видимость OS-окна.
-Native manual setup проверяет, что Chromium подтверждает фокус окна при первом
-ответе, а Windows fixture дополнительно сворачивает и повторно показывает ту
-же сессию. Синтетическая ошибка фокуса оставляет закрытым доступ модели к форме.
+native child и требует `SW_SHOWNOACTIVATE`. Отдельная нативная проверка macOS и
+Windows подписывается на события foreground до запуска Chromium и проверяет
+видимость окна без переключений при обычном запуске, `setup` и `show-login`.
+Windows fixture дополнительно проверяет, что сигнал не разворачивает свёрнутое
+окно. Отказ сигнала оставляет закрытым доступ модели к форме.
 Его PowerShell child отключает module auto-discovery и импортирует только
 Utility по fixed `$PSHOME` manifest, как существующий native scheduler fixture.
 Исходные 30 секунд и Win32 assertions сохраняются; timeout выдаёт только

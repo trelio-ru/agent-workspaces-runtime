@@ -15,6 +15,7 @@ import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-
 import { createVisualControlServer } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 import { syntheticDocx } from './fixtures/visual-docx.mjs';
+import { observeVisualForeground } from './fixtures/visual-foreground.mjs';
 import vm from 'node:vm';
 
 test('native managed Secret binds the observed HTTPS document after a redirect and permits one reviewed click',
@@ -664,10 +665,11 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
   : 'signed hidden Chromium clicks, types, scrolls and restores auth through the production presentation', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-fixture-')));
   const received = [], webdriverAtInput = [];
-  let ssoRestored = false, cookieRestored = false, persistentRestored = false, storageRestored = false, detailSeen = false, snapshot;
+  let ssoRestored = false, cookieRestored = false, persistentRestored = false, storageRestored = false, detailSeen = false, snapshot, viewport;
   const server = http.createServer((request, response) => {
     const u = new URL(request.url, 'http://127.0.0.1');
     if (u.pathname === '/typed') { received.push(u.searchParams.get('value')); webdriverAtInput.push(u.searchParams.get('webdriver')); response.end(); return; }
+    if (u.pathname === '/viewport') { viewport = { width: Number(u.searchParams.get('width')), height: Number(u.searchParams.get('height')) }; response.end(); return; }
     if (u.pathname === '/storage') { if (u.searchParams.get('value') === 'SYNTHETIC_STORAGE') storageRestored = true; response.end(); return; }
     if (u.pathname === '/detail') detailSeen = true;
     if (request.headers.cookie?.includes('fixture_session=SYNTHETIC_COOKIE')) cookieRestored = true;
@@ -676,7 +678,7 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
     if (u.pathname === '/sso-login') response.setHeader('Set-Cookie', 'fixture_sso=SYNTHETIC_SSO; HttpOnly; SameSite=Strict; Path=/');
     if (u.pathname === '/login') response.setHeader('Set-Cookie', ['fixture_session=SYNTHETIC_COOKIE; HttpOnly; SameSite=Strict; Path=/', 'fixture_persistent=SYNTHETIC_PERSISTENT; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600']);
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.end(`<!doctype html><body style="margin:0;background:#d6efde;font:24px sans-serif;${u.pathname === '/detail' ? '' : 'height:2400px'}"><input id="entry" style="position:absolute;left:40px;top:60px;width:360px;height:50px;font-size:24px"><button style="position:absolute;left:450px;top:60px;width:160px;height:55px" onclick="fetch('/typed?value='+encodeURIComponent(document.getElementById('entry').value)+'&webdriver='+navigator.webdriver)">Submit</button><a href="/detail" target="_blank" style="position:absolute;left:700px;top:60px">Detail</a><h1 style="position:absolute;top:180px">${u.pathname === '/detail' ? 'Detail fixture' : 'Input fixture'}</h1><script>${u.pathname === '/login' ? 'localStorage.setItem("fixture","SYNTHETIC_STORAGE");' : ''}fetch('/storage?value='+localStorage.getItem('fixture'))</script>`);
+    response.end(`<!doctype html><body style="margin:0;background:#d6efde;font:24px sans-serif;${u.pathname === '/detail' ? '' : 'height:2400px'}"><input id="entry" style="position:absolute;left:5vw;top:60px;width:22vw;height:50px;font-size:24px"><button style="position:absolute;left:35vw;top:60px;width:20vw;height:55px" onclick="fetch('/typed?value='+encodeURIComponent(document.getElementById('entry').value)+'&webdriver='+navigator.webdriver)">Submit</button><a href="/detail" target="_blank" style="position:absolute;left:70vw;top:60px">Detail</a><h1 style="position:absolute;top:180px">${u.pathname === '/detail' ? 'Detail fixture' : 'Input fixture'}</h1><script>${u.pathname === '/login' ? 'localStorage.setItem("fixture","SYNTHETIC_STORAGE");' : ''}fetch('/storage?value='+localStorage.getItem('fixture'));fetch('/viewport?width='+innerWidth+'&height='+innerHeight)</script>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -686,9 +688,8 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
   const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], externalNavigation: true, allowLoopback: true }), origins: [origin], externalNavigation: true, profileAuthentication: true, presentation, lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
   let browser = create();
   const originalCall = ExtensionVisualBrowser.prototype.call;
-  // A native headed Mac run independently samples the OS foreground identity.
-  // Only the initial launch may change it; input/capture never restore another
-  // app to conceal an activation. Samples contain no window title/page text.
+  // Also sample the OS foreground during routine commands. The separate native
+  // launch fixture tracks activation events from before the first window.
   const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1' ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
   let focusChecks = 0;
   ExtensionVisualBrowser.prototype.call = async function(operation, args) {
@@ -704,29 +705,29 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
     let f = ready(await browser.call('navigate', { url: `${origin}/login` }));
     if (presentation === 'hidden' && startupFocus) assert.equal(focus(), startupFocus, 'hidden startup must preserve the foreground application');
     assert.equal(cookieRestored, true, 'the first document accepted its synthetic cookie before shutdown');
-    // Chromium can finish its one permitted startup activation just after the
-    // first picture. Sample input focus only after the app has settled.
-    if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
     const original = f.frameId;
-    // Coordinates come from this synthetic fixture's known rendered controls;
-    // the production controller has no selector/evaluate/DOM-text command.
-    f = ready(await browser.call('click', { frameId: f.frameId, x: 120, y: 85 }));
+    // Convert the fixture's known CSS positions to screenshot pixels, even
+    // when the native display uses a non-default size or scale factor.
+    assert.ok(viewport?.width > 0 && viewport?.height > 125, 'the fixture reported a real viewport');
+    const click = (frame, horizontal, cssY) => browser.call('click', { frameId: frame.frameId,
+      x: Math.round(frame.width * horizontal), y: Math.round(frame.height * cssY / viewport.height) });
+    f = ready(await click(f, 0.15, 85));
     f = ready(await browser.call('type-text', { frameId: f.frameId, text: 'Проверка ввода 123' }));
-    f = ready(await browser.call('click', { frameId: f.frameId, x: 500, y: 85 }));
+    f = ready(await click(f, 0.45, 85));
     assert.deepEqual(received, ['Проверка ввода 123']);
     assert.equal((await browser.call('click', { frameId: original, x: 500, y: 85 })).reason, 'stale_frame');
     assert.equal(received.length, 1);
     f = ready(await browser.call('screenshot'));
-    f = ready(await browser.call('scroll', { frameId: f.frameId, x: 900, y: 500, deltaY: 600 }));
+    f = ready(await browser.call('scroll', { frameId: f.frameId, x: Math.floor(f.width * 0.8), y: Math.floor(f.height * 0.5), deltaY: 600 }));
     assert.equal(f.scroll.up, true);
-    f = ready(await browser.call('scroll', { frameId: f.frameId, x: 900, y: 500, deltaY: -900 }));
-    f = ready(await browser.call('click', { frameId: f.frameId, x: 120, y: 85 }));
+    f = ready(await browser.call('scroll', { frameId: f.frameId, x: Math.floor(f.width * 0.8), y: Math.floor(f.height * 0.5), deltaY: -900 }));
+    f = ready(await click(f, 0.15, 85));
     f = ready(await browser.call('key', { frameId: f.frameId, key: process.platform === 'darwin' ? 'Meta+A' : 'Control+A' }));
     f = ready(await browser.call('type-text', { frameId: f.frameId, text: 'Второй ввод' }));
-    f = ready(await browser.call('click', { frameId: f.frameId, x: 500, y: 85 }));
+    f = ready(await click(f, 0.45, 85));
     assert.deepEqual(received, ['Проверка ввода 123', 'Второй ввод']);
     if (presentation === 'windowed' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') assert.deepEqual(webdriverAtInput, ['false', 'false']);
-    f = ready(await browser.call('click', { frameId: f.frameId, x: 730, y: 75 }));
+    f = ready(await click(f, 0.7 + 18 / viewport.width, 75));
     assert.equal(detailSeen, true); assert.equal(f.scroll.down, false);
     ready(await browser.call('navigate', { url: `http://localhost:${server.address().port}/sso-login` }));
     await browser.close();
@@ -752,6 +753,56 @@ for (const presentation of ['windowed', 'hidden']) test(presentation === 'window
     server.closeAllConnections(); // Fixture keep-alive cannot conceal a failed owned browser shutdown.
     await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
+test('native macOS and Windows windowed work and manual setup leave desktop focus unchanged', {
+  skip: !['darwin', 'win32'].includes(process.platform) || process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1',
+  timeout: 150_000,
+}, async t => {
+  const observer = await observeVisualForeground(t.signal);
+  t.after(() => observer.close());
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-focus-')));
+  const server = http.createServer((_request, response) => {
+    response.setHeader('Content-Type', 'text/html');
+    response.end('<!doctype html><title>Foreground fixture</title><input aria-label="Login">');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  let browser;
+  try {
+    const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+    for (const operation of ['navigate', 'setup']) {
+      let window, snapshot;
+      const diagnostics = [];
+      browser = new ExtensionVisualBrowser({
+        dependencies, origins: [origin], policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+        lease: { deadlineAt: Date.now() + 45_000 },
+        store: { directory, async prepare() {}, async read() { return snapshot; }, async write(value) { snapshot = value; }, close() {} },
+        testWindowController: value => { window = value; },
+        testDiagnostics: value => diagnostics.push(value),
+      });
+      const result = await browser.call(operation, { url: origin });
+      assert.equal(result.state, operation === 'setup' ? 'manual_input_required' : 'ready',
+        JSON.stringify({ reason: result.reason, diagnostic: result.diagnostic, diagnostics }));
+      assert.deepEqual(await window.windowState(), { state: 'fixture', count: 1, minimized: false, focused: false });
+      observer.assertUnchanged(`${operation} must preserve native foreground throughout startup`);
+      if (operation === 'setup') {
+        assert.equal((await browser.call('show-login')).state, 'manual_input_required');
+        assert.equal((await window.windowState()).focused, false);
+        assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+      }
+      await browser.close();
+      browser = undefined;
+      observer.assertUnchanged(`${operation} must preserve native foreground through handoff and close`);
+    }
+  } catch (error) {
+    // Keep the first assertion/startup failure if closing also reports it.
+    await browser?.close().catch(() => browser.abort());
+    throw error;
+  } finally {
+    server.close();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -917,7 +968,7 @@ test('manual window close and ready save once before unlocking images; crash pre
       diagnostics.push({ stage: completion });
       assert.equal((await call('setup', { url: `${origin}/login` })).state, 'manual_input_required', JSON.stringify(diagnostics));
       if (process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') {
-        assert.equal((await window.windowState()).focused, true, 'initial setup presents the owned window before returning');
+        assert.equal((await window.windowState()).minimized, false, 'initial setup presents the owned window before returning');
       }
       if (process.platform === 'win32' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1') {
         let state = await window.minimize();
@@ -928,7 +979,8 @@ test('manual window close and ready save once before unlocking images; crash pre
         }
         assert.equal(state.minimized, true, 'Windows fixture withdrew the owned window');
         assert.equal((await call('show-login')).state, 'manual_input_required');
-        assert.equal((await window.windowState()).focused, true, 'explicit show restores and focuses the same Windows session');
+        assert.deepEqual(await window.windowState(), { state: 'fixture', count: 1, minimized: true, focused: false },
+          'explicit show signals the same Windows session and leaves unminimizing to the user');
       }
       assert.equal((await call('show-login')).image, undefined);
       assert.equal((await call('screenshot')).reason, 'manual_control_active');

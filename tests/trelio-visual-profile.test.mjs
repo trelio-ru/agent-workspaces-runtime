@@ -34,6 +34,22 @@ test('persistent caller disables sign-in without enabling visual session/tab res
     { signin: { allowed: false, allowed_on_next_startup: false } });
 });
 
+test('inactive Windows launch starts a restored maximized profile as a normal window', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-inactive-profile-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await prepareVisualProfileStartup(root);
+  const preferences = path.join(root, 'Default', 'Preferences');
+  const prior = { browser: { window_placement: { maximized: true, right: 1100 }, other: true },
+    session: { restore_on_startup: 1 }, signin: { allowed: false, allowed_on_next_startup: false } };
+  await fs.writeFile(preferences, JSON.stringify(prior));
+  await prepareVisualProfileStartup(root);
+  assert.deepEqual(JSON.parse(await fs.readFile(preferences)), prior);
+  await prepareVisualProfileStartup(root, { inactiveWindowsStartup: true });
+  assert.deepEqual(JSON.parse(await fs.readFile(preferences)), {
+    ...prior, browser: { ...prior.browser, window_placement: { maximized: false, right: 1100 } },
+  });
+});
+
 test('stopped profile preserves selected auth stores and excludes history, cache and passwords', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-')));
   const input = path.join(root, 'input'), output = path.join(root, 'output');
