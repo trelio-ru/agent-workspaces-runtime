@@ -539,7 +539,7 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.match(input,/unchanged blocker.*noChange.*without a new Run\/worklog/);
   assert.match(input,/only the exact recovery references needed for safe continuation/);
   assert.match(input,/use_assistant_browser/u);
-  for(const invariant of ['follow a matching published skill through its declared assistant commands','already authorized action',
+  for(const invariant of ['use a matching published skill through its ordinary commands under current task admission','already authorized action',
     'independent persisted owner decision','Read back an uncertain result before further input',
     'Do not use ordinary Chrome','Verify the actual site outcome','closes idle windows after ten minutes'])assert.ok(input.includes(invariant));
   assert.match(input,/separate last successfully reviewed message position for each task\/account\/conversation\/topic/);
@@ -2175,7 +2175,12 @@ test('reviewed continuation uses a NEW stdin marker in the same chat, with recei
     openDesktop:async()=>{},spawnProcess:ownedRpc({threadId,onInput:text=>{input=text;}})};
   assert.equal((await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},options)).state,'completed');
   assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
-  assert.match(input,/ONE automatic recovery continuation/);assert.ok(input.includes(priorTurnId));assert.match(input,/Do not repeat the previous command/);
+  assert.match(input,/ONE automatic recovery continuation/);
+  assert.ok(input.includes(priorTurnId));
+  assert.match(input,/Retry a failed read confirmed to have no external effect/);
+  assert.match(input,/Keep an unresolved external effect on read-back only/);
+  assert.match(input,/continue independent authorized work/);
+  assert.doesNotMatch(input,/Do not repeat the previous command/);
   assert.match(input,/earlier error is not a current result/);
   assert.match(input,/ordinary status without that handle and an exact native Run read/);
   assert.match(input,/technical reopening needs no new owner approval/);

@@ -134,23 +134,24 @@ test('one chat per task; actual cyclic completion and inbox event processing com
     events: [{ id: 'event', revision: '1', taskId: scope.taskId, wake: true }] });
   let work = await inbox.claimDelivery({ authorize: async () => true }); inbox.startDelivery(work.deliveryId);
   clock += 1_800_001;
-  // A delayed event-triggered job is not claimed as the first automatic timer run.
+  // An event pass may handle only an answer or mention. Closing it must not
+  // consume the due scheduled review that the dispatcher has not yet claimed.
   inbox.completeDelivery(work.deliveryId, 'native-event-turn');
+  assert.equal(scheduler.get(scope).lastCompletedAt, clock);
   assert.equal(scheduler.get(scope).lastCycleAt, null);
-  assert.equal(scheduler.get(scope).nextRunAt, at('2026-10-20T10:00:00Z'));
-  clock = at('2026-10-20T10:00:00Z');
+  assert.equal(scheduler.get(scope).nextRunAt, first.nextRunAt);
   assert.equal(scheduler.nextDue().threadId, threadId);
   work = await inbox.claimDelivery({ authorize: async () => true, scheduledTask: { scope: source, taskId: scope.taskId } });
   inbox.startDelivery(work.deliveryId);
   failCompletion = true;
   assert.throws(() => inbox.completeDelivery(work.deliveryId, 'native-cycle-turn'), /synthetic/);
-  assert.equal(scheduler.get(scope).nextRunAt, clock, 'failed combined commit leaves the cycle due');
+  assert.equal(scheduler.get(scope).nextRunAt, first.nextRunAt, 'failed combined commit leaves the cycle due');
   assert.equal(scheduler.get(scope).lastCycleAt, null);
   failCompletion = false;
   inbox.completeDelivery(work.deliveryId, 'native-cycle-turn');
   inbox.completeDelivery(work.deliveryId, 'native-cycle-turn');
   assert.equal(scheduler.get(scope).lastCycleAt, clock);
-  assert.equal(scheduler.get(scope).nextRunAt, clock+1_800_000);
+  assert.equal(scheduler.get(scope).nextRunAt, at('2026-10-20T10:00:00Z'));
   assert.equal(scheduler.nextDue(), null);
   const paused = scheduler.setState(scope, { state: 'done', expectedRevision: first.revision });
   clock += 86_400_000;

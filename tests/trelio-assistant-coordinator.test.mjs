@@ -3257,15 +3257,24 @@ test('capacity backoff survives SQLite restart, continues beyond twenty attempts
       const count=attempts;
       assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(attempts,count,'poll does not defeat backoff');
       f.advance([60_000,300_000,900_000,1_800_000][Math.min(i,3)]);
-      if(i<24)await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
-      else await coordinator.workOnce();
-      assert.equal(attempts,count+1);
+      if(i<24){
+        await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+        assert.equal(attempts,count+1);
+      }else{
+        // Once the original event settles, this same coordinator tick can
+        // claim the single overdue timer with its own pass and native marker.
+        assert.equal((await coordinator.workOnce()).state,'completed');
+        assert.equal(attempts,count+2);
+      }
     }
-    assert.equal(attempts,26);assert.equal(resumes,25);assert.equal(f.activePass(),null);
+    assert.equal(attempts,27);assert.equal(resumes,25);assert.equal(f.activePass(),null);
     row=database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(deliveryId);
     assert.equal(row.native_started,originalStart);assert.equal(row.state,'complete');
     assert.equal(database.prepare('SELECT count(*) n FROM assistant_pass_continuations WHERE delivery_id=?').get(deliveryId).n,25);
     assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_revision=?').get('capacity-event').processed,1);
+    assert.equal(database.prepare(
+      'SELECT count(*) n FROM assistant_inbox_deliveries WHERE scheduled=1 AND state=?'
+    ).get('complete').n,1);
     const before=attempts;await reopen();await coordinator.workOnce();assert.equal(attempts,before);
   }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });

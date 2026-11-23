@@ -94,6 +94,12 @@ publication tooling также остаются вне этого публичн
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
+  Внеплановый ответ или сообщение не поглощает наступивший цикл. Время
+  следующего цикла меняют плановый проход и подтверждённая смена расписания.
+  При полном восстановлении ассистент сам повторяет разрешённые чтения
+  и проверяет исход возможной записи по её квитанции. Неопределённая запись
+  не повторяется. Полномочия отдельных режимов сохранения и просмотра
+  черновика определяются существующими native проверками.
   Retired task inspection uses the original chat/receipt and a separate
   one-use start bit. Only exact task reads and a pinned draft checkpoint can
   run there. Provider effects stay held; an independent task may proceed.

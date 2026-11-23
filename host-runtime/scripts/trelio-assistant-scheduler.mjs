@@ -266,11 +266,17 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
         }
         if(cadence!==row.cadence || timeZone!==row.time_zone || dailyLocalTime!==row.daily_local_time) anchor=completedAt;
       }
-      const next = state === 'active' ? nextAssistantRun({ cadence, anchorAt: anchor, after: completedAt, timeZone, dailyLocalTime }) : row.next_run_at;
-      const configurationChanged=Number(cadence!==row.cadence || timeZone!==row.time_zone || state!==row.state || dailyLocalTime!==row.daily_local_time);
+      const configurationChanged = cadence !== row.cadence || timeZone !== row.time_zone
+        || state !== row.state || dailyLocalTime !== row.daily_local_time;
+      // An owner reply or routed message may be handled while a cyclic review
+      // is due. Its receipt covers that delivery and cannot consume the timer.
+      // A confirmed schedule change still recalculates the next time normally.
+      const next = state === 'active' && (scheduled || configurationChanged)
+        ? nextAssistantRun({ cadence, anchorAt: anchor, after: completedAt, timeZone, dailyLocalTime })
+        : row.next_run_at;
       if (dailyLocalTime!==null) run('UPDATE assistant_schedule_meta SET version=2 WHERE version=1');
       run('UPDATE assistant_schedule_tasks SET cadence=?,time_zone=?,daily_local_time=?,state=?,anchor_at=?,next_run_at=?,last_completed_at=?,last_cycle_at=?,last_delivery_id=?,last_receipt=?,revision=revision+?,report_sequence=report_sequence+1 WHERE task_key=?',
-        cadence,timeZone,dailyLocalTime,state,anchor,next,completedAt,scheduled && completedAt >= row.next_run_at ? completedAt : row.last_cycle_at,deliveryId,receipt,configurationChanged,row.task_key);
+        cadence,timeZone,dailyLocalTime,state,anchor,next,completedAt,scheduled && completedAt >= row.next_run_at ? completedAt : row.last_cycle_at,deliveryId,receipt,Number(configurationChanged),row.task_key);
     },
   };
 };

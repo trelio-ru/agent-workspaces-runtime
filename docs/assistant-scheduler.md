@@ -194,8 +194,10 @@ latest failed turn/marker, saturated delay step and due time. Pauses are 1, 5,
 reset the clock. Each attempt is a NEW monotonic marker in the SAME permanent
 chat. Task work renews its SAME native pass through the ordinary continuation
 receipt, with fresh hook/model/ACL/lease and full negative child-marker coverage.
-Its prompt requires inspecting saved state and operation receipts first; no
-original command, send, mutation or provider ACK is replayed. Capacity entries
+The agent inspects saved state and operation receipts first. It can repeat a
+failed read under current admission or choose an authorized alternative. A
+confirmed effect stays recorded. An unresolved send, mutation or provider ACK
+stays on read-back while independent authorized work can continue. Capacity entries
 append to the existing indexed ledger under a separate budget key, without
 spending or resetting the generic twenty-attempt hook-repair budget.
 
@@ -258,11 +260,14 @@ a repeated request cannot replace the permanent chat. `done`, pause and revocati
 stop the schedule. Local active state never permits execution without fresh
 backend authorization. Cross-company tasks retain separate keys and references.
 
-The trusted `completeInsideInboxTransaction` callback advances next-run and
-records completion in the inbox transaction. Callback failure leaves both event
-processing and due time unchanged. `lastCycleAt` is recorded only for a genuine
-scheduled pass, not a delayed mention or merely saving a schedule. These tests
-use an injected clock; they are not proof of a live Windows timer run.
+The trusted `completeInsideInboxTransaction` callback records completion in the
+inbox transaction. Only a scheduled pass or a confirmed schedule change advances
+the next run. A delayed mention, owner reply or routed message can therefore
+finish while a regular check remains due. The dispatcher can claim that check
+next under its existing authority and duplicate-prevention rules. Callback
+failure leaves both the event and timer eligible for their original completion.
+Only a genuinely due scheduled pass records `lastCycleAt`. Clock-controlled
+tests cover both delivery types independently of the Windows timer.
 
 ## Native adapter
 
