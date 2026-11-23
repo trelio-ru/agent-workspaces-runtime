@@ -1,3 +1,4 @@
+import { processDiagnosticEvidence } from "./trelio-process-diagnostics.mjs";
 import { readUtf16TextChunk, sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
@@ -13,7 +14,7 @@ import { buildLocalTaskReadToolResult, buildMcpTaskBatchContinuation, buildMcpWo
   fitsMcpTaskReadResult, isMcpWorkspaceFilesPage, selectMcpTaskReadBatch } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
-import { rememberDiagnosticDetail, readDiagnosticDetail, diagnosticValueType } from "./trelio-diagnostic-observation.mjs";
+import { rememberDiagnosticDetail, readDiagnosticDetail, diagnosticValueType, parseBrowserFailureEvidence } from "./trelio-diagnostic-observation.mjs";
 import { isTelegramExactRead, parseProcessDiagnostic, ProcessDiagnosticError,
   TELEGRAM_EXACT_READ_MESSAGE } from "./trelio-process-diagnostics.mjs";
 import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
@@ -8945,7 +8946,7 @@ export const createHumanCompanySearchReader = ({ spawnReader, idleMs = 600_000, 
       else if (message.type === "failure") {
         const code = diagnosticContract.errorCodes.includes(message.code) ? message.code : "LOCAL_CONTEXT_SEARCH_FAILED";
         const failure = error(code, "Локальный поиск остановлен на этапе " + pending.stage + ". Автоматического повтора нет.");
-        if (code === "LOCAL_CONTEXT_GENERATION_CHANGED") rememberDiagnosticDetail(failure, message.diagnosticEvidence);
+        if (["LOCAL_CONTEXT_GENERATION_CHANGED", "TRELIO_BACKEND_HTTP_400"].includes(code)) rememberDiagnosticDetail(failure, message.diagnosticEvidence);
         pending.reject(failure);
       } else pending.reject(error("LOCAL_CONTEXT_SEARCH_FAILED", "Некорректный ответ процесса поиска."));
     });
@@ -11338,10 +11339,12 @@ const parseBrowserPreflightTimeout = (stderr) => {
     || payload.grantConsumedByAttempt !== false) return null;
   // Only this bridge command can prove a pre-consume timeout. Build the
   // message here from the closed phase and discard child prose and stdout.
-  return new TrelioLocalContextError(payload.code, message, {
+  // Legacy frames can omit evidence. The fixed timeout flags already attest
+  // this stage, so tag the normalized error without trusting child prose.
+  return rememberDiagnosticDetail(new TrelioLocalContextError(payload.code, message, {
     stage: "preflight", phase: payload.phase, reasonCode: "timeout",
     secretRequested: false, grantConsumedByAttempt: false, automaticRetry: false,
-  });
+  }), { kind: "browser", stage: "preflight", reason: "timeout" });
 };
 
 export const classifyWorkspaceRunLeaseFailure = (error) => {
@@ -12044,6 +12047,7 @@ const executeTrelioWorkspaceActionOperation = async (
         { operation: invocation.operation, failureCode: processDiagnostic.failureCode, process: processDiagnostic },
       );
       actionError.diagnosticCode = processDiagnostic.failureCode;
+      rememberDiagnosticDetail(actionError, processDiagnosticEvidence(processDiagnostic));
       throw actionError;
     }
     if (processDiagnostic?.diagnostic) {
@@ -12082,7 +12086,9 @@ const executeTrelioWorkspaceActionOperation = async (
     // Retain the public wrapper ABI and local stdout/stderr recovery context.
     // Telemetry sees only the closed category, never that private context.
     actionError.diagnosticCode = failureCode;
-    if (failureCode === "LOCAL_CONTEXT_GENERATION_CHANGED") rememberDiagnosticDetail(actionError, httpDiagnostic?.diagnosticEvidence);
+    if (httpDiagnostic?.diagnosticEvidence) rememberDiagnosticDetail(actionError, httpDiagnostic.diagnosticEvidence);
+    if (processDiagnostic) rememberDiagnosticDetail(actionError, processDiagnosticEvidence(processDiagnostic));
+    if (invocation.operation === "secret_browser_fill") rememberDiagnosticDetail(actionError, parseBrowserFailureEvidence(error?.stderr));
     throw actionError;
   } finally {
     heartbeatManager?.endAction(activeHeartbeatEntry);

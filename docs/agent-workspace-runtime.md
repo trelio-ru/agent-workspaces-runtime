@@ -2705,16 +2705,22 @@ category/stage, сам формирует nextStep и `automaticRetry=false`. П
 неизвестной причине, включая пустой lookup, предлагается сверить исходную
 ссылку и доступ к чату. При несовпадении возвращённого peer/ID предлагается
 сверить внешнее сопоставление с нативным ID. Сырые stderr, stdout и поля
-provider-а не входят в эту диагностику; telemetry сохраняет прежний exit bucket.
+provider-а не входят в эту диагностику; telemetry сохраняет прежний exit bucket и только отдельно согласованную закрытую причину.
 
 <a id="closed-runtime-diagnostic-details"></a>
+
+`detailEvidenceKinds` согласует http/process/browser отдельно при v1: старому
+серверу передаются только исходные четыре вида с теми же UUID/counters. HTTP400
+имеет fixed proposal stage/reason; browser fill — origin stage/reason; process —
+проверенный OS/signal/provider code из полного bounded отказа. Неизвестное остаётся
+unknown. Raw fields/values/prose не попадают в telemetry; mutation replay запрещён.
 
 ### Закрытые runtime diagnostic details v1
 
 Канонический словарь `trelio-agent-diagnostics-contract.json.detailEvidence`
 синхронизируется с backend `agent-diagnostics/contract.json`. При capability
-`detailEvidenceVersion=1` optional row `details` содержат только один из четырёх
-строгих вариантов: generation stage/guard reason, input stage/reason/known key/
+`detailEvidenceVersion=1` optional row `details` содержат исходные четыре
+строгих варианта, а новые виды требуют `detailEvidenceKinds`: generation stage/guard reason, input stage/reason/known key/
 expectedType/actualType, delivery stage/reason/httpStatus либо journal stage/
 reason/ageBucket. Каждый tuple имеет count, не более 4/row и 16/sample;
 tuple counts не превосходят исходный counter. Parent code/field и loss reason

@@ -55,10 +55,9 @@ export const runtimeAdmissionRecovery = (runtime, operation) => {
   };
 };
 
-export const buildBridgeHttpErrorFrame = (status, backendCode, message, payload = null) => {
+export const buildBridgeHttpErrorFrame = (status, backendCode, message, payload = null, originEvidence = payload?.diagnosticEvidence) => {
   const runtime = status === 409 ? projectRuntimeAdmissionFailure(backendCode, payload) : null;
-  const diagnosticEvidence = status === 409 && backendCode === "LOCAL_CONTEXT_GENERATION_CHANGED"
-    ? projectDiagnosticDetail(payload?.diagnosticEvidence) : null;
+  const diagnosticEvidence = projectDiagnosticDetail(originEvidence);
   return {
     code: "TRELIO_BRIDGE_HTTP_ERROR",
     // This is the existing bounded local CLI explanation, not telemetry. Never
@@ -68,7 +67,8 @@ export const buildBridgeHttpErrorFrame = (status, backendCode, message, payload 
       httpStatus: status,
       ...(knownCodes.has(backendCode) ? { backendCode } : {}),
       ...(runtime ? { runtime } : {}),
-      ...(diagnosticEvidence?.kind === "generation" ? { diagnosticEvidence } : {}),
+      ...((status === 400 && diagnosticEvidence?.kind === "http" || status === 409 && backendCode === "LOCAL_CONTEXT_GENERATION_CHANGED" && diagnosticEvidence?.kind === "generation"
+        || isHttpFailure(status) && diagnosticEvidence?.kind === "browser") ? { diagnosticEvidence } : {}),
     },
   };
 };
@@ -88,10 +88,10 @@ export const parseBridgeHttpDiagnostic = stderr => {
     if (payload?.code !== "TRELIO_BRIDGE_HTTP_ERROR" || !isHttpFailure(status)
       || (backendCode !== undefined && !knownCodes.has(backendCode))) return null;
     const runtime = status === 409 ? projectRuntimeAdmissionFailure(backendCode, payload.details?.runtime) : null;
-    const diagnosticEvidence = status === 409 && backendCode === "LOCAL_CONTEXT_GENERATION_CHANGED"
-      ? projectDiagnosticDetail(payload.details?.diagnosticEvidence) : null;
+    const diagnosticEvidence = projectDiagnosticDetail(payload.details?.diagnosticEvidence);
     return { httpStatus: status, failureCode: bridgeHttpDiagnosticCode(status, backendCode),
-      ...(diagnosticEvidence?.kind === "generation" ? { diagnosticEvidence } : {}),
+      ...((status === 400 && diagnosticEvidence?.kind === "http" || status === 409 && backendCode === "LOCAL_CONTEXT_GENERATION_CHANGED" && diagnosticEvidence?.kind === "generation"
+        || isHttpFailure(status) && diagnosticEvidence?.kind === "browser") ? { diagnosticEvidence } : {}),
       ...(runtime ? { runtime } : {}) };
   } catch { return null; }
 };

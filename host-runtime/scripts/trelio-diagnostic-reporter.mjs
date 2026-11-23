@@ -65,8 +65,8 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
         if (data.lossReasons !== undefined && (!Array.isArray(data.lossReasons) || data.lossReasons.length > 256)) {
           throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "loss_catalog_invalid"));
         }
-        if (["tools", "validationFields"].some(key => data[key] !== undefined &&
-          (!Array.isArray(data[key]) || data[key].length > 2000 || !data[key].includes("unknown") || data[key].some(value => typeof value !== "string")))) {
+        if (["tools", "validationFields", "detailEvidenceKinds"].some(key => data[key] !== undefined &&
+          (!Array.isArray(data[key]) || data[key].length > 2000 || key !== "detailEvidenceKinds" && !data[key].includes("unknown") || data[key].some(value => typeof value !== "string")))) {
           throw new DeliveryError("delivery_rejected", false, deliveryDetail(context, "capabilities_schema_invalid"));
         }
         capabilities = { version: 2,
@@ -74,7 +74,11 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
           fields: new Set((data.validationFields ?? LEGACY_FIELDS).filter(field => contract.validationFields.includes(field))),
           codes: new Set(data.errorCodes.filter(code => contract.errorCodes.includes(code))),
           losses: new Set((data.lossReasons ?? LEGACY_LOSS_REASONS).filter(reason => contract.lossReasons.includes(reason))),
+          // Old detail-v1 servers know only the original four kinds. Negotiate
+          // each additive kind before sending it; preserve frozen UUID/counts.
           details: data.detailEvidenceVersion === contract.detailEvidence.version,
+          detailKinds: new Set((data.detailEvidenceKinds ?? ["generation", "input", "delivery", "journal"])
+            .filter(kind => contract.detailEvidence.kinds.includes(kind))),
           expires: Date.now() + 300000 };
       } else {
         await discardBody(response);
@@ -111,7 +115,7 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
           target.count += row.count;
           if (!prior) outcomes.set(key, target);
           if (selected.details && code === row.code) for (const detail of row.details ?? [])
-            addDiagnosticDetail(target, detail, { outcomes: [...outcomes.values()], losses: [] });
+            if (selected.detailKinds.has(detail.kind)) addDiagnosticDetail(target, detail, { outcomes: [...outcomes.values()], losses: [] });
         }
         const losses = new Map();
         for (const row of sample.losses) {
@@ -119,7 +123,7 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
           const target = losses.get(reason) ?? { reason, count: 0 };
           target.count = Math.min(1000000, target.count + row.count); losses.set(reason, target);
           if (selected.details && reason === row.reason) for (const detail of row.details ?? [])
-            addDiagnosticDetail(target, detail, { outcomes: [...outcomes.values()], losses: [...losses.values()] });
+            if (selected.detailKinds.has(detail.kind)) addDiagnosticDetail(target, detail, { outcomes: [...outcomes.values()], losses: [...losses.values()] });
         }
         if (unsupported) {
           const target = losses.get("catalog_mismatch") ?? { reason: "catalog_mismatch", count: 0 };

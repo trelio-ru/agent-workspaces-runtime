@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { trelioCallSignal, waitWithinTrelioCall } from "./trelio-hook-private-session.mjs";
+import { rememberDiagnosticDetail, readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 
 const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 const DEFAULT_BROWSER_START_TIMEOUT_MS = 15_000;
@@ -34,6 +35,19 @@ export class SecretBrowserFillError extends Error {
     this.reasonCode = SAFE_REASON_CODES.has(reasonCode) ? reasonCode : "adapter_error";
   }
 }
+
+// The boundary owner supplies a fixed stage. Unknown errors retain "unknown";
+// their prose, causes, URL, selectors, grant and secret never become evidence.
+// Annotation does not consume a grant, alter retry policy or replay a setter.
+export const withBrowserFailureStage = async (stage, action) => {
+  try { return await action(); }
+  catch (error) {
+    if (!readDiagnosticDetail(error)) rememberDiagnosticDetail(error, {
+      kind: "browser", stage, reason: error instanceof SecretBrowserFillError ? error.reasonCode : "unknown",
+    });
+    throw error;
+  }
+};
 
 const hashSecretBrowserTargetUrl = (targetUrl) => (
   crypto.createHash("sha256").update(targetUrl, "utf8").digest("hex")

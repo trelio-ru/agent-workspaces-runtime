@@ -552,6 +552,13 @@ collector stage/fixed reason/HTTP status; journal validation reason/age bucket.
 detail counts – подмножество родительского счётчика. Старый сервер получает
 прежний v2 без details, с тем же UUID и counters. Никаких новых retries,
 deadlines, credentials/Hook trust changes либо переинтерпретации старых rows.
+
+`detailEvidenceKinds` согласует http/process/browser отдельно при v1: старому
+серверу передаются только исходные четыре вида с теми же UUID/counters. HTTP400
+имеет fixed proposal stage/reason; browser fill — origin stage/reason; process —
+проверенный OS/signal/provider code из полного bounded отказа. Неизвестное остаётся
+unknown. Raw fields/values/prose не попадают в telemetry; mutation replay запрещён.
+
 Report v6 хранит полную разбивку/coverage/omissions, loss reasons отдельно по
 единицам; Telegram – bounded subset. [Контракт](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
 

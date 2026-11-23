@@ -1,10 +1,11 @@
+import { parseBridgeHttpDiagnostic } from "../host-runtime/scripts/trelio-bridge-http-diagnostics.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {randomUUID} from 'node:crypto';
 import { buildAgentDiagnosticEvent, createAgentDiagnosticReporter, sendAgentDiagnosticBatch } from "../host-runtime/scripts/trelio-agent-diagnostics.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { TrelioLocalContextError, buildStableCompanyMirror, buildTrelioWorkspaceActionInvocation } from "../host-runtime/scripts/trelio-local-context.mjs";
-import { ProcessDiagnosticError, PROCESS_DIAGNOSTIC_CODES, parseProcessDiagnostic, skillRuntimeExitError, skillSetupExitError } from "../host-runtime/scripts/trelio-process-diagnostics.mjs";
+import { ProcessDiagnosticError, processDiagnosticEvidence, PROCESS_DIAGNOSTIC_CODES, parseProcessDiagnostic, skillRuntimeExitError, skillSetupExitError } from "../host-runtime/scripts/trelio-process-diagnostics.mjs";
 import { formatBridgeCommandError, runMaterializedAgentSkill, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { formatRuntimeHookFailure } from "../host-runtime/scripts/trelio-runtime-session.mjs";
 
@@ -730,4 +731,98 @@ test("dimension downgrade merges colliding fields and rejects malformed capabili
     }
     assert.deepEqual(sample, original);
   }
+});
+
+
+test('additive diagnostic kinds negotiate independently with old detail-v1 servers and retain counters', async () => {
+  for (const kinds of [undefined, ['generation','input','delivery','journal'], contract.detailEvidence.kinds]) {
+    let delivered;
+    const transport = createObservationTransport({readToken:async()=> 'synthetic', fetchImpl:async(url, options)=> {
+      if (url.pathname.endsWith('capabilities')) return new Response(JSON.stringify({schemaVersion:2,
+        errorCodes:contract.errorCodes, detailEvidenceVersion:1, ...(kinds ? {detailEvidenceKinds:kinds} : {})}));
+      delivered=JSON.parse(options.body).samples[0]; return new Response(null,{status:204});
+    }});
+    const value=buildDiagnosticObservation('continue_trelio_workspace_action',{operation:'skill_run'},'TRELIO_SKILL_RUNTIME_EXIT_2');
+    value.outcomes[0].details=[{kind:'process',stage:'skill_run',reason:'TELEGRAM_SESSION_UNAVAILABLE',count:1}];
+    const frozen=JSON.stringify(value);
+    await transport('https://fixture.invalid',[value]);
+    assert.equal(delivered.id,value.id); assert.equal(delivered.outcomes[0].count,1);
+    assert.deepEqual(delivered.outcomes[0].details,kinds?.includes('process') ? value.outcomes[0].details : undefined);
+    assert.equal(JSON.stringify(value),frozen); assert.equal(isDiagnosticObservation(delivered),true);
+  }
+});
+
+test('HTTP 400 origin evidence survives both direct and child boundaries with strict privacy', () => {
+  const detail={kind:'http',stage:'proposal_schema',reason:'schema_invalid'};
+  const error=new TrelioApiError(400,'fixed',null,null,{diagnosticEvidence:detail,issues:[{path:'PRIVATE'}]});
+  assert.deepEqual(readDiagnosticDetail(error),{...detail,count:1});
+  const frame=formatBridgeCommandError(error);
+  assert.doesNotMatch(frame,/PRIVATE/);
+  assert.deepEqual(parseBridgeHttpDiagnostic('Ошибка: '+frame).diagnosticEvidence,{...detail,count:1});
+  assert.equal(readDiagnosticDetail(new TrelioApiError(403,'fixed',null,null,{diagnosticEvidence:detail})),undefined);
+  assert.equal(readDiagnosticDetail(new TrelioApiError(400,'fixed',null,null,{diagnosticEvidence:{...detail,path:'PRIVATE'}})),undefined);
+});
+
+test('browser failures retain exact origin stage without consuming or replaying the operation', async () => {
+  const {parseBrowserFailureEvidence}=await import('../host-runtime/scripts/trelio-diagnostic-observation.mjs');
+  const {SecretBrowserFillError,withBrowserFailureStage}=await import('../host-runtime/scripts/trelio-secret-browser.mjs');
+  for (const stage of contract.detailEvidence.browserStages) {
+    let executions=0;
+    const error=new SecretBrowserFillError('fixed','field_not_found');
+    if(stage==='preflight') error.preflight=true;
+    await assert.rejects(withBrowserFailureStage(stage,()=>{executions++;throw error;}),e=>e===error);
+    const frame=formatBridgeCommandError(error);
+    assert.equal(executions,1);
+    assert.deepEqual(parseBrowserFailureEvidence('Ошибка: '+frame),{kind:'browser',stage,reason:'field_not_found',count:1});
+    assert.equal(parseBrowserFailureEvidence('Ошибка: '+frame+'\nother failure'),null);
+    if(stage==='preflight') assert.equal(JSON.parse(frame).grantConsumedByAttempt,false);
+    else assert.equal(JSON.parse(frame).grantConsumedByAttempt,undefined);
+  }
+  const unknown=Object.assign(new Error('fixed'),{reasonCode:'field_not_found',url:'PRIVATE_URL',secret:'PRIVATE_VALUE'});
+  await assert.rejects(withBrowserFailureStage('decrypt',()=>{throw unknown;}));
+  assert.deepEqual(readDiagnosticDetail(unknown),{kind:'browser',stage:'decrypt',reason:'unknown',count:1});
+  assert.doesNotMatch(formatBridgeCommandError(unknown),/PRIVATE/);
+});
+
+test('process evidence keeps the inner reviewed reason without provider prose or widening the outcome code', () => {
+  const error=skillSetupExitError(2,{skillId:'telegram-mtproto',stderr:JSON.stringify({ok:false,code:'TELEGRAM_SESSION_UNAVAILABLE',message:'PRIVATE'})});
+  assert.deepEqual(processDiagnosticEvidence(error.details),{kind:'process',stage:'skill_run',reason:'TELEGRAM_SESSION_UNAVAILABLE'});
+  const value=buildDiagnosticObservation('continue_trelio_workspace_action',{operation:'skill_run'},error.diagnosticCode);
+  value.outcomes[0].details=[{...processDiagnosticEvidence(error.details),count:1}];
+  assert.equal(isDiagnosticObservation(value),true);
+  value.outcomes[0].code='OK'; assert.equal(isDiagnosticObservation(value),false);
+  assert.doesNotMatch(JSON.stringify(processDiagnosticEvidence(error.details)),/PRIVATE/);
+  const unknown=new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_START_FAILED','fixed',{operation:'skill_run',causeCode:'UNKNOWN'});
+  const unknownValue=buildDiagnosticObservation('continue_trelio_workspace_action',{operation:'skill_run'},unknown.diagnosticCode);
+  unknownValue.outcomes[0].details=[{...processDiagnosticEvidence(unknown.details),count:1}];
+  assert.equal(isDiagnosticObservation(unknownValue),true);
+  assert.equal(unknownValue.outcomes[0].details[0].reason,'unknown');
+});
+
+
+test('ordinary reviewed provider failure waits for a complete pipe and preserves its inner exit reason', async t => {
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-provider-refusal-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const marker=path.join(directory,'executions');
+  await fs.writeFile(path.join(directory,'main.mjs'),`import fs from 'node:fs';
+    fs.appendFileSync(${JSON.stringify(marker)},'started\\n');
+    process.stderr.write(JSON.stringify({ok:false,code:'TELEGRAM_SESSION_UNAVAILABLE'}));process.exitCode=2;`);
+  const artifact={skillId:'telegram-mtproto',runtimeVersion:'0.0.0',parsedPackage:{entrypoint:{path:'main.mjs',interpreter:'node'},capabilities:[]}};
+  await assert.rejects(runMaterializedAgentSkill({artifact,runtimeDirectory:directory,runtimeArguments:['status'],
+    executionContext:{skillId:artifact.skillId,companyId:randomUUID(),releaseId:randomUUID()}}),error=> {
+    assert.equal(error.diagnosticCode,'TRELIO_SKILL_RUNTIME_EXIT_2');
+    assert.equal(error.details.providerCode,'TELEGRAM_SESSION_UNAVAILABLE'); return true;
+  });
+  assert.equal((await fs.readFile(marker,'utf8')).split('started').length-1,1);
+});
+
+test('an ambiguous consume HTTP failure keeps its origin stage without claiming the grant survived', async () => {
+  const {withBrowserFailureStage}=await import('../host-runtime/scripts/trelio-secret-browser.mjs');
+  const error=new TrelioApiError(503,'fixed');
+  await assert.rejects(withBrowserFailureStage('consume',()=>{throw error;}));
+  const frame=formatBridgeCommandError(error);
+  const parsed=parseBridgeHttpDiagnostic('Ошибка: '+frame);
+  assert.equal(parsed.failureCode,'TRELIO_BACKEND_HTTP_5XX');
+  assert.deepEqual(parsed.diagnosticEvidence,{kind:'browser',stage:'consume',reason:'unknown',count:1});
+  assert.doesNotMatch(frame,/grantConsumedByAttempt|secretRequested/);
 });

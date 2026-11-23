@@ -6,10 +6,27 @@ const known = (list, value, fallback = "unknown") => list.includes(value) ? valu
 const version = value => typeof value === "string" && /^\d{1,5}\.\d{1,5}\.\d{1,5}$/u.test(value) ? value : "0.0.0";
 const vocabulary = contract.detailEvidence;
 const detailKeys = {
+  http: ["kind", "stage", "reason", "count"],
+  process: ["kind", "stage", "reason", "count"],
+  browser: ["kind", "stage", "reason", "count"],
   generation: ["kind", "stage", "reason", "count"],
   input: ["kind", "stage", "reason", "key", "expectedType", "actualType", "count"],
   delivery: ["kind", "stage", "reason", "httpStatus", "count"],
   journal: ["kind", "stage", "reason", "ageBucket", "count"],
+};
+
+// Parse the final reviewed browser refusal frame. Callers keep the existing
+// error classification and consume only the closed stage/reason projection.
+export const parseBrowserFailureEvidence = stderr => {
+  if (typeof stderr !== "string" || Buffer.byteLength(stderr) > 64 * 1024) return null;
+  const line = stderr.trimEnd().split("\n").at(-1);
+  if (!line.startsWith("Ошибка: {") || Buffer.byteLength(line) > 8192) return null;
+  try {
+    const frame = JSON.parse(line.slice("Ошибка: ".length));
+    if (!["SECRET_BROWSER_PREFLIGHT_FAILED", "TRELIO_BROWSER_FILL_ERROR"].includes(frame.code)) return null;
+    const evidence = projectDiagnosticDetail(frame.diagnosticEvidence);
+    return evidence?.kind === "browser" ? evidence : null;
+  } catch { return null; }
 };
 
 // Strict canonical projection is shared by typed errors, untrusted HTTP/child
@@ -59,6 +76,9 @@ export const diagnosticDetailsMatch = (row, code, loss) => {
     || new Set(details.map(detailKey)).size !== details.length) return false;
   return details.every(detail => code !== undefined
     ? detail.kind === "generation" ? code === "LOCAL_CONTEXT_GENERATION_CHANGED"
+      : detail.kind === "http" ? code === "TRELIO_BACKEND_HTTP_400"
+      : detail.kind === "process" ? vocabulary.processCodes.includes(code)
+      : detail.kind === "browser" ? vocabulary.browserCodes.includes(code)
       : detail.kind === "input" && code === "TRELIO_WORKSPACE_INPUT_" + detail.reason
     : detail.kind === "delivery" ? ["delivery_timeout", "delivery_transport", "delivery_rejected", "credential_unavailable"].includes(loss)
       : detail.kind === "journal" && ["journal_full", "journal_invalid", "journal_expired"].includes(loss));

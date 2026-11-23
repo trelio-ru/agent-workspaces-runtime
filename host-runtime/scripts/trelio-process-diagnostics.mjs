@@ -211,3 +211,14 @@ export const parseProcessDiagnostic = (stderr, { completedSkillRun = false } = {
     return safeDetails(code, payload.details);
   } catch { return null; }
 };
+
+// Called only after the trusted constructor/final-frame parser has projected
+// safeDetails. The primary exit bucket remains unchanged; a provider reason
+// explains it without exporting any provider payload or authorizing a replay.
+export const processDiagnosticEvidence = details => ({
+  kind: "process", stage: stages.has(details.hookStage) ? details.hookStage
+    : details.operation === "skill_run" ? "skill_run" : "unknown",
+  // The local process ABI spells an unclassified errno as UNKNOWN; telemetry
+  // has one lowercase unknown sentinel. Preserve stage coverage in that case.
+  reason: details.providerCode ?? (details.causeCode === "UNKNOWN" ? undefined : details.causeCode) ?? details.signal ?? "unknown",
+});

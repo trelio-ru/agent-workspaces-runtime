@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { rememberDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { trelioCallSignal, waitWithinTrelioCall, withTrelioCallBudget } from "./trelio-hook-private-session.mjs";
 import {
   normalizeSecretBrowserTarget,
@@ -64,10 +65,10 @@ export const withSecretBrowserPreflight = async (prepare, timeoutMs = BROWSER_PR
     return result;
   }, {
     timeoutMs,
-    timeoutError: () => Object.assign(
+    timeoutError: () => rememberDiagnosticDetail(Object.assign(
       new SecretBrowserFillError(secretBrowserPreflightTimeoutMessage(phase), "timeout"),
       { preflight: true, phase },
-    ),
+    ), { kind: "browser", stage: "preflight", reason: "timeout" }),
   });
 };
 const nativeApplicationKind = (reply) => {

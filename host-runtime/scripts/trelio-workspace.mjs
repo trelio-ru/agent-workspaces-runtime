@@ -2,7 +2,7 @@
 import { decodeSkillInstructionGuide, readSignedSkillInstructionGuides } from "./trelio-agent-skill-budget.mjs";
 import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { rememberDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
+import { rememberDiagnosticDetail, readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 
 /**
@@ -102,6 +102,7 @@ import {
 import { needsExternalWorkspaceStorage } from "./trelio-folder-onboarding.mjs";
 import {
   SecretBrowserFillError,
+  withBrowserFailureStage,
 } from "./trelio-secret-browser.mjs";
 import {
   assertBrowserFillBindingUnchanged,
@@ -1533,7 +1534,7 @@ export class TrelioApiError extends Error {
     this.retryAfterMilliseconds = retryAfterMilliseconds;
     this.code = code;
     this.payload = payload;
-    if (statusCode === 409 && code === "LOCAL_CONTEXT_GENERATION_CHANGED") {
+    if (statusCode === 400 && payload?.diagnosticEvidence?.kind === "http" || statusCode === 409 && code === "LOCAL_CONTEXT_GENERATION_CHANGED") {
       try { rememberDiagnosticDetail(this, payload?.diagnosticEvidence); } catch { /* Preserve the original HTTP error. */ }
     }
   }
@@ -1632,6 +1633,7 @@ export const formatBridgeCommandError = (error, command = "") => {
     }
     return `${error.code}: ${detail} Повторно откройте этот exact Run через Trelio, чтобы получить новую lease, затем повторите исходное действие один раз.`;
   }
+  const browserEvidence = readDiagnosticDetail(error);
   if (error instanceof SecretBrowserFillError) {
     // The reason code is deliberately content-free and already belongs to the
     // audit allowlist. Returning it here makes a pre-consume failure actionable
@@ -1645,8 +1647,13 @@ export const formatBridgeCommandError = (error, command = "") => {
       reasonCode: error.reasonCode,
       secretRequested: false,
       grantConsumedByAttempt: false,
+      ...(browserEvidence?.kind === "browser" ? { diagnosticEvidence: browserEvidence } : {}),
     });
-    return `${error.message} [reasonCode=${error.reasonCode}]`;
+    if (browserEvidence?.kind !== "browser") return `${error.message} [reasonCode=${error.reasonCode}]`;
+  }
+  if (browserEvidence?.kind === "browser" && !(error instanceof TrelioApiError)) {
+    return JSON.stringify({ code: "TRELIO_BROWSER_FILL_ERROR", message: error.message,
+      diagnosticEvidence: browserEvidence });
   }
   if (
     !(error instanceof TrelioApiError)
@@ -1657,7 +1664,7 @@ export const formatBridgeCommandError = (error, command = "") => {
     // validation and access from an actual process failure. Existing lease and
     // storage recovery branches above/below retain their specific instructions.
     if (error instanceof TrelioApiError) {
-      return JSON.stringify(buildBridgeHttpErrorFrame(error.statusCode, error.code, error.message, error.payload));
+      return JSON.stringify(buildBridgeHttpErrorFrame(error.statusCode, error.code, error.message, error.payload, readDiagnosticDetail(error) ?? error.payload?.diagnosticEvidence));
     }
     return error instanceof Error ? error.message : String(error);
   }
@@ -9911,19 +9918,23 @@ const runMaterializedAgentSkillUnqueued = async ({
   }
   const exactRead = !prepareSetupEnvironment && grantedStdin === null
     && isTelegramExactRead(artifact.skillId, runtimeArguments);
+  const captureRefusal = exactRead || (!prepareSetupEnvironment && grantedStdin === null && artifact.skillId === "telegram-mtproto");
   await new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: runtimeDirectory,
       env: runtimeEnvironment,
       shell: false,
-      stdio: [grantedStdin === null ? "inherit" : "pipe", "inherit", exactRead ? "pipe" : "inherit"],
+      stdio: [grantedStdin === null ? "inherit" : "pipe", "inherit", captureRefusal ? "pipe" : "inherit"],
     });
-    // The exact read emits one JSON refusal on stderr. Drain the whole pipe
-    // without forwarding it, retain at most the refusal limit, and wait for
-    // close so a partial/signal-terminated response cannot become evidence.
-    const refusal = exactRead ? Buffer.alloc(SKILL_REFUSAL_MAX_BYTES) : null;
+    // Reviewed Telegram commands can explain a completed exit with one closed
+    // refusal. Exact reads keep stderr private; ordinary commands retain their
+    // existing stderr transport, with stream backpressure rather than an
+    // unbounded JS write queue. The diagnostic copy alone is capped at 64 KiB.
+    // Wait for close: exit alone cannot certify that the pipe is complete.
+    const refusal = captureRefusal ? Buffer.alloc(SKILL_REFUSAL_MAX_BYTES) : null;
     let refusalBytes = 0;
-    let completeRefusal = exactRead;
+    let completeRefusal = captureRefusal;
+    if (child.stderr && !exactRead) child.stderr.pipe(process.stderr, { end: false });
     child.stderr?.on("data", (chunk) => {
       if (!completeRefusal) return;
       if (refusalBytes + chunk.length > refusal.length) {
@@ -9960,10 +9971,11 @@ const runMaterializedAgentSkillUnqueued = async ({
         "Не удалось запустить runtime навыка.",
         { operation: "skill_run", causeCode: processDiagnosticCauseCode(error) }));
     });
-    child.once(exactRead ? "close" : "exit", (code, signal) => {
+    child.once(captureRefusal ? "close" : "exit", (code, signal) => {
       clearSupervision();
       const failure = code === 0 ? null : completeRefusal && !deadlineExceeded && !signal
-        ? skillExactReadExitError(code, refusal.subarray(0, refusalBytes))
+        ? exactRead ? skillExactReadExitError(code, refusal.subarray(0, refusalBytes))
+          : skillSetupExitError(code, { skillId: artifact.skillId, stderr: refusal.subarray(0, refusalBytes) })
         : skillRuntimeExitError(code ?? 1);
       refusal?.fill(0);
       if (deadlineExceeded) {
@@ -20357,11 +20369,12 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
   // browser-сессию до необратимого consume одноразового grant.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const contextResponse = await request(workspaceOrigin, token,
-        `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?runId=${metadata.runId}`);
-      browserContext = await contextResponse.json();
+      const contextResponse = await withBrowserFailureStage("context", () => request(workspaceOrigin, token,
+        `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?runId=${metadata.runId}`));
+      browserContext = await withBrowserFailureStage("context", () => contextResponse.json());
       if (browserContext.grantId !== grantId || browserContext.runId !== metadata.runId) {
-        throw new SecretBrowserFillError("Browser context принадлежит другому grant или Run.");
+        throw rememberDiagnosticDetail(new SecretBrowserFillError("Browser context принадлежит другому grant или Run."),
+          { kind: "browser", stage: "context", reason: "adapter_error" });
       }
       break;
     } catch (error) {
@@ -20369,7 +20382,7 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
       await wait(250 * attempt);
     }
   }
-  const browserSession = await prepareSecretBrowserSession({
+  const browserSession = await withBrowserFailureStage("preflight", () => prepareSecretBrowserSession({
     context: browserContext,
     targetUrl,
     mode: browserMode,
@@ -20378,7 +20391,7 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
     prepareManaged: browserStorage.prepareManaged,
     ensurePrivateDirectory,
     onPreflightPhase,
-  });
+  }));
   // The native grant context attests an own personal card independently of
   // Workspace encryption. Company cards keep the fail-closed E2EE decoder.
   const ownKeyringCard = profile?.kind === 'digital_assistant' && browserContext.holder === 'assistant';
@@ -20394,12 +20407,12 @@ const executeSecretBrowserFill = async (options, positional) => {
   try {
     // Plaintext появляется только в памяти bridge после atomic consume. Target
     // URL не доверяется: helper повторно сравнит его с закреплённым origin.
-    const response = await request(workspaceOrigin, token, `/api/agent-secrets/checkout-grants/${grantId}/consume`, {
+    const response = await withBrowserFailureStage("consume", () => request(workspaceOrigin, token, `/api/agent-secrets/checkout-grants/${grantId}/consume`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ runId }),
-    });
-    const payload = await response.json();
+    }));
+    const payload = await withBrowserFailureStage("consume", () => response.json());
     if (
       payload.runId !== runId
       || payload.deliveryMode !== "browser"
@@ -20409,7 +20422,8 @@ const executeSecretBrowserFill = async (options, positional) => {
       || !Array.isArray(payload.browserSteps)
       || payload.browserSteps.length === 0
     ) {
-      throw new Error("Trelio вернул некорректный browser-fill grant.");
+      throw rememberDiagnosticDetail(new Error("Trelio вернул некорректный browser-fill grant."),
+        { kind: "browser", stage: "consume", reason: "unknown" });
     }
 
     // The automatic fallback is a separate browser profile. Surface metadata
@@ -20420,14 +20434,17 @@ const executeSecretBrowserFill = async (options, positional) => {
     let localResult = null;
     let outcomeReported = false;
     try {
-      assertBrowserFillBindingUnchanged(browserContext, payload);
-      if (ownKeyringCard && payload.storageMode !== 'trelio') {
-        throw new SecretBrowserFillError('The personal browser grant changed its storage mode.');
-      }
-      const secretValues = await resolveCheckoutSecretValues(payload, ownKeyringCard ? null : companyEncryption);
+      await withBrowserFailureStage("binding", () => {
+        assertBrowserFillBindingUnchanged(browserContext, payload);
+        if (ownKeyringCard && payload.storageMode !== 'trelio') {
+          throw new SecretBrowserFillError('The personal browser grant changed its storage mode.');
+        }
+      });
+      const secretValues = await withBrowserFailureStage("decrypt", () =>
+        resolveCheckoutSecretValues(payload, ownKeyringCard ? null : companyEncryption));
       // The prepared session already owns the checked URL, fields and
       // profile. Delivery supplies only the values from the one-use grant.
-      const result = await browserSession.fill({ secretValues });
+      const result = await withBrowserFailureStage("fill", () => browserSession.fill({ secretValues }));
       localResult = result;
 
       await reportSecretBrowserFillOutcome({
@@ -20441,10 +20458,10 @@ const executeSecretBrowserFill = async (options, positional) => {
       outcomeReported = true;
       if (result.outcome !== "succeeded") {
         const reasonCode = result.reasonCode || "adapter_error";
-        throw new SecretBrowserFillError(
+        throw rememberDiagnosticDetail(new SecretBrowserFillError(
           `Trelio Secret Browser не выполнил автоматическую подстановку значения (${reasonCode}).`,
           reasonCode,
-        );
+        ), { kind: "browser", stage: "fill", reason: reasonCode });
       }
       process.stdout.write("Секрет автоматически вставлен в exact поле; plaintext агенту не возвращался.\n");
       if (browserSession.surface === "chrome" && result.postSubmit) {
@@ -20466,10 +20483,10 @@ const executeSecretBrowserFill = async (options, positional) => {
       // Локальный результат уже мог наступить, а потерялся только ответ audit
       // endpoint. В таком случае нельзя записывать противоречивый outcome.
       if (localResult && !outcomeReported) {
-        throw new Error(
+        throw rememberDiagnosticDetail(new Error(
           "Browser fill завершился локально, но безопасный audit outcome не удалось подтвердить после трёх попыток. Не повторяйте операцию автоматически.",
           { cause: error },
-        );
+        ), { kind: "browser", stage: "outcome", reason: "unknown" });
       }
       if (localResult && outcomeReported) throw error;
       const reasonCode = error instanceof SecretBrowserFillError
@@ -20489,17 +20506,17 @@ const executeSecretBrowserFill = async (options, positional) => {
         outcomeError = reportError;
       }
       if (outcomeError) {
-        throw new Error(
+        throw rememberDiagnosticDetail(new Error(
           "Browser fill завершился ошибкой, а безопасный audit outcome не удалось подтвердить после трёх попыток.",
           { cause: new AggregateError([error, outcomeError]) },
-        );
+        ), { kind: "browser", stage: "outcome", reason: "unknown" });
       }
       throw error;
     }
   } finally {
     // Даже потерянный consume response закрывает prepared native handle. Нельзя
     // повторять checkout: сервер уже мог потратить одноразовый grant.
-    await browserSession.close();
+    await withBrowserFailureStage("close", () => browserSession.close());
   }
 };
 

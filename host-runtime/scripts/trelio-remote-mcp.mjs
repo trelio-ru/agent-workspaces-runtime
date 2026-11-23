@@ -32,7 +32,7 @@ import {
 } from "./trelio-host-runtime-recovery.mjs";
 import { readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
-import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
+import { ProcessDiagnosticError, processDiagnosticEvidence } from "./trelio-process-diagnostics.mjs";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
@@ -7005,7 +7005,7 @@ export const handleLocalMcpMessage = async (
         recordDiagnostic?.(message.params?.name, message.params?.arguments,
           diagnosticCode,
           { field: effectiveError instanceof TrelioLocalContextError ? effectiveError.diagnosticField : undefined,
-            evidence: readDiagnosticDetail(effectiveError) });
+            evidence: effectiveError instanceof ProcessDiagnosticError ? processDiagnosticEvidence(effectiveError.details) : readDiagnosticDetail(effectiveError) });
       } catch { /* Telemetry must preserve the original result. */ }
       const isProposalCardError = errorPayload.code.startsWith("LOCAL_CONTEXT_PROPOSAL_");
       return {

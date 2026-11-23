@@ -1791,6 +1791,9 @@ Exact legacy template bytes для распознавания при мигра�
   Shared guard генерируется из backend, а не поддерживается копией.
 - Личный слой навыка в model projection сохраняется отдельно от signed base;
   lazy/reuse semantics проверяются в `tests/trelio-mcp-results.test.mjs`.
+- Additive diagnostic kinds are negotiated independently from detailEvidenceVersion;
+  preserve frozen UUID/counters and never derive retry authority from evidence.
+  See [closed diagnostics](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
 
 ## Git workflow
 
