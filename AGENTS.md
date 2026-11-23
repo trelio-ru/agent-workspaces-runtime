@@ -104,6 +104,10 @@ publication tooling также остаются вне этого публичн
   и проверяет исход возможной записи по её квитанции. Неопределённая запись
   не повторяется. Полномочия отдельных режимов сохранения и просмотра
   черновика определяются существующими native проверками.
+  Retired acceptance inspects only its pinned Workspace/head through the
+  ordinary encrypted material profile. A verified pre-dispatch local profile
+  refusal can earn one separately journaled correction after native read-back;
+  uncertain actions keep both immutable markers. See the scheduler contract.
   Retired task inspection uses the original chat/receipt and a separate
   one-use start bit. Only exact task reads and a pinned draft checkpoint can
   run there. Provider effects stay held; an independent task may proceed.

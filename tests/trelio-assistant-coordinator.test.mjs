@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createAssistantInbox, readAssistantWorkspaceDraftRecovery } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantWorkspaceDraftRecovery, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { assistantTaskStorageDirectory, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
@@ -821,8 +821,9 @@ test(`retired writer preserves the original task and admits an independent overd
   }finally{await restarted.close();}
 });
 
-for(const mode of ['completed','lost_committed','unknown_write','lost_unknown'])
+for(const mode of ['completed','lost_committed','unknown_write','lost_unknown','repair','repair_lost','repair_wrong_arguments'])
 test(`retired accepted task can settle only its existing scheduled receipt (${mode})`,async t=>{
+  const repairing=mode.startsWith('repair');
   const f=fixture(t);f.authority.workMode='task';
   const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
   f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
@@ -845,6 +846,9 @@ test(`retired accepted task can settle only its existing scheduled receipt (${mo
   const evidence={workspaceId:randomUUID(),runId:randomUUID(),acceptedHead:'a'.repeat(40),nativeControlReceipts:[]};
   const originalTurn=randomUUID();
   const selected={goalState:'active',schedule:{priorReceiptId:randomUUID(),cadence:'every_30_minutes',timeZone:'Europe/Moscow',dailyLocalTime:null}};
+  const failedMarker=repairing?randomUUID():undefined;
+  const failureTurn=randomUUID();
+  if(failedMarker)inbox.startRetiredTaskOutcome(pass.deliveryId,receipt.receiptId,failedMarker);
   f.options.onBusinessConfirmed=async()=>{recoveryClears++;};
   f.options.client.readBusinessOutcome=async()=>outcome??{schemaVersion:1,state:'pending'};
   f.options.client.readTaskRetiredOutcomeEvidence=async (original,witness)=>{
@@ -856,43 +860,53 @@ test(`retired accepted task can settle only its existing scheduled receipt (${mo
   f.options.native.readDelivery=async (thread,marker,options)=>{
     assert.equal(thread,pass.threadId);assert.equal(marker,pass.deliveryId);
     assert.equal(options.retiredAcceptedOutcome.retirementReceiptId,receipt.receiptId);
-    return mode==='unknown_write'?{state:'uncertain'}:{state:'retired_outcome_observed',turnId:originalTurn,evidence};
+    if(mode==='unknown_write')return {state:'uncertain'};
+    if(repairing)assert.equal(options.retiredAcceptedOutcome.failedConfirmationMarker,failedMarker);
+    const refusal=repairing?{turnId:failureTurn,arguments:assistantRetiredOutcomeCompletion(evidence,
+      selected.schedule,selected.goalState,receipt.receiptId)}:null;
+    if(mode==='repair_wrong_arguments')refusal.arguments.cadence='daily';
+    return {state:'retired_outcome_observed',turnId:originalTurn,evidence,...(refusal?{refusal}:{})};
   };
   f.options.native.run=async(input,options)=>{
     starts++;
     assert.equal(input.threadId,pass.threadId);assert.notEqual(input.deliveryId,pass.deliveryId);
     assert.notEqual(input.deliveryId,receipt.receiptId);assert.deepEqual(options.retiredPass.outcome,evidence);
     assert.equal(options.retiredOutcome.originalTurnId,originalTurn);
-    assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).outcomeMarker,undefined);
+    assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).outcomeMarker,failedMarker);
+    if(repairing)assert.equal(options.retiredOutcome.refusal.turnId,failureTurn);
     await options.beforeInvocation(options.signal);
     options.startInvocation(input);
-    assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).outcomeMarker,input.deliveryId);
-    if(mode!=='lost_unknown'){
+    const record=inbox.readRetiredTaskWriter(pass.deliveryId);
+    assert.equal(record.outcomeMarker,failedMarker??input.deliveryId);
+    assert.equal(record.outcomeRepairMarker,repairing?input.deliveryId:undefined);
+    if(!['lost_unknown','repair_lost'].includes(mode)){
       const {assistantId,deviceId,companyId,taskId,bindingId,bindingRevision,deliveryId,threadId}=pass;
       outcome={schemaVersion:1,state:'confirmed',receiptId:randomUUID(),assistantId,deviceId,companyId,taskId,bindingId,bindingRevision,deliveryId,threadId,
         continuation:{goalState:'active',cadence:'every_30_minutes',timeZone:'Europe/Moscow'}};
     }
-    if(mode.startsWith('lost_'))throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    if(mode.startsWith('lost_')||mode==='repair_lost')
+      throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
     return {state:'completed'};
   };
   await f.coordinator.close();
   let restarted=createAssistantCoordinator(f.options);
   try{
-    if(mode.startsWith('lost_')){
+    if(mode.startsWith('lost_')||mode==='repair_lost'){
       await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
       await restarted.close();
       restarted=createAssistantCoordinator(f.options);
     }
     if(mode!=='completed')await restarted.workOnce();
     else assert.equal((await restarted.workOnce()).state,'completed');
-    const settled=['completed','lost_committed'].includes(mode);
-    assert.equal(starts,mode==='unknown_write'?0:1);
-    assert.equal(reads,mode==='unknown_write'?0:2);
+    const settled=['completed','lost_committed','repair'].includes(mode);
+    assert.equal(starts,['unknown_write','repair_wrong_arguments'].includes(mode)?0:1);
+    assert.equal(reads,mode==='unknown_write'?0:mode==='repair_wrong_arguments'?1:2);
     assert.equal(recoveryClears,settled?1:0);
     assert.equal(inbox.readDelivery(pass.deliveryId).state,settled?'complete':'uncertain');
     assert.deepEqual(inbox.retiredTaskIds(),settled?[]:[pass.taskId]);
     assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).receipt.receiptId,receipt.receiptId);
-    assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,mode==='unknown_write'?32:34);
+    assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,
+      mode==='unknown_write'?32:repairing&&mode!=='repair_wrong_arguments'?35:34);
     const actual=restarted.status()[0];
     assert.equal(f.activePass(),null);
     if(settled){

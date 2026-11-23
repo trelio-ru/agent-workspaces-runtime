@@ -4266,17 +4266,18 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
     // and native responses, never the profile, signer or accepted-file path.
     const withProfile=(action,options)=>withProductionAssistantWorkspace(action,{...options,
       context:opened=>opened({...f.client,identity:f.identity},f.host,f.store)});
-    const completed=await withAssistantEncryptedMaterial({args:completion},async wire=>{
+    const confirmMaterial=async wire=>{
       completionCalls++;
       assert.doesNotMatch(JSON.stringify(wire),/Verified material result|SYNTHETIC_ENCRYPTED_DELIVERABLE|privateKey|WORK\.md/u);
       const {runtimeSessionProof:proof,...facts}=wire.encryptedMaterialWitness;
       assert.equal(facts.cryptoDeviceId,cryptoDeviceId);assert.equal(facts.envelopeId,envelope.id);
-      const manifest=assistantEncryptedMaterialProofPayload({...f.pass,...completion,...facts,references:[]});
+      const manifest=assistantEncryptedMaterialProofPayload({...f.pass,...wire,...facts,references:[]});
       const tool=assistantEncryptedMaterialProofTool(digest(manifest));
       assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
         createPublicKey({key:Buffer.from(f.runtime.state.privateKeyPkcs8,'base64url'),format:'der',type:'pkcs8'}),Buffer.from(proof.signature,'base64url')),true);
       return {state:'confirmed'};
-    },{withProfile});
+    };
+    const completed=await withAssistantEncryptedMaterial({args:completion},confirmMaterial,{withProfile});
     if(named){
       assert.equal(completed.isError,true);
       assert.equal(completed.structuredContent.code,'ASSISTANT_WORKSPACE_MATERIAL_TARGET_REQUIRED');
@@ -4292,7 +4293,26 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
         ()=>assert.fail('foreign completion dispatched'),{withProfile}),
         {code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
       mode='valid';
-    }else{assert.equal(completed.state,'confirmed');assert.equal(completionCalls,1);}
+    }else{
+      assert.equal(completed.state,'confirmed');assert.equal(completionCalls,1);
+      // Exercise the production protected profile, the same HPKE recipient and
+      // the exact accepted Git head again after the original writer stopped.
+      // A stub that returns prepareWorkspaceMaterial=true misses this boundary.
+      const readOriginalPass=f.client.readTaskPass;
+      const retiredPass={writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:4,
+        outcome:{workspaceId:descriptor.workspaceId,runId,acceptedHead:selectedHead,nativeControlReceipts:[]}};
+      f.changePass({...f.pass,retiredPass});
+      f.client.readTaskPass=async()=>({...await readOriginalPass(),state:'closed',workMode:'task',leaseRevision:4});
+      const retiredArgs={...completion,clientRequestId:retiredPass.writerRetirementReceiptId};
+      try{
+        await assert.rejects(withAssistantEncryptedMaterial({args:{...retiredArgs,workspaceId:randomUUID()}},
+          ()=>assert.fail('foreign material dispatched'),{withProfile}),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+        await assert.rejects(withAssistantEncryptedMaterial({args:{...retiredArgs,acceptedRunId:randomUUID()}},
+          ()=>assert.fail('foreign Run dispatched'),{withProfile}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+        const confirmed=await withAssistantEncryptedMaterial({args:retiredArgs},confirmMaterial,{withProfile});
+        assert.equal(confirmed.state,'confirmed');assert.equal(completionCalls,2);
+      }finally{f.changePass(f.pass);f.client.readTaskPass=readOriginalPass;}
+    }
     // A named archive remains independently readable; refusal of task evidence
     // cannot delete, rewrite or prohibit the accepted related-context save.
     const inspection=await common.withWorkspaceExecutionProfile(f.profile,()=>common.inspectAcceptedWorkspace(f.identity.origin,{workspace:descriptor.workspaceId}));

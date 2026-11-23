@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
-  ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+  ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft,
   readAssistantCodexWriterReleased,withAssistantCodexWriter,inspectRetiredAcceptedOutcome } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
@@ -69,12 +69,44 @@ test('a retired scheduled task can confirm its own accepted Run with independent
   }
   const legacy={id:randomUUID(),status:'completed',items:[{type:'userMessage',
     content:[{type:'text',text:assistantDeliveryMarker(retirementReceiptId)+'\ninspection'}]},call('get_task',{}, {})]};
-  const read=(later)=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
-    retiredAcceptedOutcome:{taskPass,retirementReceiptId,assistantId:taskContext.assistantId},
+  const read=(turns,failedConfirmationMarker)=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
+    retiredAcceptedOutcome:{taskPass,retirementReceiptId,assistantId:taskContext.assistantId,failedConfirmationMarker},
     spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
-      ?{thread:{id:threadId,cwd:process.cwd()}}:{data:[later,turn],nextCursor:null}}))});
-  assert.deepEqual(await read(legacy),{state:'retired_outcome_observed',turnId:turn.id,evidence});
-  assert.deepEqual(await read({...legacy,items:[...legacy.items,call('create_comment',{}, {})]}),{state:'uncertain'});
+      ?{thread:{id:threadId,cwd:process.cwd()}}:{data:turns,nextCursor:null}}))});
+  const observed={state:'retired_outcome_observed',turnId:turn.id,evidence};
+  assert.deepEqual(await read([legacy,turn]),observed);
+  assert.deepEqual(await read([{...legacy,items:[...legacy.items,call('create_comment',{}, {})]},turn]),{state:'uncertain'});
+
+  // Native Codex serializes the local refusals as failed tool items, with the
+  // closed content/code, even though the surrounding model turn completed.
+  const marker=randomUUID();
+  const schedule={priorReceiptId:randomUUID(),cadence:'every_30_minutes',timeZone:'Europe/Moscow',dailyLocalTime:null};
+  const business=assistantRetiredOutcomeCompletion(evidence,schedule,'waiting_owner',retirementReceiptId);
+  const prompt=assistantNativePrompt(marker,assistantWorkStateContext(taskContext),{
+    retiredPass:{writerRetirementReceiptId:retirementReceiptId,expectedLeaseRevision:1,outcome:evidence},
+    retiredOutcome:{schedule,goalState:'waiting_owner'},
+  });
+  const code='ASSISTANT_WORKSPACE_PROFILE_DENIED';
+  const failed={id:randomUUID(),status:'completed',items:[
+    {type:'userMessage',content:[{type:'text',text:prompt}]},
+    {type:'mcpToolCall',server:'trelio-assistant',tool:'complete_assistant_pass',status:'failed',error:null,
+      arguments:{...business,taskPass,runtimeSessionProof:{runtimeSessionId:randomUUID()}},
+      result:{content:[{type:'text',text:code}],structuredContent:{code},_meta:null}},
+    {type:'reasoning'}, {type:'agentMessage',text:'Fixture refused before dispatch.'},
+  ]};
+  assert.deepEqual(await read([failed,legacy,turn],marker),{...observed,refusal:{turnId:failed.id,arguments:business}});
+  assert.deepEqual(await read([failed,turn],marker),{...observed,refusal:{turnId:failed.id,arguments:business}});
+  for(const alter of [
+    value=>{value.status='interrupted';}, value=>{value.items[1].result.structuredContent={code:'ASSISTANT_TRANSPORT_UNAVAILABLE'};},
+    value=>{value.items.push(call('get_task',{},{}));}, value=>{value.items[1].arguments.workspaceHead='f'.repeat(40);},
+    value=>{value.items[1].result._meta={unknown:true};}, value=>{value.items[1].result.content.push({type:'text',text:code});},
+    value=>{value.items[1].arguments.taskPass={...taskPass,passId:randomUUID()};},
+    value=>{value.items[1].arguments.runtimeSessionProof=null;},
+  ]){
+    const altered=structuredClone(failed);alter(altered);
+    assert.deepEqual(await read([altered,legacy,turn],marker),{state:'uncertain'});
+  }
+  assert.deepEqual(await read([failed,legacy,turn],randomUUID()),{state:'uncertain'});
 });
 
 test('completed PREPARE permits only a separate bounded readiness witness, never provision completion',async()=>{

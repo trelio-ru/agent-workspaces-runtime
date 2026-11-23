@@ -67,12 +67,21 @@ native receipts. The order and number of ordinary reads do not matter.
 Any unknown external effect keeps its fence. The backend checks the exact
 retirement, accepted head, still-pending owner question when present, and
 previous schedule. It issues a new accepted-only session on the same chat.
-Only the ordinary pass confirmation and its encrypted material reads are
-available in that session. The old lease, save and stop time remain immutable.
-One separately journaled marker is recorded before the native start. A lost
-attempt can only read back the business receipt. SQLite v34 consumes the
-original slot and confirms the next schedule in the same transaction. Other
-tasks remain available while this task is waiting for reconciliation.
+Only the ordinary pass confirmation and encrypted reads of the exact accepted
+Workspace and head are available in that session. The common material reader
+verifies its native route, recipient and Git evidence. The old lease, save and
+stop time remain immutable.
+
+The dispatcher records the first marker before native start. An ambiguous
+attempt permits only read-back of the business receipt. A completed native
+turn whose sole exact confirmation was refused by the old local material
+profile has a known pre-dispatch outcome. After matching that refusal and the
+current accepted Run and schedule again under the exclusive writer, the
+dispatcher may record one distinct correction marker in SQLite v35 and
+confirm with the same request ID. An uncertain correction keeps both markers
+and permits read-back only. A confirmed receipt consumes the original slot
+and records the next schedule in the same transaction. Other tasks can run
+while this one waits for reconciliation.
 Admit the new path only when both backend and runtime support the fenced
 handover and the retained pass can prove its own operation state. Keep the
 legacy classifiers for existing unsettled passes without that evidence.

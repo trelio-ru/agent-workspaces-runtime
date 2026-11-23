@@ -3719,8 +3719,12 @@ export const withAssistantEncryptedMaterial = async ({args,signal},send,
       structuredContent:{code:'ASSISTANT_MCP_INPUT_INVALID',recovery:{beforeDispatch:true,omitFields:['acceptedRunId']}}};
   }
   return withProfile(async({identity,host,client,store,prepareWorkspaceMaterial})=>{
-    const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+    const {validateAssistantActivePass,assertAssistantRetiredPassTool}=await import('./trelio-assistant-hook.mjs');
     const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+    // Recheck the actual accepted Run and request ID inside the material
+    // adapter as well. Even a correctly selected Workspace cannot confirm
+    // another revision or use this read profile to assume a writer.
+    if(pass.retiredPass)assertAssistantRetiredPassTool(pass.retiredPass,'complete_assistant_pass',args);
     if(!await prepareWorkspaceMaterial())return send(args);
     const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
     const basis=args.noChange?await client.readTaskMaterialBasis(locator,signal):null;

@@ -619,7 +619,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // dispatch diagnostics unavailable and prevents its health recovery. This
     // does not admit old schedule executors, interpret clocks or migrate state;
     // unknown/multiple versions and all retained uncertainty still fail closed.
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -724,7 +724,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -1011,6 +1011,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     if(versions[0]?.version>=34&&!retiredColumns.includes('outcome_marker'))fail('ASSISTANT_INBOX_CONFLICT');
     if(!retiredColumns.includes('outcome_marker'))db.exec(`ALTER TABLE assistant_retired_task_writers
       ADD COLUMN outcome_marker TEXT`);
+    if(versions[0]?.version>=35&&!retiredColumns.includes('outcome_repair_marker'))fail('ASSISTANT_INBOX_CONFLICT');
+    // A disproved first dispatch keeps its original marker. Its one exact
+    // correction gets a distinct terminal fence across restarts and rollback.
+    if(!retiredColumns.includes('outcome_repair_marker'))db.exec(`ALTER TABLE assistant_retired_task_writers
+      ADD COLUMN outcome_repair_marker TEXT`);
     // Empty additive tables remain compatible with v31. Fence older workers
     // before the first request can leave the device.
     if(versions.length)run('UPDATE assistant_inbox_meta SET version=?',Math.max(31,versions[0].version));
@@ -1125,17 +1130,21 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     return row;
   };
   const readRetiredWriter = row => {
-    const recorded=get('SELECT receipt_id,receipt_json,released,outcome_marker FROM assistant_retired_task_writers WHERE delivery_id=?',row.delivery_id);
+    const recorded=get('SELECT receipt_id,receipt_json,released,outcome_marker,outcome_repair_marker FROM assistant_retired_task_writers WHERE delivery_id=?',row.delivery_id);
     if(!recorded)return null;
     const receipt=validateAssistantTaskWriterRetirement(JSON.parse(recorded.receipt_json));
     const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
     const outcomeMarker=recorded.outcome_marker===null?null:uuid(recorded.outcome_marker);
+    const outcomeRepairMarker=recorded.outcome_repair_marker===null?null:uuid(recorded.outcome_repair_marker);
+    if(outcomeRepairMarker&&(!outcomeMarker||[outcomeMarker,receipt.receiptId,row.delivery_id].includes(outcomeRepairMarker)))
+      fail('ASSISTANT_INBOX_CONFLICT');
     const settled=row.state==='complete'&&outcomeMarker&&recorded.released===1&&typeof row.external_receipt==='string';
     if(row.kind!=='task'||!settled&&(row.state!=='uncertain'||row.external_receipt!==null)||row.native_started!==1
       ||receipt.receiptId!==recorded.receipt_id||receipt.deliveryId!==row.delivery_id||receipt.taskId!==row.task_id
       ||scope.provider!=='trelio'||receipt.companyId!==scope.companyId
       ||receipt.assistantId!==scope.assistantId||receipt.deviceId!==scope.bindingId)fail('ASSISTANT_INBOX_CONFLICT');
-    return Object.freeze({receipt,released:recorded.released===1,...(outcomeMarker?{outcomeMarker}:{})});
+    return Object.freeze({receipt,released:recorded.released===1,...(outcomeMarker?{outcomeMarker}:{}),
+      ...(outcomeRepairMarker?{outcomeRepairMarker}:{})});
   };
   const readWriterRetirementAttempt = row => {
     const attempt=get('SELECT pass_id,request_id,lease_revision FROM assistant_task_writer_retirement_attempts WHERE delivery_id=?',row.delivery_id);
@@ -2796,19 +2805,25 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           (SELECT 1 FROM assistant_inbox_delivery_events e WHERE e.delivery_id=d.delivery_id)
         ORDER BY d.expires_at,w.delivery_id LIMIT 16`).map(row=>this.readDelivery(row.delivery_id));
     },
-    startRetiredTaskOutcome(id,receiptId,marker) {
+    startRetiredTaskOutcome(id,receiptId,marker,failedMarker) {
       return transaction(()=>{
         const row=delivery(id),retired=readRetiredWriter(row);
-        if(!retired?.released||retired.receipt.receiptId!==uuid(receiptId)||retired.outcomeMarker
+        if(!retired?.released||retired.receipt.receiptId!==uuid(receiptId)||retired.outcomeRepairMarker
+          ||retired.outcomeMarker!==failedMarker||row.state!=='uncertain'
           ||!row.scheduled||deliveryEvents(id).length)fail('ASSISTANT_INBOX_CONFLICT');
         marker=uuid(marker);
-        if(marker===receiptId||marker===id)inputError();
-        // Preserve a separate one-use marker before any native start, even
-        // when a previous version already inspected this stopped task.
-        const changed=run(`UPDATE assistant_retired_task_writers SET outcome_marker=?
-          WHERE delivery_id=? AND outcome_marker IS NULL`,marker,id);
+        if([receiptId,id,failedMarker].includes(marker))inputError();
+        // The coordinator only supplies failedMarker after verifying the same
+        // native pre-dispatch refusal under the exclusive writer. Never erase
+        // the original marker or persist a second correction.
+        const changed=failedMarker===undefined
+          ?run(`UPDATE assistant_retired_task_writers SET outcome_marker=?
+            WHERE delivery_id=? AND outcome_marker IS NULL`,marker,id)
+          :run(`UPDATE assistant_retired_task_writers SET outcome_repair_marker=?
+            WHERE delivery_id=? AND outcome_marker=? AND outcome_repair_marker IS NULL`,marker,id,uuid(failedMarker));
         if(Number(changed.changes)!==1)fail('ASSISTANT_INBOX_STALE_DELIVERY');
-        run('UPDATE assistant_inbox_meta SET version=34 WHERE version IN (32,33)');
+        const version=failedMarker===undefined?34:35;
+        run('UPDATE assistant_inbox_meta SET version=? WHERE version>=32 AND version<?',version,version);
       });
     },
     startRetiredTaskInspection(id,value) {

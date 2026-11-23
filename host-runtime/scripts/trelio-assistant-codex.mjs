@@ -2540,11 +2540,47 @@ export const inspectRetiredAcceptedOutcome=(turn,deliveryId,taskPass,assistantId
   catch{return null;}
 };
 
-const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,{taskPass,assistantId,retirementReceiptId})=>{
-  const response=await request('thread/turns/list',{threadId,limit:2,sortDirection:'desc',itemsView:'full'});
+// Runtime 3.34.38 could refuse in the private material profile before the
+// native completion POST. Its actual failed one-tool frame is the only
+// historical negative receipt that permits a corrected confirmation.
+export const inspectRetiredMaterialRefusal=(turn,marker,taskPass,assistantId,evidence,requestId)=>{
+  if(!UUID.test(marker??'')||!UUID.test(turn?.id??'')||!UUID.test(assistantId??'')
+    ||!plainRecord(evidence)||!UUID.test(requestId??'')||!exactDraftPass(taskPass,taskPass)||turn.status!=='completed'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length>12)return null;
+  const [root,...items]=turn.items;
+  const prefix=assistantDeliveryMarker(marker)+'\nTRELIO_ASSISTANT_SCOPE '
+    +JSON.stringify(assistantWorkStateContext({assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId}))
+    +'\nCall complete_assistant_pass once with these exact arguments: ';
+  const suffix='. Stop after the tool returns.';
+  const text=root?.content?.[0]?.text;
+  if(root?.type!=='userMessage'||root.content?.length!==1||root.content[0]?.type!=='text'
+    ||typeof text!=='string'||text.length>2048||!text.startsWith(prefix)||!text.endsWith(suffix))return null;
+  let expected;
+  try{expected=JSON.parse(text.slice(prefix.length,-suffix.length));}catch{return null;}
+  const calls=items.filter(item=>!['reasoning','agentMessage'].includes(item?.type));
+  if(calls.length!==1)return null;
+  const call=calls[0],result=call?.result,code='ASSISTANT_WORKSPACE_PROFILE_DENIED';
+  if(call?.type!=='mcpToolCall'||call.server!=='trelio-assistant'||call.tool!=='complete_assistant_pass'
+    ||call.status!=='failed'||call.error!=null||!plainRecord(call.arguments)||!plainRecord(expected)
+    ||!plainRecord(result)||!plainRecord(result.structuredContent)||Object.keys(result.structuredContent).join(',')!=='code'
+    ||result.structuredContent.code!==code||result._meta!=null||result.isError===false
+    ||!isDeepStrictEqual(result.content,[{type:'text',text:code}]))return null;
+  const {taskPass:scope,runtimeSessionProof,...business}=call.arguments;
+  if(!exactDraftPass(scope,taskPass)||!UUID.test(runtimeSessionProof?.runtimeSessionId??'')
+    ||!isDeepStrictEqual(expected,business)||business.clientRequestId!==requestId||business.noChange!==false
+    ||business.workspaceId!==evidence.workspaceId||business.acceptedRunId!==evidence.runId
+    ||business.workspaceHead!==evidence.acceptedHead)return null;
+  return {turnId:turn.id,arguments:business};
+};
+
+const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,
+  {taskPass,assistantId,retirementReceiptId,failedConfirmationMarker})=>{
+  const limit=failedConfirmationMarker===undefined?2:3;
+  const response=await request('thread/turns/list',{threadId,limit,sortDirection:'desc',itemsView:'full'});
   const turns=response?.data;
-  if(!Array.isArray(turns)||!turns.length||turns.length>2)return {state:'uncertain'};
-  const [latest,older]=turns;
+  if(!Array.isArray(turns)||!turns.length||turns.length>limit)return {state:'uncertain'};
+  const [failed,...previous]=turns;
+  const [latest,older]=failedConfirmationMarker===undefined?turns:previous;
   const first=latest?.items?.[0]?.content?.[0]?.text;
   let original=latest;
   if(typeof first==='string'&&first.startsWith(assistantDeliveryMarker(retirementReceiptId)+'\n')){
@@ -2558,7 +2594,11 @@ const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,{taskPass,ass
     original=older;
   }
   const evidence=inspectRetiredAcceptedOutcome(original,deliveryId,taskPass,assistantId);
-  return evidence?{state:'retired_outcome_observed',turnId:original.id,evidence}:{state:'uncertain'};
+  if(!evidence)return {state:'uncertain'};
+  const refusal=failedConfirmationMarker===undefined?null
+    :inspectRetiredMaterialRefusal(failed,failedConfirmationMarker,taskPass,assistantId,evidence,retirementReceiptId);
+  if(failedConfirmationMarker!==undefined&&!refusal)return {state:'uncertain'};
+  return {state:'retired_outcome_observed',turnId:original.id,evidence,...(refusal?{refusal}:{})};
 };
 
 /** Independently account for every operation in a continuation that obtained
@@ -3853,16 +3893,17 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       workspaceDraftRecovery:workspaceRecoveryMode,signal,
     });
     if(workspaceRecoveryMode==='retired_outcome'){
-      const {originalDeliveryId,originalTurnId,taskPass}=options.retiredOutcome;
+      const {originalDeliveryId,originalTurnId,taskPass,failedConfirmationMarker,refusal}=options.retiredOutcome;
       const {writerRetirementReceiptId:retirementReceiptId,outcome}=options.retiredPass;
       // The native app-server holding the fresh exclusive writer checks the
       // original evidence again. Native stage and old outcome cannot be
       // recycled from a read created on a different thread or process.
       const current=await readRetiredAcceptedOutcome(request,threadId,originalDeliveryId,{
-        taskPass,retirementReceiptId,assistantId:workStateContext.assistantUserId,
+        taskPass,retirementReceiptId,assistantId:workStateContext.assistantUserId,failedConfirmationMarker,
       });
       if(current.state!=='retired_outcome_observed'||current.turnId!==originalTurnId
-        ||!isDeepStrictEqual(current.evidence,outcome))fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+        ||!isDeepStrictEqual(current.evidence,outcome)||!isDeepStrictEqual(current.refusal,refusal))
+        fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     }else if(workspaceRecoveryMode==='recovered_outcome'){
       const {terminalMarkerId,terminalTurnId,taskPass,originalDeliveryId,workspaceDraft:{recoveredOutcome}}=options.workspaceDraftRecovery;
       const {providerEffect,rootDelivery,localResult}=recoveredOutcome.plan.evidence;

@@ -1357,9 +1357,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     descriptor:encryptedTaskRead,identity,pass});
   const companyRead=encryptedCompanyContext===null?null:await validateAssistantEncryptedCompanyRead({
     descriptor:encryptedCompanyContext,identity,pass});
+  // The signed retired outcome names one already accepted Workspace and
+  // head. Only that selector may reach the ordinary encrypted material reader.
+  // Draft/read-only retirement and arbitrary caller IDs remain denied here.
+  const retiredMaterial=pass.retiredPass?.outcome?.workspaceId===materialWorkspaceId
+    ?pass.retiredPass.outcome:null;
   if(pass.retiredPass && ([sourceReads,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,
-    encryptedInspection,encryptedSkillRead,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup]
-    .some(Boolean) || workspaceRun && (workspaceRun.workspaceId!==pass.retiredPass.run?.workspaceId
+    encryptedInspection,encryptedSkillRead,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup]
+    .some(Boolean) || materialWorkspaceId!==null&&!retiredMaterial
+    || workspaceRun && (workspaceRun.workspaceId!==pass.retiredPass.run?.workspaceId
       ||workspaceRun.runId!==pass.retiredPass.run?.runId))) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   // An intake may compose only this shared READ cell (or privacy metadata
   // preflight). It never inherits the task profile's skill/Secret/Run routes.
@@ -2106,6 +2112,17 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       const method=String(options.method??'GET').toUpperCase();
       if(ownerReadOrigin&&!companyRead)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       let rewritten,route,encryptionRuntime=false,bodyOverride;
+      // Until the server binds the encrypted inspection, this cell can only
+      // negotiate the ordinary control-plane route for the accepted target.
+      // A failed lookup cannot leave it with the generic write/skill profile.
+      if(retiredMaterial&&!inspection){
+        const compatibility=url.pathname===nativePrefix+'/bridge-compatibility'&&!url.search;
+        const routing=url.pathname===nativePrefix+'/bridge-routing'
+          &&[...url.searchParams.keys()].join(',')==='workspaceId'
+          &&url.searchParams.get('workspaceId')===retiredMaterial.workspaceId;
+        if(method!=='GET'||options.body!==undefined||requestOrigin!==identity.origin||!compatibility&&!routing)
+          fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      }
       if((encryptedRead || companyRead || privateSkill || inspection || lifecycle || encryptedSkillCompany || attachmentSelection) && method==='GET'
         && (requestOrigin===identity.origin || companyRead && requestOrigin===companyRead.requestOrigin || inspection && requestOrigin===inspection.requestOrigin || lifecycle && requestOrigin===lifecycle.requestOrigin || attachmentSelection&&requestOrigin===attachmentSelection.requestOrigin)
         && url.pathname==='/api/agent-workspaces/encryption/runtime' && options.body===undefined){
@@ -2338,7 +2355,8 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
             if(keys.length!==1 || keys[0]!=='workspaceId' || url.searchParams.get('workspaceId')!==inspection.workspaceId)
               fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           }else if(route.routePattern.endsWith('/encrypted-bundle')){
-            if(keys.length!==1 || keys[0]!=='head' || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(url.searchParams.get('head')??''))
+            if(keys.length!==1 || keys[0]!=='head' || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(url.searchParams.get('head')??'')
+              ||retiredMaterial&&url.searchParams.get('head')!==retiredMaterial.acceptedHead)
               fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           }else if(keys.length)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           const workspaceRoute=route.routePattern.includes('/workspaces/');

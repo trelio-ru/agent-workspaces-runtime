@@ -2,7 +2,8 @@
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
 import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
   assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff,
-  assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft, isAssistantLocalDraftFinalization } from './trelio-assistant-inbox.mjs';
+  assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft, isAssistantLocalDraftFinalization,
+  assistantRetiredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -2142,18 +2143,26 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const recorded=inbox.readRetiredTaskWriter(job.deliveryId),{receipt}=recorded;
       const {companyId,taskId,passId,threadId,bindingId,bindingRevision,receiptId}=receipt;
       if(blockedCompanies.has(companyId)||findSchedule(job.scope,taskId)?.threadId!==threadId)continue;
-      if(recorded.outcomeMarker){
+      const failedConfirmationMarker=recorded.outcomeMarker;
+      if(failedConfirmationMarker){
         if(await confirmRetiredOutcome(job,recorded,signal))return {state:'completed',kind:'task'};
-        continue; // A lost outcome attempt never starts a second model turn.
+        if(recorded.outcomeRepairMarker)continue;
       }
       const locator={companyId,taskId,passId};
       const observed=await native.readDelivery(threadId,job.deliveryId,{signal,retiredAcceptedOutcome:{
         taskPass:locator,assistantId:identity.assistantId,retirementReceiptId:receiptId,
+        ...(failedConfirmationMarker?{failedConfirmationMarker}:{}),
       }});
       lease();
-      if(observed.state!=='retired_outcome_observed'||!uuid.test(observed.turnId??''))continue;
+      if(observed.state!=='retired_outcome_observed'||!uuid.test(observed.turnId??'')
+        ||failedConfirmationMarker&&!uuid.test(observed.refusal?.turnId??''))continue;
       const selected=await client.readTaskRetiredOutcomeEvidence(receipt,observed.evidence,signal);
       if(!selected)continue;
+      // A mere missing receipt or a model error is ambiguous. A historical
+      // local refusal still needs the current native accepted evidence,
+      // including every exact argument on the single benign confirmation.
+      if(failedConfirmationMarker&&!isDeepStrictEqual(observed.refusal.arguments,assistantRetiredOutcomeCompletion(
+        observed.evidence,selected.schedule,selected.goalState,receiptId)))continue;
       let execution;
       if(!await authorize({scope:job.scope,taskId},signal,{captureExecution:value=>{execution=value;}}))continue;
       execution=assistantExecutionConfiguration(execution);
@@ -2167,19 +2176,22 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       try{
         await native.run({threadId,deliveryId:marker,cwd,execution,taskContext:{assistantId:identity.assistantId,companyId,taskId}},{
           signal,retiredPass,requireAbsentMarker:true,
-          retiredOutcome:{...selected,taskPass:locator,originalDeliveryId:job.deliveryId,originalTurnId:observed.turnId},
+          retiredOutcome:{...selected,taskPass:locator,originalDeliveryId:job.deliveryId,originalTurnId:observed.turnId,
+            ...(failedConfirmationMarker?{failedConfirmationMarker,refusal:observed.refusal}:{})},
           beforeInvocation:async ownedSignal=>{
             const live=await client.readTaskRetiredOutcomeEvidence(receipt,observed.evidence,ownedSignal);
             let currentChoice;
             if(!await authorize({scope:job.scope,taskId},ownedSignal,{captureExecution:value=>{currentChoice=value;}})
               ||!isDeepStrictEqual(assistantExecutionConfiguration(currentChoice),execution)||!isDeepStrictEqual(live,selected)
-              ||!isDeepStrictEqual(await passHost.readActivePass(),pass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+              ||!isDeepStrictEqual(await passHost.readActivePass(),pass)
+              ||!isDeepStrictEqual(inbox.readRetiredTaskWriter(job.deliveryId),recorded))
+              fail('ASSISTANT_PASS_REVIEW_REQUIRED');
             lease();ownedSignal.throwIfAborted();
           },
           startInvocation:({threadId:actualThread,deliveryId:actualMarker})=>{
             lease();signal.throwIfAborted();
             if(actualThread!==threadId||actualMarker!==marker)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-            inbox.startRetiredTaskOutcome(job.deliveryId,receiptId,marker);
+            inbox.startRetiredTaskOutcome(job.deliveryId,receiptId,marker,failedConfirmationMarker);
           },
         });
       }finally{
