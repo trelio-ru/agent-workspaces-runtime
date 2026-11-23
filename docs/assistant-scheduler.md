@@ -4328,7 +4328,11 @@ command alias. Fill preparation returns a short-lived handle or a closed refusal
 The managed worker can also obtain a value-free origin/hash from the committed
 top document behind a specific session and observation. The caller pins the
 intended HTTPS form origin independently of the browser's launch-site origin.
-The renderer's URL path and query stay in the worker. The worker checks the
+Chromium reports a committed frame address and its fragment separately. The
+same parser reconstructs the complete address for the managed worker and
+the native Secret browser controller. The fragment participates in exact
+comparison and hashing along with the origin, path and query.
+The renderer's URL path, query and fragment stay in the worker. It checks the
 same observed frame, native loader, navigation generation and current tab
 again after hashing. An old observation fails after another navigation to the
 same URL. A plan bound to an observed document retains the session/frame digest

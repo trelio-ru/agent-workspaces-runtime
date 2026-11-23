@@ -1,4 +1,4 @@
-import { createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
+import { committedBrowserFrameUrl, createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
 import { buildTextObserverScript, validateTextResult, TEXT_KIND, normalizeBusinessFieldPolicy, normalizeVisualReferenceRoutes, validBusinessFieldChecks } from './trelio-browser-text.mjs';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -703,7 +703,7 @@ export class ExtensionVisualBrowser {
     }
     // Only the ephemeral transport token is materialized here. Cookie values
     // stay in host/extension RAM and the AEAD snapshot, never in worker source.
-    await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains, profileAuthentication: this.profileAuthentication })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, { mode: 0o600 });
+    await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains, profileAuthentication: this.profileAuthentication })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()}, ${committedBrowserFrameUrl.toString()});`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
     // Only the value-free signed recipe is materialized; credentials never
     // enter extension resources, process environment or command-line arguments.

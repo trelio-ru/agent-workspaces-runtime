@@ -24,7 +24,7 @@ export function visualDocumentResponsePolicy(status, headers) {
   return (fields.get('content-type') || '').split(';', 1)[0].trim().toLowerCase() === 'text/html' ? 'html' : 'block';
 }
 
-export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget, documentPolicy) {
+export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget, documentPolicy, committedBrowserFrameUrl) {
   const requestPacing = createPacing();
   const tabBudget = createTabBudget();
   const secretBrowserOperations = new Set([
@@ -1115,8 +1115,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       const generation = navigationGeneration(tab.id);
       const { frameTree } = await command(tab.id, 'Page.getFrameTree');
       const main = frameTree?.frame;
-      if (!main?.id || !main.loaderId || generation !== navigationGeneration(tab.id)
-        || new URL(tab.url).href !== new URL(main.url).href) throw Error('stale_frame');
+      // CDP and the tab describe the same committed document in different
+      // shapes. Compare the complete address, including the native fragment.
+      const documentUrl = committedBrowserFrameUrl(main);
+      if (!main?.id || !main.loaderId || !documentUrl || generation !== navigationGeneration(tab.id)
+        || new URL(tab.url).href !== documentUrl) throw Error('stale_frame');
       const observed = frame;
       const currentObservation = () => observed && frame === observed && observedFrameId === observed.frameId
         && observed.tabId === tab.id && observed.generation === navigationGeneration(tab.id)
@@ -1132,7 +1135,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         // Navigation policy alone does not choose a credential destination.
         // Compare the explicitly selected HTTPS origin, then hash the actual
         // committed URL in the native worker. Its path/query never leave it.
-        const target = new URL(main.url);
+        const target = new URL(documentUrl);
         const originOnly = observing && args.expectedOrigin === null;
         if (!originOnly && target.origin !== (observing ? args.expectedOrigin : args.targetOrigin) || target.protocol !== 'https:'
           || target.username || target.password || target.href.length > 2048)
@@ -1151,19 +1154,18 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         if (targetUrlSha256 !== args.targetUrlSha256) throw Error('stale_frame');
       }
       if (op === 'secret-browser-bind') {
-        const url = new URL(main.url).href;
-        if (protectedSecretTab || !bindObserved && (keys !== 'expiry,handle,targetUrl' || args.targetUrl !== url)
+        if (protectedSecretTab || !bindObserved && (keys !== 'expiry,handle,targetUrl' || args.targetUrl !== documentUrl)
           || !Number.isSafeInteger(args.expiry) || args.expiry <= Date.now()
           || args.expiry > Math.min(Date.now() + 38_000, config.deadlineAt)
           || !currentObservation()) throw Error('stale_frame');
         protectedSecretTab = { handle: args.handle, tabId: tab.id, generation, frameId: main.id,
-          loaderId: main.loaderId, url, observation: observed, expiry: args.expiry };
+          loaderId: main.loaderId, url: documentUrl, observation: observed, expiry: args.expiry };
         return { state: 'bound' };
       }
       const binding = protectedSecretTab;
       if (!binding || Object.keys(args).sort().join(',') !== 'handle,method,params'
         || binding.handle !== args.handle || binding.tabId !== tab.id || binding.generation !== generation || Date.now() >= binding.expiry
-        || binding.frameId !== main.id || binding.loaderId !== main.loaderId || binding.url !== new URL(main.url).href)
+        || binding.frameId !== main.id || binding.loaderId !== main.loaderId || binding.url !== documentUrl)
         throw Error('stale_frame');
       if (args.method === 'Target.getTargetInfo' && args.params?.targetId === 'managed-tab')
         return { state: 'accepted', result: { targetInfo: { url: binding.url } } };
@@ -1315,7 +1317,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (tab.id !== original.tabId || Date.now() - original.at > 60_000
         || documentFailures.has(tab.id) || httpFailures.has(tab.id) || currentDialog()
         || frameTree?.frame?.id !== binding.frameId || frameTree?.frame?.loaderId !== binding.loaderId
-        || new URL(frameTree.frame.url).href !== binding.url || !isSecretDocumentMasked(tab.id, binding.loaderId)
+        || committedBrowserFrameUrl(frameTree.frame) !== binding.url || !isSecretDocumentMasked(tab.id, binding.loaderId)
         || !Number.isInteger(args.x) || args.x < 0 || args.x >= original.width
         || !Number.isInteger(args.y) || args.y < 0 || args.y >= original.height) throw Error('stale_frame');
       const x = args.x * original.cssWidth / original.width, y = args.y * original.cssHeight / original.height;
