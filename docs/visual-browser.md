@@ -4,6 +4,23 @@ API v1 принадлежит generic host. Signed provider задаёт
 HTTPS origins/domains, начальный адрес и явный observationMode; binary, профиль, ключ и executable
 выбирает host. Source не означает stable release или завершённую native-проверку.
 
+<a id="guest-browser-profile"></a>
+
+## Гостевой профиль
+
+Signed package с `local-accounts-v1` и `protected-snapshot` с ручным
+продолжением может включить `trelio-visual-guest-profile.json` с
+`{"schemaVersion":1}`. При обычном запуске без company connection и без
+привязанного аккаунта host выбирает отдельное защищённое хранилище браузера
+для текущих origin, skill, компании и участника. Оно не заимствует snapshot
+аккаунта или другой компании. Повторные команды сохраняют прежние lease и
+изоляцию live browser по observed execution owner.
+
+Opt-in не создаёт запись в каталоге аккаунтов. Явный selector, несколько
+привязанных аккаунтов без default, ошибочный каталог и managed assistant
+сохраняют свои отказы. При выбранном аккаунте остаётся прежний scope, включая
+совместимость с его сохранённым снимком.
+
 ## Выбор представления и восстановление UI
 
 `VISUAL_PRESENTATION_API = trelio.visual-presentation/v1` подтверждает signed

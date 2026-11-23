@@ -400,6 +400,10 @@ publication tooling также остаются вне этого публичн
   [приоритет алгоритмического исполнения](docs/agent-workspace-runtime.md#algorithmic-execution).
 - Подробно комментируй нетривиальный код, особенно security, transport, ACL,
   credential и cross-platform решения.
+- [Гостевой визуальный профиль](docs/visual-browser.md#guest-browser-profile)
+  включается подписанным opt-in. При пустой привязке обычный skill run
+  использует отдельный scope компании и участника. Явный выбор аккаунта и
+  managed assistant сохраняют обязательную проверку привязки.
 - Не добавляй tokens, credentials, cookies, sessions, workspace content, signing
   keys или production runtime packages в Git, fixtures и logs.
 - Не ослабляй exact confirmation, idempotency/CAS, bounds, attestation, package

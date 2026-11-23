@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { accountScope, accountText, createAccountCatalogue, splitAccountArguments, SkillAccountImportError } from '../host-runtime/scripts/trelio-skill-accounts.mjs';
 import { prepareSkillAccount, runMaterializedAgentSkill, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment, formatBridgeCommandError } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
+import { visualSessionBinding } from '../host-runtime/scripts/trelio-visual-session.mjs';
 
 const company = crypto.randomUUID(), member = crypto.randomUUID(), connection = crypto.randomUUID();
 const identity = { origin: 'https://example.test', skillId: 'example-skill', companyId: company,
@@ -273,6 +274,52 @@ test('host dispatch lists before setup, binds explicitly and removes only its ac
   await prepareSkillAccount({ ...other, runtimeArguments: ['accounts'] });
   assert.equal(outputs.at(-1).accounts[0].bound, false);
   await assert.rejects(prepareSkillAccount({ ...other, runtimeArguments: ['doctor', '--local-account', id] }), { code: 'ACCOUNT_NOT_BOUND' });
+});
+
+test('signed guest browser opens with an empty binding and preserves the normal account selector', async t => {
+  const { directory, make } = await fixture(t);
+  const artifact = { skillId: identity.skillId, runtimeVersion: '1.0.0', parsedPackage: {
+    capabilities: ['browser', 'local-session', 'local-accounts-v1'],
+    browserSession: { apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 120_000 },
+    files: [{ path: 'trelio-visual-guest-profile.json', bytes: Buffer.from('{"schemaVersion":1}') }],
+  } };
+  const executionContext = { origin: identity.origin, companyId: company, releaseId: connection,
+    localIdentity: { memberId: member, connectionId: connection } };
+  const runtimeArguments = ['open', '--target', 'search'];
+  const base = { origin: identity.origin, artifact, runtimeDirectory: directory,
+    catalogueDirectory: directory, executionContext, runtimeArguments, discover: async () => [] };
+  const guestMarker = { TRELIO_SKILL_VISUAL_GUEST_PROFILE: '1' };
+  const environment = (result, current = executionContext) => buildAgentSkillRuntimeEnvironment({
+    artifact, runtimeDirectory: directory, executionContext: { ...current, ...result }, inheritedEnvironment: guestMarker,
+  });
+  assert.equal(environment({}).TRELIO_SKILL_VISUAL_GUEST_PROFILE, undefined);
+  const guest = await prepareSkillAccount(base);
+  assert.deepEqual(guest, { handled: false, account: null, visualGuestProfile: true, runtimeArguments });
+  assert.deepEqual((await make().list()).accounts, []);
+  const guestEnvironment = environment(guest);
+  assert.equal(guestEnvironment.TRELIO_SKILL_ACCOUNT_JSON, undefined);
+  const guestBinding = visualSessionBinding(guestEnvironment);
+  assert.equal(guestBinding.scope, visualSessionBinding(environment(await prepareSkillAccount(base))).scope);
+  assert.throws(() => visualSessionBinding({ ...guestEnvironment, TRELIO_SKILL_VISUAL_GUEST_PROFILE: undefined }),
+    /VISUAL_IDENTITY_INVALID/u);
+  for (const key of ['TRELIO_SKILL_COMPANY_ID', 'TRELIO_SKILL_MEMBER_ID']) {
+    assert.notEqual(guestBinding.scope, visualSessionBinding({ ...guestEnvironment, [key]: crypto.randomUUID() }).scope);
+  }
+  await assert.rejects(prepareSkillAccount({ ...base, runtimeArguments: [...runtimeArguments, '--local-account', crypto.randomUUID()] }),
+    { code: 'ACCOUNT_NOT_BOUND' });
+  await assert.rejects(prepareSkillAccount({ ...base, executionContext: { ...executionContext, companyConnection: {} } }),
+    { code: 'ACCOUNT_SETUP_REQUIRED' });
+  const unmarked = { ...artifact, parsedPackage: { ...artifact.parsedPackage, files: [] } };
+  await assert.rejects(prepareSkillAccount({ ...base, artifact: unmarked }), { code: 'ACCOUNT_SETUP_REQUIRED' });
+
+  const id = crypto.randomUUID();
+  await make().change({ operation: 'create', id, name: 'Bound account', expectedRevision: (await make().list()).revision });
+  const selected = await prepareSkillAccount(base);
+  assert.equal(selected.account.id, id);
+  const accountEnvironment = environment(selected);
+  assert.equal(accountEnvironment.TRELIO_SKILL_VISUAL_GUEST_PROFILE, undefined);
+  assert.notEqual(visualSessionBinding(accountEnvironment).scope, guestBinding.scope);
+  assert.throws(() => visualSessionBinding({ ...accountEnvironment, ...guestMarker }), /VISUAL_IDENTITY_INVALID/u);
 });
 
 test('account help is static and never imports, creates a catalogue or reads an existing path', async t => {

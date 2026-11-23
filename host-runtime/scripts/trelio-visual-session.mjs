@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind, renderLocalFormPage, parseAgentSecretTotpValue, deriveAgentSecretTotp } from './trelio-workspace.mjs';
 import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
-import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
+import { visualGuestStorageScope, visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths } from './trelio-visual-browser.mjs';
 import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding, browserExecutionOwner, browserExecutionDirectory, withBrowserAccountState } from './trelio-browser-session.mjs';
@@ -120,24 +120,27 @@ export const publishVisualWorkerOwner = (file, original, update) => withVisualOw
 /** This binding is supplied by the verified package host, never CLI arguments. */
 export function visualSessionBinding(env = process.env) {
   const account = JSON.parse(env.TRELIO_SKILL_ACCOUNT_JSON || 'null');
+  const guestProfile = env.TRELIO_SKILL_VISUAL_GUEST_PROFILE === '1';
   let lease;
   try { lease = readBrowserSessionBinding({ environment: env, expectedSessionClass: 'protected-snapshot' }); }
   catch { throw new Error('VISUAL_IDENTITY_INVALID'); }
   const binding = {
     origin: new URL(env.TRELIO_ORIGIN || 'https://trelio.ru').origin,
     skillId: env.TRELIO_SKILL_ID,
-    accountId: account?.id,
+    ...(guestProfile ? { guestProfile: true } : { accountId: account?.id }),
     companyId: env.TRELIO_SKILL_COMPANY_ID,
     memberId: env.TRELIO_SKILL_MEMBER_ID,
     // Account storage remains reusable; a live browser and its close/input
     // authority belong to one observed execution owner only.
     ...(browserExecutionOwner(env) ? { executionOwner: browserExecutionOwner(env) } : {}),
   };
-  if (!uuid.test(binding.accountId) || !uuid.test(binding.companyId) || !uuid.test(binding.memberId)
+  if ((guestProfile ? account !== null : !uuid.test(binding.accountId))
+    || !uuid.test(binding.companyId) || !uuid.test(binding.memberId)
     || lease.manualAssist !== true || lease.startedAt > Date.now() + 5000) throw new Error('VISUAL_IDENTITY_INVALID');
-  // The disk session can be reused by this personal account across explicitly
-  // bound companies; the live worker stays pinned to one company and member.
-  return { ...binding, scope: visualStorageScope(binding), bindingHash: hash(binding), deadlineAt: lease.deadlineAt };
+  // Only a selected account can reuse a disk snapshot across its explicitly
+  // bound companies. A guest's snapshot stays within the current membership.
+  const scope = guestProfile ? visualGuestStorageScope(binding) : visualStorageScope(binding);
+  return { ...binding, scope, bindingHash: hash(binding), deadlineAt: lease.deadlineAt };
 }
 
 function validOwner(owner, binding) {

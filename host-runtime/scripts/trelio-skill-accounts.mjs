@@ -502,10 +502,13 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
         return { id, ...(creation||bindingIntent?{replayed:false}:{}) };
       });
     },
-    async select(id = null) {
+    async select(id = null, { allowUnboundGuest = false } = {}) {
       await io.ensureDirectory(root);
       const state = await read(), current = binding(state);
       const selected = id || current.defaultAccountId || (current.accountIds.length === 1 ? current.accountIds[0] : null);
+      // An opted-in browser can run without a binding. An explicit account
+      // selection or ambiguity among bound accounts still gets its usual error.
+      if (allowUnboundGuest && !selected && current.accountIds.length === 0) return null;
       if (!selected) throw new SkillAccountSelectionError(current.accountIds.length
         ? "ACCOUNT_SELECTION_REQUIRED" : ACCOUNT_SETUP_REQUIRED);
       if (!current.accountIds.includes(selected)) throw new SkillAccountSelectionError("ACCOUNT_NOT_BOUND");

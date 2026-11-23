@@ -9403,6 +9403,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
     TRELIO_BROWSER_SESSION_DEADLINE_AT: _staleBrowserSessionDeadlineAt,
     TRELIO_VISUAL_SESSION_MODULE_URL: _staleVisualSessionModuleUrl,
+    TRELIO_SKILL_VISUAL_GUEST_PROFILE: _staleVisualGuestProfile,
     TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS: _staleVisualAttachmentDiagnostics,
     TRELIO_LOCAL_FORM_MODULE_URL: _staleLocalFormModuleUrl,
     TRELIO_LOCAL_FORM_NODE_EXECUTABLE: _staleLocalFormNode,
@@ -9534,6 +9535,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
           // This path is from the verified host, never inherited environment.
           // The module rechecks protected-snapshot policy and account identity.
           TRELIO_VISUAL_SESSION_MODULE_URL: VISUAL_SESSION_MODULE_URL,
+          ...(executionContext.visualGuestProfile === true && !executionContext.account
+            && supportsSkillVisualGuestProfile(artifact) ? { TRELIO_SKILL_VISUAL_GUEST_PROFILE: "1" } : {}),
           ...(executionContext.visualAttachmentDiagnostics === true
             ? { TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS: "1" } : {}),
         }
@@ -10639,6 +10642,7 @@ const skillCommand = async (
     });
     if (accountResult.handled) return inventory ? taskEffectReceipt(inventoryOutput) : undefined;
     executionContext.account = accountResult.account;
+    executionContext.visualGuestProfile = accountResult.visualGuestProfile === true;
     runtimeArguments = accountResult.runtimeArguments;
   }
   if (controllerCommand) {
@@ -10769,6 +10773,18 @@ const supportsSkillAccountRemoval = artifact => {
     && marker.bytes.toString('utf8').trim() === '{"schemaVersion":1}';
 };
 
+// Only this fixed, signed opt-in enables a company/member-scoped guest
+// browser. Resolve metadata and caller arguments cannot relax account setup.
+const supportsSkillVisualGuestProfile = artifact => {
+  const manifest = artifact.parsedPackage;
+  if (!manifest?.capabilities?.includes(ACCOUNT_CAPABILITY)
+      || manifest.browserSession?.sessionClass !== 'protected-snapshot'
+      || manifest.browserSession.manualAssist !== true) return false;
+  const marker = manifest.files?.find(file => file.path === 'trelio-visual-guest-profile.json');
+  return Buffer.isBuffer(marker?.bytes) && marker.bytes.length <= 128
+    && marker.bytes.toString('utf8').trim() === '{"schemaVersion":1}';
+};
+
 export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, executionContext,
   runtimeArguments, catalogueDirectory = CONFIG_DIRECTORY, existingInventoryOnly = false,
   discover = discoverSkillAccounts, output = value => process.stdout.write(`${JSON.stringify(value)}\n`) }) => {
@@ -10865,8 +10881,11 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     const listed=await catalogue.list();
     output({ ok: true, ...result, ...listed, ...(assistant?{accounts:listed.accounts.filter(account=>account.bound)}:{}) }); return { handled: true };
   }
-  const account = await catalogue.select(parsed.accountId);
-  return { handled: false, account, runtimeArguments: parsed.providerArguments };
+  const allowUnboundGuest = !profile && !executionContext.companyConnection
+    && supportsSkillVisualGuestProfile(artifact);
+  const account = await catalogue.select(parsed.accountId, { allowUnboundGuest });
+  return { handled: false, account, runtimeArguments: parsed.providerArguments,
+    ...(account === null ? { visualGuestProfile: true } : {}) };
 };
 
 /** Discovery shares account identity, namespace and protected I/O with actual

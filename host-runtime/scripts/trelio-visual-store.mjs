@@ -52,16 +52,30 @@ export function writeVisualVaultSecret(entry, bytes, signal) {
   }, signal);
 }
 
-export function visualStorageScope({ origin, skillId, accountId }) {
+const visualUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const visualScopeKey = (origin, skillId, identity) => {
   const parsed = new URL(origin);
-  if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skillId) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(accountId)) throw invalid('VISUAL_IDENTITY_INVALID');
-  return crypto.createHash('sha256').update(JSON.stringify([origin, skillId, accountId])).digest('hex');
+  if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)
+      || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skillId)) throw invalid('VISUAL_IDENTITY_INVALID');
+  return crypto.createHash('sha256').update(JSON.stringify([origin, skillId, ...identity])).digest('hex');
+};
+
+export function visualStorageScope({ origin, skillId, accountId }) {
+  if (!visualUuid.test(accountId)) throw invalid('VISUAL_IDENTITY_INVALID');
+  return visualScopeKey(origin, skillId, [accountId]);
+}
+
+// An unbound browser never sees an existing account's state or a guest
+// snapshot from another company/member. Keep the legacy account keys intact.
+export function visualGuestStorageScope({ origin, skillId, companyId, memberId }) {
+  if (!visualUuid.test(companyId) || !visualUuid.test(memberId)) throw invalid('VISUAL_IDENTITY_INVALID');
+  return visualScopeKey(origin, skillId, ['guest/v1', companyId, memberId]);
 }
 
 /**
  * A device-local AEAD snapshot, with the random key held by the native OS
- * credential service. The binding is the verified host's personal account,
- * not a display name, company title, browser version or model-supplied path.
+ * credential service. The verified host binds it to a personal account or
+ * to the company/member of an opted-in guest browser.
  * Linux explicitly requires Secret Service: keyutils' volatile fallback would
  * lose the decryption key after reboot and therefore is never selected here.
  */
