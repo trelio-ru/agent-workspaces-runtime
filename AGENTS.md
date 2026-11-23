@@ -1422,6 +1422,11 @@ publication tooling также остаются вне этого публичн
   A refused initial SCM read in a terminal journal also leaves polling
   available after rechecking live guards. Preserve the failure and admit
   neither service recovery nor a GUI-only restart from that observation.
+  Before closing the GUI, verify actual SCM STOP and START access and repeat
+  that read after artifact/readiness checks. Denied control keeps the terminal
+  journal and ordinary polling. An exact FILE witness can identify the same
+  SCM service despite RM's RmCritical label; keep its exact short name, PID and
+  creation time. The label grants no Restart Manager or SCM control.
   Close a healthy new GUI generation,
   normally stop only the exact OS-package-bound service after all Codex clients
   are absent, register the retained signed candidate by its already-staged full

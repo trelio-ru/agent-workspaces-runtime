@@ -923,6 +923,32 @@ void requireRegisteredRunningService(SC_HANDLE service,const SERVICE_STATUS_PROC
   const auto fresh=codexServiceStatus(service);
   require(fresh.dwCurrentState==SERVICE_RUNNING&&fresh.dwProcessId==observed.dwProcessId);
 }
+// Restart Manager can label this real LocalSystem service RmCritical for an
+// ordinary interactive caller while still identifying it by the exact image,
+// service short name and process generation. The label reflects Restart Manager
+// shutdown eligibility, not SCM identity or permission to control the service.
+FILETIME packageServiceStartTime(const RM_PROCESS_INFO& info,DWORD pid,const std::wstring& serviceName) {
+  requireServiceObservation(info.Process.dwProcessId==pid,"service_inventory_pid");
+  requireServiceObservation(info.ApplicationType==RmService||info.ApplicationType==RmCritical,
+    "service_inventory_type",static_cast<DWORD>(info.ApplicationType));
+  requireServiceObservation(wcsnlen_s(info.strServiceShortName,CCH_RM_MAX_SVC_NAME+1)<=CCH_RM_MAX_SVC_NAME
+    &&_wcsicmp(info.strServiceShortName,serviceName.c_str())==0,"service_inventory_name");
+  const auto created=info.Process.ProcessStartTime;
+  requireServiceObservation(created.dwLowDateTime!=0||created.dwHighDateTime!=0,"creation_time_missing");
+  return created;
+}
+bool canRecoverPackageService(SC_HANDLE manager,PCWSTR serviceName,const std::wstring& root,DWORD expectedPid) {
+  // Opening a handle is a read-only permission check. Both rights are needed
+  // before closing the GUI: STOP to make registration possible, and START to
+  // restore the previous service if AppX does not activate it on its own.
+  ServiceHandle control(OpenServiceW(manager,serviceName,SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS|SERVICE_STOP|SERVICE_START));
+  if(!control.value&&GetLastError()==ERROR_ACCESS_DENIED)return false;
+  require(control.value);
+  verifyCodexServiceConfiguration(control.value,root);
+  const auto status=codexServiceStatus(control.value);
+  require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId==expectedPid);
+  return (status.dwControlsAccepted&SERVICE_ACCEPT_STOP)!=0;
+}
 struct PackageServiceProcess {
   DWORD pid;
   FILETIME created{};
@@ -937,18 +963,12 @@ struct PackageServiceProcess {
     // PID cannot satisfy the original creation time, and blocks exit by snapshot.
     requireServiceObservation(pid>0,"service_pid");
     created=observation();
-    requireServiceObservation(created.dwLowDateTime!=0||created.dwHighDateTime!=0,"creation_time_missing");
     const auto fresh=observation();
     requireServiceObservation(packageServicePidPresent(pid)&&CompareFileTime(&created,&fresh)==0,"generation_changed");
   }
   FILETIME observation() const {
     const auto entries=image.read();requireServiceObservation(entries.size()==1,"service_inventory_count",static_cast<DWORD>(entries.size()));
-    const auto& info=entries.front();
-    requireServiceObservation(info.Process.dwProcessId==pid,"service_inventory_pid");
-    requireServiceObservation(info.ApplicationType==RmService,"service_inventory_type",static_cast<DWORD>(info.ApplicationType));
-    requireServiceObservation(wcsnlen_s(info.strServiceShortName,CCH_RM_MAX_SVC_NAME+1)<=CCH_RM_MAX_SVC_NAME
-      &&_wcsicmp(info.strServiceShortName,serviceName.c_str())==0,"service_inventory_name");
-    return info.Process.ProcessStartTime;
+    return packageServiceStartTime(entries.front(),pid,serviceName);
   }
   void verify(DWORD freshPid) const {
     const auto current=observation();
@@ -998,15 +1018,16 @@ int codexStagedPackage(std::string_view version) {
   codexServiceReply("staged");return 0;
 }
 int codexService(std::string_view operation,std::string_view expected={}) {
-  const bool restoration=operation=="restore-status";
-  require(operation=="inspect"||operation=="stop"||operation=="start"||restoration);
+  const bool restoration=operation=="restore-status",recovery=operation=="recovery-inspect";
+  const bool observing=operation=="inspect"||restoration||recovery;
+  require(observing||operation=="stop"||operation=="start");
   const auto root=currentCodexPackagePath();require(!root.empty());
   ServiceHandle manager(OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT));require(manager.value);
   const DWORD access=SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS
     |(operation=="stop"?SERVICE_STOP:operation=="start"?SERVICE_START:0);
   ServiceHandle service(OpenServiceW(manager.value,L"CodexSandboxService.OpenAI.Codex",access));
   if(!service.value){
-    require((operation=="inspect"||restoration)&&GetLastError()==ERROR_SERVICE_DOES_NOT_EXIST);
+    require(observing&&GetLastError()==ERROR_SERVICE_DOES_NOT_EXIST);
     if(restoration)require(_wcsicmp(currentCodexPackagePath().c_str(),root.c_str())==0);
     codexServiceReply("absent");return 0;
   }
@@ -1022,7 +1043,7 @@ int codexService(std::string_view operation,std::string_view expected={}) {
     codexServiceReply("starting");return 0;
   }
   if(status.dwCurrentState==SERVICE_STOPPED){
-    require((operation=="inspect"||restoration)&&status.dwProcessId==0);
+    require(observing&&status.dwProcessId==0);
     PackageServiceImage image(root+L"\\app\\resources\\codex-windows-sandbox-service.exe");
     require(image.read().empty());codexServiceReply("stopped");return 0;
   }
@@ -1039,13 +1060,18 @@ int codexService(std::string_view operation,std::string_view expected={}) {
     codexServiceReply("registered_running");return 0;
   }
   require(status.dwCurrentState==SERVICE_RUNNING&&status.dwProcessId>0);
+  if(recovery&&!canRecoverPackageService(manager.value,L"CodexSandboxService.OpenAI.Codex",root,status.dwProcessId)){
+    codexServiceReply("control_denied");return 0;
+  }
   PackageServiceProcess process(status.dwProcessId,root+L"\\app\\resources\\codex-windows-sandbox-service.exe",
     L"CodexSandboxService.OpenAI.Codex");
   verifyCurrentCodexServiceConfiguration(service.value,root);
   const auto admission=codexServiceStatus(service.value);
-  require(admission.dwCurrentState==SERVICE_RUNNING);process.verify(admission.dwProcessId);
+  require(admission.dwCurrentState==SERVICE_RUNNING);
+  if(recovery)require((admission.dwControlsAccepted&SERVICE_ACCEPT_STOP)!=0);
+  process.verify(admission.dwProcessId);
   const auto generation=process.generation();
-  if(operation=="inspect"){codexServiceReply("running",generation);return 0;}
+  if(observing){codexServiceReply("running",generation);return 0;}
   require(expected==generation&&(status.dwControlsAccepted&SERVICE_ACCEPT_STOP)!=0);
   requireCodexClientsStopped();
   verifyCurrentCodexServiceConfiguration(service.value,root);
@@ -1128,7 +1154,7 @@ int main(int argc, char* argv[]) {
       catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}
     }
     if((argc==2&&(std::string_view(argv[1])=="--codex-service-inspect"||std::string_view(argv[1])=="--codex-service-start"
-      ||std::string_view(argv[1])=="--codex-service-restore-status"))
+      ||std::string_view(argv[1])=="--codex-service-restore-status"||std::string_view(argv[1])=="--codex-service-recovery-inspect"))
       ||(argc==3&&std::string_view(argv[1])=="--codex-service-stop")){
       try{return codexService(std::string_view(argv[1]).substr(16),argc==3?std::string_view(argv[2]):std::string_view{});}
       catch(...){try{codexServiceReply("unavailable");}catch(...){}return 1;}

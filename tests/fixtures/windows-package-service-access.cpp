@@ -155,13 +155,25 @@ void exerciseFixture(std::string_view operation,std::string_view expected) {
   fixtureStage="scm_generation_recheck";
   verifyCodexServiceConfiguration(service.value,root);process.verify(codexServiceStatus(service.value).dwProcessId);
   if(operation=="refusals"){
+    // Preserve the actual FILE witness (and exact original generation) but
+    // exercise the alternate label Windows returned for the packaged service.
+    // Do not mark the fixture process itself critical or test a second stop.
+    require(canRecoverPackageService(manager.value,FixtureService,root,status.dwProcessId));
+    auto entries=process.image.read();require(entries.size()==1);
+    auto critical=entries.front();critical.ApplicationType=RmCritical;
+    const auto observed=packageServiceStartTime(critical,status.dwProcessId,FixtureService);
+    require(CompareFileTime(&observed,&process.created)==0);
     unsigned refused=0;
+    try{packageServiceStartTime(critical,status.dwProcessId,L"OtherService");}catch(...){++refused;}
+    try{packageServiceStartTime(critical,status.dwProcessId+1,FixtureService);}catch(...){++refused;}
+    critical.ApplicationType=RmOtherWindow;
+    try{packageServiceStartTime(critical,status.dwProcessId,FixtureService);}catch(...){++refused;}
     try{PackageServiceProcess other(status.dwProcessId,fixtureExecutable(),L"ForeignService");}catch(...){++refused;}
     try{PackageServiceProcess other(status.dwProcessId,root+L"\\fixture-controller.exe",FixtureService);}catch(...){++refused;}
     try{process.verify(status.dwProcessId+1);}catch(...){++refused;}
     process.created.dwLowDateTime^=1;
     try{process.verify(status.dwProcessId);}catch(...){++refused;}
-    require(refused==4);write("{\"refused\":4}\n");return;
+    require(refused==7);write("{\"refused\":7}\n");return;
   }
   if(operation=="stop"){
     require(expected==process.generation());

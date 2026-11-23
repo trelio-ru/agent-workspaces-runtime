@@ -1012,7 +1012,7 @@ export const runAssistantWindowsCodexService = async (operation,generation=null,
   signal,guard=async()=>{},runNative=runAssistantWindowsBackgroundNative,selectWorker}={})=>{
   const validArgument=operation==='stop'?/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u.test(generation??'')
     :operation==='staged'?CODEX_DESKTOP_VERSION.test(generation??''):generation===null;
-  if(!['inspect','stop','start','staged','restore-status'].includes(operation)||!validArgument)
+  if(!['inspect','stop','start','staged','restore-status','recovery-inspect'].includes(operation)||!validArgument)
     fail('ASSISTANT_CODEX_UPDATE_FAILED');
   const worker=await (selectWorker??(async()=>{
     const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
@@ -1024,7 +1024,8 @@ export const runAssistantWindowsCodexService = async (operation,generation=null,
     project:value=>{
       if(!value||Object.keys(value).sort().join(',')!=='generation,schemaVersion,state'||value.schemaVersion!==1
         ||!(operation==='staged'?['staged','absent']:operation==='restore-status'
-          ?['registered_running','stopped','absent','pending']:['running','stopped','absent','starting']).includes(value.state)
+          ?['registered_running','stopped','absent','pending']:operation==='recovery-inspect'
+            ?['running','stopped','absent','control_denied']:['running','stopped','absent','starting']).includes(value.state)
         ||(value.state==='running'?!/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u.test(value.generation??''):value.generation!==null)
         ||operation==='inspect'&&value.state==='starting'||operation==='stop'&&value.state!=='stopped'
         ||operation==='start'&&value.state!=='starting')fail('ASSISTANT_CODEX_UPDATE_FAILED');
@@ -1484,18 +1485,18 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
   // uncertain close/install/start phases cannot acquire this new effect path.
   if(service&&register&&['failed','registration_failed'].includes(state.phase)&&state.serviceGeneration==null
     &&compareCodexDesktopVersions(current.version,state.targetVersion)<0&&state.sha256!==null){
-    let active;
-    try{active=await service('inspect');}
-    catch(error){
-      if(error?.code!=='ASSISTANT_BACKGROUND_UNAVAILABLE')throw error;
-      // No new recovery intent exists in this terminal journal. A refused
-      // SCM observation grants neither a service stop nor a GUI-only restart.
-      // Keep the recorded failure and let the scheduler poll with live guards.
-      await guard();
-      serviceBlocksRestart=true;
-    }
+    const inspectRecovery=async()=>{
+      try{return await service('recovery-inspect');}
+      catch(error){
+        if(error?.code!=='ASSISTANT_BACKGROUND_UNAVAILABLE')throw error;
+        // A refused observation has no authority to close the GUI. Preserve
+        // the terminal failure and keep ordinary work behind the live guard.
+        await guard();return null;
+      }
+    };
+    const active=await inspectRecovery();
+    serviceBlocksRestart=!active||['running','control_denied'].includes(active.state);
     if(active?.state==='running'){
-      serviceBlocksRestart=true;
       // Terminal failure permits ordinary tasks. A stopped or unchanged GUI
       // cannot qualify for separate service recovery, so skip the potentially
       // long signature/package checks before polling and claiming due work.
@@ -1511,9 +1512,15 @@ export const maintainAssistantCodexDesktop = async ({identity,readState,writeSta
           const app=await desktop('inspect');
           if(app.state==='running'&&app.generation===candidate.generation){
             await guard();await probe();
-            await save({phase:'service_closing',desktopGeneration:app.generation,serviceGeneration:active.generation,checkedAt:now()});
-            await guard();await desktop('close',app.generation);
-            return {state:'activating',blockBusiness:true};
+            // Signature verification and readiness can take time. Check the
+            // exact service generation and both SCM rights again before
+            // persisting an intent that will take the old GUI offline.
+            const fresh=await inspectRecovery();
+            if(fresh?.state==='running'&&fresh.generation===active.generation){
+              await save({phase:'service_closing',desktopGeneration:app.generation,serviceGeneration:active.generation,checkedAt:now()});
+              await guard();await desktop('close',app.generation);
+              return {state:'activating',blockBusiness:true};
+            }
           }
         }
       }

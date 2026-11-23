@@ -3359,8 +3359,13 @@ generation, native hook/MCP/device readiness and the SAME idle/setup guards.
 If the initial native SCM inspection returns `ASSISTANT_BACKGROUND_UNAVAILABLE`,
 recheck the live guards, keep the recorded installation failure, and allow
 ordinary polling and task dispatch. An unavailable inspection authorizes
-neither service recovery nor a GUI-only restart. A previously journaled stop
-or registration continues to require its own exact native read-back.
+neither service recovery nor a GUI-only restart. The native recovery inspection
+also proves that the same service accepts a normal STOP and that the ordinary
+account can open it with both STOP and START access. A denial leaves the
+working GUI and the failed candidate intact. Repeat the inspection after
+artifact verification and readiness, before saving the close intent. A
+previously journaled stop or registration continues to require its own exact
+native read-back.
 Check the GUI before revalidating the staged MSIX. A stopped or unchanged GUI
 leaves ordinary polling available with the original failure recorded. After
 validating the package signature and confirming through
@@ -3381,8 +3386,13 @@ current-user AppModel selects the registered package and SCM configuration must
 exactly match its fixed sandbox-service executable and LocalSystem own-process
 identity. An owned read-only Restart Manager session registers only that exact
 image FILE. Its complete OS inventory must contain one service with the exact
-short name, fresh SCM PID and original process creation time. Each observation
-uses a fresh session, never a retained inventory as current evidence.
+short name, fresh SCM PID and original process creation time. Windows may label
+this exact record `RmCritical` for the ordinary interactive caller. That label
+describes Restart Manager shutdown eligibility. The unchanged exact FILE,
+service short name, SCM configuration/PID and generation checks still establish
+identity. Control uses the separately checked SCM access and never Restart
+Manager shutdown. Each observation uses a fresh session, never a retained
+inventory as current evidence.
 
 Retain the original OS [RM_UNIQUE_PROCESS](https://learn.microsoft.com/en-us/windows/win32/api/restartmanager/ns-restartmanager-rm_unique_process)
 generation (PID plus creation time), not a bare PID or process handle. Admission

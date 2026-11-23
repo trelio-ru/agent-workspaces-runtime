@@ -639,7 +639,7 @@ test('a stopped Desktop leaves terminal service recovery idle before rechecking 
     return {state:'stopped',generation:null};
   };
   f.options.service=(operation,generation)=>{
-    assert.equal(operation,'inspect','only inspect the service while the GUI is stopped');
+    assert.equal(operation,'recovery-inspect','only inspect the service while the GUI is stopped');
     return service(operation,generation);
   };
   f.options.prepare=async()=>assert.fail('a stopped GUI cannot authorize slow package verification');
@@ -655,7 +655,7 @@ test('an unavailable sandbox service observation preserves the failed installer 
   const failed=structuredClone(f.state);
   const calls=[];
   f.options.service=async operation=>{
-    assert.equal(operation,'inspect','a refused service read supplies no service control authority');
+    assert.equal(operation,'recovery-inspect','a refused service read supplies no service control authority');
     calls.push('inspect_service');
     throw Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_UNAVAILABLE'});
   };
@@ -673,6 +673,21 @@ test('an unavailable sandbox service observation preserves the failed installer 
   assert.deepEqual(calls,['inspect_service','ASSISTANT_CODEX_UPDATE_FAILED','poll','dispatch']);
   assert.deepEqual(f.state,failed);
   assert.deepEqual(f.effects,[]);
+});
+
+test('a denied SCM admission cannot close Codex or consume its staged update',async()=>{
+  for(const late of [false,true]){
+    const {f,service}=await serviceUpdateFixture();
+    const failed=structuredClone(f.state);let reads=0;
+    f.options.service=async(operation,generation)=>{
+      if(operation==='recovery-inspect'&&++reads===(late?2:1))return {state:'control_denied',generation:null};
+      return service(operation,generation);
+    };
+    assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'current',failedVersion:'26.101.0.0'});
+    assert.equal(reads,late?2:1);
+    assert.deepEqual(f.state,failed);
+    assert.deepEqual(f.effects,late?['probe']:[]);
+  }
 });
 
 test('an unavailable service read cannot hide a changed guard or release an in-progress recovery',async()=>{
@@ -768,6 +783,15 @@ test('native service adapter checks admission before spawn and exposes only the 
     assert.deepEqual(o.nativeCommand.args,['--codex-service-restore-status']);
     return o.project(registered);
   }}),registered);
+  const denied={schemaVersion:1,state:'control_denied',generation:null};
+  assert.deepEqual(await runAssistantWindowsCodexService('recovery-inspect',null,{...options,runNative:async(_p,o)=>{
+    assert.deepEqual(o.nativeCommand.args,['--codex-service-recovery-inspect']);
+    return o.project(denied);
+  }}),denied);
+  await assert.rejects(runAssistantWindowsCodexService('recovery-inspect','500:10',options));
+  await assert.rejects(runAssistantWindowsCodexService('inspect',null,{...options,runNative:async(_p,o)=>o.project(denied)}));
+  await assert.rejects(runAssistantWindowsCodexService('recovery-inspect',null,{...options,runNative:async(_p,o)=>
+    o.project({...denied,generation:'500:10'})}));
   await assert.rejects(runAssistantWindowsCodexService('restore-status','500:10',options));
   await assert.rejects(runAssistantWindowsCodexService('inspect',null,{...options,runNative:async(_p,o)=>o.project(registered)}));
   await assert.rejects(runAssistantWindowsCodexService('restore-status',null,{...options,runNative:async(_p,o)=>
