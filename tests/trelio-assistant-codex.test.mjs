@@ -544,6 +544,9 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
     'Do not use ordinary Chrome','Verify the actual site outcome','closes idle windows after ten minutes'])assert.ok(input.includes(invariant));
   assert.match(input,/separate last successfully reviewed message position for each task\/account\/conversation\/topic/);
   assert.match(input,/advance that position only together with successfully accepted task material/);
+  assert.match(input,/newly verified complete interval is substantive task material even when it contains no new messages/);
+  assert.match(input,/Keep the last message ID if it did not change/);
+  assert.match(input,/Use noChange only when no coverage boundary or other substantive task material changed/);
   assert.match(input,/never use the background monitor cursor/);
   assert.match(input,/retain its exact provider\/account\/chat\/topic selectors in accepted WORK.md/);
   assert.match(input,/even when no reply is pending/);

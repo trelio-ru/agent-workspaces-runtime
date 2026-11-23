@@ -81,6 +81,10 @@ publication tooling также остаются вне этого публичн
   the pre-history channel pts. No seed/reset for an existing channel cursor.
   Provider/domain authority,
   private storage и native Codex adapters не заменяются состоянием очереди.
+  Полностью проверенный новый интервал связанной беседы сохраняет границу
+  чтения в принятом WORK.md даже при пустой выдаче. Старый ID сообщения
+  остаётся, если новых сообщений не было. Неполная проверка или сбой
+  сохранения не сдвигают границу. Пустой штатный обзор не требует уведомления.
   Native source discovery/passive reads feed that same queue; unknown refs stay
   unrouted/non-waking. Channel hints retain their source position until initialized/backfilled.
   Native per-original routes dispatch only through the canonical Trelio

@@ -291,8 +291,13 @@ alone uses accepted state/noChange without another Run/worklog. Supply the
 current accepted head and omit acceptedRunId for noChange. The host returns a
 correctable input refusal before protected reads or native completion when a
 Run ID accompanies noChange=true. New answers, decisions, changed blockers and
-deliverables remain substantive saves. Save ordinary company task data with
-the common Workspace Run and its existing revision check. The
+deliverables remain substantive saves. A scheduled review of a linked
+conversation that fully verifies a new interval saves the new coverage boundary
+even if the interval is empty. Retain the last message ID when it did not
+change. Record the actual covered interval in the existing task state through
+the ordinary Workspace Run. Partial reads and failed saves keep the previously
+accepted boundary. An empty routine review needs no notification. Save ordinary
+company task data with the common Workspace Run and its existing revision check. The
 coordinator does not read/cache the Markdown or store goal text in SQLite.
 
 An ordinary full-task pass rechecks a retained technical blocker through the
