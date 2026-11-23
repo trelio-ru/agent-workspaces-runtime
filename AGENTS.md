@@ -2008,8 +2008,10 @@ Exact legacy template bytes для распознавания при мигра�
   Its value-free target reader hashes the browser's actual committed HTTPS
   URL for an explicitly selected origin. Reconstruct CDP's separate
   `urlFragment` in the common Secret preflight and managed worker before
-  any exact comparison or hash. The same origin, loader and stale-frame
-  guards still apply. Site storage and credential
+  any exact comparison or hash. Both materialized worker fixtures inject the
+  same parser as the signed extension. Ordinary Chrome fallback also tests
+  a separately reported fragment after navigation commits. The same origin,
+  loader and stale-frame guards still apply. Site storage and credential
   destination stay separate. Test a real cross-origin redirect and stale
   document rejection after another navigation to the same URL. Negotiate the
   observed plan through native on-demand metadata. Plain/encrypted use the

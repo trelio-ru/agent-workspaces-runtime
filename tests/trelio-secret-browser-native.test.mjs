@@ -1377,13 +1377,16 @@ test("controller compares the normalized verified URL, not TargetInfo spelling",
   assert.ok(!controllerExpression.includes(JSON.stringify(rawTargetUrl)));
 });
 
-test("Chrome waits for the committed document after TargetInfo reaches the requested URL", async () => {
+test("Chrome waits for the committed document and compares its separate CDP fragment", async () => {
+  const urlFragment = "#identifier";
+  const fullTargetUrl = targetUrl + urlFragment;
+  const fullTargetUrlSha256 = createHash("sha256").update(fullTargetUrl).digest("hex");
   let frameReads = 0;
   let controllerCreatedAfterFrame = false;
   const client = {
     request: async (method, parameters) => {
       if (method === "Target.createTarget") return { targetId: "synthetic-tab" };
-      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: fullTargetUrl } };
       if (method === "Target.attachToTarget") return { sessionId: "synthetic-session" };
       if (method === "Page.getFrameTree") {
         frameReads += 1;
@@ -1392,6 +1395,7 @@ test("Chrome waits for the committed document after TargetInfo reaches the reque
           // Chrome can report the requested TargetInfo URL while the main
           // frame is still about:blank and has no committed URL at all.
           url: frameReads < 3 ? "" : targetUrl,
+          ...(frameReads >= 3 ? { urlFragment } : {}),
         } } };
       }
       if (method === "Page.createIsolatedWorld") {
@@ -1407,8 +1411,9 @@ test("Chrome waits for the committed document after TargetInfo reaches the reque
     },
   };
   await prepareSecretBrowserControllerViaDevTools({
-    client, targetUrl, targetOrigin: context.targetOrigin,
-    targetUrlSha256: context.targetUrlSha256, browserSteps: context.browserSteps,
+    client, targetUrl: fullTargetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: fullTargetUrlSha256,
+    browserSteps: [{ ...context.browserSteps[0], targetUrlSha256: fullTargetUrlSha256 }],
     fillTimeoutMs: 2_000,
   });
   assert.ok(frameReads >= 3);

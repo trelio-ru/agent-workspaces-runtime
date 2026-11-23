@@ -1,5 +1,4 @@
-import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-policy.mjs';
-import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
+import { committedBrowserFrameUrl, createBrowserRequestPacing, createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -7,9 +6,10 @@ import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-run
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
 import { createHash, randomUUID, webcrypto } from 'node:crypto';
 import { authenticateVisualBrowser, normalizeVisualAuthentication, visualAuthenticationFingerprint } from '../host-runtime/scripts/trelio-visual-session.mjs';
+// Materialize the same worker dependencies as the installed extension.
 const startWorker = (config, context) => {
   context.chrome.contentSettings ??= { notifications: { async set() {}, async get() { return { setting: 'block' }; } } };
-  return vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
+  return vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()}, ${committedBrowserFrameUrl.toString()});`, context);
 };
 
 /** Execute the actual materialised worker with a native input whose reply is

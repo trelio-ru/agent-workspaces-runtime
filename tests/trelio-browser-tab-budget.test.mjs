@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
-import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-policy.mjs';
+import { committedBrowserFrameUrl, createBrowserRequestPacing, createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 
@@ -35,7 +34,7 @@ test('native extension events remove popup overflow; close removes every owned w
     tabs: { onCreated: { addListener(fn) { onCreated = fn; } }, onRemoved: { addListener(fn) { onRemoved = fn; } },
       async query() { return [{ id: 1, url: 'about:blank' }]; }, async update() { return { id: 1, status: 'complete' }; }, async remove(id) { removed.push(id); onRemoved(id, { windowId: 2, isWindowClosing: false }); } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
-  vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
+  vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()}, ${committedBrowserFrameUrl.toString()});`, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen();
   socket.onmessage({ data: JSON.stringify({ id: 'auth', operation: 'restore-session-auth', args: { cookies: [], replace: false } }) });
