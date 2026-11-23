@@ -2086,8 +2086,10 @@ clean Git и принятый head проверяются обычным preflig
 
    Local MCP tools/list описывает handoff поля parameters прямо в inputSchema:
    summary/nextAction – string; evidence/questions – до 50 строк, filePaths – до
-   1000 строк. Они общие для checkpoint/pause/finish, остальные server-selected
-   параметры проверяются dispatcher по прежней per-operation схеме. Backend
+   1000 строк. Описание инструмента ограничивает эти поля операциями
+   checkpoint/pause/finish для клиентов с одной общей сигнатурой. Для open и
+   status передаётся исходный `action.arguments`. Dispatcher проверяет
+   разрешённые параметры каждой операции до запуска bridge. Backend
    checkpoint имеет другой wire format; объект evidence/nextAction не приводится
    к строке автоматически. Типизация помогает caller до выполнения, не снимая
    validation-before-child или требований handoff.

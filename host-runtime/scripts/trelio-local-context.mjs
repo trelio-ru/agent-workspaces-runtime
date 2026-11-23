@@ -13474,7 +13474,7 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
 
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
-  description: "Copy action.arguments. Open recovers once; reconcile recovery and save without moving source. Ask only on semantic conflict.",
+  description: "Copy action.arguments. Handoff: checkpoint/pause/finish only. Recover open once; save in place unless semantic conflict.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -13483,10 +13483,10 @@ export const TRELIO_WORKSPACE_ACTION_TOOL = {
       schemaVersion: { type: "integer", const: TRELIO_WORKSPACE_ACTION_SCHEMA_VERSION },
       operation: { type: "string" },
       // These editable handoff fields have one wire type across checkpoint,
-      // pause and finish. Publish them where the model forms its actual call;
-      // the separate native checkpoint accepts different object-shaped data.
-      // Other operations retain their server-selected parameters and the
-      // dispatcher's closed per-operation validation before any private I/O.
+      // pause and finish. The tool description scopes these shared schema
+      // properties for clients that flatten operations into one signature.
+      // Other operations copy server-selected parameters and retain closed
+      // per-operation validation before any private I/O.
       parameters: { type: "object", properties: {
         summary: { type: "string" },
         evidence: { type: "array", items: { type: "string" }, maxItems: 50 },

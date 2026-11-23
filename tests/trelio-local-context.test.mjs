@@ -6282,8 +6282,13 @@ test("exact document raw scope uses resolved UUID while hydrated aliases retain 
 });
 
 
-test("published workspace handoff schema matches the production validator instead of opaque objects", () => {
-  const fields = TRELIO_WORKSPACE_ACTION_TOOL.inputSchema.properties.parameters.properties;
+test("published workspace handoff fields are typed and scoped to the three saving operations", async () => {
+  const { handleLocalMcpMessage } = await import("../host-runtime/scripts/trelio-remote-mcp.mjs");
+  const response = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const published = response.result.tools.find(tool => tool.name === TRELIO_WORKSPACE_ACTION_TOOL.name);
+  assert.match(published.description, /Copy action\.arguments\. Handoff: checkpoint\/pause\/finish only\./u);
+  const fields = published.inputSchema.properties.parameters.properties;
+  assert.deepEqual(Object.keys(fields).sort(), ["evidence", "filePaths", "nextAction", "questions", "summary"]);
   assert.equal(fields.nextAction.type, "string");
   assert.deepEqual(fields.evidence, { type: "array", items: { type: "string" }, maxItems: 50 });
   for (const operation of ["checkpoint", "pause", "finish"]) {
@@ -6293,5 +6298,15 @@ test("published workspace handoff schema matches the production validator instea
       assert.throws(() => buildTrelioWorkspaceActionInvocation({ schemaVersion: 1, operation, parameters: { ...parameters, ...invalid }, workingDirectory: actionWorkingDirectory }),
         error => error.diagnosticCode === "TRELIO_WORKSPACE_INPUT_WRONG_TYPE");
     }
+  }
+  for (const [operation, parameters, invalid] of [
+    ["open", { workspaceId: actionWorkspaceId }, { summary: "Result" }],
+    ["open", { workspaceId: actionWorkspaceId }, { filePaths: ["result.md"] }],
+    ["status", {}, { workspaceId: actionWorkspaceId }],
+  ]) {
+    const action = { schemaVersion: 1, operation, parameters, workingDirectory: actionWorkingDirectory };
+    assert.doesNotThrow(() => buildTrelioWorkspaceActionInvocation(action));
+    assert.throws(() => buildTrelioWorkspaceActionInvocation({ ...action, parameters: { ...parameters, ...invalid } }),
+      error => error.diagnosticCode === "TRELIO_WORKSPACE_INPUT_UNKNOWN_FIELD");
   }
 });

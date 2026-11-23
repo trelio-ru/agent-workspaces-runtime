@@ -791,7 +791,7 @@ test("same-Run draft recovery preserves both histories and exposes one exact rec
   assert.equal(calls, 1, "noncanonical older envelopes remain available for explicit recovery");
   assert.match(
     TRELIO_WORKSPACE_ACTION_TOOL.description,
-    /Open recovers once.*save without moving source.*only on semantic conflict/u,
+    /Recover open once.*save in place unless semantic conflict/u,
   );
 
   for (const mutate of [

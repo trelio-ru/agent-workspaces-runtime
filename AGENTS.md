@@ -1742,6 +1742,9 @@ Exact legacy template bytes для распознавания при мигра�
   `render_trelio_local_proposal` сохраняется только из-за MCP App metadata, а
   typed `continue_trelio_workspace_action` – как bridge ABI. Старые отдельные
   local aliases и прямой pre-envelope ABI не публикуются в MCP catalog.
+- Описание Workspace action ограничивает handoff поля операциями
+  checkpoint/pause/finish. Для open и status сохраняй exact action.arguments
+  и проверяй опубликованный tools/list вместе с dispatcher.
 - Standalone encrypted rules read через `context/native_read` использует native
   settings handler и верхний hook proof, сохраняя history/editing и native
   envelope. Этот exact переход не допускает context mutations или guessed
