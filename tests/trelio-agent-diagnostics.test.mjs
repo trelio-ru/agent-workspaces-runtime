@@ -6,7 +6,7 @@ import { buildAgentDiagnosticEvent, createAgentDiagnosticReporter, sendAgentDiag
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { TrelioLocalContextError, buildStableCompanyMirror, buildTrelioWorkspaceActionInvocation } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { ProcessDiagnosticError, processDiagnosticEvidence, PROCESS_DIAGNOSTIC_CODES, parseProcessDiagnostic, skillRuntimeExitError, skillSetupExitError } from "../host-runtime/scripts/trelio-process-diagnostics.mjs";
-import { formatBridgeCommandError, runMaterializedAgentSkill, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { formatBridgeCommandError, runMaterializedAgentSkill, withBrowserFailureStage, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { formatRuntimeHookFailure } from "../host-runtime/scripts/trelio-runtime-session.mjs";
 
 test('protected Telegram setup retains only a reviewed code and bounded wait across the actual bridge frame', () => {
@@ -765,7 +765,7 @@ test('HTTP 400 origin evidence survives both direct and child boundaries with st
 
 test('browser failures retain exact origin stage without consuming or replaying the operation', async () => {
   const {parseBrowserFailureEvidence}=await import('../host-runtime/scripts/trelio-diagnostic-observation.mjs');
-  const {SecretBrowserFillError,withBrowserFailureStage}=await import('../host-runtime/scripts/trelio-secret-browser.mjs');
+  const {SecretBrowserFillError}=await import('../host-runtime/scripts/trelio-secret-browser.mjs');
   for (const stage of contract.detailEvidence.browserStages) {
     let executions=0;
     const error=new SecretBrowserFillError('fixed','field_not_found');
@@ -817,7 +817,6 @@ test('ordinary reviewed provider failure waits for a complete pipe and preserves
 });
 
 test('an ambiguous consume HTTP failure keeps its origin stage without claiming the grant survived', async () => {
-  const {withBrowserFailureStage}=await import('../host-runtime/scripts/trelio-secret-browser.mjs');
   const error=new TrelioApiError(503,'fixed');
   await assert.rejects(withBrowserFailureStage('consume',()=>{throw error;}));
   const frame=formatBridgeCommandError(error);

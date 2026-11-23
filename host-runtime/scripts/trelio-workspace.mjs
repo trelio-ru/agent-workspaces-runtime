@@ -100,10 +100,7 @@ import {
   verifyGitRuntime,
 } from "./trelio-git.mjs";
 import { needsExternalWorkspaceStorage } from "./trelio-folder-onboarding.mjs";
-import {
-  SecretBrowserFillError,
-  withBrowserFailureStage,
-} from "./trelio-secret-browser.mjs";
+import { SecretBrowserFillError } from "./trelio-secret-browser.mjs";
 import {
   assertBrowserFillBindingUnchanged,
   normalizeSecretBrowserMode,
@@ -20332,6 +20329,19 @@ const reportSecretBrowserFillOutcome = async ({
     }
   }
   throw lastError;
+};
+
+// The boundary owner supplies a fixed stage. Unknown errors retain "unknown";
+// their prose, causes, URL, selectors, grant and secret never become evidence.
+// Annotation does not consume a grant, alter retry policy or replay a setter.
+export const withBrowserFailureStage = async (stage, action) => {
+  try { return await action(); }
+  catch (error) {
+    if (!readDiagnosticDetail(error)) rememberDiagnosticDetail(error, {
+      kind: "browser", stage, reason: error instanceof SecretBrowserFillError ? error.reasonCode : "unknown",
+    });
+    throw error;
+  }
 };
 
 const prepareSecretBrowserFillAction = async (options, positional, onPreflightPhase, {
