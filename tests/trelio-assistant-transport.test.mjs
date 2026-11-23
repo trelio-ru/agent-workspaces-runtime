@@ -1021,7 +1021,9 @@ test('fixed control-plane task admission carries the current loader version inde
   const {getHostRuntimeVersion}=await import('../host-runtime/scripts/trelio-component-versions.mjs');
   const paths=['task','task/claim','schedule','task-pass/begin'];let calls=0;
   const http=createAssistantHttp({origin:'https://assistant.test',fetchImpl:async(url,options)=>{
-    assert.equal(url,'https://assistant.test/api/digital-assistants/runtime/'+paths[calls++]);
+    const route=paths[calls++];
+    assert.equal(url,'https://assistant.test/api/digital-assistants/runtime/'+route);
+    assert.equal(options.headers['x-trelio-assistant-start-protocol'],route==='task-pass/begin'?'1':undefined);
     assert.equal(options.headers['x-trelio-host-runtime-version'],getHostRuntimeVersion());
     assert.notEqual(options.headers['x-trelio-host-runtime-version'],'999.0.0');
     assert.equal(options.headers.authorization,`Bearer tda_${'a'.repeat(43)}`);
@@ -1283,6 +1285,26 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   await assert.rejects(client.registerRuntime({...request,observation:{...observation,source:'agent_request'}}),/INVALID_INPUT/);
   assert.deepEqual(await client.endRuntime({...locator,runtimeSessionId:sessionId}),{ended:true});
   assert.deepEqual(operations,['passBegin','passRead','passRenew','registerRuntime','registerRuntime','endRuntime']);
+});
+
+test('first-start hint belongs only to the exact new lease in a begin response',async()=>{
+  const origin='https://admission.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1});
+  const companyId=randomUUID(),taskId=randomUUID(),passId=randomUUID();
+  const request={companyId,taskId,bindingId:randomUUID(),bindingRevision:2,deliveryId:randomUUID(),threadId:randomUUID()};
+  const response={...request,passId,state:'leased',leaseRevision:0,leaseExpiresAt:new Date().toISOString(),
+    execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async()=>response});
+  assert.equal(Object.hasOwn(await client.beginTaskPass(request),'startState'),false);
+  for(const state of ['created','observe']){
+    response.startState=state;
+    assert.equal((await client.beginTaskPass(request)).startState,state);
+    assert.equal(Object.hasOwn(await client.readTaskPass({companyId,taskId,passId}),'startState'),false);
+  }
+  for(const invalid of [{startState:true},{startState:'created',leaseRevision:1},{startState:'created',leaseRevision:0,state:'closed'}]){
+    Object.assign(response,invalid);
+    await assert.rejects(client.beginTaskPass(request),/INVALID_RESPONSE/);
+  }
 });
 
 test('native discussion mode survives task inventory, exact reads, event and pass projection; unknown modes fail closed',async()=>{

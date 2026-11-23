@@ -2076,7 +2076,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   const database=await openDatabase(deviceRoot);
   let coordinator,closed=false;
   try {
-    const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
+    const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,
+      run:nativeRuntime.runAssistantTurn,recover:nativeRuntime.runAssistantCodexPass,
       readDelivery:nativeRuntime.readAssistantCodexDelivery,readWriterReleased:nativeRuntime.readAssistantCodexWriterReleased,
       withWriter:nativeRuntime.withAssistantCodexWriter,
       readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply,
@@ -2104,7 +2105,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
           ...(code==='ready'?{clearedReason:'codex_auth_required'}:{})},signal);
       });} catch { /* A CAS/transport refusal preserves the original receipt and incident. */ }
     };
-    const observedNative={...native,...Object.fromEntries(['provision','run'].map(name=>[name,async(input,options)=>{
+    const observedNative={...native,...Object.fromEntries(['provision','run','recover'].filter(name=>typeof native[name]==='function').map(name=>[name,async(input,options)=>{
       try {return await native[name](input,{...options,
         onAuthenticationConfirmed:()=>reportAuthentication('ready',options.signal)});}
       catch(error){

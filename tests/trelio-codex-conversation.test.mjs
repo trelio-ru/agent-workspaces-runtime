@@ -23,7 +23,7 @@ import {maintainAssistantPlugin} from '../host-runtime/scripts/trelio-assistant-
 import http from 'node:http';
 import {randomUUID} from 'node:crypto';
 import {assistantCodexExecutionOverrides,provisionAssistantCodexChat,readAssistantCodexDelivery,readAssistantCodexWriterReleased,
- readAssistantCodexMetadata,runAssistantCodexPass,withAssistantCodexWriter} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+ readAssistantCodexMetadata,runAssistantTurn,withAssistantCodexWriter} from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import {ASSISTANT_WORKSPACE_DRAFT_TOOLS} from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -537,6 +537,14 @@ test('actual Codex isolated assistant refuses alternate tools across process res
    return {request,close};
   }catch(error){await close();throw error;}
  };
+ // Exercise the production fresh executor through the real App Server. Legacy
+ // receipt readers, provision callbacks and Desktop helpers are deliberately
+ // absent from its interface. Both executors share the same isolated fixture.
+ const freshOptions={
+   executable, environment:options.environment, spawnProcess:observedSpawn,
+   passTimeoutMs:options.passTimeoutMs, readExecutionAvailability:options.readExecutionAvailability,
+   readHookReadiness:options.readHookReadiness, startInvocation:options.startInvocation, startState:'created',
+ };
  const first=await attach();
  const passInput={threadId,deliveryId:randomUUID(),cwd:root,execution,
   taskContext:{assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID()}};
@@ -545,7 +553,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
   assert.equal(resumed.result?.thread?.id,threadId);
   const requestsBefore=modelRequests;
   await assert.rejects(readAssistantCodexWriterReleased(threadId,root,options),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
-  await assert.rejects(runAssistantCodexPass(passInput,options),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+  await assert.rejects(runAssistantTurn(passInput,freshOptions),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
   assert.equal(starts,1,'a competing writer cannot spend another invocation');
   assert.equal(modelRequests,requestsBefore,'a competing writer cannot send a model request');
  } finally {await first.close();}
@@ -569,7 +577,7 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // through a new process, with exactly the same restrictions and history.
  business=true;
  let result;
- try{result=await runAssistantCodexPass(passInput,options);}
+ try{result=await runAssistantTurn(passInput,freshOptions);}
  catch(error){assert.fail(JSON.stringify({code:error.code,phases}));}
  assert.equal(result.state,'completed');assert.equal(starts,2);
  assert.ok(sawWorkflow,'the model receives both admitted workflow documents without shell');
@@ -593,10 +601,20 @@ test('actual Codex isolated assistant refuses alternate tools across process res
  // not how a real model will judge the business state.
  resumedAfterBlocker=true;attempt=4;
  let next;
- try{next=await runAssistantCodexPass({...passInput,deliveryId:randomUUID(),
-  taskContext:{...passInput.taskContext,scheduled:true}},options);}
+ try{next=await runAssistantTurn({...passInput,deliveryId:randomUUID(),
+  taskContext:{...passInput.taskContext,scheduled:true}},freshOptions);}
  catch(error){assert.fail(JSON.stringify({code:error.code,phases,pendingResumeCatalogues,delayedCatalogueDelivered}));}
  assert.equal(next.state,'completed');assert.equal(starts,3);
+ // Losing the original begin receipt may bring the same delivery back after a
+ // newer turn. A real Codex history read must locate its exact marker without
+ // invoking either the Responses fixture or its MCP tool a second time.
+ await awaitRpcClose();
+ const callsBeforeReadback={starts,allowedCalls,modelRequests};
+ const reconciled=await runAssistantTurn(passInput,{...freshOptions,startState:'observe'});
+ assert.deepEqual(reconciled,result);
+ assert.deepEqual({starts,allowedCalls,modelRequests},callsBeforeReadback);
+ await awaitRpcClose();
+
  assert.ok(delayedCatalogueDelivered,'the original pending connection finished without a second writer');
  assert.equal(allowedCalls,2,'the new pass has one additional direct native read');
  assert.ok(resumedRequests.length>=2,'native MCP continuation reaches the model again');

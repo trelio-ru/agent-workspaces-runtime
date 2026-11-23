@@ -6,11 +6,11 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, assistantInterruptedAcceptedWorkspace, assistantInterruptedPendingWorkspaceFinish, assistantInterruptedRetainedHandoff, assistantInterruptedNamedWorkspaceFinish, assistantAcceptedNamedArchive, assistantInterruptedWorkspaceDraft, assistantInterruptedTaskRead, assistantInterruptedTechnicalPrelude, verifyAssistantPowerShellReadExecutable, assistantReadOnlyPreparationFailure, assistantDeliveryMarker, assistantFreshPrompt, assistantNativePrompt, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantUnmaterializedTriage, readAssistantRejectedTriageIgnore, readAssistantCodexOwnerReply, runAssistantCodexPass as runNativePass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
   ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft,
-  readAssistantCodexWriterReleased,withAssistantCodexWriter,inspectRetiredAcceptedOutcome } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+  runAssistantTurn,readAssistantCodexWriterReleased,withAssistantCodexWriter,inspectRetiredAcceptedOutcome } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
@@ -280,7 +280,7 @@ const nativeRpc = (handler, executionPolicy=()=>null) => (_executable, args, opt
 // the execution policy and must fail rather than silently simulate success.
 const ownedRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onTurn=()=>{},
   onRequest=()=>{},nameFailure=false,pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[],bootstrapError=null,
-  status={type:'notLoaded'},canAcceptDirectInput=null,executionPolicy,resumeError,priorTurn}={}) => {
+  status={type:'notLoaded'},canAcceptDirectInput=null,executionPolicy,resumeError,priorTurn,storedHistory=[],onHistoryRead,terminalId,storedId}={}) => {
   let input='',turnId=randomUUID(),phase='read',snapshot=0;
   const rpc=nativeRpc(request=>{
     onRequest(request);
@@ -302,16 +302,181 @@ const ownedRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onT
       if(phase==='controlled')onTurn(request);onInput(input,phase);
       const failed=phase==='bootstrap'&&bootstrapError;
       return {result:{turn:{id:turnId}},notifications:terminal?[{method:'turn/completed',params:{threadId,
-        turn:{id:turnId,status:failed?'failed':'completed',...(failed?{error:bootstrapError}:{})}}}]:[]};
+        turn:{id:terminalId??turnId,status:failed?'failed':'completed',...(failed?{error:bootstrapError}:{})}}}]:[]};
     }
     if(request.method==='thread/queue/list')return {result:{data:queued,nextCursor:null}};
     assert.equal(request.method,'thread/turns/list');
+    if(phase==='read'&&onHistoryRead)return onHistoryRead(request.params);
     if(phase==='read'&&priorTurn)return {result:{data:Array.isArray(priorTurn)?priorTurn:[priorTurn],nextCursor:'older'}};
     const current=phase==='controlled'&&snapshotStatuses.length?snapshotStatuses[Math.min(snapshot++,snapshotStatuses.length-1)]:'completed';
-    return {result:{data:terminal?[{id:turnId,status:current,items:[{type:'userMessage',content:[{type:'text',text:input}]},{type:'agentMessage',text:'READY'}]}]:[],nextCursor:null}};
+    const turns=terminal?[{id:storedId??turnId,status:current,items:[{type:'userMessage',content:[{type:'text',text:input}]},{type:'agentMessage',text:'READY'}]},...storedHistory]:[];
+    return {result:{data:turns.slice(0,request.params.limit),nextCursor:turns.length>request.params.limit?'older':null}};
   },executionPolicy);
   return (...args)=>{const child=rpc(...args);children.push(child);return child;};
 };
+
+for(const mode of ['task','discussion'])test(`fresh ${mode} owns one native turn and confirms its persisted ID`,async t=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const scope={...taskContext,...(mode==='discussion'?{workMode:'discussion'}:{scheduled:true})};
+  const steps=[];
+  // Run the actual private role loader. Each file has distinct content so a
+  // prompt containing only a name, leading fragment, or stale role fails.
+  const home=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'assistant-native-role-')));
+  t.after(()=>fs.rm(home,{recursive:true,force:true}));
+  const plugin=path.join(home,'plugins','cache','trelio-digital-assistants','trelio-digital-assistant','1.0.0');
+  const worker=path.join(plugin,'skills','assistant-task-worker');
+  const role='Task role, including its closing instruction.',reference='Work-state contract, including its closing instruction.';
+  await fs.mkdir(path.join(plugin,'.codex-plugin'),{recursive:true});
+  await fs.mkdir(path.join(worker,'references'),{recursive:true});
+  await fs.writeFile(path.join(plugin,'.codex-plugin','plugin.json'),JSON.stringify({name:'trelio-digital-assistant',version:'1.0.0'}));
+  await fs.writeFile(path.join(worker,'SKILL.md'),role);
+  await fs.writeFile(path.join(worker,'references','work-state.md'),reference);
+  const storedHistory=Array.from({length:135},()=>({id:randomUUID(),status:'completed',items:[]}));
+  const result=await runAssistantTurn({threadId,deliveryId,cwd,execution,taskContext:scope},{
+    startState:'created',executable:process.execPath,environment:{CODEX_HOME:home,TRELIO_PLUGIN_ROOT:plugin},
+    readExecutionAvailability:async()=>{steps.push('model');return true;},
+    readHookReadiness:async()=>{steps.push('hooks');},
+    beforeInvocation:async signal=>{signal.throwIfAborted();steps.push('recheck');},
+    startInvocation:identity=>{assert.deepEqual(identity,{threadId,deliveryId});steps.push('reserve');},
+    onAuthenticationConfirmed:()=>{steps.push('confirmed');},
+    spawnProcess:ownedRpc({threadId,cwd,storedHistory,executionPolicy:(request,reply)=>{
+      if(request.method==='mcpServerStatus/list')steps.push('mcp');
+      return reply;
+    },onRequest:request=>{
+      if(request.method==='thread/read')assert.equal(request.params.includeTurns,false);
+      if(request.method==='thread/resume'){
+        assert.equal(request.params.excludeTurns,true);steps.push('writer');
+      }
+      if(request.method==='thread/turns/list'){
+        assert.deepEqual(request.params,{threadId,limit:1,sortDirection:'desc',itemsView:'summary'});steps.push('readback');
+      }
+    },onTurn:({params})=>{
+      steps.push('turn');
+      assert.equal(params.threadId,threadId);
+      assert.ok(params.collaborationMode.settings.developer_instructions.includes(role));
+      assert.ok(params.collaborationMode.settings.developer_instructions.includes(reference));
+      assert.equal(params.input[0].text,assistantFreshPrompt(deliveryId,assistantWorkStateContext(scope)));
+      const wake=params.input[0].text;
+      assert.ok(Buffer.byteLength(wake)<2300);
+      assert.ok(!wake.includes(role)&&!wake.includes(reference));
+      if(mode==='discussion'){
+        assert.match(wake,/replyCommentId/u);
+        assert.doesNotMatch(wake,/Scheduled review|Resume the human goal/u);
+      }else{
+        assert.match(wake,/Scheduled review/u);
+        assert.doesNotMatch(wake,/processedSourceReferences|unsubscribeEventIds/u);
+      }
+      assert.deepEqual(params.sandboxPolicy,{type:'readOnly',networkAccess:false});
+    }}),
+  });
+  assert.deepEqual(steps,['model','hooks','writer','mcp','recheck','reserve','turn','readback','confirmed']);
+  assert.equal(result.state,'completed');assert.equal(result.receipt,`codex:${threadId}:${result.turnId}`);
+});
+
+for(const reason of ['busy','revoked','start_refused','restricted','wrong_terminal_id','wrong_stored_id','wrong_stored_status'])test(`fresh task retains native fence on ${reason}`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const refusal=Object.assign(new Error('stopped'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  let starts=0,turns=0;
+  await assert.rejects(runAssistantTurn({threadId,deliveryId,cwd,execution,taskContext},{
+    startState:'created',executable:process.execPath,environment:{},readWorkflow:async()=>'Verified workflow',
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},
+    ...(reason==='restricted'?{requireAbsentMarker:true}:{}),
+    beforeInvocation:async()=>{if(reason==='revoked')throw refusal;},
+    startInvocation:()=>{if(reason==='start_refused')throw refusal;starts++;},
+    onAuthenticationConfirmed:()=>assert.fail('failed turns cannot clear authentication health'),
+    spawnProcess:ownedRpc({threadId,cwd,queued:reason==='busy'?[{}]:[],onTurn:()=>{turns++;},
+      terminalId:reason==='wrong_terminal_id'?randomUUID():undefined,storedId:reason==='wrong_stored_id'?randomUUID():undefined,
+      snapshotStatuses:reason==='wrong_stored_status'?['failed']:[]}),
+  }),{code:{busy:'ASSISTANT_CODEX_THREAD_BUSY',revoked:refusal.code,start_refused:'ASSISTANT_CODEX_DELIVERY_NOT_STARTED',
+    restricted:'ASSISTANT_CODEX_INVALID_INPUT',wrong_terminal_id:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN',
+    wrong_stored_id:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN',wrong_stored_status:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'}[reason]});
+  assert.equal(starts,reason.startsWith('wrong_')?1:0);assert.equal(turns,starts);
+});
+
+for(const previous of ['absent','completed','failed','interrupted','duplicate','partial','unloaded','legacy','missing_observed'])test(`restored task checks only its reserved native marker (${previous})`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const history=Array.from({length:275},()=>({id:randomUUID(),status:'completed',items:[]}));
+  const marker={type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nTask context'}]};
+  const row=history[222];
+  if(!['absent','partial','missing_observed'].includes(previous)){
+    row.items=[marker];row.status=['failed','interrupted'].includes(previous)?previous:'completed';
+  }
+  if(previous==='duplicate')history[265].items=[marker];
+  if(previous==='unloaded')Object.assign(history[17],{itemsView:'notLoaded',items:[]});
+  let turns=0,reserved=0,pages=0,confirmed=0;
+  const work=runAssistantTurn({threadId,deliveryId,cwd,execution,taskContext},{
+    ...(['legacy','absent'].includes(previous)?{}:{startState:'observe'}),
+    executable:process.execPath,environment:{},readWorkflow:async()=>'Verified workflow',
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},
+    startInvocation:()=>{reserved++;},onAuthenticationConfirmed:()=>{confirmed++;},
+    spawnProcess:ownedRpc({threadId,cwd,onTurn:()=>{turns++;},onHistoryRead:({threadId:actual,limit,cursor,itemsView})=>{
+      assert.equal(actual,threadId);assert.equal(itemsView,'summary');assert.equal(limit,20);pages++;
+      const offset=Number(cursor??0),next=offset+limit;
+      return {result:{data:history.slice(offset,next),nextCursor:previous==='partial'?'20':next<history.length?String(next):null}};
+    }}),
+  });
+  if(['duplicate','partial','unloaded','interrupted','missing_observed'].includes(previous))
+    await assert.rejects(work,{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  else{
+    const result=await work;
+    assert.equal(result.state,previous==='failed'?'failed':'completed');
+    if(previous!=='absent'){
+      assert.equal(result.turnId,row.id);assert.equal(result.receipt,`${previous==='failed'?'codex-failed':'codex'}:${threadId}:${row.id}`);
+    }
+  }
+  assert.equal(pages,previous==='partial'?2:previous==='unloaded'?1:previous==='interrupted'?12:14);
+  assert.equal(turns,previous==='absent'?1:0);
+  assert.equal(reserved,turns);assert.equal(confirmed,turns);
+});
+
+for(const mode of ['owner','triage','source_with_task_grant','reply_only','both_scopes'])test(`ordinary source intake keeps its own authority (${mode})`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const eventId=randomUUID(),intakeContext={assistantId:taskContext.assistantId,companyId:taskContext.companyId,
+    sourceId:randomUUID(),sourceRevision:3,intakeId:randomUUID(),eventId,
+    ...(mode==='triage'?{intakeKind:'route_existing',eventIds:[eventId,randomUUID()]}:{})};
+  let scans=0,starts=0;
+  const work=runAssistantTurn({threadId,deliveryId,cwd,execution,intakeContext,...(mode==='both_scopes'?{taskContext}:{})},{
+    ...(mode==='source_with_task_grant'?{startState:'created'}:mode==='reply_only'?{replyOnlyRecovery:true}:{}),
+    executable:process.execPath,environment:{},readWorkflow:async()=>'Verified workflow',
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},startInvocation:()=>{starts++;},
+    spawnProcess:ownedRpc({threadId,cwd,onHistoryRead:()=>{scans++;return {result:{data:[],nextCursor:null}};},
+      onTurn:({params})=>{
+        assert.equal(starts,1);
+        const canonical=assistantFreshPrompt(deliveryId,{kind:'source_intake',...intakeContext});
+        assert.equal(params.input[0].text,canonical);
+        assert.match(canonical,/TRELIO_ASSISTANT_INTAKE /u);
+        assert.doesNotMatch(canonical,/TRELIO_ASSISTANT_SCOPE /u);
+        assert.match(canonical,/resolve_assistant_intake/u);
+        if(mode==='triage'){
+          assert.match(canonical,/Partition every event once/u);
+          assert.match(canonical,/emailAutoUnsubscribeEnabled and unsubscribeEligible/u);
+          assert.doesNotMatch(canonical,/reply_owner|targetSourceId/u);
+        }else{
+          assert.match(canonical,/reply_owner in the original chat/u);
+          assert.match(canonical,/exact targetSourceId/u);
+          assert.doesNotMatch(canonical,/unsubscribeEventIds/u);
+        }
+      }}),
+  });
+  if(['owner','triage'].includes(mode)){
+    assert.equal((await work).state,'completed');assert.equal(scans,1);assert.equal(starts,1);
+  }else{
+    await assert.rejects(work,{code:'ASSISTANT_CODEX_INVALID_INPUT'});assert.equal(starts,0);assert.equal(scans,0);
+  }
+});
+
+for(const stage of ['before_cas','after_cas'])test(`native shutdown at ${stage} cannot dispatch model input`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd()),stop=new AbortController();
+  let reservations=0,submissions=0;
+  await assert.rejects(runAssistantTurn({threadId,deliveryId,cwd,execution,taskContext},{
+    signal:stop.signal,startState:'created',executable:process.execPath,environment:{},readWorkflow:async()=>'Verified workflow',
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},
+    beforeInvocation:async()=>{if(stage==='before_cas')stop.abort();},
+    startInvocation:()=>{reservations++;if(stage==='after_cas')stop.abort();},
+    spawnProcess:ownedRpc({threadId,cwd,onTurn:()=>{submissions++;}}),
+  }),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  assert.equal(reservations,stage==='after_cas'?1:0);assert.equal(submissions,0);
+});
 
 test('writer release requires the native claim, an empty queue and the observer close',async()=>{
   const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());
@@ -595,6 +760,10 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
     sourceId:randomUUID(),sourceRevision:3,routeId:randomUUID(),accountId:randomUUID(),eventRevision:'b'.repeat(64),
     eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`}));
   const repliedTaskContext={...taskContext,scheduled:true,ownerQuestionIds:[randomUUID()],sourceReferences};
+  const fresh=assistantFreshPrompt(deliveryId,assistantWorkStateContext(repliedTaskContext));
+  assert.match(fresh,/get_assistant_owner_question/u);
+  assert.match(fresh,/processedSourceReferences in ascending ordinal order/u);
+  assert.match(fresh,/retain the old bookmark|Keep the old bookmark/u);
   let starts=0,reads=0,launches=0,confirmed=0,input='';
   const options = { readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,
     ComSpec:'C:\\Windows\\System32\\cmd.exe',PATHEXT:'.COM;.EXE;.BAT;.CMD',OPENAI_API_KEY:'private',SHOULD_NOT_PASS:'private' },
@@ -1221,6 +1390,11 @@ test('intermediate restart requires an exact durable checkpoint and signed read 
       continuation('skill_run',parameters,{stdout,taskSkillRead}));
     const proof={taskPass,workStateContext,checkpoint};
     assert.equal(assistantInterruptedTaskCheckpoint(originalTurn,terminalMarkerId,proof),true);
+    const freshRoot=structuredClone(originalTurn);
+    freshRoot.items[0].content[0].text=assistantFreshPrompt(terminalMarkerId,workStateContext);
+    assert.equal(assistantInterruptedTaskCheckpoint(freshRoot,terminalMarkerId,proof),true);
+    freshRoot.items[0].content[0].text+='untrusted suffix';
+    assert.equal(assistantInterruptedTaskCheckpoint(freshRoot,terminalMarkerId,proof),false);
     const observed=await readAssistantCodexDelivery(threadId,terminalMarkerId,{
       executable:process.execPath,environment:{},interruptedWorkspaceDraft:{...taskPass,intermediateDraft:{workStateContext,checkpoint}},
       spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[originalTurn],nextCursor:null}})),
@@ -1692,6 +1866,11 @@ test('an accepted local save can nominate only the exact observed outbound effec
     })),
   });
   const restored=await readRoot();
+  const freshRoot=structuredClone(root);
+  freshRoot.items[0].content[0].text=assistantFreshPrompt(deliveryId,rootScope);
+  assert.deepEqual(await readRoot(freshRoot),restored);
+  freshRoot.items[0].content[0].text+='untrusted suffix';
+  assert.equal((await readRoot(freshRoot)).state,'uncertain');
   assert.equal(restored.state,'recovered_outcome_observed');
   assert.deepEqual(restored.evidence,{...run,acceptedHead:candidateHead,historicalSkillReleases:[release],
     rootDelivery:{sourceMarkerId:deliveryId,sourceTurnId:root.id},nativeControlReceipts:[control]});
@@ -3524,6 +3703,13 @@ for(const variant of ['exact','inline-authority','cached-authority','newer-turn'
     if(variant==='provider-command')turn.items[5].tool='continue_assistant_workspace_action';
     const changed=['cached-authority','incomplete-authority','provider-command','owner-input','changed-prompt'].includes(variant);
     assert.equal(assistantInterruptedTaskRead(turn,terminalMarkerId,witness),!changed);
+    if(!changed){
+      const freshRoot=structuredClone(turn);
+      freshRoot.items[0].content[0].text=assistantFreshPrompt(terminalMarkerId,scope);
+      assert.equal(assistantInterruptedTaskRead(freshRoot,terminalMarkerId,witness),true);
+      freshRoot.items[0].content[0].text+='untrusted suffix';
+      assert.equal(assistantInterruptedTaskRead(freshRoot,terminalMarkerId,witness),false);
+    }
     const priorTurn=variant==='newer-turn'?[{id:randomUUID(),status:'completed',items:[]}]:[turn];
     const steps=[];
     let reads=0,starts=0;

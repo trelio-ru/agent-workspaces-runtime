@@ -503,6 +503,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
         // never substitutes device authorization, task ACL or observed proof.
         headers: { accept: 'application/json', 'x-trelio-host-runtime-version':getHostRuntimeVersion(),
           ...(operation==='heartbeat'?{'x-trelio-assistant-operation-protocol':'1'}:{}),
+          ...(operation==='passBegin'?{'x-trelio-assistant-start-protocol':'1'}:{}),
           ...(operation==='passOutcome'?{'x-trelio-assistant-schedule-protocol':'2'}:{}),
           ...(['healthRead','healthReport'].includes(operation)?{'x-trelio-assistant-health-protocol':'3'}:{}),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
@@ -3190,7 +3191,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId)},signal);
       if(value.bindingId!==input.bindingId || value.deliveryId!==input.deliveryId || value.threadId!==input.threadId
         || value.bindingRevision!==input.bindingRevision || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+      // Only the INSERT transaction can identify a first delivery. A cached
+      // row or older backend gives the native executor no such guarantee.
+      if (Object.hasOwn(value,'startState') && (!['created','observe'].includes(value.startState)
+        || value.startState==='created' && (value.leaseRevision !== 0 || value.state !== 'leased')))
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {...(Object.hasOwn(value,'startState') ? {startState:value.startState} : {}),passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },

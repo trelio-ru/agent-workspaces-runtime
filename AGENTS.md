@@ -101,6 +101,7 @@ publication tooling также остаются вне этого публичн
   journal; ambiguous known peers retain the cursor without wake/ACK. Unjournaled
   ordinary group deletions are ignored without inventing peer identity.
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
+  Обычный проход выполняет один ход в исходном чате.
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
   Внеплановый ответ или сообщение не поглощает наступивший цикл. Время

@@ -479,7 +479,12 @@ satisfied by this delivery. Fresh company and pinned Run authority remain
 independent. Disabled Code Mode is the intentional isolation policy, not evidence
 that direct MCP or signed guides are unavailable. Ordinary task prompts apply
 these delivered documents instead of asking to open them again. They do not
-change the installed skill or other chats. The native regression resumes the
+change the installed skill or other chats. The ordinary user message carries the fixed
+delivery marker, native scope and instructions for that wake. A scheduled review,
+discussion, owner message and batch triage receive their own operations. Exact
+historical task-root checks accept either the complete original wording or the
+complete current wording for the same permitted scope and delivery. Restricted
+recovery and READY prompts keep their original forms. The native regression resumes the
 same persisted chat containing a synthetic stale blocker in a new owned process,
 checks the actual model request for complete documents/current guidance and
 executes a direct MCP read without changing configuration. That fixture proves
@@ -734,6 +739,24 @@ uses only that identity. The native launch receives the immutable model/effort
 snapshot returned by admission. Lost pass-claim responses may repeat only the
 same idempotent claim while the durable native bit proves no launch crossed its
 boundary. A started native invocation is reconciled, never repeated.
+
+For an ordinary assignment, discussion or source message, the scheduled host
+claims the existing chat, registers its terminal-event listener and sends one
+`turn/start`. The same App Server checks the saved delivery marker, turn ID
+and terminal status before releasing the writer. The source intake or task
+receipt still determines what was processed. Restricted recovery keeps the
+authority of the original pass.
+
+The task host requests start protocol 1 on `/runtime/task-pass/begin`.
+Only the transaction that inserts the reservation returns
+`startState: created`. An idempotent begin returns `observe`. If the first
+reply was lost, a still-live reservation can restore its exact identity into
+an empty protected slot for observation. An existing terminal turn can then
+be reconciled. A missing marker requires the existing pre-native recovery
+after lease expiry. A closed grant requires its previously retained identity,
+a committed business receipt and a released native writer.
+An older backend and source intake retain their existing journal and marker
+checks under the exclusive writer. Incomplete history retains the fence.
 
 `complete_assistant_pass` stays a backend-validated model action with a fresh
 observed proof and accepted evidence. The host's fixed

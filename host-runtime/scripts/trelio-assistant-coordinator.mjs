@@ -84,6 +84,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   const schedule = createAssistantScheduler({database,now});
   const inbox = createAssistantInbox({database,now,onDeliveryCompleted:schedule.completeInsideInboxTransaction});
   const identity = client.identity;
+  // A legacy embedding provides one method for all modes. The installed host
+  // supplies a dedicated recovery executor which enforces the narrower grant.
+  const recover = (input,options) => (native.recover ?? native.run)(input,options);
   // A short transactional coordinator lease fences concurrent service processes.
   // It is separate from the longer delivery lease: after a crash another host
   // can poll/reconcile, while a started/uncertain native turn still blocks work.
@@ -710,11 +713,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(summary.uncertainDeliveries===0)await onBusinessConfirmed();
     } catch { /* Keep the independent server incident until a later real completion. */ }
   };
-  const commitCompletion = async (job,threadId,nativeReceipt,signal,expectedReceiptId) => {
+  const commitCompletion = async (job,threadId,nativeReceipt,signal,expectedReceiptId,expectedPass) => {
     const result=await completedReceipt(job,threadId,nativeReceipt,signal,expectedReceiptId);
     let binding;
     if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{requireModel:false,
       allowTaskDone:job.kind!=='provision',captureBinding:value=>{binding=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+    if(expectedPass){
+      // Restore may have rolled SQLite behind a separately persisted closed
+      // pass. Recheck the exact protected identity after all network reads.
+      if(!isDeepStrictEqual(await passHost.readActivePass(),expectedPass))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      lease();signal.throwIfAborted();
+    }
     // Schedule decision and event processing share the same SQLite commit.
     // Only afterwards may the protected pass journal/key be released. If that
     // release fails, the next reconcile reads this completed row and receipt.
@@ -1651,7 +1660,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }else if(value.state==='leased'&&Date.parse(value.leaseExpiresAt)<=now())controller.abort();
       }).catch(()=>controller.abort()).finally(()=>{watching=false;});},watchIntervalMs);
     try{
-      const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
+      const execute = recovery || triage || answeredAdmission ? recover : native.run;
+      const result=await execute({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
           intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,passTimeoutMs:remaining,...(recovery?{replyOnlyRecovery:true,...(recovery.technicalReplyCorrection||recovery.generationReplyCorrection?{technicalReplyCorrection:true}:{})}:{}),startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
       if(cancelledOutcome)return settleOwnedCancellation();
@@ -2174,7 +2184,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(await passHost.readActivePass()!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
       await passHost.activatePass(pass);
       try{
-        await native.run({threadId,deliveryId:marker,cwd,execution,taskContext:{assistantId:identity.assistantId,companyId,taskId}},{
+        await recover({threadId,deliveryId:marker,cwd,execution,taskContext:{assistantId:identity.assistantId,companyId,taskId}},{
           signal,retiredPass,requireAbsentMarker:true,
           retiredOutcome:{...selected,taskPass:locator,originalDeliveryId:job.deliveryId,originalTurnId:observed.turnId,
             ...(failedConfirmationMarker?{failedConfirmationMarker,refusal:observed.refusal}:{})},
@@ -2242,7 +2252,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       await passHost.activatePass(pass);
       let result;
       try {
-        result=await native.run({threadId:pass.threadId,deliveryId:receipt.receiptId,cwd,execution,
+        result=await recover({threadId:pass.threadId,deliveryId:receipt.receiptId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:pass.companyId,taskId:pass.taskId}},{
           signal,retiredPass,requireAbsentMarker:true,
           beforeInvocation:async ownedSignal=>{
@@ -2564,7 +2574,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return continueTerminalPass(job,result,signal,marker);
     if(result.state==='failed'&&result.failure==='model_capacity'&&job.kind==='provision'&&uuid.test(result.turnId??''))
       return continueCapacityProvision(job,result,signal,marker);
-    if(!continued&&result.state==='uncertain'&&await retireInterruptedWriter(job,saved,threadId,signal))return false;
+    // There is no recoverable step left in this original invocation. Whether
+    // Codex recorded a terminal error or lost the turn cannot establish any
+    // business effect. The exclusive writer, expired lease and server CAS can
+    // release the computer in either case, retaining the original task fence.
+    if (!continued && (result.state === 'uncertain' || result.state === 'failed')
+      && await retireInterruptedWriter(job,saved,threadId,signal)) return false;
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };
@@ -2687,11 +2702,27 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const admitted=continuation?await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},combined)
           :await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
             bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId},combined);lease();
+        if(admitted.bindingId!==authority.bindingId||admitted.bindingRevision!==authority.revision
+          ||admitted.deliveryId!==job.deliveryId||admitted.threadId!==plan.threadId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
+          passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);
+        const samePass=value=>value&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key])
+          &&Object.keys(value).length===Object.keys(expectedPass).length;
+        if(!continuation&&admitted.state==='closed'){
+          // A restored zero-start row cannot reopen a closed grant. Only the
+          // retained signer identity, matching business receipt and exclusive
+          // writer probe can settle its original pending delivery.
+          if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+          const closed=await observeReleasedTaskOutcome(job,plan.threadId,combined);
+          if(!closed)fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+          await commitCompletion(job,plan.threadId,closed.receipt,combined,closed.receiptId,expectedPass);
+          return {state:'completed',kind:job.kind};
+        }
         const recoveryIntent=continuation?null:inbox.readPassRecovery(job.deliveryId);
         const recovering=admitted.state==='review_required'||recoveryIntent!==null;
-        if(!['leased','review_required'].includes(admitted.state) || admitted.bindingId!==authority.bindingId || admitted.bindingRevision!==authority.revision
-          || admitted.deliveryId!==job.deliveryId || admitted.threadId!==plan.threadId
-          || !Number.isFinite(Date.parse(admitted.leaseExpiresAt)) || !recovering&&Date.parse(admitted.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        if(!['leased','review_required'].includes(admitted.state)||!Number.isFinite(Date.parse(admitted.leaseExpiresAt))
+          ||!recovering&&Date.parse(admitted.leaseExpiresAt)<=now())fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        execution=assistantExecutionConfiguration(admitted.execution);
         const observePassUntil=leaseExpiresAt=>{
           // Restricted and discussion turns still sample the negotiated
           // boundary once. They have no ordinary task extension budget.
@@ -2716,11 +2747,6 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             options.passTimeoutMs=maxObservationMs;
           }else options.passTimeoutMs=observePassUntil(admitted.leaseExpiresAt);
         }
-        const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
-          passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);
-        execution=assistantExecutionConfiguration(admitted.execution);
-        const samePass=value=>value&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key])
-          &&Object.keys(value).length===Object.keys(expectedPass).length;
         if(continuation){
           options.requireAbsentMarker=true;
           options.continuationReview={priorTurnId:continuation.terminalTurnId,reviewId:continuation.reviewId};
@@ -2809,12 +2835,43 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             taskPass=expectedPass;
           };
         }else{
-          // Origin belongs to host identity, not the exact pass ABI.
-          await passHost.activatePass(expectedPass);taskPass=expectedPass;
+          if(admitted.startState==='observe'){
+            let retained=await passHost.readActivePass();
+            if(retained===null){
+              // The server can commit begin before its first reply reaches this
+              // device. Restore that exact live reservation so expiry can use
+              // the guarded pre-native renewal. This observation cannot start
+              // a turn, even when the chat has no matching delivery marker.
+              lease();combined.throwIfAborted();
+              if(Date.parse(admitted.leaseExpiresAt)<=now())fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+              await passHost.activatePass(expectedPass);
+              retained=await passHost.readActivePass();
+            }
+            if(!samePass(retained))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+            options.startInvocation=()=>fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          }else await passHost.activatePass(expectedPass);
+          taskPass=expectedPass;
         }
+        // Admission selects the executor. A fresh task goes straight to its
+        // native chat. A previously started or expired reservation keeps its
+        // narrower recovery authority and its original no-replay evidence.
+        // Both settle through the same backend receipt and SQLite transaction.
+        const execute = continuation || recovering ? recover : native.run;
+        if (!continuation && !recovering && admitted.startState !== undefined) options.startState = admitted.startState;
         failureStage='native_preflight';
-        result=await native.run({threadId:plan.threadId,deliveryId:continuation?.reviewId??job.deliveryId,cwd,execution,
+        result=await execute({threadId:plan.threadId,deliveryId:continuation?.reviewId??job.deliveryId,cwd,execution,
           taskContext:taskContextForJob(job,admitted.workMode)},options);
+        if(!continuation&&!recovering&&!inbox.readDelivery(job.deliveryId).nativeStarted){
+          // The native reader can return a stored terminal turn without
+          // invoking startInvocation. Restore the existing fact through the
+          // same SQLite lease/task/source CAS. No model call follows this
+          // write; a still-pending business receipt uses ordinary reconciliation.
+          const prefix=result?.state==='completed'?'codex':result?.state==='failed'?'codex-failed':null;
+          if(admitted.startState==='created'||!prefix||!uuid.test(result.turnId??'')||result.receipt!==`${prefix}:${plan.threadId}:${result.turnId}`
+            ||!samePass(await passHost.readActivePass()))fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
+          lease();combined.throwIfAborted();inbox.startDelivery(job.deliveryId);
+        }
+
       }
       failureStage='readback';
       if(result.state==='failed'&&result.failure==='model_capacity'&&uuid.test(result.turnId??''))

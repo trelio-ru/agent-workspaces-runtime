@@ -80,6 +80,29 @@ const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={})
     counts:()=>({starts,provisions,runs,acks}),advance:ms=>{clock+=ms;},failNative:value=>{nativeFailure=value;},failInventory:value=>{inventoryFailure=value;}};
 };
 
+// Check the actual scheduler boundary. Only the server which inserted the
+// pass can spare the executor its restart lookup. This hint must not affect
+// the native work scope the model receives, or the independent outcome check.
+test('a queued assignment runs one task turn with the current begin result',async t=>{
+  const f=fixture(t);
+  const begin=f.options.client.beginTaskPass, nativeRun=f.options.native.run;
+  f.options.client.beginTaskPass=async(...args)=>({...await begin(...args),startState:'created'});
+  let count=0;
+  f.options.native.run=async(input,options)=>{
+    count++;
+    assert.equal(options.startState,'created');
+    assert.equal(Object.hasOwn(input.taskContext,'startState'),false);
+    return nativeRun(input,options);
+  };
+  f.options.native.recover=()=>assert.fail('fresh work reached the recovery executor');
+  f.events.push({id:randomUUID(),revision:'fresh-turn',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();
+  await f.coordinator.workOnce();
+  assert.equal((await f.coordinator.workOnce()).state,'completed');
+  assert.equal(count,1);
+  assert.equal(f.activePass(),null);
+});
+
 // This is journal/coordinator coverage, not the native HTTP system stand. It
 // deliberately keeps the positive old send and the cancelled no-send child in
 // one real SQLite history, then restarts the coordinator over that SAME file.
@@ -923,19 +946,39 @@ test(`retired accepted task can settle only its existing scheduled receipt (${mo
   }finally{await restarted.close();}
 });
 
-for(const committed of [true,false])
-test(`retirement lost its HTTP reply and only the original device receipt can release it (committed=${committed})`,async t=>{
+for(const [committed,terminal] of [[true,'uncertain'],[false,'uncertain'],[true,'failed']])
+test(`retirement lost its HTTP reply and only the original device receipt can release it (committed=${committed}, terminal=${terminal})`,async t=>{
   const f=fixture(t);f.authority.workMode='task';
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-writer-retirement-'));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));
-  f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
-  f.failNative(true);
+  const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0,workMode:'task'};
+  f.options.client.tasks=async()=>({bindings:[f.authority,second],nextCursor:null});
+  f.options.client.task=async(_company,taskId)=>({...(taskId===f.taskId?f.authority:second),execution:f.execution});
+  const readOutcome=f.options.client.readBusinessOutcome;
+  f.options.client.readBusinessOutcome=input=>input.taskId===f.taskId?{schemaVersion:1,state:'pending'}:readOutcome(input);
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();await f.coordinator.workOnce();
+  // Both schedules exist before the failing delivery is even created. An
+  // event selects the first task; the second must run on its actual due slot.
+  const plans=f.coordinator.status(),originalPlan=plans.find(row=>row.taskId===f.taskId),secondPlan=plans.find(row=>row.taskId===second.taskId);
+  f.advance(Math.max(originalPlan.nextRunAt,secondPlan.nextRunAt)-f.options.now()+300_000);
+  const starts=[],errorTurn=randomUUID();
+  f.options.native.run=async({taskContext,threadId},options)=>{
+    starts.push(taskContext.taskId);options.startInvocation();
+    if(taskContext.taskId===f.taskId){
+      if(terminal==='uncertain')throw new Error('lost native response');
+      return {state:'failed',turnId:errorTurn,receipt:`codex-failed:${threadId}:${errorTurn}`};
+    }
+    assert.equal(taskContext.taskId,second.taskId);assert.equal(threadId,secondPlan.threadId);
+    return {state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};
+  };
   f.events.push({id:randomUUID(),revision:'writer-retire',taskId:f.taskId,wake:true});
-  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  await f.coordinator.pollOnce();
   await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  assert.deepEqual(starts,[f.taskId]);
   const saved=f.activePass(),pass=f.passes.get(saved.deliveryId);
   f.advance(21*60_000);pass.state='review_required';
-  f.options.native.readDelivery=async()=>({state:'uncertain'});
+  const terminalResult=terminal==='failed'?{state:terminal,turnId:errorTurn}:{state:terminal};
+  f.options.native.readDelivery=async()=>terminalResult;
   const inbox=createAssistantInbox({database:f.database,now:f.options.now});
   let retained,receipt,attempts=0,reads=0,writer=false,setupLocked=false;
   f.options.native.withWriter=async(thread,cwd,action,{signal})=>{
@@ -989,6 +1032,13 @@ test(`retirement lost its HTTP reply and only the original device receipt can re
     assert.equal(f.activePass()===null,committed);
     assert.equal(inbox.readRetiredTaskWriter(saved.deliveryId)?.released??false,committed);
     assert.equal(inbox.readDelivery(saved.deliveryId).state,'uncertain');
+    assert.deepEqual(starts,committed?[f.taskId,second.taskId]:[f.taskId]);
+    const after=host.coordinator.status();
+    assert.equal(after.find(row=>row.taskId===f.taskId).nextRunAt,originalPlan.nextRunAt);
+    assert.equal(after.find(row=>row.taskId===f.taskId).lastCompletedAt,originalPlan.lastCompletedAt);
+    const independent=after.find(row=>row.taskId===second.taskId);
+    assert.equal(independent.lastCompletedAt>0,committed);
+    assert.equal(independent.nextRunAt>f.options.now(),committed);
     assert.deepEqual(f.counts(),before);
     assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
   }finally{await host.close();}
@@ -2627,6 +2677,127 @@ test('another retained device delivery suppresses dispatch recovery even after t
   await next.close();
 });
 
+
+for(const mode of ['confirmed','absent','foreign','pending','busy','lost_identity','live_marker','foreign_marker'])
+test(`restored zero-start delivery reconciles the original protected pass (${mode})`,async t=>{
+  const f=fixture(t);
+  f.events.push({id:randomUUID(),revision:'restored',taskId:f.taskId,wake:true});
+  // The model may already have worked in the original machine state. The
+  // restored SQLite copy knows only that the same pass had been reserved.
+  f.options.native.run=async()=>{throw new Error('restore at the pre-start snapshot');};
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  const original=f.activePass(),server=f.passes.get(original.deliveryId),inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  assert.equal(inbox.readDelivery(original.deliveryId).nativeStarted,false);
+  const live=['live_marker','foreign_marker'].includes(mode);
+  Object.assign(server,{state:live?'leased':'closed',startState:'observe'});
+  let identity=mode==='absent'?null:mode==='foreign'?{...original,passId:randomUUID()}:original;
+  const receiptId=randomUUID(),turnId=randomUUID();let pending=mode==='pending'||live,probes=0,markers=0;
+  f.options.passHost.readActivePass=async()=>identity;
+  f.options.passHost.activatePass=async()=>assert.fail('a restored pass may never regain signer authority');
+  const release=f.options.passHost.releasePass;
+  f.options.passHost.releasePass=async outcome=>{await release(outcome);identity=null;};
+  f.options.client.readBusinessOutcome=async input=>pending?{schemaVersion:1,state:'pending'}:{
+    ...input,schemaVersion:1,state:'confirmed',receiptId,continuation:f.continuation};
+  f.options.native.readWriterReleased=async thread=>{
+    assert.equal(thread,original.threadId);probes++;
+    if(mode==='lost_identity')identity=null;
+    return mode!=='busy';
+  };
+  f.options.native.run=async(input,options)=>{
+    assert.ok(live,'closed grants cannot invoke the model or inspect its old turns');
+    assert.equal(options.startState,'observe');assert.equal(input.threadId,original.threadId);markers++;
+    return {state:'completed',turnId,receipt:`codex:${mode==='foreign_marker'?randomUUID():original.threadId}:${turnId}`};
+  };
+  if(mode==='confirmed')await f.coordinator.workOnce();
+  else await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  assert.equal(inbox.readDelivery(original.deliveryId).nativeStarted,mode==='live_marker');
+  if(mode==='live_marker'){
+    // The existing terminal receipt restores the start fence once. The next
+    // worker settles a later positive business result without another begin.
+    pending=false;server.state='closed';
+    f.options.client.beginTaskPass=async()=>assert.fail('an observed native turn cannot reserve a second start');
+    await f.coordinator.workOnce();
+  }
+  const settled=mode==='confirmed'||mode==='live_marker';
+  assert.equal(inbox.readDelivery(original.deliveryId).state,settled?'complete':'uncertain');
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,settled?1:0);
+  assert.equal(probes,['confirmed','busy','lost_identity','live_marker'].includes(mode)?1:0);
+  assert.equal(markers,live?1:0);assert.equal(f.counts().runs,0);
+  await f.coordinator.close();
+});
+
+for(const mode of ['unstarted','registered','foreign'])
+test(`lost first pass response preserves the exact reservation until guarded recovery (${mode})`,async t=>{
+  const f=fixture(t);f.authority.workMode='task';
+  const begin=f.options.client.beginTaskPass,run=f.options.native.run,renew=f.options.client.renewTaskPass;
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  let begins=0,observations=0,renewals=0;
+  f.options.client.beginTaskPass=async input=>{
+    const pass=await begin(input);
+    if(++begins===1)throw Object.assign(new Error('insert committed, response lost'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    return {...pass,startState:'observe'};
+  };
+  f.options.native.run=async(input,options)=>{
+    assert.equal(options.startState,'observe');observations++;
+    assert.equal(input.deliveryId,f.activePass().deliveryId);
+    assert.throws(options.startInvocation,{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    throw Object.assign(new Error('no delivery marker'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  };
+  f.events.push({id:randomUUID(),revision:'lost-reservation',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  assert.equal(f.activePass(),null);assert.equal(f.passes.size,1);assert.equal(f.counts().runs,0);
+  const [server]=f.passes.values(),{passId,deliveryId,threadId}=server;
+  const expected={schemaVersion:1,assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.companyId,
+    taskId:f.taskId,bindingId:f.bindingId,bindingRevision:f.authority.revision,passId,deliveryId,threadId};
+  const foreign={...expected,passId:randomUUID()};
+  if(mode==='foreign')await f.options.passHost.activatePass(foreign);
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  assert.deepEqual(f.activePass(),mode==='foreign'?foreign:expected);
+  assert.equal(observations,mode==='foreign'?0:1);
+  assert.equal(inbox.readDelivery(deliveryId).nativeStarted,false);
+  assert.equal(inbox.readPassRecovery(deliveryId),null);
+  await f.coordinator.close();
+
+  // Expiry enters the real protected host's recovery method. Only the
+  // separate pre-native renewal can authorize start after marker absence.
+  f.advance(21*60_000);server.state='review_required';
+  let locked=false;
+  f.options.native.recover=async(input,options)=>{
+    assert.equal(options.requireAbsentMarker,true);
+    await options.beforeInvocation();return run(input,options);
+  };
+  f.options.client.renewTaskPass=async input=>{
+    assert.ok(locked);assert.equal(input.preNativeRecovery,true);assert.equal(input.passId,passId);
+    assert.equal(input.expectedLeaseRevision,0);renewals++;
+    if(mode==='registered')throw Object.assign(new Error('pass already registered a runtime'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    server.state='leased';return renew(input);
+  };
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-lost-reservation-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const host=await createAssistantRuntimeHost({context:async action=>action(f.options.client,{
+    ...f.options.passHost,readIdentity:async()=>f.identity,readActivation:async()=>null,withSetupLock:async action=>{
+      locked=true;try{return await action();}finally{locked=false;}
+    },
+  }),dependencies:{directory,ensureDirectory:async()=>{},now:f.options.now,timeZone:'UTC',native:f.options.native,
+    openDatabase:async()=>({database:f.database,close:async()=>{}}),
+    readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,
+      authorizedByUserId:f.memberId,businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome',
+        'workspace_execution','owner_decisions','background_service']}}),
+  }});
+  try{
+    if(mode==='unstarted'){await host.coordinator.workOnce();await host.coordinator.workOnce();}
+    else await assert.rejects(host.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+    assert.equal(f.passes.size,1);assert.equal(renewals,mode==='foreign'?0:1);
+    const complete=mode==='unstarted';
+    assert.equal(f.counts().runs,complete?1:0);
+    assert.equal(inbox.readDelivery(deliveryId).nativeStarted,complete);
+    assert.equal(inbox.readDelivery(deliveryId).state,complete?'complete':'uncertain');
+    assert.deepEqual(f.activePass(),complete?null:mode==='registered'?expected:foreign);
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,complete?1:0);
+  }finally{await host.close();}
+});
 
 test('expired pre-native pass recovery retains SAME SQLite intent across lost response/reopen and launches once',async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-pre-native-recovery-'));
