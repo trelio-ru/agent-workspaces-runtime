@@ -30,7 +30,10 @@ const artifact = { skillId: 'synthetic-browser', runtimeVersion: '1.0.0',
 const context = { companyId: randomUUID(), projectId: null, releaseId: randomUUID(), runtimeSessionId: randomUUID(),
   codexThreadId: randomUUID(), localIdentity: { memberId: randomUUID() } };
 const environment = () => buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory: os.tmpdir(), executionContext: context });
-const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Native I/O and the bounded poll use the real event loop even when the
+// expiry fixture below drives the controller's lease timer deterministically.
+const pollTimeout = setTimeout;
+const wait = ms => new Promise(resolve => pollTimeout(resolve, ms));
 async function settled(env, sessionId, requestId) {
   for (let count = 0; count < 50; count++) {
     const result = await runBrowserControllerCommand({ environment: env, command: { operation: 'poll', sessionId, requestId } });
@@ -164,15 +167,14 @@ test('expired original descriptor cannot be claimed or revived by fresh host lea
   }
 });
 
-test('bounded events/results and expiry clean up an awaiting caller without replay', async () => {
+test('bounded events/results and expiry clean up an awaiting caller without replay', async t => {
+  // Keep the fixture's signed lease while real native ACL and loopback calls
+  // complete. A loaded Windows runner must not use the lease before the test
+  // has even observed the awaiting request. Only the test drives this clock.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const env = environment(), descriptor = await prepareBrowserController({ environment: env });
-  const owner = JSON.parse(await fs.readFile(descriptor.ownerFile, 'utf8'));
-  // Synthetic shorter lease only: production providers retain their signed
-  // 30-minute policy. Keep enough native I/O margin on hosted Windows.
-  owner.deadlineAt = Date.now() + 5000;
-  await writePrivateJsonFile(descriptor.ownerFile, owner);
   let effects = 0, cleanup = 0, release;
-  const controller = await openBrowserController({ ...descriptor, deadlineAt: owner.deadlineAt }, {
+  const controller = await openBrowserController(descriptor, {
     handle: async command => {
       effects++;
       if (command.action === 'oversize') return 'x'.repeat(262_144);
@@ -201,6 +203,7 @@ test('bounded events/results and expiry clean up an awaiting caller without repl
     await runBrowserControllerCommand({ environment: env, command });
     assert.equal((await runBrowserControllerCommand({ environment: env,
       command: { operation: 'poll', sessionId: descriptor.sessionId, requestId: waitingId } })).state, 'running');
+    t.mock.timers.tick(descriptor.deadlineAt - Date.now());
     assert.deepEqual(await controller.closed, { state: 'closed' });
     assert.equal(cleanup, 1); assert.equal(effects, 2);
     await assert.rejects(runBrowserControllerCommand({ environment: environment(), command }));
