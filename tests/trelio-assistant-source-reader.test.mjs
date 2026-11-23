@@ -843,7 +843,7 @@ test('email/MAX wire projections discard content and cannot promote a sender to 
   }
 });
 
-for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed package, native command and process engine with fresh pass admission (policy v${policyVersion})`,async()=>{
+for (const policyVersion of [0,1,2,3]) test(`task skills use the SAME signed package, native command and process engine with fresh pass admission (${policyVersion ? `policy v${policyVersion}` : 'ordinary package'})`,async()=>{
   const {createAssistantWorkspaceProfile}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const taskIdentity={schemaVersion:1,origin:policyVersion===2?'https://assistant-qa.example.test':'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
@@ -870,7 +870,7 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
   const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,sourceReads,
     lockDirectory:path.join(directory,'task-locks'),lock:(_file,action)=>action()});
   const sourceDir=path.join(directory,`task-package-${policyVersion}`);await fs.mkdir(sourceDir);
-  await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:policyVersion,taskCommands:[['read'],['fail']],
+  if(policyVersion)await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:policyVersion,taskCommands:[['read'],['fail']],
     ...(policyVersion>=2?{deniedOptions:['--chrome','--timeout-ms']}: {}),
     ...(policyVersion===3?{readOnlyCommands:[['read']]}:{})}));
   const calls=path.join(directory,`task-native-calls-${policyVersion}`);
@@ -948,8 +948,11 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
     await assert.rejects(run(plan));assert.equal(await fs.readFile(calls,'utf8'),'111','late native refusal blocks cached execution');
     denyNextLaunch=false;live=false;
     await assert.rejects(run(plan),/PASS_REVIEW_REQUIRED/);assert.equal(await fs.readFile(calls,'utf8'),'111');live=true;
-    for(const args of [['configure','--password-input','browser'],['policy','set','--mode','confirm'],
-      ['ack-reference','--confirm'],['__trelio_accounts_import'],['read-more','PRIVATE_SETUP_CANARY']]) {
+    const reservedCommands=[['ack-reference','--confirm'],['__trelio_accounts_import'],['__trelio_account_remove']];
+    const restrictedCommands=policyVersion
+      ? [['configure','--password-input','browser'],['policy','set','--mode','confirm'],['read-more','PRIVATE_SETUP_CANARY']]
+      : [];
+    for(const args of [...reservedCommands,...restrictedCommands]) {
       const denied=structuredClone(plan);denied.localAction.parameters.arguments=args;
       await assert.rejects(run(denied),error=>error.code==='ASSISTANT_SKILL_COMMAND_DENIED'
         && !JSON.stringify(error).includes('PRIVATE_SETUP_CANARY'));
@@ -965,7 +968,7 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
     // interpreter/path access; a caller cannot skip skillCommand's early guard.
     await assert.rejects(engine.withWorkspaceExecutionProfile(profile,()=>engine.runMaterializedAgentSkill({
       artifact:{parsedPackage:engine.parseAndValidateAgentSkillPackage(bytes)},runtimeDirectory:'/not-an-executable-fixture',
-      runtimeArguments:['configure'],executionContext:{},captureOutput:true,captureMode:'assistant_task'})),
+      runtimeArguments:['ack-reference'],executionContext:{},captureOutput:true,captureMode:'assistant_task'})),
       {code:'ASSISTANT_SKILL_COMMAND_DENIED'});
     for(const change of [{runIdentity:{workspaceId:randomUUID(),runId:randomUUID()}},{localAction:{...plan.localAction,parameters:{...plan.localAction.parameters,directory:'/other'}}}]){
       await assert.rejects(run({...plan,...change}));
@@ -1048,7 +1051,7 @@ for (const policyVersion of [1,2,3]) test(`task skills use the SAME signed packa
       const file=path.join(guideDirectory,guidePaths[index]);await fs.mkdir(path.dirname(file),{recursive:true});
       await fs.writeFile(file,texts[index]);
     }
-    await fs.writeFile(path.join(guideDirectory,'trelio-assistant-execution.json'),
+    if(policyVersion)await fs.writeFile(path.join(guideDirectory,'trelio-assistant-execution.json'),
       JSON.stringify(policyVersion===3?{schemaVersion:4,taskCommands:[['guides'],['export']],
         deniedOptions:['--overwrite'],readOnlyCommands:[],localArtifactCommands:[['export']]}
         :{schemaVersion:1,taskCommands:[['guides']]}));

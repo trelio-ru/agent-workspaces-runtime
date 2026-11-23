@@ -9608,9 +9608,9 @@ const runMaterializedAgentSkillUnqueued = async ({
   const taskCapture = captureMode === 'assistant_task';
   const sourceSetupCapture = captureMode === 'assistant_source_setup';
   const taskSetupCapture = captureMode === 'assistant_skill_setup';
-  // An explicit owner chat uses ordinary published skill commands, rather
-  // than the narrower background-task command policy. The private local
-  // profile must independently fence device/owner/scope and ONE invocation;
+  // An explicit owner chat can make separate account and setup decisions.
+  // The private local profile independently fences device, owner, scope and
+  // one invocation;
   // a model-selected captureMode or an active task profile cannot grant it.
   const interactiveCapture = captureMode === 'assistant_interactive';
   // The SAME signed Secret setup may run in an explicit owner chat. Its value
@@ -10524,8 +10524,8 @@ const skillCommand = async (
     || setupCommand.fieldKey!==privateSecretSetup.fieldKey || setupCommand.environmentVariable!==privateSecretSetup.environmentVariable))
     throw Object.assign(new Error('Use exact signed authentication setup.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
   if (assistant && !privateSecretSetup && !humanInputSetup && !parseAccountCommand(positional.slice(1))) {
-    // Check before prepareSkillAccount: catalogue import/selection is I/O too.
-    // Only the existing host selector is removed, by its strict shared parser.
+    // Refuse protected operations and any explicit signed restrictions before
+    // account I/O. Remove only the existing strict host account selector.
     const providerArguments = artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
       ? splitAccountArguments(positional.slice(1)).providerArguments : positional.slice(1);
     assertAssistantTaskSkillCommand(artifactForCache.parsedPackage, providerArguments);

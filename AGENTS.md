@@ -1269,11 +1269,12 @@ publication tooling также остаются вне этого публичн
   Test the real stdio and child pipe across expiry of the admission clock.
   Signed v2 humanInputCommands reuse the SAME setup parser; existing-account
   auth requires independent owner/account admission and never ordinary task prefixes.
-  Task commands additionally require provider-owned signed command prefixes;
-  legacy/missing policy fails before account/bootstrap and again at execution.
-  Policy v2 also rejects signed denied options (token/equals forms); no host
-  provider map or model-selected executable/window/time override is introduced.
-  This restriction never authorizes sending, source ACK or owner setup.
+  Ordinary signed skills require no assistant-specific command declaration.
+  Shared task admission still checks device, company, pass, release and bound
+  account before execution. Protected account/setup and native source entry
+  points are checked before account/bootstrap and again at execution. Honor
+  existing signed release restrictions, including v2 exact/equals options.
+  Missing policy yields unknown effects and cannot supply recovery receipts.
 
 - Typed custom fields use native type/revision discovery and the SAME value protector; no model type hint or structural prose over HTTP.
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).

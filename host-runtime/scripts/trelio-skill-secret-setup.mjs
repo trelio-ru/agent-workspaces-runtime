@@ -331,16 +331,41 @@ export const matchesHistoricalReplyHeaders = (bytes,expected) => {
     &&crypto.createHash('sha256').update(canonicalJson(pair)).digest('hex')===expected;
 };
 
-/** The provider owns CLI classification in the SAME signed file inventory.
- * Absence is not legacy permission: a package that has not reviewed its task
- * surface cannot run with assistant credentials. This is a restriction only;
- * a matching command still needs live task/account/action authority. No model
- * flag, environment value or unsigned resolve metadata supplies this policy.
+// Source monitor/ACK/reply/media operations have their own native admission
+// and attempt records. An ordinary task must never address those entry points
+// directly, even if its signed provider also implements them.
+const nativeSourceCommands = new Set([
+  'monitor', 'ack-reference', 'source-original', 'reply-reference', 'unsubscribe-reference',
+]);
+const visualAccountCommands = new Set(['disconnect', 'show-login', 'credentials-setup', 'credentials-forget']);
+
+/** Ordinary skills use their published CLI under the existing native task and
+ * account admission. A signed policy can still restrict its own release and
+ * attest command effects. Missing metadata supplies neither an effect witness
+ * nor access to an internal host or protected account operation.
  */
 export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments) => {
   const fail = code => { throw Object.assign(new Error(code), { code }); };
-  const files = parsedPackage?.files?.filter(file => file.path === 'trelio-assistant-execution.json') ?? [];
-  if (!files.length) fail('ASSISTANT_SKILL_COMMAND_UNAVAILABLE');
+  if (!Array.isArray(runtimeArguments) || !runtimeArguments.length
+    || runtimeArguments.some(argument => typeof argument !== 'string'))
+    fail('ASSISTANT_SKILL_COMMAND_DENIED');
+  const [command] = runtimeArguments;
+  if (!command || command.startsWith('__trelio_') || nativeSourceCommands.has(command)
+    || parsedPackage.browserSession?.sessionClass === 'protected-snapshot' && visualAccountCommands.has(command))
+    fail('ASSISTANT_SKILL_COMMAND_DENIED');
+
+  let setup;
+  try { setup = readSkillSetupDescriptor(parsedPackage); }
+  catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
+  // These exact signed operations use a separate native one-use owner grant.
+  // Check before any ordinary package can select its account or interpreter.
+  const protectedCommands = [...(setup?.commands ?? []), ...(setup?.humanInputCommands ?? [])];
+  if (protectedCommands.some(({arguments: declared}) =>
+    declared.length === runtimeArguments.length && assistantTaskPrefixMatches(declared, runtimeArguments)))
+    fail('ASSISTANT_SKILL_COMMAND_DENIED');
+
+  const files = parsedPackage.files.filter(file => file.path === 'trelio-assistant-execution.json');
+  if (!files.length) return 'unknown';
   if (files.length !== 1 || !Buffer.isBuffer(files[0].bytes) || files[0].bytes.length > 8192)
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
   let policy;
@@ -387,24 +412,10 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
       localArtifact.add(key);
     }
   }
-  let setup;
-  try { setup = readSkillSetupDescriptor(parsedPackage); }
-  catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
-  // A broad provider task prefix must not make its explicitly declared human
-  // login an ordinary unattended command. Its dedicated native owner/account
-  // grant and original human-input deadline remain an independent boundary.
-  if (setup?.humanInputCommands?.some(command => JSON.stringify(command.arguments) === JSON.stringify(runtimeArguments)))
-    fail('ASSISTANT_SKILL_COMMAND_DENIED');
-  // Literal positional tokens only. No regex/glob, shell expansion, substring
-  // matching, option skipping or parser abbreviation can broaden a prefix.
-  // Provider arguments after it retain their existing strict native parser.
-  if (!Array.isArray(runtimeArguments) || runtimeArguments.some(arg => typeof arg !== 'string')
-    // A reviewed provider may have a legitimate human executable/window/budget
-    // override (e.g. MAX --chrome). Its signed restriction, not a host-owned
-    // provider map, closes both token spellings before any account/bootstrap.
-    // Providers must review their native parser aliases/abbreviations too;
-    // literal deny cannot promise to classify an undeclared synonym.
-    || runtimeArguments.some(arg => deniedOptions.some(option => arg === option || arg.startsWith(`${option}=`))))
+  // Match the publisher's literal protected options without interpreting the
+  // provider parser. Both the separate value and equals spelling are denied.
+  if (runtimeArguments.some(argument => deniedOptions.some(option =>
+    argument === option || argument.startsWith(`${option}=`))))
     fail('ASSISTANT_SKILL_COMMAND_DENIED');
   const matches = policy.taskCommands.filter(prefix => assistantTaskPrefixMatches(prefix, runtimeArguments));
   if (!matches.length) fail('ASSISTANT_SKILL_COMMAND_DENIED');

@@ -12,15 +12,13 @@ const packageWith = (commands, extra = {}) => ({ capabilities: ["secret-checkout
   path: "trelio-secret-setup.json", bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, commands, ...extra })),
 }] });
 
-test('assistant command policy is signed bytes only, exact positional prefixes and fail-closed for legacy packages', () => {
+test('explicit assistant command policy is signed bytes only and matches exact positional prefixes', () => {
   const policy = {schemaVersion:1,taskCommands:[['read'],['policy','show']]};
   const packaged = value => ({files:[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(value))}]});
   for (const args of [['read'],['read','--uid','11'],['policy','show','--account','own']])
     assert.doesNotThrow(()=>assertAssistantTaskSkillCommand(packaged(policy),args));
   for (const args of [['configure'],['policy','set'],['--help','read'],['Read'],['read-more'],[],['read',null]])
     assert.throws(()=>assertAssistantTaskSkillCommand(packaged(policy),args),{code:'ASSISTANT_SKILL_COMMAND_DENIED'});
-  assert.throws(()=>assertAssistantTaskSkillCommand({files:[],taskCommands:[['configure']]},['configure']),
-    {code:'ASSISTANT_SKILL_COMMAND_UNAVAILABLE'},'unsigned metadata is never a fallback');
   for(const value of [{...policy,schemaVersion:2},{...policy,allowSetup:true},{...policy,taskCommands:[]},
     {...policy,taskCommands:[['read'],['read']]},{...policy,taskCommands:[['*']]},
     {...policy,taskCommands:[['read','a','b','c']]}, {...policy,taskCommands:Array(65).fill(['read'])}])
@@ -28,6 +26,23 @@ test('assistant command policy is signed bytes only, exact positional prefixes a
   for(const bytes of [Buffer.from('{'),Buffer.from([0xff]),Buffer.alloc(8193)])
     assert.throws(()=>assertAssistantTaskSkillCommand({files:[{path:'trelio-assistant-execution.json',bytes}]},['read']),
       {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
+});
+
+test('ordinary skill commands need no assistant policy and provide no effect witness', () => {
+  const ordinary = {files:[],readOnlyCommands:[['search']]};
+  assert.equal(assertAssistantTaskSkillCommand(ordinary,['search','apartment']),'unknown');
+  assert.equal(assertAssistantTaskSkillCommand(ordinary,['guides']),'unknown');
+  for (const argv of [[],['read',null],['__trelio_accounts_import'],['__trelio_account_remove'],
+    ['monitor'],['ack-reference'],['source-original'],['reply-reference'],['unsubscribe-reference']]) {
+    assert.throws(()=>assertAssistantTaskSkillCommand(ordinary,argv),{code:'ASSISTANT_SKILL_COMMAND_DENIED'});
+  }
+  const browser = {...ordinary,browserSession:{sessionClass:'protected-snapshot'}};
+  assert.equal(assertAssistantTaskSkillCommand(browser,['submit-search','--frameId','current']),'unknown');
+  for (const command of ['disconnect','show-login','credentials-setup','credentials-forget']) {
+    assert.throws(()=>assertAssistantTaskSkillCommand(browser,[command]),{code:'ASSISTANT_SKILL_COMMAND_DENIED'});
+  }
+  assert.throws(()=>assertAssistantTaskSkillCommand(packageWith([command]),command.arguments),
+    {code:'ASSISTANT_SKILL_COMMAND_DENIED'},'ordinary execution cannot consume a signed setup command');
 });
 
 test('v2 signed option restrictions close native overrides without changing v1', () => {

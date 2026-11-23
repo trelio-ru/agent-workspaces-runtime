@@ -1739,13 +1739,20 @@ not notification evidence. Ready describes the checked source metadata read,
 not routed/processed/acknowledged messages or whole product readiness.
 
 
-Arbitrary task-skill arguments require `trelio-assistant-execution.json` in the
-SAME verified signed package file inventory. Its v1 object has exactly
+An ordinary signed skill uses its published CLI for task work. The same
+runner checks its native task pass, release, consent and bound account before
+execution. No assistant-specific command file is required. Without one,
+provider subprocess effects remain unknown and cannot prove a safe recovery.
+Host-owned account inventory and signed guide bytes keep their own receipts.
+
+If a verified release includes `trelio-assistant-execution.json`, retain its
+published restrictions and effect evidence. Its v1 object has exactly
 `schemaVersion:1` and `taskCommands`: 1–64 unique literal positional prefixes,
 each 1–3 command tokens `[a-z][a-z0-9-]{0,63}`, at most 8192 UTF-8 bytes.
 Provider authors classify their own real parser leaves; the generic host has no
-provider command map, regex/glob, option-skipping or second executor. Unknown or
-missing policy fails closed; unsigned resolve metadata/model flags cannot opt in.
+provider command map, regex/glob, option-skipping or second executor. A malformed
+or unsupported signed policy fails closed. Resolve metadata and model flags
+cannot supply restrictions or effect declarations.
 
 Version 2 retains the same prefix list and requires one additional
 `deniedOptions` field: 1–32 unique literal long options matching
@@ -1796,22 +1803,16 @@ remaining unproved for recovery. A file outside the verified Run or absent
 from the exact Git draft never qualifies. This classification grants
 neither a new executable command nor permission to repeat a previous one.
 
-The shared `skillCommand` checks after package verification but BEFORE managed
-account selection/import. It removes only the host's strict local-account
-selector, then compares literal leading tokens. The shared materialized executor
-checks again before interpreter/bootstrap/provider I/O. Native host account
-commands retain their independent existing gates. Human calls retain the old
-CLI; fixed source monitor/setup keep their separate exact native admissions.
-The composition fixture executes real signed v1/v2/v3 Node providers, verifies
-approved task work, and proves forbidden setup/policy/ACK/import commands and
-v2 executable/time overrides never launch them.
-
-This is restriction, not business permission: send/reply still require the
-existing task/operator/owner authority and provider guards. Exact source ACK
-needs committed processing/read proof/lease, independently of this file. Email
-is the first reviewed provider opt-in; other providers remain unavailable to
-generic task execution until their actual CLI classification is signed/tested.
-Owner onboarding and the Windows business E2E remain separate release gates.
+The shared `skillCommand` checks after package verification and before managed
+account selection. Only the host's strict local-account selector is removed. The
+materialized executor repeats the check before interpreter or provider I/O.
+Host-internal verbs, protected visual account actions, signed setup commands
+and the native source monitor/ACK/reply/media entry points keep their own
+admission. Send and reply keep the provider and task/owner checks. Exact ACK
+still requires committed processing and an independent native receipt.
+Composition tests run real signed packages with and without declarations
+through fresh task admission and the child process, and cover bound account
+inventory, lost/failed outputs and denied native actions.
 
 `readAssistantSourceMonitor` composes the same package resolution validator,
 Ed25519/digest/file-inventory verifier, executable cache, explicit bound local
