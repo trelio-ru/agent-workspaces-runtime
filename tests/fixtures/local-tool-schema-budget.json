@@ -218,6 +218,13 @@
       "maxBytes": 576,
       "baselineTokens": 131,
       "maxTokens": 132
+    },
+    "use_private_agent_skill_drafts": {
+      "modelVisible": true,
+      "baselineBytes": 3184,
+      "maxBytes": 3200,
+      "baselineTokens": 751,
+      "maxTokens": 752
     }
   }
 }

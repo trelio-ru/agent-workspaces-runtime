@@ -336,6 +336,15 @@ test("local skill detail loads authority sections lazily and reuses only an exac
   }
   assert.deepEqual(reused.responseProjection.includedSections, ["execution"]);
   assert.deepEqual(reused.responseProjection.reusedSections, ["instructions"]);
+  const trial = { draftId: "draft", expectedRevision: 2, expectedReleaseId: "release-3" };
+  const trialEnvelope = { content: [{ type: "text", text: JSON.stringify({ ...payload,
+    skill: { ...payload.skill, authorTrial: { cachePolicy: "live_admission_only" } } }) }] };
+  const authorRead = JSON.parse(compactLocalNativeMcpResult("get_agent_skill", trialEnvelope, {
+    ...selectedArgs, trial, knownInstructionKey: summary.skill.instructionKey,
+  }).content[0].text);
+  assert.equal(authorRead.skill.instructionsMarkdown, payload.skill.instructionsMarkdown);
+  assert.deepEqual(authorRead.responseProjection.reusedSections, []);
+  assert.deepEqual(authorRead.deferredData.arguments.trial, trial);
   const otherProject = projectMcpAgentPayload("get_agent_skill", { ...payload, projectSlug: "other" }, {
     ...selectedArgs,
     projectSlug: "other",

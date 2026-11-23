@@ -115,6 +115,35 @@ exact `currentReleaseId` и не меняет существующие assignmen
 подтверждает показанный `planHash`; даже прямая исходная просьба «создай» или
 «опубликуй» не считается подтверждением ещё не построенного плана.
 
+Обычный активный участник использует отдельный
+`use_private_agent_skill_drafts`: read, plan_create/plan_save, save, trial,
+report_test, submit/withdraw. Он сохраняет собственный immutable candidate
+через те же validators, signing и E2EE publication payloads. Сохранение draft
+не требует второго согласия. Изменения очищают отчёт о тестах и review; отчёт
+остаётся заявлением автора, а не серверной проверкой. Только current owner/admin
+может request_changes/reject либо отдельно подтвердить publish точных
+`expectedRevision`/`expectedReleaseId`. Свежий context не подменяет согласованный
+snapshot. Unknown write не повторяется автоматически.
+Большой exact review выдаётся lossless `reviewJsonText` частями через общий
+Unicode cursor; nextCall сохраняет полный digest и revision/release. Изменившийся
+baseline/card/report отклоняет продолжение. До решения читаются все части;
+plaintext review не кешируется. Offset списка остаётся обычным row offset.
+
+Trial возвращает nextCall обычного protected native `get_agent_skill` с exact
+`trial` selector. Только этот reader выдаёт полные instructions/execution и
+привязывает observed runtime session; bridge preparation не создаёт proof и
+не выбирает сессию из окружения. Автор исполняет свой current candidate через
+обычный signed/Remote MCP engine, собственные подключения и Secret ACL, с
+отдельным device consent. Это не OS sandbox. Raw `authorTrial` исключает
+admission cache до normalization: каждый resolve повторяет live author/current
+candidate ACL. Чужой reviewer не получает execution grant.
+
+При выпуске обновления production-base CAS и новый immutable published release
+сохраняют working version/assignments до approval; новая публикация требует
+нового device consent даже при reuse package. Первая approval устанавливает
+навык без assignment. Backend с draft ACL/crypto должен предшествовать host;
+plugin shell и minimum не меняются.
+
 Поддерживаются Markdown, Remote MCP и `.skillpkg`. Remote MCP проходит тот же
 provider-neutral HTTPS/auth/header/tool-policy validator, который применяется
 при исполнении. Package читается только как bounded regular non-symlink file,
@@ -167,7 +196,7 @@ payload вместе с release одной транзакцией. Исполн�
 два независимых уровня доверия:
 
 - `platform_verified` – runtime проверен и опубликован Trelio;
-- `company_unverified` – runtime загрузил owner/admin компании, а Trelio не
+- `company_unverified` – runtime загружен внутри компании, а Trelio не
   проверял его код.
 
 Оба варианта подписаны Trelio для контроля целостности доставки. Подпись

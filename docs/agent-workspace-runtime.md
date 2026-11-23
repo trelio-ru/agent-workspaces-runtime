@@ -1643,7 +1643,11 @@ model admission и выбранный сервером E2EE route с исход�
 
 Local MCP фильтрует пять company-private skill management definitions в
 `tools/list` по свежему `companySkillManagement` из paired
-`GET /api/agent-workspaces/mcp-tool-catalog`. Backend выводит только этот boolean
+`GET /api/agent-workspaces/mcp-tool-catalog`. Независимый boolean
+`companySkillAuthoring` открывает один `use_private_agent_skill_drafts` любому
+действующему human member с MCP/Workspace в одной компании; роль reviewer
+проверяется отдельно при точном действии. Отсутствующий boolean у старого
+backend скрывает author tool. Backend выводит только эти booleans
 и `schemaVersion:1` из открытых ролей, module/MCP access metadata во всех
 компаниях аккаунта: owner/admin и Agent Workspaces должны совпадать в одной
 доступной компании. Company content/IDs/имена, E2EE payload, инструкции и

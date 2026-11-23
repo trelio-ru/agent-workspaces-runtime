@@ -97,10 +97,13 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // initialize instructions once per schema, not extra runtime instructions.
   // New setup-only opener: its own reviewed 672-byte/160-token ceiling is
   // additive. Existing method limits and normal task-Run ceilings stay fixed.
-  modelVisibleLocalToolSchemasBytes: 15_500 + 672 + 329,
+  // One unified author/reviewer operation adds its independently measured
+  // 3,200-byte schema; existing per-method and historical baselines stay fixed.
+  modelVisibleLocalToolSchemasBytes: 15_500 + 672 + 329 + 3_200,
   // +schemaToolName lets doctor load one exact schema instead of every schema;
   // skill section routing adds one bounded initialize prefix, not response data.
-  clientPrefixedLocalToolSchemasBytes: 75_000,
+  // The new method also receives the client initialize prefix once.
+  clientPrefixedLocalToolSchemasBytes: 75_000 + 3_200 + 4_200,
   clientPrefixedTaskRunLocalToolSchemasBytes: 4_700,
   representativeLocalProposalResultBytes: 14_500,
   representativeLocalAttachmentResultBytes: 1_400,
@@ -120,8 +123,8 @@ export const PLUGIN_CONTEXT_TOKEN_LIMITS = Object.freeze({
   encryptedCompanyTaskRunPluginLayer: 17_600,
   localProviderToolSchemas: 600,
   localMcpInstructions: 650,
-  modelVisibleLocalToolSchemas: 3_500 + 160,
-  clientPrefixedLocalToolSchemas: 13_000 + 160 + 650,
+  modelVisibleLocalToolSchemas: 3_500 + 160 + 768,
+  clientPrefixedLocalToolSchemas: 13_000 + 160 + 650 + 768 + 650,
   clientPrefixedTaskRunLocalToolSchemas: 750 + 82,
   representativeLocalProposalResult: 1_650,
   representativeLocalAttachmentResult: 200,
@@ -325,7 +328,7 @@ export const buildPluginContextBudgetReport = async ({
   // A fixed fictional owner measures the full historical surface offline.
   // Live rights filtering must not make this ceiling pass by dropping tools.
   const listed = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {
-    loadCatalogPermissions: async () => ({ companySkillManagement: true }),
+    loadCatalogPermissions: async () => ({ companySkillManagement: true, companySkillAuthoring: true }),
   });
   const localTools = listed.result.tools.filter(isModelVisibleLocalTool);
   const taskRunLocalTools = localTools.filter((tool) => tool.name === TRELIO_WORKSPACE_ACTION_TOOL.name);

@@ -1687,7 +1687,10 @@ Exact legacy template bytes для распознавания при мигра�
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
 - Local tools/list скрывает owner/admin-only private-skill management по свежему
-  content-free backend каталогу, без cache/pairing/Run. Диагностика остаётся доступна;
+  content-free backend каталогу; отдельный `companySkillAuthoring` открывает
+  `use_private_agent_skill_drafts` участникам. Trial продолжает protected native
+  `get_agent_skill`, без подмены observed tool/session и без admission cache.
+  Без cache/pairing/Run. Диагностика остаётся доступна;
   проверка точного действия остаётся у backend. [Контракт](docs/agent-workspace-runtime.md#catalog-permissions).
 - Публичный ABI между ними включает signed package format, три entrypoint mode
   `bridge|hook|mcp`, descriptor fields, `minimumPluginVersion`, environment

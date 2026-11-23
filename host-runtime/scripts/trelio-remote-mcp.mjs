@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
+import { sliceUtf16CodePoints, readUtf16TextChunk } from "./trelio-context-search-matching.mjs";
 import { AGENT_SKILL_GUIDES_MINIMUM_HOST, normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
-import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
+import { buildLocalTaskReadToolResult, fitsMcpTaskReadResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-session.mjs";
@@ -254,6 +254,7 @@ const COMPANY_SKILL_PLAN_DIRECTORY = path.join(
   resolveWorkspaceBridgeConfigDirectory(),
   "agent-skill-publication-plans",
 );
+const COMPANY_SKILL_DRAFT_TOOL_NAMES = new Set(["use_private_agent_skill_drafts"]);
 const COMPANY_SKILL_MANAGEMENT_TOOL_NAMES = new Set([
   "get_company_private_agent_skill_authoring_contract",
   "plan_company_private_agent_skill_create",
@@ -297,7 +298,8 @@ export const loadLocalMcpCatalogPermissions = async (origin, {
     if (payload?.schemaVersion !== 1 || typeof payload.companySkillManagement !== "boolean") {
       throw new RemoteMcpHostError("LOCAL_MCP_CATALOG_UNAVAILABLE", "Trelio вернул несовместимый MCP-каталог.");
     }
-    return { companySkillManagement: payload.companySkillManagement };
+    return { companySkillManagement: payload.companySkillManagement,
+      ...(typeof payload.companySkillAuthoring === "boolean" ? { companySkillAuthoring: payload.companySkillAuthoring } : {}) };
   },
 });
 const CODEX_ROUTING_TOOL_NAMES = new Set([
@@ -3160,20 +3162,26 @@ const readCompanyPrivateSkillManagementContext = async ({
   token,
   companySlug,
   skillSlug,
+  draftWorkflow = false, draftId, offset = 0, limit = 20,
 }) => {
   const query = new URLSearchParams({ companySlug });
+  if (draftId) query.set("draftId", requireUuid(draftId, "draftId"));
+  if (draftWorkflow) {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "Invalid draft page.");
+    query.set("offset", String(offset)); query.set("limit", String(limit));
+  }
   if (skillSlug) query.set("skillSlug", skillSlug);
   const response = await request(
     origin,
     token,
-    `/api/agent-skills/private-management/context?${query.toString()}`,
+    `/api/agent-skills/private-management/${draftWorkflow ? "drafts/" : ""}context?${query.toString()}`,
   );
   const rawContext = await response.json();
   if (
     !UUID_PATTERN.test(String(rawContext?.company?.id || ""))
     || rawContext.company.slug !== companySlug
     || !["plain", "encrypted"].includes(rawContext.company.encryptionState)
-    || rawContext.permissions?.canManage !== true
+    || (draftWorkflow ? rawContext.permissions?.canAuthor !== true : rawContext.permissions?.canManage !== true)
     || typeof rawContext.settingsPath !== "string"
   ) {
     throw new RemoteMcpHostError(
@@ -3189,15 +3197,15 @@ const readCompanyPrivateSkillManagementContext = async ({
         company: rawContext.company,
       })
     : null;
-  const skill = companyEncryption && rawContext.skill
+  const hydrated = companyEncryption
     ? await hydrateAgentCompanyEncryptedJson({
-        value: rawContext.skill,
+        value: rawContext,
         origin,
         token,
         companyEncryption,
       })
-    : rawContext.skill;
-  return { ...rawContext, skill, companyEncryption };
+    : rawContext;
+  return { ...hydrated, companyEncryption };
 };
 
 /**
@@ -3474,8 +3482,11 @@ const storeCompanySkillPlan = async ({
     expiresAt: expiresAt.toISOString(),
     settingsUrl,
     ...summary,
-    confirmationRequired: true,
-    confirmationAction: operation === "create"
+    operation,
+    ...(operation.endsWith("_draft") ? { nextCall: { tool: "use_private_agent_skill_drafts", arguments: {
+      companySlug: applyBase.companySlug, operation: "save", planOperation: operation, planId, planHash } } } : {}),
+    confirmationRequired: !operation.endsWith("_draft"),
+    confirmationAction: operation.endsWith("_draft") ? "use_private_agent_skill_drafts" : operation === "create"
       ? "create_company_private_agent_skill"
       : "publish_company_private_agent_skill_release",
   };
@@ -3502,7 +3513,7 @@ const buildExecutionSummary = (execution) => ({
     : {}),
 });
 
-const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) => {
+const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal, draftWorkflow = false } = {}) => {
   const common = normalizeCommonPublicationInput(rawInput);
   const token = await requireToken(origin, { onStatus: () => undefined, signal });
   await ensureBridgeCompatibility(origin, token, { signal });
@@ -3510,7 +3521,8 @@ const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) 
     origin,
     token,
     companySlug: common.companySlug,
-    skillSlug: common.skillSlug,
+    skillSlug: common.skillSlug, draftWorkflow,
+    ...(draftWorkflow && rawInput.draftId ? { draftId: rawInput.draftId } : {}),
   });
   if (context.skill) {
     throw new RemoteMcpHostError(
@@ -3553,7 +3565,7 @@ const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) 
   const applyBase = { companySlug: common.companySlug, ...protectedDraft };
   return storeCompanySkillPlan({
     origin,
-    operation: "create",
+    operation: draftWorkflow ? "create_draft" : "create",
     applyBase,
     settingsUrl: new URL(context.settingsPath, `${origin}/`).href,
     summary: {
@@ -3565,7 +3577,8 @@ const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) 
       contentProtection: context.companyEncryption ? "company_e2ee_v1" : "plain",
       changes: [
         "Создать приватный catalog item и initial release 1.0.0",
-        "Установить навык в компанию без назначения компании или проектам",
+        draftWorkflow ? "Сохранить только авторский кандидат; публикация требует решения администратора"
+          : "Установить навык в компанию без назначения компании или проектам",
       ],
       warnings: execution.kind === "runtime"
         ? ["Исполняемый пакет остаётся company_unverified и потребует отдельного согласия на каждом устройстве перед первым запуском."]
@@ -3574,7 +3587,7 @@ const planCompanyPrivateSkillCreate = async (origin, rawInput, { signal } = {}) 
   });
 };
 
-const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {}) => {
+const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal, draftWorkflow = false } = {}) => {
   const common = normalizeCommonPublicationInput(rawInput);
   const version = requireStableVersion(rawInput?.version, "version");
   const token = await requireToken(origin, { onStatus: () => undefined, signal });
@@ -3583,13 +3596,17 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
     origin,
     token,
     companySlug: common.companySlug,
-    skillSlug: common.skillSlug,
+    skillSlug: common.skillSlug, draftWorkflow,
+    ...(draftWorkflow && rawInput.draftId ? { draftId: rawInput.draftId } : {}),
   });
   if (!context.skill || !UUID_PATTERN.test(String(context.skill.currentReleaseId || ""))) {
     throw new RemoteMcpHostError(
       "AGENT_SKILL_NOT_FOUND",
       "Приватный навык не найден; сначала подготовьте его создание.",
     );
+  }
+  if (draftWorkflow && context.draft && context.permissions?.canEdit !== true) {
+    throw new RemoteMcpHostError("AGENT_SKILL_DRAFT_NOT_EDITABLE", "Withdraw your submitted candidate before editing; other authors remain read-only.");
   }
   // Refuse during planning, before a human reviews a payload an old backend
   // cannot apply. An update never falls back to a second metadata mutation.
@@ -3608,6 +3625,8 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
     summary: common.summary,
     changeReason: common.changeReason,
     expectedCurrentReleaseId: context.skill.currentReleaseId,
+    ...(draftWorkflow && context.draft ? { snapshot: { draftId: context.draft.id,
+      expectedRevision: context.draft.revision, expectedReleaseId: context.draft.releaseId } } : {}),
   };
   const execution = await normalizePublicationExecution({
     input: rawInput,
@@ -3642,7 +3661,7 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
   ].filter(Boolean);
   return storeCompanySkillPlan({
     origin,
-    operation: "publish",
+    operation: draftWorkflow ? "save_draft" : "publish",
     applyBase,
     settingsUrl: new URL(context.settingsPath, `${origin}/`).href,
     summary: {
@@ -3659,6 +3678,7 @@ const planCompanyPrivateSkillRelease = async (origin, rawInput, { signal } = {})
       changedFields,
       metadata: { before: { title: context.skill.title, description: context.skill.description }, after: metadata },
       assignmentChanged: false,
+      ...(draftWorkflow ? { effect: "author_candidate_only", testReportInvalidated: true } : {}),
       warnings: execution.kind === "runtime"
         ? ["Новая исполняемая публикация остаётся company_unverified и потребует отдельного согласия устройства."]
         : [],
@@ -3705,7 +3725,7 @@ const applyCompanyPrivateSkillPlan = async (
   operation,
   { signal } = {},
 ) => {
-  if (rawInput?.confirmed !== true) {
+  if (!operation.endsWith("_draft") && rawInput?.confirmed !== true) {
     throw new RemoteMcpHostError(
       "AGENT_SKILL_CONFIRMATION_REQUIRED",
       "Apply требует confirmed=true после отдельного явного подтверждения exact planHash.",
@@ -3725,11 +3745,14 @@ const applyCompanyPrivateSkillPlan = async (
     planHash,
     operation,
   });
+  if (operation.endsWith("_draft") && rawInput.companySlug !== plan.applyBase.companySlug) throw new RemoteMcpHostError("AGENT_SKILL_PLAN_CHANGED", "Plan belongs to another company.");
   const token = await requireToken(origin, { onStatus: () => undefined, signal });
   await ensureBridgeCompatibility(origin, token, { signal });
-  const endpoint = operation === "create"
-    ? "/api/agent-skills/private-management/create"
-    : "/api/agent-skills/private-management/publish";
+  const endpoint = ({ create: "/api/agent-skills/private-management/create",
+    publish: "/api/agent-skills/private-management/publish",
+    create_draft: "/api/agent-skills/private-management/drafts/create",
+    save_draft: "/api/agent-skills/private-management/drafts/save" })[operation];
+  if (!endpoint) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_PLAN", "Unknown private skill plan operation.");
   const response = await request(origin, token, endpoint, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -3742,6 +3765,13 @@ const applyCompanyPrivateSkillPlan = async (
     signal,
   });
   const result = await response.json();
+  if (operation.endsWith("_draft")) {
+    if (!UUID_PATTERN.test(String(result?.draft?.id || "")) || result.published !== false) {
+      throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_RESPONSE", "Draft save outcome is unknown. Read the current draft before any retry.");
+    }
+    await fs.rm(planPath, { force: true });
+    return { applied: true, operation, ...result };
+  }
   if (
     typeof result?.settingsPath !== "string"
     || result.company?.slug !== plan.applyBase.companySlug
@@ -3771,6 +3801,118 @@ const applyCompanyPrivateSkillPlan = async (
       ? "Навык установлен, но не назначен компании или проектам. Откройте settingsUrl для проверки и назначения."
       : "Публикация создана без изменения назначения. Откройте settingsUrl для проверки.",
   };
+};
+
+/** Author operations reuse the publisher's validator/encryption/plan store.
+ * Only the backend owns author/reviewer ACL and immutable candidate state. */
+export const handlePrivateSkillDraftTool = async (origin, name, rawInput, {
+  signal, draftToken = requireToken, draftCompatibility = ensureBridgeCompatibility,
+  draftContext = readCompanyPrivateSkillManagementContext, draftRequest = request,
+} = {}) => {
+  const companySlug = requireBoundedText(rawInput?.companySlug, "companySlug", 120);
+  if (name === "plan_private_agent_skill_draft") {
+    if (!["create", "save"].includes(rawInput.operation)) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "Choose create or save.");
+    return buildTextResult(await (rawInput.operation === "create" ? planCompanyPrivateSkillCreate : planCompanyPrivateSkillRelease)(
+      origin, rawInput, { signal, draftWorkflow: true }));
+  }
+  if (name === "save_private_agent_skill_draft") {
+    if (!["create_draft", "save_draft"].includes(rawInput.operation)) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_PLAN", "Use the exact candidate plan operation.");
+    return buildTextResult(await applyCompanyPrivateSkillPlan(origin, rawInput, rawInput.operation, { signal }));
+  }
+  const token = await draftToken(origin, { onStatus: () => undefined, signal });
+  await draftCompatibility(origin, token, { signal });
+  const context = await draftContext({ origin, token, companySlug,
+    draftWorkflow: true, ...(rawInput.draftId ? { draftId: rawInput.draftId } : {}),
+    ...(!rawInput.draftId && rawInput.offset !== undefined ? { offset: rawInput.offset } : {}),
+    ...(rawInput.limit !== undefined ? { limit: rawInput.limit } : {}) });
+  if (name === "get_private_agent_skill_draft") {
+    // Review carries one candidate and its pinned production baseline. The
+    // planning-only skill copy would duplicate executable instructions.
+    const { companyEncryption: _crypto, skill: _skill, ...review } = context;
+    let result = buildTextResult(review);
+    if (!context.draft) {
+      // Lists may return fewer complete metadata rows than requested, but must
+      // never truncate a title or lose the omitted rows from the next cursor.
+      const rows = Array.isArray(review.drafts) ? [...review.drafts] : [];
+      while (!fitsMcpTaskReadResult(result) && rows.length > 1) {
+        rows.pop();
+        const offset = rawInput.offset ?? 0;
+        result = buildTextResult({ ...review, drafts: rows, pagination: { ...review.pagination,
+          offset, limit: rows.length, hasMore: true, nextOffset: offset + rows.length } });
+      }
+      if (!fitsMcpTaskReadResult(result)) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_RESPONSE", "Draft inventory exceeds the complete delivery bound.");
+      return result;
+    }
+    const offset = rawInput.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10_000_000) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "Invalid review offset.");
+    const snapshot = { expectedRevision: context.draft.revision, expectedReleaseId: context.draft.releaseId };
+    if ((rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== snapshot.expectedRevision)
+      || (rawInput.expectedReleaseId !== undefined && rawInput.expectedReleaseId !== snapshot.expectedReleaseId)) {
+      throw new RemoteMcpHostError("AGENT_SKILL_DRAFT_CHANGED", "Candidate changed during review.");
+    }
+    if (offset === 0 && fitsMcpTaskReadResult(result)) return result;
+    const serialized = JSON.stringify(review), planHash = crypto.createHash("sha256").update(serialized).digest("hex");
+    // Paging pins the WHOLE hydrated review, including baseline/card/runtime
+    // and author evidence. A changed source must never splice unrelated pages
+    // into a result the moderator is asked to approve. Keep only its digest in
+    // the continuation; plaintext is not cached or written to another store.
+    if (offset > 0 && (rawInput.planHash !== planHash || rawInput.expectedRevision !== snapshot.expectedRevision
+      || rawInput.expectedReleaseId !== snapshot.expectedReleaseId)) throw new RemoteMcpHostError("AGENT_SKILL_DRAFT_CHANGED", "Review changed. Read it again from the start.");
+    const part = readUtf16TextChunk(serialized, offset, 6_000);
+    return buildTextResult({ draftId: context.draft.id, ...snapshot, planHash, reviewJsonText: part.text,
+      offset, nextOffset: part.nextOffset, nextCall: part.nextOffset === null ? null : {
+        toolName: "use_private_agent_skill_drafts", arguments: { companySlug, operation: "read", draftId: context.draft.id,
+          ...snapshot, planHash, offset: part.nextOffset } },
+      instruction: "Read every part and concatenate reviewJsonText exactly before reviewing or approving the complete JSON. A partial review cannot authorize publication." });
+  }
+  const draft = context.draft;
+  if (!draft || !UUID_PATTERN.test(String(draft.id || ""))) throw new RemoteMcpHostError("AGENT_SKILL_DRAFT_CHANGED", "Read one exact draft first.");
+  const snapshot = { draftId: draft.id, expectedRevision: draft.revision, expectedReleaseId: draft.releaseId };
+  if (name === "trial_private_agent_skill_draft") {
+    if (context.permissions?.canTrial !== true) throw new RemoteMcpHostError("AGENT_SKILL_ACCESS_DENIED", "Only the author can prepare this trial.");
+    const query = new URLSearchParams({ companySlug, ...Object.fromEntries(Object.entries(snapshot).map(([key, value]) => [key, String(value)])) });
+    const response = await draftRequest(origin, token, `/api/agent-skills/private-management/drafts/trial?${query}`, { signal });
+    const raw = await response.json();
+    const next = raw.nextCall;
+    if (raw.trial?.releaseId !== draft.releaseId || next?.server !== "trelio" || next?.toolName !== "get_agent_skill"
+      || next.arguments?.companySlug !== companySlug || next.arguments?.skillId !== draft.skillId
+      || next.arguments?.trial?.draftId !== draft.id || next.arguments?.trial?.expectedRevision !== draft.revision
+      || next.arguments?.trial?.expectedReleaseId !== draft.releaseId) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_RESPONSE", "Trial response does not match its exact candidate.");
+    // The native protected read owns the observed current client session and
+    // complete instruction budget. A local preparation must not invent that
+    // session or return an executable descriptor with null model admission.
+    return buildTextResult(raw);
+  }
+  if (name !== "act_on_private_agent_skill_draft" || !["report_test", "submit", "withdraw", "request_changes", "reject", "publish"].includes(rawInput.action)) {
+    throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "Unknown draft action.");
+  }
+  // Never substitute a freshly read candidate for the one the human reviewed.
+  if (rawInput.expectedRevision !== snapshot.expectedRevision || rawInput.expectedReleaseId !== snapshot.expectedReleaseId) {
+    throw new RemoteMcpHostError("AGENT_SKILL_DRAFT_CHANGED", "Draft changed after review. Read it again before deciding.");
+  }
+  if (rawInput.action === "publish" && rawInput.confirmed !== true) throw new RemoteMcpHostError("AGENT_SKILL_CONFIRMATION_REQUIRED", "Publication requires the moderator's separate exact-snapshot confirmation.");
+  const needsText = ["report_test", "request_changes", "reject"].includes(rawInput.action);
+  let protectedText = {};
+  if (needsText) {
+    const text = requireBoundedText(rawInput.text, "text", 16_384);
+    if (Buffer.byteLength(text, "utf8") > 16_384) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "Draft note exceeds its UTF-8 limit.");
+    if (context.companyEncryption) {
+      const field = rawInput.action === "report_test" ? "test_report" : "review_note";
+      const entityId = crypto.randomUUID();
+      const payload = await encryptPublicationPayload({ companyEncryption: context.companyEncryption, entityId,
+        source: { kind: "agent_skill_draft", draftId: draft.id, action: rawInput.action }, values: { [field]: text } });
+      protectedText = { text: buildCompanyEncryptedTextMarker(entityId, field),
+        writerDeviceId: context.companyEncryption.runtime.device.id, encryptedPayloads: [payload] };
+    } else protectedText = { text };
+  } else if (rawInput.text !== undefined) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "This structural action accepts no text.");
+  const response = await draftRequest(origin, token, "/api/agent-skills/private-management/drafts/action", {
+    method: "POST", headers: { "content-type": "application/json" }, signal,
+    body: JSON.stringify({ companySlug, ...snapshot, action: rawInput.action, ...protectedText,
+      ...(rawInput.action === "publish" ? { confirmed: true } : {}) }),
+  });
+  const raw = await response.json();
+  return buildTextResult(context.companyEncryption ? await hydrateAgentCompanyEncryptedJson({
+    value: raw, origin, token, companyEncryption: context.companyEncryption }) : raw);
 };
 
 const handleCompanySkillManagementTool = async (
@@ -4230,6 +4372,21 @@ const LOCAL_TOOLS = [
       destructiveHint: false,
       openWorldHint: false,
     },
+  },
+  {
+    name: "use_private_agent_skill_drafts", title: "Author and review private skill candidates",
+    description: "Active members author/read/test their own immutable candidates; owner/admin reviews them. Read the authoring contract and full candidate/base before acting. plan_create/plan_save reuse protected Markdown/Remote MCP/.skillpkg validation; save changes drafts only. Edits invalidate tests/review. report_test records honest author evidence; submit sends for review. request_changes/reject require text. publish requires the moderator's separate explicit confirmation of the exact expectedRevision/expectedReleaseId shown in review. Preserve assignments. trial returns protected get_agent_skill nextCall for its author; ACL/Secret rights, device consent and live admission apply. A trial is not a sandbox. Never substitute fresh snapshot arguments or retry an unknown write.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["companySlug", "operation"], properties: {
+      ...companySkillPlanCommonProperties,
+      operation: { type: "string", enum: ["read", "plan_create", "plan_save", "save", "report_test", "submit", "withdraw", "request_changes", "reject", "publish", "trial"] },
+      offset: { type: "integer", minimum: 0, maximum: 10000000 }, limit: { type: "integer", minimum: 1, maximum: 50 },
+      draftId: { type: "string", format: "uuid" }, expectedRevision: { type: "integer", minimum: 1 }, expectedReleaseId: { type: "string", format: "uuid" },
+      title: { type: "string", minLength: 1, maxLength: 255 }, description: { type: "string", minLength: 1, maxLength: 10000 },
+      version: { type: "string", pattern: "^\\d+\\.\\d+\\.\\d+$" },
+      marketplaceCategory: { type: "string", enum: ["communications", "business", "knowledge", "development", "other"] },
+      planId: { type: "string", format: "uuid" }, planHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      planOperation: { type: "string", enum: ["create_draft", "save_draft"] }, text: { type: "string", maxLength: 16384 }, confirmed: { const: true },
+    } }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   {
     name: "get_company_private_agent_skill_authoring_contract",
@@ -6258,6 +6415,16 @@ const handleToolCallWithoutSkillHints = async (
       readTarget,
     }));
   }
+  if (COMPANY_SKILL_DRAFT_TOOL_NAMES.has(name)) {
+    const operation = rawArguments.operation;
+    const method = ({ read: "get_private_agent_skill_draft", plan_create: "plan_private_agent_skill_draft",
+      plan_save: "plan_private_agent_skill_draft", save: "save_private_agent_skill_draft", trial: "trial_private_agent_skill_draft" })[operation];
+    if (!method && !["report_test", "submit", "withdraw", "request_changes", "reject", "publish"].includes(operation)) throw new RemoteMcpHostError("AGENT_SKILL_MANAGEMENT_INVALID_INPUT", "Unknown private skill draft operation.");
+    return handlePrivateSkillDraftTool(origin, method ?? "act_on_private_agent_skill_draft", { ...rawArguments,
+      ...(operation === "plan_create" ? { operation: "create" } : operation === "plan_save" ? { operation: "save" }
+        : operation === "save" ? { operation: rawArguments.planOperation } : method ? {} : { action: operation }),
+    }, { signal });
+  }
   if (COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(name)) {
     return handleCompanySkillManagementTool(
       origin,
@@ -6836,15 +7003,16 @@ export const handleLocalMcpMessage = async (
       const permissions = await loadCatalogPermissions(origin, { signal });
       return {
         jsonrpc: "2.0", id: message.id,
-        result: { tools: LOCAL_TOOLS.filter(tool => permissions.companySkillManagement
-          || !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name)) },
+        result: { tools: LOCAL_TOOLS.filter(tool => (permissions.companySkillManagement
+          || !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name))
+          && (permissions.companySkillAuthoring === true || !COMPANY_SKILL_DRAFT_TOOL_NAMES.has(tool.name))) },
       };
     } catch {
       // Fail closed for owner-only definitions without hiding the very setup
       // and diagnostic tools needed to recover an initial connection outage.
       // Keep the failure content-free; never reflect private native/HTTP causes.
       return { jsonrpc: "2.0", id: message.id, result: {
-        tools: LOCAL_TOOLS.filter(tool => !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name)),
+        tools: LOCAL_TOOLS.filter(tool => !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name) && !COMPANY_SKILL_DRAFT_TOOL_NAMES.has(tool.name)),
         _meta: { "trelio/catalogStatus": "unavailable", "trelio/catalogCode": "LOCAL_MCP_CATALOG_UNAVAILABLE" },
       } };
     }

@@ -1160,6 +1160,7 @@ const projectAgentSkillDetail = (payload, args) => {
             ? ["publication"] : []),
     ];
     const reuseInstructions = requested.has("instructions")
+        && !skill.authorTrial
         && args.knownInstructionKey === instructionKey;
     const { instructionsMarkdown, personalRules: _personalRules, connectionDefinition, connection, runtimeRequirements, runtimeRelease: _runtimeRelease, remoteMcp, ...skillSummary } = skill;
     let projectedSkill = {
@@ -1256,6 +1257,7 @@ const projectAgentSkillDetail = (payload, args) => {
                 ...(payload.projectSlug ?? args.projectSlug
                     ? { projectSlug: payload.projectSlug ?? args.projectSlug } : {}),
                 skillId: skill.id,
+                ...(args.trial ? { trial: args.trial } : {}),
                 sections: deferredSections,
             },
             instruction: "Загрузите только нужные sections. Перед первым внешним действием нужны instructions и execution; connection – только для настройки, publication – для проверки происхождения релиза.",

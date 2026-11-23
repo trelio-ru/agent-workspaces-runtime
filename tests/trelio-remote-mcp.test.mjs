@@ -28,6 +28,7 @@ import {
   handleLocalMcpMessage as handleLocalMcpMessageProduction,
   loadLocalMcpCatalogPermissions,
   handleToolCall as handleToolCallProduction,
+  handlePrivateSkillDraftTool,
   isHostRuntimeUpgradeRequiredError,
   normalizeCompanyPrivateSkillAuthoringContract,
   resolveCompanySkillPublicationMetadata,
@@ -6131,6 +6132,7 @@ test("Remote MCP admission expires absolutely and never caches protected wire de
       let resolutions = 0;
       let denied = false;
       let protectedWire = false;
+      let authorTrial = false;
       const rulesMarkdown = "# Platform rules\\n\\nUse typed actions.\\n";
       const rulesSha256 = createHash("sha256").update(rulesMarkdown, "utf8").digest("hex");
       globalThis.fetch = async (url, options) => {
@@ -6155,6 +6157,7 @@ test("Remote MCP admission expires absolutely and never caches protected wire de
         const input = JSON.parse(options.body);
         return Response.json({ ...fixture.resolution, releaseId: input.expectedReleaseId,
           ...(protectedWire ? { encryptedLabel: "~e1:protected-fixture" } : {}),
+          ...(authorTrial ? { authorTrial: { cachePolicy: "live_admission_only" } } : {}),
         });
       };
       const input = { ...fixture.resolution.localIdentity, releaseId: fixture.resolution.releaseId };
@@ -6178,6 +6181,9 @@ test("Remote MCP admission expires absolutely and never caches protected wire de
       await resolve();
       await resolve();
       assert.equal(resolutions, 6, "protected wire data must stay uncached even when normalization drops fields");
+      protectedWire = false; authorTrial = true;
+      await resolve(); await resolve();
+      assert.equal(resolutions, 8, "plain author candidates must also reauthorize after normalization");
     } finally {
       await fs.rm(directory, { recursive: true, force: true });
     }
@@ -6278,4 +6284,105 @@ test("private skill create and release require a bounded routingSummary before I
       }), /routingSummary/u);
     }
   }
+});
+
+
+// Use the actual candidate action adapter, with only authenticated native I/O
+// replaced. Revision/refusal guards and serialization remain production code.
+test("draft actions retain the reviewed snapshot and never replay an uncertain write", async () => {
+  const draft = { id: "11111111-1111-4111-8111-111111111111", revision: 7,
+    releaseId: "22222222-2222-4222-8222-222222222222" };
+  const input = { companySlug: "synthetic", draftId: draft.id, expectedRevision: 7,
+    expectedReleaseId: draft.releaseId, action: "publish" };
+  let writes = 0;
+  const options = { draftToken: async () => "synthetic-token", draftCompatibility: async () => {},
+    draftContext: async () => ({ company: { id: companyId, slug: "synthetic" }, draft,
+      permissions: { canAuthor: true, canReview: true, canTrial: false }, companyEncryption: null }),
+    draftRequest: async (_origin, _token, endpoint, request) => {
+      writes++;
+      assert.equal(endpoint, "/api/agent-skills/private-management/drafts/action");
+      assert.deepEqual(JSON.parse(request.body), { ...input, confirmed: true });
+      throw new Error("synthetic lost write response");
+    } };
+  await assert.rejects(handlePrivateSkillDraftTool("https://synthetic.invalid", "act_on_private_agent_skill_draft",
+    { ...input, expectedRevision: 6, confirmed: true }, options), error => error.code === "AGENT_SKILL_DRAFT_CHANGED");
+  await assert.rejects(handlePrivateSkillDraftTool("https://synthetic.invalid", "act_on_private_agent_skill_draft",
+    input, options), error => error.code === "AGENT_SKILL_CONFIRMATION_REQUIRED");
+  assert.equal(writes, 0);
+  await assert.rejects(handlePrivateSkillDraftTool("https://synthetic.invalid", "act_on_private_agent_skill_draft",
+    { ...input, confirmed: true }, options), /synthetic lost/u);
+  assert.equal(writes, 1);
+  await assert.rejects(handlePrivateSkillDraftTool("https://synthetic.invalid", "trial_private_agent_skill_draft",
+    { companySlug: input.companySlug, draftId: draft.id }, options), error => error.code === "AGENT_SKILL_ACCESS_DENIED");
+  assert.equal(writes, 1);
+});
+
+test("author tools are independently discovered without exposing direct company publication", async () => {
+  const response = await handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {
+    loadCatalogPermissions: async () => ({ companySkillManagement: false, companySkillAuthoring: true }),
+  });
+  const names = response.result.tools.map(tool => tool.name);
+  assert.ok(names.includes("use_private_agent_skill_drafts"));
+  assert.equal(names.includes("publish_company_private_agent_skill_release"), false);
+  const legacy = await handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 2, method: "tools/list" }, {
+    loadCatalogPermissions: async () => ({ companySkillManagement: true }),
+  });
+  assert.equal(legacy.result.tools.some(tool => tool.name === "use_private_agent_skill_drafts"), false);
+});
+
+test("author trial continues the exact protected native read without inventing a runtime session", async () => {
+  const draft = { id: "11111111-1111-4111-8111-111111111111", revision: 2,
+    skillId: "synthetic", releaseId: "22222222-2222-4222-8222-222222222222" };
+  const nextCall = { server: "trelio", toolName: "get_agent_skill", arguments: { companySlug: "synthetic", skillId: draft.skillId,
+    trial: { draftId: draft.id, expectedRevision: draft.revision, expectedReleaseId: draft.releaseId }, sections: ["instructions", "execution"] } };
+  let requests = 0;
+  const result = await handlePrivateSkillDraftTool("https://synthetic.invalid", "trial_private_agent_skill_draft", {
+    companySlug: "synthetic", draftId: draft.id,
+  }, { draftToken: async () => "synthetic-token", draftCompatibility: async () => {},
+    draftContext: async () => ({ draft, permissions: { canTrial: true } }),
+    draftRequest: async (_origin, _token, endpoint) => {
+      requests++;
+      assert.doesNotMatch(endpoint, /runtimeSession/u);
+      return { json: async () => ({ nextCall, trial: { releaseId: draft.releaseId } }) };
+    } });
+  const delivered = JSON.parse(result.content[0].text);
+  assert.deepEqual(delivered.nextCall, nextCall);
+  assert.equal(requests, 1);
+  assert.equal(delivered.runtimeExecution, undefined);
+});
+
+test("author candidate plans enforce the same UTF-8 instruction bound before I/O", async () => {
+  await assert.rejects(handlePrivateSkillDraftTool("https://synthetic.invalid", "plan_private_agent_skill_draft", {
+    companySlug: "synthetic", operation: "create", skillSlug: "synthetic", instructionsMarkdown: "я".repeat(8193),
+  }), error => error.code === "AGENT_SKILL_INSTRUCTIONS_TOO_LARGE");
+});
+
+test("large candidate reviews page losslessly under the final envelope bound and reject changed sources", async () => {
+  const draft = { id: "11111111-1111-4111-8111-111111111111", revision: 2,
+    releaseId: "22222222-2222-4222-8222-222222222222" };
+  const context = { draft, candidate: { instructionsMarkdown: '🧪"\\\n'.repeat(10_000) },
+    base: { instructionsMarkdown: "Базовый текст".repeat(2_000) } };
+  const options = { draftToken: async () => "synthetic-token", draftCompatibility: async () => {},
+    draftContext: async () => context };
+  let args = { companySlug: "synthetic", draftId: draft.id }, text = "", next;
+  do {
+    const result = await handlePrivateSkillDraftTool("https://synthetic.invalid", "get_private_agent_skill_draft", args, options);
+    assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 40_000);
+    const page = JSON.parse(result.content[0].text);
+    text += page.reviewJsonText;
+    next = page.nextCall;
+    if (next) args = next.arguments;
+  } while (next);
+  assert.deepEqual(JSON.parse(text), context);
+  context.base.instructionsMarkdown += "changed";
+  await assert.rejects(handlePrivateSkillDraftTool("https://synthetic.invalid", "get_private_agent_skill_draft", args, options),
+    error => error.code === "AGENT_SKILL_DRAFT_CHANGED");
+  const inventory = await handlePrivateSkillDraftTool("https://synthetic.invalid", "get_private_agent_skill_draft", {
+    companySlug: "synthetic", limit: 50,
+  }, { ...options, draftContext: async () => ({ drafts: Array.from({ length: 50 }, (_, id) => ({ id, title: "🧪".repeat(255) })),
+    pagination: { offset: 0, limit: 50, hasMore: false, nextOffset: null } }) });
+  assert.ok(Buffer.byteLength(JSON.stringify(inventory), "utf8") <= 40_000);
+  const list = JSON.parse(inventory.content[0].text);
+  assert.ok(list.drafts.length < 50);
+  assert.equal(list.pagination.nextOffset, list.drafts.length);
 });

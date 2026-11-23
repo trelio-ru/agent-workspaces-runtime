@@ -53,6 +53,9 @@ export const openSkillAdmission = ({ entry, key, token, now = Date.now() }) => {
 
 /** Plaintext private E2EE declarations must never enter this disk/memory cache. */
 export const canCacheSkillAdmission = (resolution) => {
+  // Candidate ACL/revision changes are immediately authoritative. A tested
+  // draft must never borrow the 12-hour admission of a published release.
+  if (resolution?.authorTrial) return false;
   const text = JSON.stringify(resolution);
   return !text.includes("company_e2ee_v1") && !text.includes("~e1:");
 };

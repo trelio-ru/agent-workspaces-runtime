@@ -53,3 +53,8 @@ test("encrypted declarations and encrypted connection markers are never cached a
   assert.equal(canCacheSkillAdmission({ remoteMcp: { contentProtection: "company_e2ee_v1", config: { title: "private" } } }), false);
   assert.equal(canCacheSkillAdmission({ companyConnection: { config: "~e1:opaque:config_json~" } }), false);
 });
+
+// Even plain candidates must recheck the current author/revision on each use.
+test("author trials never acquire a published-release admission cache", () => {
+  assert.equal(canCacheSkillAdmission({ ...resolution, authorTrial: { cachePolicy: "live_admission_only" } }), false);
+});

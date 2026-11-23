@@ -17,6 +17,8 @@
     "AGENT_SKILL_DEVICE_CONSENT_CONTEXT_INVALID",
     "AGENT_SKILL_DEVICE_CONSENT_HOST_REQUIRED",
     "AGENT_SKILL_DEVICE_CONSENT_REQUIRED",
+    "AGENT_SKILL_DRAFT_CHANGED",
+    "AGENT_SKILL_DRAFT_NOT_EDITABLE",
     "AGENT_SKILL_MANAGEMENT_INVALID_CONTEXT",
     "AGENT_SKILL_MANAGEMENT_INVALID_INPUT",
     "AGENT_SKILL_MANAGEMENT_INVALID_PACKAGE",
@@ -497,7 +499,8 @@
     "call_remote_agent_skill_tool",
     "forget_remote_agent_skill_credential",
     "open_codex_connection_wizard",
-    "codex_connection_app_action"
+    "codex_connection_app_action",
+    "use_private_agent_skill_drafts"
   ],
   "operations": [
     "unknown",
