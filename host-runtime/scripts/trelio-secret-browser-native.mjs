@@ -95,6 +95,20 @@ const nativeTraversalDiagnostic = (reply) => {
   return diagnostic;
 };
 
+const nativeDocumentRecoveryHint = (canRetrySameTab) => {
+  if (!canRetrySameTab) {
+    return "Не повторяйте действие с activation автоматически. Сначала проверьте исходную вкладку без чтения значений полей.";
+  }
+  // An extension tab handle can see a page while the native helper cannot.
+  // Require a new observation of the original native window before another
+  // preflight. This guidance cannot admit a new tab or authorize replay after fill.
+  return "Проверьте уже открытую исходную вкладку через нативное управление окном браузера. "
+    + "Для Chrome на macOS чтение вкладки через расширение само по себе не подтверждает, что страницу видно через Accessibility. "
+    + "Если нативное управление через клиент недоступно, попросите показать ту же вкладку в окне браузера. "
+    + "Повторите проверку один раз, только если страница теперь видна в исходном окне и её точный адрес совпадает. "
+    + "Сохраните исходную вкладку и профиль, не считывайте значения полей.";
+};
+
 export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
   constructor(nativeReason, { canRetrySameTab = false } = {}) {
     const reason = NATIVE_UNAVAILABLE.has(nativeReason) ? nativeReason : "helper_unavailable";
@@ -105,11 +119,7 @@ export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
       : reason === "accessibility_unavailable"
         ? " Native helper не видит пригодное дерево исходной вкладки; это не отказ системного разрешения Accessibility. "
           + "Секрет ещё не запрошен, grant не израсходован этой попыткой. "
-          + (canRetrySameTab
-            ? "Покажите уже открытую исходную вкладку в её чате через штатный browser tool и повторите то же действие один раз. "
-              + "Не создавайте другую вкладку, не меняйте browser/профиль и не считывайте значения полей. "
-              + "Если ошибка сохраняется, нужен ручной вход."
-            : "Автоматически не повторяйте действие с activation; сначала проверьте состояние исходной вкладки без чтения значений полей.")
+          + nativeDocumentRecoveryHint(canRetrySameTab)
         : "";
     super("Встроенный browser transport недоступен: " + reason + "." + hint, "browser_unavailable");
     this.nativeReason = reason;
@@ -529,6 +539,7 @@ const prepareSecretBrowserSessionInternal = async ({
     onPreflightPhase?.("native_helper");
     const executable = await buildHelper({ directory, ensurePrivateDirectory, platform });
     onPreflightPhase?.("native_document");
+    const canRetrySameTab = !steps.some((step) => step.activationId);
     let ready;
     for (let attempt = 0; attempt < NATIVE_PREFLIGHT_ATTEMPTS; attempt++) {
       channel = openChannel({ executable, platform });
@@ -539,7 +550,7 @@ const prepareSecretBrowserSessionInternal = async ({
         && ["field_write_failed", "field_value_unsettable"].includes(ready.reasonCode);
       if ((!discoveryPending && !transientField)
         || attempt === NATIVE_PREFLIGHT_ATTEMPTS - 1
-        || steps.some((step) => step.activationId)) break;
+        || !canRetrySameTab) break;
       // The exact document can be absent while Chromium attaches the tab,
       // even when other windows already expose documents. An unobserved
       // document has no pinned identity to invalidate. A changed pinned URL,
@@ -552,9 +563,7 @@ const prepareSecretBrowserSessionInternal = async ({
     }
     const traversalDiagnostic = nativeTraversalDiagnostic(ready);
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {
-      throw new EmbeddedBrowserUnavailable(ready.reasonCode, {
-        canRetrySameTab: !steps.some((step) => step.activationId),
-      });
+      throw new EmbeddedBrowserUnavailable(ready.reasonCode, { canRetrySameTab });
     }
     if (ready.status !== "ready") {
       // Preserve the public/audit reason and the existing auto-mode fallback.
@@ -600,8 +609,7 @@ const prepareSecretBrowserSessionInternal = async ({
         message = "Кнопка submit не поддерживает AXPress. Для финального шага подготовьте новый field-only grant без submitSelector и после успешной подстановки нажмите ранее определённую кнопку в той же embedded-вкладке без чтения заполненных полей.";
       } else if (missingDocument) {
         message = "Не найден native документ с точным адресом исходной вкладки. Секрет не запрошен. "
-          + "Покажите уже открытую исходную вкладку штатным browser tool и проверьте адрес. "
-          + "Если адрес прежний, повторите ту же проверку один раз; не открывайте другую вкладку и не меняйте профиль.";
+          + nativeDocumentRecoveryHint(canRetrySameTab);
       } else if (traversalDiagnostic) {
         message = `Native обход остановлен: stage=${traversalDiagnostic.stage}; limit=${traversalDiagnostic.limit}. Секрет не запрошен этой попыткой для подстановки. Увеличение лимитов и повтор выдачи значения не разрешены этим отказом.`;
       } else if (ready.status === "failed" && ready.reasonCode === "field_not_found") {

@@ -625,7 +625,9 @@ publication tooling также остаются вне этого публичн
   Signed Chrome discovery не зависит от locator; field-only сохраняет вкладку.
   На macOS exact AXPlaceholderValue допустим для обычного edit без title/description;
   дубликаты и смена pinned объекта останавливают выдачу. Ненаблюдаемый документ
-  просит показать исходную вкладку, без переключения приложения из helper.
+  требует нового наблюдения исходного окна через нативное управление перед
+  одним повтором. Чтение вкладки через расширение Chrome недостаточно.
+  Helper сам не переключает приложение и не рекомендует повтор activation.
   Preflight receipt не разрешает replay consume/fill: [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
   Exact browser fill получает 120 секунд на весь вызов и 90 на подготовку до
   consume. Native и Chrome делят срок. Опоздавшая готовность закрывает свой

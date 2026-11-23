@@ -252,8 +252,8 @@ test("persistent same-tab tree failure returns bounded pre-consume recovery, nev
     error instanceof EmbeddedBrowserUnavailable
     && error.nativeReason === "accessibility_unavailable"
     && /grant не израсходован этой попыткой/u.test(error.message)
-    && /уже открытую исходную вкладку/u.test(error.message)
-    && /повторите то же действие один раз/u.test(error.message)
+    && /исходную вкладку через нативное управление окном/u.test(error.message)
+    && /Повторите проверку один раз, только если/u.test(error.message)
   ));
   assert.equal(f.requests.length, 3);
   assert.ok(f.requests.every(({ command }) => command === "prepare"));
@@ -261,17 +261,23 @@ test("persistent same-tab tree failure returns bounded pre-consume recovery, nev
   assert.equal(f.chromePreflights, 0);
   assert.ok(f.closed);
 });
-test("unavailable tree never replays an activation plan", async () => {
-  const f = fixture({ status: "unavailable", reasonCode: "accessibility_unavailable" });
-  f.args.context.browserSteps[0].activationSelector = "#login-mode";
-  await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
-    error instanceof EmbeddedBrowserUnavailable
-    && !/повторите то же действие один раз/u.test(error.message)
-    && /не повторяйте действие с activation/u.test(error.message)
-  ));
-  assert.equal(f.requests.length, 1);
-  assert.equal(f.chromePreflights, 0);
-});
+for (const reply of [
+  { status: "unavailable", reasonCode: "accessibility_unavailable" },
+  { status: "failed", reasonCode: "target_document_unavailable" },
+]) {
+  test(`native discovery failure never recommends replay of activation: ${reply.reasonCode}`, async () => {
+    const f = fixture(reply);
+    f.args.context.browserSteps[0].activationSelector = "#login-mode";
+    await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
+      error instanceof SecretBrowserFillError && error.preflight === true
+      && !/Повторите проверку один раз/u.test(error.message)
+      && /Не повторяйте действие с activation автоматически/u.test(error.message)
+    ));
+    assert.deepEqual(f.requests.map(({ command }) => command), ["prepare"]);
+    assert.equal(f.chromePreflights, 0);
+    assert.ok(f.closed);
+  });
+}
 test("a hidden embedded tab selects an isolated background profile before checkout", async () => {
   const f = fixture({ status: "unavailable", reasonCode: "accessibility_unavailable" });
   let preparedInput;
@@ -543,15 +549,18 @@ for (const reasonCode of ["target_url_changed", "target_document_unavailable", "
     assert.equal(f.chromeCalls, 1);
   });
 }
-test("an unobserved native document directs the agent to the same tab before checkout", async () => {
+test("an unobserved native document requires a fresh native-window check before repeating preflight", async () => {
   const f = fixture({ status: "failed", reasonCode: "target_document_unavailable" });
-  f.args.context.browserSteps[0].fields[0] = { fieldKey: "username", accessibleName: "Phone" };
   delete f.args.context.browserSteps[0].submitSelector;
   await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
-    error.reasonCode === "target_url_changed" && /уже открытую исходную вкладку/u.test(error.message)
+    error.reasonCode === "target_url_changed" && error.preflight === true
+    && /исходную вкладку через нативное управление окном/u.test(error.message)
+    && /чтение вкладки через расширение само по себе не подтверждает/u.test(error.message)
+    && /Повторите проверку один раз, только если.*точный адрес совпадает/u.test(error.message)
     && /Секрет не запрошен/u.test(error.message) && !error.message.includes(targetUrl)
   ));
   assert.deepEqual(f.requests.map(({ command }) => command), ["prepare", "prepare", "prepare"]);
+  assert.ok(f.requests.every(request => !Object.hasOwn(request, "values")));
   assert.equal(f.chromePreflights, 0);
   assert.equal(f.chromeCalls, 0);
   assert.ok(f.closed);
@@ -587,7 +596,8 @@ test("a pinned URL change remains terminal in the original tab", async () => {
   const f = fixture({ status: "failed", reasonCode: "target_url_changed" });
   delete f.args.context.browserSteps[0].submitSelector;
   await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }),
-    (error) => error.reasonCode === "target_url_changed" && error.preflight === true);
+    (error) => error.reasonCode === "target_url_changed" && error.preflight === true
+      && !/Повторите проверку один раз/u.test(error.message));
   assert.deepEqual(f.requests.map(({ command }) => command), ["prepare"]);
   assert.equal(f.chromePreflights, 0);
   assert.ok(f.closed);
