@@ -1884,25 +1884,33 @@ export const canonicalizeLocalProposalMentions = (value, mentionableMembers) => 
   return visit(value)[0];
 };
 
-/** Structural projection from the SAME canonical rich-text document. The
- * native exact task catalogue defines all eligible IDs; group membership is
- * expanded only by the existing native resolver, never copied into the host. */
-export const collectLocalTaskCommentMentions = (document, {members,groupIds}) => {
-  const eligibleMembers=new Set(members.map(member=>member.memberId)),eligibleGroups=new Set(groupIds),memberIds=new Set(),groups=new Set();
+// Comments and task descriptions both project the same canonical rich-text
+// nodes. URLs, code, labels and literal @names are never mention metadata.
+const collectLocalRichTextMentions = (document, normalizeId) => {
+  const memberIds=new Set(),groups=new Set();
   const visit=node=>{
     if(Array.isArray(node)){for(const child of node)visit(child);return;}
     if(!node||typeof node!=='object')return;
     if(node.type==='mention'){
       const id=node.attrs?.id,group=node.attrs?.entityType==='group';
-      if(typeof id!=='string'||!(group?eligibleGroups:eligibleMembers).has(id))
-        throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','Read the exact current task mention audience before publishing.');
-      (group?groups:memberIds).add(id);
+      (group?groups:memberIds).add(normalizeId(id,group));
     }
     if(Array.isArray(node.content))visit(node.content);
   };
   visit(document);
   if(memberIds.size+groups.size>500)throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','Too many selected mention targets.');
   return {memberIds:[...memberIds].sort(),groupIds:[...groups].sort()};
+};
+
+/** The exact publication catalogue supplies comment eligibility. Group
+ * expansion and all final access checks remain in the native task service. */
+export const collectLocalTaskCommentMentions = (document, {members,groupIds}) => {
+  const eligibleMembers=new Set(members.map(member=>member.memberId)),eligibleGroups=new Set(groupIds);
+  return collectLocalRichTextMentions(document,(id,group)=>{
+    if(typeof id!=='string'||!(group?eligibleGroups:eligibleMembers).has(id))
+      throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','Read the exact current task mention audience before publishing.');
+    return id;
+  });
 };
 
 export const buildLocalProposalPublicationDocument = ({
@@ -2189,11 +2197,18 @@ export const protectLocalActionArguments = async ({
   mirror = null,
   // Trusted native-selected metadata injection, never a model transport hint.
   customFieldTypeForId = null,
+  includeDescriptionMentions = false,
 }) => {
   const payloads = [];
   const expectedPayloadValues = {};
   let objectSequence = 0;
   let normalizedArguments = normalizeLocalActionRichTextInputs(rawArguments);
+  if (Object.hasOwn(normalizedArguments, "encryptedTaskDescriptionMentions")) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Protected mention metadata must come from the selected rich-text document.");
+  }
+  const descriptionMentions = includeDescriptionMentions && nativeTool === "update_task_description"
+    ? collectLocalRichTextMentions(normalizedArguments.descriptionJson, id => normalizeUuid(id, "mention ID"))
+    : null;
   if (nativeTool === 'execute_assistant_operation') {
     const operation=normalizedArguments.operation,fields=normalizedArguments.arguments;
     if(typeof operation!=='string'||!fields||typeof fields!=='object'||Array.isArray(fields))
@@ -2586,8 +2601,15 @@ export const protectLocalActionArguments = async ({
     await addPayload({ entityId, values, objectPath });
     return result;
   };
+  const value = await visit(normalizedArguments);
+  // Only the existing native description writer can interpret these
+  // coordinates. Derive them before encryption from the document we upload;
+  // do not send the body, labels, usernames or any broad audience inventory.
+  if (descriptionMentions && (descriptionMentions.memberIds.length || descriptionMentions.groupIds.length)) {
+    value.encryptedTaskDescriptionMentions = descriptionMentions;
+  }
   return {
-    value: await visit(normalizedArguments),
+    value,
     payloads,
     expectedPayloadValues,
   };
@@ -10357,6 +10379,7 @@ const executeTrelioLocalActionOperation = async (
         arguments: canonicalArguments,
         companyEncryption: provider.companyEncryption,
         mirror: actionMirror,
+        includeDescriptionMentions: true,
       });
   await uploadLocalActionPayloads({
     origin: provider.requestOrigin,

@@ -2690,6 +2690,39 @@ test("local action protects nested task content and converts Markdown before upl
   assert.match(JSON.stringify(decryptedValues), /bulletList/u);
   assert.match(JSON.stringify(decryptedValues), /Не утечь/u);
 
+  const memberId = "66666666-6666-4666-8666-666666666666";
+  const groupId = "77777777-7777-4777-8777-777777777777";
+  const description = {
+    type: "doc",
+    content: [{ type: "paragraph", content: [
+      { type: "mention", attrs: { id: memberId, entityType: "member", username: "private-mention-name" } },
+      { type: "text", text: " private description @not-a-mention " },
+      { type: "mention", attrs: { id: memberId, entityType: "member" } },
+      { type: "mention", attrs: { id: groupId, entityType: "group" } },
+    ] }],
+  };
+  const descriptionOptions = {
+    nativeTool: "update_task_description", companyEncryption,
+    arguments: { companySlug: "acme", projectSlug: `e-${actionRunId}`, taskNumber: 9,
+      clientRequestId: "description-metadata-test", descriptionJson: description },
+  };
+  const localDescription = await protectLocalActionArguments({ ...descriptionOptions, includeDescriptionMentions: true });
+  assert.deepEqual(localDescription.value.encryptedTaskDescriptionMentions, {
+    memberIds: [memberId], groupIds: [groupId],
+  });
+  assert.ok(localDescription.value.descriptionJson.$trelioE2ee);
+  assert.doesNotMatch(JSON.stringify(localDescription.value), /private-mention-name|private description|@not-a-mention/u);
+  const decryptedDescription = await decryptCompanyPayload({
+    encryptedPayload: localDescription.payloads[0],
+    scopePrivateKey: device.privateKeys.encryptionPrivateKey,
+    scopePrivateJwk: device.privateBundle.encryptionPrivateJwk,
+  });
+  assert.deepEqual(decryptedDescription.values.description_json, description);
+  assert.equal((await protectLocalActionArguments(descriptionOptions)).value.encryptedTaskDescriptionMentions, undefined);
+  await assert.rejects(protectLocalActionArguments({ ...descriptionOptions, includeDescriptionMentions: true,
+    arguments: { ...descriptionOptions.arguments, encryptedTaskDescriptionMentions: { memberIds: [memberId], groupIds: [] } },
+  }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+
   const launchPath = "/Users/Fixture/Private company folder  ";
   const launch = await protectLocalActionArguments({ nativeTool: "register_codex_folder",
     arguments: { clientRequestId: "44444444-4444-4444-8444-444444444444", folderPath: launchPath }, companyEncryption });

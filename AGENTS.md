@@ -32,6 +32,11 @@ publication tooling также остаются вне этого публичн
 
 ## Общие правила
 
+- Encrypted task description edits project canonical mention nodes from the
+  exact document entering the existing local bridge. The native current task
+  ACL and ordinary mention notification own delivery. Keep body text and
+  labels encrypted and never accept model-supplied transport metadata.
+
 - [Claude Desktop Code Local navigation](docs/agent-workspace-runtime.md#claude-desktop-local-navigation) uses the private native tab record and a server-confirmed locator; engine IDs never substitute for Desktop tabs.
 - [Browser confirmation](docs/agent-workspace-runtime.md#codex-connection-wizard) opens after verified interactive setup. Native browser approval and loopback proof remain independent of folder registration.
 
