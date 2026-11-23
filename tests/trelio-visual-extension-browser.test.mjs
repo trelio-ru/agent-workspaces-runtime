@@ -51,7 +51,9 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
       });
       listener = ownFixtureHttpServer(server, t.signal); await listener.listen();
       const origin = `https://127.0.0.1:${server.address().port}`;
-      const targetUrl = origin + '/login?flow=fixture-only';
+      // A sign-in route may use a fragment. Chromium reports it separately
+      // from Frame.url, while the selected tab carries the complete URL.
+      const targetUrl = origin + '/login?flow=fixture-only#identifier';
       // A distinct HTTPS port is a distinct origin. The form's origin has
       // to be selected independently of the managed profile's launch site.
       const redirect = https.createServer({ key, cert }, (_request, response) => {
@@ -101,6 +103,8 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
         { state: 'located', targetOrigin: origin });
       const observed = await request(locator).then(response => response.json());
       assert.match(observed.observedFrameSha256, /^[a-f0-9]{64}$/u);
+      assert.notEqual(observed.targetUrlSha256, planFor(origin + '/login?flow=fixture-only').context.targetUrlSha256,
+        'the committed fragment is part of the protected grant');
       assert.deepEqual(observed, {
         state: 'observed', targetOrigin: origin, targetUrlSha256: plan.context.targetUrlSha256,
         observedFrameSha256: observed.observedFrameSha256,
@@ -116,6 +120,8 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
       const observation = { sessionId: view.sessionId, frameId: view.frameId };
       const wrong = { operation: 'prepare', observation, context: planFor(origin + '/wrong-path').context };
       assert.deepEqual(await request(wrong).then(response => response.json()),
+        { state: 'refused', reasonCode: 'target_url_changed' });
+      assert.deepEqual(await request(planFor(targetUrl.replace('#identifier', '#password'))).then(response => response.json()),
         { state: 'refused', reasonCode: 'target_url_changed' });
       // The trusted path can prepare against the observed digest without
       // putting the redirected URL into the calling plan or loopback result.

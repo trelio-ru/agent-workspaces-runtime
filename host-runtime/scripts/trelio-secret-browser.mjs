@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { trelioCallSignal, waitWithinTrelioCall } from "./trelio-hook-private-session.mjs";
+import { committedBrowserFrameUrl } from "./trelio-browser-policy.mjs";
 
 const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 const DEFAULT_BROWSER_START_TIMEOUT_MS = 15_000;
@@ -805,20 +806,21 @@ const readExactTargetInfo = async ({
 
 const readBoundDocumentState = async ({ client, sessionId, step, previousStep }) => {
   const { frameTree } = await client.request("Page.getFrameTree", {}, sessionId);
-  const frameUrl = frameTree?.frame?.url;
-  if (typeof frameUrl !== "string") {
+  const frame = frameTree?.frame;
+  if (typeof frame?.url !== "string") {
     throw new SecretBrowserFillError("Не удалось определить URL browser document.");
   }
   // Chrome publishes the requested TargetInfo.url before the navigation commits:
   // the top-level frame can still be about:blank. Wait for that exact document
   // instead of installing the controller in the old frame and reporting a
   // misleading target_url_changed. No secret is available at this boundary.
-  if (!frameUrl || frameUrl === "about:blank") return "pending";
+  if (!frame.url || frame.url === "about:blank") return "pending";
+  const frameUrl = committedBrowserFrameUrl(frame);
   const frameOrigin = targetOriginFromUrl(frameUrl);
   if (!frameOrigin) {
     throw new SecretBrowserFillError("Browser document открыл некорректный URL.", "target_url_changed");
   }
-  const frameUrlSha256 = hashSecretBrowserTargetUrl(new URL(frameUrl).toString());
+  const frameUrlSha256 = hashSecretBrowserTargetUrl(frameUrl);
   if (frameOrigin === step.targetOrigin && frameUrlSha256 === step.targetUrlSha256) return "ready";
   // During a multi-step navigation the previous bound document may outlive
   // TargetInfo's switch to the next URL. Keep waiting in the same tab only for
@@ -953,10 +955,11 @@ export const observeSecretBrowserPostSubmit = async ({
     if (currentUrl.toString() !== targetUrl) return { state: "navigation_observed" };
     const { frameTree } = await client.request("Page.getFrameTree", {}, sessionId);
     const frame = frameTree?.frame;
-    if (typeof frame?.url !== "string" || typeof frame?.id !== "string") {
+    const committedUrl = committedBrowserFrameUrl(frame);
+    if (!committedUrl || typeof frame?.id !== "string") {
       return { state: "unknown" };
     }
-    const frameUrl = new URL(frame.url);
+    const frameUrl = new URL(committedUrl);
     if (frameUrl.origin !== targetOrigin) return { state: "other_origin" };
     if (frameUrl.toString() !== targetUrl) return { state: "navigation_observed" };
     // The site can change main-world JavaScript. Inspect only DOM presence in

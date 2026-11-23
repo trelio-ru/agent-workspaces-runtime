@@ -1,3 +1,26 @@
+/** CDP separates a frame's fragment from its URL. Reconstruct the committed
+ * address before comparing it with TargetInfo, chrome.tabs or location.href.
+ * An older adapter may already include the fragment. Conflicting native
+ * fields must fail closed instead of silently dropping either fragment.
+ * Keep this pure function self-contained for the signed extension worker. */
+export function committedBrowserFrameUrl(frame) {
+  if (typeof frame?.url !== 'string' || !frame.url) return null;
+  try {
+    const document = new URL(frame.url);
+    const fragment = frame.urlFragment;
+    if (fragment === undefined || fragment === '') return document.href;
+    if (typeof fragment !== 'string' || !fragment.startsWith('#')) return null;
+    const fragmentOffset = document.href.indexOf('#');
+    if (fragmentOffset !== -1) {
+      return document.href.slice(fragmentOffset) === fragment ? document.href : null;
+    }
+    document.hash = fragment;
+    return document.href;
+  } catch {
+    return null;
+  }
+}
+
 /** The same completion-based pacing contract delivered by the Yandex Search
  * and Google AI Search skills. The owning browser worker keeps ONE controller
  * for the logical search session; short CLI calls must not reset its clock.
