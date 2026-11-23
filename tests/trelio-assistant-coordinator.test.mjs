@@ -821,6 +821,94 @@ test(`retired writer preserves the original task and admits an independent overd
   }finally{await restarted.close();}
 });
 
+for(const mode of ['completed','lost_committed','unknown_write','lost_unknown'])
+test(`retired accepted task can settle only its existing scheduled receipt (${mode})`,async t=>{
+  const f=fixture(t);f.authority.workMode='task';
+  const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
+  f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
+  await f.coordinator.pollOnce();
+  await f.coordinator.workOnce();
+  const plan=f.coordinator.status()[0];
+  f.advance(plan.nextRunAt-f.options.now());
+  f.failNative(true);
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  const pass=f.activePass(),live=f.passes.get(pass.deliveryId);
+  f.advance(21*60_000);
+  live.state='closed';
+  const receipt={...pass,receiptId:randomUUID(),state:'retired',leaseRevision:live.leaseRevision};
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  inbox.recordRetiredTaskWriter(pass,receipt);
+  inbox.releaseRetiredTaskWriter(pass.deliveryId,receipt);
+  await f.options.passHost.releasePass(receipt);
+  f.options.passHost.releaseRetiredTaskPass=f.options.passHost.releasePass;
+  let outcome,starts=0,recoveryClears=0,reads=0;
+  const evidence={workspaceId:randomUUID(),runId:randomUUID(),acceptedHead:'a'.repeat(40),nativeControlReceipts:[]};
+  const originalTurn=randomUUID();
+  const selected={goalState:'active',schedule:{priorReceiptId:randomUUID(),cadence:'every_30_minutes',timeZone:'Europe/Moscow',dailyLocalTime:null}};
+  f.options.onBusinessConfirmed=async()=>{recoveryClears++;};
+  f.options.client.readBusinessOutcome=async()=>outcome??{schemaVersion:1,state:'pending'};
+  f.options.client.readTaskRetiredOutcomeEvidence=async (original,witness)=>{
+    reads++;assert.deepEqual(original,receipt);assert.deepEqual(witness,evidence);return selected;
+  };
+  f.options.native.readWriterReleased=async thread=>{
+    assert.equal(thread,pass.threadId);return true;
+  };
+  f.options.native.readDelivery=async (thread,marker,options)=>{
+    assert.equal(thread,pass.threadId);assert.equal(marker,pass.deliveryId);
+    assert.equal(options.retiredAcceptedOutcome.retirementReceiptId,receipt.receiptId);
+    return mode==='unknown_write'?{state:'uncertain'}:{state:'retired_outcome_observed',turnId:originalTurn,evidence};
+  };
+  f.options.native.run=async(input,options)=>{
+    starts++;
+    assert.equal(input.threadId,pass.threadId);assert.notEqual(input.deliveryId,pass.deliveryId);
+    assert.notEqual(input.deliveryId,receipt.receiptId);assert.deepEqual(options.retiredPass.outcome,evidence);
+    assert.equal(options.retiredOutcome.originalTurnId,originalTurn);
+    assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).outcomeMarker,undefined);
+    await options.beforeInvocation(options.signal);
+    options.startInvocation(input);
+    assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).outcomeMarker,input.deliveryId);
+    if(mode!=='lost_unknown'){
+      const {assistantId,deviceId,companyId,taskId,bindingId,bindingRevision,deliveryId,threadId}=pass;
+      outcome={schemaVersion:1,state:'confirmed',receiptId:randomUUID(),assistantId,deviceId,companyId,taskId,bindingId,bindingRevision,deliveryId,threadId,
+        continuation:{goalState:'active',cadence:'every_30_minutes',timeZone:'Europe/Moscow'}};
+    }
+    if(mode.startsWith('lost_'))throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    return {state:'completed'};
+  };
+  await f.coordinator.close();
+  let restarted=createAssistantCoordinator(f.options);
+  try{
+    if(mode.startsWith('lost_')){
+      await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+      await restarted.close();
+      restarted=createAssistantCoordinator(f.options);
+    }
+    if(mode!=='completed')await restarted.workOnce();
+    else assert.equal((await restarted.workOnce()).state,'completed');
+    const settled=['completed','lost_committed'].includes(mode);
+    assert.equal(starts,mode==='unknown_write'?0:1);
+    assert.equal(reads,mode==='unknown_write'?0:2);
+    assert.equal(recoveryClears,settled?1:0);
+    assert.equal(inbox.readDelivery(pass.deliveryId).state,settled?'complete':'uncertain');
+    assert.deepEqual(inbox.retiredTaskIds(),settled?[]:[pass.taskId]);
+    assert.equal(inbox.readRetiredTaskWriter(pass.deliveryId).receipt.receiptId,receipt.receiptId);
+    assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,mode==='unknown_write'?32:34);
+    const actual=restarted.status()[0];
+    assert.equal(f.activePass(),null);
+    if(settled){
+      assert.ok(actual.nextRunAt>f.options.now());
+      f.options.native.run=ordinaryRun;
+      f.options.client.readBusinessOutcome=ordinaryOutcome;
+      f.failNative(false);
+      f.advance(actual.nextRunAt-f.options.now());
+      assert.equal((await restarted.workOnce()).state,'completed',
+        'the next ordinary slot uses a fresh delivery and the same task chat');
+      assert.equal(inbox.readDelivery(pass.deliveryId).state,'complete');
+      assert.equal(f.counts().runs,2);
+    }else assert.equal(actual.nextRunAt,plan.nextRunAt);
+  }finally{await restarted.close();}
+});
+
 for(const committed of [true,false])
 test(`retirement lost its HTTP reply and only the original device receipt can release it (committed=${committed})`,async t=>{
   const f=fixture(t);f.authority.workMode='task';

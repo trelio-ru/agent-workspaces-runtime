@@ -14,8 +14,9 @@ import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, AS
   assistantConversationKeyMatches, validateAssistantPortableFinish, validateAssistantRetainedHandoff, validateAssistantTechnicalPrelude,
   validateAssistantLocalDraftBasis, validateAssistantLocalDraftFiles, validateAssistantLocalDraftWitness,
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRecoveredOutcomeEvidence,
-  assistantWorkspaceCheckpointLocator, assistantRecoveredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
-import { ASSISTANT_RETIRED_TASK_READ_TOOLS, ASSISTANT_RETIRED_TASK_TOOLS, validateAssistantRetiredPass } from './trelio-assistant-hook.mjs';
+  assistantWorkspaceCheckpointLocator, assistantRecoveredOutcomeCompletion,
+  validateAssistantRetiredOutcomeEvidence, assistantRetiredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
+import { ASSISTANT_RETIRED_TASK_READ_TOOLS, ASSISTANT_RETIRED_TASK_TOOLS, ASSISTANT_RETIRED_OUTCOME_TOOLS, validateAssistantRetiredPass } from './trelio-assistant-hook.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
@@ -57,9 +58,10 @@ export const assistantCodexExecutionArguments = () => ['app-server','--listen','
  * plugin. A user server with the same name must never impersonate that plugin.
  * No config file, enabled setting or native hook trust is changed on disk. */
 const workspaceRecoveryTools=mode=>mode==='retired_draft'?ASSISTANT_RETIRED_TASK_TOOLS:mode==='retired_read'?ASSISTANT_RETIRED_TASK_READ_TOOLS
+  :mode==='retired_outcome'?ASSISTANT_RETIRED_OUTCOME_TOOLS
   :mode==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS:mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS
   :mode==='named_archive'?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
-const workspaceRecoveryModeFor=options=>options.retiredPass?options.retiredPass.run?'retired_draft':'retired_read'
+const workspaceRecoveryModeFor=options=>options.retiredPass?options.retiredPass.outcome?'retired_outcome':options.retiredPass.run?'retired_draft':'retired_read'
   :options.workspaceDraftRecovery?.workspaceDraft?.recoveredOutcome!==undefined?'recovered_outcome'
   :options.workspaceDraftRecovery?.workspaceDraft?.namedArchive===true
   ||options.workspaceDraftRecovery?.workspaceDraft?.portableFinish!==undefined
@@ -147,7 +149,7 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
   // positive readiness; verify required tools after the live connection.
   if([null,'notStarted','starting'].includes(server.runtimeStatus))return false;
   if(server.runtimeStatus!=='connected'
-    ||(workspaceDraftRecovery==='retired_draft'||workspaceDraftRecovery==='retired_read'?workspaceRecoveryTools(workspaceDraftRecovery)
+    ||(['retired_draft','retired_read','retired_outcome'].includes(workspaceDraftRecovery)?workspaceRecoveryTools(workspaceDraftRecovery)
       :workspaceDraftRecovery==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS
       :workspaceDraftRecovery==='accepted'?['get_assistant_status','complete_assistant_pass']:
       workspaceDraftRecovery?['get_assistant_status','prepare_assistant_workspace_run','continue_assistant_workspace_action',
@@ -2447,6 +2449,118 @@ const recoveredOutcomeSkillRead=(args,result,pass)=>{
   return historicalTaskSkillRead(p,result,pass,{terminal:true});
 };
 
+/** Compatibility observation for a scheduled turn that had already saved
+ * and read back its accepted material when the writer was stopped. Native
+ * effect validation is per operation, independent of the order or count of
+ * harmless reads. A complete trusted signed read witness is required for
+ * each provider command. No unknown or failed write is declared settled. */
+export const inspectRetiredAcceptedOutcome=(turn,deliveryId,taskPass,assistantId)=>{
+  if(!UUID.test(deliveryId??'')||!UUID.test(turn?.id??'')||!UUID.test(assistantId??'')
+    ||!exactDraftPass(taskPass,taskPass)||turn.status!=='interrupted'||turn.error!=null
+    ||!Array.isArray(turn.items)||turn.items.length>128)return null;
+  const [root,...items]=turn.items;
+  const prefix=assistantDeliveryMarker(deliveryId)+'\nTRELIO_ASSISTANT_SCOPE '
+    +JSON.stringify(assistantWorkStateContext({assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true}))+'\n';
+  if(root?.type!=='userMessage'||root.content?.length!==1||root.content[0]?.type!=='text'
+    ||typeof root.content[0].text!=='string'||!root.content[0].text.startsWith(prefix))return null;
+  let run,question,finishHandle,finished=false,acceptedHead;
+  const controls=[];
+  for(const item of items){
+    if(['agentMessage','reasoning','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||item.status!=='completed'||item.error!=null
+      ||item.result?.isError===true||!item.arguments||Object.getPrototypeOf(item.arguments)!==Object.prototype)return null;
+    const args=item.arguments,v=item.result?.structuredContent;
+    if(item.tool==='get_assistant_status'&&args.taskPass===undefined){
+      if(Object.keys(args).every(key=>key==='view')||absentOperationRead(args,v))continue;
+      return null;
+    }
+    if(!exactDraftPass(args.taskPass,taskPass))return null;
+    if(recoveredOutcomeReads.has(item.tool))continue;
+    if(item.tool==='ask_assistant_owner'){
+      if(finishHandle||question||!(question=committedQuestion(args,v)))return null;
+      continue;
+    }
+    if(item.tool==='update_task_control'){
+      const control=committedControl(args,v,taskPass);
+      if(finishHandle||!control||controls.length>=8)return null;
+      controls.push(control);
+      continue;
+    }
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(run||v?.prepared!==true||v.workspace?.scopeType!=='task'||v.workspace.taskId!==taskPass.taskId
+        ||v.workspace.companyId!==taskPass.companyId||!UUID.test(v.workspace.id??'')||!UUID.test(v.run?.id??''))return null;
+      run={workspaceId:v.workspace.id,runId:v.run.id};
+      continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'){
+      const operation=args.command?.action;
+      if(['read','list'].includes(operation))continue;
+      if(!run||finishHandle||operation!=='replace'||!sameDraftRun(args.runIdentity,run))return null;
+      let replacement;
+      try{replacement=parseAssistantRunFileCommand(args.command);}catch{return null;}
+      if(v?.state!=='draft_updated'||v.sha256!==createHash('sha256').update(replacement.text,'utf8').digest('hex'))return null;
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1||v?.schemaVersion!==1)return null;
+    const parameters=args.parameters??{};
+    if(args.operation==='skill_run'){
+      // Unlike a compatibility heuristic on stdout or verb names, this
+      // module validates the exact package/action/output's signed read cell.
+      if(finishHandle||!v.taskSkillRead||recoveredOutcomeSkillRead(args,v,taskPass)!==true)return null;
+      continue;
+    }
+    if(args.operation==='inspect'&&v.operation==='inspect'&&!finishHandle)continue;
+    if(!run||!sameDraftRun(args.operation==='open'?parameters:args.runIdentity,run))return null;
+    if(args.operation==='open'&&v.operation==='open'&&!finishHandle)continue;
+    if(args.operation==='checkpoint'&&v.operation==='checkpoint'&&parameters.type==='draft'&&!finishHandle)continue;
+    if(args.operation==='heartbeat'&&v.operation==='heartbeat'&&!finishHandle&&!Object.keys(parameters).length)continue;
+    if(args.operation==='finish'){
+      if(finishHandle||parameters.taskOutcome!=='no_status_change'||v.operation!=='finish'
+        ||!['running','completed'].includes(v.state))return null;
+      finishHandle=v.state==='running'?observedWorkspacePollHandle(v,'finish',run):v.operationId;
+      if(!UUID.test(finishHandle??''))return null;
+      finished=v.state==='completed';
+      continue;
+    }
+    if(args.operation!=='status')return null;
+    if(Object.keys(parameters).join(',')==='finishOperationId'){
+      if(!finishHandle&&v.operation==='open')continue;
+      if(!finishHandle||parameters.finishOperationId!==finishHandle||v.operationId!==finishHandle
+        ||v.operation!=='finish'||!['running','completed'].includes(v.state)||finished&&v.state!=='completed')return null;
+      finished=v.state==='completed';
+    }else if(!Object.keys(parameters).length&&v.operation==='status'){
+      if(!finishHandle)continue;
+      const status=acceptedStatusHead(v,run);
+      if(!finished||!status||status.head===status.base||acceptedHead&&acceptedHead!==status.head)return null;
+      acceptedHead=status.head;
+    }else return null;
+  }
+  if(!acceptedHead)return null;
+  try{return validateAssistantRetiredOutcomeEvidence({...run,acceptedHead,question,nativeControlReceipts:controls});}
+  catch{return null;}
+};
+
+const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,{taskPass,assistantId,retirementReceiptId})=>{
+  const response=await request('thread/turns/list',{threadId,limit:2,sortDirection:'desc',itemsView:'full'});
+  const turns=response?.data;
+  if(!Array.isArray(turns)||!turns.length||turns.length>2)return {state:'uncertain'};
+  const [latest,older]=turns;
+  const first=latest?.items?.[0]?.content?.[0]?.text;
+  let original=latest;
+  if(typeof first==='string'&&first.startsWith(assistantDeliveryMarker(retirementReceiptId)+'\n')){
+    // A previously installed runtime can have inspected the original task
+    // before support for confirmation arrived. Only its bounded read-only
+    // inspection at the exact retirement marker may follow the original.
+    if(!older||!['completed','interrupted'].includes(latest.status)||latest.error!=null
+      ||latest.items.length>128||latest.items.slice(1).some(item=>!['agentMessage','reasoning','sleep'].includes(item.type)
+        &&!completedTaskContextCompaction(item)&&(item.type!=='mcpToolCall'||item.server!=='trelio-assistant'
+          ||!ASSISTANT_RETIRED_TASK_READ_TOOLS.includes(item.tool))))return {state:'uncertain'};
+    original=older;
+  }
+  const evidence=inspectRetiredAcceptedOutcome(original,deliveryId,taskPass,assistantId);
+  return evidence?{state:'retired_outcome_observed',turnId:original.id,evidence}:{state:'uncertain'};
+};
+
 /** Independently account for every operation in a continuation that obtained
  * a provider read-back. The save's exact Run still owns the exported file.
  * Only this projection can turn the ordered provider records into a
@@ -2993,6 +3107,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.retiredAcceptedOutcome!==undefined)
+      return readRetiredAcceptedOutcome(request,threadId,deliveryId,options.retiredAcceptedOutcome);
     if(options.committedTaskOutcome!==undefined)
       return readCommittedTaskOutcome(_thread,request,marker,options.committedTaskOutcome);
     if(options.unreadOwnerPreflight!==undefined){
@@ -3389,13 +3505,22 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   const workspaceRecoveryMode=workspaceRecoveryModeFor(options);
   if(options.retiredPass!==undefined) {
     const profile=validateAssistantRetiredPass(options.retiredPass);
-    if (profile.writerRetirementReceiptId!==deliveryId||intakeContext!==undefined
+    const selected=options.retiredOutcome;
+    if (Boolean(profile.outcome)!==Boolean(selected)
+      ||!selected&&profile.writerRetirementReceiptId!==deliveryId
+      ||selected&&(profile.writerRetirementReceiptId===deliveryId||selected.originalDeliveryId===deliveryId
+        ||!UUID.test(selected.originalDeliveryId??'')||!UUID.test(selected.originalTurnId??'')
+        ||!exactDraftPass(selected.taskPass,selected.taskPass)||selected.taskPass.taskId!==workStateContext.taskId
+        ||selected.taskPass.companyId!==workStateContext.companyId)
+      ||intakeContext!==undefined
       ||workStateContext.workMode==='discussion'||workStateContext.sourceReferences!==undefined
       ||workStateContext.ownerQuestionIds!==undefined||options.workspaceDraftRecovery!==undefined
       ||options.taskReadRecovery!==undefined||options.namedArchiveResume!==undefined||options.continuationReview!==undefined
       ||options.requireAbsentMarker!==true||typeof options.beforeInvocation!=='function')
       fail('ASSISTANT_CODEX_INVALID_INPUT');
+    if(selected)assistantRetiredOutcomeCompletion(profile.outcome,selected.schedule,selected.goalState,profile.writerRetirementReceiptId);
   }
+  else if(options.retiredOutcome!==undefined)fail('ASSISTANT_CODEX_INVALID_INPUT');
   if(options.workspaceDraftRecovery){
     const {terminalMarkerId,terminalTurnId,workspaceDraft,taskPass}=options.workspaceDraftRecovery;
     if(intakeContext!==undefined||workStateContext.workMode==='discussion'||workStateContext.sourceReferences!==undefined
@@ -3727,7 +3852,18 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     await verifyAssistantExecutionServer(request,threadId,{
       workspaceDraftRecovery:workspaceRecoveryMode,signal,
     });
-    if(workspaceRecoveryMode==='recovered_outcome'){
+    if(workspaceRecoveryMode==='retired_outcome'){
+      const {originalDeliveryId,originalTurnId,taskPass}=options.retiredOutcome;
+      const {writerRetirementReceiptId:retirementReceiptId,outcome}=options.retiredPass;
+      // The native app-server holding the fresh exclusive writer checks the
+      // original evidence again. Native stage and old outcome cannot be
+      // recycled from a read created on a different thread or process.
+      const current=await readRetiredAcceptedOutcome(request,threadId,originalDeliveryId,{
+        taskPass,retirementReceiptId,assistantId:workStateContext.assistantUserId,
+      });
+      if(current.state!=='retired_outcome_observed'||current.turnId!==originalTurnId
+        ||!isDeepStrictEqual(current.evidence,outcome))fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    }else if(workspaceRecoveryMode==='recovered_outcome'){
       const {terminalMarkerId,terminalTurnId,taskPass,originalDeliveryId,workspaceDraft:{recoveredOutcome}}=options.workspaceDraftRecovery;
       const {providerEffect,rootDelivery,localResult}=recoveredOutcome.plan.evidence;
       const sourceMarkerId=(providerEffect??rootDelivery??localResult)?.sourceMarkerId;
@@ -3798,7 +3934,9 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     }
     const workflow=options.readinessProbe===true?null
       :await (options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
-    const developerInstructions=options.retiredPass
+    const developerInstructions=workspaceRecoveryMode==='retired_outcome'
+      ?'Confirm only an already accepted result. The original writer and its signing session have ended. The sole tool verifies the canonical accepted material, recorded effects and the existing cadence.'
+      :options.retiredPass
       ? `${workflow}\n\nThe native task writer has been retired. This inspection may read only its original task and checkpoint the pinned draft when one is provided. A draft checkpoint is the save boundary for this turn. The earlier provider effect must remain on hold pending independent evidence.`
       : workflow;
     const run=async text=>{
@@ -3832,6 +3970,11 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
 
 export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       if(options.retiredPass) {
+        if(options.retiredPass.outcome){
+          const {schedule,goalState}=options.retiredOutcome;
+          const args=assistantRetiredOutcomeCompletion(options.retiredPass.outcome,schedule,goalState,options.retiredPass.writerRetirementReceiptId);
+          return `${assistantDeliveryMarker(deliveryId)}\nTRELIO_ASSISTANT_SCOPE ${JSON.stringify(workStateContext)}\nCall complete_assistant_pass once with these exact arguments: ${JSON.stringify(args)}. Stop after the tool returns.`;
+        }
         const run=options.retiredPass.run;
         const draft=run
           ? `The exact existing Run is workspaceId=${run.workspaceId}, runId=${run.runId}, with original draft head ${run.draftHead}. Use its native open and read both pinned authority files before editing. Preserve useful verified progress with a draft checkpoint.`

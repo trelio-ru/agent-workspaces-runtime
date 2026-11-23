@@ -8,7 +8,7 @@ import { detectAgentRuntimeAttestation } from './trelio-runtime-attestation.mjs'
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from './trelio-context-recovery.mjs';
 import { runtimeHookSignal, assertRuntimeHookBudget } from './trelio-hook-private-session.mjs';
-import { validateAssistantTaskWriterRetirement } from './trelio-assistant-inbox.mjs';
+import { validateAssistantTaskWriterRetirement, validateAssistantRetiredOutcomeEvidence } from './trelio-assistant-inbox.mjs';
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const fail=code=>{throw Object.assign(new Error(code),{code});};
@@ -53,23 +53,34 @@ export const ASSISTANT_RETIRED_TASK_TOOLS = Object.freeze([
   ...ASSISTANT_RETIRED_TASK_READ_TOOLS, 'prepare_assistant_workspace_run',
   'continue_assistant_workspace_action', 'use_assistant_workspace_files',
 ]);
+export const ASSISTANT_RETIRED_OUTCOME_TOOLS = Object.freeze(['complete_assistant_pass']);
 export const validateAssistantRetiredPass = value => {
   const keys=['writerRetirementReceiptId','expectedLeaseRevision'];
   if (value?.run!==undefined) keys.push('run');
+  if (value?.outcome!==undefined) keys.push('outcome');
   if (!exactObject(value,keys)||!uuid.test(value.writerRetirementReceiptId??'')
     ||!Number.isSafeInteger(value.expectedLeaseRevision)||value.expectedLeaseRevision<0
-    ||value.expectedLeaseRevision>2_147_483_647) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    ||value.expectedLeaseRevision>2_147_483_647||value.run!==undefined&&value.outcome!==undefined) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
   const run=value.run;
   if (run!==undefined&&(!exactObject(run,['workspaceId','runId','draftHead'])
     ||!uuid.test(run.workspaceId??'')||!uuid.test(run.runId??'')
     ||!(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u).test(run.draftHead??''))) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
   return Object.freeze({writerRetirementReceiptId:value.writerRetirementReceiptId,expectedLeaseRevision:value.expectedLeaseRevision,
-    ...(run?{run:Object.freeze({workspaceId:run.workspaceId,runId:run.runId,draftHead:run.draftHead})}:{})});
+    ...(run?{run:Object.freeze({workspaceId:run.workspaceId,runId:run.runId,draftHead:run.draftHead})}:{}),
+    ...(value.outcome!==undefined?{outcome:validateAssistantRetiredOutcomeEvidence(value.outcome)}:{})});
 };
 
 // Apply the same small profile at the hook, the fresh worker and the
 // Workspace execution adapter. A stale catalogue is never permission.
 export const assertAssistantRetiredPassTool = (profile,name,args) => {
+  if(profile.outcome){
+    const {workspaceId,runId,acceptedHead}=profile.outcome;
+    if(name!=='complete_assistant_pass'||args?.workspaceId!==workspaceId||args.acceptedRunId!==runId
+      ||args.workspaceHead!==acceptedHead||args.clientRequestId!==profile.writerRetirementReceiptId
+      ||args.noChange!==false||args.processedSourceReferences?.length||args.ownerDecisionId!==undefined)
+      fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+    return;
+  }
   if (!(profile.run?ASSISTANT_RETIRED_TASK_TOOLS:ASSISTANT_RETIRED_TASK_READ_TOOLS).includes(name)) fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   const sameRun=value=>profile.run&&profile.run.workspaceId===value?.workspaceId&&profile.run.runId===value?.runId;
   if (name==='prepare_assistant_workspace_run'&&(!sameRun(args)||args.relatedWorkspaceIds!==undefined))

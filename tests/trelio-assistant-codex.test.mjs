@@ -10,13 +10,72 @@ import { assistantCodexExecutionArguments, assistantCodexExecutionOverrides, ass
 import { ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, ASSISTANT_WORKSPACE_DRAFT_TOOLS,
   ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { assistantInterruptedTaskCheckpoint, matchesAssistantPortableFinishTurn, assistantInterruptedLocalDraft,
-  readAssistantCodexWriterReleased,withAssistantCodexWriter } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+  readAssistantCodexWriterReleased,withAssistantCodexWriter,inspectRetiredAcceptedOutcome } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, reviewedAssistantHistoricalSkillRead } from '../host-runtime/scripts/trelio-skill-secret-setup.mjs';
 import { assistantSkillGuidePage, projectAssistantSkillGuideResult } from '../host-runtime/scripts/trelio-workspace.mjs';
 const runAssistantCodexPass=(input,options)=>runNativePass(input,{readWorkflow:async()=>'Synthetic admitted workflow',...options});
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
+
+test('a retired scheduled task can confirm its own accepted Run with independently verified effects',async()=>{
+  const deliveryId=randomUUID(),threadId=randomUUID(),retirementReceiptId=randomUUID();
+  const taskPass={companyId:taskContext.companyId,taskId:taskContext.taskId,passId:randomUUID()};
+  const run={workspaceId:randomUUID(),runId:randomUUID()},head='a'.repeat(40),baseHead='b'.repeat(40);
+  const call=(tool,args,structuredContent)=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:{taskPass,...args},result:{structuredContent}});
+  const action=(operation,parameters,value,runIdentity)=>call('continue_assistant_workspace_action',
+    {schemaVersion:1,operation,parameters,...(runIdentity?{runIdentity}:{})},{schemaVersion:1,operation,...value});
+  const root={type:'userMessage',content:[{type:'text',text:assistantNativePrompt(deliveryId,
+    assistantWorkStateContext({...taskContext,scheduled:true}),{})}]};
+  const makeRead=(skillId,command)=>{
+    const parameters={companyId:taskPass.companyId,skillId,releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:[command,'fixture']};
+    const stdout=JSON.stringify({ok:true,count:0});
+    const taskSkillRead=bindAssistantTaskSkillRead({schemaVersion:1,releaseId:parameters.releaseId,packageSha256:'c'.repeat(64),
+      outputSha256:createHash('sha256').update(stdout).digest('hex')},{scope:taskPass,parameters,stdout});
+    return action('skill_run',parameters,{stdout,taskSkillRead});
+  };
+  const question={questionId:randomUUID(),questionRequestId:randomUUID()};
+  const ask=call('ask_assistant_owner',{clientRequestId:question.questionRequestId},
+    {id:question.questionId,path:'/test',replayed:false,state:'pending'});
+  const control={controlId:randomUUID(),controlRequestId:randomUUID(),controlReceiptId:randomUUID()};
+  const update=call('update_task_control',{controlId:control.controlId,clientRequestId:control.controlRequestId,visibility:'shared'},
+    {schemaVersion:1,operation:'update_task_control',taskId:taskPass.taskId,receiptId:control.controlReceiptId,resultId:control.controlId});
+  const prepare=call('prepare_assistant_workspace_run',{workspaceId:run.workspaceId},{prepared:true,
+    workspace:{id:run.workspaceId,scopeType:'task',companyId:taskPass.companyId,taskId:taskPass.taskId},run:{id:run.runId}});
+  const finish=action('finish',{taskOutcome:'no_status_change'},{state:'completed',operationId:randomUUID()},run);
+  const accepted=action('status',{},{
+    nativeRunStatus:{status:'accepted',candidateHead:head,baseHead},
+    stdout:JSON.stringify({...run,dirty:false,terminalStatus:'accepted',candidateHead:head,baseHead}),
+  },run);
+  const reads=[makeRead('fixture-inventory','lookup'),makeRead('fixture-archive','search'),
+    call('get_task_sections',{},{}),call('get_agent_skill',{},{})];
+  const evidence={...run,acceptedHead:head,question,nativeControlReceipts:[control]};
+  const turn={id:randomUUID(),status:'interrupted',items:[root,...reads,ask,prepare,update,finish,accepted]};
+  const observe=value=>inspectRetiredAcceptedOutcome(value,deliveryId,taskPass,taskContext.assistantId);
+  assert.deepEqual(observe(turn),evidence);
+  assert.deepEqual(observe({...turn,items:[root,reads[1],prepare,reads[3],ask,reads[2],update,reads[0],finish,accepted]}),evidence);
+  for(const damaged of [
+    value=>{delete value.items[1].result.structuredContent.taskSkillRead;},
+    value=>{value.items[1].arguments.parameters.arguments=['send','fixture'];},
+    value=>{value.items[1].status='inProgress';},
+    value=>{value.items.push(call('create_comment',{},{}));},
+    value=>{value.items.pop();},
+    value=>{value.items.at(-1).arguments.runIdentity.runId=randomUUID();},
+    value=>{value.items[0].content[0].text=assistantNativePrompt(deliveryId,assistantWorkStateContext(taskContext),{});},
+  ]){
+    const altered=structuredClone(turn);damaged(altered);
+    assert.equal(observe(altered),null);
+  }
+  const legacy={id:randomUUID(),status:'completed',items:[{type:'userMessage',
+    content:[{type:'text',text:assistantDeliveryMarker(retirementReceiptId)+'\ninspection'}]},call('get_task',{}, {})]};
+  const read=(later)=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
+    retiredAcceptedOutcome:{taskPass,retirementReceiptId,assistantId:taskContext.assistantId},
+    spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'
+      ?{thread:{id:threadId,cwd:process.cwd()}}:{data:[later,turn],nextCursor:null}}))});
+  assert.deepEqual(await read(legacy),{state:'retired_outcome_observed',turnId:turn.id,evidence});
+  assert.deepEqual(await read({...legacy,items:[...legacy.items,call('create_comment',{}, {})]}),{state:'uncertain'});
+});
 
 test('completed PREPARE permits only a separate bounded readiness witness, never provision completion',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();

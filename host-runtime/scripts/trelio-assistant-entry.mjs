@@ -2063,6 +2063,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return live.retireTaskWriter(scope,signal);
     })),
     readTaskRecoveryContext:(...args)=>invoke(live=>live.readTaskRecoveryContext?.(...args)??null),
+    readTaskRetiredOutcomeEvidence:(...args)=>invoke(live=>live.readTaskRetiredOutcomeEvidence?.(...args)??null),
     ...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
     ['claimTaskHost','beginTaskPass','beginSourceIntake','reconcileAnsweredSourceIntake','prepareOwnerReplyDelivery'].includes(name))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));

@@ -15,7 +15,8 @@ import { assistantSourceProcessingReferences, assistantConversationKeyMatches, a
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
   validateAssistantLocalDraftBasis, validateAssistantLocalDraft, validateAssistantRecoveredOutcomeEvidence,
   validateAssistantRecoveredOutcomePlan, validateAssistantRecoveredOutcomeSchedule,
-  validateAssistantTaskWriterRetirement, ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
+  validateAssistantTaskWriterRetirement, validateAssistantRetiredOutcomeEvidence,
+  assistantRetiredOutcomeCompletion, ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
 
@@ -3192,6 +3193,31 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     },
     async retireTaskWriter(input,signal){
       return taskWriterRetirement(input,'retire',signal);
+    },
+    async readTaskRetiredOutcomeEvidence(retirement,witness,signal){
+      const receipt=validateAssistantTaskWriterRetirement(retirement);
+      if(receipt.assistantId!==assistantId||receipt.deviceId!==deviceId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const {companyId,taskId,passId,receiptId,leaseRevision:expectedLeaseRevision}=receipt;
+      const evidence=validateAssistantRetiredOutcomeEvidence(witness);
+      let value;
+      try{
+        value=await call('passRead',{companyId,taskId,passId,
+          retiredOutcomeEvidence:{receiptId,expectedLeaseRevision,witness:evidence}},signal);
+      }catch(error){
+        if(error instanceof AssistantTransportError&&error.status===400&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
+        throw error;
+      }
+      if(value?.state!=='closed'||value.workMode!=='task'||value.businessReady!==false
+        ||['passId','bindingId','bindingRevision','deliveryId','threadId','leaseRevision'].some(key=>value[key]!==receipt[key])
+        ||!Object.hasOwn(value,'retiredOutcomeEvidence'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const selected=value.retiredOutcomeEvidence;
+      if(selected===null)return null;
+      if(!object(selected)||Object.keys(selected).sort().join(',')!=='goalState,schedule')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      try{
+        const schedule=validateAssistantRecoveredOutcomeSchedule(selected.schedule);
+        assistantRetiredOutcomeCompletion(evidence,schedule,selected.goalState,receiptId);
+        return {schedule,goalState:selected.goalState};
+      }catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
     },
     async readTaskRecoveryContext(input,signal){
       const expectedLeaseRevision=revision(input.expectedLeaseRevision);

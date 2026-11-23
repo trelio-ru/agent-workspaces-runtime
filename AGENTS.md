@@ -295,6 +295,11 @@ publication tooling также остаются вне этого публичн
   outcome-only lease once. Inspect the complete latest turn plus the original
   save and work turns under the SAME native writer. Native CAS requires the
   unchanged plan and missing durable outcome. An unknown send cannot qualify.
+  An already accepted scheduled Run can confirm after technical retirement.
+  Match independent signed read and committed native receipts. Recheck under
+  the newly owned writer and limit the session to ordinary confirmation.
+  SQLite v34 records one start marker before dispatch and settles the same
+  schedule only from matching backend read-back. Unknown effects stay held.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

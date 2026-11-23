@@ -60,6 +60,19 @@ For a retired pass, the same read sends the original retirement receipt ID.
 The client verifies the receipt against the device and original scope before
 HTTP and requires a closed response with the same lease revision. A rejected
 or unsupported selector leaves recovery unavailable.
+An event-free scheduled pass can already have accepted its canonical Run when
+the original process stops. The device verifies the actual native save and
+accepted read-back, together with independent signed read proofs and committed
+native receipts. The order and number of ordinary reads do not matter.
+Any unknown external effect keeps its fence. The backend checks the exact
+retirement, accepted head, still-pending owner question when present, and
+previous schedule. It issues a new accepted-only session on the same chat.
+Only the ordinary pass confirmation and its encrypted material reads are
+available in that session. The old lease, save and stop time remain immutable.
+One separately journaled marker is recorded before the native start. A lost
+attempt can only read back the business receipt. SQLite v34 consumes the
+original slot and confirms the next schedule in the same transaction. Other
+tasks remain available while this task is waiting for reconciliation.
 Admit the new path only when both backend and runtime support the fenced
 handover and the retained pass can prove its own operation state. Keep the
 legacy classifiers for existing unsettled passes without that evidence.

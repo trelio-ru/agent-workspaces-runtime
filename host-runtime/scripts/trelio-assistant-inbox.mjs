@@ -152,6 +152,27 @@ const settledControlLocator=value=>{
   return {controlId:uuid(value.controlId),controlRequestId:uuid(value.controlRequestId),
     controlReceiptId:uuid(value.controlReceiptId)};
 };
+export const validateAssistantRetiredOutcomeEvidence=value=>{
+  object(value,['workspaceId','runId','acceptedHead','question','nativeControlReceipts']);
+  if(!Array.isArray(value.nativeControlReceipts)||value.nativeControlReceipts.length>8)inputError();
+  const nativeControlReceipts=value.nativeControlReceipts.map(settledControlLocator);
+  if(new Set(nativeControlReceipts.map(control=>control.controlReceiptId)).size!==nativeControlReceipts.length)inputError();
+  let question;
+  if(value.question!==undefined){
+    object(value.question,['questionId','questionRequestId']);
+    question={questionId:uuid(value.question.questionId),questionRequestId:uuid(value.question.questionRequestId)};
+  }
+  return {workspaceId:uuid(value.workspaceId),runId:uuid(value.runId),acceptedHead:workspaceObjectId(value.acceptedHead),
+    ...(question?{question}:{}),nativeControlReceipts};
+};
+
+export const assistantRetiredOutcomeCompletion=(evidence,schedule,goalState,requestId)=>{
+  const {workspaceId,runId,acceptedHead,question}=validateAssistantRetiredOutcomeEvidence(evidence);
+  const {cadence,timeZone,dailyLocalTime}=validateAssistantRecoveredOutcomeSchedule(schedule);
+  if(question?goalState!=='waiting_owner':!['active','waiting_external','blocked'].includes(goalState))inputError();
+  return {workspaceId,acceptedRunId:runId,workspaceHead:acceptedHead,goalState,cadence,timeZone,
+    noChange:false,clientRequestId:uuid(requestId),...(dailyLocalTime===null?{}:{dailyLocalTime})};
+};
 
 export const validateAssistantRecoveredOutcomeEvidence=value=>{
   object(value,['workspaceId','runId','acceptedHead','questionId','questionRequestId','control','historicalSkillReleases',
@@ -598,7 +619,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // dispatch diagnostics unavailable and prevents its health recovery. This
     // does not admit old schedule executors, interpret clocks or migrate state;
     // unknown/multiple versions and all retained uncertainty still fail closed.
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -703,7 +724,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -987,6 +1008,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     if(versions[0]?.version>=33&&!retiredColumns.includes('inspection_started')) fail('ASSISTANT_INBOX_CONFLICT');
     if(!retiredColumns.includes('inspection_started'))db.exec(`ALTER TABLE assistant_retired_task_writers
       ADD COLUMN inspection_started INTEGER NOT NULL DEFAULT 0 CHECK(inspection_started IN (0,1))`);
+    if(versions[0]?.version>=34&&!retiredColumns.includes('outcome_marker'))fail('ASSISTANT_INBOX_CONFLICT');
+    if(!retiredColumns.includes('outcome_marker'))db.exec(`ALTER TABLE assistant_retired_task_writers
+      ADD COLUMN outcome_marker TEXT`);
     // Empty additive tables remain compatible with v31. Fence older workers
     // before the first request can leave the device.
     if(versions.length)run('UPDATE assistant_inbox_meta SET version=?',Math.max(31,versions[0].version));
@@ -1101,15 +1125,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     return row;
   };
   const readRetiredWriter = row => {
-    const recorded=get('SELECT receipt_id,receipt_json,released FROM assistant_retired_task_writers WHERE delivery_id=?',row.delivery_id);
+    const recorded=get('SELECT receipt_id,receipt_json,released,outcome_marker FROM assistant_retired_task_writers WHERE delivery_id=?',row.delivery_id);
     if(!recorded)return null;
     const receipt=validateAssistantTaskWriterRetirement(JSON.parse(recorded.receipt_json));
     const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
-    if(row.kind!=='task'||row.state!=='uncertain'||row.native_started!==1||row.external_receipt!==null
+    const outcomeMarker=recorded.outcome_marker===null?null:uuid(recorded.outcome_marker);
+    const settled=row.state==='complete'&&outcomeMarker&&recorded.released===1&&typeof row.external_receipt==='string';
+    if(row.kind!=='task'||!settled&&(row.state!=='uncertain'||row.external_receipt!==null)||row.native_started!==1
       ||receipt.receiptId!==recorded.receipt_id||receipt.deliveryId!==row.delivery_id||receipt.taskId!==row.task_id
       ||scope.provider!=='trelio'||receipt.companyId!==scope.companyId
       ||receipt.assistantId!==scope.assistantId||receipt.deviceId!==scope.bindingId)fail('ASSISTANT_INBOX_CONFLICT');
-    return Object.freeze({receipt,released:recorded.released===1});
+    return Object.freeze({receipt,released:recorded.released===1,...(outcomeMarker?{outcomeMarker}:{})});
   };
   const readWriterRetirementAttempt = row => {
     const attempt=get('SELECT pass_id,request_id,lease_revision FROM assistant_task_writer_retirement_attempts WHERE delivery_id=?',row.delivery_id);
@@ -1125,7 +1151,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     return row;
   };
   const isTaskWriterRetired = taskId => Boolean(get(`SELECT 1 FROM assistant_retired_task_writers w
-    JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id WHERE d.task_id=? LIMIT 1`,taskId));
+    JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id WHERE d.task_id=? AND d.state<>'complete' LIMIT 1`,taskId));
   const hasActiveDelivery=()=>get(`SELECT 1 FROM assistant_inbox_deliveries d WHERE d.state IN ('leased','started','uncertain')
     AND NOT EXISTS (SELECT 1 FROM assistant_retired_task_writers w WHERE w.delivery_id=d.delivery_id AND w.released=1) LIMIT 1`);
   const taskProvisionRecovery = row => {
@@ -2757,8 +2783,33 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     pendingRetiredTaskInspections() {
       return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
         JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
-        WHERE w.released=1 AND w.inspection_started=0 ORDER BY d.expires_at,w.delivery_id LIMIT 16`)
+        WHERE w.released=1 AND w.inspection_started=0 AND w.outcome_marker IS NULL AND d.state='uncertain'
+        ORDER BY d.expires_at,w.delivery_id LIMIT 16`)
         .map(row=>this.readDelivery(row.delivery_id));
+    },
+    pendingRetiredTaskOutcomes() {
+      // An explicit timed slot with no attached events permits outcome-only
+      // reconciliation. No source ACK, event change or retry can use it.
+      return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
+        JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
+        WHERE w.released=1 AND d.state='uncertain' AND d.scheduled=1 AND NOT EXISTS
+          (SELECT 1 FROM assistant_inbox_delivery_events e WHERE e.delivery_id=d.delivery_id)
+        ORDER BY d.expires_at,w.delivery_id LIMIT 16`).map(row=>this.readDelivery(row.delivery_id));
+    },
+    startRetiredTaskOutcome(id,receiptId,marker) {
+      return transaction(()=>{
+        const row=delivery(id),retired=readRetiredWriter(row);
+        if(!retired?.released||retired.receipt.receiptId!==uuid(receiptId)||retired.outcomeMarker
+          ||!row.scheduled||deliveryEvents(id).length)fail('ASSISTANT_INBOX_CONFLICT');
+        marker=uuid(marker);
+        if(marker===receiptId||marker===id)inputError();
+        // Preserve a separate one-use marker before any native start, even
+        // when a previous version already inspected this stopped task.
+        const changed=run(`UPDATE assistant_retired_task_writers SET outcome_marker=?
+          WHERE delivery_id=? AND outcome_marker IS NULL`,marker,id);
+        if(Number(changed.changes)!==1)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run('UPDATE assistant_inbox_meta SET version=34 WHERE version IN (32,33)');
+      });
     },
     startRetiredTaskInspection(id,value) {
       const receipt=validateAssistantTaskWriterRetirement(value);
@@ -2776,7 +2827,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     },
     retiredTaskIds() {
       return all(`SELECT d.task_id FROM assistant_retired_task_writers w
-        JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id WHERE w.released=1 ORDER BY d.task_id`).map(row=>uuid(row.task_id));
+        JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
+        WHERE w.released=1 AND d.state<>'complete' ORDER BY d.task_id`).map(row=>uuid(row.task_id));
     },
     incompleteDeliveries() {
       return transaction(() => {
@@ -2798,10 +2850,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ...(row.scheduled?{scheduled:true}:{}),
         kind:row.kind,threadId:row.native_thread_id,nativeStarted:Boolean(row.native_started),receipt:row.external_receipt};
     },
-    completeDelivery(id, receipt, completion = null) {
+    completeDelivery(id, receipt, completion = null, retiredReceiptId = null) {
       opaque(receipt);
       return transaction(() => {
-        const row = mutableDelivery(id);
+        const row = retiredReceiptId===null?mutableDelivery(id):delivery(id);
+        if(retiredReceiptId!==null){
+          const retired=readRetiredWriter(row);
+          if(!retired?.released||!retired.outcomeMarker||retired.receipt.receiptId!==uuid(retiredReceiptId)
+            ||!row.scheduled||deliveryEvents(id).length||!completion||completion.processedSourceReferences?.length)
+            fail('ASSISTANT_INBOX_CONFLICT');
+        }
         if (row.state === 'complete' && row.external_receipt === receipt) return;
         if (row.state !== 'started' && row.state !== 'uncertain') fail('ASSISTANT_INBOX_STALE_DELIVERY');
         // Whole-pass completion and even an actual body read are insufficient:

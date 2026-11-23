@@ -2105,6 +2105,91 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     await passHost.releaseRetiredTaskPass(recorded.receipt);
     return true;
   };
+  const confirmRetiredOutcome = async (job,recorded,signal) => {
+    if(!recorded.outcomeMarker)return false;
+    const {receipt}=recorded;
+    const {assistantId,deviceId,companyId,taskId,bindingId,bindingRevision,deliveryId,threadId}=receipt;
+    const expected={assistantId,deviceId,companyId,taskId,bindingId,bindingRevision,deliveryId,threadId};
+    const read=async()=>{
+      const outcome=validateAssistantPassOutcome(await client.readBusinessOutcome(expected,signal),expected);
+      lease();signal.throwIfAborted();
+      return outcome;
+    };
+    const outcome=await read();
+    if(outcome.state!=='confirmed')return false;
+    const cwd=await workspaceForTask(scopeFor(job.scope,taskId));
+    if(await native.readWriterReleased(threadId,cwd,{signal})!==true)return false;
+    let binding;
+    if(!await authorize({scope:job.scope,taskId},signal,{requireModel:false,captureBinding:value=>{binding=value;}})
+      ||binding?.state!=='accepted'||!isDeepStrictEqual(outcome,await read())
+      ||!isDeepStrictEqual(inbox.readRetiredTaskWriter(deliveryId),recorded)
+      ||await passHost.readActivePass()!==null)return false;
+    lease();signal.throwIfAborted();
+    if(outcome.processedSourceReferences?.length)fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+    // Consume the original scheduled slot and the verified receipt in one
+    // transaction. Leave retirement history intact. No provider or source
+    // slot can be acknowledged by this accepted-material confirmation.
+    inbox.completeDelivery(deliveryId,`assistant:${outcome.receiptId}:codex-writer-released:${threadId}:${deliveryId}`,
+      {continuation:outcome.continuation,bindingState:binding.state},receipt.receiptId);
+    await businessConfirmed();
+    return true;
+  };
+  const resolveRetiredAcceptedTask = async signal => {
+    if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
+      ||typeof native.readWriterReleased!=='function'||typeof client.readTaskRetiredOutcomeEvidence!=='function')return null;
+    for(const job of inbox.pendingRetiredTaskOutcomes()){
+      signal.throwIfAborted();lease();
+      const recorded=inbox.readRetiredTaskWriter(job.deliveryId),{receipt}=recorded;
+      const {companyId,taskId,passId,threadId,bindingId,bindingRevision,receiptId}=receipt;
+      if(blockedCompanies.has(companyId)||findSchedule(job.scope,taskId)?.threadId!==threadId)continue;
+      if(recorded.outcomeMarker){
+        if(await confirmRetiredOutcome(job,recorded,signal))return {state:'completed',kind:'task'};
+        continue; // A lost outcome attempt never starts a second model turn.
+      }
+      const locator={companyId,taskId,passId};
+      const observed=await native.readDelivery(threadId,job.deliveryId,{signal,retiredAcceptedOutcome:{
+        taskPass:locator,assistantId:identity.assistantId,retirementReceiptId:receiptId,
+      }});
+      lease();
+      if(observed.state!=='retired_outcome_observed'||!uuid.test(observed.turnId??''))continue;
+      const selected=await client.readTaskRetiredOutcomeEvidence(receipt,observed.evidence,signal);
+      if(!selected)continue;
+      let execution;
+      if(!await authorize({scope:job.scope,taskId},signal,{captureExecution:value=>{execution=value;}}))continue;
+      execution=assistantExecutionConfiguration(execution);
+      const retiredPass={writerRetirementReceiptId:receiptId,expectedLeaseRevision:receipt.leaseRevision,outcome:observed.evidence};
+      const pass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+        ...locator,threadId,bindingId,bindingRevision,deliveryId:job.deliveryId,retiredPass},identity);
+      const cwd=await workspaceForTask(scopeFor(job.scope,taskId)),marker=randomUUID();
+      lease();signal.throwIfAborted();
+      if(await passHost.readActivePass()!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      await passHost.activatePass(pass);
+      try{
+        await native.run({threadId,deliveryId:marker,cwd,execution,taskContext:{assistantId:identity.assistantId,companyId,taskId}},{
+          signal,retiredPass,requireAbsentMarker:true,
+          retiredOutcome:{...selected,taskPass:locator,originalDeliveryId:job.deliveryId,originalTurnId:observed.turnId},
+          beforeInvocation:async ownedSignal=>{
+            const live=await client.readTaskRetiredOutcomeEvidence(receipt,observed.evidence,ownedSignal);
+            let currentChoice;
+            if(!await authorize({scope:job.scope,taskId},ownedSignal,{captureExecution:value=>{currentChoice=value;}})
+              ||!isDeepStrictEqual(assistantExecutionConfiguration(currentChoice),execution)||!isDeepStrictEqual(live,selected)
+              ||!isDeepStrictEqual(await passHost.readActivePass(),pass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            lease();ownedSignal.throwIfAborted();
+          },
+          startInvocation:({threadId:actualThread,deliveryId:actualMarker})=>{
+            lease();signal.throwIfAborted();
+            if(actualThread!==threadId||actualMarker!==marker)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            inbox.startRetiredTaskOutcome(job.deliveryId,receiptId,marker);
+          },
+        });
+      }finally{
+        if(!signal.aborted&&!await releaseRetiredInspection(job,pass,signal))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      }
+      if(await confirmRetiredOutcome(job,inbox.readRetiredTaskWriter(job.deliveryId),signal))return {state:'completed',kind:'task'};
+      return {state:'retired_inspection',kind:'task'};
+    }
+    return null;
+  };
   const inspectRetiredTask = async signal => {
     if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
       ||typeof native.readWriterReleased!=='function'||typeof client.readTaskRecoveryContext!=='function')return null;
@@ -2817,7 +2902,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(job) return perform(job,signal);
         if(job===null) break;
       }
-      return inspectRetiredTask(signal);
+      return await resolveRetiredAcceptedTask(signal)??inspectRetiredTask(signal);
     })();
     try { return await active; } catch(error) { throw safeError(error); } finally { active=null; }
   };
