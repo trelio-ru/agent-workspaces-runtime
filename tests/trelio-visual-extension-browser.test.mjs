@@ -1122,7 +1122,10 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
     assert.deepEqual(await fs.readFile(file.filePath), pdf); assert.equal(file.sha256, createHash('sha256').update(pdf).digest('hex')); assert.equal(file.mimeType, 'application/pdf');
     assert.doesNotMatch(JSON.stringify(file), /SYNTHETIC_ATTACHMENT|untrusted-name|\/redirect|dataBase64/);
     f = await browser.call('read-text'); assert.equal(f.state, 'ready'); assert.match(f.text, /Original synthetic chat/);
-    assert.equal((await browser.call('download-attachment', { frameId: f.frameId, x: 1000, y: 500 })).reason, 'attachment_link_required');
+    // Test a non-link inside the document. Background Windows browsers can
+    // open a narrower viewport, where an off-frame point fails coordinate
+    // validation before it reaches the attachment link check.
+    assert.equal((await browser.call('download-attachment', { frameId: f.frameId, x: 10, y: 40 })).reason, 'attachment_link_required');
     for (const [y, expected] of [[135, 'ready'], [195, 'attachment_unsupported'], [255, 'attachment_unsupported'], [315, 'attachment_too_large']]) {
       f = await browser.call('read-text'); assert.equal(f.state, 'ready');
       const value = await browser.call('download-attachment', { frameId: f.frameId, x: 50, y });
