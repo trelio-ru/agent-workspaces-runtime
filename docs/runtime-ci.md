@@ -192,10 +192,10 @@ An unknown/live child preserves its exact disposable fixture/account/files rathe
 than racing late control or inventing successful cleanup. Diagnostic comparisons
 and unsupported API experiments are not installed production fallbacks.
 
-The browser controller expiry fixture uses its unchanged signed lease and
-advances only its test clock once the real loopback poll observes a running
-request. The native ACL, cleanup receipt and one-effect assertions still run on
-each Windows lane; runner load cannot consume a synthetic short lease first.
+The browser controller expiry fixture captures its exact lease callback and
+invokes it at the signed deadline after the real loopback poll observes the
+waiting request. Transport timers, native ACL, cleanup and one-effect checks
+remain real. Load cannot consume an artificially shortened lease.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure.

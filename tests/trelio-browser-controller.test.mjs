@@ -30,10 +30,7 @@ const artifact = { skillId: 'synthetic-browser', runtimeVersion: '1.0.0',
 const context = { companyId: randomUUID(), projectId: null, releaseId: randomUUID(), runtimeSessionId: randomUUID(),
   codexThreadId: randomUUID(), localIdentity: { memberId: randomUUID() } };
 const environment = () => buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory: os.tmpdir(), executionContext: context });
-// Native I/O and the bounded poll use the real event loop even when the
-// expiry fixture below drives the controller's lease timer deterministically.
-const pollTimeout = setTimeout;
-const wait = ms => new Promise(resolve => pollTimeout(resolve, ms));
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function settled(env, sessionId, requestId) {
   for (let count = 0; count < 50; count++) {
     const result = await runBrowserControllerCommand({ environment: env, command: { operation: 'poll', sessionId, requestId } });
@@ -168,11 +165,20 @@ test('expired original descriptor cannot be claimed or revived by fresh host lea
 });
 
 test('bounded events/results and expiry clean up an awaiting caller without replay', async t => {
-  // Keep the fixture's signed lease while real native ACL and loopback calls
-  // complete. A loaded Windows runner must not use the lease before the test
-  // has even observed the awaiting request. Only the test drives this clock.
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  // Capture only the controller's expiry timer. Keep real Node timers and
+  // wall time for all loopback calls, including Undici's connection timers.
+  const preparedAt = Date.now();
+  const preparationClock = t.mock.method(Date, 'now', () => preparedAt);
   const env = environment(), descriptor = await prepareBrowserController({ environment: env });
+  const nativeTimeout = setTimeout;
+  let expire;
+  const timer = t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    if (delay !== descriptor.deadlineAt - preparedAt || expire)
+      return nativeTimeout(callback, delay, ...args);
+    expire = () => callback(...args);
+    // Return an owned handle so production close clears it in the usual way.
+    return nativeTimeout(() => {}, delay).unref();
+  });
   let effects = 0, cleanup = 0, release;
   const controller = await openBrowserController(descriptor, {
     handle: async command => {
@@ -181,6 +187,9 @@ test('bounded events/results and expiry clean up an awaiting caller without repl
       await new Promise(resolve => { release = resolve; });
       return { done: true };
     }, onClose: async () => { cleanup++; },
+  }).finally(() => {
+    timer.mock.restore();
+    preparationClock.mock.restore();
   });
   const inputFile = path.join(suiteHome, 'bounded-command.json');
   try {
@@ -203,7 +212,9 @@ test('bounded events/results and expiry clean up an awaiting caller without repl
     await runBrowserControllerCommand({ environment: env, command });
     assert.equal((await runBrowserControllerCommand({ environment: env,
       command: { operation: 'poll', sessionId: descriptor.sessionId, requestId: waitingId } })).state, 'running');
-    t.mock.timers.tick(descriptor.deadlineAt - Date.now());
+    assert.equal(typeof expire, 'function');
+    t.mock.method(Date, 'now', () => descriptor.deadlineAt);
+    expire();
     assert.deepEqual(await controller.closed, { state: 'closed' });
     assert.equal(cleanup, 1); assert.equal(effects, 2);
     await assert.rejects(runBrowserControllerCommand({ environment: environment(), command }));
