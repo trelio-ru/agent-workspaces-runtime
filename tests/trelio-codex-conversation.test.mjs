@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { PassThrough } from "node:stream";
+import { createInterface } from "node:readline";
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -49,6 +50,196 @@ async function createNativeCodexFixtureDirectory(executable, prefix, maxRetries)
   },
  };
 }
+
+test("actual Codex continues one read turn after the startup catalogue timeout without a relist",
+ { skip: !process.env.TRELIO_TEST_CODEX_CLI, timeout: 65_000 }, async t => {
+  const executable = process.env.TRELIO_TEST_CODEX_CLI;
+  assert.ok(path.isAbsolute(executable));
+  const { root, remove } = await createNativeCodexFixtureDirectory(executable, "catalog-recovery-", 5);
+  const home = path.join(root, "codex"), mcpScript = path.join(root, "mcp.mjs");
+  const mcpEvents = path.join(root, "mcp.jsonl"), modelCatalog = path.join(root, "models.json");
+  const readMarker = "catalogue-recovery-fixture-data", finalText = "Fixture read completed";
+  await fs.mkdir(home);
+  // The real stdio handler owns the deadline and dispatch. The fixture controls
+  // upstream availability without using an account or the desktop user's config.
+  const runtimeUrl = new URL("../host-runtime/scripts/trelio-remote-mcp.mjs", import.meta.url).href;
+  await fs.writeFile(mcpScript, [
+    "import { appendFileSync } from 'node:fs';",
+    'import { runCodexMcpStdioHost } from ' + JSON.stringify(runtimeUrl) + ';',
+    'const record = (...row) => appendFileSync(' + JSON.stringify(mcpEvents) + ', JSON.stringify(row) + "\\n");',
+    'record("start");',
+    'await runCodexMcpStdioHost({ profile: "remote", environment: {}, preservePlugin: () => null,',
+    '  startupTrace() {}, diagnosticReporter: { record() {}, close() {} },',
+    '  connect: () => ({',
+    '    async listTools(signal, { toolNames, onStage } = {}) {',
+    '      if (!toolNames) {',
+    '        record("full"); onStage("catalog_body");',
+    '        return new Promise((resolve, reject) => signal.addEventListener("abort", () => {',
+    '          record("timeout", signal.reason.code); reject(signal.reason);',
+    '        }, { once: true }));',
+    '      }',
+    '      record("exact", toolNames);',
+    '      return [{ name: "list_my_tasks", inputSchema: { type: "object", properties: { companySlug: { type: "string" } } },',
+    '        annotations: { readOnlyHint: true, destructiveHint: false } }];',
+    '    },',
+    '    listResources: async () => ({ resources: [] }),',
+    '    connect() { throw new Error("Unexpected OAuth"); },',
+    '    async call(name, args) {',
+    '      record("read", name, args);',
+    '      return { content: [{ type: "text", text: ' + JSON.stringify(readMarker) + ' }] };',
+    '    },',
+    '  }),',
+    '  prepare: async ({ toolName, input }) => { record("prepare", toolName); return input; },',
+    '});',
+  ].join("\n"));
+  await fs.writeFile(modelCatalog, JSON.stringify({ models: [{
+    slug: "catalogue-fixture", display_name: "Catalogue fixture", default_reasoning_level: "high",
+    supported_reasoning_levels: [{ effort: "high", description: "Fixture reasoning" }],
+    shell_type: "shell_command", visibility: "list", supported_in_api: true, priority: 0,
+    support_verbosity: false, truncation_policy: { mode: "tokens", limit: 10000 },
+    model_messages: { instructions_template: "Fixture model instructions" },
+    experimental_supported_tools: [], supports_search_tool: true, use_responses_lite: true,
+  }] }));
+  let modelRequests = 0, searched = false, responseFailure;
+  const server = http.createServer(async (req, res) => {
+    try {
+      assert.equal(req.url, "/v1/responses");
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const data = JSON.parse(Buffer.concat(chunks));
+      const index = ++modelRequests;
+      const discovered = data.input.find(row => row.type === "tool_search_output" && row.call_id === "fixture-search");
+      let item;
+      if (index === 1 || (index === 2 && searched)) {
+        const toolList = [...(data.tools ?? []),
+          ...data.input.filter(row => row.type === "additional_tools").flatMap(row => row.tools ?? []),
+          ...(discovered?.tools ?? [])];
+        const tools = toolList.flatMap(tool => tool.type === "namespace"
+          ? tool.tools.map(child => ({ name: child.name, namespace: tool.name }))
+          : [{ name: tool.name }]);
+        const selected = tools.find(tool => tool.name?.endsWith("trelio_read"));
+        assert.ok(!tools.some(tool => tool.name?.endsWith("list_my_tasks")),
+          "the native direct schema must be absent from the degraded inventory");
+        // Newer Codex defers MCP tools until a native search; older Codex can
+        // expose them directly. Exercise the actual model-facing route.
+        if (index === 1 && !selected && toolList.some(tool => tool.type === "tool_search" && tool.execution === "client")) {
+          searched = true;
+          item = { type: "tool_search_call", id: "fixture-search-item", call_id: "fixture-search",
+            execution: "client", status: "completed", arguments: { query: "Trelio read tasks" } };
+        } else {
+          assert.ok(selected, "native model input must include the stable tool: " + JSON.stringify({ tools, discovered }));
+          item = { type: "function_call", id: "fixture-call-item", call_id: "fixture-call", ...selected,
+            arguments: JSON.stringify({ name: "list_my_tasks", arguments: { companySlug: "fixture" } }) };
+        }
+      } else {
+        assert.equal(index, searched ? 3 : 2);
+        const result = data.input.find(row => row.type === "function_call_output" && row.call_id === "fixture-call");
+        assert.ok(JSON.stringify(result?.output ?? "").includes(readMarker), "the model must receive the upstream data");
+        item = { id: "fixture-message", type: "message", role: "assistant", status: "completed",
+          content: [{ type: "output_text", text: finalText, annotations: [] }] };
+      }
+      const response = { id: "fixture-response-" + index, status: "completed", output: [item],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const emit = (type, fields) => res.write("event: " + type + "\ndata: " + JSON.stringify({ type, ...fields }) + "\n\n");
+      emit("response.created", { response: { ...response, status: "in_progress", output: [] } });
+      emit("response.output_item.added", { output_index: 0,
+        item: item.type === "function_call" ? { ...item, arguments: "" } : item });
+      if (item.type === "function_call") {
+        emit("response.function_call_arguments.delta", { item_id: item.id, output_index: 0, delta: item.arguments });
+        emit("response.function_call_arguments.done", { item_id: item.id, output_index: 0, arguments: item.arguments });
+      }
+      emit("response.output_item.done", { output_index: 0, item });
+      emit("response.completed", { response });
+      res.end();
+    } catch (error) {
+      responseFailure ??= error;
+      if (!res.headersSent) res.writeHead(400);
+      res.end();
+    }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  let child, exited;
+  t.after(async () => {
+    if (child) {
+      const terminate = setTimeout(() => child.kill(), 2000);
+      child.stdin.end();
+      await exited;
+      clearTimeout(terminate);
+    }
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await remove();
+  });
+  await fs.writeFile(path.join(home, "config.toml"), [
+    'model = "catalogue-fixture"', "model_catalog_json = " + JSON.stringify(modelCatalog), 'model_provider = "fixture"',
+    "[model_providers.fixture]", 'name = "fixture"', 'base_url = "http://127.0.0.1:' + server.address().port + '/v1"',
+    'wire_api = "responses"', "requires_openai_auth = false", "supports_websockets = false",
+    "[features]", "plugins = false", "apps = false", "mcp_tool_list_changed = false",
+    "[mcp_servers.trelio_runtime]", "command = " + JSON.stringify(process.execPath),
+    "args = " + JSON.stringify([mcpScript]), "startup_timeout_sec = 40", "required = true",
+  ].join("\n"));
+  const environment = buildCodexEnvironment({ ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: home,
+    APPDATA: path.join(root, "AppData"), LOCALAPPDATA: path.join(root, "Local") });
+  child = spawn(executable, ["app-server", "--listen", "stdio://"], {
+    cwd: root, env: environment, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+  });
+  exited = new Promise(resolve => child.once("close", resolve));
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
+  const messages = [], responses = new Map();
+  let sequence = 0;
+  const completed = Promise.withResolvers(), closed = Promise.withResolvers();
+  child.on("error", error => closed.resolve(error));
+  child.stdin.on("error", error => closed.resolve(error));
+  child.on("close", code => closed.resolve(new Error("Native Codex exited: " + code)));
+  const lines = createInterface({ input: child.stdout });
+  lines.on("line", line => {
+    try {
+      const message = JSON.parse(line);
+      messages.push(message);
+      responses.get(message.id)?.(message);
+      if (message.method === "turn/completed") completed.resolve(message.params);
+    } catch (error) { closed.resolve(error); }
+  });
+  const live = pending => Promise.race([pending, closed.promise.then(error => { throw error; })]);
+  const send = message => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
+  const request = async (method, params) => {
+    const id = ++sequence;
+    const reply = await live(new Promise(resolve => {
+      responses.set(id, resolve);
+      send({ id, method, params });
+    }));
+    responses.delete(id);
+    assert.equal(reply.error, undefined, method + " " + JSON.stringify(reply.error));
+    return reply.result;
+  };
+  try {
+    await request("initialize", { clientInfo: { name: "trelio_catalogue_fixture", version: "1.0.0" },
+      capabilities: { experimentalApi: true } });
+    send({ method: "initialized" });
+    const { thread } = await request("thread/start", { cwd: root, ephemeral: true, approvalPolicy: "never", sandbox: "read-only" });
+    const { turn } = await request("turn/start", { threadId: thread.id,
+      input: [{ type: "text", text: "Read my fixture tasks in Trelio.", textElements: [] }] });
+    const finished = await live(completed.promise);
+    if (responseFailure) throw responseFailure;
+    assert.equal(finished.threadId, thread.id);
+    assert.equal(finished.turn.id, turn.id);
+    assert.equal(finished.turn.status, "completed", JSON.stringify(finished.turn.error));
+    assert.ok(messages.some(message => message.method === "item/completed"
+      && message.params.turnId === turn.id && message.params.item.type === "agentMessage"
+      && message.params.item.text === finalText));
+    assert.equal(modelRequests, searched ? 3 : 2);
+    assert.deepEqual((await fs.readFile(mcpEvents, "utf8")).trim().split("\n").map(line => JSON.parse(line)), [
+      ["start"], ["full"], ["timeout", "TRELIO_CODEX_CATALOG_TIMEOUT"], ["exact", ["list_my_tasks"]],
+      ["prepare", "mcp__trelio__list_my_tasks"], ["read", "list_my_tasks", { companySlug: "fixture" }],
+    ]);
+    t.diagnostic(searched ? "Read recovered through native tool search" : "Read recovered through native tool exposure");
+  } catch (error) {
+    t.diagnostic(stderr);
+    throw responseFailure ?? error;
+  }
+});
 
 test('actual Codex isolated assistant refuses alternate tools across process restart without changing user configuration',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{

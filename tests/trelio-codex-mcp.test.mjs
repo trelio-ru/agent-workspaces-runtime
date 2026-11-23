@@ -41,7 +41,7 @@ test("catalogue transport failures preserve visible recovery and only closed rea
     await handler(frame("initialize"), { clientInfo });
     const listed = await handler(frame("tools/list"));
     assert.equal(listed.error, undefined);
-    assert.deepEqual(listed.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect"]);
+    assert.deepEqual(listed.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect", "trelio_read"]);
     assert.equal(listed.result._meta["trelio/catalogReason"], error.code);
     assert.ok(listed.result.tools[0].description.includes(error.code), "reason reaches model without hidden metadata");
     assert.equal(listed.result.tools[0].annotations.readOnlyHint, true);
@@ -70,11 +70,11 @@ test("catalogue auth, integrity, vault and cancellation failures are not network
     await handler(frame("initialize"), { clientInfo });
     const response = await handler(frame("tools/list"));
     if (["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(code)) {
-      assert.deepEqual(response.result.tools.map(tool => tool.name), ["trelio_connect"]);
+      assert.deepEqual(response.result.tools.map(tool => tool.name), ["trelio_connect", "trelio_read"]);
     } else assert.equal(response.error.message, code);
     assert.doesNotMatch(JSON.stringify(response), /private error prose/u);
   }
-  for (const reserved of ["trelio_connect", "trelio_retry_catalog"]) {
+  for (const reserved of ["trelio_connect", "trelio_retry_catalog", "trelio_read"]) {
     const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => [{ name: reserved }] }) });
     await handler(frame("initialize"), { clientInfo });
     assert.equal((await handler(frame("tools/list"))).error.message, "TRELIO_CODEX_CATALOG_CONFLICT");
@@ -126,6 +126,68 @@ test("catalogue startup is bounded and late readers cannot restore stale dispatc
   assert.equal(reads, 2);
 });
 
+test("stable Codex read uses a fresh exact definition and the normal guarded dispatch", async () => {
+  const lookups = [], calls = [], observations = [];
+  const metadata = meta("gpt-6.1-sol", "high");
+  const nativeInput = { companySlug: "fixture", projectSlug: "tasks", taskNumber: 7 };
+  const returned = { isError: true, content: [], structuredContent: {
+    code: "MCP_LOCAL_CONTEXT_REQUIRED", providerSelection: { provider: "local_company_context" },
+  } };
+  const definition = {
+    name: "get_task",
+    inputSchema: { type: "object", properties: { taskNumber: {}, runtimeSessionProof: {}, knownInstructionLayerKeys: {} } },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  };
+  let exactDefinitions = [definition];
+  const handler = createCodexMcpHandler({
+    connect: () => ({
+      listTools: async (_signal, { toolNames }) => {
+        lookups.push(toolNames);
+        if (!toolNames) throw new RemoteMcpHostError("TRELIO_CODEX_CATALOG_TIMEOUT", "fixture private detail");
+        return exactDefinitions;
+      },
+      call: async (name, input) => { calls.push([name, input]); return returned; },
+    }),
+    prepare: async (input) => {
+      observations.push(input);
+      return { ...input.input, runtimeSessionProof: "fixture-signed" };
+    },
+  });
+  await handler(frame("initialize"), { clientInfo });
+  const listing = await handler(frame("tools/list"));
+  const stable = listing.result.tools.find(tool => tool.name === "trelio_read");
+  assert.ok(stable.inputSchema.properties.name.enum.includes("get_task"));
+  assert.ok(Buffer.byteLength(JSON.stringify(stable)) <= 1000, "stable schema remains compact");
+  const recover = args => handler(frame("tools/call", { name: "trelio_read", arguments: args, _meta: metadata }), { clientInfo });
+
+  const schema = readResult(await recover({ name: "get_task" }));
+  assert.deepEqual(schema.tool, { name: "get_task", inputSchema: { type: "object", properties: { taskNumber: {} } } });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(observations, []);
+  assert.deepEqual((await recover({
+    name: "get_task", arguments: { ...nativeInput, runtimeSessionProof: "forged", knownInstructionLayerKeys: ["forged"] },
+  })).result, returned);
+  assert.deepEqual(lookups, [undefined, ["get_task"], ["get_task"]]);
+  assert.deepEqual(calls, [["get_task", { ...nativeInput, runtimeSessionProof: "fixture-signed" }]]);
+  assert.equal(observations[0].metadata, metadata);
+  assert.equal(observations[0].toolName, "mcp__trelio__get_task");
+  assert.deepEqual(observations[0].input, nativeInput);
+
+  for (const invalid of [{ name: "update_task_status", arguments: {} }, { name: "get_task", arguments: [] },
+    { name: "get_task", arguments: {}, extra: true }]) {
+    assert.equal(readResult(await recover(invalid)).code, "TRELIO_CODEX_INPUT_INVALID");
+  }
+  assert.equal(lookups.length, 3, "rejected envelopes do not read any catalogue");
+  for (const denied of [[], [definition, definition], [{ ...definition, annotations: {} }],
+    [{ ...definition, _meta: { ui: { visibility: ["app"] } } }]]) {
+    exactDefinitions = denied;
+    assert.equal(readResult(await recover({ name: "get_task", arguments: nativeInput })).code,
+      "TRELIO_CODEX_TOOL_UNAVAILABLE");
+  }
+  assert.equal(calls.length, 1, "missing scope, ambiguous definitions and App-only tools fail before dispatch");
+  assert.equal(observations.length, 1);
+});
+
 test("explicit catalogue recovery and its subsequent live list both have time beyond startup", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const phases = [Promise.withResolvers(), Promise.withResolvers()];
@@ -155,7 +217,7 @@ test("explicit catalogue recovery and its subsequent live list both have time be
   t.mock.timers.tick(30_000);
   assert.equal(observedSignal.aborted, false);
   phases[1].resolve([{ name: "list_companies" }]);
-  assert.deepEqual((await relist).result.tools.map(tool => tool.name), ["list_companies", "trelio_connect"]);
+  assert.deepEqual((await relist).result.tools.map(tool => tool.name), ["list_companies", "trelio_connect", "trelio_read"]);
   assert.equal(reads, 3, "the following list receives fresh server ACL metadata");
 });
 
@@ -271,7 +333,7 @@ test("real Codex stdio survives HTTP 503 catalogue failure and reloads without O
   try {
     assert.ok((await request("initialize", { clientInfo, protocolVersion: "2025-03-26" })).result);
     const initial = await request("tools/list");
-    assert.deepEqual(initial.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect"]);
+    assert.deepEqual(initial.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect", "trelio_read"]);
     const retry = () => request("tools/call", { name: "trelio_retry_catalog", arguments: {} });
     assert.equal(readResult(await retry()).reason, "REMOTE_MCP_HTTP_ERROR");
     assert.equal(notifications.length, 0);
@@ -287,8 +349,8 @@ test("real Codex stdio survives HTTP 503 catalogue failure and reloads without O
     });
     assert.deepEqual(notifications.map(row => row.method), ["notifications/tools/list_changed"]);
     const fresh = await request("tools/list");
-    assert.deepEqual(fresh.result.tools.map(tool => tool.name), ["list_companies", "trelio_connect"]);
-    assert.equal(fresh.result._meta, undefined, "healthy catalogue has no additional context cost");
+    assert.deepEqual(fresh.result.tools.map(tool => tool.name), ["list_companies", "trelio_connect", "trelio_read"]);
+    assert.equal(fresh.result._meta, undefined, "healthy catalogue has no failure diagnostics");
     assert.equal(catalogReads, 4);
     assert.equal(businessCalls, 0);
     assert.doesNotMatch(JSON.stringify([initial, fresh, notifications]), /private backend diagnostic|synthetic-token/u);

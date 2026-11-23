@@ -8534,6 +8534,25 @@ const CODEX_RETRY_CATALOG_TOOL = {
 const CODEX_CATALOG_DIAGNOSTIC_READ_TOOLS = [
   "list_companies", "get_agent_instructions", "get_task", "list_my_tasks", "list_project_tasks",
 ];
+const CODEX_RECOVERY_READ_NAMES = [
+  ...CODEX_CATALOG_DIAGNOSTIC_READ_TOOLS,
+  "list_projects", "search", "fetch", "get_tasks", "get_task_instruction_page", "get_task_sections",
+];
+// Codex may retain its first tools/list indefinitely. This bounded definition
+// is present even if that list times out, and owns no upstream schema or ACL.
+// The same entry point can return the live schema or execute a fresh read.
+const CODEX_RECOVERY_READ_TOOL = {
+  name: "trelio_read",
+  description: "Continue a Trelio read in this turn when its native tool is missing or the catalogue timed out. Omit arguments for the live schema or pass native arguments ({} for no inputs) to read. Keep the original native arguments for a returned local continuation. No writes or full catalogue retry needed.",
+  inputSchema: {
+    type: "object",
+    properties: { name: { type: "string", enum: CODEX_RECOVERY_READ_NAMES }, arguments: { type: "object" } },
+    required: ["name"], additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+};
+const isAppOnlyCatalogTool = tool => tool?._meta?.ui?.visibility?.length > 0
+  && tool._meta.ui.visibility.every(value => value === "app");
 
 /** Only reviewed transport failures qualify for a recoverable bootstrap list.
  * In particular, a malformed catalogue, blocked endpoint, vault failure or
@@ -8588,14 +8607,16 @@ class CodexCatalogUnavailableError extends RemoteMcpHostError {
   }
 }
 
-const codexCatalogFailureResult = error => ({
+const codexCatalogFailureResult = (error, isCodex) => ({
   code: error.code,
   ...error.failure,
   catalogStatus: "unavailable",
   catalogTiming: error.catalogTiming,
   automaticRetry: false,
   nextCall: { toolName: CODEX_RETRY_CATALOG_TOOL.name, arguments: {} },
-  instruction: "Повторите только чтение каталога через trelio_retry_catalog. Сетевой сбой не требует нового входа или переустановки. Исходное рабочее действие автоматически не повторяется.",
+  instruction: isCodex
+    ? "Для поддерживаемого чтения используйте trelio_read в текущем ходе. trelio_retry_catalog отдельно проверяет полный каталог. Исходная запись не повторяется."
+    : "Повторите только чтение каталога через trelio_retry_catalog. Сетевой сбой не требует нового входа или переустановки. Исходное рабочее действие автоматически не повторяется.",
 });
 
 const CODEX_RUNTIME_POLICY_INSTRUCTIONS = "Trelio checks the model and reasoning effort of the current Codex tool call. The local runtime supplies one-use proof automatically. Never supply runtimeSessionProof or instruction reuse keys. If disconnected or challenged for additional OAuth scopes, call trelio_connect, with reauthorize=true only for a replaced or insufficient grant, and retry the original call once after browser consent. On an admission failure preserve its exact code and reason. Use trelio-diagnostics for missing or invalid observations. Never bypass the check through another connection or direct HTTP. ";
@@ -8621,6 +8642,8 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
   prepare = prepareCodexMcpToolArguments,
 } = {}) => {
   const isCodex = nativeClient === "codex";
+  const stableTools = isCodex ? [CODEX_CONNECT_TOOL, CODEX_RECOVERY_READ_TOOL] : [CODEX_CONNECT_TOOL];
+  const reservedToolNames = new Set([...stableTools.map(tool => tool.name), CODEX_RETRY_CATALOG_TOOL.name]);
   const desktopProfile = getDesktopOAuthProfile(nativeClient);
   if (!isCodex && !desktopProfile) throw new Error("TRELIO_NATIVE_CLIENT_INVALID");
   const isClaude = nativeClient === "claude-code";
@@ -8657,7 +8680,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           // after timeout. Each failed refresh discards the old dispatch map;
           // an older concurrent read cannot overwrite a newer observation.
           throwIfAborted(catalogSignal);
-          if (tools.some(tool => [CODEX_CONNECT_TOOL.name, CODEX_RETRY_CATALOG_TOOL.name].includes(tool.name))) {
+          if (tools.some(tool => reservedToolNames.has(tool.name))) {
             throw new RemoteMcpHostError("TRELIO_CODEX_CATALOG_CONFLICT", "Trelio вернул несовместимый каталог.");
           }
           if (generation === catalogGeneration) toolsByName = new Map(tools.map(tool => [tool.name, tool]));
@@ -8668,7 +8691,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
             return isCodex ? { ...definition, description: description?.replace(
               "Approved PreToolUse hook injects one-use runtimeSessionProof; never supply it.",
               "The Codex runtime supplies proof automatically; never supply it.") } : tool;
-          }), CODEX_CONNECT_TOOL];
+          }), ...stableTools];
         } });
       return { tools, catalogTiming: timing() };
     } catch (error) {
@@ -8684,6 +8707,8 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
   const handler = async (message, { signal, clientInfo, clientCapabilities, notifyClient, requestClient, runtimeUpgradeRecovery, recordDiagnostic } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === null || message.id === undefined) return null;
     let failureCode;
+    let diagnosticName = message.params?.name;
+    let diagnosticArguments = message.params?.arguments;
     const reply = result => {
       // This is the native Codex transport boundary, independently of the
       // backend handler. Include local preparation refusals and login, exactly
@@ -8697,7 +8722,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         // Let the reporter project unsupported codes AND retain its existing
         // unknown_code loss signal. Pre-projecting to UNKNOWN here would hide
         // that diagnostic gap; the reporter never serializes the raw value.
-        try { recordDiagnostic?.(message.params?.name, message.params?.arguments, code); }
+        try { recordDiagnostic?.(diagnosticName, diagnosticArguments, code); }
         catch { /* Optional diagnostics cannot replace the original response. */ }
       }
       return { jsonrpc: "2.0", id: message.id, result };
@@ -8735,19 +8760,19 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           return reply({ tools });
         }
         catch (error) {
-          if (authFailure(error)) return reply({ tools: [CODEX_CONNECT_TOOL] });
+          if (authFailure(error)) return reply({ tools: stableTools });
           if (!(error instanceof CodexCatalogUnavailableError)) throw error;
           // Erroring tools/list can make the client drop the entire server.
           // Advertise only host-owned recovery, never stale business schemas.
           // The reason also goes in the visible tool description: _meta alone
           // is not guaranteed to reach the model in every Codex route.
           return reply({ tools: [{ ...CODEX_RETRY_CATALOG_TOOL,
-            description: `${error.failure.reason}: ${error.message} Этап: ${error.catalogTiming.stage}. ${CODEX_RETRY_CATALOG_TOOL.description}`,
-          }, CODEX_CONNECT_TOOL], _meta: { "trelio/catalogStatus": "unavailable",
+            description: `${error.failure.reason}: ${error.message} Этап: ${error.catalogTiming.stage}. ${CODEX_RETRY_CATALOG_TOOL.description}${isCodex ? " Use trelio_read for supported reads in this turn." : ""}`,
+          }, ...stableTools], _meta: { "trelio/catalogStatus": "unavailable",
             "trelio/catalogCode": error.code, "trelio/catalogReason": error.failure.reason, "trelio/catalogTiming": error.catalogTiming } });
         } finally {
-          // Codex re-lists after list_changed. Fetch a live snapshot again
-          // with the recovery budget rather than returning cached ACL data.
+          // A client may re-list after list_changed. Fetch a live snapshot
+          // with the recovery budget instead of returning cached ACL data.
           if (listedConnection === connection) catalogListed = true;
         }
       }
@@ -8760,7 +8785,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
       }
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } };
 
-      const { name, arguments: raw = {}, _meta: metadata } = message.params ?? {};
+      let { name, arguments: raw = {}, _meta: metadata } = message.params ?? {};
       if (typeof name !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(name) || !raw || typeof raw !== "object" || Array.isArray(raw)) {
         throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Некорректный вызов Trelio.");
       }
@@ -8773,7 +8798,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         // tool inventory using only fixed names. A written notification is
         // not an acknowledgement from Codex or evidence of a completed read.
         const nativeNames = new Set(tools.map(tool => tool.name));
-        nativeNames.delete(CODEX_CONNECT_TOOL.name);
+        for (const stableTool of stableTools) nativeNames.delete(stableTool.name);
         await notifyClient?.({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         return reply(buildTextResult({ catalogStatus: "ready", automaticRetry: false, catalogTiming,
           catalogEvidence: {
@@ -8782,7 +8807,9 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
             listChangedNotification: notifyClient ? "sent" : "not_sent",
             clientToolExposure: "not_checked",
           },
-          instruction: "Сверьте наличие нужного инструмента в readTools и на доступных маршрутах текущего хода. Если он доступен, проверьте обычным чтением. Если каталог содержит инструмент, а Codex ещё его не показывает, повторите запрос одним новым сообщением в этом же чате. При повторном сбое сохраните catalogEvidence и результат проверки инструментов в отчёте. Рабочие действия не повторялись." }));
+          instruction: isCodex
+            ? "Продолжите чтение в текущем ходе. Если Codex ещё не показывает нужный инструмент, используйте trelio_read для поддерживаемых методов. При отказе сохраните точный код и catalogEvidence. Рабочие действия не повторялись."
+            : "Сверьте наличие нужного инструмента в readTools и на доступных маршрутах текущего хода. Если он доступен, проверьте обычным чтением. Если каталог содержит инструмент, а Codex ещё его не показывает, повторите запрос одним новым сообщением в этом же чате. При повторном сбое сохраните catalogEvidence и результат проверки инструментов в отчёте. Рабочие действия не повторялись." }));
       }
       if (name === CODEX_CONNECT_TOOL.name) {
         if (Object.keys(raw).some(key => key !== "reauthorize") || (raw.reauthorize !== undefined && typeof raw.reauthorize !== "boolean")) {
@@ -8795,13 +8822,58 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         return reply(buildTextResult({ connected: true, instructions: instructions(connection.instructions?.() ?? "") }));
       }
 
+      const recoveryRead = isCodex && name === CODEX_RECOVERY_READ_TOOL.name;
+      const schemaOnly = recoveryRead && !Object.hasOwn(raw, "arguments");
+      if (recoveryRead) {
+        if (!CODEX_RECOVERY_READ_NAMES.includes(raw.name)
+          || Object.keys(raw).some(key => key !== "name" && key !== "arguments")
+          || (!schemaOnly && (!raw.arguments || typeof raw.arguments !== "object" || Array.isArray(raw.arguments)))) {
+          throw new RemoteMcpHostError("TRELIO_CODEX_INPUT_INVALID", "Резервное чтение принимает только указанную операцию чтения и её исходные аргументы.");
+        }
+        ({ name, arguments: raw = {} } = raw);
+        if (!schemaOnly) {
+          diagnosticName = name;
+          diagnosticArguments = raw;
+        }
+      }
       const result = await withTrelioCallBudget(callSignal => withPrivateProcessSession(async () => {
-        // App-only actions carry their own server capability. Every other
-        // tool goes through the same protection classification as the hook.
-        if (!toolsByName) await catalog(callSignal);
-        const tool = toolsByName?.get(name);
-        if (!tool) throw new RemoteMcpHostError("TRELIO_CODEX_TOOL_UNAVAILABLE", "Инструмент недоступен в каталоге Trelio.");
-        const appOnly = tool._meta?.ui?.visibility?.length > 0 && tool._meta.ui.visibility.every(value => value === "app");
+        let tool;
+        if (recoveryRead) {
+          // A fresh exact catalogue lookup uses the original authenticated
+          // connection. It neither fills nor trusts the full dispatch map.
+          let definitions;
+          try {
+            definitions = await connection.listTools(callSignal, { toolNames: [name] });
+          } catch (error) {
+            throwIfAborted(callSignal);
+            const failure = codexCatalogTransportFailure(error);
+            if (failure) throw new RemoteMcpHostError(failure.reason, failure.message);
+            throw error;
+          }
+          throwIfAborted(callSignal);
+          const matches = definitions.filter(candidate => candidate.name === name);
+          tool = matches.length === 1 ? matches[0] : null;
+          if (!tool || tool.inputSchema?.type !== "object" || tool.annotations?.readOnlyHint !== true
+            || tool.annotations?.destructiveHint !== false || isAppOnlyCatalogTool(tool)) {
+            throw new RemoteMcpHostError("TRELIO_CODEX_TOOL_UNAVAILABLE", "Чтение недоступно в актуальном каталоге Trelio.");
+          }
+          if (schemaOnly) {
+            const schema = structuredClone(tool.inputSchema);
+            for (const field of ["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"]) {
+              if (schema.properties) delete schema.properties[field];
+              if (schema.required) schema.required = schema.required.filter(key => key !== field);
+            }
+            return buildTextResult({ tool: { name, inputSchema: schema },
+              instruction: "Вызовите trelio_read с тем же name и arguments по этой схеме. Для server-selected local continuation передайте исходные аргументы вложенного чтения." });
+          }
+        } else {
+          if (!toolsByName) await catalog(callSignal);
+          tool = toolsByName?.get(name);
+          if (!tool) throw new RemoteMcpHostError("TRELIO_CODEX_TOOL_UNAVAILABLE", "Инструмент недоступен в каталоге Trelio.");
+        }
+        // Both read paths share native runtime proof, backend validation and
+        // encrypted routing. App-only calls remain on their own direct path.
+        const appOnly = isAppOnlyCatalogTool(tool);
         // An MCP context-window change cannot attest whether the model reread
         // its authority: pinned Run files may be read by a shell or the local
         // adapter, while task rules may arrive in several instruction pages.
@@ -8859,7 +8931,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
       failureCode = error instanceof TrelioApiError ? bridgeHttpDiagnosticCode(error.statusCode, error.code)
         : error instanceof TrelioCallTimeoutError ? "REMOTE_MCP_TRELIO_TIMEOUT" : safeErrorPayload(error).code;
       if (message.method === "tools/call" && error instanceof CodexCatalogUnavailableError) {
-        const result = buildTextResult(codexCatalogFailureResult(error));
+        const result = buildTextResult(codexCatalogFailureResult(error, isCodex));
         // A previously advertised upstream tool may have a success-only
         // outputSchema. The catalogue is now untrusted/unavailable, so use
         // text for its error rather than inventing a structured success shape.

@@ -1670,12 +1670,14 @@ Exact legacy template bytes для распознавания при мигра�
   штатный запуск браузера агентом при подтверждённом запросе на подключение.
   [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Сетевой отказ Codex tools/list сохраняет host-owned recovery и закрытый код
-  причины; повторяет только чтение каталога, без OAuth и replay рабочих действий.
+  причины. `trelio_retry_catalog` проверяет каталог без OAuth и replay действий.
   Фиксированные native connections Trelio запрашивают gzip для tools/list,
   wire/decoded size ограничены.
   Первый list имеет 25 с, обновление 45 с. Тайм-аут сохраняет закрытый этап.
   Receipt подтверждает только count, наличие фиксированных read tools и отправку
-  list_changed. Codex отдельно подтверждает выдачу инструмента и safe read.
+  list_changed. Если Codex сохранил первый список, стабильный `trelio_read`
+  продолжает разрешённое чтение в исходном ходе через обычный admission/ACL.
+  Native gate проверяет результат хода с отключённым обновлением каталога.
   [Контракт](docs/agent-workspace-runtime.md#codex-catalog-recovery).
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
