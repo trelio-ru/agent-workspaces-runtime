@@ -320,8 +320,9 @@ test('the SAME uncertain delivery row retains a closed original claim/preflight/
   }
 });
 
-for(const duration of [90_000,30*60_000,45*60_000])test(`new task observer samples the native lease once (${duration})`,async t=>{
+for(const duration of [90_000,30*60_000,45*60_000])test(`new task observer fences preflight by the native lease (${duration})`,async t=>{
   const f=fixture(t),timers=[];
+  f.authority.workMode='task';
   const originalSetTimeout=globalThis.setTimeout,begin=f.options.client.beginTaskPass,run=f.options.native.run;
   t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
     const timer=originalSetTimeout(callback,delay,...args);timers.push({callback,delay,timer});return timer;
@@ -330,9 +331,9 @@ for(const duration of [90_000,30*60_000,45*60_000])test(`new task observer sampl
     const pass=await begin(input);pass.leaseExpiresAt=new Date(f.options.now()+duration).toISOString();return pass;
   };
   f.options.native.run=async(input,options)=>{
-    assert.equal(options.passTimeoutMs,Math.min(duration,30*60_000));
+    assert.equal(options.passTimeoutMs,30*60_000);
     assert.equal(options.signal.aborted,false);
-    assert.ok(timers.some(timer=>timer.delay===options.passTimeoutMs),'an independent original timer also bounds native preflight');
+    assert.ok(timers.some(timer=>timer.delay===Math.min(duration,options.passTimeoutMs)),'preflight must also stop at the current native lease');
     return run(input,options);
   };
   try{
@@ -343,33 +344,84 @@ for(const duration of [90_000,30*60_000,45*60_000])test(`new task observer sampl
   }finally{await f.coordinator.close();}
 });
 
-test('native task lease renewal cannot reset observation or replay an uncertain action',async t=>{
-  const f=fixture(t),timers=[],originalSetTimeout=globalThis.setTimeout;
+for(const mode of ['completed','renewed','foreign','late','unknown'])test(`native task observation follows only a verified lease before its fixed cutoff (${mode})`,async t=>{
+  const f=fixture(t),timers=[],watchers=[],originalSetTimeout=globalThis.setTimeout,originalSetInterval=globalThis.setInterval;
+  f.authority.workMode='task';
   t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
     const timer=originalSetTimeout(callback,delay,...args);timers.push({callback,delay,timer});return timer;
   });
-  let nativeStarts=0;
+  t.mock.method(globalThis,'setInterval',(callback,delay,...args)=>{
+    const timer=originalSetInterval(callback,delay,...args);watchers.push({callback,delay});return timer;
+  });
+  const renew=f.options.client.renewTaskPass;
+  let renewals=0;
+  let originalCutoff;
+  f.options.client.renewTaskPass=async input=>{
+    renewals++;
+    // The write can succeed without proving its response. For a late valid
+    // receipt simulate the original independent deadline firing during I/O.
+    const renewed=await renew(input);
+    if(mode==='late')originalCutoff.callback();
+    if(mode==='unknown')throw new Error('synthetic lost response');
+    return mode==='foreign'?{...renewed,threadId:randomUUID()}:renewed;
+  };
+  let nativeStarts=0,observed;
   f.options.native.run=async(input,options)=>{
     nativeStarts++;options.startInvocation();
-    const originalBudget=options.passTimeoutMs,owned=timers.find(timer=>timer.delay===originalBudget);
-    assert.ok(owned);f.advance(1000);
-    const pass=[...f.passes.values()][0],previousExpiry=pass.leaseExpiresAt;
-    await f.options.client.renewTaskPass({passId:pass.passId,expectedLeaseRevision:pass.leaseRevision});
-    assert.ok(Date.parse(pass.leaseExpiresAt)>Date.parse(previousExpiry));
-    assert.equal(options.passTimeoutMs,originalBudget);
-    assert.equal(timers.filter(timer=>timer.delay===originalBudget).length,1);
-    owned.callback();assert.equal(options.signal.aborted,true);
+    const cap=30*60_000,elapsed=15*60_000+30_000,lease=20*60_000;
+    originalCutoff=timers.find(timer=>timer.delay===lease);
+    assert.ok(originalCutoff);
+    const watch=watchers.findLast(watch=>watch.delay===30_000);
+    const advanceWithWatchdog=async duration=>{
+      for(let remaining=duration;remaining>0;remaining-=watch.delay){
+        f.advance(Math.min(remaining,watch.delay));
+        watch.callback();
+        // Run the actual authorization, inbox heartbeat and native renewal
+        // at their regular intervals, using the injected clock for the wait.
+        await new Promise(resolve=>setImmediate(resolve));
+      }
+    };
+    await advanceWithWatchdog(elapsed);
+    const extended=timers.find(timer=>timer.delay===cap-elapsed);
+    observed={cap:options.passTimeoutMs,isExtended:Boolean(extended),afterRenewalAborted:options.signal.aborted};
+    if(mode==='renewed'||mode==='completed'){
+      await advanceWithWatchdog(lease-elapsed+1);
+      observed.afterFirstExpiryAborted=options.signal.aborted;
+      observed.capTimerCount=timers.filter(timer=>timer.delay===cap-elapsed).length;
+      if(mode==='completed'&&!options.signal.aborted){
+        return {state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+      }
+      extended?.callback();
+    }
+    observed.finalAborted=options.signal.aborted;
     throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
   };
   try{
     f.events.push({id:randomUUID(),revision:'uncertain-original',taskId:f.taskId,wake:true});
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
-    await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
-    assert.equal(f.activePass().taskId,f.taskId);
-    assert.equal((await f.coordinator.dispatchStatus()).uncertainDeliveries,1);
-    assert.equal((await f.coordinator.workOnce()).state,'blocked');
-    assert.equal(nativeStarts,1,'an expired observer never grants a second native start');
-    assert.equal(f.database.prepare("SELECT count(*) n FROM assistant_inbox_deliveries WHERE state='uncertain' AND native_started=1").get().n,1);
+    if(mode==='completed'){
+      assert.equal((await f.coordinator.workOnce()).state,'completed');
+      assert.equal(f.activePass(),null);
+    }else{
+      await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+      assert.equal(f.activePass().taskId,f.taskId);
+      assert.equal((await f.coordinator.dispatchStatus()).uncertainDeliveries,1);
+      assert.equal((await f.coordinator.workOnce()).state,'blocked');
+      assert.equal(f.database.prepare("SELECT count(*) n FROM assistant_inbox_deliveries WHERE state='uncertain' AND native_started=1").get().n,1);
+      assert.equal(observed.finalAborted,true);
+    }
+    // Assertions must live outside the adapter. Its exceptions deliberately
+    // become uncertain deliveries, the expected failure for the denied cases.
+    assert.equal(nativeStarts,1);
+    assert.equal(renewals,1);
+    assert.equal(observed.cap,30*60_000);
+    const shouldExtend=['completed','renewed'].includes(mode);
+    assert.equal(observed.isExtended,shouldExtend);
+    assert.equal(observed.afterRenewalAborted,!shouldExtend);
+    if(shouldExtend){
+      assert.equal(observed.afterFirstExpiryAborted,false);
+      assert.equal(observed.capTimerCount,1,'later observations cannot slide the fixed limit');
+    }
   }finally{await f.coordinator.close();}
 });
 

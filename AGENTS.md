@@ -1913,6 +1913,11 @@ Exact legacy template bytes для распознавания при мигра�
   fresh exact backend confirmation. Signed maintenance can use the same
   writer proof without settling the delivery. Only adapters without a writer
   check use the legacy whole-turn receipt. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery).
+  A new ordinary task has a fixed thirty-minute observation cap including
+  preflight, plus the earlier live native lease cutoff. A verified renewal
+  of the exact owned pass can move only the lease cutoff before it expires.
+  The fixed cap, session/assignment checks and uncertain-start fence remain.
+  Preserve the separate deadlines for restricted and discussion turns.
   Fixed daily clocks use negotiated v2 receipts and keep wall time across late passes.
   SELECT-only dispatch summaries accept scheduler v1/v2's unchanged task/source
   projection. Test actual daily completion, health boundary, read-only SQLite

@@ -2475,6 +2475,35 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     let checking=false,started=false,taskPass=null,observationTimer=null,failureStage='native_claim';
+    let ordinaryObservation=null;
+    const maxObservationMs=30*60_000;
+    const armObservation=deadline=>{
+      const remaining=deadline-now();
+      if(!Number.isSafeInteger(remaining)||remaining<100)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      clearTimeout(observationTimer);
+      observationTimer=setTimeout(()=>controller.abort(),remaining);
+      observationTimer.unref?.();
+      return remaining;
+    };
+    const checkOrdinaryLease=live=>{
+      // The local timer is an additional cutoff for the one active writer.
+      // Move it only for a positively observed live renewal of the SAME
+      // native pass. A late response cannot revive an already expired window.
+      const observed=Date.parse(live?.leaseExpiresAt);
+      if(!ordinaryObservation||!taskPass||live?.state!=='leased'||live.workMode!=='task'
+        ||['passId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>live[key]!==taskPass[key])
+        ||!Number.isSafeInteger(live.leaseRevision)||live.leaseRevision<ordinaryObservation.revision
+        ||!Number.isFinite(observed)||observed<=now()||ordinaryObservation.deadline<=now())
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if(live.leaseRevision===ordinaryObservation.revision){
+        if(observed!==ordinaryObservation.leaseExpiry)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        return;
+      }
+      if(observed<=ordinaryObservation.leaseExpiry)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      const deadline=Math.min(ordinaryObservation.limit,observed);
+      if(deadline!==ordinaryObservation.deadline)armObservation(deadline);
+      ordinaryObservation={...ordinaryObservation,revision:live.leaseRevision,leaseExpiry:observed,deadline};
+    };
     const watch=setInterval(()=>{
       if(checking) return; checking=true;
       void (async()=>{
@@ -2486,8 +2515,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:taskPass.passId},combined);
           if(live.state==='closed') return;
           if(live.state!=='leased') fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-          if(Date.parse(live.leaseExpiresAt)-now()<300_000) await client.renewTaskPass({companyId:job.scope.companyId,
-            taskId:job.taskId,passId:taskPass.passId,expectedLeaseRevision:live.leaseRevision,clientRequestId:randomUUID()},combined);
+          combined.throwIfAborted();
+          if(ordinaryObservation)checkOrdinaryLease(live);
+          if(Date.parse(live.leaseExpiresAt)-now()<300_000
+            &&(!ordinaryObservation||ordinaryObservation.deadline<ordinaryObservation.limit)){
+            const expectedLeaseRevision=live.leaseRevision;
+            const renewed=await client.renewTaskPass({companyId:job.scope.companyId,
+              taskId:job.taskId,passId:taskPass.passId,expectedLeaseRevision,clientRequestId:randomUUID()},combined);
+            combined.throwIfAborted();
+            if(ordinaryObservation){
+              if(renewed?.leaseRevision!==expectedLeaseRevision+1)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+              checkOrdinaryLease(renewed);
+            }
+          }
         }
       })().catch(()=>controller.abort()).finally(()=>{checking=false;});
     },watchIntervalMs);
@@ -2556,28 +2596,28 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           || admitted.deliveryId!==job.deliveryId || admitted.threadId!==plan.threadId
           || !Number.isFinite(Date.parse(admitted.leaseExpiresAt)) || !recovering&&Date.parse(admitted.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         const observePassUntil=leaseExpiresAt=>{
-          // Read once at the positive native admission boundary. Later
-          // watchdog renewals cannot move this invocation's original clock.
+          // Restricted and discussion turns still sample the negotiated
+          // boundary once. They have no ordinary task extension budget.
           if(observationTimer!==null)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-          const remaining=Math.min(30*60_000,Date.parse(leaseExpiresAt)-now());
-          if(!Number.isSafeInteger(remaining)||remaining<100)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-          observationTimer=setTimeout(()=>controller.abort(),remaining);observationTimer.unref?.();
-          return remaining;
+          return armObservation(Math.min(now()+maxObservationMs,Date.parse(leaseExpiresAt)));
         };
         if(continuation){
           // Bound the whole App Server including preflight. The shorter live
           // lease is sampled once after renewal, while it owns the writer.
-          options.passTimeoutMs=30*60_000;
+          options.passTimeoutMs=maxObservationMs;
         }else if(!recovering){
-          // A NEW ordinary task has the same potentially twenty-minute company
-          // preparation as owner intake. The native adapter's fifteen-minute
-          // default previously abandoned its reader while the GUI still worked.
-          // Sample this exact admitted lease ONCE, capped by the adapter's
-          // existing thirty-minute ceiling. Independent cancellation also counts
-          // preflight time; watchdog renewals never move this original clock.
-          // An expired zero-start recovery keeps its separate existing path:
-          // this does not renew an old pass or grant another model invocation.
-          options.passTimeoutMs=observePassUntil(admitted.leaseExpiresAt);
+          if(admitted.workMode==='task'){
+            // Preflight counts against both boundaries. The adapter's fixed
+            // upper limit never slides, even if the backend renews its lease.
+            // This lets one owned turn finish after a routine renewal without
+            // waiting on a new invocation or over-running current authority.
+            const limit=now()+maxObservationMs,leaseExpiry=Date.parse(admitted.leaseExpiresAt);
+            const deadline=Math.min(limit,leaseExpiry);
+            if(!Number.isSafeInteger(admitted.leaseRevision)||admitted.leaseRevision<0)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            ordinaryObservation={limit,leaseExpiry,deadline,revision:admitted.leaseRevision};
+            armObservation(deadline);
+            options.passTimeoutMs=maxObservationMs;
+          }else options.passTimeoutMs=observePassUntil(admitted.leaseExpiresAt);
         }
         const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
           passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);

@@ -665,14 +665,16 @@ profile and synthetic stdio MCP: legacy projection reproduces error 193, fixed
 projection reaches `initialize`/`tools/list` through the native resolver. It
 makes no model turn or tool call and is not a real assistant business outcome.
 
-New ordinary task invocations sample an observation budget from their exact
-native admitted lease, capped at the existing thirty-minute adapter ceiling.
-An independent nonrenewing timer also includes preflight time; periodic native
-lease renewal never moves that original deadline. This avoids the unrelated
-fifteen-minute default expiring while a legitimate 600s + 600s search still runs.
-Expired zero-start recovery retains its separate existing admission path and
-earlier uncertain work never receives a new observer or start from this change.
-Expiry still preserves the original marker/pass and unknown-action fence.
+New ordinary task invocations keep a fixed thirty-minute observation ceiling,
+including preflight. A separate timer stops the invocation at the earlier
+native lease expiry. Before that timer expires, an authenticated read or
+successful watchdog renewal can move it within the fixed ceiling. The new
+expiry must advance the same owned pass and binding revision. A lost, stale,
+foreign or late renewal cannot keep the original writer alive. This preserves
+time to confirm a saved result when a valid renewal outlasts the first lease.
+Discussion and restricted continuation keep their existing time bounds. An
+expired zero-start reservation follows its separate admission path. Expiry
+preserves the original pass, marker and unknown-action fence.
 
 The host passes a one-use synchronous `startInvocation` callback that performs the
 inbox's leased -> started CAS. Missing history cannot authorize a second attempt.
