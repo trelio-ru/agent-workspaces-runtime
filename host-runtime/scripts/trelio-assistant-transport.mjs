@@ -3714,7 +3714,11 @@ export const ASSISTANT_COMPANY_CONTEXT_READ_TOOLS = assistantCompanyContextReadT
 // presentation change before its model tool inventory refreshes. These native
 // read names therefore accompany task/intake discovery from startup; execution
 // still uses the separate native company session and genuine current origin.
-export const ASSISTANT_COMPANY_DISCOVERY_TOOLS=Object.freeze(['search','fetch','get_trelio_tool_contract']);
+const ASSISTANT_BASE_COMPANY_DISCOVERY_TOOLS=Object.freeze(['search','fetch','get_trelio_tool_contract']);
+// The native task-only projection skips Workspace files. Advertise it beside
+// unified search when the live catalogue offers it, so a clear task command
+// need not wait for a full index or a second model-catalogue presentation.
+export const ASSISTANT_COMPANY_DISCOVERY_TOOLS=Object.freeze([...ASSISTANT_BASE_COMPANY_DISCOVERY_TOOLS,'search_tasks']);
 // Presentation views reuse ONE generated native names policy. This changes
 // neither schemas nor authority: v2 consent, task-work pass and source ACL are
 // checked natively. Existing task writers remain available alongside discovery.
@@ -4160,7 +4164,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Read native discovery definitions from their existing session-fixed
       // view BEFORE the client starts a model turn, not after a status call.
       // Older native catalogues may have none; partial sets fail closed.
-      const discovery=presentationProfile==='task'?await catalogue(ASSISTANT_COMPANY_DISCOVERY_TOOLS,'company_context',true):[];
+      const discovery=presentationProfile==='task'
+        ?await catalogue(ASSISTANT_BASE_COMPANY_DISCOVERY_TOOLS,'company_context',true,['search_tasks']):[];
       let result=[...normal,...intake,...discovery.filter(tool=>!normal.some(existing=>existing.name===tool.name))];
       if(Buffer.byteLength(JSON.stringify(result))>65_536){
         // Lossless MCP defaults only: false readOnly/idempotent, true
@@ -4183,7 +4188,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // from the current signed worker and receive the ordinary revision-change
       // notification, so this fallback remains discoverable without restart.
       if(refinementAvailable){
-        const hint=' Local full-index preparation timeout: select get_assistant_status(view=company_context), then search_tasks with the original company and queries. This separately authorised task-only read does not wait for Workspace file indexing. Reformulate empty task queries; fetch the selected current source.';
+        const hint=' For a known Trelio task, use search_tasks first or while full indexing is preparing. That authorised task-only read skips Workspace file indexing. Search by the task subject, then read the selected exact task.';
         const candidate=result.map(tool=>tool.name==='search'&&tool.description.length+hint.length<=4096
           ?{...tool,description:tool.description+hint}:tool);
         if(Buffer.byteLength(JSON.stringify(candidate))<=65_536)result=candidate;

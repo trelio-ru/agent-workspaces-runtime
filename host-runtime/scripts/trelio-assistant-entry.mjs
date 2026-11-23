@@ -1396,7 +1396,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
         if([2,3].includes(preparation.schemaVersion)){
           const completed=await workspace.completeCompanySearch(preparation,business,{signal,request});
           if(completed!==null)return completed;
-          return {content:[{type:'text',text:'The selected encrypted company read is still preparing. After 10 seconds call nextCall with fresh hook admission. Do not create a task or Workspace Run, claim absence, or send a final unavailable reply while this preparation is progressing.'}],
+          return {content:[{type:'text',text:'The selected encrypted company read is still preparing. After 10 seconds call nextCall with fresh hook admission if the full read is needed. For a known task, separately use search_tasks and read the exact match. Preparation alone does not establish absence or require a question to the owner.'}],
             structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:name,arguments:business}}};
         }
         // The native search proof was consumed exactly once above. A long
@@ -3975,7 +3975,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       // original business nextCall, never its result, proof or private locator.
       // The same rule survives its first owned timeout: that grants ONE resume
       // of this query, not a replacement formulation under a fresh600s clock.
-      return {content:[{type:'text',text:'The original encrypted company query is still preparing. Continue its nextCall with fresh admission before starting another formulation.'}],
+      return {content:[{type:'text',text:'The original encrypted company query is still preparing. Continue its nextCall with fresh admission for a full company search. For a known task, use the separately authorised task-only search.'}],
         structuredContent:{schemaVersion:1,state:'preparing',readOnly:true,nextCall:{tool:descriptor.nativeTool,arguments:structuredClone(originalQuery.arguments)}}};
     }
     if(!job){

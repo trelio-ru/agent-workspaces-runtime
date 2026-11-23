@@ -4458,10 +4458,14 @@ independent of natural command assessment. Clear owner commands need no second
 approval; ambiguous context uses the SAME owner questions with Other+text.
 See the schema-v9 inbox contract for cancellation, restart and per-event routing.
 
-Simple verified-owner private Telegram questions use the SAME visible source
-intake chat and `reply_owner`; they never become tasks/Workspace Runs. A question
-about company facts first selects the company read view, searches independent
-anchored formulations and reads the selected exact source. A failed, unavailable
+Simple questions, clarifications and status updates belong in the original
+verified owner-private Telegram chat via `reply_owner`. They do not create a
+task, Workspace Run or Trelio question. Use an in-app question for a durable
+decision or approval that needs it. For an existing task, start with the
+native `search_tasks` definition from the first tool catalogue, then read the
+exact task. This search excludes Workspace files and stays usable while the
+full company index is preparing. Company-wide findings still use the shared
+search with anchored formulations and exact source reads. A failed, unavailable
 or incomplete read is a limitation, never an absence claim. Encrypted snapshot
 refusals distinguish fixed JSON, envelope format, payload binding, reference
 coverage stages. These codes expose no field values,
