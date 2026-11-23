@@ -5170,7 +5170,7 @@ test('stable native intake metadata survives cached task chats while execution k
  }});
  const expected=['get_assistant_status','get_task','get_assistant_intake_context','resolve_assistant_intake'];
  assert.deepEqual((await client.listTools()).map(tool=>tool.name),expected);
- assert.deepEqual([...new Set(views)],['task','source_intake','company_context']);
+ assert.deepEqual([...new Set(views)],['company_context','source_intake']);
  await assert.rejects(client.callTool('create_task',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
  await client.callTool('resolve_assistant_intake',{});assert.equal(calls,1);
  active={kind:'task'};views.length=0;assert.deepEqual((await client.listTools()).map(tool=>tool.name),expected);
@@ -5256,11 +5256,12 @@ test('stable task plus native intake catalogue stays within the unchanged 64KiB 
  await assert.rejects(client.listTools(),/ASSISTANT_MCP_INVALID_RESPONSE/,'one missing intake definition is never a legacy fallback');
 });
 
-test('initial cached task catalogue exposes unified company discovery before any status call or active intake',async()=>{
+test('a private intake opens the complete native company-read catalogue from its first turn',async()=>{
  const origin='https://initial-discovery.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
- let active=null,malformed=false,refinement=false,longDescription=false;const calls=[];
- const definition=name=>({name,description:longDescription&&name==='search'?'x'.repeat(4096):`Native ${name}`,inputSchema:{type:'object',properties:{
+ let active=null;const calls=[],catalogueViews=[];
+ const companyReads=['search','search_tasks','fetch','get_project_meta','list_my_tasks','get_contact','get_task'];
+ const definition=name=>({name,description:`Native ${name}`,inputSchema:{type:'object',properties:{
   ...(['search','search_tasks'].includes(name)?{queries:{type:'array',items:{type:'string'},minItems:1}}:{}),
   ...(name==='fetch'?{id:{type:'string'}}:{}),intakePass:{},taskPass:{},runtimeSessionProof:{}},additionalProperties:false}});
  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>active,httpRequest:async input=>{
@@ -5268,43 +5269,40 @@ test('initial cached task catalogue exposes unified company discovery before any
   const response=result=>({sessionId:'initial',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
   if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
   if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
-  if(input.payload.method==='tools/list')return response({tools:(view==='company_context'
-   ?['get_assistant_status','search','fetch',...(malformed?[]:['get_trelio_tool_contract']),...(refinement?['search_tasks']:[])]
-   :view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']
-   :['get_assistant_status','get_task','update_task_title']).map(definition)});
+  if(input.payload.method==='tools/list'){
+   catalogueViews.push(view);
+   return response({tools:(view==='company_context'
+    ?['get_assistant_status','get_trelio_tool_contract',...companyReads]
+    :view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']
+    :['get_assistant_status','get_task','update_task_title']).map(definition)});
+  }
   calls.push({view,name:input.payload.params.name});return response({content:[],structuredContent:{view}});
  }});
- const tools=await client.listTools();
- for(const name of ['search','fetch','get_trelio_tool_contract','get_task','update_task_title','get_assistant_intake_context','resolve_assistant_intake'])
-  assert.ok(tools.some(tool=>tool.name===name),`${name} is discoverable before the first pass/model turn`);
- assert.deepEqual(calls,[],'metadata never creates an intake, task, Run or model call');
- assert.equal(JSON.stringify(tools).includes('intakePass'),false);
- assert.equal(tools.find(tool=>tool.name==='search').description,'Native search','a missing native refinement grants no host hint');
- assert.equal(tools.some(tool=>tool.name==='search_tasks'),false,'legacy metadata cannot invent a native tool');
- refinement=true;
- const refinedCatalogue=await client.listTools(),searchDefinition=refinedCatalogue.find(tool=>tool.name==='search');
- assert.ok(searchDefinition.description.startsWith('Native search'));
- assert.match(searchDefinition.description,/search_tasks/);
- assert.equal(refinedCatalogue.find(tool=>tool.name==='search_tasks')?.annotations.readOnlyHint,true,
-  'task-only search is visible in the initial native catalogue without a status/view switch');
- assert.deepEqual(searchDefinition.inputSchema,tools.find(tool=>tool.name==='search').inputSchema,'recovery guidance never changes the native schema');
- assert.ok(Buffer.byteLength(JSON.stringify(refinedCatalogue))<=65536);
- longDescription=true;
- assert.equal((await client.listTools()).find(tool=>tool.name==='search').description,'x'.repeat(4096),'omit optional guidance rather than truncating a native description');
- longDescription=false;
+ const taskTools=await client.listTools();
+ for(const name of ['get_task','update_task_title','get_assistant_intake_context','resolve_assistant_intake','get_trelio_tool_contract'])
+  assert.ok(taskTools.some(tool=>tool.name===name),`${name} keeps its native task/setup path`);
+ for(const name of companyReads.filter(name=>name!=='get_task'))
+  assert.equal(taskTools.some(tool=>tool.name===name),false,'no second search subset in an unbound task catalogue');
  active={kind:'source_intake',intakeKind:'owner_command'};
- assert.equal((await client.callTool('search',{queries:['trip']})).structuredContent.view,'company_context');
+ catalogueViews.length=0;
+ const ownerTools=await client.listTools();
+ assert.deepEqual(catalogueViews,['company_context','source_intake'],'native pass selects the existing read view before any model command');
+ for(const name of companyReads)
+  assert.equal(ownerTools.find(tool=>tool.name===name)?.annotations.readOnlyHint,true,`${name} is a genuine shared native read`);
+ assert.equal(ownerTools.some(tool=>tool.name==='update_task_title'),false,'intake metadata never includes a task writer');
+ assert.deepEqual(calls,[],'discovery performs no content read or write');
+ assert.equal(JSON.stringify(ownerTools).includes('intakePass'),false);
+ assert.ok(Buffer.byteLength(JSON.stringify(ownerTools))<=65536);
  assert.equal((await client.callTool('search_tasks',{queries:['current assignment']})).structuredContent.view,'company_context');
- assert.equal((await client.callTool('fetch',{id:'selected-native-id'})).structuredContent.view,'company_context');
+ assert.equal((await client.callTool('get_task',{})).structuredContent.view,'company_context');
+ assert.equal((await client.callTool('get_contact',{})).structuredContent.view,'company_context');
  await assert.rejects(client.callTool('update_task_title',{title:'not permitted'}),/CAPABILITY_UNAVAILABLE/);
  active={kind:'source_intake',intakeKind:'route_existing'};
- await assert.rejects(client.callTool('search',{queries:['not an owner']}),/CAPABILITY_UNAVAILABLE/);
- await assert.rejects(client.callTool('search_tasks',{queries:['current assignment']}),/CAPABILITY_UNAVAILABLE/);
+ await assert.rejects(client.callTool('search_tasks',{queries:['not an owner']}),/CAPABILITY_UNAVAILABLE/);
  active={kind:'task'};
  assert.equal((await client.callTool('search',{queries:['native task read']})).structuredContent.view,'company_context');
- assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task','ordinary task read retains its original native adapter');
- assert.deepEqual(calls.map(call=>call.name),['search','search_tasks','fetch','search','get_task'],'no hidden status/view-switch call or writer');
- malformed=true;await assert.rejects(client.listTools(),/ASSISTANT_MCP_INVALID_RESPONSE/,'partial discovery is not an empty legacy catalogue');
+ assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task','ordinary exact task read keeps its original native adapter');
+ assert.deepEqual(calls.map(call=>call.name),['search_tasks','get_task','get_contact','search','get_task'],'no extra model view command or writer');
 });
 
 test('catalogue scalar sharing is lossless, tool-local and preserves all native bounds and business annotations',()=>{

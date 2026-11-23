@@ -142,8 +142,9 @@ publication tooling также остаются вне этого публичн
   actions retain their native schemas and fresh pass/consent checks, including
   from an older facade. Test both views through the original call and keep every
   allowlist, input bound and one-attempt fence. No aliases or retry.
-  For an existing task from private Telegram, expose native `search_tasks`
-  from the first catalogue and read the exact match. A full index in progress
+  A private Telegram pass selects the complete existing native company-read
+  catalogue before its first model turn, without a host search subset. For an
+  existing task use `search_tasks`, then read the exact match. Full indexing
   does not block this narrower read. Send ordinary answers and clarifications
   through `reply_owner` in the verified original private chat. Preserve native
   in-app decisions/approvals and the original reply receipt and send fence.

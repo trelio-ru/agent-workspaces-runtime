@@ -4462,10 +4462,13 @@ Simple questions, clarifications and status updates belong in the original
 verified owner-private Telegram chat via `reply_owner`. They do not create a
 task, Workspace Run or Trelio question. Use an in-app question for a durable
 decision or approval that needs it. For an existing task, start with the
-native `search_tasks` definition from the first tool catalogue, then read the
-exact task. This search excludes Workspace files and stays usable while the
-full company index is preparing. Company-wide findings still use the shared
-search with anchored formulations and exact source reads. A failed, unavailable
+native `search_tasks` operation, then read the exact task. Before an incoming
+private Telegram turn starts, its protected pass selects the full native
+company-read catalogue. The host takes ordinary definitions from that
+catalogue instead of combining a separately curated search subset with task
+tools. This keeps the original catalogue size limit and current ACL. Task-only
+search excludes Workspace files and stays usable while the full company index
+is preparing. Company-wide findings use shared search and exact source reads. A failed, unavailable
 or incomplete read is a limitation, never an absence claim. Encrypted snapshot
 refusals distinguish fixed JSON, envelope format, payload binding, reference
 coverage stages. These codes expose no field values,

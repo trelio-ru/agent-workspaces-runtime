@@ -3710,15 +3710,12 @@ const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS
   "complete_checklist_item", "create_subtask", "create_task_relation", "delete_task_relation", "delete_checklist", "delete_attachment",
 ]);
 export const ASSISTANT_COMPANY_CONTEXT_READ_TOOLS = assistantCompanyContextReadTools();
-// Discovery must be callable in the FIRST model turn. Codex can acknowledge a
-// presentation change before its model tool inventory refreshes. These native
-// read names therefore accompany task/intake discovery from startup; execution
-// still uses the separate native company session and genuine current origin.
-const ASSISTANT_BASE_COMPANY_DISCOVERY_TOOLS=Object.freeze(['search','fetch','get_trelio_tool_contract']);
-// The native task-only projection skips Workspace files. Advertise it beside
-// unified search when the live catalogue offers it, so a clear task command
-// need not wait for a full index or a second model-catalogue presentation.
-export const ASSISTANT_COMPANY_DISCOVERY_TOOLS=Object.freeze([...ASSISTANT_BASE_COMPANY_DISCOVERY_TOOLS,'search_tasks']);
+// The native scope decides which ordinary tool schemas apply. A task keeps its
+// own schema for overlapping exact reads. A verified private intake and its
+// independent company read must use the complete shared native read view.
+export const assistantUsesCompanyRead = (name, presentationProfile, active) => name==='get_trelio_tool_contract'
+  || ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name)
+    && (presentationProfile==='company_context'||active?.kind==='source_intake'||!ASSISTANT_TASK_MCP_TOOLS.includes(name));
 // Presentation views reuse ONE generated native names policy. This changes
 // neither schemas nor authority: v2 consent, task-work pass and source ACL are
 // checked natively. Existing task writers remain available alongside discovery.
@@ -3770,7 +3767,7 @@ export const assistantSkillReadNeedsSetup=(execution,sections)=>execution?.runti
  */
 export const assistantMcpCallProfile = (profile, name, args) => {
   if (!['task', 'skill_setup', 'remote_mcp'].includes(profile)) return profile;
-  if (ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(name)) return 'task';
+  if (assistantUsesCompanyRead(name, 'task')) return 'task';
   if (!ASSISTANT_TASK_MCP_TOOLS.includes(name)) return profile;
   if (['connect_remote_agent_skill', 'doctor_remote_agent_skill', 'call_remote_agent_skill_tool'].includes(name)) {
     return 'remote_mcp';
@@ -4070,13 +4067,14 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ?{reason:error.reason}:{});
     }
   };
-  const selectedTools=async(metadata=false)=>{
+  const selectedTools=async(metadata=false, profile=presentationProfile)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update','use_assistant_browser','review_outgoing_message',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
+    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:['request_assistant_profile_update','use_assistant_browser','review_outgoing_message',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:profile==='remote_mcp'
       ?['get_assistant_status','review_outgoing_message','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
-      :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
-      :presentationProfile==='company_context'?['get_assistant_status','use_assistant_browser','review_outgoing_message',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
-      :[...ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)),...ASSISTANT_COMPANY_DISCOVERY_TOOLS];
+      :profile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
+      :profile==='company_context'?['get_assistant_status','use_assistant_browser','review_outgoing_message',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
+      :[...ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)),
+        ...(metadata?[]:[...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])];
   };
   const perform = async (action, signal, operationTimeoutMs = timeoutMs, metadataProfile=null) => {
     const deadline = AbortSignal.timeout(operationTimeoutMs);
@@ -4129,12 +4127,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // This is metadata from the SAME device/native endpoint, not a schema
       // copy, a task grant, another connector or a second business executor.
       const deadline=AbortSignal.timeout(timeoutMs),bounded=signal?AbortSignal.any([signal,deadline]):deadline;
-      let refinementAvailable=false;
       const catalogue=(allowed,profile,optional=false,additional=[])=>perform(async({protocol,config,credential,session,request,signal})=>{
         const tools=await protocol.listRemoteTools(config,credential,session,request,{signal}),seen=new Set();
-        if(profile==='company_context'&&tools.some(tool=>tool?.name==='search_tasks'
-          &&typeof tool.description==='string'&&tool.description.length<=4096&&object(tool.inputSchema)
-          &&tool.inputSchema.type==='object'))refinementAvailable=true;
         const selected=tools.filter(tool=>(allowed.includes(tool?.name)||additional.includes(tool?.name))
           &&(tool.name!=='use_assistant_browser'||typeof materializeBrowser==='function')
           &&(tool.name!=='use_assistant_workspace_files'||typeof materializeWorkspaceFiles==='function')
@@ -4152,21 +4146,29 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(JSON.stringify(selected).includes(credential)||Buffer.byteLength(JSON.stringify(selected))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return selected;
       },bounded,timeoutMs,profile);
-      const normal=await catalogue(await selectedTools(true),presentationProfile);
+      // The coordinator activates the native intake before the owned Codex
+      // process reconnects its MCP server. Choose the shared native read view
+      // there, instead of bolting a second handpicked search subset onto the
+      // task catalogue. The full catalogues are each within the same limit.
+      // Intake discovery itself grants no company, object or write authority.
+      const active=typeof readActivePass==='function'?await readActivePass():null;
+      const profile=active?.kind==='source_intake'&&active.intakeKind!=='route_existing'
+        ?'company_context':presentationProfile;
+      const normal=await catalogue(await selectedTools(true,profile),profile);
       // The two original intake methods remain an indivisible legacy pair.
       // Use the same small native view for optional shared definitions,
       // including the content-free self-check. Older backends may omit them.
       // Keep the near-bound task catalogue and exact schemas intact.
       const intake=await catalogue(intakeToolNames,'source_intake',true,[
         'request_assistant_profile_update','use_assistant_browser','use_assistant_workspace_files',
-        ...(presentationProfile==='skill_setup'?[]:['review_outgoing_message']),
+        ...(profile==='skill_setup'?[]:['review_outgoing_message']),
       ]);
-      // Read native discovery definitions from their existing session-fixed
-      // view BEFORE the client starts a model turn, not after a status call.
-      // Older native catalogues may have none; partial sets fail closed.
-      const discovery=presentationProfile==='task'
-        ?await catalogue(ASSISTANT_BASE_COMPANY_DISCOVERY_TOOLS,'company_context',true,['search_tasks']):[];
-      let result=[...normal,...intake,...discovery.filter(tool=>!normal.some(existing=>existing.name===tool.name))];
+      // The native schema contract is presentation-independent metadata used
+      // by readers and writers alike. Get its definition from the existing
+      // native catalogue, never reimplement its schema in the host.
+      const contract=profile==='task'
+        ? await catalogue([],'company_context',true,['get_trelio_tool_contract']):[];
+      let result=[...normal,...intake,...contract].filter((tool,index,all)=>all.findIndex(row=>row.name===tool.name)===index);
       if(Buffer.byteLength(JSON.stringify(result))>65_536){
         // Lossless MCP defaults only: false readOnly/idempotent, true
         // destructive, and write hints ignored on a read-only tool. Preserve
@@ -4181,18 +4183,6 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(Buffer.byteLength(JSON.stringify(result))>65_536)result=compact(true);
       }
       if(Buffer.byteLength(JSON.stringify(result))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
-      // The same fresh native catalogue must actually offer this refinement.
-      // Keep every native description/schema and the original byte ceiling:
-      // an optional host-mechanics hint never makes a valid catalogue fail or
-      // silently truncates native authority. Older facades request definitions
-      // from the current signed worker and receive the ordinary revision-change
-      // notification, so this fallback remains discoverable without restart.
-      if(refinementAvailable){
-        const hint=' For a known Trelio task, use search_tasks first or while full indexing is preparing. That authorised task-only read skips Workspace file indexing. Search by the task subject, then read the selected exact task.';
-        const candidate=result.map(tool=>tool.name==='search'&&tool.description.length+hint.length<=4096
-          ?{...tool,description:tool.description+hint}:tool);
-        if(Buffer.byteLength(JSON.stringify(candidate))<=65_536)result=candidate;
-      }
       return result;
     },
     async callTool(name, args, signal) {
@@ -4214,12 +4204,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // session. Repeat after initialization too: the protected pass can change
       // during I/O, and metadata is never execution authority.
       if(!(await selectedTools()).includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-      // Initial discovery always uses the native company read session. Other
-      // implicit company reads require the protected taskless owner origin.
-      // Ordinary task get_task keeps its task schema and encrypted adapter.
+      // Select the native read schema for the actual pass. Existing task
+      // reads and executions keep their task validators; a stale catalogue
+      // cannot turn an intake into a task writer or grant a foreign read.
       const active=typeof readActivePass==='function'?await readActivePass():null;
-      const companyReadSession=ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(name)||active?.kind==='source_intake'
-        &&(ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name)||name==='get_trelio_tool_contract');
+      const companyReadSession=assistantUsesCompanyRead(name,presentationProfile,active);
       return perform(async ({ protocol, config, credential, session, request, signal, deadline }) => {
         const allowed=await selectedTools();
         if(!allowed.includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');

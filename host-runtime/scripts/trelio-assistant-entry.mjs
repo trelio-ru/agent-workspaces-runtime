@@ -11,7 +11,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,assistantMcpCallProfile,completeAssistantSourceIntakeDelivery,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, assistantUsesCompanyRead, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,assistantMcpCallProfile,completeAssistantSourceIntakeDelivery,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode,assistantSecretListMetadataArguments,normalizeAssistantPrivateBrowserArguments,isAssistantBrowserPlanInputError } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
@@ -1140,8 +1140,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
           workspaceId:selected.workspaceId,workspaceHead:selected.workspaceHead}}};
       }
       return withAssistantEncryptedWorkspaceArguments(request,send,{withProfile,withManagedContent,
-        companyContextRead:ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(request.name)||presentationProfile==='company_context'
-          ||active?.kind==='source_intake'&&ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(request.name)});
+        companyContextRead:presentationProfile==='company_context'||assistantUsesCompanyRead(request.name,presentationProfile,active)});
     },
     readActivePass:host.readActivePass,
     materializeSourceIntake:async({result,arguments:args,signal})=>{
