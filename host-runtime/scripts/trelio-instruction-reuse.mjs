@@ -161,14 +161,19 @@ const taskLocators = (tool, args) => canonicalJson(
     taskNumber: args.taskNumber }] : args.tasks,
 );
 
+// The server revision hashes the rule layers and original reuse set. Two
+// different tasks may legitimately share that hash. Bind receipts to both
+// revision and exact ordered locators so a later read cannot replace an
+// earlier task's manifest or remove its frozen reuse set.
+const pageCatalogKey = (revision, locators) => JSON.stringify([revision, locators]);
+
 // A page's final nextExactReadArguments is only a suggestion. Reuse requires
 // every original part, its exact manifest and a verified concatenated digest.
 // The assembly is in RAM for this inspection only, never a second rule cache.
 const acceptInstructionPage = (result, call, pageCatalogs, layers) => {
-  const page = pageCatalogs.get(result.catalogRevisionKey);
-  if (!page || result.schemaVersion !== 3
-    || call.args.expectedCatalogRevisionKey !== result.catalogRevisionKey
-    || taskLocators(call.tool, call.args) !== page.locators) return;
+  if (result.schemaVersion !== 3 || call.args.expectedCatalogRevisionKey !== result.catalogRevisionKey) return;
+  const page = pageCatalogs.get(pageCatalogKey(result.catalogRevisionKey, taskLocators(call.tool, call.args)));
+  if (!page) return;
   const parts = result.responseKind === "instruction_page_batch" ? result.parts
     : result.responseKind === "instruction_page" ? [result.part] : [];
   if (!Array.isArray(parts)) return;
@@ -280,16 +285,17 @@ export const collectCodexInstructionHints = ({ rows, header, hookInput, input, i
             || canonicalJson(result.nextBatch) !== canonicalJson(buildMcpTaskBatchContinuation(original.slice(count)))) continue;
           locators = canonicalJson(original.slice(0, count));
         }
-        pageCatalogs.set(catalog.delivery.catalogRevisionKey, {
-          reused: [...catalog.reusedLayerKeys], manifest, locators,
+        pageCatalogs.set(pageCatalogKey(catalog.delivery.catalogRevisionKey, locators), {
+          reused: [...catalog.reusedLayerKeys], manifest,
         });
       }
     }
   }
   if (!witnessedCurrentCall) return {};
   if (identity.toolName === "get_task_instruction_page") {
-    const page = pageCatalogs.get(currentArguments.expectedCatalogRevisionKey);
-    const frozenKeys = page?.locators === taskLocators(identity.toolName, currentArguments) ? page.reused : null;
+    const page = pageCatalogs.get(pageCatalogKey(currentArguments.expectedCatalogRevisionKey,
+      taskLocators(identity.toolName, currentArguments)));
+    const frozenKeys = page?.reused;
     return frozenKeys?.length ? { knownInstructionLayerKeys: frozenKeys } : {};
   }
   if (localArguments || LAYER_TOOLS.has(identity.toolName)) {

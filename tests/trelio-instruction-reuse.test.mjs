@@ -194,6 +194,41 @@ test("pagination freezes the original reuse set rather than newly delivered laye
     identity: { status: "native", toolName: "get_task_instruction_page" } }), { knownInstructionLayerKeys: [layer.key] });
 });
 
+test("interleaved tasks sharing one instruction revision keep their exact page receipts", () => {
+  const otherTask = { ...input, taskNumber: 2 };
+  const secondLayer = { key: "instruction-layer:" + hash("shared-instruction-layer"),
+    sha256: hash("Shared rules"), markdown: "Shared rules" };
+  // Tasks in the same scope can have identical rule keys (including reuse),
+  // so the backend gives both manifests the same content-derived revision.
+  const reusedLayerKeys = [layer.key];
+  const revision = hash(JSON.stringify({ allLayerKeys: [layer.key, secondLayer.key], reusedLayerKeys }));
+  const begin = { effectiveInstructions: { schemaVersion: 3, status: "incomplete", layers: [],
+    reusedLayerKeys, delivery: { catalogRevisionKey: revision,
+      layerManifest: [{ key: secondLayer.key, sha256: secondLayer.sha256, partCount: 1 }] } } };
+  const pageInput = { tasks: [input], expectedCatalogRevisionKey: revision, pageIndex: 0 };
+  const page = { schemaVersion: 3, responseKind: "instruction_page", catalogRevisionKey: revision,
+    part: { ...secondLayer, partIndex: 0, partCount: 1 } };
+  for (const local of [false, true]) {
+    const invoke = local ? (id, name, args) => localCall(id, localInput(name, args)) : call;
+    const deliver = local ? localOutput : output;
+    const evaluate = (history, name, args) => collect({
+      rows: [...history, invoke("current", name, args)],
+      input: local ? localInput(name, args) : args,
+      identity: local ? localIdentity(localInput(name, args)) : { status: "native", toolName: name },
+    });
+    const history = [invoke("warm", "get_task", input), deliver("warm", catalog),
+      invoke("first", "get_task", input), deliver("first", begin),
+      invoke("second", "get_task", otherTask), deliver("second", begin)];
+    assert.deepEqual(evaluate(history, "get_task_instruction_page", pageInput),
+      { knownInstructionLayerKeys: reusedLayerKeys });
+    assert.deepEqual(evaluate(history, "get_task_instruction_page", { ...pageInput, tasks: [otherTask] }),
+      { knownInstructionLayerKeys: reusedLayerKeys });
+    assert.deepEqual(evaluate(history, "get_task_instruction_page", { ...pageInput, tasks: [input, otherTask] }), {});
+    assert.deepEqual(evaluate([...history, invoke("page", "get_task_instruction_page", pageInput),
+      deliver("page", page)], "get_task", input), { knownInstructionLayerKeys: [layer.key, secondLayer.key] });
+  }
+});
+
 test("a split batch freezes reuse only for its exact delivered prefix", () => {
   const second = { ...input, taskNumber: 2 };
   const original = [input, second];

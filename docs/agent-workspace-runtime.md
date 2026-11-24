@@ -1458,7 +1458,10 @@ mismatch завершается обновлением вместо fallback к 
 возвращает `effectiveInstructions.status=incomplete` с manifest. Агент получает
 части по 4 КиБ через `get_task_instruction_page` с теми же task locators и
 cache keys, сверяет `catalogRevisionKey` и SHA-256 каждого восстановленного
-слоя, затем применяет правила. Manifest рекомендует `pageSize=4`: значения
+слоя, затем применяет правила. Host хранит receipt по паре revision и
+точного упорядоченного списка локаторов. Независимые чтения задач с одинаковыми
+слоями и revision сохраняют свои manifests и исходные reuse keys.
+Manifest рекомендует `pageSize=4`: значения
 2–4 возвращают `instruction_page_batch.parts`. Полный text-only MCP result
 проверяется вместе с повторным JSON-экранированием и финальными cache keys.
 Omission/1 сохраняет `instruction_page.part` и проходит ту же проверку размера.

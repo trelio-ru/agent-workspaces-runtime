@@ -1800,6 +1800,9 @@ Exact legacy template bytes для распознавания при мигра�
   Shared guard генерируется из backend, а не поддерживается копией.
 - Личный слой навыка в model projection сохраняется отдельно от signed base;
   lazy/reuse semantics проверяются в `tests/trelio-mcp-results.test.mjs`.
+- Exact task instruction paging binds host receipts to both the catalog revision
+  and the ordered task locators. A second task with identical rules cannot
+  replace the first manifest or its frozen reuse set.
 - Additive diagnostic kinds are negotiated independently from detailEvidenceVersion;
   preserve frozen UUID/counters and never derive retry authority from evidence.
   See [closed diagnostics](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
