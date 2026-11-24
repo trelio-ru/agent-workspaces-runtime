@@ -243,8 +243,9 @@ ordinary release signature/policy/read-back chain.
 
 Full Windows also executes the real Workspace recovery/cleanup fixtures from
 `trelio-workspace.test.mjs`: isolated retention with live siblings, protected
-local changes, retention-only source discovery, persistent checkout reuse and
-repeat recovery opens. Path-parser tests alone do not cover native deletion.
+local changes, retention-only source discovery, persistent checkout reuse,
+selection of a bound checkout after a terminal legacy checkout has disappeared,
+and repeat recovery opens. Path-parser tests alone do not cover native deletion.
 Pre-metadata recovery composes the actual encrypted own-Run/related-history
 opener with an empty original and a preserved partial sibling. Server work and
 local edits refuse without overwriting their source. The real-Git negative

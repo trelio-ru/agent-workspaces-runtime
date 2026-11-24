@@ -1856,6 +1856,10 @@ Exact legacy template bytes для распознавания при мигра�
   При ручном запуске или `localCleanupState=pending` заверши worktree штатным
   `git:finish-worktree` из canonical checkout.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
+- Выбор рабочей папки – [контракт](docs/agent-workspace-runtime.md#выбор-локальной-папки).
+  Только подтверждённый terminal legacy Run без всего `workspace/` может
+  уступить существующей привязанной копии. Обычные проверки local Git и native
+  Run идут до claim; старые каталоги не удаляются.
 - Stable runtime tag создаётся только по явной команде на runtime release и
   резервируется до CI через `npm run git:integrate -- --wait --tag vX.Y.Z` в Codex.
   Низкоуровневый `git:push-main` доступен только verified владельцу очереди.

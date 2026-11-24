@@ -186,7 +186,12 @@ import {
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { saveRuntimeChatBinding } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
-import { parseWorkspaceDraftRecoveryRequiredError, parseWorkspaceLocalRecoveryRequiredError, parseWorkspaceMergeError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
+import {
+  parseWorkspaceDraftRecoveryRequiredError,
+  parseWorkspaceLayoutMigrationBlockedError,
+  parseWorkspaceLocalRecoveryRequiredError,
+  parseWorkspaceMergeError,
+} from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   createAgentEncryptionDevice,
@@ -3515,6 +3520,123 @@ for (const recoverDirtyLegacy of [false, true]) test(`legacy layout migration ig
 // concurrent-lock refusal. Preserve every 10s child deadline and budget their
 // full chain plus setup/cleanup instead of cancelling valid Windows work at 20s.
 const portableWorkspaceChildTimeoutMs = 10_000;
+test("open bypasses a terminal legacy locator with no checkout for the existing bound checkout", {
+  timeout: 7 * portableWorkspaceChildTimeoutMs + 20_000,
+}, async (t) => {
+  const temporaryDirectory = await realpath(await mkdtemp(path.join(os.tmpdir(), "trelio-missing-legacy-checkout-")));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const binding = path.join(temporaryDirectory, "bound folder");
+  const workspaceId = "41414141-4141-4141-8141-414141414141";
+  const legacyRunId = "42424242-4242-4242-8242-424242424242";
+  const boundRunId = "43434343-4343-4343-8343-434343434343";
+  const targetRunId = "44444444-4444-4444-8444-444444444444";
+  const childEnvironment = workspaceFixtureEnvironment(homeDirectory);
+  const { head, bundle } = await createExportBundle(path.join(temporaryDirectory, "export"), {
+    "WORKSPACE_CONTEXT.md": "# Workspace\n",
+  });
+  const claimed = [];
+  const exactReads = [];
+  let legacyStatus = "running";
+  let boundStatus = "running";
+  const buildRun = (id, status) => ({
+    id, workspaceId, status, baseHead: head, draftHead: null,
+    leaseId: "45454545-4545-4545-8545-454545454545", fencingToken: 1,
+    contextHeadsJson: {},
+    agentInstructionsSnapshotJson: { schemaVersion: 1, compiledMarkdown: "# Working rules\n" },
+    userProfileSnapshotJson: { schemaVersion: 1, compiledMarkdown: "# User profile\n" },
+  });
+  const workspaceUrl = `/api/agent-workspaces/workspaces/${workspaceId}`;
+  const server = createServer((request, response) => {
+    if (respondToPlainTestBridgeRouting(request, response)) return;
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/api/agent-workspaces/bridge-compatibility") {
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+    } else if (request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
+      response.end(JSON.stringify({ suite: "trelio-e2ee-v1", state: "plain", company: testCompany }));
+    } else if (request.url === workspaceUrl) {
+      response.end(JSON.stringify({
+        workspace: { id: workspaceId, acceptedHead: head }, company: testCompany,
+        // The legacy Run is old enough to require an exact native read.
+        runs: [buildRun(boundRunId, boundStatus), buildRun(targetRunId, "running")], checkpoints: [],
+      }));
+    } else if (request.url === `${workspaceUrl}/runs/${legacyRunId}`) {
+      exactReads.push(legacyStatus);
+      response.end(JSON.stringify({ run: buildRun(legacyRunId, legacyStatus), latestCheckpoint: null }));
+    } else if ([boundRunId, targetRunId].some(id => request.url === `/api/agent-workspaces/runs/${id}/claim`)) {
+      const id = request.url.split("/").at(-2);
+      claimed.push(id);
+      response.end(JSON.stringify(buildRun(id, "running")));
+    } else if (request.url === `/api/agent-workspaces/runs/${boundRunId}/bundle`) {
+      response.setHeader("content-type", "application/vnd.git.bundle");
+      response.end(bundle);
+    } else {
+      response.statusCode = 404;
+      response.end();
+    }
+  });
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+  await mkdir(homeDirectory);
+  await mkdir(binding);
+  await writeFile(path.join(binding, "AGENTS.md"),
+    "<!-- trelio-agent-workspaces:start -->\n## Trelio\n<!-- trelio-agent-workspaces:end -->\n");
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await writeTestCredential(homeDirectory, origin, childEnvironment);
+  const open = (id, extra = []) => execFileAsync(process.execPath,
+    [bridgePath, "open", "--origin", origin, "--workspace", workspaceId, "--run", id, ...extra],
+    { cwd: binding, env: childEnvironment, encoding: "utf8", timeout: portableWorkspaceChildTimeoutMs });
+  const boundWorkspace = path.join(binding, "workspaces", workspaceId, "workspace");
+  assert.equal((await open(boundRunId)).stdout.trim(), boundWorkspace);
+  boundStatus = "accepted";
+
+  const legacyRoot = path.join(homeDirectory, "Trelio Workspaces", workspaceId);
+  const backup = path.join(legacyRoot, "workspace-archive", "preserved.md");
+  await mkdir(path.dirname(backup), { recursive: true });
+  await writeFile(backup, "retained legacy copy\n");
+  const metadataPath = path.join(legacyRoot, ".trelio-run.json");
+  const legacyWorkspace = path.join(legacyRoot, "workspace");
+  const metadata = JSON.stringify({
+    schemaVersion: 3, origin, workspaceId, runId: legacyRunId,
+    workspaceDirectory: legacyWorkspace, candidateHead: head, company: testCompany,
+  });
+  await writeFile(metadataPath, metadata, { mode: 0o600 });
+
+  const missingCheckout = (error) => {
+    const details = parseWorkspaceLayoutMigrationBlockedError(error.stderr, workspaceId)?.details;
+    assert.equal(details?.rootDirectory, legacyRoot);
+    assert.equal(details.automaticChangesPerformed, false);
+    assert.deepEqual(details.blockingEntries, [
+      { name: ".trelio-run.json", entryType: "file", reasonCode: "RUN_CHECKOUT_MISSING" },
+    ]);
+    return true;
+  };
+  await assert.rejects(open(targetRunId), missingCheckout);
+  assert.deepEqual(exactReads, ["running"]);
+  legacyStatus = "accepted";
+  await assert.rejects(open(legacyRunId), missingCheckout);
+  await assert.rejects(open(targetRunId, ["--dir", legacyRoot]), missingCheckout);
+  const draftPath = path.join(legacyWorkspace, "local-only.md");
+  await mkdir(legacyWorkspace);
+  await writeFile(draftPath, "unsaved legacy work\n");
+  await assert.rejects(open(targetRunId), missingCheckout, "an existing checkout without Git may contain edits");
+  assert.equal(await readFile(draftPath, "utf8"), "unsaved legacy work\n");
+  assert.deepEqual(claimed, [boundRunId], "every blocked open must stop before claim");
+  await rm(legacyWorkspace, { recursive: true });
+
+  assert.equal((await open(targetRunId)).stdout.trim(), boundWorkspace);
+  assert.deepEqual(exactReads, ["running", "accepted"]);
+  assert.deepEqual(claimed, [boundRunId, targetRunId]);
+  assert.equal(await readFile(metadataPath, "utf8"), metadata);
+  assert.equal(await readFile(backup, "utf8"), "retained legacy copy\n");
+  await assert.rejects(lstat(legacyWorkspace), { code: "ENOENT" });
+});
+
 test("future Runs reuse one persistent Workspace folder and sync accepted head before start", {
   timeout: 15 * portableWorkspaceChildTimeoutMs + 20_000,
 }, async () => {

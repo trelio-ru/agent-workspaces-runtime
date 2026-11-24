@@ -13834,26 +13834,82 @@ const ensureWorkingFolderWorkspacesDirectory = async (workingFolderRoot) => {
   return workspacesDirectory;
 };
 
-const assertValidMaterializedRoot = async (
+const matchesMaterializedRootIdentity = (
   rootDirectory,
   metadata,
   workspaceId,
   origin,
-) => {
-  if (
-    metadata.workspaceId !== workspaceId
-    || !UUID_PATTERN.test(String(metadata.runId || ""))
-    || normalizeOrigin(metadata.origin || DEFAULT_ORIGIN) !== origin
-    || !sameLocalPath(String(metadata.workspaceDirectory || ""), path.join(rootDirectory, "workspace"))
-  ) {
+) => (
+  metadata?.workspaceId === workspaceId
+  && UUID_PATTERN.test(String(metadata.runId || ""))
+  && normalizeOrigin(metadata.origin || DEFAULT_ORIGIN) === origin
+  && sameLocalPath(String(metadata.workspaceDirectory || ""), path.join(rootDirectory, "workspace"))
+);
+
+const assertValidMaterializedRoot = async (rootDirectory, metadata, workspaceId, origin) => {
+  if (!matchesMaterializedRootIdentity(rootDirectory, metadata, workspaceId, origin)) {
     throw new Error("Локальный каталог принадлежит другой или повреждённой папке в Трелио.");
   }
 
-  const gitDirectoryStat = await fs.stat(path.join(rootDirectory, "workspace", ".git"));
-
-  if (!gitDirectoryStat.isDirectory()) {
-    throw new Error("Каталог папки в Трелио повреждён: локальный Git-каталог отсутствует.");
+  const workspaceDirectory = path.join(rootDirectory, "workspace");
+  let gitDirectoryStat;
+  try {
+    const workspaceStat = await fs.lstat(workspaceDirectory);
+    if (!workspaceStat.isDirectory()) throw new Error("Локальная рабочая копия папки в Трелио не является обычным каталогом.");
+    gitDirectoryStat = await fs.lstat(path.join(workspaceDirectory, ".git"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    throw new WorkspaceLayoutMigrationBlockedError({
+      workspaceId,
+      rootDirectory,
+      blockingEntries: [{ name: ".trelio-run.json", entryType: "file", reasonCode: "RUN_CHECKOUT_MISSING" }],
+    });
   }
+  if (!gitDirectoryStat.isDirectory()) {
+    throw new Error("Каталог папки в Трелио повреждён: локальный Git-каталог небезопасен.");
+  }
+};
+
+const findBoundCheckoutForMissingLegacyWorkspace = async ({
+  legacyRoot, workspaceId, requestedRunId, origin, companyId, loadRunSnapshot,
+}) => {
+  const legacyWorkspace = path.join(legacyRoot, "workspace");
+  // A missing .git inside an existing checkout is ambiguous: user files can
+  // still be there. Only the absence of the whole workspace/ allows selection
+  // of a different checkout. Never remove or rewrite the old root, including
+  // backups and pinned context alongside its metadata.
+  if (await pathEntryExists(legacyWorkspace)) return null;
+  const legacyMetadata = await readAssistantWorkspaceRunMetadata(legacyRoot);
+  if (!matchesMaterializedRootIdentity(legacyRoot, legacyMetadata, workspaceId, origin)
+    || legacyMetadata.runId === requestedRunId
+    || (legacyMetadata.company?.id && legacyMetadata.company.id !== companyId)) return null;
+
+  const binding = await findTrelioWorkingFolderRoot();
+  if (!binding) return null;
+  const workspacesDirectory = path.join(binding, WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME);
+  const boundRoot = path.join(workspacesDirectory, workspaceId);
+  if (sameLocalPath(legacyRoot, boundRoot)) return null;
+  try {
+    // Inspect each prospective parent without following directory symlinks.
+    // An absent or unsafe target cannot turn this into a new checkout.
+    for (const directory of [binding, workspacesDirectory, boundRoot]) {
+      if (!(await fs.lstat(directory)).isDirectory()) return null;
+    }
+    const boundMetadata = await readAssistantWorkspaceRunMetadata(boundRoot);
+    if (!matchesMaterializedRootIdentity(boundRoot, boundMetadata, workspaceId, origin)
+      || (boundMetadata.company?.id && boundMetadata.company.id !== companyId)) return null;
+    await assertValidMaterializedRoot(boundRoot, boundMetadata, workspaceId, origin);
+  } catch (error) {
+    if (error.code === "ENOENT" || error instanceof WorkspaceLayoutMigrationBlockedError) return null;
+    throw error;
+  }
+
+  // The local Run record is only a locator. Native terminal state proves that
+  // selecting the existing bound checkout cannot interrupt a live or portable
+  // Run. The target still runs the ordinary Git, server state and claim checks.
+  const { run: legacyRun } = await loadRunSnapshot(legacyMetadata.runId) || {};
+  if (!TERMINAL_RUN_STATUSES.has(legacyRun?.status) || await pathEntryExists(legacyWorkspace)) return null;
+  return boundRoot;
 };
 
 const resolveRecordedMaterializedHead = (metadata) => [
@@ -14507,6 +14563,19 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
     return (await loadRunSnapshot(runId))?.run ?? null;
   };
 
+  let displacedLegacyRoot = null;
+  if (!retainedAssistantFinish && rootDirectoryExists && rootResolution.layout === "legacy-default"
+    && sameLocalPath(rootDirectory, path.join(LEGACY_DEFAULT_WORKSPACES_DIRECTORY, workspaceId))) {
+    const boundCheckout = await findBoundCheckoutForMissingLegacyWorkspace({
+      legacyRoot: rootDirectory, workspaceId, requestedRunId, origin,
+      companyId: runOverview?.company?.id, loadRunSnapshot,
+    });
+    if (boundCheckout) {
+      displacedLegacyRoot = rootDirectory;
+      rootDirectory = boundCheckout;
+    }
+  }
+
   const preflight = (directory, explicit = options.dir) => preflightWorkspaceDirectory({
     workspaceId,
     origin,
@@ -14575,6 +14644,10 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
       }
     }
     directoryPreflight ??= await preflight(rootDirectory);
+    if (displacedLegacyRoot && (!directoryPreflight.existingMetadata
+      || await pathEntryExists(path.join(displacedLegacyRoot, "workspace")))) {
+      throw new Error("Локальные копии папки изменились во время открытия; повторите выбор каталога.");
+    }
   } catch (error) {
     // The server has already prepared an independent Run. A known live Run
     // occupying the default checkout is not a content conflict and must not

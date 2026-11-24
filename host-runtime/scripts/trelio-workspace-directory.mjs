@@ -120,6 +120,7 @@ const MIGRATION_REASON_CODES = new Set([
   "LEGACY_RUN_ID_MISMATCH",
   "LEGACY_RUN_STATUS_UNKNOWN",
   "LEGACY_RUN_LOCAL_CHANGES",
+  "RUN_CHECKOUT_MISSING",
   "SYSTEM_METADATA_NOT_REGULAR_FILE",
   "SYSTEM_METADATA_TOO_LARGE",
 ]);
@@ -281,7 +282,9 @@ const LAYOUT_MIGRATION_MESSAGE = "Старая локальная структу
 // прежних Run и не даёт агенту права автоматически очищать каталог.
 export class WorkspaceLayoutMigrationBlockedError extends Error {
   constructor({ workspaceId, rootDirectory, blockingEntries }) {
-    super(LAYOUT_MIGRATION_MESSAGE);
+    super(blockingEntries.some((entry) => entry?.reasonCode === "RUN_CHECKOUT_MISSING")
+      ? "Служебный файл локального Run есть, но его рабочий каталог или .git отсутствует. Проверьте rootDirectory; bridge сохранил локальные файлы."
+      : LAYOUT_MIGRATION_MESSAGE);
     this.code = WORKSPACE_LAYOUT_MIGRATION_BLOCKED;
     const visibleEntries = blockingEntries
       .filter((entry) => (
