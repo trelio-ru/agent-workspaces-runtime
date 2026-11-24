@@ -691,7 +691,7 @@ test("Harness navigation resolves the requested folder and exact saved session t
   action = { kind: "start", folderId: codexLaunchFolderId(token, origin, folder(second.directory), "deepseek"),
     taskPath: "/fixture/general/tasks/23/" };
   assert.deepEqual((await (await next()).json()).action, { kind: "start", workspaceId: second.workspaceId,
-    prompt: "Trelio Agent Workspaces https://trelio.ru/fixture/general/tasks/23/ \n" });
+    prompt: "Trelio Agent Workspaces https://trelio.ru/fixture/general/tasks/23/\n\n\u2060" });
   canOpenFolder = false;
   assert.deepEqual(await (await next()).json(), { action: null }, "A stale registered folder cannot be opened");
   action = { kind: "resume", sessionId: `session-${sessionId}` };

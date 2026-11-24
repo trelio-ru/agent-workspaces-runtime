@@ -1120,11 +1120,11 @@ export const createDeepseekDesktopNavigation = ({
       if (local?.state !== "bound" || codexLaunchFolderId(token, origin, local, "deepseek") !== action.folderId) return reply(null);
       const taskUrl = new URL(action.taskPath, origin);
       if (taskUrl.origin !== origin) return reply(null);
-      // Match the browser launchers: leave a space before the final newline
-      // so the task URL has a separator even if the editor drops the newline.
-      // Harness already has the native plugin loaded here.
+      // Match the browser launchers. U+2060 keeps the editable paragraph
+      // visually empty if the composer normalizes trailing whitespace.
+      // The paragraph boundary keeps the character outside the canonical URL.
       return reply({ kind: "start", workspaceId: selected.workspaceId,
-        prompt: `Trelio Agent Workspaces ${taskUrl.href} \n` });
+        prompt: `Trelio Agent Workspaces ${taskUrl.href}\n\n\u2060` });
     } catch {
       return reply(null, 503);
     } finally {
