@@ -1705,7 +1705,7 @@ test("agent-guidance routing ranks skills and published procedures in one local 
   assert.doesNotMatch(JSON.stringify(result), /must-never-reach-guidance-search/u);
 });
 
-test("unified local search keeps compact guidance independent of material limits and intent", () => {
+test("unified local search keeps procedures, rule excerpts and skills independent of material limits", () => {
   const snapshot = structuredClone(mirror);
   const companyProcedure = structuredClone(snapshot.agentProcedures[0]);
   companyProcedure.project = null;
@@ -1715,13 +1715,30 @@ test("unified local search keeps compact guidance independent of material limits
     ...snapshot.agentSkills.company[0], id: `calendar-${index}`,
   })));
   snapshot.agentSkills.projects = [{ projectId: snapshot.projects[0].id, skills: snapshot.agentSkills.company }];
+  snapshot.agentSearchRules = [
+    { type: "company", companySlug: "acme", revisionId: "current", markdown: "Use a fencing token." },
+    { type: "personal-skill", companySlug: "acme", revisionId: "own", skillId: "calendar-1",
+      skillTitle: "Calendar", markdown: "Review the fencing token before execution." },
+    { type: "project", companySlug: "acme", revisionId: "foreign-project", projectSlug: "other",
+      markdown: "A fencing token is required." },
+  ];
   const input = { queries: ["fencing token"], companySlugs: ["acme"], intent: "согласование отпуска", limit: 1 };
   const result = handleNativeLocalContextRead(snapshot, "search", input);
   assert.deepEqual(result.results, searchCompanyContextMirror(snapshot, input.queries, 1).results);
-  assert.equal(result.guidance.items.length, 3);
-  assert.equal(result.guidance.hasMore, true);
+  assert.equal(result.guidance.items.length, 1);
+  assert.equal(result.guidance.hasMore, false);
+  assert.equal(result.skills.items.length, 2);
+  assert.equal(result.skills.hasMore, true);
+  assert.equal(result.guidance.rules.items.length, 3);
+  const own = result.guidance.rules.items.find((item) => item.type === "personal-skill");
+  assert.equal(own.skillTitle, "Calendar");
+  assert.deepEqual(own.read.arguments, { companySlug: "acme", skillId: "calendar-1", sections: ["instructions"] });
+  assert.equal("markdown" in own, false);
+  assert.deepEqual(handleNativeLocalContextRead({ ...snapshot, agentSearchRules: undefined }, "search", input).guidance.rules,
+    { status: "unavailable" });
   assert.doesNotMatch(JSON.stringify(result.guidance), /instructionsMarkdown|Проверь календарь|must-never-reach|config|secretBindings/);
   const expanded = handleNativeLocalContextRead(snapshot, "search", { ...input, projectSlug: "mobile", guidanceLimit: 5 });
+  assert.equal(expanded.guidance.rules.items.some((item) => item.projectSlug === "other"), false);
   const inherited = expanded.guidance.items.find((item) => item.read.arguments.procedureId === companyProcedure.procedure.id);
   assert.deepEqual(inherited.read.arguments, { companySlug: "acme", procedureId: companyProcedure.procedure.id });
   assert.equal(handleNativeLocalContextRead(snapshot, inherited.read.tool, inherited.read.arguments).project, null);

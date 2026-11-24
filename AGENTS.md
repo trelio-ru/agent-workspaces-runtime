@@ -1198,7 +1198,7 @@ publication tooling также остаются вне этого публичн
   real helper with one empty-slot read in their isolated HOME before timing
   lookup or private-session seed. Cold compilation remains covered by the
   separate migration/rebuild fixture; never relax production deadlines.
-- `search` возвращает компактный `guidance` перед материалами; matching и
+- `search` возвращает материалы по категориям, `guidance` для правил/процедур и отдельный `skills`; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.
   Проверяй `--check`, scope parity и раздельные limits. Legacy guidance tool

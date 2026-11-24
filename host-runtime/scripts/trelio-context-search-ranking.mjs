@@ -1,5 +1,5 @@
 // Generated portable context-search ranking. Do not edit by hand.
-import { compileContextSearchQuery, normalizeContextSearchReference, normalizeContextSearchText } from "./trelio-context-search-matching.mjs";
+import { buildContextSearchPreview, compileContextSearchQuery, matchContextSearchField, normalizeContextSearchQueries, normalizeContextSearchReference, normalizeContextSearchText, } from "./trelio-context-search-matching.mjs";
 export { normalizeContextSearchText } from "./trelio-context-search-matching.mjs";
 // This module deliberately has no MCP or domain-service dependencies: task,
 // contact and registry retrieval can select evidence with the same policy that
@@ -207,3 +207,106 @@ export const compareContextSearchCandidates = (left, right) => compareContextSea
 export const rankContextSearchCandidates = (candidates, toCandidate) => candidates.map((candidate) => ({ candidate, rank: buildContextSearchRank(toCandidate(candidate)) }))
     .sort((left, right) => compareContextSearchRanks(left.rank, right.rank))
     .map(({ candidate }) => candidate);
+export const CONTEXT_SEARCH_MATERIAL_LIMIT = 10;
+export const CONTEXT_SEARCH_CATEGORY_LIMITS = {
+    task: 4,
+    workspace: 2,
+    "workspace-file": 3,
+    meeting: 2,
+    "knowledge-page": 2,
+    registry: 2,
+    "regular-work": 2,
+    contact: 2,
+    project: 2,
+};
+const contextSearchCategory = (type) => ({
+    workspace_file: "workspace-file", "workspace-artifact": "workspace-file",
+    workspace_artifact: "workspace-file", knowledge_page: "knowledge-page", regular_work: "regular-work",
+}[type] ?? type);
+export const getCategorizedContextSearchLimit = (limit) => {
+    const requested = typeof limit === "number" && Number.isFinite(limit) ? Math.trunc(limit) : CONTEXT_SEARCH_MATERIAL_LIMIT;
+    return Math.min(CONTEXT_SEARCH_MATERIAL_LIMIT, Math.max(1, requested));
+};
+/** Allocate category seats before cutting the global list. Keep the existing
+ * candidate order and reuse its scores for both passes. Unknown categories
+ * (currently safe Secret metadata) may compete for unreserved places. */
+export const selectCategorizedContextSearchResults = (candidates, toCandidate, limit) => {
+    const ranked = candidates.map((value) => {
+        const candidate = toCandidate(value);
+        return { value, candidate, category: contextSearchCategory(candidate.type), rank: buildContextSearchRank(candidate) };
+    }).sort((left, right) => compareContextSearchRanks(left.rank, right.rank));
+    const knownLimits = CONTEXT_SEARCH_CATEGORY_LIMITS;
+    const selected = new Set();
+    const counts = new Map();
+    const queries = new Map();
+    const reserve = (entry) => {
+        selected.add(entry);
+        counts.set(entry.category, (counts.get(entry.category) ?? 0) + 1);
+    };
+    for (const entry of ranked) {
+        if (selected.size >= limit)
+            break;
+        if (!Object.hasOwn(knownLimits, entry.category) || counts.has(entry.category))
+            continue;
+        const strong = entry.rank.exactReferenceMatches > 0 || entry.candidate.matches.some((match) => {
+            let query = queries.get(match.query);
+            if (!query) {
+                query = compileContextSearchQuery(match.query);
+                queries.set(match.query, query);
+            }
+            // Work with the evidence from one matched field or file chunk. Neither
+            // decoration on the result title nor words spread across hits count.
+            if (query.reference)
+                return false;
+            if (entry.candidate.fileName && matchContextSearchField(entry.candidate.fileName, query))
+                return true;
+            return (PRIMARY_FIELD_SOURCES.has(match.source) || query.patterns.length > 1)
+                && match.previewText.split(" … ").some((fragment) => matchContextSearchField(fragment, query));
+        });
+        if (strong)
+            reserve(entry);
+    }
+    for (const entry of ranked) {
+        if (selected.size >= limit)
+            break;
+        const cap = Object.hasOwn(knownLimits, entry.category) ? knownLimits[entry.category] : limit;
+        if (!selected.has(entry) && (counts.get(entry.category) ?? 0) < cap)
+            reserve(entry);
+    }
+    // Keep exact references and relevance in the displayed order. Indexes group
+    // the flat, fetchable results for consumers without repeating the text.
+    const results = ranked.filter((entry) => selected.has(entry));
+    const resultCategories = Object.create(null);
+    for (const [index, entry] of results.entries()) {
+        (resultCategories[entry.category] ??= []).push(index);
+    }
+    return { ranked: ranked.map((entry) => entry.value), selected: results.map((entry) => entry.value), resultCategories };
+};
+export const searchAgentRuleDocuments = (documents, rawQueries) => {
+    const queries = normalizeContextSearchQueries(rawQueries);
+    const candidates = documents.flatMap(({ markdown, ...document }) => {
+        const matches = queries.filter((query) => matchContextSearchField(markdown, query)).map((query) => ({
+            query: query.original, source: "agent-rule", previewText: markdown,
+        }));
+        return matches.length > 0 ? [{ document, matches }] : [];
+    });
+    const ranked = rankContextSearchCandidates(candidates, ({ document, matches }) => ({
+        type: "agent-rule", title: "", stableKey: `${document.companySlug}/${document.type}/${document.revisionId}`, matches,
+    }));
+    const limit = 3;
+    return {
+        items: ranked.slice(0, limit).map(({ document, matches }) => ({
+            ...document,
+            preview: buildContextSearchPreview(matches[0].previewText, matches.map((match) => match.query), 240),
+            matchedQueries: matches.map((match) => match.query),
+            read: {
+                tool: document.type === "personal-skill" ? "get_agent_skill" : "get_agent_instructions",
+                arguments: { companySlug: document.companySlug,
+                    ...(document.projectSlug ? { projectSlug: document.projectSlug } : {}),
+                    ...(document.skillId ? { skillId: document.skillId, sections: ["instructions"] } : {}),
+                },
+            },
+        })),
+        hasMore: ranked.length > limit,
+    };
+};

@@ -21,7 +21,10 @@ import { parseBridgeHttpDiagnostic, runtimeAdmissionRecovery, bridgeHttpDiagnost
 import { secretBrowserPreflightTimeoutMessage } from "./trelio-secret-browser-native.mjs";
 import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { ACCOUNT_SELECTION_FAILURES, ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "./trelio-skill-accounts.mjs";
-import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
+import {
+  compactCategorizedSearchGuidance, getCategorizedGuidanceLimit, guidanceSearchInput,
+  rankAgentSkillSearchDocuments, rankCategorizedAgentGuidance,
+} from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { LOCAL_PROPOSAL_FILES, prepareLocalProposalFiles, bindLocalProposalFilePreviews } from "./trelio-proposal-local-files.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator, workspaceFileLocatorFromResultId } from "./trelio-workspace-files.mjs";
@@ -118,8 +121,11 @@ import {
 import {
   CONTEXT_SEARCH_RANKING_POLICY_VERSION,
   calculateLexicalQuality,
+  getCategorizedContextSearchLimit,
   rankContextSearchCandidates,
   normalizeContextSearchText,
+  searchAgentRuleDocuments,
+  selectCategorizedContextSearchResults,
 } from "./trelio-context-search-ranking.mjs";
 import {
   buildLocalAttachmentFileResult,
@@ -3731,7 +3737,8 @@ const fetchManifest = async ({ origin, token, companySlug, signal, projection })
   const manifest = await readJson(await request(origin, token,
     `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest${suffix}`, {
       signal, ...(negotiated ? { headers: { "x-trelio-context-projection": projection } }
-        : projection === "task_inventory" ? { headers: { "x-trelio-task-inventory-version": "2" } } : {}),
+        : projection === "task_inventory" ? { headers: { "x-trelio-task-inventory-version": "2" } }
+        : !projection ? { headers: { "x-trelio-search-rules-version": "1" } } : {}),
     }));
   const expected = projection === "tasks_fence" ? "tasks" : projection;
   // Pre-projection servers ignore the known query; current legacy servers
@@ -3749,7 +3756,7 @@ const fetchManifest = async ({ origin, token, companySlug, signal, projection })
 export const readFullCompanyContextGeneration = async ({ origin, token, companySlug, signal }) => {
   const value = await readJson(await request(origin, token,
     `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/manifest`, {
-      signal, headers: { "x-trelio-context-check": "generation-v1" },
+      signal, headers: { "x-trelio-context-check": "generation-v1", "x-trelio-search-rules-version": "1" },
     }));
   const compact = value?.kind === "company_context_generation";
   if (typeof value?.generation !== "string" || !MIRROR_GENERATION_PATTERN.test(value.generation)
@@ -4288,6 +4295,7 @@ const buildMirror = async ({
     // Only exact published revisions are present in the server manifest.
     // Drafts and discussion never enter the searchable local authority store.
     agentProcedures: manifest.agentProcedures ?? [],
+    ...(Array.isArray(manifest.agentSearchRules) ? { agentSearchRules: manifest.agentSearchRules } : {}),
     tasks,
     workspaces,
   };
@@ -4996,7 +5004,7 @@ const assertSearchFormulationCount = (queries, maximumQueries = MAX_CONTEXT_SEAR
 export const searchCompanyContextMirror = (
   mirror,
   rawQueries,
-  rawLimit = DEFAULT_CONTEXT_SEARCH_RESULTS,
+  rawLimit,
   {
     maximumQueries = MAX_CONTEXT_SEARCH_FORMULATIONS,
     maximumResults = MAX_SEARCH_RESULTS,
@@ -5005,6 +5013,7 @@ export const searchCompanyContextMirror = (
     includeScopeMetadata = false,
     includeMatchDetails = false,
     includeArchivedMeetings = false,
+    categorized = false,
   } = {},
 ) => {
   assertSearchFormulationCount(rawQueries, maximumQueries);
@@ -5017,7 +5026,7 @@ export const searchCompanyContextMirror = (
       "At least one local context search query is required.",
     );
   }
-  const limit = Math.max(1, Math.min(
+  const limit = categorized ? getCategorizedContextSearchLimit(rawLimit) : Math.max(1, Math.min(
     maximumResults,
     Math.trunc(Number(rawLimit) || DEFAULT_CONTEXT_SEARCH_RESULTS),
   ));
@@ -5053,17 +5062,23 @@ export const searchCompanyContextMirror = (
       title: document.title,
       stableKey: document.stableKey,
       referenceValues: document.referenceValues,
+      ...(document.type === "workspace_file" && document.metadata?.path ? {
+        fileName: document.metadata.path.split("/").at(-1),
+      } : {}),
       matches,
       matchedQueries: matches.map((match) => match.query),
       ...document.metadata,
     });
   }
 
-  const rankedResults = rankContextSearchCandidates(results, (result) => result);
-  const hasMore = rankedResults.length > limit;
-  const returnedResults = rankedResults.slice(0, limit).map(({
+  const selection = categorized ? selectCategorizedContextSearchResults(results, (result) => result, limit) : null;
+  const rankedResults = selection?.ranked ?? rankContextSearchCandidates(results, (result) => result);
+  const selected = selection?.selected ?? rankedResults.slice(0, limit);
+  const hasMore = rankedResults.length > selected.length;
+  const returnedResults = selected.map(({
     stableKey: _stableKey,
     referenceValues: _referenceValues,
+    fileName: _fileName,
     matches: _matches,
     ...result
   }) => {
@@ -5091,6 +5106,7 @@ export const searchCompanyContextMirror = (
     generation: mirror.generation,
     queries: queries.map(([, original]) => original),
     results: returnedResults,
+    ...(selection ? { resultCategories: selection.resultCategories } : {}),
     hasMore,
     pagination: { limit, total: rankedResults.length, returned: returnedResults.length, hasMore },
     freshness: { mirroredAt: mirror.createdAt, serverGeneration: mirror.serverGeneration },
@@ -6341,7 +6357,7 @@ const resolveLocalAgentSkillScope = (mirror, rawProjectSlug) => {
   return { project, skills: scope?.skills ?? [] };
 };
 
-const searchAgentGuidanceFromMirror = (mirror, rawInput) => {
+const searchAgentGuidanceFromMirror = (mirror, rawInput, categorizedLimit) => {
   const query = normalizeBoundedString(rawInput?.query, "query", 500);
   const hints = Array.isArray(rawInput?.hints)
     ? rawInput.hints.slice(0, 12).map((hint) => normalizeBoundedString(hint, "hint", 120))
@@ -6360,9 +6376,11 @@ const searchAgentGuidanceFromMirror = (mirror, rawInput) => {
       kind: "procedure", source: procedure,
     })),
   ];
-  const ranked = rankAgentSkillSearchDocuments(documents, { query, hints, limit,
-    exactSlugs: Array.isArray(rawInput?.exactSlugs) ? rawInput.exactSlugs : [],
-  });
+  const rankingInput = { query, hints, limit,
+    exactSlugs: Array.isArray(rawInput?.exactSlugs) ? rawInput.exactSlugs : [] };
+  const ranked = categorizedLimit === undefined
+    ? rankAgentSkillSearchDocuments(documents, rankingInput)
+    : rankCategorizedAgentGuidance(documents, { ...rankingInput, categorizedLimit });
 
   return {
     company: buildLocalCompanySummary(mirror.company),
@@ -6438,6 +6456,7 @@ const getAgentProcedureFromMirror = (mirror, rawInput) => {
 // Cross-company discovery must not pick a business scope implicitly; keep the
 // guidance result visibly unresolved while preserving independent materials.
 const searchUnifiedGuidanceFromMirror = (mirror, rawInput) => {
+  const both = (status) => ({ guidance: status, skills: status });
   // Continuations may arrive without native Zod validation. Reject malformed
   // new fields before reading catalog data instead of silently widening scope.
   const input = {
@@ -6453,21 +6472,29 @@ const searchUnifiedGuidanceFromMirror = (mirror, rawInput) => {
   if (input.projectSlug && companies.length !== 1) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "projectSlug requires exactly one companySlugs entry.");
   }
-  if (companies.length !== 1) return { status: "requires_scope" };
+  if (companies.length !== 1) return both({ status: "requires_scope" });
   if (companies[0] !== mirror.company.slug) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND", "Company does not match the selected mirror.");
   }
-  if (!mirror.agentSkills) return { status: "unavailable", code: "MCP_INSUFFICIENT_SCOPE", requiredScope: "mcp:workspaces:read" };
+  if (!mirror.agentSkills) return both({ status: "unavailable", code: "MCP_INSUFFICIENT_SCOPE", requiredScope: "mcp:workspaces:read" });
   if (Array.isArray(mirror.company.enabledModules) && !mirror.company.enabledModules.includes("agent-workspaces")) {
-    return { status: "unavailable", code: "AGENT_WORKSPACES_MODULE_DISABLED" };
+    return both({ status: "unavailable", code: "AGENT_WORKSPACES_MODULE_DISABLED" });
   }
   if (input.projectSlug && !(mirror.projects ?? []).some((project) => project.slug === input.projectSlug)) {
-    return { status: "unavailable", code: "GUIDANCE_SCOPE_UNAVAILABLE" };
+    return both({ status: "unavailable", code: "GUIDANCE_SCOPE_UNAVAILABLE" });
   }
-  const search = searchAgentGuidanceFromMirror(mirror, { ...input, ...guidanceSearchInput(input) });
-  return compactSearchGuidance(search.guidance, {
+  const search = searchAgentGuidanceFromMirror(mirror, { ...input, ...guidanceSearchInput(input) },
+    getCategorizedGuidanceLimit(input.guidanceLimit));
+  // Legacy backends can return a manifest without the opted-in projection.
+  // Keep usable material/skill results, but distinguish unavailable rules from
+  // a searched empty list. Never attempt to derive ACL from sidebar projects.
+  const rules = Array.isArray(mirror.agentSearchRules) ? { status: "searched",
+    ...searchAgentRuleDocuments(mirror.agentSearchRules.filter((rule) => rule.type !== "project"
+      || !input.projectSlug || rule.projectSlug === input.projectSlug), input.queries),
+  } : { status: "unavailable" };
+  return compactCategorizedSearchGuidance(search.guidance, {
     companySlug: mirror.company.slug, projectSlug: search.project?.slug,
-  }, input.guidanceLimit);
+  }, rules, input.guidanceLimit);
 };
 
 // A task-derived project title is not project-wide inventory permission.
@@ -7134,11 +7161,11 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
     return {effectiveInstructions:buildLocalScopedEffectiveInstructions(mirror,metadata.project),...metadata};
   }
   if (nativeTool === "search") {
-    // Validate/normalize the existing query contract before matching guidance.
-    // This also preserves the same material output for legacy query arguments.
-    const context = searchCompanyContextMirror(mirror, input.queries, input.limit);
+    // Validate and normalize formulations once for both material and guidance
+    // discovery. Only unified search spends the category quotas.
+    const context = searchCompanyContextMirror(mirror, input.queries, input.limit, { categorized: true });
     return {
-      guidance: searchUnifiedGuidanceFromMirror(mirror, { ...input, queries: context.queries }),
+      ...searchUnifiedGuidanceFromMirror(mirror, { ...input, queries: context.queries }),
       ...context,
     };
   }

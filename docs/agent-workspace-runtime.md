@@ -150,6 +150,15 @@ exact Run read-back. Ограничение signed runtime не меняет cli
 
 ### Подготовка поиска в обычном чате
 
+Общий MCP `search` использует те же квоты материалов, что native backend.
+`guidance` содержит scoped rule previews и опубликованные процедуры, `skills` –
+доступные навыки. Текст правил поиска поступает как field-bound markers только
+на full manifest с `x-trelio-search-rules-version: 1`. Обе проверки generation
+используют этот же header. Legacy ответ без rule corpus даёт typed unavailable
+в `guidance.rules`. Matching и фрагменты остаются в доверенном процессе; правило
+для применения читается отдельно. Публикация снимка, синхронизация, matching и
+fresh generation fence используют прежний deadline и admission.
+
 Human `context/native_read` для `search`, `search_agent_workspace_files`,
 `search_agent_secrets`, `search_agent_guidance` использует
 тот же полный encrypted mirror, matching/ranking и atomic publication. Sync и

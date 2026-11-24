@@ -4,6 +4,7 @@ import { sliceUtf16CodePoints } from "./trelio-context-search-matching.mjs";
  * Keep this module free of DB, transport and company-content dependencies. */
 export const DEFAULT_GUIDANCE_RESULTS = 3;
 export const MAX_GUIDANCE_RESULTS = 5;
+export const getCategorizedGuidanceLimit = (limit) => Math.min(2, limit ?? 2);
 export const guidanceSearchInput = (input) => ({
     query: sliceUtf16CodePoints(input.intent ?? input.queries.join(" "), 0, 500),
     // Keep original intent for lexical discovery. A query that is exactly a
@@ -43,6 +44,20 @@ export const compactSearchGuidance = (candidates, scope, rawLimit) => {
             },
         })),
         hasMore: candidates.length > limit,
+    };
+};
+/** A result from one catalog must not consume a slot of the other catalog.
+ * Keep the shared compact exact-read projection and its per-kind truncation. */
+export const compactCategorizedSearchGuidance = (candidates, scope, rules, rawLimit) => {
+    const limit = getCategorizedGuidanceLimit(rawLimit);
+    const guidance = compactSearchGuidance(candidates.filter((item) => item.kind === "procedure"), scope, limit);
+    const skills = compactSearchGuidance(candidates.filter((item) => item.kind === "skill"), scope, limit);
+    return {
+        guidance: { ...guidance, rules },
+        skills: !skills.items.length && !skills.hasMore && !guidance.items.length ? { ...skills,
+            installationDiscovery: { tool: "search_agent_skill_catalog", arguments: { companySlug: scope.companySlug },
+                instruction: "Search with public-safe capability wording. Review and approve an exact plan before installing a skill or notifying administrators." },
+        } : skills,
     };
 };
 const AGENT_SKILL_SEARCH_STOP_WORDS = new Set([
@@ -182,4 +197,13 @@ export const rankAgentSkillSearchDocuments = (documents, input) => {
         || left.skill.title.localeCompare(right.skill.title, "ru")
         || left.skill.id.localeCompare(right.skill.id, "en")))
         .slice(0, limit);
+};
+export const rankCategorizedAgentGuidance = (documents, input) => {
+    // Rank each universe once, preserving the existing relevance and provider
+    // tie-breaks, and keep one sentinel per kind for honest hasMore metadata.
+    const limit = input.categorizedLimit + 1;
+    return [
+        ...rankAgentSkillSearchDocuments(documents.filter((item) => item.kind === "procedure"), { ...input, limit }),
+        ...rankAgentSkillSearchDocuments(documents.filter((item) => item.kind === "skill"), { ...input, limit }),
+    ];
 };

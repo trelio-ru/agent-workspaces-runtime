@@ -83,7 +83,7 @@ test("unified search reads cutover bundles without browser projections and keeps
       companySlugs: ["synthetic"], projectSlug: "project", intent: "согласование отпуска", queries: ["договор"],
     });
     assert.equal(result.guidance.status, "searched");
-    assert.equal(result.guidance.items[0].read.arguments.skillId, skill.id);
+    assert.equal(result.skills.items[0].read.arguments.skillId, skill.id);
     assert.ok(result.results.length > 0);
     await assert.rejects(readAcceptedWorkspaceBlob({ workspaceDirectory: repository, blobId: "HEAD:large.md" },
       () => assert.fail("A decrypted filename must never be accepted as the Git selector")), /WORKSPACE_FILE_INVALID_LOCATOR/u);
