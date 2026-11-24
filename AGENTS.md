@@ -2095,7 +2095,11 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   selection, observed proof and two-tool `source_intake` view. Freeze original UUID
   batches before native begin; selected-scope refs must come from the actual signed
   journal before body access. Complete-inventory local queue preference grants no
-  company authority. Native `routed` receipts install only original batch routes;
+  company authority. Telegram triage can display the current original's matched
+  sender name/username as context (including the forwarder). Ambiguous routing
+  pages that exact Telegram chat in the existing context read until resolved or
+  at the beginning; every history page preserves source/lease scope and grants no ACK.
+  Native `routed` receipts install only original batch routes;
   presentation-only `intakeKind:'route_existing'` never grants read/ACK/binding.
   Conversation binding is nonexclusive correlation; every inbound batch is
   partitioned by original UUID across tasks before delivery. Permanent task

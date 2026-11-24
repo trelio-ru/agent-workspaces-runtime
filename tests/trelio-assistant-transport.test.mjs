@@ -938,6 +938,27 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       assert.equal(context.structuredContent.effectiveInstructions.scope.project.id,projectId);
       assert.match(context.structuredContent.effectiveInstructions.layers[0].markdown,/SELECTED_PROJECT.*RICH_BODY_CANARY/);
       assert.equal(context.structuredContent.creationAuthority,undefined,'SAME selected bundle hydrator exposes authority once, without general payload resolve');
+      // History uses the signed source runtime after native E2EE admission;
+      // unlike the candidate read it carries no creation/rule documents. It
+      // must still match this specific recipient, source, batch and project.
+      const locator={companyId,sourceId:intake.sourceId,intakeId:intake.passId},historyRequest={...input,
+        name:'get_assistant_intake_context',args:{intakePass:locator,history:{}}};
+      const historyRead={schemaVersion:1,kind:'conversation_history',...locator,projectId,sourceRevision:intake.sourceRevision,
+        localAccountId:randomUUID(),skillId:'telegram-mtproto',threadId:intake.threadId,eventId:intake.eventId,eventIds:intake.eventIds};
+      const historyValue={schemaVersion:1,kind:'route_existing',companyId,projectId,sourceRead:historyRead};
+      const historyResult=(context,recipient=cryptoDeviceId)=>({content:[],structuredContent:{managedEncryptedContent:{
+        schemaVersion:1,companyId,recipientDeviceId:recipient,envelopeId:envelope.id,scopeId,scopeEpoch:1,context,encryptedPayloads:[]}}});
+      const admitted=await withAssistantManagedContentArguments(historyRequest,async wire=>{
+        assert.deepEqual(wire.history,{});return historyResult(historyValue);
+      });
+      assert.deepEqual(admitted.structuredContent,historyValue);
+      await assert.rejects(withAssistantManagedContentArguments(historyRequest,async()=>({content:[],structuredContent:historyValue})),/INVALID_RESPONSE/);
+      const extra=historyResult(historyValue);extra.structuredContent.managedEncryptedContent.encryptedPayloads=[richPayload];
+      await assert.rejects(withAssistantManagedContentArguments(historyRequest,async()=>extra),/INVALID_RESPONSE/);
+      await assert.rejects(withAssistantManagedContentArguments(historyRequest,async()=>historyResult(historyValue,randomUUID())),/INVALID_RESPONSE/);
+      await assert.rejects(withAssistantManagedContentArguments(historyRequest,async()=>historyResult({...historyValue,
+        sourceRead:{...historyRead,eventIds:[randomUUID()]}})),/INTAKE_CHANGED/);
+      await assert.rejects(withAssistantManagedContentArguments(historyRequest,async()=>historyResult({...historyValue,projectId:randomUUID()})),/INTAKE_CHANGED/);
       const beforeTriage=preparations;
       await assert.rejects(withAssistantManagedContentArguments({...input,name:'resolve_assistant_intake',args:{decision:'create_task',clientRequestId:intake.passId,fields:{title:'UNAUTHORIZED_TRIAGE_TITLE'}}},()=>assert.fail('triage cannot stage a new task')),/CAPABILITY_UNAVAILABLE/);
       assert.equal(preparations,beforeTriage,'owner creation fields cannot reach staging under a triage role');

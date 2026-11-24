@@ -9801,6 +9801,8 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
   assert.throws(() => buildAgentSkillRuntimeEnvironment({ artifact: resolution.artifact,
     runtimeDirectory: "/verified/runtime", executionContext,
     grantedEnvironment: { TRELIO_EXECUTION_SESSION_MODULE_URL: "file:///forged.mjs" } }), /runtime env binding/);
+  assert.throws(()=>buildAgentSkillRuntimeEnvironment({artifact:resolution.artifact,runtimeDirectory:'/verified/runtime',executionContext,
+    grantedEnvironment:{TRELIO_ASSISTANT_SOURCE_HISTORY:'1'}}), /runtime env binding/);
   // Native-supervised adapters receive diagnostics without an invented lease.
   resolution.artifact.parsedPackage = { capabilities: ["browser"] };
   const nativeEnvironment = buildAgentSkillRuntimeEnvironment({ artifact: resolution.artifact,

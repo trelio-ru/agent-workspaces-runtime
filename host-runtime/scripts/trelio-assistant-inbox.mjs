@@ -1760,6 +1760,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const originals=all('SELECT original_event_id,event_key,native_event_id,native_revision,ordinal FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',row.id);
       return {...row,eventIds:originals.map(event=>event.original_event_id),originals,scope:scopeInputWithoutKey(JSON.parse(row.scope_json))};
     },
+    intakeModelReadComplete(intakeId){
+      // Provider reads and native confirmation may precede an oversized/failed
+      // MCP delivery. A history page requires the complete original model witness.
+      const row=get(`SELECT count(*) total, count(CASE WHEN e.model_read_intake_id=b.intake_id THEN 1 END) delivered
+        FROM assistant_source_intake_events b LEFT JOIN assistant_inbox_events e ON e.event_key=b.event_key
+        WHERE b.intake_id=?`,uuid(intakeId));
+      return row.total>0&&row.total===row.delivered;
+    },
     emailUnsubscribeReference(intakeId,eventId){
       const row=this.ownerIntake(intakeId);eventId=uuid(eventId);
       if(row.kind!=='route_existing'||row.scope.provider!=='email'||row.source_state!=='active'

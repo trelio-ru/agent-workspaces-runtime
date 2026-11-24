@@ -11,7 +11,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, assistantUsesCompanyRead, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,assistantMcpCallProfile,completeAssistantSourceIntakeDelivery,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, assistantUsesCompanyRead, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,assistantMcpCallProfile,completeAssistantSourceIntakeDelivery,assistantSourceIntakeEnvelope,assertAssistantTelegramHistoryDescriptor,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies,assistantCompanyContextReadRefusalCode,assistantSecretListMetadataArguments,normalizeAssistantPrivateBrowserArguments,isAssistantBrowserPlanInputError } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
@@ -1151,14 +1151,17 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
         ||descriptor.sourceId!==pass.sourceId||descriptor.sourceRevision!==pass.sourceRevision||descriptor.threadId!==pass.threadId
         ||descriptor.companyId!==pass.companyId||args.intakePass?.intakeId!==pass.passId)
         throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
-      const routing=pass.intakeKind==='route_existing';
-      if(routing&&(descriptor.kind!=='route_existing'||JSON.stringify(descriptor.eventIds)!==JSON.stringify(pass.eventIds)))
+      const routing=pass.intakeKind==='route_existing',history=Object.hasOwn(args,'history');
+      if(history)assertAssistantTelegramHistoryDescriptor(result.structuredContent,pass);
+      if(!history&&routing&&(descriptor.kind!=='route_existing'||JSON.stringify(descriptor.eventIds)!==JSON.stringify(pass.eventIds)))
         throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
       const opened=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
       let references;
       try{
         const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
-        const row=createAssistantInbox({database:opened.database}).ownerIntake(pass.passId);
+        const inbox=createAssistantInbox({database:opened.database});
+        const row=inbox.ownerIntake(pass.passId);
+        if(history&&(row.scope.provider!=='telegram'||!inbox.intakeModelReadComplete(row.id)))fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
         if(row.original_event_id!==pass.eventId||row.scope.bindingId!==pass.sourceId||row.scope.accountId!==descriptor.localAccountId
           ||row.source_revision!==pass.sourceRevision||row.thread_id!==pass.threadId||!['started','uncertain'].includes(row.state))
           throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
@@ -1168,6 +1171,46 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
           :[{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key}];
       }finally{await opened.close();}
       const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(row=>row.id===pass.sourceId);
+      if(history){
+        if(source?.skillId!=='telegram-mtproto'||source.projectId!==descriptor.projectId
+          ||source.localAccountId!==descriptor.localAccountId)fail('ASSISTANT_INTAKE_CHANGED');
+        const reference=references[0],cursor=args.history.cursor??null;
+        const live=await sourceClient.readSourceIntake(args.intakePass,signal),leaseExpiresAt=live.leaseExpiresAt;
+        const slot={origin:identity.origin,kind:'runtime',id:pass.passId};
+        const lock=path.join(directory,'runtime-locks',pass.passId+'.json');
+        // Each MCP call can start a new worker. Keep only two positions in the
+        // existing protected pass slot. The previous input remains readable if
+        // delivery of its reply was interrupted; no messages or pages are stored.
+        const loadPosition=async()=>{
+          const record=await store.get(slot);
+          if(!record?.state||record.ended||record.passId!==pass.passId||record.threadId!==pass.threadId
+            ||!new RegExp(UUID,'iu').test(record.state.runtimeSessionId??'')||!Number.isFinite(Date.parse(record.state.expiresAt))||Date.parse(record.state.expiresAt)<=Date.now())fail('ASSISTANT_INTAKE_CHANGED');
+          const binding=createHash('sha256').update(JSON.stringify([identity.origin,identity.assistantId,identity.deviceId,
+            pass.companyId,source.projectId,pass.passId,pass.threadId,pass.deliveryId,pass.eventIds,pass.sourceId,
+            pass.sourceRevision,source.localAccountId,reference.id,reference.revision,reference.conversationKey,
+            record.state.runtimeSessionId,leaseExpiresAt])).digest('hex');
+          const saved=record.telegramHistory?.binding===binding?record.telegramHistory:null;
+          const position=cursor===null?{cursor:null,beforeId:null}:[saved?.input,saved?.next].find(p=>p?.cursor===cursor);
+          if(!position)fail('ASSISTANT_INTAKE_CHANGED');
+          return {record,binding,saved,position};
+        };
+        const initial=await withRuntimeStateLock(lock,loadPosition);
+        return readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal,sourcePackage,
+          historyPage:{beforeId:initial.position.beforeId,leaseExpiresAt,deliver:({messages,nextBeforeId})=>withRuntimeStateLock(lock,async()=>{
+            const {record,binding,saved,position}=await loadPosition();
+            if(binding!==initial.binding||position.beforeId!==initial.position.beforeId)fail('ASSISTANT_INTAKE_CHANGED');
+            // A duplicate of the same read may return the same continuation.
+            // A slower first/previous page cannot invalidate a newer position
+            // another worker already returned while this provider was running.
+            if(!isDeepStrictEqual(saved,initial.saved)&&!(saved?.input.cursor===cursor&&(saved.next?.beforeId??null)===nextBeforeId))
+              fail('ASSISTANT_INTAKE_CHANGED');
+            const next=nextBeforeId===null?null:{beforeId:nextBeforeId,cursor:
+              saved?.next?.beforeId===nextBeforeId?saved.next.cursor:randomUUID()};
+            const result=assistantSourceIntakeEnvelope({schemaVersion:1,kind:'route_existing',history:{messages,nextCursor:next?.cursor??null}});
+            await store.put(slot,{...record,telegramHistory:{binding,input:position,next}});
+            return result;
+          })}});
+      }
       const messages=[];let bytes=0;
       // Complete the frozen exact batch through the SAME signed read engine.
       // Partial reads never earn confirmation, owner proof, processing or ACK.
@@ -1200,7 +1243,8 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
       // into an apparently empty message after native confirmation. Media bytes
       // are unprocessed until the independently verified decoder completes;
       // do not copy private owner identity or native document fields.
-      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text,media,mail,unsubscribeEligible})=>({eventId,text,media,...(mail?{mail,unsubscribeEligible:source.autoUnsubscribe===true&&unsubscribeEligible===true}:{})}))}
+      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text,media,telegram,mail,unsubscribeEligible})=>({eventId,text,media,
+        ...(telegram?{telegram}:{}),...(mail?{mail,unsubscribeEligible:source.autoUnsubscribe===true&&unsubscribeEligible===true}:{})}))}
         :{ownerMessage:{text:message.text,media:message.media,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
       delete value.sourceRead;
       // ASR/file verification may have continued after the original source

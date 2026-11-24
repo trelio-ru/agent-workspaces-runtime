@@ -84,7 +84,7 @@ const store={get:async slot=>{
 let setupFixture=null,ackFixture=null,intakeFixture=null,maxAccountFixture=false,sourceSelectionFixture=null;
 const baseAdmission=()=>{
   if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
-    protocol:intakeFixture.admission.kind==='email_unsubscribe'?'email-unsubscribe/v1':intakeFixture.admission.kind==='reply_owner'?`telegram-owner-reply/v${intakeFixture.intent.replyProtocolVersion??1}`:intakeFixture.admission.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${intakeFixture.intent.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='email_unsubscribe'?'unsubscribe-reference':intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?(intakeFixture.intent.replyProtocolVersion===2?'reply-reference':'read'):'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    protocol:intakeFixture.admission.kind==='conversation_history'?'telegram-conversation-history/v1':intakeFixture.admission.kind==='email_unsubscribe'?'email-unsubscribe/v1':intakeFixture.admission.kind==='reply_owner'?`telegram-owner-reply/v${intakeFixture.intent.replyProtocolVersion??1}`:intakeFixture.admission.kind==='verify_owner_reply'?`telegram-owner-reply-read/v${intakeFixture.intent.replyProtocolVersion??1}`:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='email_unsubscribe'?'unsubscribe-reference':intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?(intakeFixture.intent.replyProtocolVersion===2?'reply-reference':'read'):'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
@@ -2776,7 +2776,7 @@ test('existing-task triage reads exact signed Telegram/email/MAX bodies without 
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({...live})};
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
   await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text,
-    media:{status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false},...(skillId==='email-imap-smtp'?{originalSha256:message.originalSha256}:{})});
+    media:{status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false},...(provider==='telegram'?{telegram:{sender:null,forwarded:true,viaBot:null}}:{}),...(skillId==='email-imap-smtp'?{originalSha256:message.originalSha256}:{})});
   assert.equal(await fs.readFile(marker,'utf8'),'r','SAME selected-account signed child, one exact read');
   intakeFixture.admission={...intakeFixture.admission,ownerIdentityId:randomUUID(),ownerExternalUserId:'654321'};
   await assert.rejects(readAssistantOwnerIntakeMessage(input),/INVALID_RESPONSE/);
@@ -2816,6 +2816,212 @@ test('original audio requires one exact signed declaration, never a version/name
     [{path:'trelio-source-media.json',bytes:Buffer.alloc(513)}]]){
     assert.throws(()=>assistantSourceOriginalAudioCapability({files}),error=>error.code==='ASSISTANT_SOURCE_READ_INVALID');
   }
+});
+
+
+for(const encrypted of [false,true])test('Telegram triage exposes only each original sender in both MCP projections (encrypted='+encrypted+')',async t=>{
+  const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
+  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
+  scope.skillId='telegram-mtproto';
+  const {createProductionAssistantMcp,executeAssistantRuntimeRequest}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {openAssistantDatabase}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+  const accountId=randomUUID(),sourceId=randomUUID(),threadId=randomUUID(),kind='route_existing';
+  const configurationDirectory=engine.resolveWorkspaceBridgeConfigDirectory();
+  const inboxDirectory=path.join(configurationDirectory,'digital-assistants','runtime',assistantId,deviceId);
+  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0};
+  const local={origin,assistantId,companyId,provider:'telegram',accountId,bindingId:sourceId};
+  const conversationKey='telegram-conversation/v1.'+'a'.repeat(64),text='Да, сделаем';
+  // All messages share the same short text and conversation. Two distinct senders,
+  // a forwarded message, an anonymous sender, a stale entity and a legacy result
+  // must each retain their own attribution throughout the real signed batch.
+  const verified=(id,extra={})=>({outgoing:false,senderNamespace:'telegram_user_id',senderUserId:String(id),forwarded:false,viaBot:false,...extra});
+  const entity=(id,title,username)=>({id,title,username,lastActivity:'PRIVATE_ACTIVITY',phone:'PRIVATE_PHONE',bio:'PRIVATE_BIO'});
+  const cases=[
+    [verified(912300001),entity(912300001,'Анна','anna_work'),{displayName:'Анна',username:'anna_work'}],
+    [verified(912300002,{forwarded:true,viaBot:true}),entity(912300002,'Михаил',null),{displayName:'Михаил',username:null}],
+    [{outgoing:false,forwarded:false,viaBot:false},entity(912300003,'PRIVATE_CHANNEL','PRIVATE_CHANNEL'),null],
+    [verified(912300004),entity(912399999,'PRIVATE_STALE','PRIVATE_STALE'),null],
+    [{},null,null],
+    [verified(912300006),entity(912300006,'PRIVATE\nNAME','PRIVATE@USERNAME'),null],
+    [verified(912300007),entity(912300007,null,'work_only'),{displayName:null,username:'work_only'}],
+    [verified(912300008),entity(912300008,'PRIVATE_OTHER_ORIGINAL',null),null,{id:1}],
+    [verified(912300009,{outgoing:true}),entity(912300009,'PRIVATE_OUTGOING',null),null,{outgoing:true}],
+  ];
+  const originals=cases.map(([identity,sender,,messageFields],index)=>({
+    schemaVersion:1,protocol:'telegram-message-read/v1',
+    reference:{id:'message:77:'+String(index+1),revision:String(index+1).repeat(64),conversationKey,...identity},
+    message:{id:index+1,outgoing:false,text,textTruncated:false,sender,forwardFrom:'PRIVATE_FORWARD',viaBotId:'PRIVATE_BOT',peerId:'PRIVATE_CHAT',...messageFields},
+    coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false},
+    readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false},
+  }));
+  const opened=await openAssistantDatabase(inboxDirectory);
+  t.after(()=>opened.close());
+  const inbox=createAssistantInbox({database:opened.database});
+  inbox.register(local);inbox.observeExternalSourceRevision(local,0);
+  inbox.commitPage(local,{...inbox.claimPoll(local),nextCursor:'sender-context',hasMore:false,events:originals.map(({reference})=>({
+    id:reference.id,revision:reference.revision,conversationKey,taskId:null,wake:false,providerWake:true}))});
+  inbox.queueExistingTaskIntakes(local,{sourceRevision:0,eventKeys:inbox.pendingExternalRoutes(local).map(e=>e.event_key)});
+  const row=inbox.freezeExistingTaskIntake(inbox.ownerIntakes().find(r=>r.scope.bindingId===sourceId).id);
+  inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);inbox.bindOwnerIntakeThread(row.id,threadId);
+  inbox.readyOwnerIntake(row.id);inbox.startOwnerIntake(row.id);
+  const pass={schemaVersion:1,kind:'source_intake',intakeKind:kind,eventIds:row.eventIds,assistantId,deviceId,companyId,sourceId,
+    sourceRevision:0,passId:row.id,deliveryId:row.delivery_id,eventId:row.original_event_id,threadId};
+  const intakePass={companyId,sourceId,intakeId:row.id};
+  const descriptor={...intakePass,localAccountId:accountId,kind,threadId,sourceRevision:0,eventId:pass.eventId,eventIds:row.eventIds};
+  intakeFixture={intent:{intakeId:row.id,sourceId,expectedRevision:0},admission:{schemaVersion:1,...descriptor}};
+  delete intakeFixture.admission.companyId;
+  const dir=path.join(directory,'sender-context-'+encrypted),marker=path.join(dir,'calls');
+  await fs.mkdir(dir);
+  const historyOutput=path.join(dir,'history.json');
+  const oldMarker=process.env.TRELIO_ASSISTANT_SOURCE_HISTORY;
+  process.env.TRELIO_ASSISTANT_SOURCE_HISTORY='1';
+  t.after(()=>{if(oldMarker===undefined)delete process.env.TRELIO_ASSISTANT_SOURCE_HISTORY;
+    else process.env.TRELIO_ASSISTANT_SOURCE_HISTORY=oldMarker;});
+  // Only an exact signed read of a current batch original reaches this child.
+  // Selecting another chat, account, revision, history command or an adjacent
+  // message must fail the fixture before producing any content.
+  await fs.writeFile(path.join(dir,'main.mjs'),[
+    "import assert from 'node:assert/strict';import fs from 'node:fs';",
+    'const args=process.argv.slice(2),index=Number(args[4])-1,original='+JSON.stringify(originals)+'[index];',
+    "assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,"+JSON.stringify(accountId)+");",
+    encrypted?"assert.equal(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON).setup,'ENCRYPTED_SETUP_CONFIG_CANARY');":"",
+    "assert.deepEqual(args.slice(0,9),['read-reference','--chat','77','--message-id',String(index+1),'--expected-revision',original.reference.revision,'--expected-conversation-key',original.reference.conversationKey]);",
+    "if(args.length>9){assert.equal(process.env.TRELIO_ASSISTANT_SOURCE_HISTORY,'1');const h=JSON.parse(fs.readFileSync("+JSON.stringify(historyOutput)+"));",
+    "assert.deepEqual(args.slice(9),h.before===null?['--history-page']:['--history-page','--history-before-id',h.before]);",
+    "process.stdout.write(JSON.stringify({ok:true,schemaVersion:1,protocol:'telegram-conversation-history/v1',reference:original.reference,readState:original.readState,...h.page}));process.exit(0);}",
+    "assert.equal(process.env.TRELIO_ASSISTANT_SOURCE_HISTORY,undefined);",
+    "fs.appendFileSync("+JSON.stringify(marker)+",String(index+1));process.stdout.write(JSON.stringify(original));",
+  ].join('\n'));
+  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:providerVersion,
+    sourceDirectory:dir,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await profile.resolveSkillCatalogueDirectory(configurationDirectory);profile.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),io:{
+    ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  await catalogue.change({operation:'create',id:accountId,name:'Synthetic sender fixture',expectedRevision:(await catalogue.list()).revision});
+  let runtimeRecord={schemaVersion:1,passId:row.id,threadId,state:{runtimeSessionId:randomUUID(),expiresAt:new Date(Date.now()+300000).toISOString(),
+    privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url')}};
+  const runtimeStore={...selectedStore,get:slot=>slot.kind==='runtime'&&slot.id===row.id?runtimeRecord:selectedStore.get(slot),
+    put:async(slot,value)=>{if(slot.kind==='runtime'&&slot.id===row.id)runtimeRecord=structuredClone(value);else await selectedStore.put(slot,value);}};
+  let denyDelivery=true,confirmations=0,historyProjectId=null,leaseExpiresAt=new Date(Date.now()+240000).toISOString();
+  const client={identity,readHealth:async()=>({code:'ready',revision:0,compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
+    reportHealth:async()=>{},sourceAccounts:async()=>[source],readSourceIntake:async()=>({...descriptor,state:'leased',readConfirmed:confirmations>0,leaseExpiresAt}),
+    confirmIntakeRead:async proof=>{
+      confirmations++;
+      assert.deepEqual(Object.keys(proof).sort(),['eventIds','intakePass','kind','runtimeSessionProof']);
+      assert.deepEqual(proof.eventIds,row.eventIds);assert.equal(proof.kind,kind);assert.equal(typeof proof.runtimeSessionProof.signature,'string');
+      // Revoke admission AFTER all original reads, before the actual native MCP
+      // response. The encrypted fixture replaces the real recipient binding.
+      if(denyDelivery){
+        if(encrypted)setMode('recipient');
+        else resolveOverride=()=>new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED'}),{status:403});
+      }
+    }};
+  const candidates=[{taskId:randomUUID(),title:'Доставка'},{taskId:randomUUID(),title:'Оплата'}];
+  const freshProxy=()=>createProductionAssistantMcp({context:action=>action(client,{...host,configurationDirectory,readActivePass:async()=>pass},runtimeStore),
+    withProfile:action=>action({readCompanyContentMode:async()=>encrypted?'encrypted':'plain'}),withManagedContent:async({args},send)=>send(args),
+    httpRequest:async wire=>{
+      const reply=result=>({sessionId:'sender-context',message:{jsonrpc:'2.0',id:wire.payload?.id,result}});
+      if(wire.method==='DELETE'||wire.payload.method==='notifications/initialized')return reply({});
+      if(wire.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(wire.payload.method==='tools/list')return reply({tools:[{name:'get_assistant_intake_context',inputSchema:{type:'object',additionalProperties:false,properties:{history:{type:'object',additionalProperties:false,properties:{cursor:{type:'string',format:'uuid'}}}}},description:'Synthetic'}]});
+      assert.equal(wire.payload.params.name,'get_assistant_intake_context');
+      if(Object.hasOwn(wire.payload.params.arguments,'history')){
+        assert.deepEqual(wire.payload.params.arguments.history,{},'even the opaque cursor stays local');
+        const sourceRead={...descriptor,schemaVersion:1,kind:'conversation_history',skillId:'telegram-mtproto',projectId:historyProjectId};
+        return reply({content:[],structuredContent:{schemaVersion:1,companyId,kind,projectId:historyProjectId,sourceRead}});
+      }
+      return reply({content:[],structuredContent:{sourceRead:descriptor,candidates,historyProtocolVersion:1}});
+    }});
+  const proxy=await freshProxy();
+  const history=(cursor=null)=>executeAssistantRuntimeRequest({operation:'call',name:'get_assistant_intake_context',
+    arguments:{intakePass,history:cursor===null?{}:{cursor}}},{context:action=>action(client,host,runtimeStore),
+    versions:()=>({pluginVersion:'3.3.2',hostRuntimeVersion:'3.35.1'}),proxyFor:freshProxy});
+  const read=()=>proxy.callTool('get_assistant_intake_context',{intakePass});
+  const modelReads=()=>opened.database.prepare('SELECT count(*) n FROM assistant_inbox_events WHERE model_read_intake_id=?').get(row.id).n;
+  await assert.rejects(read,{code:encrypted?'ASSISTANT_SOURCE_BINDING_CHANGED':'ASSISTANT_MCP_LOCAL_SOURCE_READ_TRELIO_BACKEND_HTTP_403'});
+  assert.equal(modelReads(),0);
+  // Native confirmation already exists, but the refused final MCP delivery
+  // earned no local read witness for the frozen originals.
+  await assert.rejects(history(),{code:'ASSISTANT_INBOX_SOURCE_READ_REQUIRED'});
+  denyDelivery=false;resolveOverride=null;if(encrypted)setMode('valid');
+  const delivered=await read();
+  for(const view of [delivered.structuredContent,JSON.parse(delivered.content[0].text)]){
+    assert.deepEqual(view.candidates,candidates);
+    const expected=row.originals.map(({native_event_id,original_event_id})=>{
+      const index=Number(native_event_id.split(':')[2])-1,[ref,,sender]=cases[index];
+      return {eventId:original_event_id,text,media:{status:'unknown',kind:null,fileName:null,sizeBytes:null,contentRead:false},
+        telegram:{sender,forwarded:ref.forwarded??null,viaBot:ref.viaBot??null}};
+    });
+    assert.deepEqual(view.sourceMessages,expected);assert.equal(view.sourceRead,undefined);
+  }
+  assert.doesNotMatch(JSON.stringify(delivered),/PRIVATE_|9123\d{5}|senderUserId|lastActivity|ENCRYPTED_SETUP|ownerIdentityId|verifiedNativeOwner/);
+  assert.equal(modelReads(),cases.length);
+  assert.equal(delivered.structuredContent.historyProtocolVersion,1);
+  const reads=await fs.readFile(marker,'utf8');
+  assert.equal(reads,row.originals.map(ref=>ref.native_event_id.split(':')[2]).join('').repeat(2),'one signed read per frozen original per call');
+  const originalConfirmations=confirmations;
+  intakeFixture.intent.historyProtocolVersion=1;intakeFixture.admission.kind='conversation_history';
+  // A live native grant does not upgrade an older signed package. Refusal
+  // precedes provider invocation and cannot silently fall back to a task tool.
+  const priorPackage={artifactId,releaseId,providerVersion,packageBytes};
+  try{
+    const legacy=path.join(directory,'legacy-history-'+encrypted);await fs.mkdir(legacy);
+    await fs.writeFile(path.join(legacy,'main.mjs'),'process.exit(42)');
+    artifactId=randomUUID();releaseId=randomUUID();providerVersion='2.18.0';
+    packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:providerVersion,sourceDirectory:legacy,
+      entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+    await assert.rejects(history(),{code:'ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED'});
+  }finally{({artifactId,releaseId,providerVersion,packageBytes}=priorPackage);}
+  const rowData={text:'',sentAt:'2026-11-20T10:00:00Z',outgoing:false,mediaType:'text',sender:null,forwarded:false};
+  const writePage=(before,messages,nextBeforeId)=>fs.writeFile(historyOutput,JSON.stringify({before,page:{messages,nextBeforeId}}));
+  // Include JSON escape expansion in the *actual* final MCP envelope, not
+  // just the raw provider output size. A large short page must still advance.
+  await writePage(null,[{...rowData,text:'\\'.repeat(23000),peerId:'PRIVATE_HISTORY_PEER'}],'7654391');
+  const [first,duplicate]=await Promise.all([history(),history()]),page=first.structuredContent.history;
+  assert.deepEqual(duplicate.structuredContent.history,page,'concurrent first pages retain the same opaque continuation');
+  assert.deepEqual(page,JSON.parse(first.content[0].text).history);
+  assert.equal(page.messages[0].text.length,23000);assert.match(page.nextCursor,/^[0-9a-f-]{36}$/u);
+  assert.ok(Buffer.byteLength(JSON.stringify(first))>100000);
+  assert.ok(Buffer.byteLength(JSON.stringify(first))<=512*1024);
+  assert.doesNotMatch(JSON.stringify(first),/7654391|PRIVATE_HISTORY_PEER|conversationKey/);
+  await assert.rejects(history(randomUUID()),{code:'ASSISTANT_INTAKE_CHANGED'});
+  historyProjectId=randomUUID();await assert.rejects(history(page.nextCursor),{code:'ASSISTANT_INTAKE_CHANGED'});historyProjectId=null;
+  // A renewed lease does not port the old cursor to that renewed authority.
+  const originalLease=leaseExpiresAt;leaseExpiresAt=new Date(Date.parse(originalLease)+1000).toISOString();
+  await assert.rejects(history(page.nextCursor),{code:'ASSISTANT_INTAKE_CHANGED'});leaseExpiresAt=originalLease;
+  await writePage('7654391',[],'7654391');
+  await assert.rejects(history(page.nextCursor),{code:'ASSISTANT_SOURCE_READ_INVALID'});
+  await writePage('7654391',[rowData],null);
+  await assert.rejects(history(page.nextCursor),{code:'ASSISTANT_SOURCE_READ_INVALID'});
+  await writePage('7654391',[],'7654300');
+  const tombstones=(await history(page.nextCursor)).structuredContent.history;
+  assert.deepEqual(tombstones.messages,[]);assert.ok(tombstones.nextCursor);
+  await writePage('7654300',[{...rowData,service:true}],'7654200');
+  const service=(await history(tombstones.nextCursor)).structuredContent.history;
+  assert.deepEqual(service.messages,[{...rowData,service:true}]);assert.ok(service.nextCursor);
+  const old={...rowData,text:'Это по задаче «Оплата»',sender:{displayName:'Анна',username:'anna_work',phone:'PRIVATE_HISTORY_PHONE'}};
+  await writePage('7654200',[old],'7654100');
+  const priorResolve=resolveOverride;let phases=0;
+  resolveOverride=()=>{if(++phases===3){
+    if(encrypted)setMode('recipient');
+    else return new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED'}),{status:403});
+  }return new Response(JSON.stringify(resolution()));};
+  await assert.rejects(history(service.nextCursor),{code:encrypted?'ASSISTANT_SOURCE_BINDING_CHANGED':'ASSISTANT_MCP_LOCAL_SOURCE_READ_TRELIO_BACKEND_HTTP_403'});
+  assert.equal(phases,3,'the signed page was actually read before last admission failed');
+  resolveOverride=priorResolve;if(encrypted)setMode('valid');
+  const older=await history(service.nextCursor);
+  assert.match(older.structuredContent.history.messages[0].text,/Оплата/u);
+  assert.doesNotMatch(JSON.stringify(older),/PRIVATE_|7654100/);
+  await writePage('7654100',[],null);
+  const end=await history(older.structuredContent.history.nextCursor);
+  assert.deepEqual(end.structuredContent.history,{messages:[],nextCursor:null});
+  assert.equal(confirmations,originalConfirmations);assert.equal(modelReads(),cases.length);
+  delete pass.intakeKind;delete pass.eventIds;
+  await assert.rejects(history(),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
+  assert.doesNotMatch(JSON.stringify(runtimeRecord.telegramHistory),/Да, сделаем|Оплата|PRIVATE_|Анна/u);
+
 });
 
 test('original media projection distinguishes absent, present and legacy unknown without private fields',()=>{

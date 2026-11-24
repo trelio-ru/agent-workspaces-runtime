@@ -9473,6 +9473,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
         "TRELIO_BROWSER_CONTROLLER_ENABLED",
         "TRELIO_BROWSER_CONTROLLER_ORIGIN",
         "TRELIO_EXECUTION_SESSION_MODULE_URL",
+        "TRELIO_ASSISTANT_SOURCE_HISTORY",
       ].includes(key)
     );
     if (
@@ -9770,6 +9771,9 @@ const runMaterializedAgentSkillUnqueued = async ({
   // granted Secret. Apply after the closed environment builder and only for
   // Node packages; Python/executable entrypoints retain their existing ABI.
   if (interpreter === "node") runtimeEnvironment = nodeChildEnvironment(runtimeEnvironment, executable);
+  // An ordinary skill caller cannot inherit or supply the protected Telegram
+  // history mode. Only the exact native-admitted intake below grants it.
+  delete runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_HISTORY;
   if (sourceSetupCapture) await profile.assertInteractiveSourceSetupCurrent();
   if (taskSetupCapture) await profile.assertHumanInputSkillSetupCurrent();
   if (interactiveCapture || interactiveRemoval) await profile.assertInteractiveSkillCurrent();
@@ -9819,6 +9823,8 @@ const runMaterializedAgentSkillUnqueued = async ({
     // the host-created scratch destination through its bounded private pipe.
     delete runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_MEDIA;
     delete runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_AUDIO;
+    if(sourceIntakeCapture&&profile.sourceIntakeInputKind==='telegram-conversation-history/v1'&&replyInput===null)
+      runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_HISTORY='1';
     if(sourceIntakeCapture&&replyInput!==null){
       if(profile.sourceIntakeInputKind==='assistant-source-audio/v1')runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_AUDIO='1';
       else if(profile.sourceIntakeInputKind==='source-original-audio/v1')runtimeEnvironment.TRELIO_ASSISTANT_SOURCE_MEDIA='1';

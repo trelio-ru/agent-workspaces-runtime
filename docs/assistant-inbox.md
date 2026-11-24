@@ -977,7 +977,32 @@ execution. Native context supplies accessible task candidates with bounded
 cursor pagination. The SAME signed account/process/read-result guard supplies
 complete exact original text and confirms the whole frozen batch without owner
 proof, neighboring history, attachment reads or read-state mutation. Partial,
-changed or oversized reads remain unresolved. Candidate/rules hydration uses
+changed or oversized reads remain unresolved. For Telegram, each original in
+`sourceMessages` includes `telegram.sender` (display name and username, each
+nullable) only when its cached sender matches the verified incoming user.
+The field is null for unknown or anonymous senders. `telegram.forwarded` and
+`telegram.viaBot` describe the original when supplied. A forwarded message
+identifies the person who forwarded it. Routing uses this display context
+alongside the text and candidate tasks; an owner question names the sender
+when known. Sender labels never grant owner or action authority.
+
+For Telegram routing, native context advertises `historyProtocolVersion:1`.
+If the sender, originals and task list leave the choice ambiguous, use
+`get_assistant_intake_context({history:{}})`. Read `history.messages` newest
+first and follow `history.nextCursor` with `{history:{cursor}}` until the
+task becomes clear or the cursor is null. Short pages, service messages and
+pages containing only deleted messages can all have a continuation. The signed
+Telegram runtime (2.19.0+) revalidates the frozen anchor in the selected account
+and same chat on each read. Each provider response fits 20 rows and 48 KiB
+including its envelope; the number of pages is unbounded. The host retains
+only the private position in the existing pass slot, bound to the current
+lease, account, assistant, source revision, chat and frozen originals. The
+host sends `history:{}` to native and returns only display fields and a local
+opaque continuation. Page reads require confirmed delivery of the original
+batch and fresh source/recipient admission. They produce no original UUID,
+processing receipt, model-read evidence or Telegram read acknowledgement.
+
+Candidate/rules hydration uses
 only the native-selected encrypted bundle and current managed recipient; fixed
 project sources load that project's exact effective rules through the SAME
 instruction builder. No plaintext server fallback or generic payload resolver

@@ -449,6 +449,9 @@ for(const mode of ['owner','triage','source_with_task_grant','reply_only','both_
         assert.match(canonical,/resolve_assistant_intake/u);
         if(mode==='triage'){
           assert.match(canonical,/Partition every event once/u);
+          assert.match(canonical,/use telegram\.sender with its text and candidate tasks/u);
+          assert.match(canonical,/name that sender when known/u);
+          assert.match(canonical,/until the context identifies the task or nextCursor is null/u);
           assert.match(canonical,/emailAutoUnsubscribeEnabled and unsubscribeEligible/u);
           assert.doesNotMatch(canonical,/reply_owner|targetSourceId/u);
         }else{
@@ -3135,6 +3138,9 @@ test('routing-only intake receives no browser observation recovery or wider tool
  assert.equal(starts,1);assert.match(input,/restricted source_triage\/v1/u);
  assert.doesNotMatch(input,/use_assistant_browser|native app\/computer interface/u);
  assert.match(input,/Use only get_assistant_intake_context and resolve_assistant_intake/u);
+ assert.match(input,/use telegram\.sender with its text and candidate tasks/u);
+ assert.match(input,/name that sender when known/u);
+ assert.match(input,/Continue through empty or short pages with a cursor/u);
 });
 test('native recovery reader requires complete latest unique marker coverage and returns only a closed witness',async()=>{
  const f=readonlyPreparationFixture();let reads=0;
