@@ -814,6 +814,10 @@ Reply receipt alone does not borrow the task-material processing/ACK path.
 A direct owner command about existing tasks first reads those sources, then
 selects `route_existing` with one already accepted `taskId`. The backend repeats
 BOTH task ACL/source scope and commits one structural `routed` receipt/route.
+On read-back the owner command identifies its sole original by `eventId`.
+Its single route in `routes` must match that original, the target task and the
+original conversation. The current response includes the same single `route`;
+both copies must agree. Older singular-only receipts retain their wire shape.
 `finishOwnerIntake` accepts this result only for one whole original/one target,
 without ignored originals, a reply attempt or reply-only recovery. The coordinator
 settles it through its existing native read-back, accepted task inventory and

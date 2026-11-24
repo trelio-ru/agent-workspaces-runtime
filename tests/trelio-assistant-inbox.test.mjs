@@ -1916,7 +1916,7 @@ test('schema26 preserves a settled v25 negative original and consumes dispatch c
 });
 
 
-test('owner command reuses one native existing-task route across SQLite reopen without new work or ACK',async t=>{
+test('device read-back settles one routed owner command across SQLite reopen without new work or ACK',async t=>{
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-owner-existing-')),file=path.join(directory,'inbox.sqlite');
  let database=new DatabaseSync(file),inbox=createAssistantInbox({database});
  t.after(async()=>{database.close();await fs.rm(directory,{recursive:true,force:true});});
@@ -1925,21 +1925,59 @@ test('owner command reuses one native existing-task route across SQLite reopen w
  const key=`telegram-conversation/v1.${'a'.repeat(64)}`;
  page(inbox,source,[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,providerWake:true,
   conversationKey:key,ownerIdentityId:randomUUID()}]);
- const row=inbox.ownerIntakes()[0],taskId=randomUUID(),bindingId=randomUUID();
- inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);inbox.bindOwnerIntakeThread(row.id,randomUUID());
+ const row=inbox.ownerIntakes()[0],taskId=randomUUID(),bindingId=randomUUID(),threadId=randomUUID();
+ inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);inbox.bindOwnerIntakeThread(row.id,threadId);
  inbox.readyOwnerIntake(row.id);inbox.startOwnerIntake(row.id);
+ inbox.uncertainOwnerIntake(row.id);
  inbox.applyTaskState(canonical,{taskId,state:'accepted',expectedRevision:0,authority:{bindingId,revision:0}});
  const route={id:randomUUID(),sourceId:source.bindingId,sourceRevision:0,conversationKey:key,taskId,bindingId,
-  bindingRevision:0,eventIds:[row.original_event_id]},receipt={state:'routed',receiptId:randomUUID(),taskId,routes:[route]};
+  bindingRevision:0,eventIds:[row.original_event_id]};
+ // The real server returns eventId on owner intakes and both aliases for a
+ // single route. The old test injected the projected result below the codec.
+ const wire={schemaVersion:1,id:row.id,companyId:source.companyId,sourceId:source.bindingId,sourceRevision:0,
+  eventId:row.original_event_id,threadId,state:'routed',leaseExpiresAt:new Date(0).toISOString(),taskId,receiptId:randomUUID(),
+  readConfirmed:true,ownerPrivateRead:true,execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},
+  route,routes:[route],ignoredEventIds:[]};
+ const locator={companyId:source.companyId,sourceId:source.bindingId,intakeId:row.id},deviceId=randomUUID();
+ const {createAssistantDeviceClient}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ let response=wire;
+ const client=createAssistantDeviceClient({origin:source.origin,assistantId:source.assistantId,deviceId,
+  store:{get:async()=>({assistantId:source.assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1})},
+  http:async(operation,body)=>{assert.equal(operation,'intakeRead');assert.deepEqual(body,locator);return response;}});
+ const read=()=>client.readSourceIntake(locator);
+ assert.deepEqual((await read()).routes,[route]);
+ response={...wire,kind:'owner_command'};
+ assert.deepEqual((await read()).routes,[route]);
+ response={...wire,routes:undefined,ignoredEventIds:undefined,route:{...route,taskId:undefined,eventIds:undefined}};
+ assert.equal((await read()).route.id,route.id,'a legacy singular receipt keeps its original shape');
+ for(const patch of [{route:undefined},{route:null},{routes:[]},{routes:[route,{...route,id:randomUUID(),taskId:randomUUID()}]},
+   {routes:[{...route,eventIds:[]}]},{eventId:randomUUID()},{eventIds:[wire.eventId,randomUUID()]},
+   {taskId:randomUUID()},{receiptId:null},{readConfirmed:false},{ignoredEventIds:[wire.eventId]},
+   {sourceRevision:1},{routes:[{...route,sourceId:randomUUID()}]},
+   ...[{id:randomUUID()},{sourceRevision:1},{bindingId:randomUUID()},{bindingRevision:1},
+     {conversationKey:`telegram-conversation/v1.${'b'.repeat(64)}`},{taskId:randomUUID()},{eventIds:[randomUUID()]}]
+    .map(change=>({route:{...route,...change}}))]){
+  response={...wire,...patch};await assert.rejects(read,/INVALID_RESPONSE/);
+ }
+ response=wire;
+ const receipt=await read();
  assert.throws(()=>inbox.finishOwnerIntake(row.id,{...receipt,taskId:randomUUID()}),/CONFLICT/);
  assert.throws(()=>inbox.finishOwnerIntake(row.id,{...receipt,routes:[route,{...route,id:randomUUID(),taskId:randomUUID()}]}),/CONFLICT/,
   'one command must not execute in two task workers');
  assert.throws(()=>inbox.finishOwnerIntake(row.id,{...receipt,ignoredEventIds:[row.original_event_id]}),/CONFLICT/);
+ // A consistent pair of wire aliases still needs the actual local event's
+ // conversation before recording a terminal receipt or releasing the writer.
+ const foreign={...route,conversationKey:`telegram-conversation/v1.${'b'.repeat(64)}`};
+ response={...wire,route:foreign,routes:[foreign]};
+ const changed=await read();assert.throws(()=>inbox.finishOwnerIntake(row.id,changed),/CONFLICT/);
+ response=wire;
  inbox.finishOwnerIntake(row.id,receipt);
  database.close();database=new DatabaseSync(file);inbox=createAssistantInbox({database});
  assert.equal(inbox.ownerIntake(row.id).outcome_state,'routed');
  assert.equal(inbox.ownerIntake(row.id).outcome_receipt,receipt.receiptId);
- inbox.routeExternalEvents(source,{canonicalSource:canonical,sourceRevision:0,eventKeys:[row.event_key],routes:[route],intakeId:row.id});
+ const retained=await read();
+ assert.equal(retained.receiptId,inbox.ownerIntake(row.id).outcome_receipt);
+ inbox.routeExternalEvents(source,{canonicalSource:canonical,sourceRevision:0,eventKeys:[row.event_key],routes:retained.routes,intakeId:row.id});
  inbox.settleOwnerIntake(row.id);
  const stored=inbox.ownerIntake(row.id);assert.equal(stored.settled,1);assert.equal(stored.outcome_task_id,taskId);
  assert.equal(database.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,1);

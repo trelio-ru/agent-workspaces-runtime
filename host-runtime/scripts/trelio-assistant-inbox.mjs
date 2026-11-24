@@ -2043,7 +2043,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const ownerRoute=row.kind==='owner_command';
         if(ownerRoute&&(selected.length!==1||ignoredEventIds.length!==0
           ||row.readonly_recovery_json!==null||row.reply_receipt_id!==null||row.reply_message_id!==null
-          ||taskId!==selected[0]?.taskId))fail('ASSISTANT_INBOX_CONFLICT');
+          ||taskId!==selected[0]?.taskId||selected[0].conversationKey!==row.conversation_key))fail('ASSISTANT_INBOX_CONFLICT');
         if(!selected.length||selected.length>100
           ||selected.some(item=>item.sourceId!==row.scope.bindingId||item.sourceRevision!==row.source_revision||!Array.isArray(item.eventIds)||!item.eventIds.length)
           ||ids.length!==row.eventIds.length||new Set(ids).size!==ids.length||ids.some(id=>!row.eventIds.includes(id)))fail('ASSISTANT_INBOX_CONFLICT');

@@ -2810,6 +2810,14 @@ const sourceRouteEventIds=value=>{
   if(!Array.isArray(value)||value.length>100||new Set(value).size!==value.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return value.map(id);
 };
+// The singular route predates event partitions. Decode its common fields the
+// same way as a partition member so contradictory receipts cannot select a worker.
+const intakeRoute=value=>{
+  if(!object(value))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {id:id(value.id),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
+    bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),conversationKey:text(value.conversationKey,96),
+    ...(value.eventIds!==undefined?{eventIds:sourceRouteEventIds(value.eventIds)}:{})};
+};
 const assistantReplyFileSelection=value=>{
   if(!object(value)||Object.keys(value).sort().join(',')!=='workspaceHead,workspaceId'
     ||!UUID.test(value.workspaceId??'')||!(/^[0-9a-f]{40,64}$/u).test(value.workspaceHead??''))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -2843,16 +2851,35 @@ const intakeProjection=(value,expected)=>{
   if(routing&&(!Array.isArray(value.eventIds)||!value.eventIds.length||value.eventIds.length>100||value.eventIds[0]!==value.eventId
     ||new Set(value.eventIds).size!==value.eventIds.length||value.eventIds.some(eventId=>!UUID.test(eventId??'')))
     ||!routing&&value.threadId===null||value.execution===null&&!(routing&&value.threadId===null&&['waiting_owner','redirected','cancelled'].includes(value.state)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  const route=value.route?intakeRoute(value.route):null;
   let routes;
   if(value.routes!==undefined){
-    if(!routing||value.state!=='routed'||!Array.isArray(value.routes)||!value.routes.length||value.routes.length>100)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-    routes=value.routes.map(route=>({id:id(route.id),sourceId:id(route.sourceId),sourceRevision:revision(route.sourceRevision),
-      bindingId:id(route.bindingId),bindingRevision:revision(route.bindingRevision),conversationKey:text(route.conversationKey,96),
-      taskId:id(route.taskId),eventIds:sourceRouteEventIds(route.eventIds)}));
+    if(value.state!=='routed'||!Array.isArray(value.routes)||!value.routes.length||value.routes.length>100)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    routes=value.routes.map(item=>({...intakeRoute(item),taskId:id(item.taskId)}));
+    // Triage partitions an explicit batch. An owner command names its sole
+    // original in eventId; its native receipt omits the top-level eventIds.
+    const originals=routing?value.eventIds:[value.eventId];
     const selected=[...routes.flatMap(route=>route.eventIds),...sourceRouteEventIds(value.ignoredEventIds??[])];
-    if(routes.some(route=>!route.eventIds.length||route.sourceId!==value.sourceId||route.sourceRevision!==value.sourceRevision)
+    if(routes.some(route=>!route.eventIds?.length||route.sourceId!==value.sourceId||route.sourceRevision!==value.sourceRevision)
       ||new Set(routes.map(route=>route.id)).size!==routes.length||new Set(routes.map(route=>route.taskId)).size!==routes.length
-      ||selected.length!==value.eventIds.length||new Set(selected).size!==selected.length||selected.some(id=>!value.eventIds.includes(id)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      ||selected.length!==originals.length||new Set(selected).size!==selected.length||selected.some(id=>!originals.includes(id)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  }
+  if(!routing&&value.state==='routed'){
+    if(!route||!value.readConfirmed||!UUID.test(value.receiptId??'')||!UUID.test(value.taskId??'')
+      ||route.sourceId!==value.sourceId||route.sourceRevision!==value.sourceRevision||value.eventIds!==undefined
+      ||!['telegram','max'].some(provider=>assistantConversationKeyMatches(provider,route.conversationKey))
+      ||expected.conversationKey!==undefined&&route.conversationKey!==expected.conversationKey
+      ||route.eventIds!==undefined&&(route.eventIds.length!==1||route.eventIds[0]!==value.eventId)
+      ||value.ignoredEventIds!==undefined&&(!Array.isArray(value.ignoredEventIds)||value.ignoredEventIds.length!==0)
+      ||value.route.taskId!==undefined&&value.route.taskId!==value.taskId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    // A nonempty disjoint partition of one original has precisely one member.
+    // Both wire forms must attest the same task and assignment. Older singular
+    // receipts carry the task on the envelope and may omit explicit event IDs.
+    if(routes){
+      const [member]=routes;
+      if(!route.eventIds||value.route.taskId!==value.taskId||member.taskId!==value.taskId
+        ||['id','bindingId','bindingRevision','conversationKey'].some(field=>route[field]!==member[field]))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    }
   }
   const recovery=value.readOnlyRecovery===undefined?null:assistantReadOnlyRecoveryMetadata(value.readOnlyRecovery,{response:true});
   if(value.readOnlyRecovery!==undefined&&(!recovery||routing||value.taskId!==null
@@ -2892,9 +2919,7 @@ const intakeProjection=(value,expected)=>{
     readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
     ...(value.redirect?{redirect:{sourceId:id(value.redirect.sourceId),companyId:id(value.redirect.companyId),sourceRevision:revision(value.redirect.sourceRevision)}}:{}),
-    ...(value.route?{route:{id:id(value.route.id),sourceId:id(value.route.sourceId),sourceRevision:revision(value.route.sourceRevision),
-      bindingId:id(value.route.bindingId),bindingRevision:revision(value.route.bindingRevision),conversationKey:text(value.route.conversationKey,96),
-      ...(value.route.eventIds!==undefined?{eventIds:sourceRouteEventIds(value.route.eventIds)}:{})}}:{})};
+    ...(route?{route}:{})};
 };
 
 /** Fixed host wire receipt, never a model tool or a content cache. Echo every
