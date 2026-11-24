@@ -202,12 +202,12 @@ const resolveCodexExecutable = async (environment,{platform=process.platform,fil
 };
 
 /**
- * Read only one server-verified ID through Codex's documented App Server.
- * includeTurns=false prevents transcript retrieval; thread/read does not
- * resume a thread, subscribe to it, or start a model. Suppress stderr because
- * even a local CLI diagnostic can include private config or content.
+ * Read only one verified thread through Codex App Server. Project setup can
+ * also read the exact project ID returned by that thread. Both projections
+ * discard the other metadata, omit turns and never resume a chat. Suppress
+ * stderr because even a local CLI diagnostic can contain private content.
  */
-export const readCodexConversationTitle = async (conversationId, {
+const readCodexConversationMetadata = async (conversationId, projection, {
   environment = process.env,
   executable,
   spawnProcess = spawn,
@@ -227,7 +227,8 @@ export const readCodexConversationTitle = async (conversationId, {
     let pending = "";
     let bytes = 0;
     let initialized = false;
-    const finish = (title = null) => {
+    let projectSelection = null;
+    const finish = (value = null) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
@@ -237,7 +238,7 @@ export const readCodexConversationTitle = async (conversationId, {
       // A separate App Server is short-lived even after success. Never leave
       // a background subscriber/process behind to watch future renames.
       child?.kill("SIGKILL");
-      resolve(title);
+      resolve(value);
     };
     const abort = () => finish();
     const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -264,22 +265,39 @@ export const readCodexConversationTitle = async (conversationId, {
           pending = pending.slice(newline + 1);
           let message;
           try { message = JSON.parse(line); } catch { return finish(); }
+          if (!object(message)) return finish();
           if (message.id === 1 && !initialized) {
             if (message.error || !message.result) return finish();
             initialized = true;
             send({ method: "initialized" });
             send({ id: 2, method: "thread/read", params: { threadId: conversationId, includeTurns: false } });
-          } else if (message.id === 2 && initialized) {
+          } else if (message.id === 2 && initialized && !projectSelection) {
             const thread = message.result?.thread;
-            const title = typeof thread?.name === "string" ? thread.name.trim() : "";
-            return finish(!message.error && thread?.id === conversationId && title && title.length <= 500 ? title : null);
+            if (message.error || thread?.id !== conversationId) return finish();
+            if (projection === "title") {
+              const title = typeof thread.name === "string" ? thread.name.trim() : "";
+              return finish(title && title.length <= 500 ? title : null);
+            }
+            projectSelection = codexThreadProjectSelection(thread);
+            if (!projectSelection) return finish();
+            send({ id: 3, method: "project/read", params: { projectId: projectSelection.projectId } });
+          } else if (message.id === 3 && projectSelection) {
+            return finish(message.error ? null : selectCodexProjectFolder(message.result?.project, projectSelection));
           }
         }
       });
-      send({ id: 1, method: "initialize", params: { clientInfo: { name: "trelio_chat_title", version: "1.0.0" } } });
+      send({ id: 1, method: "initialize", params: projection === "title"
+        ? { clientInfo: { name: "trelio_chat_title", version: "1.0.0" } }
+        : { clientInfo: { name: "trelio_project_setup", version: "1.0.0" }, capabilities: { experimentalApi: true } } });
     } catch { finish(); }
   });
 };
+
+export const readCodexConversationTitle = (conversationId, options) =>
+  readCodexConversationMetadata(conversationId, "title", options);
+
+export const readCodexProjectFolder = (conversationId, options) =>
+  readCodexConversationMetadata(normalizeCodexNavigationThreadId(conversationId), "project", options);
 
 /**
  * Every attempt starts from live private Run metadata, never CODEX_THREAD_ID.
@@ -559,6 +577,38 @@ const safeFolderPath = value => typeof value === "string" && value.length <= 409
 const safeConnectionName = value => typeof value === "string" && value.trim().length > 0
   && value.length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value);
 
+// Windows accepts "/folder" as drive-relative in path.resolve. A project
+// reported by another environment must never turn into a path on our drive.
+const safeCodexProjectPath = value => safeFolderPath(value)
+  && (process.platform !== "win32" || /^[A-Za-z]:[\\/]/u.test(value));
+
+const codexThreadProjectSelection = ({ projectId, cwd, ephemeral, environments }) => {
+  if (typeof projectId !== "string" || !projectId || projectId.length > 256
+    || /[\u0000-\u001f\u007f]/u.test(projectId) || ephemeral !== false || !safeCodexProjectPath(cwd)) return null;
+  // A cold read may omit environments. When the server exposes a current
+  // environment, refuse remote, multiple or internally inconsistent results.
+  if (environments != null) {
+    if (!Array.isArray(environments) || environments.length !== 1) return null;
+    const [environment] = environments;
+    if (environment?.environmentId !== "local" || !safeCodexProjectPath(environment.cwd)
+      || path.relative(cwd, environment.cwd) !== "") return null;
+  }
+  return { projectId, cwd };
+};
+
+const selectCodexProjectFolder = (project, { projectId, cwd }) => {
+  const roots = project?.roots;
+  if (project?.id !== projectId || !Array.isArray(roots) || !roots.every(root => safeCodexProjectPath(root?.path))) return null;
+  // Root order is display metadata. The verified chat location must identify a
+  // single root. Prefer an exact root match over any enclosing multi-root entry.
+  const exact = roots.filter(root => path.relative(root.path, cwd) === "");
+  const matches = exact.length ? exact : roots.filter((root) => {
+    const relative = path.relative(root.path, cwd);
+    return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+  });
+  return matches.length === 1 ? { projectId, folderPath: path.resolve(matches[0].path) } : null;
+};
+
 /** Native modal child has no input channel. Capture bounded bytes and settle
  * only after close: an early exit, abort or output overflow cannot leave a live
  * dialog behind while the App enables another picker or claim partial success. */
@@ -686,7 +736,7 @@ export const confirmManualCodexBrowser = async (origin, { companySlug, folderPat
 const wizardResult = (capabilityToken, capability, state, mount = false) => ({
   content: [{ type: "text", text: state.stage === "ready"
     ? "Codex connection verified: the selected folder was registered in Trelio and read back."
-    : "Codex connection wizard is open. Complete the folder selection in the App." }],
+    : "Codex connection wizard is open. Connect the folder shown in the App." }],
   structuredContent: { stage: state.stage, verified: state.stage === "ready" },
   _meta: { ...(mount ? { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } : {}),
     "trelio/codexConnection": { capabilityToken, companyName: capability.company.name, ...state } },
@@ -708,15 +758,23 @@ export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) 
     throw wizardError("CODEX_CONNECTION_LOCAL_STATE_INVALID");
   }
   const { homedir } = await import("node:os");
-  const state = { stage: "folder", folderPath: previous.folderPath ?? path.join(homedir(), "Documents", "Trelio", context.company.slug),
+  // The opener is read-only. Resolve the native project before displaying a
+  // target, then pin it to this App capability until the human clicks Connect.
+  const threadId = normalizeCodexNavigationThreadId(dependencies.codexThreadId);
+  const project = threadId ? await (dependencies.readProjectFolder ?? readCodexProjectFolder)(threadId, {
+    signal: dependencies.signal,
+  }) : null;
+  dependencies.signal?.throwIfAborted();
+  const state = { stage: "folder",
+    folderPath: project?.folderPath ?? previous.folderPath ?? path.join(homedir(), "Documents", "Trelio", context.company.slug),
     displayName: previous.displayName ?? `Trelio · ${context.company.name}`.slice(0, 199).replace(/[\uD800-\uDBFF]$/u, ""),
-    createFolder: previous.createFolder ?? true };
+    createFolder: project ? false : previous.createFolder ?? true };
   const now = Date.now();
   for (const [key, value] of wizardCapabilities) if (value.expiresAt <= now) wizardCapabilities.delete(key);
   if (wizardCapabilities.size >= 32) throw wizardError("CODEX_CONNECTION_LIMIT");
   const capabilityToken = crypto.randomBytes(32).toString("base64url");
   const capability = { origin, parameters: raw.parameters, company: context.company, memberId: context.memberId, stateFile, state,
-    busyKey: key, expiresAt: now + WIZARD_LIFETIME_MS };
+    project: project ? { ...project, threadId } : null, busyKey: key, expiresAt: now + WIZARD_LIFETIME_MS };
   wizardCapabilities.set(capabilityToken, capability);
   return wizardResult(capabilityToken, capability, state, true);
 };
@@ -798,6 +856,18 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
         || typeof input.settings.createFolder !== "boolean") throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
       cap.state = { stage: "folder", folderPath: path.resolve(input.settings.folderPath),
         displayName: input.settings.displayName.trim(), createFolder: input.settings.createFolder };
+      // An explicit different App path is a manual selection. A submitted
+      // form with the same path still uses the native project's freshness check.
+      if (cap.project && cap.state.folderPath !== cap.project.folderPath) cap.project = null;
+    }
+    if (input.action === "connect" && cap.project) {
+      const current = await (dependencies.readProjectFolder ?? readCodexProjectFolder)(cap.project.threadId, {
+        signal: dependencies.signal,
+      });
+      dependencies.signal?.throwIfAborted();
+      if (current?.projectId !== cap.project.projectId || current.folderPath !== cap.project.folderPath) {
+        throw wizardError("CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
+      }
     }
     // Persist the user's typed choice before opening a native modal. A cancel,
     // unavailable GUI or interrupted modal must not lose the edited name/path.
@@ -809,6 +879,7 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       if (selected) {
         if (!safeFolderPath(selected)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
         cap.state = { ...cap.state, stage: "folder", folderPath: selected, createFolder: false };
+        if (cap.project && selected !== cap.project.folderPath) cap.project = null;
       }
     }
     if (input.action === "pick") await bridge.writePrivateJsonFile(cap.stateFile, {
@@ -821,7 +892,7 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       // A previously rendered success never grants a blind registration replay.
       // The same deterministic ID and fresh GET reconcile interrupted setup.
       cap.state.stage = "checking";
-      await prepareWizardDirectory(cap.state.folderPath, cap.state.createFolder, filesystem, dependencies.signal);
+      await prepareWizardDirectory(cap.state.folderPath, !cap.project && cap.state.createFolder, filesystem, dependencies.signal);
       const folderModule = dependencies.onboarding ?? await import("./trelio-folder-onboarding.mjs");
       const existing = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
       if (existing?.state === "bound" && (existing.company.slug !== cap.company.slug || existing.project)) {
@@ -983,6 +1054,7 @@ function render(result) {
       DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED:'Привязка не завершена. Откройте страницу привязки снова',
       CODEX_CONNECTION_PICKER_UNAVAILABLE:'Окно выбора папки недоступно. Укажите абсолютный путь в поле «Локальная папка»',
       CODEX_CONNECTION_BINDING_CONFLICT:'Эта папка связана с другой компанией или проектом. Выберите отдельную папку',
+      CODEX_CONNECTION_PROJECT_FOLDER_CHANGED:'Codex больше не подтверждает этот путь. Откройте подключение из нужного проекта',
       CODEX_CONNECTION_REGISTRATION_UNCONFIRMED:'Trelio пока не подтвердил регистрацию. Проверьте соединение и повторите проверку',
       CODEX_CONNECTION_READBACK_FAILED:'Не удалось подтвердить путь в Trelio. Повторите проверку',
       CODEX_CONNECTION_FOLDER_UNSAFE:'Папка содержит символическую ссылку. Выберите обычную локальную папку'

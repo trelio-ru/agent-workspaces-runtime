@@ -290,6 +290,28 @@ test("parallel Codex open calls pass only their own native thread IDs to the bri
     && !JSON.stringify(response).includes(secondThread)));
 });
 
+test("the Codex wizard receives only the thread ID from its native tool-call metadata", async () => {
+  const nativeId = "33333333-3333-7333-8333-333333333333";
+  const suppliedId = "44444444-4444-7444-8444-444444444444";
+  const calls = [];
+  const invoke = (id, client, threadId) => handleLocalMcpMessage({
+    jsonrpc: "2.0", id, method: "tools/call", params: {
+      name: "open_codex_connection_wizard", _meta: { threadId },
+      arguments: { companySlug: "fixture", codexThreadId: suppliedId },
+    },
+  }, {
+    clientInfo: { name: client },
+    callTool: async (_origin, _name, _args, options) => {
+      calls.push(options.codexThreadId ?? null);
+      return { content: [] };
+    },
+  });
+  await invoke(1, "codex-mcp-client", nativeId);
+  await invoke(2, "codex-mcp-client", "malformed");
+  await invoke(3, "other-mcp-client", nativeId);
+  assert.deepEqual(calls, [nativeId, null, null]);
+});
+
 test("local MCP offers account discovery only for the bridge's own setup refusal", async () => {
   const parameters = {
     companyId: "11111111-1111-4111-8111-111111111111",

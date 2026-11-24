@@ -4275,7 +4275,7 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
-  { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action. The user selects the folder in the App.",
+  { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action. The App shows the folder to connect.",
     inputSchema: { type: "object", additionalProperties: false, required: ["companySlug"],
       properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
         memberId: { type: "string", format: "uuid" }, runtimeSessionId: { type: "string", format: "uuid" } } },
@@ -6266,7 +6266,8 @@ const handleToolCallWithoutSkillHints = async (
       throw new RemoteMcpHostError("CODEX_CONNECTION_CLIENT_REQUIRED", "Open the folder setup in Codex.");
     }
     try {
-      return await openCodexConnectionWizard(origin, { schemaVersion: 1, operation: "codex_connection_open", parameters: rawArguments }, { signal });
+      return await openCodexConnectionWizard(origin, { schemaVersion: 1, operation: "codex_connection_open", parameters: rawArguments },
+        { signal, codexThreadId });
     } catch (error) {
       // The ordinary pairing error already carries the exact approval request.
       // Preserve its public instructions without serializing the local verifier.
@@ -7066,9 +7067,8 @@ export const handleLocalMcpMessage = async (
       // call. A shared MCP process cannot use its inherited environment or an
       // ID supplied in tool arguments to identify the current chat.
       const nativeCodex = clientInfo?.name === "codex-mcp-client";
-      const codexThreadId = nativeCodex
-        && message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name
-        && message.params?.arguments?.operation === "open"
+      const codexThreadId = nativeCodex && (message.params?.name === "open_codex_connection_wizard"
+        || (message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name && message.params?.arguments?.operation === "open"))
         ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId)
         : null;
       const execute = async (callSignal) => {

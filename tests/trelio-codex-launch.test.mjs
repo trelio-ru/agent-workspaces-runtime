@@ -246,7 +246,7 @@ const wizardFixture = async (t, pairedSetup = false) => {
   };
   const raw = { schemaVersion: 1, operation: "codex_connection_open", parameters: { companySlug: "company-a",
     ...(pairedSetup ? { memberId: originalMemberId } : { runtimeSessionId: state.runtimeSessionId }) } };
-  const open = () => openCodexConnectionWizard(origin, raw, { bridge });
+  const open = (extra = {}) => openCodexConnectionWizard(origin, raw, { bridge, ...extra });
   const first = await open();
   const token = first._meta["trelio/codexConnection"].capabilityToken;
   const action = (action, settings, extra = {}) => handleCodexConnectionAction(origin, { capabilityToken: token, action,
@@ -269,6 +269,67 @@ test("paired setup picks and registers a folder without a hook, and rejects an a
   await assert.rejects(fixture.open(), /CODEX_CONNECTION_SCOPE_CHANGED/u);
   assert.equal((await fixture.action("connect")).structuredContent.code, "CODEX_CONNECTION_SCOPE_CHANGED");
   assert.equal(fixture.puts, 1);
+});
+
+test("wizard preselects the native project and one Connect click applies and verifies that folder", async t => {
+  const fixture = await wizardFixture(t, true);
+  const saved = path.join(fixture.root, "Saved folder");
+  const folderPath = path.join(fixture.root, "Project folder");
+  await fs.mkdir(saved);
+  await fs.mkdir(folderPath);
+  await execFileAsync("git", ["init", "--quiet"], { cwd: folderPath });
+  await fixture.action("save", { folderPath: saved, displayName: "Fixture", createFolder: true });
+  const codexThreadId = "33333333-3333-7333-8333-333333333333";
+  const projectId = "44444444-4444-4444-8444-444444444444";
+  const readProjectFolder = async threadId => {
+    assert.equal(threadId, codexThreadId);
+    return { projectId, folderPath };
+  };
+  const fallback = await fixture.open({ codexThreadId, readProjectFolder: async () => null });
+  assert.equal(fallback._meta["trelio/codexConnection"].folderPath, saved);
+
+  const opened = await fixture.open({ codexThreadId, readProjectFolder });
+  const meta = opened._meta["trelio/codexConnection"];
+  assert.equal(meta.folderPath, folderPath);
+  assert.equal(meta.createFolder, false);
+  assert.equal(opened.structuredContent.verified, false);
+  assert.ok(!JSON.stringify(opened).includes(codexThreadId) && !JSON.stringify(opened).includes(projectId));
+  await assert.rejects(fs.access(path.join(folderPath, "AGENTS.md")), { code: "ENOENT" });
+  assert.equal(fixture.puts, 0);
+
+  const connected = await handleCodexConnectionAction(fixture.origin, {
+    capabilityToken: meta.capabilityToken, action: "connect",
+    settings: { folderPath: meta.folderPath, displayName: meta.displayName, createFolder: meta.createFolder },
+  }, { bridge: fixture.bridge, readProjectFolder });
+  assert.equal(connected.structuredContent.verified, true, JSON.stringify(connected.content));
+  assert.equal(connected._meta["trelio/codexConnection"].folderPath, folderPath);
+  assert.equal((await prepareTrelioFolderDiagnostic({ folderPath }, "codex")).status, "ready");
+  assert.match(await fs.readFile(path.join(folderPath, ".gitignore"), "utf8"), /^\/workspaces\/$/mu);
+  assert.deepEqual(await fs.readdir(saved), []);
+  assert.equal(fixture.puts, 1);
+});
+
+test("a project change after the wizard opened blocks both folder writes and registration", async t => {
+  const fixture = await wizardFixture(t, true);
+  const first = path.join(fixture.root, "First folder");
+  const second = path.join(fixture.root, "Second folder");
+  await fs.mkdir(first);
+  await fs.mkdir(second);
+  let folderPath = first;
+  const readProjectFolder = async () => ({ projectId: "44444444-4444-4444-8444-444444444444", folderPath });
+  const opened = await fixture.open({ codexThreadId: "33333333-3333-7333-8333-333333333333", readProjectFolder });
+  const meta = opened._meta["trelio/codexConnection"];
+  folderPath = second;
+  const connected = await handleCodexConnectionAction(fixture.origin, {
+    capabilityToken: meta.capabilityToken, action: "connect",
+    settings: { folderPath: first, displayName: meta.displayName, createFolder: false },
+  }, { bridge: fixture.bridge, readProjectFolder });
+  assert.equal(connected.structuredContent.code, "CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
+  assert.equal(connected.structuredContent.verified, false);
+  assert.deepEqual(await fs.readdir(first), []);
+  assert.deepEqual(await fs.readdir(second), []);
+  assert.equal(fixture.files.size, 0);
+  assert.equal(fixture.puts, 0);
 });
 
 for (const phase of ["registration", "browser confirmation"]) {

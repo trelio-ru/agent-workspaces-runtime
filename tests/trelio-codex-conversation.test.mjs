@@ -10,7 +10,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { readCodexConversationTitle, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { readCodexConversationTitle, readCodexProjectFolder, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateHumanCodexHookComponent,
@@ -1299,6 +1299,51 @@ test("exact App Server metadata read has no inventory, transcript or model calls
   assert.equal(server.killed, true);
 });
 
+test("Codex project lookup uses the active thread's exact native project without reading turns or listing projects", async () => {
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const root = path.resolve("project-root");
+  const cwd = path.join(root, "subfolder");
+  const server = fakeServer((request, output) => {
+    if (request.id === 1) reply(output, { id: 1, result: {} });
+    if (request.id === 2) reply(output, { id: 2, result: { thread: { id, projectId, cwd, ephemeral: false,
+      environments: [{ environmentId: "local", cwd, runtimeWorkspaceRoots: [root] }], preview: "private fixture" } } });
+    if (request.id === 3) reply(output, { id: 3, result: { project: { id: projectId,
+      roots: [{ path: path.resolve("unrelated-root") }, { path: root }] } } });
+  });
+  assert.deepEqual(await readCodexProjectFolder(id, { executable: "/exact/codex", spawnProcess: server.spawnProcess }),
+    { projectId, folderPath: root });
+  assert.deepEqual(server.requests.map((request) => request.method), ["initialize", "initialized", "thread/read", "project/read"]);
+  assert.equal(server.requests[0].params.capabilities.experimentalApi, true);
+  assert.deepEqual(server.requests[2].params, { threadId: id, includeTurns: false });
+  assert.deepEqual(server.requests[3].params, { projectId });
+  assert.equal(server.killed, true);
+});
+
+test("Codex project lookup leaves projectless, remote, inconsistent and ambiguous roots unselected", async () => {
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const root = path.resolve("project-root");
+  const cwd = path.join(root, "nested", "folder");
+  const thread = { id, projectId, cwd, ephemeral: false };
+  for (const [overrides, roots, projectRead] of [
+    [{ projectId: null }, [root], false],
+    [{ ephemeral: true }, [root], false],
+    [{ environments: [{ environmentId: "remote", cwd }] }, [root], false],
+    [{ environments: [{ environmentId: "local", cwd: root }] }, [root], false],
+    [{}, [root, path.join(root, "nested")], true],
+    [{}, [path.resolve("unrelated-root")], true],
+  ]) {
+    const server = fakeServer((request, output) => {
+      if (request.id === 1) reply(output, { id: 1, result: {} });
+      if (request.id === 2) reply(output, { id: 2, result: { thread: { ...thread, ...overrides } } });
+      if (request.id === 3) reply(output, { id: 3, result: { project: { id: projectId,
+        roots: roots.map(folderPath => ({ path: folderPath })) } } });
+    });
+    assert.equal(await readCodexProjectFolder(id, { executable: "/exact/codex", spawnProcess: server.spawnProcess }), null);
+    assert.equal(server.requests.some(request => request.method === "project/read"), projectRead);
+    assert.equal(server.killed, true);
+  }
+});
+
 for (const [label, response] of [
   ["wrong exact ID", { thread: { id: "22222222-2222-4222-8222-222222222222", name: "Wrong" } }],
   ["missing name", { thread: { id } }],
@@ -1316,7 +1361,7 @@ for (const [label, response] of [
 }
 
 test("timeout, malformed and oversized responses close the optional child", async () => {
-  for (const output of [null, "not JSON\n", "x".repeat(256 * 1024 + 1)]) {
+  for (const output of [null, "not JSON\n", "null\n", "x".repeat(256 * 1024 + 1)]) {
     const server = fakeServer((_request, stream) => { if (output) stream.write(output); });
     assert.equal(await readCodexConversationTitle(id, { executable: "/exact/codex", spawnProcess: server.spawnProcess, timeoutMs: 10 }), null);
     assert.equal(server.killed, true);

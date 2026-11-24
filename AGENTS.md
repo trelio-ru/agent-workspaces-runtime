@@ -672,7 +672,7 @@ publication tooling также остаются вне этого публичн
   старого `PreToolUse`. Не читать или менять hook trust ради перехода.
 - Запуск новых чатов Codex в общем `trelio-codex-conversation.mjs` – [личная привязка папки](docs/agent-workspace-runtime.md#codex-new-chat); company задачи не определяет launch root. Без existing managed binding hook молчит: чтение задачи не запускает onboarding и не просит выбрать или привязать папку.
 - [Формат черновика запуска DeepSeek Harness](docs/agent-workspace-runtime.md#native-deepseek-harness-connection) согласован с запуском из карточки задачи в Codex и Claude Code.
-- Явный setup Codex использует [локальный мастер](docs/agent-workspace-runtime.md#codex-connection-wizard): личный bridge → App-only выбор папки → CAS planner → registration read-back. Хуки не нужны для настройки; название подключения остаётся локальным.
+- Явный setup Codex использует [локальный мастер](docs/agent-workspace-runtime.md#codex-connection-wizard). Точный native thread/project read подставляет корень проекта. Кнопка App подтверждает показанный путь, проверка повторяется перед CAS planner/apply и registration read-back. При отсутствии однозначного корня сохраняется ручной выбор. Хуки не нужны; название остаётся локальным.
 - Привязка браузера повторяется отдельно от настройки папки. Подтверждение
   открывает браузер, а локальный listener держит verifier до одноразового
   обмена. Team/Run access и срок браузерной привязки принадлежат backend.
