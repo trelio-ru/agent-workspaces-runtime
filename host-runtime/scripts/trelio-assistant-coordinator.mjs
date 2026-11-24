@@ -1533,7 +1533,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // the capacity marker. That cannot revive an already consumed POST or
       // turn its expired lease into automatic cancellation/replay authority.
       if(ownerCapacityCancellationAttempted(row))return blockedIntake();
-      if(Date.parse(outcome.leaseExpiresAt)<=now()){
+      // Closed intakes keep their original lease timestamp. Their receipt is
+      // already fixed; wait for the original Codex turn to finish above.
+      if(outcome.state==='leased'&&Date.parse(outcome.leaseExpiresAt)<=now()){
         const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(closed.state!=='cancelled')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
         if(!['completed','failed'].includes(nativeResult.state))return blockedIntake();

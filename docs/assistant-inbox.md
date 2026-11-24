@@ -894,7 +894,10 @@ marker; started cancellation rereads that original native delivery independently
 Before the durable native-start CAS, cancellation closes only the never-started
 preparation. After crash/restart, a source pause, expired lease or positive backend
 cancellation cannot replace the exact original Codex completed/failed read-back.
-The protected pass stays held until that native terminal marker. A closed created
+The protected pass stays held until that native terminal marker. Only an intake
+still reported as leased is cancelled on expiry. Once the server has committed
+a route, the coordinator rereads that receipt and the original turn until it
+can settle them together. A closed created
 receipt whose fresh task binding/ACL/transport read fails retains its receipt and
 typed cause, backs off new company work and never recreates, routes or ACKs the
 original event. An unknown active pass keeps its global fence.

@@ -1912,9 +1912,13 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
   }finally{await f.coordinator.close();}
 });
 
-for(const reuseExisting of [false,true])test(`owner command intake ${reuseExisting?'reuses the existing task':'creates a new goal'} with SAME SQLite/native routing and restart dedup`,async t=>{
+for(const {name,reuseExisting=false,interrupted=false} of [
+  {name:'creates a new goal'},
+  {name:'reuses the existing task',reuseExisting:true},
+  {name:'waits for an interrupted routed turn',reuseExisting:true,interrupted:true},
+])test(`owner command intake ${name} with SAME SQLite/native routing and restart dedup`,async t=>{
   const database=new DatabaseSync(':memory:');
-  let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0,intakeReads=0;
+  let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0,intakeReads=0,releases=0;
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
   const ownerIdentityId=randomUUID(),accountId=randomUUID(),sourceId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
   const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -1949,10 +1953,12 @@ for(const reuseExisting of [false,true])test(`owner command intake ${reuseExisti
       if(!reuse){created++;tasks.set(taskId,{id:bindingId,taskId,state:'accepted',revision:0});}
       Object.assign(current,{state:reuse?'routed':'created',taskId,receiptId:randomUUID(),readConfirmed:true,route:{id:randomUUID(),sourceId,
         sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key,eventIds:[current.eventId]}});
-      const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};turns.set(input.deliveryId,result);return result;
+      const turnId=randomUUID();
+      const result=interrupted&&reuse?{state:'uncertain',turnId}:{state:'completed',turnId,receipt:`codex:${input.threadId}:${turnId}`};
+      turns.set(input.deliveryId,result);return result;
     }};
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
-    releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
+    releasePass:async outcome=>{assert.equal(outcome.id,active.passId);releases++;active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
     timeZone:'Europe/Moscow',now:()=>clock,readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
       events:poll===1?[]:[{id:`message:123:${poll}`,revision:String(poll).repeat(64),conversationKey:key,kind:'new',outgoing:false,attention:'direct',
         forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
@@ -1973,7 +1979,31 @@ for(const reuseExisting of [false,true])test(`owner command intake ${reuseExisti
   // another task, while reusing the restricted intake chat. No conversation
   // route can hijack it into the first task.
   clock+=300000;await coordinator.pollOnce();
-  await coordinator.workOnce().catch(()=>{});
+  if(interrupted){
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_INTAKE_REVIEW_REQUIRED'});
+    const pass=structuredClone(active),receipt=intakes.get(pass.passId);
+    const local=()=>database.prepare('SELECT state,settled,outcome_receipt FROM assistant_owner_intakes WHERE id=?').get(pass.passId);
+    assert.equal(receipt.state,'routed');
+    let cancellations=0;
+    client.cancelSourceIntake=async()=>{cancellations++;return structuredClone(receipt);};
+    clock=Date.parse(receipt.leaseExpiresAt)+1;
+    await coordinator.close();coordinator=createAssistantCoordinator(options);
+    assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.deepEqual(active,pass);assert.equal(local().state,'uncertain');assert.equal(local().outcome_receipt,null);
+    assert.equal(cancellations,0);assert.equal(releases,1);assert.equal(intakeTurns,2);
+    // Only the same original turn finishing releases this pass. The route was
+    // already committed before restart and its event still has no read ACK.
+    const {turnId}=turns.get(pass.deliveryId);
+    turns.set(pass.deliveryId,{state:'completed',turnId,receipt:`codex:${pass.threadId}:${turnId}`});
+    await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u));
+    assert.deepEqual({...local()},{state:'complete',settled:1,outcome_receipt:receipt.receiptId});
+    assert.equal(active,null);assert.equal(releases,2);assert.equal(cancellations,0);
+    const routedEvent=database.prepare(`SELECT e.route_id,e.processed,e.acked FROM assistant_inbox_events e
+      JOIN assistant_owner_intakes i ON i.event_key=e.event_key WHERE i.id=?`).get(pass.passId);
+    assert.deepEqual({...routedEvent},{route_id:receipt.route.id,processed:0,acked:0});
+    await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u));
+    assert.equal(releases,2);assert.equal(cancellations,0);
+  }else await coordinator.workOnce();
   assert.equal(created,reuseExisting?1:2);assert.equal(intakeTurns,2);assert.equal(provisions,2,'one intake chat plus first permanent task chat');
   assert.equal(new Set([...intakes.values()].map(value=>value.threadId)).size,1);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'created\'').get().n,reuseExisting?1:2);
@@ -2307,6 +2337,7 @@ for(const recovery of ['source_paused','lease_expired','release_pending'])test(`
     // still cannot substitute that domain receipt for the original live turn.
     await coordinator.close();coordinator=createAssistantCoordinator(f.options);
     assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(releases,0);assert.equal(f.counts().provisions,0);
+    if(recovery==='lease_expired')assert.equal(cancellations,1,'the committed cancellation survives the restart');
     terminal=true;
     assert.equal((await coordinator.workOnce()).kind,'provision','only terminal read-back releases unrelated task work');
     assert.equal(releases,1);assert.equal(active,null);assert.equal(f.counts().provisions,1);
