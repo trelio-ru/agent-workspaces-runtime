@@ -1120,11 +1120,11 @@ export const createDeepseekDesktopNavigation = ({
       if (local?.state !== "bound" || codexLaunchFolderId(token, origin, local, "deepseek") !== action.folderId) return reply(null);
       const taskUrl = new URL(action.taskPath, origin);
       if (taskUrl.origin !== origin) return reply(null);
-      // Match the browser launchers. U+2060 keeps the editable paragraph
-      // visually empty if the composer normalizes trailing whitespace.
-      // The paragraph boundary keeps the character outside the canonical URL.
+      // Match the browser launchers: the first U+2060 protects the space
+      // immediately after the URL from trimming, even if newlines are dropped.
+      // The second keeps the editable paragraph visually empty but present.
       return reply({ kind: "start", workspaceId: selected.workspaceId,
-        prompt: `Trelio Agent Workspaces ${taskUrl.href}\n\n\u2060` });
+        prompt: `Trelio Agent Workspaces ${taskUrl.href} \u2060\n\n\u2060` });
     } catch {
       return reply(null, 503);
     } finally {
