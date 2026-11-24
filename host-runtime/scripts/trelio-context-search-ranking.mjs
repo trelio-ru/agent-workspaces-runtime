@@ -219,10 +219,11 @@ export const CONTEXT_SEARCH_CATEGORY_LIMITS = {
     contact: 2,
     project: 2,
 };
-const contextSearchCategory = (type) => ({
-    workspace_file: "workspace-file", "workspace-artifact": "workspace-file",
-    workspace_artifact: "workspace-file", knowledge_page: "knowledge-page", regular_work: "regular-work",
-}[type] ?? type);
+const contextSearchCategoryAliases = new Map([
+    ["workspace_file", "workspace-file"], ["workspace-artifact", "workspace-file"],
+    ["workspace_artifact", "workspace-file"], ["knowledge_page", "knowledge-page"], ["regular_work", "regular-work"],
+]);
+const contextSearchCategory = (type) => contextSearchCategoryAliases.get(type) ?? type;
 export const getCategorizedContextSearchLimit = (limit) => {
     const requested = typeof limit === "number" && Number.isFinite(limit) ? Math.trunc(limit) : CONTEXT_SEARCH_MATERIAL_LIMIT;
     return Math.min(CONTEXT_SEARCH_MATERIAL_LIMIT, Math.max(1, requested));

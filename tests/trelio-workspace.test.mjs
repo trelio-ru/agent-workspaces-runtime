@@ -9504,13 +9504,15 @@ test("workspace worker gates external services but not native Trelio work", asyn
   assert.match(workerSkill, /После обмена кратко сообщи о подключении\s+устройства и продолжай/u);
   assert.match(workerSkill, /никогда не\s+включают `mcp:agent-instructions:manage`/u);
   assert.match(workerSkill, /не начинай второй OAuth/u);
-  assert.match(catalogSkill, /После `guidance.status=searched` не вызывай `search_agent_guidance` ещё раз/u);
+  // Both the released bootstrap and the categorized-search bootstrap must
+  // suppress the legacy call once the native response has routed discovery.
+  assert.match(catalogSkill, /После `guidance.status=searched` не вызывай `search_agent_guidance` ещё раз|вызывай `search_agent_guidance` только если отсутствуют оба блока/u);
   assert.match(catalogSkill, /`list_agent_skills` нужен только для явной инвентаризации/u);
   assert.match(catalogSkill, /`kind=procedure` читай через exact\s+`get_agent_procedure`/u);
   assert.match(catalogSkill, /не вызывай `request_plugin_install`/u);
   assert.match(catalogSkill, /личный навык\/коннектор разрешён/u);
   assert.match(catalogSkill, /не считай неготовность разрешением другого\s+источника/u);
-  assert.match(catalogSkill, /Он одновременно возвращает `guidance` и материалы/u);
+  assert.match(catalogSkill, /Он одновременно возвращает `guidance` и материалы|возвращает материалы, `guidance` для правил и процедур и отдельный\s+`skills`/u);
   assert.match(catalogSkill, /Вызови точные server\/tool из `runtimeExecution\.localAction`/u);
   assert.match(catalogSkill, /Host проверяет подпись\s+package и file hashes при каждом запуске/u);
   assert.match(catalogSkill, /При `integrationRouting` используй только текущи(?:е поля|й контракт)/u);

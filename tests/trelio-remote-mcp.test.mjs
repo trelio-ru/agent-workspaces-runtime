@@ -5707,7 +5707,7 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
     /do not ask merely to choose a provider/u,
     /Preserve explicit service\/account choice, ACL, authorized recipients\/costs and independent mutation approval/u,
     /ask only for missing authority/u,
-    /Personal connectors require searched skills \(legacy: guidance\), hasMore=false, no usable match/u,
+    /Compatible personal connectors require searched skills \(legacy guidance\), hasMore=false, no usable match/u,
     /Control-plane outage is not an empty catalog; transient failure is not no_access\/setup_required/u,
     /Unknown mutation outcomes require read-back before retry or switching/u,
     /Never bypass a working skill through browser\/HTTP\/another MCP\/script/u,
@@ -6021,8 +6021,7 @@ test("platform routing allows a named fallback when no relevant skill exists", a
     type: "fallback",
     reason: "no_relevant_skill",
   });
-  assert.match(instructions, /Searched guidance with hasMore=false and no usable relevant skill/u);
-  assert.match(instructions, /permits compatible personal connectors/u);
+  assert.match(instructions, /Compatible personal connectors require searched skills \(legacy guidance\), hasMore=false, no usable match/u);
   assert.match(instructions, /Exact reads\/Run без поиска/u);
 });
 
