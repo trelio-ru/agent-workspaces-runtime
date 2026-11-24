@@ -39,6 +39,8 @@ publication tooling также остаются вне этого публичн
 
 - [Claude Desktop Code Local navigation](docs/agent-workspace-runtime.md#claude-desktop-local-navigation) uses the private native tab record and a server-confirmed locator; engine IDs never substitute for Desktop tabs.
 - [Browser confirmation](docs/agent-workspace-runtime.md#codex-connection-wizard) opens after verified interactive setup. Recheck the exact local folder after registration and browser confirmation. Late service Git recovery uses the existing planner and CAS for `.gitignore` only. Native approval and folder registration remain independent.
+  The wizard shows the browser action until confirmation succeeds. Link additional
+  browser profiles from Trelio’s «Работа с агентом» section.
 
 - Human encrypted-device setup follows [browser self-enrollment](docs/agent-workspace-runtime.md#self-device-enrollment): personal phrases stay in Trelio, own-device confirmation and bounded readiness reads; managed/existing-only profiles never open that flow.
 

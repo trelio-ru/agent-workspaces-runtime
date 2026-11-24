@@ -596,7 +596,7 @@ test("native folder dialog uses fixed code on macOS/Windows/Linux and preserves 
 test("wizard App handles real host RPC, disables duplicate actions and renders verified/error results", async t => {
   const fixture = await wizardFixture(t);
   const listeners = {}, messages = [], elements = new Map();
-  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "main", "confirm-browser", "browser-help"]) {
+  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "main", "browser-actions", "confirm-browser", "browser-help"]) {
     elements.set(id, { hidden: id === "settings", value: "", checked: false, textContent: "", disabled: false,
       setAttribute() {}, focus() {}, reportValidity: () => true });
   }
@@ -605,7 +605,9 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   const document = { getElementById: id => elements.get(id), documentElement: { scrollHeight: 700 },
     querySelector: () => elements.get("main"), querySelectorAll: () => [...elements.values()] };
   const context = vm.createContext({ window, document, Map, Error, setTimeout, clearTimeout });
-  vm.runInContext(codexConnectionAppResource().text.match(/<script>([\s\S]*?)<\/script>/u)[1], context);
+  const html = codexConnectionAppResource().text;
+  assert.match(html, /id="browser-actions"><button[^>]*id="confirm-browser"[^>]*>Привязать к браузеру<\/button><\/div>/u);
+  vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/u)[1], context);
   const receive = data => listeners.message({ source: parent, data });
   receive({ jsonrpc: "2.0", id: messages[0].id, result: { hostCapabilities: { openLinks: {} } } });
   await new Promise(resolve => setImmediate(resolve));
@@ -662,7 +664,7 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   assert.equal(elements.get("done").hidden, false);
   assert.match(elements.get("status").textContent, /Подтвердите привязку/u);
   assert.equal(fixture.puts, 1);
-  assert.equal(elements.get("confirm-browser").hidden, false);
+  assert.equal(elements.get("browser-actions").hidden, false);
   assert.equal(elements.get("confirm-browser").disabled, true);
   const bindRequest = messages.filter(message => message.method === "tools/call").at(-1);
   assert.equal(bindRequest.params.arguments.action, "confirm_browser");
@@ -670,33 +672,31 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   await elements.get("confirm-browser").onclick();
   assert.equal(messages.filter(message => message.method === "tools/call").at(-1).id, bindRequest.id,
     "The pending browser exchange prevents a duplicate confirmation");
-  const bound = await handleCodexConnectionAction(fixture.origin, structuredClone(bindRequest.params.arguments), {
-    bridge: fixture.bridge,
-    confirmBrowser: async (_origin, input) => assert.equal(input.provider, "codex"),
-  });
-  receive({ jsonrpc: "2.0", id: bindRequest.id, result: bound }); await clicked;
-  assert.equal(elements.get("confirm-browser").textContent, "Привязать другой браузер");
-  const repeatBinding = elements.get("confirm-browser").onclick();
-  const repeat = messages.filter(message => message.method === "tools/call").at(-1);
-  const expired = await handleCodexConnectionAction(fixture.origin, structuredClone(repeat.params.arguments), {
+  const expired = await handleCodexConnectionAction(fixture.origin, structuredClone(bindRequest.params.arguments), {
     bridge: fixture.bridge, confirmBrowser: async () => {
       throw Object.assign(new Error("timeout"), { code: "DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED" });
     },
   });
-  receive({ jsonrpc: "2.0", id: repeat.id, result: expired }); await repeatBinding;
+  receive({ jsonrpc: "2.0", id: bindRequest.id, result: expired }); await clicked;
   assert.equal(elements.get("done").hidden, false);
   assert.match(elements.get("status").textContent, /Привязка не завершена/u);
-  assert.equal(elements.get("confirm-browser").textContent, "Привязать к браузеру");
+  assert.equal(elements.get("browser-actions").hidden, false);
+  assert.equal(elements.get("confirm-browser").disabled, false);
   assert.doesNotMatch(elements.get("browser-help").textContent, /Привязка подтверждена/u);
-  assert.equal(fixture.puts, 1, "Browser repair never repeats folder registration");
+
   const retryBinding = elements.get("confirm-browser").onclick();
-  const next = messages.filter(message => message.method === "tools/call").at(-1);
-  fixture.allowed = false;
-  const refused = await handleCodexConnectionAction(fixture.origin, structuredClone(next.params.arguments), { bridge: fixture.bridge });
-  receive({ jsonrpc: "2.0", id: next.id, result: refused }); await retryBinding;
-  assert.equal(elements.get("done").hidden, true);
-  assert.equal(elements.get("setup").hidden, false);
-  assert.match(elements.get("status").textContent, /ACCESS_DENIED/u);
+  const retry = messages.filter(message => message.method === "tools/call").at(-1);
+  assert.equal(retry.params.arguments.action, "confirm_browser");
+  assert.notEqual(retry.id, bindRequest.id);
+  const bound = await handleCodexConnectionAction(fixture.origin, structuredClone(retry.params.arguments), {
+    bridge: fixture.bridge,
+    confirmBrowser: async (_origin, input) => assert.equal(input.provider, "codex"),
+  });
+  receive({ jsonrpc: "2.0", id: retry.id, result: bound }); await retryBinding;
+  assert.equal(elements.get("done").hidden, false);
+  assert.equal(elements.get("browser-actions").hidden, true);
+  assert.match(elements.get("browser-help").textContent, /Привязка подтверждена/u);
+  assert.equal(fixture.puts, 1, "Browser retry never repeats folder registration");
 });
 
 

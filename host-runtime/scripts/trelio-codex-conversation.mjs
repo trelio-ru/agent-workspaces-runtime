@@ -925,7 +925,7 @@ export const codexConnectionAppResource = () => ({
 <label class="choice"><input id="create" type="checkbox">Создать папку, если её ещё нет</label><div class="actions"><button id="pick" type="button">Выбрать существующую</button><button type="submit">Сохранить выбор</button></div></form></section>
 <p class="muted">По кнопке «Подключить» сохраним в папке файлы AGENTS.md и CLAUDE.md и зарегистрируем путь в вашем аккаунте Trelio. Файлы настройки сохраняют существующий текст</p>
 <div class="actions"><button id="connect" class="primary" type="button">Подключить</button></div></div>
-<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p id="browser-help">Свяжите браузер с Codex, чтобы открывать новые чаты из задач Trelio.</p><div class="actions"><button class="primary" id="confirm-browser" type="button">Привязать к браузеру</button></div></section>
+<section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p id="browser-help">Свяжите браузер с Codex, чтобы открывать новые чаты из задач Trelio.</p><div class="actions" id="browser-actions"><button class="primary" id="confirm-browser" type="button">Привязать к браузеру</button></div></section>
 <p id="status" role="status" aria-live="polite"></p>
 </main><script>
 (function(){'use strict';
@@ -971,8 +971,11 @@ function render(result) {
   $('create').checked = meta.createFolder;
   var done = meta.stage === 'ready';
   $('setup').hidden = done; $('done').hidden = !done;
-  $('confirm-browser').textContent = meta.browserConfirmed === true ? 'Привязать другой браузер' : 'Привязать к браузеру';
-  $('browser-help').textContent = meta.browserConfirmed === true
+  // Folder registration alone leaves browser confirmation available for retry.
+  // Once confirmed, hide the whole action row; additional profiles use Trelio's connections page.
+  var browserConfirmed = meta.browserConfirmed === true;
+  $('browser-actions').hidden = browserConfirmed;
+  $('browser-help').textContent = browserConfirmed
     ? 'Привязка подтверждена. Из задачи Trelio можно открыть новый чат в Codex.'
     : 'Свяжите браузер с Codex, чтобы открывать новые чаты из задач Trelio.';
   if (meta.errorCode) {
