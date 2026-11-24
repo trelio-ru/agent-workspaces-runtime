@@ -742,6 +742,37 @@ const prepareWizardDirectory = async (folderPath, createFolder, filesystem, sign
   if (await filesystem.realpath(folderPath) !== folderPath) throw wizardError("CODEX_CONNECTION_FOLDER_UNSAFE");
 };
 
+const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, onboarding, signal }) => {
+  const folderModule = onboarding ?? await import("./trelio-folder-onboarding.mjs");
+  const verify = async () => {
+    signal?.throwIfAborted();
+    const result = await folderModule.prepareTrelioFolderDiagnostic({ folderPath }, "codex", { filesystem });
+    if (result.folder?.path !== folderPath || result.scope?.companySlug !== company.slug || result.scope?.projectSlug) {
+      throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+    }
+  };
+  try {
+    await verify();
+  } catch (error) {
+    if (error?.code !== "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED") throw error;
+
+    // Codex can create service Git while registration or browser confirmation
+    // is in flight. The original setup covers the isolation rule on this exact
+    // bound root, so limit recovery to the one file that establishes it. The
+    // ordinary planner/apply still owns Git classification, file CAS and rollback.
+    signal?.throwIfAborted();
+    const { plan } = await folderModule.prepareTrelioFolderOnboarding({ folderPath, company }, { filesystem });
+    if (plan?.folderPath !== folderPath || plan.folderKind !== "service_git"
+      || plan.changes.some(({ action, path }) => action !== "none" && path !== ".gitignore")) {
+      throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+    }
+    signal?.throwIfAborted();
+    if (plan.apply) await folderModule.applyTrelioFolderOnboarding(plan.apply.arguments.parameters, { filesystem });
+    await verify();
+  }
+  signal?.throwIfAborted();
+};
+
 export const handleCodexConnectionAction = async (origin, input, dependencies = {}) => {
   if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
     || !["state", "pick", "save", "connect", "confirm_browser"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
@@ -801,7 +832,8 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       dependencies.signal?.throwIfAborted();
       if (plan.plan.apply) await folderModule.applyTrelioFolderOnboarding(plan.plan.apply.arguments.parameters);
       const folder = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
-      if (folder?.state !== "bound" || folder.company.slug !== cap.company.slug || folder.project) {
+      if (folder?.state !== "bound" || folder.folderPath !== cap.state.folderPath
+        || folder.company.slug !== cap.company.slug || folder.project) {
         throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
       }
       dependencies.signal?.throwIfAborted();
@@ -809,18 +841,15 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       const receipt = await (dependencies.register ?? registerAndVerifyCodexLaunchFolder)({ origin, token, folder,
         state: { runtimeSessionId: cap.parameters.runtimeSessionId }, signal: dependencies.signal, interactive: true }, dependencies);
       if (receipt?.verified !== true) throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
-      const verifiedFolder = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
-      if (verifiedFolder?.state !== "bound" || verifiedFolder.folderPath !== folder.folderPath
-        || verifiedFolder.company.slug !== cap.company.slug || verifiedFolder.project) {
-        throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
-      }
       // Registration read-back and local CAS are distinct from live access.
       // A policy/account change during HTTP must not leave an old green screen.
       const finalContext = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
       if (wizardBindingKey(origin, finalContext.token, finalContext.context) !== cap.busyKey) {
         throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
       }
-      dependencies.signal?.throwIfAborted();
+      await verifyWizardFolderReadiness(folder.folderPath, cap.company, {
+        filesystem, onboarding: folderModule, signal: dependencies.signal,
+      });
       cap.state.stage = "ready";
     }
     if (input.action === "confirm_browser") {
@@ -836,17 +865,17 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
         confirmationError = error || wizardError("DESKTOP_BROWSER_CONFIRMATION_FAILED");
       }
       // The browser exchange may take almost a minute. A timeout alone says
-      // nothing about a grant revoked during that wait, and the loopback must
-      // not expose backend errors. Recheck the SAME account/device under the
-      // original call budget, on success and failure, without replaying either
-      // folder registration or confirmation. Unknown/denied access invalidates
-      // readiness; only a positive fresh read preserves the verified folder.
+      // nothing about a grant revoked or Git initialized during that wait.
+      // Recheck the account/device and folder under the original call budget,
+      // on success and failure, without replaying registration or confirmation.
       dependencies.signal?.throwIfAborted();
       const finalContext = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
       if (wizardBindingKey(origin, finalContext.token, finalContext.context) !== cap.busyKey) {
         throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
       }
-      dependencies.signal?.throwIfAborted();
+      await verifyWizardFolderReadiness(cap.state.folderPath, cap.company, {
+        filesystem, onboarding: dependencies.onboarding, signal: dependencies.signal,
+      });
       if (confirmationError) {
         preserveVerifiedFolder = true;
         throw confirmationError;
@@ -855,8 +884,8 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
     }
     return wizardResult(input.capabilityToken, cap, cap.state);
   } catch (error) {
-    // Keep a browser-only failure separate from folder setup only after its
-    // final live access check. Every other refusal hides the old ready state.
+    // Only a fresh account and folder check can preserve readiness after a
+    // browser-only failure. Every other refusal hides the old ready state.
     if (!preserveVerifiedFolder) cap.state.stage = "folder";
     // Only the Git classifier can expose its reviewed, path-free description.
     // Other errors still use closed codes so private I/O stays in the host.

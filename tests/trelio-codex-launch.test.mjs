@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { inspectCodexLaunchFolder, synchronizeDesktopLaunchFolder, codexLaunchFolderId, createDeepseekDesktopNavigation, confirmDesktopBrowser, confirmManualCodexBrowser } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { findTrelioWorkingFolderRoot, readWorkingFolderInstructionFile } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { prepareTrelioFolderDiagnostic } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
 
 const managed = line => `<!-- trelio-agent-workspaces:start -->\n## Trelio\n${line}\n<!-- trelio-agent-workspaces:end -->\n`;
 const canonical = managed("Папка привязана к компании «Company A» (`company-a`). Это контекст работы, а не привязка Git-репозитория.");
@@ -267,6 +268,68 @@ test("paired setup picks and registers a folder without a hook, and rejects an a
   fixture.memberId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   await assert.rejects(fixture.open(), /CODEX_CONNECTION_SCOPE_CHANGED/u);
   assert.equal((await fixture.action("connect")).structuredContent.code, "CODEX_CONNECTION_SCOPE_CHANGED");
+  assert.equal(fixture.puts, 1);
+});
+
+for (const phase of ["registration", "browser confirmation"]) {
+  test(`wizard verifies isolation before success when service Git appears during ${phase}`, async t => {
+    const fixture = await wizardFixture(t, true);
+    const folderPath = path.join(fixture.root, "Selected folder");
+    await fs.mkdir(folderPath);
+    const ignorePath = path.join(folderPath, ".gitignore");
+    const instructionPath = path.join(folderPath, "AGENTS.md");
+    let originalInstructions;
+    const initializeServiceGit = async () => {
+      await assert.rejects(fs.access(ignorePath), { code: "ENOENT" });
+      originalInstructions = await fs.readFile(instructionPath, "utf8");
+      await execFileAsync("git", ["init", "--quiet"], { cwd: folderPath });
+    };
+
+    const connected = await fixture.action("connect", { folderPath, displayName: "Fixture", createFolder: false }, {
+      register: async (input, dependencies) => {
+        const receipt = await registerAndVerifyCodexLaunchFolder(input, dependencies);
+        if (phase === "registration") await initializeServiceGit();
+        return receipt;
+      },
+    });
+    assert.equal(connected.structuredContent.verified, true, JSON.stringify(connected.content));
+    assert.equal((await prepareTrelioFolderDiagnostic({ folderPath }, "codex")).status, "ready");
+
+    const confirmed = await fixture.action("confirm_browser", undefined, {
+      confirmBrowser: async () => {
+        if (phase === "browser confirmation") await initializeServiceGit();
+      },
+    });
+    assert.equal(confirmed.structuredContent.verified, true, JSON.stringify(confirmed.content));
+    assert.equal(confirmed._meta["trelio/codexConnection"].browserConfirmed, true);
+    assert.equal((await prepareTrelioFolderDiagnostic({ folderPath }, "codex")).status, "ready");
+    assert.match(await fs.readFile(ignorePath, "utf8"), /^\/workspaces\/$/mu);
+    assert.equal(await fs.readFile(instructionPath, "utf8"), originalInstructions);
+    assert.equal((await fs.lstat(path.join(folderPath, ".git"))).isDirectory(), true);
+    assert.equal(fixture.puts, 1, "Local recovery must not register the folder again");
+  });
+}
+
+test("wizard recovery cannot repair Git by overwriting an intervening company binding", async t => {
+  const fixture = await wizardFixture(t, true);
+  const folderPath = path.join(fixture.root, "Selected folder");
+  await fs.mkdir(folderPath);
+  const instructionPath = path.join(folderPath, "AGENTS.md");
+  const replacement = managed("Папка привязана к компании «Company B» (`company-b`). Это контекст работы, а не привязка Git-репозитория.");
+
+  const connected = await fixture.action("connect", { folderPath, displayName: "Fixture", createFolder: false }, {
+    register: async (input, dependencies) => {
+      const receipt = await registerAndVerifyCodexLaunchFolder(input, dependencies);
+      await execFileAsync("git", ["init", "--quiet"], { cwd: folderPath });
+      await fs.writeFile(instructionPath, replacement);
+      return receipt;
+    },
+  });
+  assert.deepEqual(connected.structuredContent, {
+    stage: "folder", verified: false, code: "CODEX_CONNECTION_BINDING_UNCONFIRMED",
+  });
+  assert.equal(await fs.readFile(instructionPath, "utf8"), replacement);
+  await assert.rejects(fs.access(path.join(folderPath, ".gitignore")), { code: "ENOENT" });
   assert.equal(fixture.puts, 1);
 });
 
