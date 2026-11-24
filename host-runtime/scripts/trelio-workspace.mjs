@@ -13443,7 +13443,7 @@ const withWorkspaceOpenLock = async (workspaceId, handler, kind = "open") => {
   }
 };
 
-export const readWorkingFolderInstructionFile = async (filePath) => {
+const readBoundedLocalTextFile = async (filePath, maximumBytes) => {
   let fileStat;
 
   try {
@@ -13453,14 +13453,13 @@ export const readWorkingFolderInstructionFile = async (filePath) => {
     throw error;
   }
 
-  // Инструкция выбирает путь для расшифрованной рабочей копии. Symlink,
-  // special file и неожиданно большой файл не могут служить таким trust
-  // anchor: это ограничивает и подмену пути, и неограниченное чтение вверх от
-  // cwd. Onboarding сам пишет только маленький обычный Markdown-файл.
+  // Both the working-folder binding and the Run locator are inputs to local
+  // path selection. Read ordinary files only, without calling the credential
+  // reader that may repair ACLs on Windows as part of opening a private file.
   if (
     !fileStat.isFile()
     || fileStat.isSymbolicLink()
-    || fileStat.size > WORKING_FOLDER_INSTRUCTIONS_MAX_BYTES
+    || fileStat.size > maximumBytes
   ) {
     return null;
   }
@@ -13473,7 +13472,7 @@ export const readWorkingFolderInstructionFile = async (filePath) => {
     handle = await fs.open(filePath, flags);
   } catch (error) {
     // The entry may have been replaced between lstat and open. Treat that as
-    // no trusted binding instead of following the replacement.
+    // no usable locator instead of following the replacement.
     if (error.code === "ELOOP" || error.code === "ENOENT") return null;
     throw error;
   }
@@ -13482,15 +13481,29 @@ export const readWorkingFolderInstructionFile = async (filePath) => {
     const openedStat = await handle.stat();
     if (
       !openedStat.isFile()
-      || openedStat.size > WORKING_FOLDER_INSTRUCTIONS_MAX_BYTES
+      || openedStat.dev !== fileStat.dev
+      || openedStat.ino !== fileStat.ino
+      || openedStat.size > maximumBytes
     ) {
       return null;
     }
-    return handle.readFile({ encoding: "utf8" });
+    // The file may grow after fstat. Read at most the observed length and
+    // one sentinel byte from this same descriptor, then require exact EOF.
+    const buffer = Buffer.alloc(openedStat.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    return length === openedStat.size ? buffer.toString("utf8", 0, length) : null;
   } finally {
     await handle.close();
   }
 };
+
+export const readWorkingFolderInstructionFile = (filePath) =>
+  readBoundedLocalTextFile(filePath, WORKING_FOLDER_INSTRUCTIONS_MAX_BYTES);
 
 const containsManagedWorkingFolderBinding = (markdown) => {
   if (typeof markdown !== "string") return false;
@@ -13870,6 +13883,13 @@ const assertValidMaterializedRoot = async (rootDirectory, metadata, workspaceId,
   }
 };
 
+const readRunRootLocator = async (rootDirectory) => {
+  const text = await readBoundedLocalTextFile(
+    path.join(rootDirectory, ".trelio-run.json"), MAX_ASSISTANT_RUN_METADATA_BYTES,
+  );
+  return text === null ? null : JSON.parse(text);
+};
+
 const findBoundCheckoutForMissingLegacyWorkspace = async ({
   legacyRoot, workspaceId, requestedRunId, origin, companyId, loadRunSnapshot,
 }) => {
@@ -13879,7 +13899,7 @@ const findBoundCheckoutForMissingLegacyWorkspace = async ({
   // of a different checkout. Never remove or rewrite the old root, including
   // backups and pinned context alongside its metadata.
   if (await pathEntryExists(legacyWorkspace)) return null;
-  const legacyMetadata = await readAssistantWorkspaceRunMetadata(legacyRoot);
+  const legacyMetadata = await readRunRootLocator(legacyRoot);
   if (!matchesMaterializedRootIdentity(legacyRoot, legacyMetadata, workspaceId, origin)
     || legacyMetadata.runId === requestedRunId
     || (legacyMetadata.company?.id && legacyMetadata.company.id !== companyId)) return null;
@@ -13895,7 +13915,7 @@ const findBoundCheckoutForMissingLegacyWorkspace = async ({
     for (const directory of [binding, workspacesDirectory, boundRoot]) {
       if (!(await fs.lstat(directory)).isDirectory()) return null;
     }
-    const boundMetadata = await readAssistantWorkspaceRunMetadata(boundRoot);
+    const boundMetadata = await readRunRootLocator(boundRoot);
     if (!matchesMaterializedRootIdentity(boundRoot, boundMetadata, workspaceId, origin)
       || (boundMetadata.company?.id && boundMetadata.company.id !== companyId)) return null;
     await assertValidMaterializedRoot(boundRoot, boundMetadata, workspaceId, origin);

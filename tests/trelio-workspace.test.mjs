@@ -3606,6 +3606,13 @@ test("open bypasses a terminal legacy locator with no checkout for the existing 
     workspaceDirectory: legacyWorkspace, candidateHead: head, company: testCompany,
   });
   await writeFile(metadataPath, metadata, { mode: 0o600 });
+  const readLegacyPermissions = async () => {
+    if (process.platform !== "win32") return (await stat(metadataPath)).mode & 0o777;
+    const icacls = path.join(process.env.SystemRoot, "System32", "icacls.exe");
+    const { stdout } = await execFileAsync(icacls, [metadataPath], { windowsHide: true });
+    return createHash("sha256").update(stdout).digest("hex");
+  };
+  const originalPermissions = await readLegacyPermissions();
 
   const missingCheckout = (error) => {
     const details = parseWorkspaceLayoutMigrationBlockedError(error.stderr, workspaceId)?.details;
@@ -3633,6 +3640,7 @@ test("open bypasses a terminal legacy locator with no checkout for the existing 
   assert.deepEqual(exactReads, ["running", "accepted"]);
   assert.deepEqual(claimed, [boundRunId, targetRunId]);
   assert.equal(await readFile(metadataPath, "utf8"), metadata);
+  assert.equal(await readLegacyPermissions(), originalPermissions, "legacy metadata inspection must not rewrite its ACL");
   assert.equal(await readFile(backup, "utf8"), "retained legacy copy\n");
   await assert.rejects(lstat(legacyWorkspace), { code: "ENOENT" });
 });
