@@ -1544,6 +1544,18 @@ test('recovery context selects the original expired or retired pass without infe
   expectedSelector={expectedLeaseRevision:2,writerRetirementReceiptId:writerRetirement.receiptId};
   status=200;value={...projection,state:'closed',recoveryContext:context};
   assert.deepEqual(await client.readTaskRecoveryContext(readRetired),context);
+  const notificationId=randomUUID(),review={workspaceId:checkpoint.workspaceId,acceptedHead:context.materialBasis.workspaceHead,
+    pendingOwnerCheck:{questionId:randomUUID(),priorReceiptId:context.materialBasis.receiptId,sourceMarkerId:binding.deliveryId,sourceTurnId:randomUUID()}};
+  expectedSelector={...expectedSelector,review,notificationId};
+  value={...value,recoveryContext:{...context,review:{questionState:'answered'}}};
+  assert.deepEqual((await client.readTaskRecoveryContext({...readRetired,review,notificationId})).review,{questionState:'answered'});
+  value={...value,recoveryContext:{...context,materialBasis:{...context.materialBasis,receiptId:randomUUID()},review:{questionState:'answered'}}};
+  await assert.rejects(client.readTaskRecoveryContext({...readRetired,review,notificationId}),/INVALID_RESPONSE/);
+  value={...value,recoveryContext:{...context,review:null}};
+  assert.equal((await client.readTaskRecoveryContext({...readRetired,review,notificationId})).review,null);
+  await assert.rejects(client.readTaskRecoveryContext({...readRetired,review}),/INVALID_INPUT/);
+  expectedSelector={expectedLeaseRevision:2,writerRetirementReceiptId:writerRetirement.receiptId};
+  value={...value,recoveryContext:context};
   for(const corrupt of [{...value,state:'review_required'},{...value,businessReady:true},
     {...value,recoveryContext:null},{...value,leaseRevision:3}]){
     value=corrupt;
@@ -6227,4 +6239,29 @@ test('material target correction cannot be forged by an upstream same-code refus
       loadCommon:async()=>({inspectAcceptedWorkspace:async()=>{throw error;}}),
     }),observed=>observed===error);
   }
+});
+
+test('an owner answer begin preserves the exact historical selector and accepts only the matching new native receipt',async()=>{
+  const origin='https://admission.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1});
+  const input={companyId:randomUUID(),taskId:randomUUID(),bindingId:randomUUID(),bindingRevision:2,deliveryId:randomUUID(),threadId:randomUUID()};
+  const retiredAnswer={passId:randomUUID(),expectedLeaseRevision:1,writerRetirementReceiptId:randomUUID(),notificationId:randomUUID(),
+    review:{workspaceId:randomUUID(),acceptedHead:'a'.repeat(40),pendingOwnerCheck:{questionId:randomUUID(),priorReceiptId:randomUUID(),
+      sourceMarkerId:randomUUID(),sourceTurnId:randomUUID()}}};
+  const receipt={notificationId:retiredAnswer.notificationId,writerRetirementReceiptId:retiredAnswer.writerRetirementReceiptId};
+  const response={...input,passId:randomUUID(),state:'leased',workMode:'task',startState:'created',leaseRevision:0,
+    retiredAnswer:receipt,leaseExpiresAt:new Date().toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
+  let value=response;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/begin');assert.deepEqual(JSON.parse(options.body),{...input,retiredAnswer});
+    return Response.json(value);
+  }})});
+  for(const startState of ['created','observe']){
+    value={...response,startState};assert.deepEqual((await client.beginTaskPass({...input,retiredAnswer})).retiredAnswer,receipt);
+  }
+  for(const incorrect of [{retiredAnswer:null},{retiredAnswer:{...receipt,notificationId:randomUUID()}},{passId:retiredAnswer.passId},
+    {deliveryId:retiredAnswer.review.pendingOwnerCheck.sourceMarkerId},{workMode:'discussion'},{startState:undefined}]){
+    value={...response,...incorrect};await assert.rejects(client.beginTaskPass({...input,retiredAnswer}),/INVALID_RESPONSE/);
+  }
+  await assert.rejects(client.beginTaskPass({...input,deliveryId:retiredAnswer.review.pendingOwnerCheck.sourceMarkerId,retiredAnswer}),/INVALID_INPUT/);
 });

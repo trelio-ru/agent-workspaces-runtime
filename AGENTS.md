@@ -320,6 +320,7 @@ publication tooling также остаются вне этого публичн
   An already accepted scheduled Run can confirm after technical retirement.
   Match independent signed read and committed native receipts. Recheck under
   the newly owned writer and limit the session to ordinary confirmation.
+  A genuine answered owner question can wake its task after a fully verified interrupted scheduled review. Match the existing notification, retired writer, entire native turn and clean accepted base in the [inbox contract](docs/assistant-inbox.md#owner-answer-after-a-retired-scheduled-pass-schema-v36).
   SQLite v34 records one start marker before dispatch and settles the same
   schedule only from matching backend read-back. Unknown effects stay held.
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).

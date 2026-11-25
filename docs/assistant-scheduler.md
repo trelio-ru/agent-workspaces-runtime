@@ -880,6 +880,17 @@ turn, failed proof, uncertain transport and private/revoked/different provider
 release supply no continuation authority. Continue from the same Run after fresh
 pinned reads. Ordinary task material and native completion still settle the pass.
 
+### Answer delivered after scheduled writer retirement
+
+After ordinary ready events and scheduled work, the coordinator can admit an
+existing owner-answer notification for the same task. It verifies the complete
+old turn, its observed owner question, accepted material and the exact current
+notification before native begin. The ordinary new writer rechecks the original
+chat and any previously opened Run under its exclusive lock. It reads the
+answer and acts on current authority. Each task keeps its own outcome and
+cadence until native business completion. See the [durable event and restart
+contract](assistant-inbox.md#owner-answer-after-a-retired-scheduled-pass-schema-v36).
+
 ### Interrupted Workspace draft settlement
 
 A stored `interrupted` is still uncertainty. The one narrow exception is a

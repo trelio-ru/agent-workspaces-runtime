@@ -21,7 +21,7 @@ import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validat
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { inspectHistoricalTaskDelivery, matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead,
-  reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill } from './trelio-skill-secret-setup.mjs';
+  reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill, reviewedHistoricalOwnerAnswerSkills } from './trelio-skill-secret-setup.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -2573,12 +2573,12 @@ export const inspectRetiredMaterialRefusal=(turn,marker,taskPass,assistantId,evi
   return {turnId:turn.id,arguments:business};
 };
 
-const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,
-  {taskPass,assistantId,retirementReceiptId,failedConfirmationMarker})=>{
+const readOriginalRetiredTurn=async(request,threadId,
+  {retirementReceiptId,failedConfirmationMarker})=>{
   const limit=failedConfirmationMarker===undefined?2:3;
   const response=await request('thread/turns/list',{threadId,limit,sortDirection:'desc',itemsView:'full'});
   const turns=response?.data;
-  if(!Array.isArray(turns)||!turns.length||turns.length>limit)return {state:'uncertain'};
+  if(!Array.isArray(turns)||!turns.length||turns.length>limit)return null;
   const [failed,...previous]=turns;
   const [latest,older]=failedConfirmationMarker===undefined?turns:previous;
   const first=latest?.items?.[0]?.content?.[0]?.text;
@@ -2590,9 +2590,132 @@ const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,
     if(!older||!['completed','interrupted'].includes(latest.status)||latest.error!=null
       ||latest.items.length>128||latest.items.slice(1).some(item=>!['agentMessage','reasoning','sleep'].includes(item.type)
         &&!completedTaskContextCompaction(item)&&(item.type!=='mcpToolCall'||item.server!=='trelio-assistant'
-          ||!ASSISTANT_RETIRED_TASK_READ_TOOLS.includes(item.tool))))return {state:'uncertain'};
+          ||!ASSISTANT_RETIRED_TASK_READ_TOOLS.includes(item.tool))))return null;
     original=older;
   }
+  return {original,failed};
+};
+
+// Classify the whole previous scheduled pass before admitting a DIFFERENT
+// notification. A fresh answer is not a receipt for any operation in this
+// turn. In particular, an authentication failure qualifies only when the
+// native preflight positively reported that no Secret/grant was used.
+const matchesRetiredAnswerRoot=(text,deliveryId,scope)=>{
+  if(matchesTaskStartPrompt(text,deliveryId,scope))return true;
+  // v3.34.37–39 (e521b6da): the complete published scheduled task body
+  // contains no dynamic fields. Bind its exact two identity lines first;
+  // this digest is from the public tagged template, independent of any chat.
+  const header=assistantDeliveryMarker(deliveryId)+'\nTRELIO_ASSISTANT_SCOPE '+JSON.stringify(scope)+'\n';
+  return text.startsWith(header)&&Buffer.byteLength(text)<=32_768
+    &&createHash('sha256').update(text.slice(header.length)).digest('hex')==='7b34c25ef84384eae744b842525e39922d9983b64ae019c21d1d2486600d1b57';
+};
+
+export const assistantRetiredAnswerEvidence=(original,deliveryId,{taskPass,assistantId,questionId,localDraft})=>{
+  if(!UUID.test(deliveryId??'')||!UUID.test(questionId??'')||!UUID.test(assistantId??'')||!exactDraftPass(taskPass,taskPass)
+    ||original?.status!=='interrupted'||original.error!=null||!UUID.test(original.id??'')
+    ||!Array.isArray(original.items)||original.items.length>128)return false;
+  const [marker,...items]=original.items;
+  const scope=assistantWorkStateContext({assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true});
+  if(marker?.type!=='userMessage'||marker.content?.length!==1||marker.content[0]?.type!=='text'
+    ||typeof marker.content[0].text!=='string'||!matchesRetiredAnswerRoot(marker.content[0].text,deliveryId,scope))return false;
+  let found=false,prepared=false,openHandle=null,opened=false;
+  const visit={origin:null,closed:true,pending:false};
+  for(const item of items){
+    if(['reasoning','agentMessage','sleep'].includes(item?.type)||completedTaskContextCompaction(item))continue;
+    if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!plainRecord(item.arguments)
+      ||!['completed','failed'].includes(item.status))return false;
+    const args=item.arguments,v=item.result?.structuredContent,success=item.status==='completed'&&item.error==null&&item.result?.isError!==true;
+    if(item.tool==='get_assistant_status'&&args.taskPass===undefined&&onlyKeys(args,['view'])&&success)continue;
+    if(!exactDraftPass(args.taskPass,taskPass))return false;
+    if(item.tool==='get_assistant_owner_question'){
+      if(!success||args.questionId!==questionId||v?.id!==questionId||v.taskId!==taskPass.taskId||v.state!=='pending'
+        ||v.assistantUserId!==assistantId||v.action!=null||v.systemTemplate!=null)return false;
+      found=true;continue;
+    }
+    if(recoveredOutcomeReads.has(item.tool)){
+      // This set contains native readers only. Two old presentation profiles
+      // could refuse a guide/schema read before any worker was invoked.
+      if(!success&&!(['get_agent_procedure','get_assistant_operation_contract'].includes(item.tool)
+        &&localDraftRefusal(item,'ASSISTANT_CAPABILITY_UNAVAILABLE')))return false;
+      continue;
+    }
+    if(item.tool==='use_assistant_browser'){
+      const content=item.result?.content;
+      if(!success||!Array.isArray(content)||content[0]?.type!=='text'||typeof content[0].text!=='string'
+        ||Buffer.byteLength(content[0].text)>32_768||content.length>2||content.length===2&&content[1]?.type!=='image')return false;
+      let visual;try{visual=JSON.parse(content[0].text);}catch{return false;}
+      // A native ready frame can itself settle a preceding preparing status.
+      // A window remaining visible is not a pending click, login, or send.
+      if(args.command?.operation==='navigate'){
+        let target;try{target=new URL(args.command.args.url);}catch{return false;}
+        if(target.origin!==args.siteOrigin||target.search)return false;
+      }
+      if(args.command?.operation==='screenshot'&&visual?.state==='ready'&&visual.reason==='none')visit.pending=false;
+      if(!observeClosedBrowserVisit(visit,args,visual))return false;
+      continue;
+    }
+    if(item.tool==='prepare_assistant_workspace_run'){
+      if(!success||prepared||!localDraft||v?.prepared!==true||v.workspace?.id!==localDraft.workspaceId
+        ||v.workspace.scopeType!=='task'||v.workspace.taskId!==taskPass.taskId||v.workspace.companyId!==taskPass.companyId
+        ||v.run?.id!==localDraft.runId)return false;
+      prepared=true;continue;
+    }
+    if(item.tool==='use_assistant_workspace_files'){
+      if(!success||!prepared||!sameDraftRun(args.runIdentity,localDraft)||!['read','list'].includes(args.command?.action))return false;
+      continue;
+    }
+    if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return false;
+    const p=args.parameters??{};
+    if(args.operation==='skill_run')continue; // Verified collectively against exact release/arguments below.
+    if(args.operation==='secret_list'&&success)continue;
+    if(args.operation==='secret_browser_prepare'&&!success&&localDraft&&p.runId===localDraft.runId
+      &&localDraftRefusal(item,'SECRET_BROWSER_PREFLIGHT_FAILED')
+      &&isDeepStrictEqual(v,{code:'SECRET_BROWSER_PREFLIGHT_FAILED',stage:'preflight',reasonCode:'target_url_changed',
+        secretRequested:false,grantConsumedByAttempt:false}))continue;
+    if(args.operation==='open'){
+      if(!success||!prepared||opened||!sameDraftRun(p,localDraft)||v?.operation!=='open')return false;
+      if(v.state==='running'){
+        openHandle=observedWorkspacePollHandle(v,'open',localDraft);
+        if(!openHandle)return false;
+      }else if(v.state!=='completed')return false;
+      opened=true;continue;
+    }
+    if(args.operation==='status'&&opened&&sameDraftRun(args.runIdentity,localDraft)){
+      if(!Object.keys(p).length&&success&&v?.operation==='status')continue;
+      if(Object.keys(p).join(',')==='finishOperationId'&&openHandle&&p.finishOperationId===openHandle
+        &&(success&&v?.operation==='open'&&v.operationId===openHandle&&['running','completed'].includes(v.state)
+          ||localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED')))continue;
+    }
+    return false;
+  }
+  return found&&!visit.pending&&Boolean(localDraft)===prepared&&(!prepared||opened)&&reviewedHistoricalOwnerAnswerSkills(items,taskPass);
+};
+
+const readRetiredOwnerQuestion=async(request,threadId,deliveryId,options)=>{
+  const selected=await readOriginalRetiredTurn(request,threadId,options);
+  if(!selected||!assistantRetiredAnswerEvidence(selected.original,deliveryId,options))
+    return {state:'uncertain'};
+  return {state:'owner_question_observed',questionId:options.questionId,turnId:selected.original.id};
+};
+
+// The new turn reads the owner's current answer in the ordinary task scope.
+// Historical navigation or a refused Secret preflight cannot establish login.
+const answeredTaskInstructions=workflow=>workflow+'\n\nProcess the newly delivered owner answer and the current accepted WORK. Reconcile any previous external or browser action from its existing state before further input. The interrupted turn and its observations do not authorize repeating an earlier operation.';
+const verifyRetiredAnswerSource=async(request,threadId,deliveryId,scope,check)=>{
+  if(!check)return;
+  if(check.assistantId!==scope.assistantUserId||check.taskPass?.companyId!==scope.companyId
+    ||check.taskPass.taskId!==scope.taskId||scope.ownerQuestionIds?.length!==1
+    ||scope.ownerQuestionIds[0]!==check.questionId||check.sourceMarkerId===deliveryId||scope.scheduled
+    ||scope.workMode==='discussion'||scope.sourceReferences)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+  const current=await readRetiredOwnerQuestion(request,threadId,check.sourceMarkerId,check);
+  if(current.state!=='owner_question_observed'||current.turnId!==check.sourceTurnId)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+};
+
+const readRetiredAcceptedOutcome=async(request,threadId,deliveryId,
+  {taskPass,assistantId,retirementReceiptId,failedConfirmationMarker})=>{
+  const turns=await readOriginalRetiredTurn(request,threadId,{retirementReceiptId,failedConfirmationMarker});
+  if(!turns)return {state:'uncertain'};
+  const {original,failed}=turns;
   const evidence=inspectRetiredAcceptedOutcome(original,deliveryId,taskPass,assistantId);
   if(!evidence)return {state:'uncertain'};
   const refusal=failedConfirmationMarker===undefined?null
@@ -3147,6 +3270,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.retiredOwnerQuestion!==undefined)
+      return readRetiredOwnerQuestion(request,threadId,deliveryId,options.retiredOwnerQuestion);
     if(options.retiredAcceptedOutcome!==undefined)
       return readRetiredAcceptedOutcome(request,threadId,deliveryId,options.retiredAcceptedOutcome);
     if(options.committedTaskOutcome!==undefined)
@@ -3938,7 +4063,8 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
   if(await(options.readExecutionAvailability??readAssistantCodexExecutionAvailability)(execution,preflight)!==true)
     fail('ASSISTANT_CODEX_MODEL_UNAVAILABLE');
   await(options.readHookReadiness??readAssistantCodexHookReadiness)(cwd,preflight);
-  const developerInstructions=await(options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
+  const workflow=await(options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
+  const developerInstructions=options.retiredAnswerCheck?answeredTaskInstructions(workflow):workflow;
   const text=assistantFreshPrompt(deliveryId,scope);
   let admissionError;
   let observedFresh=false;
@@ -3961,6 +4087,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
         if(options.startState==='observe')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       }
       await verifyAssistantExecutionServer(request,threadId,{signal:ownedSignal});
+      await verifyRetiredAnswerSource(request,threadId,deliveryId,scope,options.retiredAnswerCheck);
       // Hold this exact native writer through device/lease recheck and the
       // SQLite start CAS. A denied or disconnected preflight cannot send input.
       try{await options.beforeInvocation?.(ownedSignal);}
@@ -4038,6 +4165,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     await verifyAssistantExecutionServer(request,threadId,{
       workspaceDraftRecovery:workspaceRecoveryMode,signal,
     });
+    await verifyRetiredAnswerSource(request,threadId,deliveryId,workStateContext,options.retiredAnswerCheck);
     if(workspaceRecoveryMode==='retired_outcome'){
       const {originalDeliveryId,originalTurnId,taskPass,failedConfirmationMarker,refusal}=options.retiredOutcome;
       const {writerRetirementReceiptId:retirementReceiptId,outcome}=options.retiredPass;
@@ -4125,7 +4253,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       ?'Confirm only an already accepted result. The original writer and its signing session have ended. The sole tool verifies the canonical accepted material, recorded effects and the existing cadence.'
       :options.retiredPass
       ? `${workflow}\n\nThe native task writer has been retired. This inspection may read only its original task and checkpoint the pinned draft when one is provided. A draft checkpoint is the save boundary for this turn. The earlier provider effect must remain on hold pending independent evidence.`
-      : workflow;
+      : options.retiredAnswerCheck?answeredTaskInstructions(workflow):workflow;
     const run=async text=>{
       const completed=await submitAssistantTurn(request,watchTerminal,{threadId,execution,developerInstructions,text});
       if(completed.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');

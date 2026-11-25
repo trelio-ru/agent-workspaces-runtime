@@ -3933,3 +3933,58 @@ test('an interrupted technical prelude matches the original native Run and histo
     }
   }
 });
+
+test('native history selects only the exact interrupted scheduled review that observed this pending owner question',async()=>{
+  const deliveryId=randomUUID(),threadId=randomUUID(),questionId=randomUUID(),assistantId=randomUUID(),retirementReceiptId=randomUUID();
+  const taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const scope=assistantWorkStateContext({assistantId,companyId:taskPass.companyId,taskId:taskPass.taskId,scheduled:true});
+  const question={id:questionId,state:'pending',assistantUserId:assistantId,taskId:taskPass.taskId,action:null};
+  const call=(tool,args,structuredContent,content=[])=>({type:'mcpToolCall',server:'trelio-assistant',tool,status:'completed',
+    arguments:{taskPass,...args},result:{content,structuredContent},error:null});
+  const makeRoot=()=>({id:randomUUID(),status:'interrupted',items:[
+    {type:'userMessage',content:[{type:'text',text:assistantFreshPrompt(deliveryId,scope)}]},
+    call('get_task',{},{}),call('get_assistant_owner_question',{questionId},question)]});
+  const read=async(turn,localDraft=null)=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
+    retiredOwnerQuestion:{assistantId,taskPass,retirementReceiptId,questionId,localDraft},spawnProcess:nativeRpc(request=>({
+      result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[turn],nextCursor:null}}))});
+  const selected=turn=>({state:'owner_question_observed',questionId,turnId:turn.id});
+  const plain=makeRoot();assert.deepEqual(await read(plain),selected(plain));
+  const legacy=makeRoot();
+  legacy.items[0].content[0].text=assistantNativePrompt(deliveryId,scope,{}).replace(
+    ' If work needs broader company readings, get_assistant_status(view=company_context) displays the ordinary native source catalogue. Use view=task to restore task operations. Select the needed existing view yourself; presentation never changes authority.','');
+  assert.deepEqual(await read(legacy),selected(legacy));
+  legacy.items[0].content[0].text+='not part of the public release';
+  assert.deepEqual(await read(legacy),{state:'uncertain'});
+  const run={workspaceId:randomUUID(),runId:randomUUID()},localDraft={...run,baseHead:'a'.repeat(40),anchorHead:'a'.repeat(40),checkpointId:null};
+  const visual=(operation,args,state)=>call('use_assistant_browser',{siteOrigin:'https://account.example',command:{operation,args}},
+    null,[{type:'text',text:JSON.stringify({state,reason:'none'})}]);
+  const refused='SECRET_BROWSER_PREFLIGHT_FAILED';
+  const full=makeRoot();
+  full.items.push(call('prepare_assistant_workspace_run',{workspaceId:run.workspaceId},{prepared:true,workspace:{id:run.workspaceId,scopeType:'task',
+    taskId:taskPass.taskId,companyId:taskPass.companyId},run:{id:run.runId}}),
+    call('continue_assistant_workspace_action',{schemaVersion:1,operation:'open',parameters:run},{schemaVersion:1,operation:'open',state:'completed'}),
+    call('use_assistant_workspace_files',{runIdentity:run,command:{action:'read',path:scope.workStatePath}},{text:'accepted test material'}),
+    visual('status',{},'saved_unverified'),visual('navigate',{url:'https://account.example/session#start'},'preparing'),
+    visual('screenshot',{},'ready'),visual('status',{},'ready'),
+    {...call('continue_assistant_workspace_action',{schemaVersion:1,operation:'secret_browser_prepare',parameters:{runId:run.runId}},
+      {code:refused,stage:'preflight',reasonCode:'target_url_changed',secretRequested:false,grantConsumedByAttempt:false}),status:'failed'});
+  assert.deepEqual(await read(full,localDraft),selected(full));
+  for(const corrupt of [
+    turn=>{turn.items[0].content[0].text+='Foreign mode';},
+    turn=>{turn.items[2].result.structuredContent.action={type:'authorize'};},
+    turn=>{turn.items[2].arguments.questionId=randomUUID();},
+    turn=>{turn.items[2].result.structuredContent.assistantUserId=randomUUID();},
+    turn=>{turn.items.at(-1).result.structuredContent.grantConsumedByAttempt=true;},
+    turn=>{turn.items.at(-1).result.structuredContent.secretRequested=true;},
+    turn=>{turn.items.find(i=>i.arguments?.command?.operation==='navigate').arguments.command.args.url='https://different.example/login';},
+    turn=>{turn.items.find(i=>i.arguments?.command?.operation==='navigate').arguments.command.args.url='https://account.example/?action=send';},
+    turn=>{turn.items=turn.items.filter(i=>i.arguments?.command?.operation!=='screenshot'&&i.arguments?.command?.operation!=='status');},
+    turn=>{turn.items.push(visual('click',{selector:'#test'},'ready'));},
+    turn=>{turn.items.push(call('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters:{}},{}));},
+    turn=>{turn.items.push(call('create_comment',{},{}));},
+    turn=>{turn.items.find(i=>i.tool==='use_assistant_workspace_files').arguments.command.action='write';},
+  ]){
+    const copy=structuredClone(full);corrupt(copy);assert.deepEqual(await read(copy,localDraft),{state:'uncertain'});
+  }
+  assert.deepEqual(await read(full,{...localDraft,runId:randomUUID()}),{state:'uncertain'});
+});

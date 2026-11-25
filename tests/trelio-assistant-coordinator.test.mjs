@@ -4881,3 +4881,215 @@ for(const repaired of [false,true])test(`retained named archive settles once, th
     assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,1);
   }finally{await f.coordinator.close();}
 });
+
+// A stopped scheduled review and an actual later answer have distinct lifetimes.
+// Use the normal notifier ACK, SQLite claim, registered chat and business receipt.
+// Restart the same journal at each native boundary: no original operation may run.
+for(const mode of ['no_run','clean_run','after_begin','after_start','dirty_run','unknown_effect','missing_answer','wrong_receipt','revoked_begin'])
+test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,async t=>{
+  const f=fixture(t);f.authority.workMode='task';
+  const originalReadOutcome=f.options.client.readBusinessOutcome;
+  f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const plan=f.coordinator.status()[0];f.advance(plan.nextRunAt-f.options.now());
+  f.failNative(true);await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  f.failNative(false);
+  const pass=f.activePass(),old=f.passes.get(pass.deliveryId);
+  old.state='closed';f.advance(21*60_000);
+  const receipt={...pass,receiptId:randomUUID(),state:'retired',leaseRevision:old.leaseRevision};
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  inbox.recordRetiredTaskWriter(pass,receipt);inbox.releaseRetiredTaskWriter(pass.deliveryId,receipt);
+  await f.options.passHost.releasePass(receipt);inbox.startRetiredTaskInspection(pass.deliveryId,receipt);
+  const snapshot=()=>({...f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(pass.deliveryId)});
+  // A prior capacity diagnostic may still be retained on this historical
+  // row. It is an idle/update fence until a genuine successor commits.
+  if(mode==='no_run')inbox.observeModelCapacity(pass.deliveryId,{turnId:randomUUID(),markerId:pass.deliveryId});
+  const frozen=snapshot(),questionId=randomUUID(),notificationId=randomUUID(),sourceTurnId=randomUUID(),head='a'.repeat(40);
+  const basis={workspaceId:randomUUID(),workspaceHead:head,receiptId:randomUUID()};
+  const draft=['clean_run','dirty_run'].includes(mode)?{workspaceId:basis.workspaceId,runId:randomUUID(),checkpointId:null,baseHead:head,anchorHead:head}:null;
+  let nativeStarts=0,begins=0,oldReads=0,checks=0,newDelivery,completed=false;
+  f.events.push({id:notificationId,revision:'owner-answer',taskId:pass.taskId,wake:true,ownerQuestionId:questionId});
+  await f.coordinator.pollOnce();
+  f.options.client.readTaskRecoveryContext=async input=>{
+    assert.deepEqual(input.writerRetirement,receipt);
+    if(input.review){
+      assert.equal(input.notificationId,notificationId);
+      assert.deepEqual(input.review,{workspaceId:basis.workspaceId,acceptedHead:head,pendingOwnerCheck:{
+        priorReceiptId:basis.receiptId,sourceMarkerId:pass.deliveryId,sourceTurnId,questionId}});
+    }
+    return {draftEvidence:draft?{localDraft:draft,intermediateDraft:null,portableFinish:null}:null,materialBasis:basis,
+      operations:{coverage:'partial',hasMore:false,receipts:[]},...(input.review?{review:mode==='missing_answer'?null:{questionState:'answered'}}:{})};
+  };
+  f.options.native.readWriterReleased=async thread=>thread===pass.threadId;
+  f.options.verifyReadOnlyPrelude=async(oldReceipt,candidate,_signal,newPass)=>{
+    checks++;assert.deepEqual(oldReceipt,receipt);assert.deepEqual(candidate,draft);
+    if(newPass)assert.equal(newPass.deliveryId,newDelivery);
+    return mode!=='dirty_run';
+  };
+  const originalNativeRead=f.options.native.readDelivery;
+  f.options.native.readDelivery=async(thread,marker,options)=>{
+    if(options.retiredOwnerQuestion){
+      oldReads++;assert.equal(thread,pass.threadId);assert.equal(marker,pass.deliveryId);
+      return mode==='unknown_effect'?{state:'uncertain'}:{state:'owner_question_observed',questionId,turnId:sourceTurnId};
+    }
+    return originalNativeRead(thread,marker,options);
+  };
+  const begin=f.options.client.beginTaskPass;
+  f.options.client.beginTaskPass=async input=>{
+    begins++;
+    if(newDelivery)assert.equal(input.deliveryId,newDelivery);else newDelivery=input.deliveryId;
+    assert.notEqual(input.deliveryId,pass.deliveryId);
+    assert.deepEqual(inbox.readRetiredAnswer(input.deliveryId).request,input.retiredAnswer);
+    assert.deepEqual(snapshot(),frozen);
+    if(mode==='revoked_begin'&&begins===1)throw Object.assign(new Error('revision changed before begin'),{status:409});
+    const observed=await begin(input);
+    observed.retiredAnswer={writerRetirementReceiptId:receipt.receiptId,notificationId:mode==='wrong_receipt'?randomUUID():notificationId};
+    if(mode==='after_begin'&&begins===1)throw Object.assign(new Error('lost begin'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    return {...observed,startState:begins===1||mode==='revoked_begin'?'created':'observe'};
+  };
+  f.options.passHost.recoverPass=async(request,expected)=>{
+    assert.deepEqual(expected,f.activePass());assert.equal(request.passId,f.passes.get(newDelivery).passId);
+    const live=f.passes.get(newDelivery);assert.equal(live.state,'review_required');
+    live.state='leased';
+    return f.options.client.renewTaskPass(request);
+  };
+  const run=f.options.native.run;
+  f.options.native.run=async(input,options)=>{
+    if(options.startState==='observe'){
+      assert.throws(()=>options.startInvocation(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+      throw Object.assign(new Error('no positive native result for the new marker'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    }
+    nativeStarts++;assert.equal(nativeStarts,1);assert.equal(input.threadId,pass.threadId);
+    assert.equal(input.deliveryId,newDelivery);assert.deepEqual(input.taskContext.ownerQuestionIds,[questionId]);
+    assert.equal(input.taskContext.scheduled,undefined);assert.equal(options.retiredPass,undefined);
+    assert.equal(options.retiredAnswerCheck.sourceMarkerId,pass.deliveryId);
+    assert.equal(options.retiredAnswerCheck.sourceTurnId,sourceTurnId);
+    await options.beforeInvocation(options.signal);
+    const value=await run(input,options);completed=true;
+    if(mode==='after_start')throw Object.assign(new Error('lost after positive new native turn'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    return value;
+  };
+  f.options.client.readBusinessOutcome=async input=>{
+    if(input.deliveryId===pass.deliveryId||!completed)return {schemaVersion:1,state:'pending'};
+    assert.equal(input.deliveryId,newDelivery);
+    // The new ordinary decision controls future cadence. This fixture chooses
+    // a confirmed daily schedule, making further independent work future.
+    f.continuation.cadence='daily';f.continuation.dailyLocalTime='22:00';
+    return originalReadOutcome(input);
+  };
+  await f.coordinator.close();
+  let coordinator=createAssistantCoordinator(f.options);
+  try{
+    const maintenance=()=>coordinator.maintainPluginAtIdleBoundary(async guard=>{await guard();return {state:'current'};});
+    assert.equal((await maintenance()).state,'deferred');
+    if(mode==='no_run')assert.ok(coordinator.modelCapacityRetryDelay()>0);
+    const work=()=>coordinator.workOnce();
+    if(['after_begin','after_start','wrong_receipt'].includes(mode))await assert.rejects(work());
+    else await work();
+    assert.deepEqual(snapshot(),frozen);assert.equal(old.state,'closed');
+    if(!completed)assert.equal(coordinator.status()[0].nextRunAt,plan.nextRunAt);
+    if(['after_begin','after_start'].includes(mode)){
+      await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+      if(mode==='after_begin'){
+        await assert.rejects(work(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+        assert.equal(nativeStarts,0);assert.deepEqual(snapshot(),frozen);
+        assert.equal(coordinator.status()[0].nextRunAt,plan.nextRunAt);
+        f.advance(21*60_000);f.passes.get(newDelivery).state='review_required';
+      }
+      await work();
+    }
+    if(mode==='revoked_begin'){
+      assert.equal(nativeStarts,0);assert.equal(f.activePass(),null);
+      assert.deepEqual(inbox.incompleteDeliveries(),[]);
+      assert.equal(inbox.readDelivery(newDelivery).state,'not_accepted');
+      assert.equal(coordinator.status()[0].nextRunAt,plan.nextRunAt);
+      await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+      assert.equal((await work()).state,'completed');
+    }
+    const event=f.database.prepare('SELECT acked,processed FROM assistant_inbox_events WHERE event_id=?').get(notificationId);
+    assert.equal(event.acked,1);assert.equal(oldReads,mode==='revoked_begin'?2:1);
+    assert.equal(checks,mode==='dirty_run'?1:mode==='clean_run'?2:0);
+    assert.equal(event.processed,Number(completed));
+    const related=f.database.prepare('SELECT count(*) n FROM assistant_retired_answer_deliveries').get().n;
+    assert.equal(related,['dirty_run','unknown_effect','missing_answer'].includes(mode)?0:1);
+    assert.equal(nativeStarts,['no_run','clean_run','after_start','after_begin','revoked_begin'].includes(mode)?1:0);
+    assert.equal(begins,related+(mode==='after_begin'?2:mode==='revoked_begin'?1:0));
+    if(completed){
+      assert.equal((await maintenance()).state,'current');
+      assert.deepEqual(inbox.status(plan.source).uncertain,[]);
+      const dispatch=await coordinator.dispatchStatus();
+      assert.equal(dispatch.uncertainDeliveries,0);assert.equal(dispatch.failure,null);
+      assert.equal(coordinator.modelCapacityRetryDelay(),null);
+      assert.equal(inbox.readDelivery(newDelivery).state,'complete');assert.deepEqual(inbox.retiredTaskIds(),[]);
+      assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_delivery_events WHERE delivery_id=?').get(newDelivery).n,1);
+    }else assert.deepEqual(inbox.retiredTaskIds(),[pass.taskId]);
+    assert.deepEqual(snapshot(),frozen);
+  }finally{await coordinator.close();}
+});
+
+for(const errorAt of ['native_read','backend_preflight','first_begin'])
+test(`one scoped owner-answer refusal permits another independently verified answer in the same cycle (${errorAt})`,async t=>{
+  const f=fixture(t),first=f.authority,second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0,workMode:'task'};
+  first.workMode='task';
+  const assignments=new Map([first,second].map(binding=>[binding.taskId,binding]));
+  f.options.client.tasks=async()=>({bindings:[first,second],nextCursor:null});
+  f.options.client.task=async(_company,id)=>({...assignments.get(id),execution:f.execution});
+  f.options.client.poll=async(_company,position)=>({events:f.events.slice(Number(position)).map(event=>({...event,
+    bindingId:assignments.get(event.taskId).id,bindingRevision:0,taskState:'accepted'})),nextCursor:String(f.events.length),hasMore:false});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();f.advance(60_000);await f.coordinator.workOnce();
+  f.advance(2*60*60_000);
+  const retired=new Map(),inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  const readOutcome=f.options.client.readBusinessOutcome, nativeStarts=[];
+  let finished=null;
+  f.options.client.readBusinessOutcome=async input=>input.deliveryId===finished?readOutcome(input):{schemaVersion:1,state:'pending'};
+  f.options.native.run=async(input,options)=>{
+    options.startInvocation(input);throw Object.assign(new Error('interrupted original scheduled turn'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  };
+  for(let i=0;i<2;i++){
+    await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+    const old=f.activePass(),live=f.passes.get(old.deliveryId),receipt={...old,state:'retired',leaseRevision:live.leaseRevision,receiptId:randomUUID()};
+    f.advance(21*60_000);live.state='closed';
+    inbox.recordRetiredTaskWriter(old,receipt);inbox.releaseRetiredTaskWriter(old.deliveryId,receipt);
+    await f.options.passHost.releasePass(receipt);inbox.startRetiredTaskInspection(old.deliveryId,receipt);
+    retired.set(old.taskId,{receipt,questionId:randomUUID(),notificationId:randomUUID(),sourceTurnId:randomUUID(),
+      basis:{workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),receiptId:randomUUID()}});
+  }
+  const [denied,allowed]=[...retired.values()];
+  for(const {receipt,questionId,notificationId} of retired.values())f.events.push({id:notificationId,revision:'owner-answer',
+    taskId:receipt.taskId,wake:true,ownerQuestionId:questionId});
+  await f.coordinator.pollOnce();
+  const consulted=new Set();
+  f.options.client.readTaskRecoveryContext=async input=>{
+    const record=retired.get(input.taskId);consulted.add(input.taskId);
+    if(record===denied&&input.review&&errorAt==='backend_preflight')throw Object.assign(new Error('scope withdrawn'),{status:403});
+    return {draftEvidence:null,operations:{coverage:'partial',hasMore:false,receipts:[]},materialBasis:record.basis,
+      ...(input.review?{review:{questionState:'answered'}}:{})};
+  };
+  f.options.native.readDelivery=async(_thread,_marker,opts)=>{
+    const record=retired.get(opts.retiredOwnerQuestion.taskPass.taskId);
+    if(record===denied&&errorAt==='native_read')throw Object.assign(new Error('old chat unavailable'),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+    return {state:'owner_question_observed',questionId:record.questionId,turnId:record.sourceTurnId};
+  };
+  f.options.native.readWriterReleased=async()=>true;
+  const begin=f.options.client.beginTaskPass;
+  f.options.client.beginTaskPass=async input=>{
+    const record=retired.get(input.taskId);
+    if(record===denied&&errorAt==='first_begin')throw Object.assign(new Error('native CAS denied'),{status:409});
+    const live=await begin(input);
+    return {...live,startState:'created',retiredAnswer:{writerRetirementReceiptId:record.receipt.receiptId,notificationId:record.notificationId}};
+  };
+  f.options.native.run=async(input,opts)=>{
+    assert.deepEqual(input.taskContext.ownerQuestionIds,[allowed.questionId]);await opts.beforeInvocation(opts.signal);opts.startInvocation();
+    finished=input.deliveryId;nativeStarts.push(input.taskContext.taskId);
+    return {state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+  };
+  assert.equal((await f.coordinator.workOnce()).state,'completed');
+  assert.deepEqual([...consulted],[denied.receipt.taskId,allowed.receipt.taskId]);assert.deepEqual(nativeStarts,[allowed.receipt.taskId]);
+  assert.deepEqual(inbox.retiredTaskIds(),[denied.receipt.taskId]);assert.deepEqual(inbox.incompleteDeliveries(),[]);
+  for(const record of retired.values()){
+    assert.equal(inbox.readDelivery(record.receipt.deliveryId).state,'uncertain');
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(record.notificationId).processed,
+      Number(record===allowed));
+  }
+  await f.coordinator.close();
+});

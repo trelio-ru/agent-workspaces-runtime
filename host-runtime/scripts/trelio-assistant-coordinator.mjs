@@ -3,7 +3,7 @@
 import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
   assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff,
   assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft, isAssistantLocalDraftFinalization,
-  assistantRetiredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
+  assistantRetiredOutcomeCompletion, ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -2270,6 +2270,59 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     return null;
   };
+  // A real answer is a separate delivery. Inspect the entire stopped root,
+  // its original workspace and the server's current question/assignment before
+  // reserving that exact pending event. No recovery turn or old outcome is
+  // created; only the ordinary task worker will interpret the human answer.
+  const takeRetiredAnswer=async signal=>{
+    if(!passHost||typeof native.readWriterReleased!=='function'||typeof client.readTaskRecoveryContext!=='function')return null;
+    for(const job of inbox.pendingRetiredTaskOutcomes(true)){
+      let next;
+      try {
+        const wake=inbox.pendingRetiredAnswer(job.deliveryId);
+        if(!wake||blockedCompanies.has(job.scope.companyId))continue;
+        const {receipt}=inbox.readRetiredTaskWriter(job.deliveryId);
+        if(findSchedule(job.scope,job.taskId)?.threadId!==receipt.threadId)continue;
+        const contextArgs={...receipt,expectedLeaseRevision:receipt.leaseRevision,writerRetirement:receipt};
+        const context=await client.readTaskRecoveryContext(contextArgs,signal),basis=context?.materialBasis;
+        if(!basis||context.operations?.hasMore!==false||!Array.isArray(context.operations.receipts)||context.operations.receipts.length
+          ||context.draftEvidence?.intermediateDraft||context.draftEvidence?.portableFinish)continue;
+        const taskPass={companyId:receipt.companyId,taskId:receipt.taskId,passId:receipt.passId};
+        const select={taskPass,assistantId:identity.assistantId,retirementReceiptId:receipt.receiptId,
+          questionId:wake.questionId,localDraft:context.draftEvidence?.localDraft??null};
+        const observed=await native.readDelivery(receipt.threadId,job.deliveryId,{signal,retiredOwnerQuestion:select});
+        if(observed.state!=='owner_question_observed'||observed.questionId!==wake.questionId||!uuid.test(observed.turnId??''))continue;
+        const review={workspaceId:basis.workspaceId,acceptedHead:basis.workspaceHead,pendingOwnerCheck:{
+          questionId:wake.questionId,priorReceiptId:basis.receiptId,sourceMarkerId:job.deliveryId,sourceTurnId:observed.turnId}};
+        const selected=await client.readTaskRecoveryContext({...contextArgs,review,notificationId:wake.notificationId},signal);
+        if(selected?.review?.questionState!=='answered'||!isDeepStrictEqual(selected.draftEvidence,context.draftEvidence)
+          ||!isDeepStrictEqual(selected.materialBasis,basis)||!isDeepStrictEqual(selected.operations,context.operations))continue;
+        const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
+        if(!await authorize({scope:job.scope,taskId:job.taskId},signal)
+          ||await native.readWriterReleased(receipt.threadId,cwd,{signal})!==true||await passHost.readActivePass()!==null)continue;
+        // A server-side empty Run can still contain meaningful uncommitted
+        // local bytes. The existing full Git/index/hydration check must see its
+        // exact originally accepted base, under the same task/device namespace.
+        const draft=select.localDraft;
+        if(draft&&(draft.workspaceId!==basis.workspaceId||draft.baseHead!==basis.workspaceHead||draft.checkpointId!==null
+          ||draft.anchorHead!==draft.baseHead||await verifyReadOnlyPrelude?.(receipt,draft,signal)!==true))continue;
+        lease();signal.throwIfAborted();
+        next=inbox.claimRetiredAnswer(job.deliveryId,receipt.receiptId,review,wake.notificationId,draft);
+      } catch(error) {
+        // A denial scoped to one old task or native chat cannot suppress
+        // another valid notification. Device/lease/transport errors propagate.
+        signal.throwIfAborted();lease();
+        if([403,404,409].includes(error?.status)||['ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_THREAD_NOT_LOADED',
+          'ASSISTANT_CODEX_THREAD_BUSY','ASSISTANT_CODEX_DELIVERY_UNCERTAIN','ASSISTANT_TRANSPORT_INVALID_RESPONSE'].includes(error?.code))continue;
+        throw error;
+      }
+      if(next){
+        const result=await perform(next,signal,null,null,true);
+        if(result.state!=='not_admitted')return result;
+      }
+    }
+    return null;
+  };
   const inspectRetiredTask = async signal => {
     if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
       ||typeof native.readWriterReleased!=='function'||typeof client.readTaskRecoveryContext!=='function')return null;
@@ -2641,11 +2694,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };
-  const perform = async (job,signal,continuation=null,resumeOwnedPass=null) => {
+  const perform = async (job,signal,continuation=null,resumeOwnedPass=null,freshRetiredAnswer=false) => {
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     let checking=false,started=false,taskPass=null,observationTimer=null,failureStage='native_claim';
     let ordinaryObservation=null;
+    // Only this first attempt follows the successful transactional claim.
+    // A replay after network loss has no authority to declare the pass absent.
+    let beforeBegin=freshRetiredAnswer,beginRejected=false;
     const maxObservationMs=30*60_000;
     const armObservation=deadline=>{
       const remaining=deadline-now();
@@ -2757,9 +2813,22 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           || savedContinuation.bindingId!==taskState.authority.bindingId))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         const authority=continuation&&taskState.state==='done'
           ?{bindingId:savedContinuation.bindingId,revision:savedContinuation.bindingRevision}:taskState.authority;
-        const admitted=continuation?await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},combined)
+        const handed=inbox.readRetiredAnswer(job.deliveryId),retiredAnswer=handed?.request;
+        let admitted;
+        beforeBegin=false;
+        try {
+          admitted=continuation?await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},combined)
           :await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
-            bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId},combined);lease();
+            bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId,...(retiredAnswer?{retiredAnswer}:{})},combined);
+        }catch(error){
+          // These are definitive native ACL/ownership/CAS refusals of the first
+          // request. A timeout, malformed reply or an uncertain retry stays held.
+          beginRejected=freshRetiredAnswer&&[403,404,409].includes(error?.status);
+          throw error;
+        }
+        lease();
+        if(retiredAnswer&&!isDeepStrictEqual(admitted.retiredAnswer,{writerRetirementReceiptId:retiredAnswer.writerRetirementReceiptId,
+          notificationId:retiredAnswer.notificationId}))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         if(admitted.bindingId!==authority.bindingId||admitted.bindingRevision!==authority.revision
           ||admitted.deliveryId!==job.deliveryId||admitted.threadId!==plan.threadId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
@@ -2910,6 +2979,24 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           }else await passHost.activatePass(expectedPass);
           taskPass=expectedPass;
         }
+        if(handed&&!inbox.readDelivery(job.deliveryId).nativeStarted){
+          const {receipt,localDraft}=handed,{review}=retiredAnswer;
+          // Repeat the ORIGINAL evidence under the exclusive writer and an
+          // independent fresh native receipt, before the ordinary new turn.
+          // The SQLite intent also survives a lost begin response on restart.
+          options.retiredAnswerCheck={taskPass:{companyId:receipt.companyId,taskId:receipt.taskId,passId:receipt.passId},
+            assistantId:identity.assistantId,retirementReceiptId:receipt.receiptId,localDraft,
+            questionId:review.pendingOwnerCheck.questionId,sourceMarkerId:receipt.deliveryId,sourceTurnId:review.pendingOwnerCheck.sourceTurnId};
+          const previous=options.beforeInvocation;
+          options.beforeInvocation=async ownedSignal=>{
+            if(previous)await previous(ownedSignal);
+            if(!isDeepStrictEqual(await passHost.readActivePass(),expectedPass)
+              ||!isDeepStrictEqual(handed,inbox.readRetiredAnswer(job.deliveryId))
+              ||localDraft&&await verifyReadOnlyPrelude?.(receipt,localDraft,ownedSignal,expectedPass)!==true)
+              fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            lease();ownedSignal.throwIfAborted();
+          };
+        }
         // Admission selects the executor. A fresh task goes straight to its
         // native chat. A previously started or expired reservation keeps its
         // narrower recovery authority and its original no-replay evidence.
@@ -2963,7 +3050,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               inbox.observeModelCapacity(job.deliveryId,{turnId:result.turnId,markerId:marker});}
         }catch{/* Incomplete native evidence retains the ordinary no-replay fence. */}
       }
-      if(started||continuation) {
+      if(freshRetiredAnswer&&(beginRejected||beforeBegin&&(error?.code==='ASSISTANT_COORDINATOR_TASK_STOPPED'||[403,404,409].includes(error?.status)))){
+        lease();combined.throwIfAborted();
+        inbox.deferRetiredAnswer(job.deliveryId);
+        return {state:'not_admitted',kind:'task'};
+      }
+      if(started||continuation||inbox.readRetiredAnswer(job.deliveryId)) {
         if(inbox.readDelivery(job.deliveryId).state!=='complete') inbox.markDeliveryUncertain(job.deliveryId,assistantDeliveryFailure(error?.code,failureStage));
       } else inbox.abandonUnstartedDelivery(job.deliveryId);
       const code=started?'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN':errorCode(error);
@@ -3029,7 +3121,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(job) return perform(job,signal);
         if(job===null) break;
       }
-      return await resolveRetiredAcceptedTask(signal)??inspectRetiredTask(signal);
+      return await takeRetiredAnswer(signal)??await resolveRetiredAcceptedTask(signal)??inspectRetiredTask(signal);
     })();
     try { return await active; } catch(error) { throw safeError(error); } finally { active=null; }
   };
@@ -3048,7 +3140,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const guard=async()=>{
           signal.throwIfAborted();lease();
           if(!passHost || await passHost.readActivePass()!==null||inbox.hasPendingPreparedOwnerReply()
-            || database.prepare("SELECT 1 FROM assistant_inbox_deliveries WHERE state IN ('leased','started','uncertain') LIMIT 1").get()
+            || database.prepare(`SELECT 1 FROM assistant_inbox_deliveries d WHERE state IN ('leased','started','uncertain')
+              AND ${ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR} LIMIT 1`).get()
             || database.prepare("SELECT 1 FROM assistant_owner_intakes WHERE state IN ('provisioning','started','uncertain') LIMIT 1").get())
             fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         };
@@ -3188,7 +3281,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }catch{return assistantDispatchDiagnostics({now:now()});}
     },
     modelCapacityRetryDelay() {
-      const rows=database.prepare("SELECT model_capacity_json FROM assistant_inbox_deliveries WHERE state IN ('started','uncertain') AND model_capacity_json IS NOT NULL LIMIT 2").all();
+      const rows=database.prepare(`SELECT model_capacity_json FROM assistant_inbox_deliveries d WHERE state IN ('started','uncertain')
+        AND model_capacity_json IS NOT NULL AND ${ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR} LIMIT 2`).all();
       // The current owner wait and its positively cancelled parent share the
       // SAME clock. Wake promptly for a due child without a timer in SQLite or
       // an extra model writer; unknown cancellation has waiting=false and no

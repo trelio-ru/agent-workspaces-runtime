@@ -191,9 +191,9 @@ next worker checks the same closed pass before committing the local release.
 A changed or unavailable server pass leaves the device blocked.
 
 Only after both steps can events or a due cycle for a different task start.
-While its original delivery is unresolved, the retired task keeps its events
-and due cycle. Once the confirmed original outcome has completed the delivery,
-a new event or due cycle for that task can enter ordinary admission. The
+The retired task keeps its events and due cycle until its original delivery
+settles or its verified owner-answer successor completes as described below.
+A new event or due cycle for that task can then enter ordinary admission. The
 ordinary completion and continuation writers reject the retired delivery.
 Existing uncertain rows receive no synthetic retirement during migration.
 The first native retirement attempt and the v32 marker commit atomically;
@@ -209,6 +209,25 @@ unchanged. On restart, the trusted host proves the writer has released before
 clearing its protected inspection key. A consumed marker does not launch again
 after a lost native response. The first inspection start commits v33 with the bit.
 
+
+## Owner answer after a retired scheduled pass (schema v36)
+
+An answered native owner question can wake its own existing task. The host
+checks its original interrupted scheduled turn, every recorded operation, and
+the independently acknowledged, unprocessed notification. It checks the
+current owner, device, assignment, previous waiting outcome, accepted WORK head
+and closed writer through the native task-pass reader. For a previously opened
+Run it verifies the private checkout, index and ignored files against that same
+accepted base. A pending effect or uncommitted material keeps the task held.
+
+SQLite links one original retirement to one notification and one new delivery.
+It freezes the notification ID, prior receipt, task pass, source turn and clean
+Run references before calling the normal pass begin. A first explicit admission
+refusal leaves the same delivery available for a fresh check. Unknown begin
+results use idempotent read-back and ordinary pre-native recovery. Only the
+new task turn reads the owner's answer. Its confirmed business outcome
+processes the notification and releases subsequent ordinary deliveries. The
+old native marker, business receipt and scheduled slot preserve their history.
 
 ## External ACK attempts (schema v5)
 

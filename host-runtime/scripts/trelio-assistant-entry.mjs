@@ -2198,10 +2198,22 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return await verifyAssistantRetainedLocalCheckpoint({
         config:host.configurationDirectory??configDirectory,identity:stableIdentity,pass:expected,witness,signal})&&await checkPass();
     });
-    const verifyReadOnlyPrelude=(expected,witness,signal)=>invoke(async(_live,host)=>{
+    const verifyReadOnlyPrelude=(expected,witness,signal,newPass=null)=>invoke(async(_live,host)=>{
       const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
       const checkPass=async()=>{
-        const current=validateAssistantActivePass(await host.readActivePass(),stableIdentity);
+        const protectedPass=await host.readActivePass();
+        if(expected.state==='retired'){
+          // This path returns a clean/dirty boolean only. The caller has
+          // verified the immutable native retirement, and repeats the exact
+          // file check once more while the new event owns its native writer.
+          const {validateAssistantTaskWriterRetirement}=await import('./trelio-assistant-inbox.mjs');
+          const receipt=validateAssistantTaskWriterRetirement(expected);
+          return receipt.assistantId===stableIdentity.assistantId&&receipt.deviceId===stableIdentity.deviceId
+            &&isDeepStrictEqual(protectedPass,newPass)&&(!newPass||newPass.taskId===receipt.taskId
+              &&newPass.companyId===receipt.companyId&&newPass.threadId===receipt.threadId
+              &&newPass.deliveryId!==receipt.deliveryId&&newPass.passId!==receipt.passId);
+        }
+        const current=validateAssistantActivePass(protectedPass,stableIdentity);
         return Object.keys(current).length===Object.keys(expected).length
           &&Object.keys(expected).every(key=>current[key]===expected[key]);
       };

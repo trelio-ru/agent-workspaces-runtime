@@ -15,7 +15,7 @@ import { assistantSourceProcessingReferences, assistantConversationKeyMatches, a
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
   validateAssistantLocalDraftBasis, validateAssistantLocalDraft, validateAssistantRecoveredOutcomeEvidence,
   validateAssistantRecoveredOutcomePlan, validateAssistantRecoveredOutcomeSchedule,
-  validateAssistantTaskWriterRetirement, validateAssistantRetiredOutcomeEvidence,
+  validateAssistantTaskWriterRetirement, validateAssistantRetiredOutcomeEvidence, validateAssistantRetiredOwnerReview,
   assistantRetiredOutcomeCompletion, ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -3221,8 +3221,22 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       return {bindingId:id(value.bindingId),provisionId:id(value.provisionId),threadId:value.threadId===null?null:id(value.threadId)};
     },
     async beginTaskPass(input,signal) {
+      let answer;
+      if(input.retiredAnswer!==undefined){
+        const r=input.retiredAnswer;
+        if(!object(r)||Object.keys(r).sort().join(',')!=='expectedLeaseRevision,notificationId,passId,review,writerRetirementReceiptId')
+          fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+        answer={passId:id(r.passId),writerRetirementReceiptId:id(r.writerRetirementReceiptId),expectedLeaseRevision:revision(r.expectedLeaseRevision),
+          review:validateAssistantRetiredOwnerReview(r.review),notificationId:id(r.notificationId)};
+        if(answer.review.pendingOwnerCheck.sourceMarkerId===input.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      }
       const value=await call('passBegin',{companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
-        bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId)},signal);
+        bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId),
+        ...(answer?{retiredAnswer:answer}:{})},signal);
+      if(answer&&(!['created','observe'].includes(value.startState)||value.passId===answer.passId||value.workMode!=='task'
+        ||!object(value.retiredAnswer)||Object.keys(value.retiredAnswer).sort().join(',')!=='notificationId,writerRetirementReceiptId'
+        ||value.retiredAnswer.writerRetirementReceiptId!==answer.writerRetirementReceiptId||value.retiredAnswer.notificationId!==answer.notificationId)
+        ||!answer&&value.retiredAnswer!==undefined)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       if(value.bindingId!==input.bindingId || value.deliveryId!==input.deliveryId || value.threadId!==input.threadId
         || value.bindingRevision!==input.bindingRevision || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       // Only the INSERT transaction can identify a first delivery. A cached
@@ -3230,7 +3244,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if (Object.hasOwn(value,'startState') && (!['created','observe'].includes(value.startState)
         || value.startState==='created' && (value.leaseRevision !== 0 || value.state !== 'leased')))
         fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {...(Object.hasOwn(value,'startState') ? {startState:value.startState} : {}),passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+      return {...(Object.hasOwn(value,'startState') ? {startState:value.startState} : {}),...(answer?{retiredAnswer:value.retiredAnswer}:{}),passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },
@@ -3283,7 +3297,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         recoveryContext:{expectedLeaseRevision}};
       const expected={passId:body.passId,bindingId:id(input.bindingId),bindingRevision:revision(input.bindingRevision),
         deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
-      let expectedState='review_required';
+      let expectedState='review_required', review;
+      if(input.notificationId!==undefined&&input.review===undefined)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      if(input.review!==undefined){
+        try{review=validateAssistantRetiredOwnerReview(input.review);}catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
+        if(!input.writerRetirement||review.pendingOwnerCheck.sourceMarkerId!==expected.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+        body.recoveryContext.review=review;
+        body.recoveryContext.notificationId=id(input.notificationId);
+      }
       if(input.writerRetirement!==undefined){
         let receipt;
         try{receipt=validateAssistantTaskWriterRetirement(input.writerRetirement);}
@@ -3310,7 +3331,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const context=value.recoveryContext;
       if(context===null&&expectedState==='review_required')return null;
       if(value.state!==expectedState||value.leaseRevision!==expectedLeaseRevision||value.workMode!=='task'||value.businessReady!==false
-        ||!object(context)||Object.keys(context).sort().join(',')!=='draftEvidence,materialBasis,operations,schemaVersion'
+        ||!object(context)||Object.keys(context).sort().join(',')!==(review?'draftEvidence,materialBasis,operations,review,schemaVersion':'draftEvidence,materialBasis,operations,schemaVersion')
         ||context.schemaVersion!==1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       let draftEvidence=null;
       if(context.draftEvidence!==null){
@@ -3343,7 +3364,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         return Object.freeze({receiptId:id(row.receiptId),clientRequestId:id(row.clientRequestId),operation:row.operation});
       });
       if(new Set(receipts.map(row=>row.receiptId)).size!==receipts.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return Object.freeze({schemaVersion:1,draftEvidence,materialBasis:materialBasis(context.materialBasis),
+      const basis=materialBasis(context.materialBasis);
+      if(review&&context.review!==null&&(!object(context.review)||Object.keys(context.review).join(',')!=='questionState'
+        ||!['pending','answered','expired'].includes(context.review.questionState)||!basis
+        ||basis.workspaceId!==review.workspaceId||basis.workspaceHead!==review.acceptedHead
+        ||basis.receiptId!==review.pendingOwnerCheck.priorReceiptId))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return Object.freeze({schemaVersion:1,draftEvidence,materialBasis:basis,...(review?{review:context.review}:{}),
         operations:Object.freeze({coverage:'partial',receipts:Object.freeze(receipts),hasMore:operations.hasMore})});
     },
     async readTaskRetainedFinishEvidence(input,signal){
