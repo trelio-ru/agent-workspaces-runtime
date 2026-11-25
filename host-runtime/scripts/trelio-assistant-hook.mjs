@@ -77,10 +77,18 @@ export const assertAssistantReconcileTool=(name,args)=>{
     ||['prepare_assistant_workspace_read','prepare_assistant_workspace_run'].includes(name)&&
       (args.relatedWorkspaceIds?.length||args.startNewRun===true)
     ||['continue_assistant_workspace_action','get_assistant_operation_contract'].includes(name)&&
-      !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run'].includes(args.operation)
-    ||name==='complete_assistant_pass'&&(args.noChange!==false||!uuid.test(args.acceptedRunId??'')
-      ||args.processedSourceReferences?.length||args.replyCommentId!==undefined||args.ownerDecisionId!==undefined))
+      !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run'].includes(args.operation))
     fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(name==='complete_assistant_pass'){
+    // The first recovery needs its own accepted Run. Later scheduled checks
+    // can reuse unchanged material: native completion compares the preceding
+    // receipt, goal, cadence and accepted head under the original binding lock.
+    const changed=args.noChange===false&&uuid.test(args.acceptedRunId??'');
+    const unchanged=args.noChange===true&&args.acceptedRunId===undefined
+      &&uuid.test(args.workspaceId??'')&&/^[0-9a-f]{40,64}$/u.test(args.workspaceHead??'');
+    if(!(changed||unchanged)||args.processedSourceReferences?.length||args.replyCommentId!==undefined||args.ownerDecisionId!==undefined)
+      fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  }
 };
 export const validateAssistantRetiredPass = value => {
   const keys=['writerRetirementReceiptId','expectedLeaseRevision'];

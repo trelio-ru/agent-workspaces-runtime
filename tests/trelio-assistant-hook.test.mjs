@@ -268,13 +268,18 @@ test('a new restricted pass repeats native identity and refuses unbound or effec
     return {...await register(input),retiredReconcile};
   };
   const event=args=>({...f.event(),tool_input:args});
+  const unchanged={noChange:true,workspaceId:crypto.randomUUID(),workspaceHead:'a'.repeat(40)};
   for(const [tool,args] of [['use_assistant_browser',{}],['execute_assistant_operation',{}],
     ['continue_assistant_workspace_action',{operation:'secret_browser_fill'}],
-    ['get_assistant_status',{view:'company_context'}],['complete_assistant_pass',{noChange:true}]]){
+    ['get_assistant_status',{view:'company_context'}],['complete_assistant_pass',{noChange:true}],
+    ...[{acceptedRunId:crypto.randomUUID()},{workspaceHead:'invalid'},{noChange:false},
+      {processedSourceReferences:[{}]},{replyCommentId:crypto.randomUUID()},{ownerDecisionId:crypto.randomUUID()}]
+      .map(patch=>['complete_assistant_pass',{...unchanged,...patch}])]){
     await assert.rejects(f.hook(event(args),tool),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
   }
   assert.equal(f.calls(),0);
-  for(const [tool,args] of [['get_task',{}],['get_agent_skill',{}],['continue_assistant_workspace_action',{operation:'skill_run'}]]){
+  for(const [tool,args] of [['get_task',{}],['get_agent_skill',{}],['continue_assistant_workspace_action',{operation:'skill_run'}],
+    ['complete_assistant_pass',unchanged],['complete_assistant_pass',{...unchanged,noChange:false,acceptedRunId:crypto.randomUUID()}]]){
     const actual=await f.hook(event(args),tool);
     assert.equal(actual.hookSpecificOutput.updatedInput.taskPass.passId,f.pass.passId);
   }

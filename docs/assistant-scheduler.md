@@ -115,9 +115,12 @@ have no admission in this profile.
 
 The worker uses the observations already in its chat and records newly verified
 facts, partial results and remaining limitations in a new canonical task Run.
-Only a confirmed business receipt for that Run can advance the schedule and
-consume the new owner-answer event. Future cycles keep the same original
-restriction and must name the preceding accepted receipt. A further interrupted
+The first reconciliation completes against its own accepted Run. A new
+owner-answer event is consumed only with its confirmed business receipt. Later scheduled
+checks at the same accepted head can report `noChange` when the goal, cadence
+and material are unchanged. The server verifies the preceding reconciliation
+receipt and checks for pending drafts, new effects and retracted material.
+Future cycles keep the same original restriction. A further interrupted
 pass may release its own writer while both attempts keep their fences. Other
 tasks on the device continue. Only authoritative settlement of the original
 operation can remove its fence.
