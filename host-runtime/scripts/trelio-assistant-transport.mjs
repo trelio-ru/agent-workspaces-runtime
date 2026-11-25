@@ -3431,8 +3431,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),
         ...(input.preNativeRecovery===true?{preNativeRecovery:true}:{})},signal);
       if(value.passId!==input.passId || value.leaseRevision!==input.expectedLeaseRevision+1 || value.state!=='leased') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
-        execution:executionConfiguration(value.execution)};
+      // The watchdog compares this native receipt to the active writer before
+      // moving its cutoff. All scope fields must come from the response, just
+      // as in readTaskPass; the request itself cannot attest that binding.
+      return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+        deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)

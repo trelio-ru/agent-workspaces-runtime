@@ -696,8 +696,10 @@ New ordinary task invocations keep a fixed thirty-minute observation ceiling,
 including preflight. A separate timer stops the invocation at the earlier
 native lease expiry. Before that timer expires, an authenticated read or
 successful watchdog renewal can move it within the fixed ceiling. The new
-expiry must advance the same owned pass and binding revision. A lost, stale,
-foreign or late renewal cannot keep the original writer alive. This preserves
+expiry must advance the same owned pass and binding revision. The device
+projects the server's state, work mode, pass, binding, delivery and thread
+from the renewal response so the watchdog can verify the active writer.
+A lost, stale, foreign or late renewal cannot keep the original writer alive. This preserves
 time to confirm a saved result when a valid renewal outlasts the first lease.
 Discussion and restricted continuation keep their existing time bounds. An
 expired zero-start reservation follows its separate admission path. Expiry

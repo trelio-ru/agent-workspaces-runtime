@@ -1984,6 +1984,8 @@ Exact legacy template bytes для распознавания при мигра�
   A new ordinary task has a fixed thirty-minute observation cap including
   preflight, plus the earlier live native lease cutoff. A verified renewal
   of the exact owned pass can move only the lease cutoff before it expires.
+  Test this through the HTTP device client so the watchdog receives the
+  native state, work mode and full binding from the renewal response.
   The fixed cap, session/assignment checks and uncertain-start fence remain.
   Preserve the separate deadlines for restricted and discussion turns.
   Fixed daily clocks use negotiated v2 receipts and keep wall time across late passes.

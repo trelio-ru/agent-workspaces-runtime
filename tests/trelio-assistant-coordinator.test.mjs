@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createAssistantInbox, readAssistantWorkspaceDraftRecovery, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
-import { assistantTaskStorageDirectory, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { assistantTaskStorageDirectory, createAssistantDeviceClient, createAssistantHttp, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { createAssistantRuntimeHost } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { ensurePrivateDirectory, runGit, verifyAssistantReadOnlyPrelude, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
@@ -367,7 +367,7 @@ for(const duration of [90_000,30*60_000,45*60_000])test(`new task observer fence
   }finally{await f.coordinator.close();}
 });
 
-for(const mode of ['completed','renewed','foreign','late','unknown'])test(`native task observation follows only a verified lease before its fixed cutoff (${mode})`,async t=>{
+for(const mode of ['completed','renewed','foreign','missing_binding','changed_mode','late','unknown'])test(`native task observation follows only a verified lease before its fixed cutoff (${mode})`,async t=>{
   const f=fixture(t),timers=[],watchers=[],originalSetTimeout=globalThis.setTimeout,originalSetInterval=globalThis.setInterval;
   f.authority.workMode='task';
   t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
@@ -376,18 +376,36 @@ for(const mode of ['completed','renewed','foreign','late','unknown'])test(`nativ
   t.mock.method(globalThis,'setInterval',(callback,delay,...args)=>{
     const timer=originalSetInterval(callback,delay,...args);watchers.push({callback,delay});return timer;
   });
-  const renew=f.options.client.renewTaskPass;
+  // Exercise the real HTTP decoding and device projection on every pass read
+  // and write. A mock that returns its in-memory pass directly hides missing
+  // binding fields between the native renewal receipt and the watchdog.
+  const {beginTaskPass,readTaskPass,renewTaskPass}=f.options.client;
   let renewals=0;
   let originalCutoff;
-  f.options.client.renewTaskPass=async input=>{
-    renewals++;
-    // The write can succeed without proving its response. For a late valid
-    // receipt simulate the original independent deadline firing during I/O.
-    const renewed=await renew(input);
-    if(mode==='late')originalCutoff.callback();
-    if(mode==='unknown')throw new Error('synthetic lost response');
-    return mode==='foreign'?{...renewed,threadId:randomUUID()}:renewed;
-  };
+  const http=createAssistantHttp({origin:f.identity.origin,fetchImpl:async(url,request)=>{
+    const input=JSON.parse(request.body),operation=new URL(url).pathname;
+    let pass;
+    switch(operation){
+      case '/api/digital-assistants/runtime/task-pass/begin': pass=await beginTaskPass(input);break;
+      case '/api/digital-assistants/runtime/task-pass/read': pass=await readTaskPass(input);break;
+      case '/api/digital-assistants/runtime/task-pass/renew':
+        renewals++;pass=await renewTaskPass(input);
+        // The server may have committed even when its reply arrives after
+        // the old cutoff, goes missing, or identifies a different writer.
+        if(mode==='late')originalCutoff.callback();
+        if(mode==='unknown')throw new Error('synthetic lost response');
+        if(mode==='foreign')pass={...pass,threadId:randomUUID()};
+        if(mode==='missing_binding')pass={...pass,bindingId:undefined};
+        if(mode==='changed_mode')pass={...pass,workMode:'discussion'};
+        break;
+      default: assert.fail(operation);
+    }
+    const {passId,bindingId,bindingRevision,deliveryId,threadId,workMode,leaseExpiresAt,leaseRevision,state,execution}=pass;
+    return Response.json({passId,bindingId,bindingRevision,deliveryId,threadId,workMode,leaseExpiresAt,leaseRevision,state,execution,businessReady:false});
+  }});
+  const wire=createAssistantDeviceClient({...f.identity,http,
+    store:{get:async()=>({...f.identity,credential:`tda_${'a'.repeat(43)}`,expiresAt:1})}});
+  Object.assign(f.options.client,{beginTaskPass:wire.beginTaskPass,readTaskPass:wire.readTaskPass,renewTaskPass:wire.renewTaskPass});
   let nativeStarts=0,observed;
   f.options.native.run=async(input,options)=>{
     nativeStarts++;options.startInvocation();

@@ -1283,12 +1283,13 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1});
   const companyId=randomUUID(),taskId=randomUUID(),passId=randomUUID(),bindingId=randomUUID(),deliveryId=randomUUID(),threadId=randomUUID();
   const observation={schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook',observedAt:new Date().toISOString()};
+  const firstExpiry=new Date(Date.now()+60000).toISOString(),renewedExpiry=new Date(Date.now()+120000).toISOString();
   const sessionId=randomUUID();let mismatch=false;const operations=[];
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,input)=>{
     operations.push(operation);
-    if(operation==='passBegin'||operation==='passRead')return {passId,bindingId,bindingRevision:3,deliveryId,threadId,state:'leased',leaseRevision:0,
-      leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},secret:'PRIVATE'};
-    if(operation==='passRenew')return {passId,leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:new Date(Date.now()+60000).toISOString(),state:'leased',execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
+    if(['passBegin','passRead','passRenew'].includes(operation))return {passId,bindingId,bindingRevision:3,deliveryId,threadId,state:'leased',
+      leaseRevision:operation==='passRenew'?input.expectedLeaseRevision+1:0,
+      leaseExpiresAt:operation==='passRenew'?renewedExpiry:firstExpiry,execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},secret:'PRIVATE'};
     if(operation==='endRuntime')return {ended:true,secret:'PRIVATE'};
     assert.equal(operation,'registerRuntime');
     return {schemaVersion:1,passId:input.passId,runtimeSessionId:sessionId,conversation:{provider:'codex',conversationId:mismatch?randomUUID():threadId,
@@ -1298,7 +1299,8 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   assert.equal(begin.passId,passId);assert.ok(!JSON.stringify(begin).includes('PRIVATE'));
   assert.deepEqual(begin.execution,{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1});
   const locator={companyId,taskId,passId};assert.equal((await client.readTaskPass(locator)).threadId,threadId);
-  assert.equal((await client.renewTaskPass({...locator,expectedLeaseRevision:0,clientRequestId:randomUUID()})).leaseRevision,1);
+  const renewed=await client.renewTaskPass({...locator,expectedLeaseRevision:0,clientRequestId:randomUUID()});
+  assert.deepEqual(renewed,{...begin,leaseRevision:1,leaseExpiresAt:renewedExpiry});
   const request={...locator,clientSessionId:threadId,observation,publicKeySpki:'a'.repeat(59)};
   const registered=await client.registerRuntime(request);assert.equal(registered.runtimeSessionId,sessionId);
   assert.ok(!JSON.stringify(registered).includes('PRIVATE'));mismatch=true;
@@ -1339,14 +1341,15 @@ test('native discussion mode survives task inventory, exact reads, event and pas
     if(operation==='task')return {binding,hostState:'this_device',execution:{state:'unconfigured',configuration:null,policyRevisionId:null}};
     if(operation==='poll')return {events:[{id:randomUUID(),revision:'1',taskId,wake:true,bindingId,bindingRevision:2,taskState:'accepted',
       ...(mode===undefined?{}:{workMode:mode})}],nextCursor:'1',hasMore:false};
-    assert.ok(['passBegin','passRead'].includes(operation));
-    return {passId,bindingId,bindingRevision:2,deliveryId,threadId,state:'leased',leaseRevision:0,
+    assert.ok(['passBegin','passRead','passRenew'].includes(operation));
+    return {passId,bindingId,bindingRevision:2,deliveryId,threadId,state:'leased',leaseRevision:operation==='passRenew'?1:0,
       leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},
       ...(mode===undefined?{}:{workMode:mode})};
   }});
   const reads=[async()=>(await client.tasks(companyId)).bindings[0],()=>client.task(companyId,taskId),
     async()=>(await client.poll(companyId)).events[0],()=>client.beginTaskPass({companyId,taskId,bindingId,bindingRevision:2,deliveryId,threadId}),
-    ()=>client.readTaskPass({companyId,taskId,passId})];
+    ()=>client.readTaskPass({companyId,taskId,passId}),
+    ()=>client.renewTaskPass({companyId,taskId,passId,expectedLeaseRevision:0,clientRequestId:randomUUID()})];
   for(const read of reads)assert.equal((await read()).workMode,'discussion');
   mode=undefined;for(const read of reads)assert.equal(Object.hasOwn(await read(),'workMode'),false,'legacy server keeps its existing projection');
   for(mode of [null,'admin','DISCUSSION',{},false])for(const read of reads)await assert.rejects(read(),/INVALID_RESPONSE/);
