@@ -930,6 +930,17 @@ test('a restricted task starts only declared read commands and performs no accou
     parsed.files=[];await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:['read']}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
     assert.equal(await fs.readFile(file,'utf8'),'read --target example\n');
   });
+  // Only host-owned local account inventory and immutable documentation are
+  // available when an earlier navigation's outcome is uncertain.
+  parsed.files=[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(policy))}];
+  await withWorkspaceExecutionProfile({...profile,retiredScheduled:{
+    writerRetirementReceiptId:profile.retiredReconcile.writerRetirementReceiptId,dueAt:Date.now()}},async()=>{
+    await prepareSkillAccount({...f.input,origin:identity.origin,runtimeArguments:['account','list'],
+      discover:()=>assert.fail('no account import'),output:value=>assert.deepEqual(value.accounts,[])});
+    for(const args of [['read','--target','example'],['guides'],['account','list'],['send']])
+      await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:args}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+    assert.equal(await fs.readFile(path.join(f.input.runtimeDirectory,'calls'),'utf8'),'read --target example\n');
+  });
 });
 
 test('a completed restricted read retains only its current local account binding',async t=>{

@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createAssistantInbox, readAssistantWorkspaceDraftRecovery, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantScheduledSource, readAssistantWorkspaceDraftRecovery, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { assistantTaskStorageDirectory, createAssistantDeviceClient, createAssistantHttp, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { ownedRpc } from './fixtures/assistant-native-rpc.mjs';
@@ -5468,4 +5468,124 @@ test(`a closed owner-answer writer releases the device while both task outcomes 
     assert.equal(coordinator.status().find(row=>row.taskId===f.taskId).nextRunAt,originalPlan.nextRunAt);
     assert.equal(coordinator.status().find(row=>row.taskId===second.taskId).lastCompletedAt>0,valid);
   }finally{await coordinator.close();}
+});
+
+for(const interrupt of [false,true])
+test(`the due calendar after a stopped owner answer uses its frozen file and leaves the device available (interrupted=${interrupt})`,async t=>{
+  const f=fixture(t),inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  const client=f.options.client,native=f.options.native,host=f.options.passHost;
+  f.authority.workMode='task';
+  const prior=new Set(),readOutcome=client.readBusinessOutcome;
+  client.readBusinessOutcome=args=>prior.has(args.deliveryId)?{schemaVersion:1,state:'pending'}:readOutcome(args);
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const plan=f.coordinator.status()[0];f.advance(plan.nextRunAt-f.options.now());f.failNative(true);
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  const initial=f.activePass();prior.add(initial.deliveryId);f.deliveries.delete(initial.deliveryId);
+  f.advance(21*60_000);f.passes.get(initial.deliveryId).state='closed';
+  const parent={...initial,state:'retired',leaseRevision:0,receiptId:randomUUID()};
+  inbox.recordRetiredTaskWriter(initial,parent);inbox.releaseRetiredTaskWriter(initial.deliveryId,parent);
+  await host.releasePass(parent);
+  const questionId=randomUUID(),notificationId=randomUUID();
+  f.events.push({id:notificationId,revision:'1',taskId:f.taskId,wake:true,ownerQuestionId:questionId});
+  f.advance(300_001);await f.coordinator.pollOnce();
+  const workspaceId=randomUUID(),runId=randomUUID(),checkpointId=randomUUID(),baseHead='a'.repeat(40),draftHead='b'.repeat(40);
+  const review={workspaceId,acceptedHead:baseHead,pendingOwnerCheck:{questionId,priorReceiptId:randomUUID(),
+    sourceMarkerId:initial.deliveryId,sourceTurnId:randomUUID()}};
+  const a=inbox.claimRetiredAnswer(initial.deliveryId,parent.receiptId,review,notificationId,{
+    workspaceId,runId,baseHead,anchorHead:baseHead,checkpointId:null});
+  const answer={...initial,deliveryId:a.deliveryId,passId:randomUUID()};prior.add(a.deliveryId);
+  await host.activatePass(answer);
+  inbox.prepareTaskPass(a.deliveryId);inbox.startDelivery(a.deliveryId);inbox.markDeliveryUncertain(a.deliveryId);
+  f.advance(21*60_000);
+  const released={...answer,state:'retired',leaseRevision:1,receiptId:randomUUID()};
+  inbox.recordRetiredTaskWriter(answer,released,{writerRetirementReceiptId:parent.receiptId,notificationId});
+  inbox.releaseRetiredTaskWriter(a.deliveryId,released);await host.releasePass(released);
+  assert.deepEqual(inbox.pendingReconciliationTasks().map(row=>row.deliveryId),[a.deliveryId]);
+  const material={sourceTurnId:randomUUID(),workspaceId,runId,checkpointId,draftHead,
+    path:`assistants/${f.identity.assistantId}/WORK.md`,beforeSha256:'a'.repeat(64),afterSha256:'b'.repeat(64)};
+  const {path:filepath,beforeSha256,afterSha256,...witness}=material;
+  const expected={...witness,sourceMarkerId:a.deliveryId,previousReceiptId:review.pendingOwnerCheck.priorReceiptId,dueAt:plan.nextRunAt};
+  const select={passId:answer.passId,expectedLeaseRevision:released.leaseRevision,writerRetirementReceiptId:released.receiptId};
+  const pair={writerRetirementReceiptId:released.receiptId,dueAt:expected.dueAt};
+  const readNative=native.readDelivery,begin=client.beginTaskPass;
+  let observed=0,starts=0,refusal=true,newId=null,independent=null,ownReceipt=null;
+  native.readWriterReleased=async()=>true;
+  native.readDelivery=(thread,id,options)=>{if(!options.scheduledCheckpoint)return readNative(thread,id,options);
+    assert.equal(thread,answer.threadId);assert.equal(id,a.deliveryId);
+    assert.equal(options.scheduledCheckpoint.taskPass.passId,answer.passId);observed++;
+    return {state:'checkpoint_observed',material};};
+  client.readTaskRecoveryContext=async input=>{
+    assert.deepEqual(input.scheduled,expected);assert.deepEqual(input.writerRetirement,released);
+    return {scheduled:refusal?null:{eligible:true,baseHead:ownReceipt?'c'.repeat(40):baseHead,...(ownReceipt?{previousReceiptId:ownReceipt}:{})}};
+  };
+  client.beginTaskPass=async input=>{
+    if(input.taskId===independent?.taskId)return begin(input);
+    assert.deepEqual(input.retiredScheduled,{...select,review:expected});
+    assert.equal(input.previousReceiptId,ownReceipt??undefined);assert.equal(input.notificationId,undefined);assert.equal(input.retiredAnswer,undefined);
+    assert.equal(input.retiredReconcile,undefined);assert.ok(!prior.has(input.deliveryId));
+    newId=input.deliveryId;const server=await begin(input);
+    Object.assign(server,{startState:'created',retiredReconcile:select,retiredScheduled:pair});return server;
+  };
+  native.run=async(input,options)=>{
+    if(input.taskContext.taskId===independent?.taskId){await options.beforeInvocation?.();options.startInvocation();
+      return {state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};}
+    assert.equal(input.taskContext.scheduled,true);assert.equal(input.taskContext.ownerQuestionIds,undefined);
+    assert.equal(input.deliveryId,newId);assert.equal(options.scheduledMaterial,ownReceipt?'current':'carry');
+    assert.deepEqual(f.activePass().retiredScheduled,pair);
+    const result=await runAssistantTurn(input,{...options,executable:process.execPath,environment:{},
+      readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},readWorkflow:async()=>'Installed task workflow',
+      spawnProcess:ownedRpc({threadId:input.threadId,cwd:input.cwd,onInput:()=>starts++,
+        executionPolicy:(request,reply)=>{
+          if(request.method==='mcpServerStatus/list')reply.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(name=>[name,{name}]));
+          return reply;
+        }})});
+    if(ownReceipt)assert.throws(()=>readAssistantScheduledSource(f.database,f.activePass()));
+    else assert.deepEqual(readAssistantScheduledSource(f.database,f.activePass()),{review:expected,baseHead,path:filepath,beforeSha256,afterSha256});
+    assert.throws(()=>readAssistantScheduledSource(f.database,{...f.activePass(),retiredScheduled:{...pair,dueAt:pair.dueAt+1}}));
+    if(interrupt)throw Object.assign(new Error('lost model result'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    f.deliveries.set(newId,result);return result;
+  };
+  host.releaseRetiredTaskPass=value=>host.releasePass(value);
+  await f.coordinator.close();const coordinator=createAssistantCoordinator(f.options);
+  // A native refusal on this exact calendar claim cannot turn the prior
+  // notification into a second wake, nor advance its schedule.
+  await coordinator.workOnce();assert.equal(newId,null);assert.equal(starts,0);
+  refusal=false;
+  if(interrupt){
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+    const stopped=f.activePass();prior.add(newId);f.advance(21*60_000);
+    const {retiredReconcile,retiredScheduled,...coordinates}=stopped;
+    const retirement={...coordinates,state:'retired',leaseRevision:0,receiptId:randomUUID()};
+    const attempt={passId:stopped.passId,clientRequestId:randomUUID(),leaseRevision:0};
+    inbox.startTaskWriterRetirement(newId,attempt);f.passes.get(newId).state='closed';
+    client.readTaskWriterRetirement=async()=>({state:'retired',clientRequestId:attempt.clientRequestId,receipt:retirement});
+    client.retireTaskWriter=async()=>assert.fail('already closed');
+    await coordinator.workOnce();
+    assert.equal(f.activePass(),null);assert.equal(inbox.readRetiredTaskWriter(newId).released,true);
+    assert.equal(inbox.readDelivery(newId).state,'uncertain');
+    // A separate task uses the same device while all three pass outcomes
+    // remain unresolved. No old wake, provider invocation or task is replayed.
+    independent={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0,workMode:'task'};
+    client.tasks=async()=>({bindings:[f.authority,independent],nextCursor:null});
+    client.task=async(_company,id)=>({...([f.authority,independent].find(x=>x.taskId===id)),execution:f.execution});
+    await coordinator.pollOnce();assert.equal((await coordinator.workOnce()).kind,'provision');
+    const next=coordinator.status().find(row=>row.taskId===independent.taskId);
+    f.advance(Math.max(0,next.nextRunAt-f.options.now()));assert.equal((await coordinator.workOnce()).state,'completed');
+    assert.ok(coordinator.status().find(row=>row.taskId===independent.taskId).lastCompletedAt);
+  }else{
+    assert.equal((await coordinator.workOnce()).state,'completed');
+    assert.equal(inbox.readDelivery(newId).state,'complete');
+    const stored=f.database.prepare('SELECT external_receipt FROM assistant_inbox_deliveries WHERE delivery_id=?').get(newId).external_receipt;
+    assert.match(stored,/^assistant:/u);ownReceipt=stored.split(':')[1];
+    const later=coordinator.status()[0].nextRunAt,first=newId;
+    assert.ok(later>plan.nextRunAt);f.advance(later-f.options.now());
+    expected.dueAt=later;pair.dueAt=later;
+    assert.equal((await coordinator.workOnce()).state,'completed');assert.notEqual(newId,first);
+    assert.equal(inbox.readDelivery(first).state,'complete');assert.equal(inbox.readDelivery(newId).state,'complete');
+  }
+  assert.equal(starts,interrupt?1:2);assert.equal(observed,2);
+  for(const id of prior){assert.equal(inbox.readDelivery(id).state,'uncertain');assert.equal(inbox.readRetiredTaskWriter(id).released,true);}
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(notificationId).processed,0);
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_delivery_events WHERE delivery_id=?').get(newId).n,0);
+  await coordinator.close();
 });
