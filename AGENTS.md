@@ -2159,6 +2159,8 @@ Pre-native reservation recovery keeps the same delivery, zero start bit, lease
 and native history. After guarded renewal, observe the same live lease through
 the ordinary watchdog. Test the real coordinator and native executor together for
 an answered notification and scheduled reconciliation with/without an answer.
+After another interrupted owner-answer, verify the closed pass, original
+retirement receipt and notification before releasing its device writer.
 See [the scheduler contract](docs/assistant-scheduler.md).
 
 Technical provision waits for the same exact connected MCP catalogue. Schema31

@@ -102,6 +102,13 @@ An independently verified source read may support the existing ordinary
 owner-answer handoff. A missing historical provider receipt leaves its effect
 fenced and the same real answer remains available for restricted work.
 
+If this owner-answer pass also stops, the server's closed-pass read binds the
+new retirement to the earlier receipt and the same owner notification. The
+device retains both interrupted deliveries, their material and the unprocessed
+notification. An exact read of the existing retirement after restart releases
+the local signer so other scheduled tasks can run. A different parent, wake or
+binding keeps that signer on hold.
+
 The host journals the new delivery and its immutable original pass reference
 before contacting the server. Repeating the same begin observes its one start.
 The device and native signer retain the restriction across process restarts.

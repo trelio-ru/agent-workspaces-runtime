@@ -3,7 +3,7 @@
 import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure, assistantReadOnlyRecoveryMetadata,
   assistantOwnerReadOnlyRecovery, assistantOwnerReplyCapacityOpen, validateAssistantRetainedHandoff,
   assistantWorkspaceCheckpointLocator, validateAssistantIntermediateDraft, isAssistantLocalDraftFinalization,
-  assistantRetiredOutcomeCompletion, ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR } from './trelio-assistant-inbox.mjs';
+  assistantRetiredOutcomeCompletion, validateAssistantTaskWriterRetirement, ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration, assistantWorkStateContext } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -2103,26 +2103,34 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return {...draft,recoveredOutcome:{...previous,saveTurnId:selection.saveTurnId,
       plan:{...plan,retryFromReviewId:continuation.reviewId}}};
   };
-  const releaseRetiredWriter = async (job,saved,signal) => {
+  const releaseRetiredWriter = async (job,saved,signal,confirmed=null) => {
     if(job.kind!=='task')return false;
     const recorded=inbox.readRetiredTaskWriter(job.deliveryId);
-    if(!recorded)return false;
-    const {receipt,released}=recorded,plan=findSchedule(job.scope,job.taskId);
+    const receipt=confirmed??recorded?.receipt;
+    if(!receipt)return false;
+    const plan=findSchedule(job.scope,job.taskId);
+    if(confirmed&&(!saved||recorded&&!isDeepStrictEqual(receipt,recorded.receipt)))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
     if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
       ||receipt.assistantId!==identity.assistantId||receipt.deviceId!==identity.deviceId||job.scope.origin!==identity.origin
       ||plan?.threadId!==receipt.threadId||saved&&['companyId','taskId','passId','bindingId','bindingRevision','deliveryId','threadId']
         .some(key=>saved[key]!==receipt[key]))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
-    if(released&&!saved)return true;
+    if(recorded?.released&&!saved)return true;
     // The persisted positive retirement is separate from the business
     // outcome. Recheck the exact server fence before clearing the old key.
     // An outage or changed pass keeps the device blocked, including after
     // a crash that removed the key before marking this SQLite cell released.
     const live=await client.readTaskPass({companyId:receipt.companyId,taskId:receipt.taskId,passId:receipt.passId},signal);
     lease();signal.throwIfAborted();
-    if(live?.state!=='closed'||['passId','bindingId','bindingRevision','deliveryId','threadId','leaseRevision']
+    if(live?.state!=='closed'
+      ||live.retiredAnswer!==undefined&&(live.workMode!=='task'||live.retiredReconcile!==undefined)
+      ||['passId','bindingId','bindingRevision','deliveryId','threadId','leaseRevision']
       .some(key=>live[key]!==receipt[key])||!isDeepStrictEqual(await passHost.readActivePass(),saved))
       fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
     lease();signal.throwIfAborted();
+    // The native closed-pass read binds a second retirement to its existing
+    // owner notification. Journal that proof before deleting the local key.
+    // Losing this read retains the original retirement intent for exact retry.
+    inbox.recordRetiredTaskWriter(saved??receipt,receipt,live.retiredAnswer);
     if(saved)await passHost.releaseRetiredTaskPass(receipt);
     lease();signal.throwIfAborted();
     if(await passHost.readActivePass()!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
@@ -2131,9 +2139,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const finishWriterRetirement = async (job,saved,response,signal) => {
     if(response?.state!=='retired')return false;
-    inbox.recordRetiredTaskWriter(saved,response.receipt);
-    await releaseRetiredWriter(job,saved,signal);
-    return true;
+    return releaseRetiredWriter(job,saved,signal,validateAssistantTaskWriterRetirement(response.receipt));
   };
   const recoverWriterRetirement = async (job,saved,attempt,signal) => {
     if(!saved||saved.passId!==attempt.passId||saved.deliveryId!==job.deliveryId||typeof client.readTaskWriterRetirement!=='function')

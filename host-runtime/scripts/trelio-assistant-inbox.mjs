@@ -2824,7 +2824,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     /** Only a trusted native reader calls this after confirming the exact
      * server retirement receipt. A timeout or absent native turn is not a
      * receipt. Recording it does not yet release the device-wide writer slot. */
-    recordRetiredTaskWriter(pass,value) {
+    recordRetiredTaskWriter(pass,value,nativeAnswer) {
       const receipt=validateAssistantTaskWriterRetirement(value);
       if(retiredWriterLocators.some(key=>receipt[key]!==pass[key])||receipt.bindingRevision!==pass.bindingRevision)
         fail('ASSISTANT_INBOX_CONFLICT');
@@ -2834,25 +2834,36 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const attempt=readWriterRetirementAttempt(row);
         if(attempt&&(attempt.passId!==receipt.passId||attempt.leaseRevision!==receipt.leaseRevision))
           fail('ASSISTANT_INBOX_CONFLICT');
+        // A second interruption releases this device while both results stay
+        // pending. Exempt only the original named by the authenticated successor.
+        // Ordinary answers bind through the closed pass's notification and
+        // retirement receipt; restricted work binds through its stored selector.
+        const link=get('SELECT original_id FROM assistant_reconciliation_deliveries WHERE delivery_id=?',row.delivery_id);
+        const answer=this.readRetiredAnswer(row.delivery_id);
+        let parentId=null;
+        if(answer||nativeAnswer!==undefined){
+          if(!answer||link||pass.retiredReconcile||!isDeepStrictEqual(nativeAnswer,{
+            writerRetirementReceiptId:answer.request.writerRetirementReceiptId,notificationId:answer.request.notificationId})
+            ||['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','threadId'].some(key=>answer.receipt[key]!==receipt[key])
+            ||answer.receipt.passId===receipt.passId)fail('ASSISTANT_INBOX_CONFLICT');
+          parentId=answer.receipt.deliveryId;
+        }
         const existing=readRetiredWriter(row);
         if(existing){
           if(JSON.stringify(existing.receipt)!==JSON.stringify(receipt))fail('ASSISTANT_INBOX_CONFLICT');
           return existing;
         }
-        const task=get('SELECT authority_binding_id,authority_revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',row.source_key,row.task_id);
-        const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
-        // A second interruption in genuinely new restricted work must release
-        // the device without settling either task attempt. Exclude only the
-        // original ledger entry authenticated by this successor's fixed link.
-        const link=get('SELECT original_id FROM assistant_reconciliation_deliveries WHERE delivery_id=?',row.delivery_id);
         if(link){
           const selected=this.readReconciliation(row.delivery_id);
           if(!pass.retiredReconcile||!Object.entries(selected.retiredReconcile).every(([key,value])=>pass.retiredReconcile[key]===value)
             ||selected.notificationId!==pass.notificationId)fail('ASSISTANT_INBOX_CONFLICT');
+          parentId=link.original_id;
         }else if(pass.retiredReconcile)fail('ASSISTANT_INBOX_CONFLICT');
+        const task=get('SELECT authority_binding_id,authority_revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',row.source_key,row.task_id);
+        const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
         if(row.expires_at>time()||receipt.taskId!==row.task_id||scope.provider!=='trelio'
           ||task?.authority_binding_id!==receipt.bindingId||task?.authority_revision!==receipt.bindingRevision
-          ||row.native_thread_id!==null&&row.native_thread_id!==receipt.threadId||isTaskWriterRetired(receipt.taskId,link?.original_id??null))
+          ||row.native_thread_id!==null&&row.native_thread_id!==receipt.threadId||isTaskWriterRetired(receipt.taskId,parentId))
           fail('ASSISTANT_INBOX_STALE_DELIVERY');
         run('INSERT INTO assistant_retired_task_writers(delivery_id,receipt_id,receipt_json) VALUES(?,?,?)',
           row.delivery_id,receipt.receiptId,JSON.stringify(receipt));
