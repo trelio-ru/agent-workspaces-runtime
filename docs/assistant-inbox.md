@@ -240,6 +240,9 @@ explicit command `{"action":"carry_forward"}` under this restricted admission.
 The signed host chooses the original checkpoint and the exact
 `assistants/<assistantUserId>/WORK.md` path. The original and destination Runs
 must share the task, workspace, accepted base and encryption recipient.
+The first open uses the ordinary per-Run parallel checkout. The historical
+checkout remains registered even after its lease ends. Later status and file
+reads resolve the destination by its exact Run ID.
 
 The host verifies the before and after SHA-256 against actual Git blobs, then
 uses the ordinary file replacement with the expected starting digest and
