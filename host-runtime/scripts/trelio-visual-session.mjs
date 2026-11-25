@@ -149,9 +149,13 @@ function validOwner(owner, binding) {
     && Number.isSafeInteger(owner.pid) && owner.pid > 0;
 }
 
+const startupDiagnosticsHeader = 'x-trelio-visual-startup-diagnostics';
+const startupDiagnosticsVersion = '2';
+
 async function request(owner, operation, args, signal) {
   const response = await fetch(`http://127.0.0.1:${owner.port}/command`, {
-    method: 'POST', headers: { authorization: `Bearer ${owner.token}`, 'content-type': 'application/json' },
+    method: 'POST', headers: { authorization: `Bearer ${owner.token}`, 'content-type': 'application/json',
+      [startupDiagnosticsHeader]: startupDiagnosticsVersion },
     body: JSON.stringify({ operation, args }), signal: signal?AbortSignal.any([signal,AbortSignal.timeout(50_000)]):AbortSignal.timeout(50_000), redirect: 'error',
   });
   if (response.status !== 200 || Number(response.headers.get('content-length') || 0) > 3 * 1024 * 1024) throw new Error('VISUAL_WORKER_UNAVAILABLE');
@@ -633,7 +637,18 @@ export function createVisualControlServer({ token, dispatch, mailDispatch, secre
         res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body); return;
       }
       if (!value || Object.keys(value).sort().join() !== 'args,operation' || typeof value.operation !== 'string') throw new Error('invalid_input');
-      const result = validateVisualCommandResult(await dispatch(value.operation, value.args), value.operation, value.args);
+      let result = validateVisualCommandResult(await dispatch(value.operation, value.args), value.operation, value.args);
+      if (result.diagnostic && req.headers[startupDiagnosticsHeader] !== startupDiagnosticsVersion) {
+        // A launcher already running during an upgrade can poll the new
+        // worker with the old strict validator. Keep its original result
+        // vocabulary at this private boundary; the same host still sees the
+        // new, validated evidence and the underlying failure never becomes success.
+        const { extensionTransport, ...diagnostic } = result.diagnostic;
+        if (diagnostic.code === 'profile_path_too_long') {
+          diagnostic.code = 'startup_failed';
+          result = { ...result, reason: visualStartupReason(diagnostic), diagnostic };
+        } else if (extensionTransport !== undefined) result = { ...result, diagnostic };
+      }
       const body = JSON.stringify(result);
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body);
     } catch (error) {

@@ -756,6 +756,10 @@ publication tooling также остаются вне этого публичн
   Production startup failures carry the SAME closed stage/code result through
   worker HTTP/MCP and later status/wait. Never forward exception prose, enable
   native logs, guess a root cause or retry startup from diagnostic evidence.
+  Windows visual profiles and extensions use an exclusive short, owner-only
+  staging directory separate from the encrypted account snapshot. Validate the
+  Chromium path budget before reading that snapshot. An authenticated upgrade,
+  accepted socket or socket closure establishes observed transport progress.
   Windows/Linux and hidden startup use one public, value-free extension page
   to wake MV3 through runtime messaging. Reuse that tab after policy/auth via
   about:blank; provider URLs/tokens never enter argv, and the original handshake

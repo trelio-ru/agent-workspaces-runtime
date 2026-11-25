@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
+import { validateWindowsVisualLaunchRoot, windowsVisualLaunchRoot } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
+import { validateVisualStartupDiagnostic } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { ExtensionVisualBrowser, visualBrowserHeadless, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess, visualNativeCompositorSwitches } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -194,6 +196,49 @@ test('signed external navigation opens web documents without widening cookie or 
   assert.throws(() => normalizeVisualAuthentication({ steps: [{ id: 'login', origin: 'https://other.test',
     challenge: '#form', fields: { password: '#password' }, submit: '#submit' }],
     success: [{ origin: origins[0], selector: '#ready' }] }, { origins }), { code: 'navigation_blocked' });
+});
+
+test('Windows transient root is independent of the protected account nesting and accepts Unicode paths', () => {
+  const localAppData = String.raw`D:\Имя пользователя\Local`;
+  assert.equal(windowsVisualLaunchRoot({ localAppData }), String.raw`D:\Имя пользователя\Local\Trelio\v`);
+  assert.equal(windowsVisualLaunchRoot({ localAppData: '', userProfile: String.raw`C:\Users\QA` }),
+    String.raw`C:\Users\QA\AppData\Local\Trelio\v`);
+  assert.equal(windowsVisualLaunchRoot({ fixtureDirectory: String.raw`C:\Temp\synthetic` }),
+    String.raw`C:\Temp\synthetic\v`);
+
+  const boundary = 'D:\\' + 'я'.repeat(150);
+  assert.equal(validateWindowsVisualLaunchRoot(boundary), boundary);
+  assert.throws(() => validateWindowsVisualLaunchRoot(boundary + 'я'), {
+    diagnostic: { stage: 'profile_prepare', code: 'profile_path_too_long' },
+  });
+  assert.throws(() => validateWindowsVisualLaunchRoot(String.raw`\relative`), {
+    diagnostic: { stage: 'profile_prepare', code: 'storage_unavailable' },
+  });
+});
+
+test('overlong Windows launch path refuses setup before touching the saved login', async () => {
+  const origins = ['https://example.test'];
+  const browser = new ExtensionVisualBrowser({ origins, dependencies: {},
+    windowsLaunchRoot: 'C:\\' + 'PRIVATE_SYNTHETIC_PATH'.repeat(10),
+    store: { async read() { assert.fail('preflight must precede private storage'); }, close() {} },
+    policy: createVisualOriginPolicy({ origins }), lease: { deadlineAt: Date.now() + 60_000 } });
+  try {
+    const failed = await browser.call('setup', { url: origins[0] });
+    assert.equal(failed.reason, 'bootstrap_failed');
+    assert.deepEqual(failed.diagnostic, { stage: 'profile_prepare', code: 'profile_path_too_long' });
+    assert.deepEqual((await browser.call('status')).diagnostic, failed.diagnostic);
+    assert.doesNotMatch(JSON.stringify(failed), /PRIVATE_SYNTHETIC_PATH/);
+  } finally { await browser.close(); }
+});
+
+test('extension transport diagnostics are enums restricted to extension connection failures', () => {
+  const base = { stage: 'extension_connect', code: 'extension_not_connected' };
+  assert.deepEqual(validateVisualStartupDiagnostic(base), base, 'old workers may omit the new field');
+  for (const extensionTransport of ['upgrade_unobserved', 'upgrade_authenticated', 'connected', 'closed']) {
+    assert.deepEqual(validateVisualStartupDiagnostic({ ...base, extensionTransport }), { ...base, extensionTransport });
+  }
+  assert.throws(() => validateVisualStartupDiagnostic({ ...base, extensionTransport: 'PRIVATE_TOKEN' }));
+  assert.throws(() => validateVisualStartupDiagnostic({ stage: 'browser_spawn', code: 'browser_exited', extensionTransport: 'closed' }));
 });
 
 test('native storage failure precedes browser I/O and remains visible in status', async () => {

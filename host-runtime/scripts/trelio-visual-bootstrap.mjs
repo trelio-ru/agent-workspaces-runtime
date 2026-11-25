@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { readFile, copyFile, lstat, mkdtemp, rename, rm, access, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { browserCacheHome, resolveNpmInvocation } from './trelio-browser-session.mjs';
 import { buildAgentSkillRuntimePath, ensurePrivateDirectory } from './trelio-workspace.mjs';
 import { visualStartupDiagnostic, visualStartupFault, visualStartupPhase } from './trelio-visual-result.mjs';
@@ -123,6 +124,45 @@ export async function prepareVisualPrivateDirectory(directory) {
 export async function prepareVisualLockRoot(directory) {
   await assertVisualDirectoryAncestors(directory);
   await mkdir(directory, { recursive: true, mode: 0o700 });
+}
+
+// The Windows cache tests observed about 70 UTF-16 units appended below
+// --user-data-dir before Chromium even named the cache files. Budget 89 units
+// below the classic 259-unit path limit for those nested paths, independently
+// of the registry's long-path policy. The account vault is not in this path.
+const windowsChromiumProfileLimit = 170;
+const windowsVisualRunPrefix = 'b-';
+
+export function windowsVisualLaunchRoot({ localAppData = process.env.LOCALAPPDATA,
+  userProfile = process.env.USERPROFILE || os.homedir(), fixtureDirectory } = {}) {
+  // A synthetic localhost worker stays under its own fixture directory. For
+  // admitted providers, only the Windows per-user OS directory selects the
+  // root. Do not inherit an override from the skill's arguments or profile.
+  if (fixtureDirectory) return path.win32.join(fixtureDirectory, 'v');
+  return path.win32.join(localAppData || path.win32.join(userProfile, 'AppData', 'Local'), 'Trelio', 'v');
+}
+
+export function validateWindowsVisualLaunchRoot(root) {
+  const normalized = path.win32.normalize(root);
+  // Chromium needs a physical, drive-absolute path. The existing native ACL
+  // check below separately rejects reparse points and unsafe directory owners.
+  if (!/^[A-Za-z]:\\$/u.test(path.win32.parse(normalized).root)) {
+    throw visualStartupFault({ stage: 'profile_prepare', code: 'storage_unavailable' });
+  }
+  if (path.win32.join(normalized, windowsVisualRunPrefix + 'XXXXXX', 'profile').length > windowsChromiumProfileLimit) {
+    throw visualStartupFault({ stage: 'profile_prepare', code: 'profile_path_too_long' });
+  }
+  return normalized;
+}
+
+export async function createVisualLaunchDirectory(storeDirectory, windowsLaunchRoot) {
+  if (windowsLaunchRoot === undefined) {
+    return mkdtemp(path.join(storeDirectory, 'extension-session-'));
+  }
+  // Secure the shared staging parent before creating anything that can hold
+  // authentication. mkdtemp allocates a fresh exclusive child per generation.
+  await prepareVisualPrivateDirectory(windowsLaunchRoot);
+  return mkdtemp(path.join(windowsLaunchRoot, windowsVisualRunPrefix));
 }
 
 export async function ensureVisualChromium(dependencies, { signal } = {}) {

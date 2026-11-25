@@ -12,8 +12,9 @@ import { visualExtensionWorker, visualDocumentResponsePolicy } from './trelio-vi
 import { visualLinkRouter, visualAttachmentRouter, visualAudioReceiver, visualAudioRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, normalizeVisualManualCompletion, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
-import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validateVisualAttachmentDiagnostic, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND, INLINE_TEXT_KIND, MAX_VISUAL_INLINE_TEXT_BYTES, validateVisualCommandResult } from './trelio-visual-result.mjs';
+import { createVisualLaunchDirectory, ensureVisualChromium, prepareVisualPrivateDirectory,
+  validateWindowsVisualLaunchRoot, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
+import { validateVisualStartupDiagnostic, visualStartupDiagnostic, visualStartupReason, validateVisualAttachmentDiagnostic, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND, INLINE_TEXT_KIND, MAX_VISUAL_INLINE_TEXT_BYTES, validateVisualCommandResult } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, visualAudioFormat, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
@@ -378,7 +379,7 @@ export class ExtensionVisualBrowser {
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
   #startupStage; #startupDiagnostic; #headless = false;
-  constructor({ dependencies, store, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
+  constructor({ dependencies, store, windowsLaunchRoot, policy, origins, domains = [], externalNavigation = false, profileAuthentication = false, lease, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false, testTlsSpki }) {
     visualBrowserHeadless(presentation, false);
     if (typeof semanticControls !== 'boolean' || semanticControls && observationMode !== 'text' || typeof externalNavigation !== 'boolean' || typeof profileAuthentication !== 'boolean' || profileAuthentication && !externalNavigation || !['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof audioDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     try { fieldCheckPolicy = normalizeBusinessFieldPolicy(fieldCheckPolicy, origins); } catch { throw fault('invalid_input'); }
@@ -397,7 +398,7 @@ export class ExtensionVisualBrowser {
     attachmentRedirectDomains = normalizeVisualAttachmentRedirectDomains(attachmentRedirectDomains, attachmentDownloads);
     fileUploadPickerPaths = normalizeVisualPickerPaths(fileUploadPickerPaths, fileUploads, referenceRoutes);
     attachmentFilePolicy = normalizeVisualAttachmentFilePolicy(attachmentFilePolicy, attachmentDownloads);
-    Object.assign(this, { dependencies, store, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, attachmentRedirectDomains, attachmentFilePolicy, audioDownloads, fileUploads, fileUploadPickerPaths, mailIdentity });
+    Object.assign(this, { dependencies, store, windowsLaunchRoot, policy, origins, domains, externalNavigation, profileAuthentication, lease, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, attachmentRedirectDomains, attachmentFilePolicy, audioDownloads, fileUploads, fileUploadPickerPaths, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.manualCompletion = normalizeVisualManualCompletion(manualCompletion, { origins, fixtureOnly: policy.fixtureOnly });
     // Merely observing fixture stages must not enable Chromium file logging.
@@ -557,6 +558,11 @@ export class ExtensionVisualBrowser {
     if (this.#child) return;
     this.#headless = visualBrowserHeadless(this.presentation, manual) || this.testHeadless;
     this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false; this.#authHandshake = false; this.#authSnapshotReady = false; this.#windowsClosed = false;
+    // Reject a profile path we cannot support before reading the saved login,
+    // and before touching Chromium's dependency, process or extension state.
+    this.#startupStage = 'profile_prepare';
+    const windowsLaunchRoot = this.windowsLaunchRoot === undefined ? undefined
+      : validateWindowsVisualLaunchRoot(this.windowsLaunchRoot);
     this.#startupStage = 'storage_read';
     const snapshot = await this.store.read();
     this.#startupStage = 'storage_prepare';
@@ -566,7 +572,7 @@ export class ExtensionVisualBrowser {
     this.#sessionCookies = this.#cookies.validate(snapshot?.sessionCookies ?? []);
     this.#replaceSessionCookies = Object.hasOwn(snapshot || {}, 'sessionCookies');
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
-    this.#directory = await fs.mkdtemp(path.join(this.store.directory, 'extension-session-'));
+    this.#directory = await createVisualLaunchDirectory(this.store.directory, windowsLaunchRoot);
     await prepareVisualPrivateDirectory(this.#directory);
     this.#profile = path.join(this.#directory, 'profile');
     await restoreVisualProfile(snapshot, this.#profile);
@@ -577,6 +583,9 @@ export class ExtensionVisualBrowser {
     const extension = path.join(this.#directory, 'extension'); await prepareVisualPrivateDirectory(extension);
     const token = crypto.randomBytes(32).toString('hex');
     const startupTrace = this.testDiagnostics ? createVisualStartupFixtureTrace() : undefined;
+    // Observe the existing transport in RAM. An unrelated localhost request
+    // cannot count as the extension, and silence cannot prove it never loaded.
+    let extensionTransport = 'upgrade_unobserved';
     this.#server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
     const transport = this.#wss = new this.dependencies.WebSocketServer({ noServer: true, maxPayload: (this.attachmentDownloads || this.audioDownloads ? 28 : 3) * 1024 * 1024, handleProtocols: protocols => protocols.has('trelio-visual-v1') ? 'trelio-visual-v1' : false });
     this.#server.on('upgrade', (req, socket, head) => {
@@ -585,8 +594,10 @@ export class ExtensionVisualBrowser {
       const candidate = protocols.find(value => /^[0-9a-f]{64}$/u.test(value));
       const validToken = candidate && crypto.timingSafeEqual(Buffer.from(token), Buffer.from(candidate));
       if (this.#wss !== transport || req.url !== '/extension' || req.headers.origin !== `chrome-extension://${EXTENSION_ID}` || !validToken || this.#socket?.readyState === 1) { startupTrace?.mark('transport_rejected'); socket.destroy(); return; }
+      extensionTransport = 'upgrade_authenticated';
       transport.handleUpgrade(req, socket, head, ws => {
         this.#socket = ws;
+        extensionTransport = 'connected';
         startupTrace?.mark('transport_connected');
         ws.on('message', data => {
           // Window, readiness and auth events belong to the active connection.
@@ -673,6 +684,7 @@ export class ExtensionVisualBrowser {
           startupTrace?.mark('transport_closed');
           if (this.#socket === ws) {
             this.#socket = undefined;
+            extensionTransport = 'closed';
             // A new extension service worker cannot prove it remembers its
             // credential-bearing documents. Preserve the previous protected
             // snapshot and refuse further model observation in this browser.
@@ -782,7 +794,10 @@ export class ExtensionVisualBrowser {
     if (startupTrace) this.testDiagnostics({ stage: 'startup_handshake', milestones: startupTrace.snapshot() });
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     if (!this.#extensionReady || this.#terminal) {
-      this.#startupDiagnostic ||= visualStartupDiagnostic('extension_connect', this.#socket ? 'extension_not_ready' : 'extension_not_connected');
+      this.#startupDiagnostic ||= validateVisualStartupDiagnostic({
+        stage: 'extension_connect', code: this.#socket ? 'extension_not_ready' : 'extension_not_connected',
+        extensionTransport,
+      });
       await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', ...this.#nativeStartup }); throw fault('bootstrap_failed'); }
     this.testWindowController?.({
       tabs: () => this.#send('fixture-tab-budget'),

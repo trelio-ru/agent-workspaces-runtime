@@ -581,7 +581,13 @@ test('all signing and version discovery shares one non-sliding deadline', () => 
 });
 
 test('detached worker keeps its original lease and encrypted storage across short calls', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000 }, async t => {
-  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-worker-test-')));
+  const fixtureRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-worker-test-')));
+  // The retired layout would append the account hash and browser generation
+  // here, then cross MAX_PATH inside Chromium's cache. Keep this Unicode path
+  // below the new launch budget while exercising the real detached worker.
+  const directory = process.platform === 'win32'
+    ? path.join(fixtureRoot, 'Профиль ' + 'a'.repeat(Math.max(0, 107 - fixtureRoot.length))) : fixtureRoot;
+  await fs.mkdir(directory, { recursive: true });
   let invalidDocumentRequests = 0;
   const externalNavigations = [];
   const externalPdf = Buffer.from('%PDF-1.7\nSynthetic external original\n%%EOF\n');
@@ -660,8 +666,18 @@ test('detached worker keeps its original lease and encrypted storage across shor
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     assert.equal(status.state, 'manual_input_required', JSON.stringify({ reason: status.reason, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') }));
+    if (process.platform === 'win32') {
+      const staging = path.join(directory, 'v');
+      const [generation, ...others] = await fs.readdir(staging);
+      assert.match(generation, /^b-[a-zA-Z0-9]{6}$/u);
+      assert.deepEqual(others, []);
+      assert.ok((await fs.stat(path.join(staging, generation, 'profile'))).isDirectory());
+      assert.ok((await fs.stat(path.join(staging, generation, 'extension', 'manifest.json'))).isFile());
+      assert.equal((await fs.readdir(store.directory)).some(name => name.startsWith('extension-session-')), false);
+    }
     assert.equal((await call('screenshot')).reason, 'manual_control_active');
     assert.equal((await call('ready')).state, 'saved_unverified');
+    if (process.platform === 'win32') assert.deepEqual(await fs.readdir(path.join(directory, 'v')), []);
     const frame = await call('navigate', { url: origin });
     assert.equal(frame.state, 'ready', JSON.stringify({ reason: frame.reason, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') })); assert.ok(frame.image);
     assert.equal((await runVisualSession({ origins: [origin], ...supportedFiles, externalNavigation: false,
@@ -755,7 +771,7 @@ test('detached worker keeps its original lease and encrypted storage across shor
         // use the same bounded disposal policy as the other native fixtures.
         // This retries removal only, never close/authentication/provider work,
         // and failed assertions retain their original evidence without disposal.
-        try { await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+        try { await fs.rm(fixtureRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
         catch (error) { failure ||= error; }
       }
     }

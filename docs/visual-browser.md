@@ -198,7 +198,17 @@ chunks и trailing bytes. Normalization не добавляет команды �
 
 `VISUAL_STARTUP_DIAGNOSTICS_API=trelio.browser-startup-diagnostics/v1` в общем
 host module подтверждает additive контракт. Legacy `state`/`reason` сохраняются;
-error дополнительно содержит закрытый `diagnostic: {stage,code,failureCode?,causeCode?,exitCode?,signal?}`.
+error дополнительно содержит закрытый `diagnostic: {stage,code,failureCode?,causeCode?,exitCode?,signal?,extensionTransport?}`.
+Только отказ `extension_connect` может содержать `extensionTransport`.
+`upgrade_unobserved` означает отсутствие наблюдённого запроса с корректными
+путём, origin и токеном. `upgrade_authenticated` фиксирует такой запрос
+до принятия WebSocket, `connected` фиксирует принятое соединение,
+`closed` означает закрытие этого соединения. Отсутствие запроса само
+по себе не показывает, загрузилось ли расширение. Эти значения фиксируются
+на исходном handshake без новых запросов, файлов журналов и продления срока.
+Для старого launcher с прежним строгим валидатором приватный worker сохраняет
+совместимость через версию заголовка команды. Без новой версии он опускает
+`extensionTransport` и возвращает прежний `profile_prepare/startup_failed`.
 Тот же validator проверяет worker HTTP, provider stdout и MCP; arbitrary поля,
 prose, URL/paths, native output, credentials и diagnostic на успешном результате
 отклоняются. Text-mode ошибки используют тот же status DTO без текста страницы.
@@ -304,7 +314,7 @@ assertions remain unchanged.
 | `worker_request` | `worker_unavailable`: не получен корректный ответ; не доказывает, что worker или браузер не запускался |
 | `dependencies`, `dependency_install`, `dependency_load` | `startup_failed`, `npm_unavailable`, `dependency_install_failed`, `dependency_load_failed`: общая подготовка, отсутствие доступного npm entrypoint, установка либо загрузка native modules |
 | `storage_read`, `storage_prepare` | `storage_unavailable`, `storage_corrupt`: недоступное либо повреждённое protected state |
-| `profile_restore`, `profile_prepare`, `extension_prepare` | `startup_failed`, `storage_unavailable`, `storage_corrupt`: восстановление/подготовка; прежний snapshot не перезаписывается |
+| `profile_restore`, `profile_prepare`, `extension_prepare` | `startup_failed`, `storage_unavailable`, `storage_corrupt`: восстановление/подготовка; прежний snapshot сохраняется. `profile_prepare/profile_path_too_long`: Windows-путь временного профиля не оставляет нужного запаса до Win32 MAX_PATH |
 | `browser_install` | `browser_install_failed`: отказ подготовки managed Chromium |
 | `browser_spawn` | `browser_spawn_failed`, `browser_exited`: spawn отказ либо наблюдённый ранний exit |
 | `extension_connect` | `extension_not_connected`, `extension_not_ready`: socket отсутствует либо hello не завершён в прежний deadline |
@@ -1236,7 +1246,15 @@ seed остаются ручными, без угадывания поля/ме�
 обязательным до использования generic API.
 
 Во время работы owned профиль существует на диске в частном каталоге с native
-owner/ACL guards. Это обычный профиль Chromium, а не in-memory incognito.
+owner/ACL guards. Это обычный профиль Chromium на диске.
+На Windows runtime размещает временный профиль и служебное расширение в
+`%LOCALAPPDATA%\Trelio\v\b-<random>`, отдельно от зашифрованного каталога аккаунта.
+Родитель проверяется native owner/DACL guard до создания уникального каталога.
+Пути с reparse points отклоняются. До чтения снимка runtime проверяет длину
+будущего пути профиля. Лимит 170 UTF-16 единиц оставляет минимум 89 под
+вложенные каталоги и имена Chromium относительно классического Win32 MAX_PATH.
+Снимок остаётся на прежнем пути с прежним ключом. Штатное закрытие удаляет
+только временный каталог текущего запуска после остановки браузера.
 После нормальной остановки выбранные auth stores упаковываются в bounded
 schema-v2 archive, шифруются AES-256-GCM и plaintext каталог удаляется.
 Сохраняются Local State/preferences, cookies и network-migration checkpoint, localStorage, IndexedDB,

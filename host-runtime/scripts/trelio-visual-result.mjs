@@ -103,17 +103,22 @@ const startupStages = new Set(['owner_read', 'owner_prepare', 'owner_publish', '
   'extension_connect', 'extension_policy', 'extension_auth', 'extension_window']);
 const startupCodes = new Set(['startup_failed', 'node_unavailable', 'npm_unavailable', 'dependency_install_failed', 'dependency_load_failed',
   'storage_unavailable', 'storage_corrupt', 'browser_install_failed', 'browser_spawn_failed', 'browser_exited',
-  'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed', 'worker_unavailable']);
+  'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed', 'worker_unavailable', 'profile_path_too_long']);
+const startupExtensionTransports = new Set(['upgrade_unobserved', 'upgrade_authenticated', 'connected', 'closed']);
 const startupCauses = new Set(['EACCES', 'EPERM', 'ENOENT', 'EIO', 'EBUSY', 'ENOSPC', 'ENOTDIR', 'EEXIST',
   'ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET', 'ERR_DLOPEN_FAILED', 'ABORT_ERR']);
 const startupSignals = new Set(['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV']);
 
 export function validateVisualStartupDiagnostic(value) {
-  if (!exact(value, ['stage', 'code', 'failureCode', 'causeCode', 'exitCode', 'signal']) || !startupStages.has(value.stage)
+  if (!exact(value, ['stage', 'code', 'failureCode', 'causeCode', 'exitCode', 'signal', 'extensionTransport']) || !startupStages.has(value.stage)
     || !startupCodes.has(value.code) || value.causeCode !== undefined && !startupCauses.has(value.causeCode)
     || value.failureCode !== undefined && !PROCESS_DIAGNOSTIC_CODES.includes(value.failureCode)
     || value.exitCode !== undefined && (!Number.isSafeInteger(value.exitCode) || value.exitCode < -2147483648 || value.exitCode > 4294967295)
-    || value.signal !== undefined && !startupSignals.has(value.signal)) fail();
+    || value.signal !== undefined && !startupSignals.has(value.signal)
+    || value.code === 'profile_path_too_long' && value.stage !== 'profile_prepare'
+    || value.extensionTransport !== undefined && (value.stage !== 'extension_connect'
+      || !['extension_not_connected', 'extension_not_ready'].includes(value.code)
+      || !startupExtensionTransports.has(value.extensionTransport))) fail();
   return { ...value };
 }
 
@@ -149,7 +154,7 @@ class VisualStartupError extends Error {
 export const visualStartupFault = diagnostic => new VisualStartupError(diagnostic);
 export const visualStartupReason = diagnostic => ['storage_corrupt', 'storage_unavailable'].includes(diagnostic.code) ? 'storage_unavailable'
     : ['node_unavailable', 'npm_unavailable', 'dependency_install_failed', 'dependency_load_failed', 'browser_install_failed',
-      'browser_spawn_failed', 'browser_exited', 'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed'].includes(diagnostic.code)
+      'browser_spawn_failed', 'browser_exited', 'extension_not_connected', 'extension_not_ready', 'extension_bootstrap_failed', 'profile_path_too_long'].includes(diagnostic.code)
       ? 'bootstrap_failed' : 'operation_failed';
 
 export async function visualStartupPhase(stage, action, code = 'startup_failed') {

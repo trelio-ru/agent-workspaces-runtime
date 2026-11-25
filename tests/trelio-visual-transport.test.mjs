@@ -45,23 +45,33 @@ test('closed startup diagnostics cross actual worker HTTP and typed MCP unchange
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const input = { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: randomUUID(), skillId: 'synthetic-visual-fixture', releaseId: randomUUID(), arguments: ['status'] } };
-    const read = () => handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
+    const read = (withNewDiagnostics = true) => handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
       workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, {
         runBridge: async () => {
           const response = await fetch(`http://127.0.0.1:${server.address().port}/command`, { method: 'POST',
-            headers: { authorization: `Bearer ${'a'.repeat(64)}`, 'content-type': 'application/json' },
+            headers: { authorization: `Bearer ${'a'.repeat(64)}`, 'content-type': 'application/json',
+              ...(withNewDiagnostics ? { 'x-trelio-visual-startup-diagnostics': '2' } : {}) },
             body: JSON.stringify({ operation: 'status', args: {} }) });
           return { stdout: await response.text(), stderr: 'PRIVATE_STDERR_NOT_FOR_THE_MODEL' };
         },
       }),
     });
-    for (const value of [diagnostic, { stage: 'dependency_install', code: 'npm_unavailable' }]) {
+    const extension = { stage: 'extension_connect', code: 'extension_not_connected', extensionTransport: 'closed' };
+    const tooLong = { stage: 'profile_prepare', code: 'profile_path_too_long' };
+    for (const value of [diagnostic, { stage: 'dependency_install', code: 'npm_unavailable' }, extension, tooLong]) {
       diagnostic = value;
       const result = await read();
       assert.equal(result.isError, true);
       assert.deepEqual(JSON.parse(result.content[0].text).diagnostic, diagnostic);
       assert.doesNotMatch(JSON.stringify(result), /PRIVATE_STDERR|stdout|Bearer/);
     }
+    diagnostic = extension;
+    const legacyExtension = JSON.parse((await read(false)).content[0].text);
+    assert.deepEqual(legacyExtension.diagnostic, { stage: 'extension_connect', code: 'extension_not_connected' });
+    diagnostic = tooLong;
+    const legacyProfile = JSON.parse((await read(false)).content[0].text);
+    assert.equal(legacyProfile.reason, 'operation_failed');
+    assert.deepEqual(legacyProfile.diagnostic, { stage: 'profile_prepare', code: 'startup_failed' });
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
 

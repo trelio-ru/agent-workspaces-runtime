@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readPrivateJsonFile, writePrivateJsonFile } from './trelio-workspace.mjs';
-import { loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
+import { loadVisualDependencies, windowsVisualLaunchRoot } from './trelio-visual-bootstrap.mjs';
 import { ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { ExtensionVisualBrowser, visualNavigationFixturePhase, visualStartupFixturePhase } from './trelio-visual-extension-browser.mjs';
@@ -193,7 +193,10 @@ try {
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.
   startupPhase = 'browser';
-  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, externalNavigation: owner.externalNavigation === true, profileAuthentication: owner.profileAuthentication === true, authentication: owner.authentication || null, manualCompletion: owner.manualCompletion || null, mailIdentity: owner.mailIdentity || null, observationMode: owner.observationMode || 'image', presentation: owner.presentation || 'windowed', semanticControls: owner.semanticControls === true, fieldCheckPolicy: owner.fieldCheckPolicy || null, referenceRoutes: owner.referenceRoutes || [], attachmentDownloads: owner.attachmentDownloads === true, attachmentRedirectDomains: owner.attachmentRedirectDomains || [], attachmentFilePolicy: owner.attachmentFilePolicy ?? null, audioDownloads: owner.audioDownloads === true, fileUploads: owner.fileUploads === true, fileUploadPickerPaths: owner.fileUploadPickerPaths || [], lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
+  const windowsLaunchRoot = process.platform === 'win32'
+    ? windowsVisualLaunchRoot({ fixtureDirectory: fixtureOnly ? owner.directory : undefined })
+    : undefined;
+  engine = new ExtensionVisualBrowser({ dependencies, store, windowsLaunchRoot, policy, origins: owner.origins, domains: owner.domains, externalNavigation: owner.externalNavigation === true, profileAuthentication: owner.profileAuthentication === true, authentication: owner.authentication || null, manualCompletion: owner.manualCompletion || null, mailIdentity: owner.mailIdentity || null, observationMode: owner.observationMode || 'image', presentation: owner.presentation || 'windowed', semanticControls: owner.semanticControls === true, fieldCheckPolicy: owner.fieldCheckPolicy || null, referenceRoutes: owner.referenceRoutes || [], attachmentDownloads: owner.attachmentDownloads === true, attachmentRedirectDomains: owner.attachmentRedirectDomains || [], attachmentFilePolicy: owner.attachmentFilePolicy ?? null, audioDownloads: owner.audioDownloads === true, fileUploads: owner.fileUploads === true, fileUploadPickerPaths: owner.fileUploadPickerPaths || [], lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   if (owner.assistantBrowserSecrets === true) engine.enableAssistantBrowserSecrets();
   current = await idle.run(owner.operation, owner.args, () => engine.call(owner.operation, owner.args));
   if (awaitingOriginalNavigation && current.state === 'error') initialNavigationFailure = current;
