@@ -2153,7 +2153,10 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   independent, and root/exact duplicates choose only one local triage queue.
   [Contract](docs/assistant-inbox.md#native-max-through-the-same-source-journal).
 
-Pre-native reservation recovery: SAME delivery v12/bit0/lease and native history, not a new invocation; see docs/assistant-scheduler.md.
+Pre-native reservation recovery keeps the same delivery, zero start bit, lease
+and native history. Test the real coordinator and native executor together for
+an answered notification and scheduled reconciliation with/without an answer.
+See [the scheduler contract](docs/assistant-scheduler.md).
 
 Technical provision waits for the same exact connected MCP catalogue. Schema31
 can recover a legacy unmaterialized task provision only with both exact native

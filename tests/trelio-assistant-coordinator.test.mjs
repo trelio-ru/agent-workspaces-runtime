@@ -8,7 +8,10 @@ import path from 'node:path';
 import { createAssistantInbox, readAssistantWorkspaceDraftRecovery, assistantRetiredOutcomeCompletion } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { assistantTaskStorageDirectory, createAssistantDeviceClient, createAssistantHttp, createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
-import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { ownedRpc } from './fixtures/assistant-native-rpc.mjs';
+import { ASSISTANT_RECONCILE_TASK_TOOLS } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
+import { assistantInterruptedAcceptedWorkspace, assistantDeliveryMarker, assistantFreshPrompt, assistantWorkStateContext,
+  runAssistantTurn, runAssistantCodexPass } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 import { createAssistantRuntimeHost } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { ensurePrivateDirectory, runGit, verifyAssistantReadOnlyPrelude, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 
@@ -4937,7 +4940,7 @@ for(const repaired of [false,true])test(`retained named archive settles once, th
 // A stopped scheduled review and an actual later answer have distinct lifetimes.
 // Use the normal notifier ACK, SQLite claim, registered chat and business receipt.
 // Restart the same journal at each native boundary: no original operation may run.
-for(const mode of ['no_run','clean_run','after_begin','after_start','dirty_run','unknown_effect','missing_answer','wrong_receipt','revoked_begin'])
+for(const mode of ['no_run','clean_run','after_begin','preflight_refusal','after_start','dirty_run','unknown_effect','missing_answer','wrong_receipt','revoked_begin'])
 test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,async t=>{
   const f=fixture(t);f.authority.workMode='task';
   const originalReadOutcome=f.options.client.readBusinessOutcome;
@@ -5021,6 +5024,34 @@ test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,a
     if(mode==='after_start')throw Object.assign(new Error('lost after positive new native turn'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
     return value;
   };
+  if(['no_run','after_begin','preflight_refusal'].includes(mode)){
+    // Drive the coordinator's actual option objects through both production
+    // runners. Only the App Server streams and installed role are synthetic.
+    const taskPass={passId:pass.passId,companyId:pass.companyId,taskId:pass.taskId};
+    const original={id:sourceTurnId,status:'interrupted',items:[
+      {type:'userMessage',content:[{type:'text',text:assistantFreshPrompt(pass.deliveryId,
+        assistantWorkStateContext({assistantId:f.identity.assistantId,companyId:pass.companyId,taskId:pass.taskId,scheduled:true}))}]},
+      {type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_owner_question',status:'completed',
+        arguments:{taskPass,questionId},result:{structuredContent:{id:questionId,state:'pending',taskId:pass.taskId,assistantUserId:f.identity.assistantId}}}]};
+    const spawnProcess=ownedRpc({threadId:pass.threadId,onHistoryRead:()=>({result:{data:[original],nextCursor:null}}),
+      onInput:text=>{
+        nativeStarts++;assert.equal(nativeStarts,1);
+        assert.ok(text.startsWith(assistantDeliveryMarker(newDelivery)+'\n'));
+        assert.ok(text.includes(questionId));assert.ok(!text.includes(sourceTurnId));
+      }});
+    const adapters={executable:process.execPath,environment:{},spawnProcess,readExecutionAvailability:async()=>true,
+      readHookReadiness:async()=>{},readWorkflow:async()=>'Installed task workflow'};
+    const invoke=async(runner,input,options)=>{
+      assert.equal(input.threadId,pass.threadId);assert.equal(input.deliveryId,newDelivery);
+      assert.equal(input.taskContext.scheduled,undefined);assert.deepEqual(input.taskContext.ownerQuestionIds,[questionId]);
+      assert.equal(options.retiredAnswerCheck.sourceTurnId,sourceTurnId);
+      const value=await runner(input,{...options,...adapters,
+        ...(mode==='preflight_refusal'&&options.startState==='created'?{unknownNativeOption:true}:{})});
+      f.deliveries.set(input.deliveryId,value);completed=true;return value;
+    };
+    f.options.native.run=(input,options)=>invoke(runAssistantTurn,input,options);
+    f.options.native.recover=(input,options)=>invoke(runAssistantCodexPass,input,options);
+  }
   f.options.client.readBusinessOutcome=async input=>{
     if(input.deliveryId===pass.deliveryId||!completed)return {schemaVersion:1,state:'pending'};
     assert.equal(input.deliveryId,newDelivery);
@@ -5036,13 +5067,19 @@ test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,a
     assert.equal((await maintenance()).state,'deferred');
     if(mode==='no_run')assert.ok(coordinator.modelCapacityRetryDelay()>0);
     const work=()=>coordinator.workOnce();
-    if(['after_begin','after_start','wrong_receipt'].includes(mode))await assert.rejects(work());
+    if(['after_begin','preflight_refusal','after_start','wrong_receipt'].includes(mode))await assert.rejects(work());
     else await work();
     assert.deepEqual(snapshot(),frozen);assert.equal(old.state,'closed');
     if(!completed)assert.equal(coordinator.status()[0].nextRunAt,plan.nextRunAt);
-    if(['after_begin','after_start'].includes(mode)){
+    if(['after_begin','preflight_refusal','after_start'].includes(mode)){
+      if(mode==='preflight_refusal'){
+        const row=inbox.readDelivery(newDelivery);
+        assert.equal(row.nativeStarted,false);
+        const failure=f.database.prepare('SELECT failure_stage,failure_code FROM assistant_inbox_deliveries WHERE delivery_id=?').get(newDelivery);
+        assert.equal(failure.failure_stage,'native_preflight');assert.equal(failure.failure_code,'ASSISTANT_CODEX_INVALID_INPUT');
+      }
       await coordinator.close();coordinator=createAssistantCoordinator(f.options);
-      if(mode==='after_begin'){
+      if(['after_begin','preflight_refusal'].includes(mode)){
         await assert.rejects(work(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
         assert.equal(nativeStarts,0);assert.deepEqual(snapshot(),frozen);
         assert.equal(coordinator.status()[0].nextRunAt,plan.nextRunAt);
@@ -5064,8 +5101,8 @@ test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,a
     assert.equal(event.processed,Number(completed));
     const related=f.database.prepare('SELECT count(*) n FROM assistant_retired_answer_deliveries').get().n;
     assert.equal(related,['dirty_run','unknown_effect','missing_answer'].includes(mode)?0:1);
-    assert.equal(nativeStarts,['no_run','clean_run','after_start','after_begin','revoked_begin'].includes(mode)?1:0);
-    assert.equal(begins,related+(mode==='after_begin'?2:mode==='revoked_begin'?1:0));
+    assert.equal(nativeStarts,['no_run','clean_run','after_start','after_begin','preflight_refusal','revoked_begin'].includes(mode)?1:0);
+    assert.equal(begins,related+(['after_begin','preflight_refusal'].includes(mode)?2:mode==='revoked_begin'?1:0));
     if(completed){
       assert.equal((await maintenance()).state,'current');
       assert.deepEqual(inbox.status(plan.source).uncertain,[]);
@@ -5148,7 +5185,8 @@ test(`one scoped owner-answer refusal permits another independently verified ans
   await f.coordinator.close();
 });
 
-for (const withAnswer of [false,true]) test(`retired scheduled work resumes independent reads and preserves its held effect (answer=${withAnswer})`,async t=>{
+for (const [withAnswer,restart] of [[false,false],[true,false],[true,true]])
+test(`retired scheduled work resumes independent reads and preserves its held effect (answer=${withAnswer}, restart=${restart})`,async t=>{
   const f=fixture(t);f.authority.workMode='task';
   await f.coordinator.pollOnce();await f.coordinator.workOnce();
   const plan=f.coordinator.status()[0];f.advance(plan.nextRunAt-f.options.now());
@@ -5165,7 +5203,7 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
     f.advance(300001);await f.coordinator.pollOnce();}
   f.failNative(false);f.options.native.readWriterReleased=async thread=>thread===old.threadId;
   const prior=f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(old.deliveryId);
-  const begin=f.options.client.beginTaskPass,run=f.options.native.run,readOutcome=f.options.client.readBusinessOutcome;
+  const begin=f.options.client.beginTaskPass,readOutcome=f.options.client.readBusinessOutcome;
   const selected=[],begins=[],accepted=new Map();
   let rejectFirst=true, inspectedOriginal=0;
   f.options.client.readTaskRetiredOutcomeEvidence=async()=>assert.fail('no accepted original');
@@ -5194,15 +5232,32 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
     assert.notEqual(args.deliveryId,old.deliveryId);
     begins.push(args.deliveryId);
     if(rejectFirst){rejectFirst=false;throw Object.assign(new Error('native revision conflict before creation'),{status:409});}
-    return {...await begin(args),startState:'created'};
+    const known=f.passes.has(args.deliveryId);
+    return {...await begin(args),startState:known?'observe':'created'};
   };
-  f.options.native.run=async(args,options)=>{
+  const invoke=async(runner,args,options)=>{
+    // Exercise the protected store as a new process sees it: nested receipt
+    // values are deserialized independently on every read.
+    if(restart&&!selected.length&&!options.requireAbsentMarker)throw Object.assign(new Error('native unavailable before start'),{code:'ASSISTANT_CODEX_UNAVAILABLE'});
     assert.equal(args.threadId,old.threadId);assert.equal(args.taskContext.scheduled,true);
     assert.deepEqual(args.taskContext.ownerQuestionIds,withAnswer&&!selected.length?[wake.questionId]:undefined);
     assert.deepEqual(options.retiredReconcile,f.activePass().retiredReconcile);
     assert.equal(args.taskContext.sourceReferences,undefined);
-    selected.push(args.deliveryId);return run(args,options);
+    const result=await runner(args,{...options,executable:process.execPath,environment:{},
+      readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},readWorkflow:async()=>'Installed task workflow',
+      spawnProcess:ownedRpc({threadId:args.threadId,cwd:args.cwd,onInput:text=>{
+        assert.ok(text.startsWith(assistantDeliveryMarker(args.deliveryId)+'\n'));
+        assert.ok(text.includes('unresolved external effect'));assert.ok(text.includes('noChange'));
+        assert.equal(text.includes(wake.questionId),withAnswer&&!selected.length);
+        selected.push(args.deliveryId);
+      },executionPolicy:(request,reply)=>{
+        if(request.method==='mcpServerStatus/list')reply.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(name=>[name,{name}]));
+        return reply;
+      }})});
+    f.deliveries.set(args.deliveryId,result);return result;
   };
+  f.options.native.run=(args,options)=>invoke(runAssistantTurn,args,options);
+  f.options.native.recover=(args,options)=>invoke(runAssistantCodexPass,args,options);
   f.options.client.readBusinessOutcome=async args=>{
     if(args.deliveryId===old.deliveryId)return {schemaVersion:1,state:'pending'};
     assert.ok(selected.includes(args.deliveryId));
@@ -5210,13 +5265,40 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
     return outcome;
   };
   await f.coordinator.close();
-  const coordinator=createAssistantCoordinator(f.options);
+  let coordinator=createAssistantCoordinator(f.options),close=()=>coordinator.close();
   await coordinator.workOnce();
   assert.deepEqual(selected,[]);
   assert.deepEqual(inbox.incompleteDeliveries(),[]);
   assert.equal(begins.length,1);
+  if(restart){
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+    const active=f.activePass(),server=f.passes.get(active.deliveryId);
+    assert.equal(inbox.readDelivery(active.deliveryId).nativeStarted,false);
+    assert.deepEqual(active.retiredReconcile,server.retiredReconcile);
+    await coordinator.close();
+    f.advance(21*60_000);server.state='review_required';
+    let locked=false;
+    const renew=f.options.client.renewTaskPass;
+    f.options.client.renewTaskPass=async input=>{
+      assert.ok(locked);assert.equal(input.preNativeRecovery,true);assert.equal(input.passId,server.passId);
+      server.state='leased';return renew(input);
+    };
+    const directory=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'assistant-reconcile-restart-')));
+    t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+    const host=await createAssistantRuntimeHost({context:async action=>action(f.options.client,{
+      ...f.options.passHost,readActivePass:async()=>structuredClone(f.activePass()),readIdentity:async()=>f.identity,
+      readActivation:async()=>null,withSetupLock:async work=>{locked=true;try{return await work();}finally{locked=false;}}
+    }),dependencies:{directory,ensureDirectory:dir=>fs.mkdir(dir,{recursive:true}),now:f.options.now,timeZone:'UTC',native:f.options.native,
+      openDatabase:async()=>({database:f.database,close:async()=>{}}),
+      readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,
+        authorizedByUserId:f.memberId,businessReady:true,availableCapabilities:['task_context','task_mutations','task_pass_outcome',
+          'workspace_execution','owner_decisions','background_service']}})}});
+    coordinator=host.coordinator;close=()=>host.close();
+  }
   for(let cycle=0;cycle<2;cycle++){
-    assert.equal((await coordinator.workOnce())?.state,'completed');
+    const result=await coordinator.workOnce();
+    // A recovered delivery settles inside reconcile, before a new selection.
+    if(!restart||cycle>0)assert.equal(result?.state,'completed');
     assert.equal(accepted.size,cycle+1);
     assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(old.deliveryId),prior);
     assert.deepEqual(inbox.retiredTaskIds(),[f.taskId]);
@@ -5225,7 +5307,7 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
     const next=coordinator.status()[0].nextRunAt;
     assert.ok(next>f.options.now());f.advance(next-f.options.now());
   }
-  assert.deepEqual(begins,[selected[0],selected[0],selected[1]]);
+  assert.deepEqual(begins,[selected[0],selected[0],...(restart?[selected[0]]:[]),selected[1]]);
   assert.equal(inspectedOriginal,Number(withAnswer));
   assert.equal(new Set(selected).size,2);
   // Even a second interrupted writer can release the device. Neither source
@@ -5245,5 +5327,5 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
   assert.equal(inbox.claimReconciliation(old.deliveryId,receipt.receiptId,[...accepted.values()].at(-1)),null);
   assert.deepEqual(inbox.readRetiredTaskWriter(old.deliveryId),{receipt,released:true});
   assert.deepEqual(inbox.readRetiredTaskWriter(next.deliveryId),{receipt:second,released:true});
-  await coordinator.close();
+  await close();
 });

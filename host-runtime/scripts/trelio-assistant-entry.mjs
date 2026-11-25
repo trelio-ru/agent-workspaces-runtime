@@ -2168,22 +2168,20 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     passHost.recoverPass=(input,expectedPass,signal)=>invoke(async(live,host)=>{
       // Pairing/rebind and recovery share the existing setup mutex. Never use
       // a pre-lock host getter as proof of the current protected pass identity.
-      const current=await host.readActivePass();
-      const same=value=>value&&Object.keys(value).length===Object.keys(expectedPass).length&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key]);
-      if(!same(current))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      // Private storage deserializes a fresh copy of the nested reconciliation
+      // receipt. Compare its fields before and after contacting the server.
+      if(!isDeepStrictEqual(await host.readActivePass(),expectedPass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       const result=await live.renewTaskPass({...input,preNativeRecovery:true},signal);
-      if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if(!isDeepStrictEqual(await host.readActivePass(),expectedPass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       return result;
     },true);
     passHost.continuePass=(input,expectedPass,signal)=>invoke(async(live,host)=>{
       // The control request stays device-only and under the existing setup
       // mutex. A replacement identity, task or pass cannot inherit the original
       // task authorization. It is never exposed as a model MCP alias.
-      const same=value=>value&&Object.keys(value).length===Object.keys(expectedPass).length
-        &&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key]);
-      if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if(!isDeepStrictEqual(await host.readActivePass(),expectedPass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       const result=await live.continueTaskPass(input,signal);
-      if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if(!isDeepStrictEqual(await host.readActivePass(),expectedPass))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       return result;
     },true);
 

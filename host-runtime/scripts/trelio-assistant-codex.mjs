@@ -4057,7 +4057,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
   const scope=intakeContext===undefined?assistantWorkStateContext(taskContext):assistantIntakeContext(intakeContext);
   // A restricted or uncertain pass has different authority. Reject a caller
   // that supplies any of its options instead of silently running a fresh turn.
-  const allowed=['startState','retiredReconcile','signal','passTimeoutMs','beforeInvocation','startInvocation','onAuthenticationConfirmed',
+  const allowed=['startState','retiredReconcile','retiredAnswerCheck','signal','passTimeoutMs','beforeInvocation','startInvocation','onAuthenticationConfirmed',
     'executable','environment','spawnProcess','readExecutionAvailability','readHookReadiness','readWorkflow'];
   const timeout=options.passTimeoutMs??15*60_000;
   if(Object.keys(other).length||Object.keys(options).some(key=>!allowed.includes(key))
@@ -4065,6 +4065,11 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
     // Only task-pass/begin currently returns a transaction-bound fresh receipt.
     // Source intake uses its existing exact delivery/revision and native journal.
     ||intakeContext!==undefined&&options.startState!==undefined
+    // Only the native begin for a single answered task supplies this check.
+    // The original evidence is read while holding the thread before start.
+    ||options.retiredAnswerCheck!==undefined&&(!plainRecord(options.retiredAnswerCheck)||!options.startState
+      ||intakeContext!==undefined||scope.scheduled||scope.ownerQuestionIds?.length!==1||scope.workMode==='discussion'
+      ||scope.sourceReferences||options.retiredReconcile!==undefined||typeof options.beforeInvocation!=='function')
     ||typeof cwd!=='string'||!path.isAbsolute(cwd)||typeof options.startInvocation!=='function'
     ||options.beforeInvocation!==undefined&&typeof options.beforeInvocation!=='function'
     ||!Number.isSafeInteger(timeout)||timeout<100||timeout>30*60_000)fail('ASSISTANT_CODEX_INVALID_INPUT');
@@ -4303,7 +4308,7 @@ export const assistantReconciliationPrompt=(deliveryId,scope)=>[
   assistantDeliveryMarker(deliveryId),'TRELIO_ASSISTANT_SCOPE '+JSON.stringify(scope),
   'Continue the scheduled goal in this chat using the verified task, existing observations and independently permitted reads. An earlier writer stopped with an unresolved external effect. Keep that effect on hold. Never repeat the earlier input or assume a click, send, save or search succeeded.',
   ...(scope.ownerQuestionIds?.length?['Read the one listed owner answer through get_assistant_owner_question. Its text guides this new task result. Keep earlier unverified external effects on hold.']:[]),
-  'Use already found references and signed read-only skill commands with an existing bound account. Reconcile prior observations, the intended destination and the canonical task files. Identify the specific missing access or evidence when a check cannot run. Record the verified result and remaining work in a new canonical task Workspace Run, preserving prior evidence. Confirm its accepted head and report the actual goal state through complete_assistant_pass. A partial result keeps the goal open.',
+  'Use already found references and signed read-only skill commands with an existing bound account. Reconcile prior observations, the intended destination and the canonical task files. Identify the specific missing access or evidence when a check cannot run. Record the first reconciliation result and remaining work in a new accepted canonical task Workspace Run, preserving prior evidence. In a later period, use noChange when the goal state, schedule and accepted material are unchanged. Confirm the accepted head and report the actual goal state through complete_assistant_pass. A partial result keeps the goal open.',
 ].join('\n')+'\n';
 
 export const assistantFreshPrompt = (deliveryId,scope) => {
