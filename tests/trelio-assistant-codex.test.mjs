@@ -3979,10 +3979,13 @@ test('a fresh calendar carry prepares its own Run before reading pinned authorit
       const text=request.params.input[0].text;
       const instructions=request.params.collaborationMode.settings.developer_instructions;
       assert.ok(text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
-      assert.match(instructions,/retired Run is only the source of the checkpoint/);
-      assert.match(instructions,/prepare_assistant_workspace_run without runId.+returned open, then read both pinned authority files.+authorityReads.+carry_forward.+complete_assistant_pass/);
-      assert.ok(!instructions.includes(retiredReconcile.passId));
-      assert.ok(!instructions.includes(retiredReconcile.writerRetirementReceiptId));
+      assert.equal(instructions,'installed task role');
+      assert.match(text,/retired Run is only the source of the checkpoint/);
+      assert.match(text,/prepare_assistant_workspace_run with a clientRequestId and without runId or workspaceId.+returned open, then read both pinned authority files.+authorityReads/);
+      assert.match(text,/authorityReads[\s\S]+carry_forward[\s\S]+complete_assistant_pass/);
+      assert.doesNotMatch(text,/Use already found references and signed read-only skill commands/);
+      assert.ok(!text.includes(retiredReconcile.passId));
+      assert.ok(!text.includes(retiredReconcile.writerRetirementReceiptId));
     },executionPolicy(request,response){
       if(request.method==='mcpServerStatus/list')
         response.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(tool=>[tool,{name:tool}]));
@@ -4002,6 +4005,7 @@ test('a continued scheduled check reopens its own draft and preserves later WORK
     scheduledMaterial:'carry',continuationReview:{priorTurnId,reviewId:deliveryId},requireAbsentMarker:true,
     executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),
     readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},beforeInvocation:async()=>{},
+    readWorkflow:async()=>'installed task role',
     readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
     openDesktop:async()=>{},startInvocation:()=>{starts++;},
     spawnProcess:ownedRpc({threadId,onTurn(request){
@@ -4010,11 +4014,12 @@ test('a continued scheduled check reopens its own draft and preserves later WORK
       const instructions=request.params.collaborationMode.settings.developer_instructions;
       assert.ok(text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
       assert.ok(text.includes(priorTurnId));
-      assert.match(text,/reopen that exact Run/);
+      assert.equal(instructions,'installed task role');
+      assert.match(text,/own earlier tool results identify it. Reopen that exact Run/);
       assert.match(text,/If already accepted, verify and reuse that revision/);
-      assert.match(instructions,/Preserve subsequent edits/);
-      assert.match(instructions,/Reuse its Run if it exists.+If this pass has no Run yet: Call prepare_assistant_workspace_run without runId/);
-      assert.match(text,/Keep that effect on hold/);
+      assert.match(text,/Preserve its later edits.+If this check has no own Run yet, call prepare_assistant_workspace_run/);
+      assert.match(text,/Keep that external action on hold/);
+      assert.doesNotMatch(text,/Use already found references and signed read-only skill commands/);
     },executionPolicy(request,response){
       if(request.method==='mcpServerStatus/list')
         response.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(tool=>[tool,{name:tool}]));

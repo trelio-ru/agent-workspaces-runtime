@@ -136,9 +136,10 @@ If an owner-answer turn resumed an earlier canonical Run and checkpointed its
 own WORK before stopping, a due calendar check can use that material. The host
 binds both released writers, the original answered notification, the exact
 turn, Run, checkpoint, file digests and clock to the new restricted pass.
-The notification stays attached to its original delivery. Prepare the new own
-Run without a Run ID, follow its returned open and read both pinned authority
-files. A continuation first looks for a Run from this same calendar pass and
+The notification stays attached to its original delivery. The native turn input
+describes only the admitted calendar work and retains the ordinary marker and
+task-scope header. Prepare the new own Run without a Run ID, follow its returned
+open and read both pinned authority files. A continuation first looks for a Run from this same calendar pass and
 uses a new one only when none exists. Use `use_assistant_workspace_files`
 with `{"action":"carry_forward"}` in that destination Run. The host
 compares the accepted and checkpoint Git blobs and the destination bytes under
