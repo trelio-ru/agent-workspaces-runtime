@@ -1930,8 +1930,11 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
   }finally{await f.coordinator.close();}
 });
 
-for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false} of [
+for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false,closed=null} of [
   {name:'creates a new goal'},
+  ...['created','waiting_owner','ignored','cancelled'].map(closed=>({
+    name:'releases the interrupted device after native '+closed,interrupted:true,recoverWriter:true,closed})),
+
   {name:'reuses the existing task',reuseExisting:true},
   {name:'waits for an interrupted routed turn',reuseExisting:true,interrupted:true},
   {name:'releases the stopped writer on its original routed receipt',reuseExisting:true,interrupted:true,recoverWriter:true},
@@ -1970,11 +1973,14 @@ for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false} of [
       assert.ok(input.intakeContext,'the fixture stops before normal task business work');intakeTurns++;options.startInvocation();
       const current=intakes.get(input.intakeContext.intakeId),reuse=reuseExisting&&intakeTurns>1;
       const taskId=reuse?[...tasks.keys()][0]:randomUUID(),bindingId=reuse?tasks.get(taskId).id:randomUUID();
-      if(!reuse){created++;tasks.set(taskId,{id:bindingId,taskId,state:'accepted',revision:0});}
+      const closedState=intakeTurns===2?closed:null;
+      if(!reuse&&(!closedState||closedState==='created')){created++;tasks.set(taskId,{id:bindingId,taskId,state:'accepted',revision:0});}
       Object.assign(current,{state:reuse?'routed':'created',taskId,receiptId:randomUUID(),readConfirmed:true,route:{id:randomUUID(),sourceId,
         sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key,eventIds:[current.eventId]}});
+      if(closedState&&closedState!=='created')Object.assign(current,{state:closedState,taskId:null,route:null,
+        readConfirmed:closedState==='ignored'});
       const turnId=randomUUID();
-      const result=interrupted&&reuse?{state:'uncertain',turnId}:{state:'completed',turnId,receipt:`codex:${input.threadId}:${turnId}`};
+      const result=interrupted&&intakeTurns===2?{state:'uncertain',turnId}:{state:'completed',turnId,receipt:`codex:${input.threadId}:${turnId}`};
       turns.set(input.deliveryId,result);return result;
     }};
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
@@ -2003,7 +2009,7 @@ for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false} of [
     await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_INTAKE_REVIEW_REQUIRED'});
     const pass=structuredClone(active),receipt=intakes.get(pass.passId);
     const local=()=>database.prepare('SELECT state,settled,outcome_receipt FROM assistant_owner_intakes WHERE id=?').get(pass.passId);
-    assert.equal(receipt.state,'routed');
+    assert.equal(receipt.state,closed??'routed');
     let cancellations=0;
     client.cancelSourceIntake=async()=>{cancellations++;return structuredClone(receipt);};
     clock=Date.parse(receipt.leaseExpiresAt)+1;
@@ -2052,7 +2058,9 @@ for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false} of [
       };
       mode='crash';
       await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PRIVATE_UNAVAILABLE'});
-      assert.deepEqual({...local()},{state:'complete',settled:0,outcome_receipt:receipt.receiptId});
+      const localState=closed==='waiting_owner'?'waiting_owner':'complete';
+      const immediatelySettled=Number(['ignored','cancelled'].includes(closed));
+      assert.deepEqual({...local()},{state:localState,settled:immediatelySettled,outcome_receipt:receipt.receiptId});
       assert.deepEqual(active,pass);assert.equal(releases,1);
       await coordinator.close();coordinator=createAssistantCoordinator(options);
       mode='busy';
@@ -2064,6 +2072,17 @@ for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false} of [
       assert.equal((await coordinator.workOnce()).kind,'provision','an independent accepted assignment gets this tick');
       assert.deepEqual(turns.get(pass.deliveryId),{state:'uncertain',turnId});
       assert.equal(database.prepare('SELECT native_started FROM assistant_owner_intakes WHERE id=?').get(pass.passId).native_started,1);
+      if(closed){
+        // The stored domain state and original native turn survive both
+        // restarts. No new pass, provider call or ACK can be inferred from
+        // the unrelated assignment just provisioned by the same coordinator.
+        assert.equal(active,null);assert.equal(intakeTurns,2);assert.equal(releases,2);
+        assert.equal(local().state,localState);assert.equal(local().outcome_receipt,receipt.receiptId);
+        assert.equal(created,closed==='created'?2:1);
+        const sourceEvent=database.prepare('SELECT e.acked FROM assistant_inbox_events e JOIN assistant_owner_intakes i ON i.event_key=e.event_key WHERE i.id=?').get(pass.passId);
+        assert.equal(sourceEvent.acked,0);
+        return;
+      }
     }else{
       // Without writer ownership only a terminal read of the original can
       // release the device. The server route is already committed.
@@ -2464,7 +2483,8 @@ for(const provider of ['telegram','email','max'])test(`${provider} first outgoin
   }finally{await f.coordinator.close();}
 });
 
-for(const provider of ['telegram','email','max'])for(const partitioned of [false,true])test(`${provider} existing-task triage ${partitioned?'partitions one conversation between two tasks and ignored originals':'retains legacy single-task results'} without ACK`,async t=>{
+for(const provider of ['telegram','email','max'])for(const partitioned of [false,true])
+for(const interrupted of provider==='telegram'&&partitioned?[false,true]:[false])test(`${provider} existing-task triage ${interrupted?'after native interruption ':''}${partitioned?'partitions one conversation between two tasks and ignored originals':'retains legacy single-task results'} without ACK`,async t=>{
   const database=new DatabaseSync(':memory:');let clock=Date.now(),active=null,provisions=0,triageTurns=0,wait=true;
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
   const sourceId=randomUUID(),accountId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID(),key=`${provider}-conversation/v1.${'8'.repeat(64)}`;
@@ -2505,7 +2525,8 @@ for(const provider of ['telegram','email','max'])for(const partitioned of [false
         current.routes=[{...route,taskId,eventIds:[ids[0]]},{...route,id:randomUUID(),taskId:otherTaskId,bindingId:otherBindingId,eventIds:[ids[1]]}];
         current.ignoredEventIds=[ids[2]];current.taskId=null;delete current.route;
       }
-      const result={state:'completed',receipt:'fixture-triage'};markers.set(input.deliveryId,result);return result;
+      const result=interrupted?{state:'uncertain',turnId:randomUUID()}:{state:'completed',receipt:'fixture-triage'};
+      markers.set(input.deliveryId,result);return result;
     }};
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
     releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
@@ -2521,7 +2542,20 @@ for(const provider of ['telegram','email','max'])for(const partitioned of [false
   await coordinator.workOnce();assert.equal(provisions,1,'ordinary accepted task may provision while the source waits');assert.equal(triageTurns,0);assert.equal(active,null);
   const original=inbox.ownerIntakes()[0];assert.equal(original.frozen,1);assert.equal(original.state,'waiting_owner');
   const selected=intake.get(original.id);wait=false;Object.assign(selected,{state:'leased',execution,receiptId:null});delete selected.companySelectionRequired;
-  clock+=300001;assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(triageTurns,1);assert.equal(provisions,2,'one permanent task chat and one selected-company triage chat');
+  clock+=300001;
+  if(interrupted){
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_INTAKE_REVIEW_REQUIRED'});
+    const pass=structuredClone(active),ids=pass.eventIds,turn=markers.get(pass.deliveryId);
+    assert.equal(ids.length,3);
+    native.withWriter=async(thread,cwd,check,options)=>{
+      assert.equal(thread,pass.threadId);
+      assert.deepEqual(options.interruptedDelivery,{deliveryId:pass.deliveryId,turnId:turn.turnId});
+      return check(options.signal);
+    };
+    await coordinator.close();coordinator=createAssistantCoordinator(options);
+    await coordinator.workOnce().catch(error=>assert.match(error.code,/BOUNDARY|SETUP_REQUIRED|UNAVAILABLE/u));
+    assert.equal(markers.get(pass.deliveryId),turn,'original native status is retained');
+  }else assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(triageTurns,1);assert.equal(provisions,interrupted?3:2,'one triage chat and ordinary independent task provisioning');
   assert.equal(begins[0].threadId,null);assert.ok(begins.at(-1).threadId);assert.equal(active,null);
   await coordinator.workOnce().catch(error=>assert.match(error.code,/BOUNDARY|SETUP_REQUIRED|UNAVAILABLE/u));
   if(partitioned)for(let i=0;i<3;i++)await coordinator.workOnce().catch(()=>{});

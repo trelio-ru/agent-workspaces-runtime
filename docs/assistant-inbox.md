@@ -914,19 +914,17 @@ marker; started cancellation rereads that original native delivery independently
 Before the durable native-start CAS, cancellation closes only the never-started
 preparation. After a crash, a source pause, expired lease or positive
 cancellation cannot attest to the original Codex turn. An intake still leased
-at expiry uses ordinary cancellation. A closed intake waits for its exact
-completed/failed native turn, with one exception for a verified owner command.
-A native `routed` receipt binds its one original to one accepted task. If the
-stored turn is interrupted, the host can claim the original Codex thread's
-exclusive writer without tools, check its empty queue, and verify that unique
-original marker and turn UUID in the native summaries. While holding the writer
-it rereads the closed route receipt. After the observer exits, it rechecks the
-protected pass and local record. The existing journal commits the business
-receipt and the device can dispatch independent work. The Codex turn keeps its
-original status. A stored reply attempt, abandonment, prepared reply, recovery
-or capacity incident prevents this path. A crash between recording the receipt
-and removing the private slot repeats the same read-only checks. Business
-processing and provider ACK retain their separate proofs for each original.
+at expiry uses ordinary cancellation. If the original turn is interrupted,
+the coordinator checks the closed server receipt under an exclusive native
+writer for the same thread. It matches the original delivery marker, turn UUID,
+source revision and every original event, checks the queue before and after
+the read and rechecks the protected slot and local journal after the observer
+exits. A confirmed creation, route, ignore, redirection, cancellation or owner
+question goes through the same ordinary settlement as a completed turn. The
+native turn retains its interrupted status. A pending send or another outstanding
+provider or recovery attempt retains its own guards. A crash after recording the
+receipt repeats only the verification. A question still waits for an actual answer,
+and acknowledging a provider event still requires its own original proof.
 A closed created receipt whose fresh task binding/ACL/transport read fails
 retains its receipt and
 typed cause, backs off new company work and never recreates, routes or ACKs the

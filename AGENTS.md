@@ -2129,6 +2129,9 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   sender name/username as context (including the forwarder). Ambiguous routing
   pages that exact Telegram chat in the existing context read until resolved or
   at the beginning; every history page preserves source/lease scope and grants no ACK.
+  A stopped original writer and the same closed native receipt release the
+  device independently of the intake decision. Keep each original event,
+  question, external effect and ACK fence on its existing journal.
   Native `routed` receipts install only original batch routes;
   presentation-only `intakeKind:'route_existing'` never grants read/ACK/binding.
   Conversation binding is nonexclusive correlation; every inbound batch is

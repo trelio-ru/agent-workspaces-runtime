@@ -855,28 +855,41 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const episode=row.model_capacity_json?JSON.parse(row.model_capacity_json):null;
     return episode?.markerId===row.delivery_id&&episode.waiting===false;
   };
-  // A routed owner intake has consumed its only native decision. A later
-  // observer may still see its original GUI turn as interrupted. The writer
-  // claim proves that execution stopped; the receipt proves only the route.
-  // Neither observation authorizes model/provider replay or an ACK.
-  const releasedRoutedOwner=async(row,saved,outcome,turn,signal)=>{
-    if(row.kind!=='owner_command'||outcome.state!=='routed'||turn.state!=='uncertain'||!uuid.test(turn.turnId??'')
-      ||!saved||typeof native.withWriter!=='function'||row.native_started!==1||row.settled!==0
-      ||!isDeepStrictEqual(saved,intakePassFor(row))||row.scope.assistantId!==identity.assistantId||row.scope.origin!==identity.origin
-      ||row.source_state!=='active'||row.configuration_revision!==row.source_revision
+  // The server settles business state. The exclusive native writer and exact
+  // interrupted marker independently establish that it is safe to free the
+  // device. Reuse the ordinary journal for the original outcome in both cases.
+  const stoppedIntakeWriter=async(row,saved,outcome,turn,signal)=>{
+    if(!['created','routed','waiting_owner','ignored','redirected','cancelled'].includes(outcome.state)
+      ||turn.state!=='uncertain'||!uuid.test(turn.turnId??'')||!saved||typeof native.withWriter!=='function'
+      ||row.native_started!==1||!isDeepStrictEqual(saved,intakePassFor(row))
+      ||row.scope.assistantId!==identity.assistantId||row.scope.origin!==identity.origin
       ||row.reply_receipt_id!==null||row.reply_message_id!==null||row.reply_abandon_receipt_id!==null
       ||row.prepared_reply_json!==null||row.readonly_recovery_json!==null||row.answered_recovery_json!==null
-      ||row.model_capacity_json!==null||outcome.kind==='route_existing'||outcome.readConfirmed!==true
-      ||!uuid.test(outcome.receiptId??'')||!uuid.test(outcome.taskId??'')||outcome.companyId!==saved.companyId
+      ||row.model_capacity_json!==null||!uuid.test(outcome.receiptId??'')||outcome.companyId!==saved.companyId
       ||outcome.id!==saved.passId||outcome.sourceId!==saved.sourceId||outcome.sourceRevision!==saved.sourceRevision
       ||outcome.threadId!==saved.threadId||outcome.eventId!==saved.eventId
-      ||!isDeepStrictEqual(row.eventIds,[saved.eventId])||!isDeepStrictEqual(outcome.route?.eventIds,row.eventIds)
+      ||(outcome.kind==='route_existing')!==(row.kind==='route_existing')
+      ||!isDeepStrictEqual(outcome.kind==='route_existing'?outcome.eventIds:[outcome.eventId],row.eventIds))return false;
+    // A stopped or rebound source can retire its old device slot against the
+    // cancelled receipt. Other results still require its original live scope.
+    if(outcome.state!=='cancelled'&&(row.source_state!=='active'||row.configuration_revision!==row.source_revision))return false;
+    if(outcome.state==='routed'&&row.kind==='owner_command'&&(outcome.readConfirmed!==true
+      ||!uuid.test(outcome.taskId??'')||!isDeepStrictEqual(outcome.route?.eventIds,row.eventIds)
       ||outcome.route.conversationKey!==row.conversation_key||outcome.route.sourceId!==saved.sourceId
-      ||outcome.route.sourceRevision!==saved.sourceRevision)return false;
-    // A crash may leave the routed receipt committed in SQLite with its
-    // protected slot still present. Only the same receipt can release it.
-    if(row.state==='complete'&&(row.outcome_state!=='routed'||row.outcome_receipt!==outcome.receiptId
-      ||row.outcome_task_id!==outcome.taskId||row.outcome_route_id!==outcome.route.id))return false;
+      ||outcome.route.sourceRevision!==saved.sourceRevision))return false;
+    // A local terminal row can outlive the slot after a crash. It is safe to
+    // finish that release only for the very same domain receipt and route.
+    if(['complete','waiting_owner'].includes(row.state)){
+      if(row.outcome_state!==outcome.state||row.outcome_receipt!==outcome.receiptId)return false;
+      if(outcome.state==='routed'){
+        // finishOwnerIntake indexes a single target, including legacy owner
+        // receipts. A partitioned receipt keeps both index columns empty.
+        const routes=outcome.routes??(outcome.route?[{...outcome.route,taskId:outcome.taskId}]:[]);
+        if(!routes.length)return false;
+        const single=routes.length===1?routes[0]:null;
+        if(row.outcome_route_id!==(single?.id??null)||row.outcome_task_id!==(single?.taskId??null))return false;
+      }
+    }
     const cwd=await workspaceForIntake({companyId:saved.companyId,sourceId:saved.sourceId});
     const unchanged=async checkSignal=>{
       const current=await passHost.readActivePass();
@@ -899,13 +912,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       throw error;
     }
   };
-  const nativeIntakeStopped=async(row,signal)=>{
+  const nativeIntakeStopped=async(row,signal,saved,outcome)=>{
     // Native domain cancellation revokes mutation authority, but cannot prove
     // that an orphaned Codex invocation stopped after a host crash. Only this
     // exact original turn marker permits releasing the global pass and
     // starting unrelated native work, including after an owned adapter abort.
     const result=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
-    return ['completed','failed'].includes(result.state);
+    return ['completed','failed'].includes(result.state)||await stoppedIntakeWriter(row,saved,outcome,result,signal);
   };
   const recoverUnreadCancelledIntake=async signal=>{
     if(typeof native.readPrerequisites!=='function')return;
@@ -1515,9 +1528,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(saved&&row.native_started===1&&['complete','waiting_owner'].includes(row.state)){
       const turn=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
       if(!['completed','failed'].includes(turn.state)){
-        if(row.kind!=='owner_command'||row.outcome_state!=='routed'||row.state!=='complete')return blockedIntake();
         const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
-        if(!await releasedRoutedOwner(row,saved,outcome,turn,signal))return blockedIntake();
+        if(!await stoppedIntakeWriter(row,saved,outcome,turn,signal))return blockedIntake();
         await settleIntake(row,outcome,signal);return deferredIntake(row);
       }
     }
@@ -1559,7 +1571,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // durable attempt permits only exact GET, even under revoked admission.
         const outcome=await client[ownerCapacityCancellationAttempted(row)?'readSourceIntake':'cancelSourceIntake'](intakeLocator(row),signal);lease();
         if(!['created','routed','ignored','redirected','cancelled','replied'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
-        if(row.native_started===1&&!await nativeIntakeStopped(row,signal))return blockedIntake();
+        if(row.native_started===1&&!await nativeIntakeStopped(row,signal,saved,outcome))return blockedIntake();
         inbox.finishOwnerIntake(row.id,outcome);if(saved)await passHost.releasePass(outcome);
         // Source revocation does not prove an old native process stopped.
         // A started invocation needs exact terminal read-back; a never-started
@@ -1584,7 +1596,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(outcome.state==='reply_pending'&&!['completed','failed'].includes(nativeResult.state))return blockedIntake();
       outcome=await reconcileIntakeReply(row,outcome,signal,nativeResult);
       if(outcome.state!=='leased'&&(['completed','failed'].includes(nativeResult.state)
-        ||await releasedRoutedOwner(row,saved,outcome,nativeResult,signal))){
+        ||await stoppedIntakeWriter(row,saved,outcome,nativeResult,signal))){
         await settleIntake(row,outcome,signal,nativeResult);return deferredIntake(row);
       }
       // Native history may later be incomplete/running instead of repeating
@@ -1596,7 +1608,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(outcome.state==='leased'&&Date.parse(outcome.leaseExpiresAt)<=now()){
         const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(closed.state!=='cancelled')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
-        if(!['completed','failed'].includes(nativeResult.state))return blockedIntake();
+        if(!['completed','failed'].includes(nativeResult.state)&&!await stoppedIntakeWriter(row,saved,closed,nativeResult,signal))
+          return blockedIntake();
         await settleIntake(row,closed,signal);emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return deferredIntake(row);
       }
       return blockedIntake();
@@ -1693,7 +1706,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // the original marker with the independent outer signal before release.
       // Before the synchronous durable start CAS there is no model invocation;
       // a cancelled preparation can close without inventing a turn marker.
-      if(started&&!await nativeIntakeStopped(inbox.ownerIntake(row.id),signal)){
+      if(started&&!await nativeIntakeStopped(inbox.ownerIntake(row.id),signal,pass,cancelledOutcome)){
         if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);
         return blockedIntake();
       }
