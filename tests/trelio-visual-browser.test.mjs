@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { validateWindowsVisualLaunchRoot, windowsVisualLaunchRoot } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { validateVisualStartupDiagnostic } from '../host-runtime/scripts/trelio-visual-result.mjs';
-import { ExtensionVisualBrowser, visualBrowserHeadless, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess, visualNativeCompositorSwitches } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualBrowserHeadless, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess, visualNativePresentationSwitches } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
@@ -11,16 +11,17 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-test('owned headed Windows and Linux Chromium use a fresh screenshot surface; native occlusion stays Windows-only', () => {
-  assert.deepEqual(visualNativeCompositorSwitches('win32', false), [
-    '--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface',
+test('owned headed Chromium uses a fresh screenshot surface and Windows separately keeps MV3 scheduled', () => {
+  assert.deepEqual(visualNativePresentationSwitches('win32', false), [
+    '--disable-features=CalculateNativeWinOcclusion',
+    '--enable-features=CDPScreenshotNewSurface,ExtensionServiceWorkerVoter',
   ]);
   // X11 minimized windows need the SAME fresh-surface path independently of
   // Windows' native occlusion tracker. Do not copy its unrelated switch or
   // change hidden/manual presentation to make a screenshot test pass.
-  assert.deepEqual(visualNativeCompositorSwitches('linux', false), ['--enable-features=CDPScreenshotNewSurface']);
+  assert.deepEqual(visualNativePresentationSwitches('linux', false), ['--enable-features=CDPScreenshotNewSurface']);
   for (const [platform, headless] of [['win32', true], ['linux', true], ['darwin', false], ['darwin', true], ['other', false]]) {
-    assert.deepEqual(visualNativeCompositorSwitches(platform, headless), []);
+    assert.deepEqual(visualNativePresentationSwitches(platform, headless), []);
   }
 });
 

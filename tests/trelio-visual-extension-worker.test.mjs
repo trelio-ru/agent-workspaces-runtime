@@ -21,7 +21,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
   const pngHeader = Buffer.alloc(36); pngHeader.writeUInt32BE(800, 16); pngHeader.writeUInt32BE(600, 20);
   const navigation=[], transport=[], nativeCommands=[], windowUpdates=[], tabUpdates=[], networkRules=[];
   const openTabs = new Set([1]);
-  let windowCreated, windowRemoved, tabCreated, headersReceived, detached, connections = 0, selectedTab = 1;
+  let windowCreated, windowRemoved, tabCreated, headersReceived, detached, runtimeMessage, connections = 0, selectedTab = 1;
   let socket, nativeEvent, currentUrl = bootstrapUrl || 'about:blank', loaderId = 'original', clicks = 0, keys = 0, keyUps = 0, reads = 0, release, rejectInput, nextType = 'confirm', answerFails = false, nextDialog = false;
   const open = (type = nextType, message = 'Send the reviewed message?', extra = {}) => nativeEvent({ tabId: 1 }, 'Page.javascriptDialogOpening',
     { type, message, url: currentUrl, ...extra });
@@ -33,7 +33,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
       async convertToBlob() { return { async arrayBuffer() { return Uint8Array.of(1, 2, 3).buffer; } }; }
     },
     chrome: {
-      runtime: { id: 'fixture', onMessage: events },
+      runtime: { id: 'fixture', onMessage: { addListener(fn) { runtimeMessage = fn; } } },
       contentSettings: { notifications: {
         async set(value) { policy.push(JSON.parse(JSON.stringify(value))); if (policyFailure === 'write') throw Error('PRIVATE_NOTIFICATION_ERROR'); },
         async get() { return { setting: policyFailure === 'read' ? 'ask' : 'block' }; },
@@ -138,7 +138,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
       responseStatusCode: 200, responseHeaders: [{ name: 'Content-Type', value: contentType }] });
     await tick();
   };
-  return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates, networkRules,
+  return { dispatch, open, sent, answers, policy, raster, navigation, transport, nativeCommands, windowUpdates, tabUpdates, networkRules, runtimeMessage,
     frameEvent: (method, params, tabId = 1) => nativeEvent({ tabId }, method, params),
     restoreDocument(id) {
       loaderId = id;
@@ -584,6 +584,27 @@ test('the exact owned bootstrap page is reused only after policy/auth and commit
   assert.deepEqual(worker.navigation,['about:blank','https://example.test/']);
   assert.ok(worker.sent.some(value=>value.kind==='hello'));
   assert.equal((await worker.dispatch('read-text')).state,'ready');
+});
+
+test('only the top-level internal bootstrap page receives an acknowledgment during manual setup', async () => {
+  const bootstrapUrl = 'chrome-extension://fixture/bootstrap.html';
+  const worker = await dialogWorker({ bootstrapUrl, manual: true, deferAuthentication: true });
+  const message = { kind: 'trelio_visual_bootstrap' };
+  const sender = { id: 'fixture', url: bootstrapUrl, frameId: 0, tab: { id: 1 } };
+  const replies = [];
+  const respond = reply => replies.push(reply);
+  worker.runtimeMessage(message, { ...sender, id: 'other' }, respond);
+  worker.runtimeMessage(message, { ...sender, frameId: 1 }, respond);
+  worker.runtimeMessage(message, { ...sender, url: 'https://example.test/' }, respond);
+  worker.runtimeMessage(message, { ...sender, tab: undefined }, respond);
+  assert.deepEqual(replies, []);
+  worker.runtimeMessage(message, sender, respond);
+  assert.deepEqual(replies, [true]);
+  assert.deepEqual(worker.navigation, []);
+  assert.equal(worker.sent.some(value => value.kind === 'hello'), false);
+  await worker.dispatch('restore-session-auth', { cookies: [], replace: false });
+  assert.deepEqual(worker.navigation, ['about:blank', 'https://example.test/']);
+  assert.equal(worker.sent.filter(value => value.kind === 'hello').length, 1);
 });
 
 const nativeReceiverTransitions = [

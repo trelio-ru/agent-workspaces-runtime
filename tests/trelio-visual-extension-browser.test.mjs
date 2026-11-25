@@ -191,16 +191,30 @@ test('startup fixture trace retains a bounded closed history without lending ide
   assert.doesNotMatch(JSON.stringify(trace.snapshot()), /PRIVATE|token|error/u);
 });
 
-test('extension bootstrap sends exactly one value-free wake event without a network request or retry', async () => {
-  const page=visualExtensionBootstrapPage(),messages=[];
-  assert.match(page.url,/^chrome-extension:\/\/[a-p]{32}\/bootstrap\.html$/u);
-  assert.equal(page.html,'<!doctype html><meta charset="utf-8"><script src="bootstrap.js" defer></script>');
-  vm.runInNewContext(page.script,{chrome:{runtime:{sendMessage:async message=>{
-    messages.push(JSON.parse(JSON.stringify(message)));throw Error('synthetic unavailable receiver');
-  }}}});
-  await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(messages,[{kind:'trelio_visual_bootstrap'}]);
-  assert.doesNotMatch(page.html+page.script,/https?:|WebSocket|fetch|token|password|setTimeout|setInterval/u);
+test('the same bootstrap page wakes its worker until acknowledgment with a bounded value-free message', async () => {
+  const page = visualExtensionBootstrapPage();
+  assert.match(page.url, /^chrome-extension:\/\/[a-p]{32}\/bootstrap\.html$/u);
+  assert.equal(page.html, '<!doctype html><meta charset="utf-8"><script src="bootstrap.js" defer></script>');
+  assert.doesNotMatch(page.html + page.script, /https?:|WebSocket|fetch|token|password|setInterval/u);
+  for (const scenario of [
+    { acknowledgeOn: 1, attempts: 1, delays: [] },
+    { acknowledgeOn: 2, attempts: 2, delays: [150] },
+    { acknowledgeOn: undefined, attempts: 5, delays: [150, 500, 1500, 4000] },
+  ]) {
+    const messages = [], delays = [];
+    // Await the original async body and run the scheduled deadline steps
+    // deterministically rather than relying on native timer latency.
+    await vm.runInNewContext(page.script.replace(/^void /u, ''), {
+      chrome: { runtime: { sendMessage: async message => {
+        messages.push(JSON.parse(JSON.stringify(message)));
+        if (messages.length === scenario.acknowledgeOn) return true;
+        throw Error('synthetic unavailable receiver');
+      } } },
+      setTimeout: (callback, delay) => { delays.push(delay); queueMicrotask(callback); },
+    });
+    assert.deepEqual(messages, Array.from({ length: scenario.attempts }, () => ({ kind: 'trelio_visual_bootstrap' })));
+    assert.deepEqual(delays, scenario.delays);
+  }
 });
 
 test('lifecycle failure callbacks contain closed original errno/syscall only, never native errors or profile data', () => {

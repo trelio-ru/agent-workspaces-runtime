@@ -761,9 +761,12 @@ publication tooling также остаются вне этого публичн
   Chromium path budget before reading that snapshot. An authenticated upgrade,
   accepted socket or socket closure establishes observed transport progress.
   Windows/Linux and hidden startup use one public, value-free extension page
-  to wake MV3 through runtime messaging. Reuse that tab after policy/auth via
-  about:blank; provider URLs/tokens never enter argv, and the original handshake
-  deadline/single launch remain unchanged. Visible macOS retains windowless start.
+  to wake MV3 through runtime messaging. Its bounded wake repeats only before
+  a value-free acknowledgement from the exact owned worker. Reuse that tab
+  after policy/auth via about:blank; provider URLs/tokens never enter argv,
+  and the original handshake deadline/single launch remain unchanged. Visible
+  Windows enables Chromium's worker priority voter in its isolated browser.
+  Visible macOS retains windowless start.
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
   Missing API support is a runtime capability gap, not a ban on automatic login.

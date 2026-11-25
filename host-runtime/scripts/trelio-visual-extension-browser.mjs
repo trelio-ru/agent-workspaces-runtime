@@ -85,16 +85,23 @@ export function createVisualStartupFixtureTrace(now = () => performance.now()) {
   };
 }
 
-/** Starting a Chromium profile is not a service-worker readiness signal. An
- * owned extension page sends one value-free runtime event to wake MV3 before
- * the authenticated socket handshake. It contains no provider URL, token or
- * credentials and does not retry a launch, input or failed handshake. The same
- * tab is consumed as about:blank after policy/auth, never left as an extra UI.
+/** Chromium can deliver the first extension page before the MV3 receiver is
+ * ready. Allow that same page to repeat only its value-free wake message when
+ * it gets no acknowledgment. Never overlap messages if a native handoff is
+ * pending. The host owns the original handshake deadline and tears down the
+ * same page on timeout. When ready the worker reuses it as about:blank.
  */
+async function wakeVisualExtensionWorker() {
+  for (const delay of [0, 150, 500, 1500, 4000]) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    const acknowledged = await chrome.runtime.sendMessage({ kind: 'trelio_visual_bootstrap' }).catch(() => false);
+    if (acknowledged === true) return;
+  }
+}
 export const visualExtensionBootstrapPage = () => ({
   url: `chrome-extension://${EXTENSION_ID}/bootstrap.html`,
   html: '<!doctype html><meta charset="utf-8"><script src="bootstrap.js" defer></script>',
-  script: "void chrome.runtime.sendMessage({kind:'trelio_visual_bootstrap'}).catch(()=>{});",
+  script: `void (${wakeVisualExtensionWorker.toString()})();`,
 });
 
 /** Presentation belongs to signed provider policy. Human setup always gets a
@@ -121,9 +128,17 @@ export function visualBrowserHeadless(presentation, manual) {
  * failed navigation a second attempt. Hidden and macOS launch policy stays
  * unchanged; a platform's successful fixture is not another platform's proof.
  */
-export function visualNativeCompositorSwitches(platform, headless) {
+export function visualNativePresentationSwitches(platform, headless) {
   if (headless !== false) return [];
-  if (platform === 'win32') return ['--disable-features=CalculateNativeWinOcclusion', '--enable-features=CDPScreenshotNewSurface'];
+  if (platform === 'win32') return [
+    '--disable-features=CalculateNativeWinOcclusion',
+    // Chromium 156 boosts MV3 until RUNNING, then its execution-context
+    // voter may still assign EcoQoS before this worker opens its socket
+    // (Chromium #484218883). The owned process permits only our extension,
+    // so this voter does not affect the person's browser or other extensions.
+    // Keep one comma-separated flag because Chromium uses the last value.
+    '--enable-features=CDPScreenshotNewSurface,ExtensionServiceWorkerVoter',
+  ];
   if (platform === 'linux') return ['--enable-features=CDPScreenshotNewSurface'];
   return [];
 }
@@ -763,7 +778,7 @@ export class ExtensionVisualBrowser {
     // --window-size can activate the first Windows window despite the
     // native show flag. Let Chromium use its normal profile bounds.
     const startupSize = inactiveWindowsStartup ? [] : ['--window-size=1440,1000'];
-    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativeCompositorSwitches(process.platform, this.#headless), '--restore-last-session', ...startupSize, ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...fixtureTlsFlags, ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment(), { headless: this.#headless });
+    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', ...visualNativePresentationSwitches(process.platform, this.#headless), '--restore-last-session', ...startupSize, ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.#headless ? ['--headless=new'] : []), ...fixtureTlsFlags, ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : []), ...(bootstrap ? [bootstrap.url] : [])], visualChildEnvironment(), { headless: this.#headless });
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
     // Reduce only the existing bounded private log, without adding a native

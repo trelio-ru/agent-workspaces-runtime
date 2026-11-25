@@ -251,8 +251,16 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const url = new URL(details.url);
     if (url.protocol === 'https:' && allowed(details.url) && details.statusCode >= 400 && details.statusCode <= 599) httpFailures.set(details.tabId, { origin: url.origin, httpStatus: details.statusCode });
   }, { urls: config.matches, types: ['main_frame'] });
-  chrome.runtime.onMessage.addListener((message, sender) => {
-    if (manual || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
+  chrome.runtime.onMessage.addListener((message, sender, respond) => {
+    if (sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
+    if (message?.kind === 'trelio_visual_bootstrap') {
+      // Acknowledging the internal page only says this listener is running.
+      // The same authenticated socket, policy and hello still gate readiness.
+      // Handle this in manual mode too, before any site-message processing.
+      if (config.bootstrapUrl && sender.url === config.bootstrapUrl) respond(true);
+      return;
+    }
+    if (manual) return;
     // Fixture evidence is selected by the trusted synthetic origin policy,
     // bounded to this exact pending operation and reduced before transport.
     // Never forward page messages, URLs, errors, nonce or native output.

@@ -514,14 +514,21 @@ Windows/Linux и hidden startup открывают одну внутреннюю
 вкладку. Её argv URL – только фиксированный публичный
 `chrome-extension://<public-extension-id>/bootstrap.html`, без адреса сайта,
 loopback endpoint, transport token или credentials. Статический self-script
-посылает один пустой по данным `runtime.sendMessage` для пробуждения MV3;
-это не новый browser command, retry или разрешение на input. Запуск профиля сам
+пробуждает MV3 через `runtime.sendMessage`. Если Chrome ещё не доставляет
+сообщение, та же вкладка делает до четырёх повторов с паузами. Положительный
+ответ только с точного внутреннего адреса завершает повторы. Этот ответ
+подтверждает запуск обработчика; готовность по-прежнему требует отдельного
+hello после аутентифицированного WebSocket, policy и auth. Запуск профиля сам
 по себе не заменяет activation service worker –
 [lifecycle Chrome](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle).
 Тот же owned tab после прежних policy/auth guards переводится через about:blank
 на provider URL, не создавая забытый bootstrap tab. Исходные 25 секунд handshake,
 один browser child и fail-closed startup result сохраняются.
 Видимый macOS startup остаётся без начального окна с её app lifecycle.
+В видимом Windows Chromium `ExtensionServiceWorkerVoter` удерживает worker
+единственного разрешённого расширения от перевода в фоновый приоритет после
+`RUNNING`. Встроенное повышение приоритета Chromium 156 действует только до
+этой границы. См. [Chromium #484218883](https://issues.chromium.org/issues/484218883).
 Для нового owned профиля host заранее устанавливает обычный continue-session
 preference: Chromium игнорирует restore switch у нового Profile. Эта настройка
 сама по себе не гарантирует сохранение session cookies на Windows; для них
