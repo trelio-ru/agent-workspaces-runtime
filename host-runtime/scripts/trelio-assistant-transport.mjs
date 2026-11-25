@@ -3552,7 +3552,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision
         ||value.invocationId!==value.reviewId||body.reviewId&&body.reviewId!==value.reviewId
         ||!object(pass)||pass.passId!==body.passId||!['leased','closed','review_required'].includes(pass.state)
-        ||[6,7,8].includes(value.schemaVersion)&&pass.workMode!=='task')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        ||[6,7,8].includes(value.schemaVersion)&&pass.workMode!=='task'
+        ||Object.hasOwn(pass,'retiredReconcile')&&(value.schemaVersion!==2||pass.workMode!=='task'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const resumed=value.resumed===null?null:{leaseRevision:revision(value.resumed?.leaseRevision),leaseExpiresAt:isoTimestamp(value.resumed?.leaseExpiresAt)};
       if(resumed&&(Object.keys(value.resumed).sort().join(',')!=='leaseExpiresAt,leaseRevision'||resumed.leaseRevision!==body.expectedLeaseRevision+1)
         ||(value.state==='resumed')!==(resumed!==null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -3560,7 +3561,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         expectedLeaseRevision:body.expectedLeaseRevision,questionPath:value.schemaVersion!==1?null:text(value.questionPath,2048),resumed,
         pass:{passId:id(pass.passId),bindingId:id(pass.bindingId),bindingRevision:revision(pass.bindingRevision),deliveryId:id(pass.deliveryId),
           threadId:id(pass.threadId),leaseRevision:revision(pass.leaseRevision),leaseExpiresAt:isoTimestamp(pass.leaseExpiresAt),
-          state:pass.state,execution:passExecution(pass),...workMode(pass.workMode)}};
+          state:pass.state,execution:passExecution(pass),...workMode(pass.workMode),...reconcileField(pass)}};
     },
     async readBusinessOutcome(input,signal) {
       const fields=['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'];

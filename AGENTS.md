@@ -1315,7 +1315,8 @@ publication tooling также остаются вне этого публичн
   Exercise facade -> coordinator -> real child and automatic heartbeat together;
   both parent boundaries reuse one closed plan projection.
   Native opaque echo equality uses existing canonical JSON, not object insertion
-  order; reordered schema objects pass, added/tampered fields still refuse.
+  order; include the active reconciliation receipt and calendar slot in the scope
+  comparison. The encrypted payload retains its original device/Run tuple.
   Exact encrypted task reads reuse the SAME schema-v3/MVCC reader and hydrator,
   with native-selected ciphertext bundles only; no general payload resolver or
   human key fallback. Other encrypted adapters retain their independent gates.
