@@ -648,7 +648,7 @@ jobs:
         if: needs.ci-plan.outputs.profile == 'full'
         run: >-
           node --test
-          --test-name-pattern="clean lists|future Runs|blocker checkpoint|legacy layout migration|terminal legacy locator|open completes after an unrelated retention"
+          --test-name-pattern="clean lists|future Runs|blocker checkpoint|legacy layout migration|terminal legacy locator|open completes after an unrelated retention|bridge open materializes a new Workspace outside Codex Git"
           tests/trelio-workspace.test.mjs
 
       - name: Run Windows path comparison regressions

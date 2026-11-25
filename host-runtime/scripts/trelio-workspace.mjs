@@ -13777,7 +13777,8 @@ const resolveWorkspaceRootDirectory = async ({
   if (workingFolderRoot) {
     const folderLocalRoot = path.join(workingFolderRoot, WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME, workspaceId);
     // Preserve even an unregistered folder-local copy for the normal recovery
-    // checks. An orphan in Codex Git only changes where a new copy is created.
+    // checks. A verified external-storage fallback only changes where a new
+    // copy is created and never migrates or duplicates a surviving local one.
     if (!await pathEntryExists(folderLocalRoot) && await needsExternalWorkspaceStorage(workingFolderRoot)) {
       return { rootDirectory: legacyPersistentRoot, layout: "external-storage", workingFolderRoot };
     }

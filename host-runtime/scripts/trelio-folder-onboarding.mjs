@@ -41,6 +41,10 @@ const ROOT_ALLOWED_FILES = new Set([
 ]);
 const CODEX_ATTACHMENT_DIRECTORY = ".codex-remote-attachments";
 const CODEX_CONFIG_DIRECTORY = ".codex";
+const RESERVED_SNAPSHOT_ROOT_NAMES = new Set([
+  ...Array.from(ROOT_ALLOWED_FILES, name => name.toLowerCase()),
+  CODEX_ATTACHMENT_DIRECTORY, CODEX_CONFIG_DIRECTORY, ".git", ".trelio-run.json", "workspaces",
+]);
 const MANAGED_START = "<!-- trelio-agent-workspaces:start -->";
 const MANAGED_END = "<!-- trelio-agent-workspaces:end -->";
 const IGNORE_START = "# trelio-agent-workspaces:ignore:start";
@@ -116,6 +120,10 @@ class FolderGitHistoryError extends TrelioFolderOnboardingError {
       && typeof objectId === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(objectId)) {
       this.#blocker.object = { type: objectType, id: objectId };
     }
+  }
+
+  get reason() {
+    return this.#blocker.reason;
   }
 
   toBlockerPayload() {
@@ -520,7 +528,20 @@ const isAllowedCodexMetadataEntry = (relativePath, type) => {
   return type === "tree" || (type === "blob" && segments.length > 0);
 };
 
-const inspectTree = async ({ gitPath, rootPath, treeId, objectsById, reachable, execFileCommand }) => {
+const isOrdinaryCodexSnapshotPath = (relativePath) => {
+  const segments = relativePath.split("/");
+  const root = segments[0].toLowerCase();
+  // Keep managed paths distinct even on case-insensitive filesystems. A DOS
+  // short name cannot prove that a snapshot is outside those paths either.
+  return relativePath.length <= MAX_PATH_LENGTH
+    && !RESERVED_SNAPSHOT_ROOT_NAMES.has(root) && !/~[0-9]+$/u.test(root)
+    && segments.every(segment => segment && !/[. ]$/u.test(segment)
+      && !/[\x00-\x1f\x7f\\:<>"|?*\ufffd]/u.test(segment));
+};
+
+const inspectTree = async ({
+  gitPath, rootPath, treeId, objectsById, reachable, execFileCommand, allowExternalWorkspaceStorage,
+}) => {
   const result = await runGit(
     gitPath,
     // Include directory entries, even empty ones. Checking only the leaves
@@ -536,6 +557,7 @@ const inspectTree = async ({ gitPath, rootPath, treeId, objectsById, reachable, 
     );
   }
   const entries = result.stdout.split("\0").slice(0, -1);
+  let ordinarySnapshotBlocker = null;
   for (const entry of entries) {
     const fields = entry.match(/^(?<mode>[0-9]{6}) (?<type>[^ ]+) (?<object>[0-9a-f]+)\t(?<file>.+)$/su)?.groups;
     const regularBlob = fields?.mode === "100644" && fields.type === "blob";
@@ -544,11 +566,18 @@ const inspectTree = async ({ gitPath, rootPath, treeId, objectsById, reachable, 
       ? regularBlob
       : isAllowedCodexMetadataEntry(fields.file, fields.type));
     if (!(regularBlob || directory) || !allowedPath) {
-      throw new FolderGitHistoryError(
+      const blocker = new FolderGitHistoryError(
         "unexpected_tree_entry",
         "A Codex turn-diff tree contains a path or object outside the onboarding allowlist.",
         "tree", treeId,
       );
+      if (!allowExternalWorkspaceStorage || !(regularBlob || directory)
+        || !isOrdinaryCodexSnapshotPath(fields.file)) throw blocker;
+      // Ordinary output snapshots make this folder unsuitable for new local
+      // copies. They do not stop an existing binding from using private
+      // storage. Still inspect every later path for an actual Workspace leak
+      // or an unsupported object and validate the object inventory below.
+      ordinarySnapshotBlocker ??= blocker;
     }
     // ls-tree can report a blob entry whose object is missing. Require the
     // same type in the complete inventory before treating that path as proof.
@@ -560,6 +589,7 @@ const inspectTree = async ({ gitPath, rootPath, treeId, objectsById, reachable, 
     }
     reachable.add(fields.object);
   }
+  return ordinarySnapshotBlocker;
 };
 
 const inspectServiceGit = async ({
@@ -567,6 +597,7 @@ const inspectServiceGit = async ({
   gitPath,
   filesystem,
   execFileCommand,
+  allowExternalWorkspaceStorage,
 }) => {
   const gitEntry = await filesystem.lstat(path.join(rootPath, ".git"));
   if (!gitEntry.isDirectory() || gitEntry.isSymbolicLink()) {
@@ -733,11 +764,16 @@ const inspectServiceGit = async ({
     );
   }
   const reachable = new Set(referencedTrees);
+  let ordinarySnapshotBlocker = null;
   for (const treeId of referencedTrees) {
     // Validate each root's full paths even when two roots share a subtree.
     // Reachability alone cannot authorize a subtree reused at another path.
-    await inspectTree({ gitPath, rootPath, treeId, objectsById, reachable, execFileCommand });
+    const blocker = await inspectTree({
+      gitPath, rootPath, treeId, objectsById, reachable, execFileCommand, allowExternalWorkspaceStorage,
+    });
+    ordinarySnapshotBlocker ??= blocker;
   }
+  if (ordinarySnapshotBlocker) return ordinarySnapshotBlocker;
   // Git may retain the empty tree after Codex drops a snapshot ref. Accept
   // that one content-free object only when the complete inventory confirms
   // both its identity and size. Keep it out of the reachability set so this
@@ -798,7 +834,7 @@ const inspectCodexMetadataDirectory = async (filesystem, rootPath, directory) =>
   }
 };
 
-const inspectRootEntries = async ({ filesystem, rootPath, serviceGit }) => {
+const inspectRootEntries = async ({ filesystem, rootPath, serviceGit, allowOrdinaryRootEntries }) => {
   const entries = await filesystem.readdir(rootPath, { withFileTypes: true });
   if (!serviceGit) return { hasWorkspacesDirectory: false };
   let hasWorkspacesDirectory = false;
@@ -812,6 +848,10 @@ const inspectRootEntries = async ({ filesystem, rootPath, serviceGit }) => {
       hasWorkspacesDirectory = true;
       continue;
     }
+    // Existing ordinary files and directories are opaque here. The bridge
+    // will materialize the new copy elsewhere and never descend into them.
+    if (allowOrdinaryRootEntries && !entry.isSymbolicLink() && (entry.isFile() || entry.isDirectory())
+      && isOrdinaryCodexSnapshotPath(entry.name)) continue;
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED",
       "The service Git root contains files outside the onboarding allowlist.",
@@ -904,7 +944,7 @@ const inspectFolder = async ({
     execFileCommand,
   );
   let serviceGit = false;
-  let orphanError = null;
+  let externalStorageBlocker = null;
   if (topLevel.ok) {
     const reportedPath = readGitPathOutput(topLevel.stdout);
     const topLevelPath = reportedPath
@@ -916,13 +956,14 @@ const inspectFolder = async ({
       );
     }
     serviceGit = true;
-    orphanError = await inspectServiceGit({
+    externalStorageBlocker = await inspectServiceGit({
       rootPath,
       gitPath: git.gitPath,
       filesystem,
       execFileCommand,
+      allowExternalWorkspaceStorage,
     });
-    if (orphanError && !allowExternalWorkspaceStorage) throw orphanError;
+    if (externalStorageBlocker && !allowExternalWorkspaceStorage) throw externalStorageBlocker;
   } else {
     const gitDir = await runGit(git.gitPath, ["rev-parse", "--git-dir"], rootPath, execFileCommand);
     if (gitDir.ok) {
@@ -949,23 +990,25 @@ const inspectFolder = async ({
   const readActiveInstruction = async () => override.exists
     ? override
     : inspectOptionalRegularFile(filesystem, path.join(rootPath, "AGENTS.md"));
-  const orphanInstruction = orphanError ? await readActiveInstruction() : null;
+  const existingInstruction = externalStorageBlocker ? await readActiveInstruction() : null;
   // Only a current binding can use external storage. For an unbound folder
-  // preserve the original orphan diagnostic before unrelated root entries can
+  // preserve the original Git diagnostic before unrelated root entries can
   // replace it with a generic layout error.
-  if (orphanError && !readManagedBinding(orphanInstruction.text)) throw orphanError;
+  if (externalStorageBlocker && !readManagedBinding(existingInstruction.text)) throw externalStorageBlocker;
 
-  const rootEntries = await inspectRootEntries({ filesystem, rootPath, serviceGit });
+  const rootEntries = await inspectRootEntries({
+    filesystem, rootPath, serviceGit,
+    allowOrdinaryRootEntries: externalStorageBlocker?.reason === "unexpected_tree_entry",
+  });
   // A pre-existing bridge directory is accepted only for a binding previously
   // activated by this runtime. We intentionally inspect only the root markers:
   // Workspace contents remain protected and outside onboarding classification.
-  if (serviceGit && (rootEntries.hasWorkspacesDirectory || orphanError)) {
-    const activeInstruction = orphanInstruction ?? await readActiveInstruction();
-    // An unreachable object never becomes a trusted Git object. Only the
-    // effective existing binding can keep working in external storage, after
-    // the repo topology, live refs, index and root entries have passed the
-    // same checks. Protect any older folder-local copies with the usual ignore
-    // proof even when all new copies will be placed elsewhere.
+  if (serviceGit && (rootEntries.hasWorkspacesDirectory || externalStorageBlocker)) {
+    const activeInstruction = existingInstruction ?? await readActiveInstruction();
+    // External placement requires the effective existing binding after the
+    // repository, live refs and root entries have been inspected. Protect any
+    // older folder-local copies with the usual ignore proof even when all
+    // new copies will be placed elsewhere.
     const ignore = await inspectOptionalRegularFile(filesystem, path.join(rootPath, ".gitignore"));
     if (
       !exactManagedBlockPresent(activeInstruction.text, MANAGED_START, MANAGED_END)
@@ -977,7 +1020,7 @@ const inspectFolder = async ({
       );
     }
   }
-  if (serviceGit && (orphanError || requireServiceGitIsolation)) {
+  if (serviceGit && (externalStorageBlocker || requireServiceGitIsolation)) {
     await verifyServiceGitIgnore({ rootPath, gitPath: git.gitPath, execFileCommand });
   }
   return {
@@ -987,7 +1030,7 @@ const inspectFolder = async ({
       path: rootPath,
       kind: serviceGit ? "service_git" : "ordinary",
       serviceGitPreserved: serviceGit,
-      ...(orphanError ? { workspaceStorage: "external" } : {}),
+      ...(externalStorageBlocker ? { workspaceStorage: "external" } : {}),
     },
     instructionTarget: override.exists ? null : "AGENTS.md",
     requiredDecision: override.exists ? {

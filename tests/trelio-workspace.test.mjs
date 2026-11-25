@@ -2583,7 +2583,8 @@ test("context sync retains object-cache references only for current pinned revis
   ], currentContexts), [currentObject]);
 });
 
-const verifyOpenWithLazyParentContext = async ({ externalStorage }) => {
+const verifyOpenWithLazyParentContext = async ({ snapshotScenario } = {}) => {
+  const externalStorage = snapshotScenario !== undefined;
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-lazy-open-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
   const environment = workspaceFixtureEnvironment(homeDirectory);
@@ -2780,6 +2781,7 @@ const verifyOpenWithLazyParentContext = async ({ externalStorage }) => {
     await mkdir(homeDirectory, { recursive: true });
     await mkdir(sessionDirectory, { recursive: true });
     const instructions = path.join(workingFolderDirectory, "AGENTS.md");
+    const localArtifact = path.join(workingFolderDirectory, "output", "result.txt");
     let gitBefore;
     const readGitFacts = async () => Promise.all([
       runGit(workingFolderDirectory, ["for-each-ref"]).then(result => result.stdout),
@@ -2794,19 +2796,28 @@ const verifyOpenWithLazyParentContext = async ({ externalStorage }) => {
       });
       await applyTrelioFolderOnboarding(setup.plan.apply.arguments.parameters);
       const index = path.join(workingFolderDirectory, ".git", "fixture-index");
-      const snapshot = async (position) => {
+      const snapshot = async (position, extraPaths = []) => {
         const options = { env: { ...process.env, GIT_INDEX_FILE: index } };
-        await runGit(workingFolderDirectory, ["add", "--", "AGENTS.md", ".gitignore", "CLAUDE.md"], options);
+        await runGit(workingFolderDirectory, ["add", "--", "AGENTS.md", ".gitignore", "CLAUDE.md", ...extraPaths], options);
         const { stdout } = await runGit(workingFolderDirectory, ["write-tree"], options);
         const ref = `refs/codex/turn-diffs/captures/${position}/123e4567-e89b-12d3-a456-426614174000/head`;
         await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", ref, stdout.trim()]);
         return ref;
       };
-      const oldRef = await snapshot(1);
-      await writeFile(instructions, "# Personal rules\n\n" + await readFile(instructions, "utf8"));
-      await snapshot(2);
+      if (snapshotScenario === "pruned") {
+        const oldRef = await snapshot(1);
+        await writeFile(instructions, "# Personal rules\n\n" + await readFile(instructions, "utf8"));
+        await snapshot(2);
+        await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", "-d", oldRef]);
+      } else {
+        // Codex can capture ordinary outputs at the start of a turn after
+        // binding. Keep those files on disk and the ref live during open.
+        await mkdir(path.dirname(localArtifact));
+        await writeFile(localArtifact, "Local-only result\n");
+        await writeFile(path.join(workingFolderDirectory, ".DS_Store"), "Synthetic OS metadata\n");
+        await snapshot(1, [".DS_Store", "output"]);
+      }
       await rm(index);
-      await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", "-d", oldRef]);
       gitBefore = await readGitFacts();
     } else {
       await writeFile(instructions, [
@@ -2862,6 +2873,10 @@ const verifyOpenWithLazyParentContext = async ({ externalStorage }) => {
     if (externalStorage) {
       await assert.rejects(stat(path.dirname(folderLocalRoot)), { code: "ENOENT" });
       assert.deepEqual(await readGitFacts(), gitBefore);
+      if (snapshotScenario === "ordinary-files") {
+        assert.equal(await readFile(localArtifact, "utf8"), "Local-only result\n");
+        await assert.rejects(stat(path.join(rootDirectory, "workspace", "output")), { code: "ENOENT" });
+      }
     } else {
       await assert.rejects(stat(defaultRoot), { code: "ENOENT" });
     }
@@ -2975,11 +2990,15 @@ const verifyOpenWithLazyParentContext = async ({ externalStorage }) => {
 
 test("bridge open keeps a large parent context pointer-first and downloads zero object bytes", {
   timeout: 15_000,
-}, () => verifyOpenWithLazyParentContext({ externalStorage: false }));
+}, () => verifyOpenWithLazyParentContext());
 
 test("bridge open materializes a new Workspace outside Codex Git after a snapshot is pruned", {
   timeout: 15_000,
-}, () => verifyOpenWithLazyParentContext({ externalStorage: true }));
+}, () => verifyOpenWithLazyParentContext({ snapshotScenario: "pruned" }));
+
+test("bridge open materializes a new Workspace outside Codex Git when live snapshots contain ordinary outputs", {
+  timeout: 15_000,
+}, () => verifyOpenWithLazyParentContext({ snapshotScenario: "ordinary-files" }));
 
 test("open completes after an unrelated retention read stalls, without another claim", {
   timeout: 30_000,

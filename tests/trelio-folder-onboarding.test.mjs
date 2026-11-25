@@ -391,6 +391,67 @@ test("a pruned Codex snapshot keeps an existing binding usable only with externa
   });
 });
 
+test("ordinary live snapshots preserve only an isolated existing Codex binding", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const initial = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  await applyTrelioFolderOnboarding(initial.plan.apply.arguments.parameters);
+  const instructionPath = path.join(root, "AGENTS.md");
+  const instructions = await fs.readFile(instructionPath);
+  const ignorePath = path.join(root, ".gitignore");
+  const ignore = await fs.readFile(ignorePath);
+  await fs.writeFile(path.join(root, ".DS_Store"), "Synthetic ordinary data");
+  const refPrefix = "refs/codex/turn-diffs/captures";
+  const refSuffix = "123e4567-e89b-12d3-a456-426614174000/head";
+  const ordinaryRef = `${refPrefix}/1/${refSuffix}`;
+  await runGit(root, "update-ref", ordinaryRef, await writeTurnDiffTree(root, ".DS_Store"));
+
+  assert.equal(await needsExternalWorkspaceStorage(root), true);
+  const diagnosed = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(diagnosed.status, "ready");
+  assert.equal(diagnosed.folder.workspaceStorage, "external");
+  assert.deepEqual(diagnosed.scope, { companySlug: "test-company", projectSlug: "work-project" });
+  assert.equal(diagnosed.refresh, null);
+  await assert.rejects(prepareTrelioFolderOnboarding({
+    folderPath: root, company: { name: "Other company", slug: "other" },
+  }), { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
+
+  await fs.writeFile(instructionPath, "# No binding\n");
+  await assert.rejects(needsExternalWorkspaceStorage(root), { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
+  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+    { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
+  await fs.writeFile(instructionPath, instructions);
+
+  await fs.appendFile(ignorePath, "\n!/workspaces/\n");
+  await assert.rejects(needsExternalWorkspaceStorage(root), { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
+  await fs.writeFile(ignorePath, ignore);
+
+  // A benign ref already forced external storage. It must not hide a later
+  // ref that contains Workspace data or invalid reserved metadata.
+  const forbiddenRef = `${refPrefix}/2/${refSuffix}`;
+  const indexPath = path.join(root, ".git", "onboarding-test-index");
+  const environment = { GIT_INDEX_FILE: indexPath };
+  for (const name of ["workspaces", "WORKSPACES", ".codex"]) {
+    const directory = path.join(root, name);
+    const relative = `${name}/fixture.txt`;
+    await fs.mkdir(directory);
+    await fs.writeFile(path.join(root, relative), "Synthetic forbidden snapshot");
+    // Force a forbidden snapshot entry without altering the real index or
+    // removing the ignore rule that protects the surrounding working folder.
+    await runGitWithEnvironment(root, environment, "add", "--force", "--", ".DS_Store", relative);
+    const forbiddenTree = (await runGitWithEnvironment(root, environment, "write-tree")).stdout.trim();
+    await fs.rm(indexPath);
+    await runGit(root, "update-ref", forbiddenRef, forbiddenTree);
+    await fs.rm(directory, { recursive: true });
+    await assert.rejects(needsExternalWorkspaceStorage(root), (error) => {
+      assert.deepEqual(projectFolderGitHistoryBlocker(error)?.details.gitBlocker,
+        { reason: "unexpected_tree_entry", object: { type: "tree", id: forbiddenTree } });
+      return true;
+    });
+    await runGit(root, "update-ref", "-d", forbiddenRef);
+  }
+});
+
 test("Cursor diagnostics require a real binding and preserve service Git isolation", async () => {
   const root = await makeRoot();
   const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "cursor");
