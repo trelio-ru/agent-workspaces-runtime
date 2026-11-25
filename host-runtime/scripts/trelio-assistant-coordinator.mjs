@@ -1859,10 +1859,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     let intent=inbox.readPassContinuation(job.deliveryId);
     // A positively completed continuation without business material may inspect
     // the task again under a NEW bounded marker, never replay the old turn.
-    if(!intent||intent.started)intent=inbox.preparePassContinuation(job.deliveryId,{passId:saved.passId,
-      expectedLeaseRevision:live.leaseRevision,terminalTurnId:result.turnId,terminalMarkerId,
-      ...(prerequisites?{prerequisiteKey:prerequisites.fingerprint}:{}),...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{}),
-      ...(parentRead?{taskReadParent:parentRead}:{}),...(archive?{namedArchiveSettled:archive}:{})});
+    if(!intent||intent.started){
+      try{
+        intent=inbox.preparePassContinuation(job.deliveryId,{passId:saved.passId,
+          expectedLeaseRevision:live.leaseRevision,terminalTurnId:result.turnId,terminalMarkerId,
+          ...(prerequisites?{prerequisiteKey:prerequisites.fingerprint}:{}),...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{}),
+          ...(parentRead?{taskReadParent:parentRead}:{}),...(archive?{namedArchiveSettled:archive}:{})});
+      }catch(error){
+        // The exact completed turn has no business receipt and the journal
+        // cannot give it another marker. Only technical retirement may free
+        // the device. A conflicting start or a missing receipt is never a limit.
+        if(error?.code!=='ASSISTANT_INBOX_CONTINUATION_LIMIT'||result.state!=='completed'||!intent?.started)throw error;
+        return !await retireInterruptedWriter(job,saved,saved.threadId,signal,intent,result);
+      }
+    }
     if(intent.passId!==saved.passId||intent.terminalTurnId!==result.turnId
       ||JSON.stringify(intent.workspaceDraft??null)!==JSON.stringify(workspaceDraft)
       ||JSON.stringify(intent.taskReadParent??null)!==JSON.stringify(parentRead)
@@ -2164,7 +2174,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // an eligible pass may be observing a request whose result is unknown.
     return !await finishWriterRetirement(job,saved,response,signal);
   };
-  const retireInterruptedWriter = async (job,saved,threadId,signal) => {
+  const retireInterruptedWriter = async (job,saved,threadId,signal,continued=null,result=null) => {
     if(saved?.deliveryId!==job.deliveryId||saved.threadId!==threadId||job.kind!=='task'
       ||typeof native.withWriter!=='function'||typeof client.readTaskWriterRetirement!=='function'
       ||typeof client.retireTaskWriter!=='function'||typeof passHost.releaseRetiredTaskPass!=='function')return false;
@@ -2172,25 +2182,37 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     lease();signal.throwIfAborted();
     if(live?.state!=='review_required'||live.workMode!=='task'||!(Date.parse(live.leaseExpiresAt)<=now())
       ||['passId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>live[key]!==saved[key]))return false;
+    if(!sameReconciliationScope(saved,live))return false;
+    // A reserved or partially resumed marker may still start. Only retire a
+    // continuation after its persisted native start and an exact observation
+    // of that distinct turn. The writer repeats the observation on its own RPC.
+    if(continued&&(!continued.started||!continued.resumeAttempted||!continued.resumed
+      ||continued.passId!==saved.passId||!uuid.test(continued.reviewId??'')
+      ||live.leaseRevision<=continued.expectedLeaseRevision||!uuid.test(result?.turnId??'')
+      ||result.turnId===continued.terminalTurnId||!['uncertain','failed','completed'].includes(result.state)
+      ||result.state==='completed'&&result.receipt!==`codex:${threadId}:${result.turnId}`
+      ||result.state==='failed'&&result.receipt!==`codex-failed:${threadId}:${result.turnId}`))return false;
+    const stoppedContinuation=continued?{deliveryId:continued.reviewId,turnId:result.turnId,
+      status:result.state==='uncertain'?'interrupted':result.state}:null;
     const scope={...saved,leaseRevision:live.leaseRevision,clientRequestId:randomUUID()};
     if((await client.readTaskWriterRetirement(scope,signal))?.state!=='eligible')return false;
     const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
     lease();signal.throwIfAborted();
     const response=await native.withWriter(threadId,cwd,async writerSignal=>{
-      await verifyCurrentWriterRetirement(job,saved,scope,writerSignal);
+      await verifyCurrentWriterRetirement(job,saved,scope,continued,writerSignal);
       // Hold the exclusive native writer through the server CAS. If either
       // the process or HTTP is lost after this point, reopen by exact read.
       inbox.startTaskWriterRetirement(job.deliveryId,scope);
       return client.retireTaskWriter(scope,writerSignal);
-    },{signal});
+    },{signal,...(stoppedContinuation?{stoppedContinuation}:{})});
     lease();signal.throwIfAborted();
     return finishWriterRetirement(job,saved,response,signal);
   };
-  const verifyCurrentWriterRetirement = async (job,saved,scope,signal) => {
+  const verifyCurrentWriterRetirement = async (job,saved,scope,continued,signal) => {
     const read=await client.readTaskWriterRetirement(scope,signal);
     lease();signal.throwIfAborted();
     if(read?.state!=='eligible'||!isDeepStrictEqual(await passHost.readActivePass(),saved)
-      ||inbox.readPassContinuation(job.deliveryId)!==null)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      ||!isDeepStrictEqual(inbox.readPassContinuation(job.deliveryId),continued))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
     lease();signal.throwIfAborted();
   };
   const releaseRetiredInspection = async (job,pass,signal) => {
@@ -2792,8 +2814,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // Codex recorded a terminal error or lost the turn cannot establish any
     // business effect. The exclusive writer, expired lease and server CAS can
     // release the computer in either case, retaining the original task fence.
-    if (!continued && (result.state === 'uncertain' || result.state === 'failed')
-      && await retireInterruptedWriter(job,saved,threadId,signal)) return false;
+    if ((result.state === 'uncertain' || result.state === 'failed')
+      && await retireInterruptedWriter(job,saved,threadId,signal,continued,result)) return false;
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };

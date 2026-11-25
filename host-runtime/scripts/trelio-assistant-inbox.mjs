@@ -2700,10 +2700,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           ||prerequisiteKey===null||!latest||prerequisiteKey===latest.prerequisite_key))fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&(!last.started||last.workspaceDraft&&!namedArchiveSettled&&!localFinalization&&!recovered
           ||last.taskReadParent&&!workspaceDraft?.namedArchive&&!workspaceDraft?.retainedHandoff&&!independentSave)
-          ||workspaceDraft&&!independentSave&&!latest||prerequisiteKey===null&&(latest||history.length>=20)
-          ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
+          ||workspaceDraft&&!independentSave&&!latest||prerequisiteKey===null&&latest)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
+        // Only exhaustion on this exact valid predecessor is terminal for
+        // this prerequisite. Identity and lineage conflicts remain refusals.
+        if(prerequisiteKey===null?history.length>=20:!capacity&&get(
+          'SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
+          fail('ASSISTANT_INBOX_CONTINUATION_LIMIT');
         const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
           resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{}),...(workspaceDraft?{workspaceDraft}:{}),
           ...(parentRead?{taskReadParent:parentRead}:{}),...(namedArchiveSettled?{namedArchiveSettled}:{})});

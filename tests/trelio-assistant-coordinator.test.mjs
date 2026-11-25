@@ -5230,7 +5230,8 @@ test(`one scoped owner-answer refusal permits another independently verified ans
   await f.coordinator.close();
 });
 
-test('a completed restricted pass resumes on its own marker after rereading the protected slot',async t=>{
+for(const ending of ['confirmed','interrupted','budget'])
+test(`a completed restricted pass resumes on its own marker after rereading the protected slot (${ending})`,async t=>{
   const f=fixture(t);
   f.authority.workMode='task';
   await f.coordinator.pollOnce();
@@ -5290,6 +5291,7 @@ test('a completed restricted pass resumes on its own marker after rereading the 
     await options.beforeInvocation();
     options.startInvocation();
     started.push(input.deliveryId);
+    if(ending!=='confirmed')throw new Error('interrupted after persisted v2 start');
     finished=true;
     return {state:'completed',receipt:`codex:${pass.threadId}:${randomUUID()}`};
   };
@@ -5302,11 +5304,93 @@ test('a completed restricted pass resumes on its own marker after rereading the 
     assert.deepEqual(phases,['review']);
     assert.deepEqual(started,[]);
     changedAt=null;
-    await coordinator.workOnce();
+    if(ending==='confirmed')await coordinator.workOnce();
+    else await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
     assert.deepEqual(phases,['review','review','resume']);
     assert.deepEqual(started,[marker]);
-    assert.equal(inbox.readDelivery(child.deliveryId).state,'complete');
     assert.equal(inbox.readDelivery(original.deliveryId).state,'uncertain');
+    if(ending==='confirmed'){
+      assert.equal(inbox.readDelivery(child.deliveryId).state,'complete');
+      return;
+    }
+    // Exercise the same persisted journal after restarting the coordinator.
+    // The first continuation was approved, resumed and actually started above.
+    let lastMarker=marker;
+    if(ending==='budget'){
+      for(let n=1;n<20;n++){
+        const intent=inbox.preparePassContinuation(child.deliveryId,{passId:pass.passId,
+          expectedLeaseRevision:n,terminalTurnId:randomUUID(),terminalMarkerId:lastMarker});
+        lastMarker=randomUUID();
+        inbox.updatePassContinuation(child.deliveryId,intent.clientRequestId,
+          {reviewId:lastMarker,resumeAttempted:true,resumed:true,started:true});
+      }
+      live.leaseRevision=20;
+    }
+    const lastTurn=randomUUID(),receipt=`codex:${pass.threadId}:${lastTurn}`;
+    const stopped=ending==='budget'?{state:'completed',turnId:lastTurn,receipt}:{state:'uncertain',turnId:lastTurn};
+    f.deliveries.set(lastMarker,stopped);
+    f.advance(21*60_000);
+    live.state='review_required';
+    await coordinator.close();
+    // A completed native receipt still cannot settle the business task.
+    const blocked=new Set([original.deliveryId,child.deliveryId]);
+    f.options.client.readBusinessOutcome=input=>blocked.has(input.deliveryId)?{schemaVersion:1,state:'pending'}:outcome(input);
+    const second={id:randomUUID(),taskId:randomUUID(),state:'accepted',revision:0};
+    f.options.client.tasks=async()=>({bindings:[f.authority,second],nextCursor:null});
+    f.options.client.task=async(_company,taskId)=>({...taskId===f.taskId?f.authority:second,execution:f.execution});
+    const newOutcomes=[];
+    f.options.native.run=async(input,options)=>{
+      assert.equal(input.taskContext.taskId,second.taskId);options.startInvocation();
+      newOutcomes.push(input.deliveryId);
+      return {state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+    };
+    const otherPass=async input=>[...f.passes.values()].find(value=>value.passId===input.passId);
+    f.options.client.readTaskPass=async input=>structuredClone(await otherPass(input));
+    let permit=false,underWriter=false,retirements=0;
+    f.options.native.withWriter=async(thread,cwd,action,options)=>{
+      assert.equal(thread,pass.threadId);
+      assert.deepEqual(options.stoppedContinuation,{deliveryId:lastMarker,turnId:lastTurn,status:ending==='budget'?'completed':'interrupted'});
+      if(!permit)throw Object.assign(new Error('still owned'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      underWriter=true;
+      try{return await action(options.signal);}finally{underWriter=false;}
+    };
+    f.options.client.readTaskWriterRetirement=async input=>{
+      assert.equal(input.passId,pass.passId);assert.equal(input.leaseRevision,live.leaseRevision);
+      assert.deepEqual(input.retiredReconcile,link);
+      return {state:'eligible'};
+    };
+    f.options.client.retireTaskWriter=async input=>{
+      assert.equal(underWriter,true);assert.equal(++retirements,1);
+      assert.equal(input.passId,pass.passId);
+      live.state='closed';
+      const {retiredReconcile:_restriction,...identity}=pass;
+      return {state:'retired',receipt:{...identity,state:'retired',receiptId:randomUUID(),leaseRevision:live.leaseRevision}};
+    };
+    f.options.passHost.releaseRetiredTaskPass=f.options.passHost.releasePass;
+    const restarted=createAssistantCoordinator(f.options);
+    try{
+      await restarted.pollOnce();
+      if(ending==='interrupted'){
+        f.deliveries.set(lastMarker,{state:'uncertain'}); // Missing native observation retains ownership.
+        await restarted.workOnce();
+        assert.equal(inbox.readTaskWriterRetirementAttempt(child.deliveryId),null);
+        f.deliveries.set(lastMarker,stopped);
+      }
+      await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+      assert.equal(retirements,0);
+      permit=true;
+      await restarted.workOnce();
+      assert.equal(retirements,1);
+      assert.equal(inbox.readRetiredTaskWriter(child.deliveryId).released,true);
+      const healthy=restarted.status().find(row=>row.taskId===second.taskId);
+      f.advance(Math.max(1,healthy.nextRunAt-f.options.now()+1));
+      await restarted.workOnce();
+      assert.equal(newOutcomes.length,1);
+      assert.equal(inbox.readDelivery(newOutcomes[0]).state,'complete');
+      for(const id of blocked)assert.equal(inbox.readDelivery(id).state,'uncertain');
+      assert.equal(inbox.readPassContinuation(child.deliveryId).reviewId,lastMarker);
+      assert.deepEqual(started,[marker]);
+    }finally{await restarted.close();}
   }finally{await coordinator.close();}
 });
 
