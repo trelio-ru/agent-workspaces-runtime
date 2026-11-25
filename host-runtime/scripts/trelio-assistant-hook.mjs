@@ -71,6 +71,14 @@ export const validateAssistantRetiredReconcile=value=>{
 };
 export const sameAssistantReconcile=(left,right)=>left===undefined&&right===undefined
   ||Boolean(left&&right&&['passId','writerRetirementReceiptId','expectedLeaseRevision'].every(key=>left[key]===right[key]));
+export const validateAssistantScheduledLink=(value,reconciliation)=>{
+  if(!exactObject(value,['writerRetirementReceiptId','dueAt'])||!uuid.test(value.writerRetirementReceiptId??'')
+    ||value.writerRetirementReceiptId!==reconciliation?.writerRetirementReceiptId
+    ||!Number.isSafeInteger(value.dueAt)||value.dueAt<=0)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+  return Object.freeze({writerRetirementReceiptId:value.writerRetirementReceiptId,dueAt:value.dueAt});
+};
+export const sameAssistantScheduledLink=(left,right)=>left?.dueAt===right?.dueAt
+  &&left?.writerRetirementReceiptId===right?.writerRetirementReceiptId;
 export const assertAssistantReconcileTool=(name,args)=>{
   if(!ASSISTANT_RECONCILE_TASK_TOOLS.includes(name)
     ||name==='get_assistant_status'&&args.view!==undefined&&args.view!=='task'
@@ -135,15 +143,18 @@ export const matchesAssistantRetiredPass = (pass,live) => Boolean(pass.retiredPa
 const intakeKeys=['schemaVersion','kind','assistantId','deviceId','companyId','sourceId','sourceRevision','passId','deliveryId','eventId','threadId'];
 export const validateAssistantActivePass=(value,identity)=>{
   const intake=value?.kind==='source_intake',routing=intake&&value.intakeKind==='route_existing',keys=intake?[...intakeKeys,...(routing?['intakeKind','eventIds']:[])]:
-    value?.retiredPass!==undefined?[...passKeys,'retiredPass']:value?.retiredReconcile!==undefined?[...passKeys,'retiredReconcile',...(value.notificationId===undefined?[]:['notificationId'])]:passKeys;
+    value?.retiredPass!==undefined?[...passKeys,'retiredPass']:value?.retiredReconcile!==undefined?[...passKeys,'retiredReconcile',
+      ...(value.notificationId===undefined?[]:['notificationId']),...(value.retiredScheduled===undefined?[]:['retiredScheduled'])]:passKeys;
   if(!exactObject(value,keys) || value.schemaVersion!==1 || value.assistantId!==identity.assistantId || value.deviceId!==identity.deviceId
     || keys.filter(key=>key.endsWith('Id')).some(key=>!uuid.test(value[key]??''))
     || !Number.isSafeInteger(intake?value.sourceRevision:value.bindingRevision) || (intake?value.sourceRevision:value.bindingRevision)<0
+    ||value.retiredScheduled!==undefined&&value.notificationId!==undefined
     ||routing&&(!Array.isArray(value.eventIds)||!value.eventIds.length||value.eventIds.length>100||value.eventIds[0]!==value.eventId
       ||new Set(value.eventIds).size!==value.eventIds.length||value.eventIds.some(id=>!uuid.test(id??''))))
     fail('ASSISTANT_ACTIVE_PASS_REQUIRED');
   return Object.freeze(Object.fromEntries(keys.map(key=>[key,key==='eventIds'?Object.freeze([...value[key]]):
-    key==='retiredPass'?validateAssistantRetiredPass(value[key]):key==='retiredReconcile'?validateAssistantRetiredReconcile(value[key]):value[key]])));
+    key==='retiredPass'?validateAssistantRetiredPass(value[key]):key==='retiredReconcile'?validateAssistantRetiredReconcile(value[key]):
+      key==='retiredScheduled'?validateAssistantScheduledLink(value[key],value.retiredReconcile):value[key]])));
 };
 
 export const createAssistantTaskHook=({identity,client,store,readActivePass,lockDirectory,
@@ -168,7 +179,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       const live=await client[intake?'readSourceIntake':'readTaskPass'](locator,runtimeHookSignal());
       const ending=event.hook_event_name==='SessionEnd';
       if((pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased' && !(ending && (intake?['ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied'].includes(live.state):live.state==='closed')))
-        || !sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
+        || !sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || !sameAssistantScheduledLink(pass.retiredScheduled,live.retiredScheduled) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
           :live.deliveryId!==pass.deliveryId || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision)
         || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || live.state==='leased' && Date.parse(live.leaseExpiresAt)<=now())
@@ -218,9 +229,9 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       const state=await ensureObservedAssistantSession({record,slot,store,observation,now,
         binding:{schemaVersion:1,passId:pass.passId,threadId:pass.threadId},
         register:fields=>client[intake?'registerIntakeRuntime':'registerRuntime']({...locator,clientSessionId:pass.threadId,...fields,
-          ...(pass.retiredPass?{retiredPass:pass.retiredPass}:{}),...(pass.retiredReconcile?{retiredReconcile:pass.retiredReconcile}:{})},runtimeHookSignal()),
+          ...(pass.retiredPass?{retiredPass:pass.retiredPass}:{}),...(pass.retiredReconcile?{retiredReconcile:pass.retiredReconcile}:{}),...(pass.retiredScheduled?{retiredScheduled:pass.retiredScheduled}:{})},runtimeHookSignal()),
         validateRegistered:registered=>registered.passId===pass.passId
-          &&sameAssistantReconcile(pass.retiredReconcile,registered.retiredReconcile)
+          &&sameAssistantReconcile(pass.retiredReconcile,registered.retiredReconcile)&&sameAssistantScheduledLink(pass.retiredScheduled,registered.retiredScheduled)
           &&Boolean(registered.retiredInspection)===Boolean(pass.retiredPass)});
       // Every call gets a fresh ordinary v1 nonce. Replace any model-authored
       // pass/proof; private signing keys never appear in the updated input.

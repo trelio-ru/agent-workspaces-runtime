@@ -847,8 +847,9 @@ export const materializeAssistantWorkspaceFiles = async ({ result, arguments: ar
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:current.passId});
       if(runtime?.ended||runtime?.threadId!==current.threadId||runtime?.state?.runtimeSessionId!==receipt.runtimeSessionId)
         fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+      return current;
     };
-    await checkPass();
+    const originalPass=await checkPass();
     const encryption=await prepareWorkspaceRun();
     if(Boolean(encryption)!==Boolean(receipt.encryptedLifecycle))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     if(receipt.encryptedLifecycle){
@@ -887,6 +888,33 @@ export const materializeAssistantWorkspaceFiles = async ({ result, arguments: ar
           fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
         await checkPass();
       };
+      if(args.command?.action==='carry_forward'){
+        files.parseAssistantRunFileCommand(args.command);
+        if(!originalPass.retiredScheduled)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        const [{openAssistantDatabase},{readAssistantScheduledSource}]=await Promise.all([
+          import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs')]);
+        const db=await openAssistantDatabase(path.join(config,'digital-assistants','runtime',identity.assistantId.toLowerCase(),
+          identity.deviceId.toLowerCase()),{readOnly:true});
+        try{
+          const source=readAssistantScheduledSource(db.database,originalPass);
+          // Both signed data-plane reads bind the destination Run to THIS
+          // current pass and live recipient. The old checkpoint is read only
+          // by its immutable Git refs, checked again inside the file CAS.
+          const assertScheduled=async()=>{
+            const active=await checkPass();
+            if(!isDeepStrictEqual(active,originalPass)||!isDeepStrictEqual(readAssistantScheduledSource(db.database,active),source))
+              fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+            const live=await prepareWorkspaceRun();
+            if(Boolean(live)!==Boolean(encryption)||live&&(live.requestOrigin!==encryption.requestOrigin
+              ||live.runtime.device.fingerprint!==encryption.runtime.device.fingerprint||live.runtime.scope.id!==encryption.runtime.scope.id
+              ||live.runtime.scope.epoch!==encryption.runtime.scope.epoch))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+            await assertCurrent();
+          };
+          const {review,baseHead,...hashes}=source;
+          return await carryAssistantScheduledWorkfile({config,identity,scope:receipt.scope,runIdentity:selected,root,
+            material:{...hashes,...review},baseHead,assertCurrent:assertScheduled,signal});
+        }finally{await db.close();}
+      }
       return files.executeAssistantRunFileCommand({root,input:args.command,assertCurrent});
     });
     return {content:[{type:'text',text:'Workspace file command completed locally.'}],structuredContent:value};
@@ -3103,7 +3131,7 @@ const readProductionWorkspaceDraftRecovery=async(identity,host,active=undefined)
     const draft=readAssistantWorkspaceDraftRecovery(opened.database,pass);
     // A new reconciliation pass can itself be interrupted. Keep both fences:
     // the immutable provider-read ceiling and any already pinned own draft.
-    return pass.retiredReconcile?{...draft,retiredReconcile:pass.retiredReconcile}:draft;
+    return pass.retiredReconcile?{...draft,retiredReconcile:pass.retiredReconcile,...(pass.retiredScheduled?{retiredScheduled:pass.retiredScheduled}:{})}:draft;
   }
   finally{await opened.close();}
 };
@@ -3325,11 +3353,13 @@ const assistantSkillGuidePart = parameters => {
 export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https://trelio.ru'}={}) => {
   if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection','encryptedLifecycle'].includes(key))
     || raw.prepared!==true || !raw.scope || !['assistantUserId,companyId,deviceId,passId,taskId',
-      'assistantUserId,companyId,deviceId,passId,retiredReconcile,taskId'].includes(Object.keys(raw.scope).sort().join(','))
+      'assistantUserId,companyId,deviceId,passId,retiredReconcile,taskId',
+      'assistantUserId,companyId,deviceId,passId,retiredReconcile,retiredScheduled,taskId'].includes(Object.keys(raw.scope).sort().join(','))
     || ['assistantUserId','companyId','deviceId','passId','taskId'].some(key=>typeof raw.scope[key]!=='string' || !new RegExp(UUID,'u').test(raw.scope[key])))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(raw.scope.retiredReconcile!==undefined){
-    const {validateAssistantRetiredReconcile}=await import('./trelio-assistant-hook.mjs');
+    const {validateAssistantRetiredReconcile,validateAssistantScheduledLink}=await import('./trelio-assistant-hook.mjs');
     validateAssistantRetiredReconcile(raw.scope.retiredReconcile);
+    if(raw.scope.retiredScheduled!==undefined)validateAssistantScheduledLink(raw.scope.retiredScheduled,raw.scope.retiredReconcile);
   }
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
@@ -4605,9 +4635,9 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         operation,runIdentity:plan.runIdentity,parameters:operation==='open'?plan.runIdentity:parameters,
       });
     }
-    if(plan.localAction.operation==='skill_run'){
-      const {sameAssistantReconcile}=await import('./trelio-assistant-hook.mjs');
-      if(!sameAssistantReconcile(active.retiredReconcile,plan.scope.retiredReconcile))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    if(plan.localAction.operation==='skill_run'||active.retiredScheduled||plan.scope.retiredScheduled){
+      const {sameAssistantReconcile,sameAssistantScheduledLink}=await import('./trelio-assistant-hook.mjs');
+      if(!sameAssistantReconcile(active.retiredReconcile,plan.scope.retiredReconcile)||!sameAssistantScheduledLink(active.retiredScheduled,plan.scope.retiredScheduled))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     }
     if(identity.origin!==expectedOrigin || identity.assistantId!==plan.scope.assistantUserId || identity.deviceId!==plan.scope.deviceId
       || ['companyId','taskId','passId'].some(key=>active[key]!==plan.scope[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');

@@ -2707,6 +2707,10 @@ const readRetiredOwnerQuestion=async(request,threadId,deliveryId,options)=>{
 
 // The new turn reads the owner's current answer in the ordinary task scope.
 // Historical navigation or a refused Secret preflight cannot establish login.
+const calendarTaskInstructions=(workflow,mode)=>mode===undefined?workflow:workflow+
+  '\n\nThis is a new due calendar check. The previous owner answer was delivered. Its external action is still on hold. Use your own task, local account inventory, signed guide pages and the currently authorised canonical material. No provider process, site navigation, login or message is available in this pass.'+
+  (mode==='carry'?' After reading the pinned instructions/profile, open a NEW canonical Run. In that Run call use_assistant_workspace_files with command {action:"carry_forward"}. Read and check your saved WORK, then continue from the verified state.':' Use the current accepted WORK and the ordinary scheduled noChange rules.')+
+  ' Save the results you actually obtained and any remaining unmet criteria.';
 const answeredTaskInstructions=workflow=>workflow+'\n\nProcess the newly delivered owner answer and the current accepted WORK. Reconcile any previous external or browser action from its existing state before further input. The interrupted turn and its observations do not authorize repeating an earlier operation.';
 const verifyRetiredAnswerSource=async(request,threadId,deliveryId,scope,check)=>{
   if(!check)return;
@@ -3277,6 +3281,11 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.scheduledCheckpoint!==undefined){
+      const selected=await readOriginalRetiredTurn(request,threadId,options.scheduledCheckpoint);
+      const material=selected&&assistantRetiredCheckpointMaterial(selected.original,deliveryId,options.scheduledCheckpoint);
+      return material?{state:'checkpoint_observed',material}:{state:'uncertain'};
+    }
     if(options.retiredOwnerQuestion!==undefined)
       return readRetiredOwnerQuestion(request,threadId,deliveryId,options.retiredOwnerQuestion);
     if(options.retiredAcceptedOutcome!==undefined)
@@ -4057,7 +4066,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
   const scope=intakeContext===undefined?assistantWorkStateContext(taskContext):assistantIntakeContext(intakeContext);
   // A restricted or uncertain pass has different authority. Reject a caller
   // that supplies any of its options instead of silently running a fresh turn.
-  const allowed=['startState','retiredReconcile','retiredAnswerCheck','signal','passTimeoutMs','beforeInvocation','startInvocation','onAuthenticationConfirmed',
+  const allowed=['startState','retiredReconcile','retiredAnswerCheck','scheduledMaterial','signal','passTimeoutMs','beforeInvocation','startInvocation','onAuthenticationConfirmed',
     'executable','environment','spawnProcess','readExecutionAvailability','readHookReadiness','readWorkflow'];
   const timeout=options.passTimeoutMs??15*60_000;
   if(Object.keys(other).length||Object.keys(options).some(key=>!allowed.includes(key))
@@ -4067,6 +4076,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
     ||intakeContext!==undefined&&options.startState!==undefined
     // Only the native begin for a single answered task supplies this check.
     // The original evidence is read while holding the thread before start.
+    ||options.scheduledMaterial!==undefined&&(!['carry','current'].includes(options.scheduledMaterial)||!options.retiredReconcile||!scope.scheduled||scope.ownerQuestionIds?.length)
     ||options.retiredAnswerCheck!==undefined&&(!plainRecord(options.retiredAnswerCheck)||!options.startState
       ||intakeContext!==undefined||scope.scheduled||scope.ownerQuestionIds?.length!==1||scope.workMode==='discussion'
       ||scope.sourceReferences||options.retiredReconcile!==undefined||typeof options.beforeInvocation!=='function')
@@ -4081,7 +4091,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
     fail('ASSISTANT_CODEX_MODEL_UNAVAILABLE');
   await(options.readHookReadiness??readAssistantCodexHookReadiness)(cwd,preflight);
   const workflow=await(options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
-  const developerInstructions=options.retiredAnswerCheck?answeredTaskInstructions(workflow):workflow;
+  const developerInstructions=options.retiredAnswerCheck?answeredTaskInstructions(workflow):calendarTaskInstructions(workflow,options.scheduledMaterial);
   const reconcile=options.retiredReconcile===undefined?null:validateAssistantRetiredReconcile(options.retiredReconcile);
   if(reconcile&&(options.retiredAnswerCheck||intakeContext!==undefined||!scope.scheduled||scope.workMode==='discussion'||scope.ownerQuestionIds?.length>1
     ||scope.sourceReferences||!options.startState))fail('ASSISTANT_CODEX_INVALID_INPUT');
@@ -4274,7 +4284,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       ?'Confirm only an already accepted result. The original writer and its signing session have ended. The sole tool verifies the canonical accepted material, recorded effects and the existing cadence.'
       :options.retiredPass
       ? `${workflow}\n\nThe native task writer has been retired. This inspection may read only its original task and checkpoint the pinned draft when one is provided. A draft checkpoint is the save boundary for this turn. The earlier provider effect must remain on hold pending independent evidence.`
-      : options.retiredAnswerCheck?answeredTaskInstructions(workflow):workflow;
+      : options.retiredAnswerCheck?answeredTaskInstructions(workflow):calendarTaskInstructions(workflow,options.scheduledMaterial);
     const run=async text=>{
       const completed=await submitAssistantTurn(request,watchTerminal,{threadId,execution,developerInstructions,text});
       if(completed.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');
@@ -4584,4 +4594,81 @@ export const maintainAssistantHostHealth=async({client,readJournal,writeJournal,
   await writeJournal({...next,lastSentAt:at,samples:[]});
   return validateAssistantHostState(await client.reportHostHealth({clientRequestId:randomUUID(),expectedRevision:current.revision,
     settingsRevision:current.settingsRevision,samples},signal));
+};
+
+/** Identify one material change in an interrupted answer to the owner. The
+ * caller independently keeps every prior external effect fenced, verifies both
+ * immutable Git blobs and the working bytes, and compares again under the
+ * writer. This result grants neither authority to replay a tool nor authority
+ * to open the Run. No question, WORK or external result text is returned. */
+export const assistantRetiredCheckpointMaterial = (turn, deliveryId, {
+  assistantId, taskPass, questionId, workspaceId, runId,
+} = {}) => {
+  if (![turn?.id, deliveryId, assistantId, questionId, workspaceId, runId].every(value => UUID.test(value ?? ''))
+    || !exactDraftPass(taskPass, taskPass) || turn.status !== 'interrupted' || turn.error != null
+    || !Array.isArray(turn.items) || turn.items.length < 2 || turn.items.length > 128) return null;
+  const scope = assistantWorkStateContext({ assistantId, companyId: taskPass.companyId, taskId: taskPass.taskId,
+    ownerQuestionIds: [questionId] });
+  const [first, ...items] = turn.items;
+  if (first?.type !== 'userMessage' || first.content?.length !== 1 || first.content[0]?.type !== 'text'
+    || !matchesTaskStartPrompt(first.content[0].text, deliveryId, scope)) return null;
+  const run = { workspaceId, runId };
+  const path = scope.workStatePath;
+  let answered = false, prepared = false, openRequested = false;
+  let beforeSha256 = null, afterSha256 = null, checkpoint = null;
+  for (const item of items) {
+    if (['agentMessage', 'reasoning', 'sleep'].includes(item?.type) || completedTaskContextCompaction(item)) continue;
+    if (item?.type !== 'mcpToolCall' || item.server !== 'trelio-assistant'
+      || !['completed', 'failed'].includes(item.status) || !plainRecord(item.arguments)) return null;
+    const args = item.arguments, result = item.result?.structuredContent;
+    const success = item.status === 'completed' && item.error == null && item.result?.isError !== true && plainRecord(result);
+    if (item.tool === 'get_assistant_status' && args.taskPass === undefined && onlyKeys(args, ['view'])) continue;
+    if (!exactDraftPass(args.taskPass, taskPass)) return null;
+    if (item.tool === 'get_assistant_owner_question') {
+      if (!success || args.questionId !== questionId || result.id !== questionId || result.state !== 'answered'
+        || result.taskId !== taskPass.taskId || result.assistantUserId !== assistantId) return null;
+      answered = true;
+    } else if (item.tool === 'prepare_assistant_workspace_run') {
+      if (!answered || prepared || !success || !UUID.test(args.clientRequestId ?? '')
+        || args.runId !== runId || args.workspaceId !== workspaceId || result.prepared !== true || result.resumed !== true
+        || result.run?.id !== runId || result.workspace?.id !== workspaceId || result.workspace.scopeType !== 'task'
+        || result.workspace.taskId !== taskPass.taskId || result.workspace.companyId !== taskPass.companyId
+        || !sameDraftRun(result.bridge?.actions?.open?.arguments?.parameters, run)) return null;
+      prepared = true;
+    } else if (item.tool === 'use_assistant_workspace_files') {
+      if (!openRequested || !sameDraftRun(args.runIdentity, run)) return null;
+      let command;
+      try { command = parseAssistantRunFileCommand(args.command); } catch { return null; }
+      if (command.action === 'replace') {
+        if (!success || command.path !== path || !beforeSha256 || command.expectedSha256 !== beforeSha256
+          || afterSha256 || result.state !== 'draft_updated' || result.sha256 === beforeSha256
+          || result.sha256 !== createHash('sha256').update(command.text, 'utf8').digest('hex')) return null;
+        afterSha256 = result.sha256;
+      } else if (command.action === 'read' && command.source === 'workspace' && command.path === path) {
+        if (!success || !/^[a-f0-9]{64}$/u.test(result.sha256 ?? '')
+          || (afterSha256 || beforeSha256) && result.sha256 !== (afterSha256 || beforeSha256)) return null;
+        if (!afterSha256) beforeSha256 = result.sha256;
+      }
+    } else if (item.tool === 'continue_assistant_workspace_action') {
+      // Only these workspace transitions can attest the file. A new material
+      // transition after it would invalidate the last-checkpoint claim. The
+      // other closed calls, including provider results, establish no material.
+      if (args.operation === 'open') {
+        if (!prepared || openRequested || !success || !sameDraftRun(args.parameters, run)
+          || !observedWorkspacePollHandle(result, 'open', run)) return null;
+        // A resumed checkout can remain usable when polling this open fails.
+        // Only the subsequent successful own-file read, replacement and signed
+        // checkpoint prove work on that Run; a running handle proves no bytes.
+        openRequested = true;
+      } else if (args.operation === 'status') {
+        if (!sameDraftRun(args.runIdentity, run)) return null;
+      } else if (args.operation === 'checkpoint') {
+        if (!afterSha256 || checkpoint || !success || !sameDraftRun(args.runIdentity, run)
+          || args.parameters?.type !== 'draft' || result.operation !== 'checkpoint') return null;
+        try { checkpoint = validateAssistantWorkspaceCheckpoint(result.taskDraftCheckpoint); } catch { return null; }
+        if (checkpoint.workspaceId !== workspaceId || checkpoint.runId !== runId) return null;
+      } else if (!['status', 'heartbeat', 'skill_run'].includes(args.operation)) return null;
+    }
+  }
+  return checkpoint ? { sourceTurnId: turn.id, ...checkpoint, path, beforeSha256, afterSha256 } : null;
 };

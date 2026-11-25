@@ -132,6 +132,21 @@ pass may release its own writer while both attempts keep their fences. Other
 tasks on the device continue. Only authoritative settlement of the original
 operation can remove its fence.
 
+If an owner-answer turn resumed an earlier canonical Run and checkpointed its
+own WORK before stopping, a due calendar check can use that material. The host
+binds both released writers, the original answered notification, the exact
+turn, Run, checkpoint, file digests and clock to the new restricted pass.
+The notification stays attached to its original delivery. After opening its
+own fresh Run and reading its pinned instructions, the calendar check can use
+`use_assistant_workspace_files` with `{"action":"carry_forward"}`. The host
+compares the accepted and checkpoint Git blobs and the destination bytes under
+the new Run's lock. The first pass records its actual result in its own Run.
+Later due periods use their own last accepted WORK. This restriction permits
+local account inventory and immutable guide pages from verified packages.
+The external action's outcome stays open. If a third writer stops, its own
+verified retirement releases the device while each prior outcome remains on
+the affected task.
+
 ### Pre-native reservation recovery
 
 An expired reservation remains review-only unless the SAME trusted coordinator

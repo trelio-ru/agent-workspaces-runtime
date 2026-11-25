@@ -2172,6 +2172,10 @@ the ordinary watchdog. Test the real coordinator and native executor together fo
 an answered notification and scheduled reconciliation with/without an answer.
 After another interrupted owner-answer, verify the closed pass, original
 retirement receipt and notification before releasing its device writer.
+  A due calendar check carrying that answer's existing WORK requires the exact
+  restricted pass, source checkpoint and new own Run. Keep previously released
+  writers out of the device-key retirement gate; their task outcomes remain
+  fenced. [Scheduler contract](docs/assistant-scheduler.md#new-work-with-a-retained-external-effect).
 See [the scheduler contract](docs/assistant-scheduler.md).
 
 Technical provision waits for the same exact connected MCP catalogue. Schema31

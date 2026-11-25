@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { setTimeout as waitForTimer } from 'node:timers/promises';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
-import { validateAssistantRetiredReconcile, sameAssistantReconcile, matchesAssistantRetiredPass, validateAssistantRetiredPass, validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
+import { validateAssistantRetiredReconcile, sameAssistantReconcile, validateAssistantScheduledLink, sameAssistantScheduledLink, matchesAssistantRetiredPass, validateAssistantRetiredPass, validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
@@ -15,7 +15,7 @@ import { assistantSourceProcessingReferences, assistantConversationKeyMatches, a
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRetainedFinishLocators, validateAssistantTechnicalPrelude,
   validateAssistantLocalDraftBasis, validateAssistantLocalDraft, validateAssistantRecoveredOutcomeEvidence,
   validateAssistantRecoveredOutcomePlan, validateAssistantRecoveredOutcomeSchedule,
-  validateAssistantTaskWriterRetirement, validateAssistantRetiredOutcomeEvidence, validateAssistantRetiredOwnerReview,
+  validateAssistantTaskWriterRetirement, validateAssistantRetiredOutcomeEvidence, validateAssistantRetiredOwnerReview, validateAssistantScheduledReview,
   assistantRetiredOutcomeCompletion, ASSISTANT_TASK_MCP_READ_TOOLS } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -286,9 +286,14 @@ const state = value => {
 // Legacy native services keep the ordinary material contract. Only an explicit
 // closed native value selects the restricted discussion prompt/timer display.
 const reconcileField = value => {
-  if(!Object.hasOwn(value,'retiredReconcile'))return {};
-  if(Object.hasOwn(value,'retiredAnswer'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if(!Object.hasOwn(value,'retiredReconcile')){
+    if(Object.hasOwn(value,'retiredScheduled'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    return {};
+  }
+  if(Object.hasOwn(value,'retiredAnswer')||value.retiredScheduled!==undefined&&value.notificationId!==undefined)
+    fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   try{return {retiredReconcile:validateAssistantRetiredReconcile(value.retiredReconcile),
+    ...(value.retiredScheduled===undefined?{}:{retiredScheduled:validateAssistantScheduledLink(value.retiredScheduled,value.retiredReconcile)}),
     ...(value.notificationId===undefined?{}:{notificationId:id(value.notificationId)})};}
   catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
 };
@@ -602,7 +607,7 @@ export const readAssistantCompanyContentMode=async({identity,host,client,signal}
       || JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))
       fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     const live=intake?await client.readSourceIntake(locator,signal):await client.readTaskPass(locator,signal);
-    if(!sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || (pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=Date.now())
+    if(!sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || !sameAssistantScheduledLink(pass.retiredScheduled,live.retiredScheduled) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || (pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=Date.now())
       ||live.threadId!==pass.threadId||!Number.isFinite(Date.parse(live.leaseExpiresAt))
       || (intake ? live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
@@ -1486,7 +1491,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     await assertIdentity();
     const live=ownerReadOrigin?await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal)
       :await client.readTaskPass(locator,signal);
-    if(!sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || (pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=now())
+    if(!sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || !sameAssistantScheduledLink(pass.retiredScheduled,live.retiredScheduled) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || (pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=now())
       ||live.threadId!==pass.threadId
       ||(ownerReadOrigin?live.kind==='route_existing'||live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
         ||(companyRead||plainSourceFile)&&(!live.ownerPrivateRead||!live.readConfirmed)
@@ -1534,6 +1539,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   return Object.freeze({
     kind:'digital_assistant',
     ...(pass.retiredReconcile?{retiredReconcile:pass.retiredReconcile}:{}),
+    ...(pass.retiredScheduled?{retiredScheduled:pass.retiredScheduled}:{}),
     async prepareAttachmentRead(value){
       if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId,skillRead].some(Boolean))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       const selected=await validateAssistantEncryptedAttachment(value,identity.origin);
@@ -3053,6 +3059,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
   const registerObservedRuntime=async(input,signal,intake=false)=>{
       const retiredPass=input.retiredPass===undefined?null:validateAssistantRetiredPass(input.retiredPass);
       const reconcile=input.retiredReconcile===undefined?null:validateAssistantRetiredReconcile(input.retiredReconcile);
+      const scheduled=input.retiredScheduled===undefined?null:validateAssistantScheduledLink(input.retiredScheduled,reconcile);
       if(reconcile&&(intake||retiredPass||reconcile.passId===input.passId))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(retiredPass&&(intake||input.previousRuntimeSessionId!==undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
@@ -3063,13 +3070,13 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call(intake?'intakeRegister':'registerRuntime',{companyId:id(input.companyId),...(intake?{sourceId:id(input.sourceId),intakeId:id(input.intakeId)}:{taskId:id(input.taskId),passId:id(input.passId)}),
         clientSessionId:id(input.clientSessionId),observation:input.observation,publicKeySpki:input.publicKeySpki,
         ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{}),
-        ...(retiredPass?{retiredPass}:{}),...(reconcile?{retiredReconcile:reconcile}:{})},signal);
+        ...(retiredPass?{retiredPass}:{}),...(reconcile?{retiredReconcile:reconcile}:{}),...(scheduled?{retiredScheduled:scheduled}:{})},signal);
       if(value.schemaVersion!==1 || value.passId!==(intake?input.intakeId:input.passId) || value.conversation?.conversationId!==input.clientSessionId
         || value.conversation?.provider!=='codex' || value.conversation?.openProtocol!=='codex-thread-v1'
         || !Number.isFinite(Date.parse(value.expiresAt)) || value.runtimeRefreshSupported!==true
         || !object(value.observation) || Boolean(retiredPass)!==(value.retiredInspection===true)
         ||!sameAssistantReconcile(input.retiredReconcile,reconcileField(value).retiredReconcile)
-        ||retiredPass&&value.businessReady!==false) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        ||!sameAssistantScheduledLink(input.retiredScheduled,value.retiredScheduled)||retiredPass&&value.businessReady!==false) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       for(const key of ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'])
         if(value.observation[key]!==input.observation[key]) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {schemaVersion:1,passId:id(value.passId),runtimeSessionId:id(value.runtimeSessionId),expiresAt:isoTimestamp(value.expiresAt),
@@ -3254,16 +3261,28 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
           review:validateAssistantRetiredOwnerReview(r.review),notificationId:id(r.notificationId)};
         if(answer.review.pendingOwnerCheck.sourceMarkerId===input.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       }
+      let scheduled;
+      if(input.retiredScheduled!==undefined){
+        const r=input.retiredScheduled;
+        if(!object(r)||Object.keys(r).sort().join(',')!=='expectedLeaseRevision,passId,review,writerRetirementReceiptId'
+          ||answer||input.retiredReconcile||input.notificationId!==undefined)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+        const {review,...selector}=r;
+        scheduled={...validateAssistantRetiredReconcile(selector),review:validateAssistantScheduledReview(review)};
+        if(scheduled.review.sourceMarkerId===input.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      }
       const reconcile=input.retiredReconcile===undefined?null:validateAssistantRetiredReconcile(input.retiredReconcile);
-      if((input.previousReceiptId!==undefined||input.notificationId!==undefined)&&!reconcile)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      if((input.previousReceiptId!==undefined&&!scheduled||input.notificationId!==undefined)&&!reconcile)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(answer&&reconcile)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('passBegin',{companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
         bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId),
-        ...(answer?{retiredAnswer:answer}:{}),...(reconcile?{retiredReconcile:reconcile}:{}),
+        ...(answer?{retiredAnswer:answer}:{}),...(reconcile?{retiredReconcile:reconcile}:{}),...(scheduled?{retiredScheduled:scheduled}:{}),
         ...(input.previousReceiptId===undefined?{}:{previousReceiptId:id(input.previousReceiptId)}),
         ...(input.notificationId===undefined?{}:{notificationId:id(input.notificationId)})},signal);
-      if(!sameAssistantReconcile(input.retiredReconcile,reconcileField(value).retiredReconcile)
-        ||reconcile&&input.notificationId!==value.notificationId||reconcile&&(value.passId===reconcile.passId||value.workMode!=='task'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const restricted=scheduled??reconcile;
+      const linkToPeriod=scheduled?{writerRetirementReceiptId:scheduled.writerRetirementReceiptId,dueAt:scheduled.review.dueAt}:undefined;
+      if(!sameAssistantReconcile(restricted??undefined,reconcileField(value).retiredReconcile)
+        ||!sameAssistantScheduledLink(linkToPeriod,value.retiredScheduled)
+        ||restricted&&input.notificationId!==value.notificationId||restricted&&(value.passId===restricted.passId||value.workMode!=='task'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const link=retiredAnswerLink(value);
       if(answer&&(!['created','observe'].includes(value.startState)||value.passId===answer.passId
         ||link.retiredAnswer?.writerRetirementReceiptId!==answer.writerRetirementReceiptId||link.retiredAnswer.notificationId!==answer.notificationId)
@@ -3329,6 +3348,11 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const expected={passId:body.passId,bindingId:id(input.bindingId),bindingRevision:revision(input.bindingRevision),
         deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
       let expectedState='review_required', review;
+      if(input.scheduled!==undefined){
+        if(input.review!==undefined||input.reconcile!==undefined||input.notificationId!==undefined||!input.writerRetirement)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+        body.recoveryContext.scheduled=validateAssistantScheduledReview(input.scheduled);
+        if(body.recoveryContext.scheduled.sourceMarkerId!==expected.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      }
       if(input.review!==undefined&&input.reconcile!==undefined||input.notificationId!==undefined&&input.review===undefined&&input.reconcile!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(input.review!==undefined){
         try{review=validateAssistantRetiredOwnerReview(input.review);}catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
@@ -3367,8 +3391,13 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const context=value.recoveryContext;
       if(context===null&&expectedState==='review_required')return null;
       if(value.state!==expectedState||value.leaseRevision!==expectedLeaseRevision||value.workMode!=='task'||value.businessReady!==false
-        ||!object(context)||Object.keys(context).sort().join(',')!==(input.reconcile?'draftEvidence,materialBasis,operations,reconcile,schemaVersion':review?'draftEvidence,materialBasis,operations,review,schemaVersion':'draftEvidence,materialBasis,operations,schemaVersion')
+        ||!object(context)||Object.keys(context).sort().join(',')!==(input.scheduled?'draftEvidence,materialBasis,operations,scheduled,schemaVersion':input.reconcile?'draftEvidence,materialBasis,operations,reconcile,schemaVersion':review?'draftEvidence,materialBasis,operations,review,schemaVersion':'draftEvidence,materialBasis,operations,schemaVersion')
         ||context.schemaVersion!==1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const scheduled=context.scheduled;
+      if(input.scheduled&&scheduled!==null&&(!object(scheduled)||scheduled.eligible!==true
+        ||!['baseHead,eligible','baseHead,eligible,previousReceiptId'].includes(Object.keys(scheduled).sort().join(','))||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(scheduled.baseHead??'')))
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      if(scheduled?.previousReceiptId!==undefined)id(scheduled.previousReceiptId);
       let reconcile;
       if(input.reconcile){
         reconcile=context.reconcile;
@@ -3416,7 +3445,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         ||basis.workspaceId!==review.workspaceId||basis.workspaceHead!==review.acceptedHead
         ||basis.receiptId!==review.pendingOwnerCheck.priorReceiptId))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return Object.freeze({schemaVersion:1,draftEvidence,materialBasis:basis,...(review?{review:context.review}:{}),
-        ...(input.reconcile?{reconcile}:{}),
+        ...(input.reconcile?{reconcile}:{}),...(input.scheduled?{scheduled}:{}),
         operations:Object.freeze({coverage:'partial',receipts:Object.freeze(receipts),hasMore:operations.hasMore})});
     },
     async readTaskRetainedFinishEvidence(input,signal){
