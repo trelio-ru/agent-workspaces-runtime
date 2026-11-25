@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import dns from "node:dns/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -134,7 +135,21 @@ for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness
     let stored, authorization, opens = 0, exchanges = 0, writes = 0;
     let releaseToken;
     const tokenGate = new Promise(resolve => { releaseToken = resolve; });
-    const httpJson = async (url, request = {}) => {
+    const fakeAddress = "240.0.0.42";
+    t.mock.method(dns, "lookup", async hostname => {
+      assert.equal(hostname, "trelio.ru");
+      return { address: fakeAddress, family: 4 };
+    });
+    const checkNativeEndpoint = async (url, resolveEndpoint) => {
+      const { endpoint, address, family } = await resolveEndpoint(url);
+      assert.equal(endpoint.href, url);
+      assert.equal(address, fakeAddress);
+      assert.equal(family, 4);
+    };
+    const httpJson = async (url, request = {}, { resolveEndpoint }) => {
+      // Exercise the resolver that production supplies to OAuth discovery,
+      // registration and exchange. Only the DNS answer and HTTP peer are fake.
+      await checkNativeEndpoint(url, resolveEndpoint);
       if (url.includes(".well-known")) return { body: { issuer: "https://trelio.ru",
         authorization_endpoint: "https://trelio.ru/authorize", token_endpoint: "https://trelio.ru/token",
         registration_endpoint: "https://trelio.ru/register", code_challenge_methods_supported: ["S256"],
@@ -156,8 +171,12 @@ for (const nativeClient of ["codex", "kimi-work", "multitool", "deepseek-harness
           opens++; authorization = new URL(url);
           throw new BrowserOpenError("safe diagnostic", { stage: "shell_execute", nativeCode: 5, exitCode: 1 });
         } }),
-      httpRequest: async ({ payload }) => ({ message: { jsonrpc: "2.0", id: payload.id,
-        result: { protocolVersion: "2025-03-26" } } }),
+      httpRequest: async ({ config, payload }, { resolveEndpoint }) => {
+        await checkNativeEndpoint(config.endpoint, resolveEndpoint);
+        await assert.rejects(resolveEndpoint("https://other.example/mcp"), { code: "REMOTE_MCP_ENDPOINT_BLOCKED" });
+        return { message: { jsonrpc: "2.0", id: payload.id,
+          result: { protocolVersion: "2025-03-26" } } };
+      },
     });
     const tool = new AbortController();
     try {

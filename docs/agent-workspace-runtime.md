@@ -1623,6 +1623,13 @@ Runtime ограничивает и полученные, и распакова�
 маршрутом. Проверка полных схем на тестовой линии 32 КиБ/с воспроизводит
 тайм-аут старого runtime на передаче несжатого каталога.
 
+Встроенный OAuth/MCP к `https://trelio.ru` передаёт системный DNS-адрес
+в сокет без классификации IP, чтобы работали VPN с Fake IP. TLS проверяет
+сертификат для `trelio.ru`. OAuth metadata и token exchange остаются на
+том же HTTPS origin, HTTP redirects по-прежнему отклоняются. Этот resolver
+выбирает встроенное подключение. Адрес из декларации Remote MCP навыка
+проходит обычную проверку публичных IP даже при совпадении hostname.
+
 При известных сетевых ошибках
 (DNS/socket, timeout, HTTP, обрыв ответа, транспорт OAuth metadata) `tools/list`
 успешно возвращает host-owned `trelio_retry_catalog`, `trelio_connect` и в

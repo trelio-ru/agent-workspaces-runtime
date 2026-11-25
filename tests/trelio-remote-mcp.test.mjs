@@ -2749,6 +2749,12 @@ test("SSRF guard allows public IPv4 and rejects private or mismatched IPv4 answe
   );
 });
 
+test("a provider declaration cannot select the built-in Trelio Fake IP route by hostname", async () => {
+  await assert.rejects(resolveSafeRemoteMcpEndpoint("https://trelio.ru/mcp", {
+    lookup: async () => [{ address: "240.0.0.42", family: 4 }],
+  }), { code: "REMOTE_MCP_SSRF_BLOCKED" });
+});
+
 test("SSRF guard rejects IPv4-mapped, NAT64 and 6to4 IPv6 answers", async () => {
   const blockedAddresses = [
     "::ffff:5bdd:a522",

@@ -1728,6 +1728,9 @@ Exact legacy template bytes для распознавания при мигра�
   [Контракт](docs/agent-workspace-runtime.md#codex-catalog-recovery).
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
+- Встроенный OAuth/MCP к фиксированному `https://trelio.ru` использует ответ
+  системного DNS, включая VPN Fake IP, и проверяет TLS для исходного hostname.
+  Remote MCP из декларации навыка сохраняет проверку публичных адресов.
 - Local tools/list скрывает owner/admin-only private-skill management по свежему
   content-free backend каталогу; отдельный `companySkillAuthoring` открывает
   `use_private_agent_skill_drafts` участникам. Trial продолжает protected native

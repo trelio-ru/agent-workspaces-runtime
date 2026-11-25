@@ -1,9 +1,9 @@
 /**
  * OAuth 2.1 public-client flow for the fixed MCP 2025-03-26 transport.
  *
- * Registration, metadata and token traffic share the Remote MCP host's pinned
- * DNS/TLS guard. Only the selected service origin is accepted as issuer. Dodo
- * IS credentials belong to the service and never enter this client.
+ * Registration, metadata and token traffic use the connection's pinned DNS
+ * result and TLS for its original hostname. Only the selected service origin
+ * is accepted as issuer. Dodo IS credentials never enter this client.
  */
 import crypto from "node:crypto";
 import http from "node:http";
@@ -74,7 +74,7 @@ export const oauthHttpJson = async (
   let lookupAbort;
   let safe;
   try {
-    // DNS validation is inside the same absolute bound as the HTTP request.
+    // DNS resolution is inside the same absolute bound as the HTTP request.
     // A late resolver cannot start network I/O after cancellation or timeout.
     safe = await Promise.race([
       resolveEndpoint(url),

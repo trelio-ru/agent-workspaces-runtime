@@ -1365,6 +1365,21 @@ export const resolveSafeRemoteMcpEndpoint = async (
   };
 };
 
+const resolveFixedTrelioEndpoint = async (rawEndpoint) => {
+  const endpoint = new URL(rawEndpoint);
+  if (endpoint.origin !== DEFAULT_ORIGIN || endpoint.username || endpoint.password || endpoint.hash) {
+    throw new RemoteMcpHostError(
+      "REMOTE_MCP_ENDPOINT_BLOCKED",
+      "Встроенное подключение использует только HTTPS origin Trelio.",
+    );
+  }
+  // Only the built-in connection can select this resolver. System DNS may
+  // return a Fake IP that the user's tunnel routes to Trelio. Pin that address
+  // for the socket and retain the original hostname for certificate validation.
+  const { address, family } = await dns.lookup(endpoint.hostname);
+  return { endpoint, address, family };
+};
+
 const parseSseEventJson = (eventText) => {
   const data = eventText
     .split(/\r\n|\r|\n/u)
@@ -1531,7 +1546,7 @@ export const remoteMcpHttpRequest = ({
     )), absoluteTimeoutMs);
 
     void (async () => {
-      // The wall-clock deadline starts before DNS validation. If resolution
+      // The wall-clock deadline starts before DNS resolution. If resolution
       // itself stalls, its late result cannot start a request after timeout.
       const safeEndpoint = await resolveEndpoint(config.endpoint);
       if (settled) {
@@ -1548,9 +1563,9 @@ export const remoteMcpHttpRequest = ({
         headers,
         servername: safeEndpoint.endpoint.hostname,
         lookup: (_hostname, options, callback) => {
-          // Use only the public address validated for this exact call. The
-          // socket cannot perform a second DNS lookup and pivot to an SSRF
-          // target between validation and connection.
+          // Use the exact address chosen by this connection's resolver. In
+          // particular, provider endpoints cannot perform a second lookup
+          // between their public-address check and opening the socket.
           if (options?.all) {
             callback(null, [{
               address: safeEndpoint.address,
@@ -7555,7 +7570,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
   createHarnessContinuations, createHarnessConnection, applyHarnessAdapter, deepseekHarnessPlugin } = (() => {
   const name = "trelio-deepseek-harness";
   const inject = ["tools", "llm"];
-  const ORIGIN = "https://trelio.ru";
+  const ORIGIN = DEFAULT_ORIGIN;
   const RESOURCE = `${ORIGIN}/mcp`;
   const PROTOCOL = "2025-03-26";
   const MAX_TOOLS = 512;
@@ -7795,7 +7810,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       headers: Object.fromEntries(buildBridgeRequestHeaders(null)), authentication: { type: "oauth2_pkce", scopes: [] } };
     const readMetadata = async signal => {
       const response = await httpJson(`${ORIGIN}/.well-known/oauth-authorization-server`, { signal },
-        { resolveEndpoint: resolveSafeRemoteMcpEndpoint });
+        { resolveEndpoint: resolveFixedTrelioEndpoint });
       const scopes = response.body?.scopes_supported;
       if (response.body?.issuer !== ORIGIN || !Array.isArray(scopes) || !scopes.length || scopes.length > 128
           || scopes.some(scope => typeof scope !== "string" || !/^mcp:[a-z0-9:-]+$/u.test(scope))) {
@@ -7832,6 +7847,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     // catalogue reads and session recovery still consume the original budget.
     const requestTrelioMcp = (request, signal, onCatalogPhase, onServerRequest) =>
       httpRequest(request, { signal,
+        resolveEndpoint: resolveFixedTrelioEndpoint,
         timeoutMs: nativeTrelioToolBudget(request.payload.method === "tools/call" ? request.payload.params?.name : undefined).timeoutMs
           ?? TRELIO_CALL_BUDGET_MS,
         ...(request.payload.method === "tools/list" ? { acceptCatalogGzip: true, onCatalogPhase } : {}),
@@ -7928,7 +7944,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       const current = await store.read(ORIGIN, target);
       if (reauthorize || !current || current.expiresAt <= Date.now()) {
         const created = await connectOAuth(config(), { signal, onManualAuthorization, onAuthorizationReceived,
-          resolveEndpoint: resolveSafeRemoteMcpEndpoint,
+          resolveEndpoint: resolveFixedTrelioEndpoint,
           clientName: publicProfile?.name ?? "Trelio – DeepSeek Harness", resource: RESOURCE,
           ...(publicProfile ? { publicClientId: publicProfile.id } : {}),
           maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
