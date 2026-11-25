@@ -706,37 +706,71 @@ const liveWizardContext = async (origin, parameters, dependencies, signal, { all
 const wizardBindingKey = (origin, token, context) => crypto.createHmac("sha256", token)
   .update(`${origin}\n${context.company.id}\n${context.memberId}`).digest("hex");
 
-/** Manual Codex setup doesn't open the picker. Register only its exact
- * already-configured company root using the same paired route and read-back.
- * No folder writes, ancestor selection, pairing or encryption enrollment here. */
+/** Manual setup has already selected and configured this exact root. Use the
+ * same device fence, registration and final checks that protect the card. */
 export const confirmManualCodexBrowser = async (origin, { companySlug, folderPath }, dependencies = {}) => {
   if (!safeFolderPath(folderPath) || typeof companySlug !== "string" || !/^[a-z0-9][a-z0-9_-]{0,119}$/u.test(companySlug)) {
     throw wizardError("DESKTOP_BROWSER_CONFIRMATION_INVALID");
   }
   const { context, token, bridge } = await liveWizardContext(origin, { companySlug }, dependencies, dependencies.signal);
-  const folder = await inspectCodexLaunchFolder(folderPath, dependencies);
-  if (folder?.state !== "bound" || folder.folderPath !== path.resolve(folderPath)
-    || folder.company.slug !== companySlug || folder.project) {
-    throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+  const busyKey = wizardBindingKey(origin, token, context);
+  if (wizardBusy.has(busyKey)) throw wizardError("CODEX_CONNECTION_BUSY");
+  wizardBusy.add(busyKey);
+  try {
+    const { filesystem } = await wizardDependencies(dependencies);
+    const folder = await inspectCodexLaunchFolder(folderPath, { bridge, filesystem });
+    if (folder?.state !== "bound" || folder.folderPath !== path.resolve(folderPath)
+      || folder.company.slug !== companySlug || folder.project) {
+      throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
+    }
+    const checks = { filesystem, onboarding: dependencies.onboarding, signal: dependencies.signal };
+    await verifyWizardFolderReadiness(folder.folderPath, context.company, checks);
+    const receipt = await (dependencies.register ?? registerAndVerifyCodexLaunchFolder)({
+      origin, token, folder, signal: dependencies.signal,
+    }, dependencies);
+    if (receipt?.verified !== true) throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
+    const recheck = async () => {
+      dependencies.signal?.throwIfAborted();
+      const current = await liveWizardContext(origin, { companySlug }, dependencies, dependencies.signal);
+      if (busyKey !== wizardBindingKey(origin, current.token, current.context)) {
+        throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
+      }
+      await verifyWizardFolderReadiness(folder.folderPath, context.company, checks);
+    };
+    await recheck();
+    try {
+      // Keep the browser challenge on the same verified device as registration.
+      const result = await (dependencies.confirmBrowser ?? confirmDesktopBrowser)(origin, { companySlug, provider: "codex" },
+        { ...dependencies, bridge: { ...bridge, loadToken: async () => token } });
+      await recheck();
+      return result;
+    } catch (error) {
+      if (error?.code !== "DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED") throw error;
+      // An expired/cancelled browser challenge can leave a registered folder.
+      // Report that partial result only after revalidating access and the root.
+      // Retrying this entry point reads the same registration before any PUT.
+      await recheck();
+      return { connected: false, folderRegistered: true, code: error.code };
+    }
+  } finally {
+    wizardBusy.delete(busyKey);
   }
-  const result = await (dependencies.register ?? registerAndVerifyCodexLaunchFolder)({
-    origin, token, folder, signal: dependencies.signal,
-  }, dependencies);
-  if (result?.verified !== true) throw wizardError("CODEX_CONNECTION_REGISTRATION_UNCONFIRMED");
-  const current = await liveWizardContext(origin, { companySlug }, dependencies, dependencies.signal);
-  if (wizardBindingKey(origin, token, context) !== wizardBindingKey(origin, current.token, current.context)) {
-    throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
-  }
-  // Pin the already verified device for the challenge as well. Loading a new
-  // credential after registration could open a page for another account.
-  return (dependencies.confirmBrowser ?? confirmDesktopBrowser)(origin, { companySlug, provider: "codex" },
-    { ...dependencies, bridge: { ...bridge, loadToken: async () => token } });
 };
+
+// MCP can hand a resource to Codex without learning whether the host mounted
+// it. Keep the chat continuation in the ordinary result so a client that drops
+// App metadata can still complete the same setup on a user-selected folder.
+const wizardPreparedText = [
+  "Codex connection wizard prepared. Ask the user to choose a folder in the card or tell you if it is missing or unusable.",
+  "If the card is unavailable, continue in this chat with the same company, OAuth and pairing. Use the selected permanent folder or ask the user to choose one.",
+  "Follow trelio-project-onboarding, preserving a valid existing binding. Finish with local diagnose_trelio_installation (clientKind=codex, intent=onboarding, folderOnboarding={companySlug,folderPath,confirmBrowser:true}).",
+  "Folder registration requires server read-back. If folderRegistered=true and connected=false, keep the folder and retry only browser confirmation on request.",
+].join(" ");
 
 const wizardResult = (capabilityToken, capability, state, mount = false) => ({
   content: [{ type: "text", text: state.stage === "ready"
     ? "Codex connection verified: the selected folder was registered in Trelio and read back."
-    : "Codex connection wizard is open. Connect the folder shown in the App." }],
+    : mount ? wizardPreparedText : "Codex folder setup is awaiting confirmation." }],
   structuredContent: { stage: state.stage, verified: state.stage === "ready" },
   _meta: { ...(mount ? { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } : {}),
     "trelio/codexConnection": { capabilityToken, companyName: capability.company.name, ...state } },

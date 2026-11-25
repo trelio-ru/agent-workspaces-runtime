@@ -494,6 +494,22 @@ test("wizard creates a chosen folder, preserves existing text, registers and rea
   assert.ok(!JSON.stringify(denied).includes("native private message"));
 });
 
+test("wizard preparation gives a text-only client the same-chat recovery without any folder write", async t => {
+  const fixture = await wizardFixture(t, true);
+  const opened = await fixture.open();
+  const text = opened.content[0].text;
+  assert.match(text, /wizard prepared.*missing or unusable/u);
+  assert.match(text, /continue in this chat with the same company, OAuth and pairing/u);
+  assert.match(text, /selected permanent folder or ask the user to choose one/u);
+  assert.match(text, /trelio-project-onboarding.*diagnose_trelio_installation.*folderOnboarding=\{companySlug,folderPath,confirmBrowser:true\}/u);
+  assert.deepEqual(opened.structuredContent, { stage: "folder", verified: false });
+  assert.equal(opened._meta.ui.resourceUri, codexConnectionAppResource().uri);
+  assert.ok(!text.includes(opened._meta["trelio/codexConnection"].folderPath));
+  assert.ok(!text.includes(opened._meta["trelio/codexConnection"].capabilityToken));
+  assert.equal(fixture.puts, 0);
+  assert.equal(fixture.files.size, 0);
+});
+
 test("manual Codex setup verifies the exact managed folder before opening browser confirmation", async t => {
   const fixture = await wizardFixture(t, true);
   const folderPath = path.join(fixture.root, "manual-setup");
@@ -517,6 +533,55 @@ test("manual Codex setup verifies the exact managed folder before opening browse
   assert.deepEqual(await confirmManualCodexBrowser(fixture.origin, input, dependencies), { connected: true });
   assert.equal(confirmations, 1);
   assert.equal(await fs.readFile(instructions, "utf8"), canonical);
+});
+
+test("fallback reconciles registration once and resumes after an unconfirmed browser", async t => {
+  const fixture = await wizardFixture(t, true);
+  const folderPath = path.join(fixture.root, "already-configured");
+  await fs.mkdir(folderPath);
+  await fs.writeFile(path.join(folderPath, "AGENTS.md"), canonical);
+  const input = { companySlug: "company-a", folderPath };
+  const code = "DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED";
+  let confirmations = 0;
+  fixture.loseResponse = true;
+  const dependencies = {
+    bridge: fixture.bridge,
+    confirmBrowser: async () => {
+      // The visible card may recover while chat setup is in progress. Both
+      // entry points must share the company/device writer fence.
+      await assert.rejects(fixture.action("state"), /CODEX_CONNECTION_BUSY/u);
+      confirmations++;
+      if (confirmations === 1) throw Object.assign(new Error("Expired browser challenge"), { code });
+      return { connected: true };
+    },
+  };
+  assert.deepEqual(await confirmManualCodexBrowser(fixture.origin, input, dependencies),
+    { connected: false, folderRegistered: true, code });
+  assert.equal(fixture.puts, 1);
+  assert.deepEqual(await confirmManualCodexBrowser(fixture.origin, input, dependencies), { connected: true });
+  assert.equal(fixture.puts, 1, "Retry reads back the existing folder before the new browser confirmation");
+  assert.equal(confirmations, 2);
+});
+
+test("fallback hides partial readiness when the account or folder changes during browser confirmation", async t => {
+  for (const changed of ["account", "folder"]) {
+    await t.test(changed, async t => {
+      const fixture = await wizardFixture(t, true);
+      const folderPath = path.join(fixture.root, "reconfigured");
+      const instructions = path.join(folderPath, "AGENTS.md");
+      await fs.mkdir(folderPath);
+      await fs.writeFile(instructions, canonical);
+      await assert.rejects(confirmManualCodexBrowser(fixture.origin, { companySlug: "company-a", folderPath }, {
+        bridge: fixture.bridge,
+        confirmBrowser: async () => {
+          if (changed === "account") fixture.memberId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+          else await fs.writeFile(instructions, canonical.replaceAll("company-a", "company-b"));
+          throw Object.assign(new Error("Expired browser challenge"), { code: "DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED" });
+        },
+      }), changed === "account" ? /CODEX_CONNECTION_SCOPE_CHANGED/u : /CODEX_CONNECTION_BINDING_UNCONFIRMED/u);
+      assert.equal(fixture.puts, 1);
+    });
+  }
 });
 
 test("browser confirmation rereads access after real challenge and loopback revocation failures", async t => {

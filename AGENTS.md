@@ -41,6 +41,8 @@ publication tooling также остаются вне этого публичн
 - [Browser confirmation](docs/agent-workspace-runtime.md#codex-connection-wizard) opens after verified interactive setup. Recheck the exact local folder after registration and browser confirmation. Late service Git recovery uses the existing planner and CAS for `.gitignore` only. Native approval and folder registration remain independent.
   The wizard shows the browser action until confirmation succeeds. Link additional
   browser profiles from Trelio’s «Работа с агентом» section.
+  The opener reports preparation and includes same-chat recovery in ordinary text.
+  Its manual continuation shares the device writer fence and fresh readiness checks.
 
 - Human encrypted-device setup follows [browser self-enrollment](docs/agent-workspace-runtime.md#self-device-enrollment): personal phrases stay in Trelio, own-device confirmation and bounded readiness reads; managed/existing-only profiles never open that flow.
 

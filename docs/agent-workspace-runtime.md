@@ -4397,7 +4397,12 @@ lifecycle и ключ. Старый backend не обязан возвращат
 `diagnose_trelio_installation` с `intent=onboarding` и
 `folderOnboarding={companySlug,confirmBrowser:true}`. Ручной Codex также
 передаёт `folderPath`: точный уже настроенный корень компании регистрируется
-с read-back на том же paired bridge. Native Harness перечитывает папку точной
+с read-back на том же paired bridge. Ручной путь и App используют общую
+блокировку записи на устройство и компанию. Перед созданием browser challenge
+и после него этот путь подтверждает ту же локальную привязку и живой доступ.
+При отмене или истечении challenge `folderRegistered=true, connected=false`
+выдаётся только после такой проверки. Повтор читает ту же регистрацию перед
+любым PUT и запускает новый browser challenge. Native Harness перечитывает папку точной
 сессии из каталога Desktop перед подтверждением, даже если фоновый кэш был
 заполнен до привязки. Путь берётся из каталога Desktop. Runtime открывает Trelio в
 системном браузере и ждёт одноразовый receipt на локальном `127.0.0.1`.
@@ -4485,8 +4490,11 @@ Draft path/name/create choice живут в bounded owner-private local file п�
 company/member/device key. При повторном открытии они восстанавливаются, но старый
 успех не восстанавливается без проверки. Явный Save настроек имеет local dirty
 flag/beforeunload; busy отключает native controls. App actions не создают новые App
-карточки. Неотображённая App – не подтверждённая готовность: доступен прежний ручной
-onboarding в Trelio. Backend/source интеграция не означает публикацию runtime;
+карточки. Ответ opener подтверждает только подготовку App. Его обычный
+TextContent содержит переход к ручному onboarding в том же чате, даже если
+клиент не обработал App metadata. Используется выбранная пользователем папка
+и действующее подключение. Незавершённая регистрация не даёт «Готово».
+Backend/source интеграция не означает публикацию runtime;
 активация подписанной версии и backend deploy идут отдельным release flow.
 
 Проверки находятся в существующем `trelio-codex-launch.test.mjs`, который входит
