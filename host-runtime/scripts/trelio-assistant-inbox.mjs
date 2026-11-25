@@ -2338,6 +2338,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if (scheduled) return get(`SELECT t.source_key,t.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_tasks t
           JOIN assistant_inbox_sources s ON s.source_key=t.source_key
           WHERE t.source_key=? AND t.task_id=? AND t.state='accepted' AND s.state='active'${exclusion}`, scheduled.scope.key, scheduled.taskId,...excluded);
+        // Keep waiting events on a retired task until its original delivery
+        // settles. Its retirement receipt remains in history after settlement.
         return get(`SELECT t.source_key,e.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_events e
           JOIN assistant_inbox_sources es ON es.source_key=e.source_key
           JOIN assistant_inbox_sources s ON s.source_key=coalesce(e.dispatch_source_key,e.source_key)
@@ -2345,7 +2347,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           WHERE e.processed=0 AND e.dispatched=0 AND (e.wake=1 OR e.dispatch_source_key IS NOT NULL AND e.provider_wake=1)
           AND es.state='active' AND s.state='active' AND t.state='accepted'
           AND NOT EXISTS (SELECT 1 FROM assistant_retired_task_writers w JOIN assistant_inbox_deliveries d
-            ON d.delivery_id=w.delivery_id WHERE d.task_id=t.task_id)${exclusion} ORDER BY e.rowid LIMIT 1`,...excluded);
+            ON d.delivery_id=w.delivery_id WHERE d.task_id=t.task_id AND d.state<>'complete')${exclusion} ORDER BY e.rowid LIMIT 1`,...excluded);
       });
       if (!candidate) return null;
       const scope = JSON.parse(candidate.scope_json);

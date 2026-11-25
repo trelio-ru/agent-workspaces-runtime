@@ -371,6 +371,37 @@ test('a scheduled task pass consumes context without inventing an event wake or 
   assert.equal(next.events.length, 0, 'the real scheduler can trigger a task with no new events');
 });
 
+test('a new event waits for an interrupted task outcome and is delivered once after settlement', async t => {
+  const {inbox, advance} = memory(t);
+  const source = scope(), taskId = randomUUID(), bindingId = randomUUID();
+  inbox.register(source);
+  inbox.applyTaskState(source, {taskId, state:'accepted', expectedRevision:0, authority:{bindingId, revision:0}});
+  const original = await inbox.claimDelivery({authorize:authorized, scheduledTask:{scope:source, taskId}});
+  inbox.startDelivery(original.deliveryId);
+  advance(60 * 60_000);
+
+  const pass = {assistantId:source.assistantId, deviceId:source.bindingId, companyId:source.companyId, taskId,
+    bindingId, bindingRevision:0, deliveryId:original.deliveryId, passId:randomUUID(), threadId:randomUUID()};
+  const retirement = {...pass, schemaVersion:1, state:'retired', receiptId:randomUUID(), leaseRevision:0};
+  inbox.recordRetiredTaskWriter(pass, retirement);
+  inbox.releaseRetiredTaskWriter(original.deliveryId, retirement);
+  const incoming = event(taskId);
+  page(inbox, source, [incoming]);
+  assert.equal(await inbox.claimDelivery({authorize:authorized}), null);
+
+  // Settlement preserves the original writer receipt as history. Only the new
+  // event may wake this task, and only after the original outcome commits.
+  inbox.startRetiredTaskOutcome(original.deliveryId, retirement.receiptId, randomUUID());
+  inbox.completeDelivery(original.deliveryId, 'original-confirmed', {}, retirement.receiptId);
+  const next = await inbox.claimDelivery({authorize:authorized});
+  assert.notEqual(next?.deliveryId, original.deliveryId);
+  assert.deepEqual(next?.events.map(item=>item.event_id), [incoming.id]);
+  inbox.startDelivery(next.deliveryId);
+  inbox.completeDelivery(next.deliveryId, 'new-event-confirmed');
+  assert.equal(await inbox.claimDelivery({authorize:authorized}), null);
+  assert.equal(inbox.readRetiredTaskWriter(original.deliveryId).receipt.receiptId, retirement.receiptId);
+});
+
 test('owner-pending and unknown tasks neither dispatch nor mark read', async t => {
   const { inbox } = memory(t), source = scope(), task = randomUUID();
   inbox.register(source);
