@@ -1496,7 +1496,7 @@ test('same journal preserves twenty legacy starts and bounds each actual prerequ
   };
   for(let i=0;i<20;i++)next();
   const legacy=f.database.prepare('SELECT pass_continuation_json FROM assistant_inbox_deliveries').get().pass_continuation_json;
-  assert.equal(JSON.parse(legacy).length,20);assert.throws(()=>next(),/CONFLICT/);
+  assert.equal(JSON.parse(legacy).length,20);assert.throws(()=>next(),/CONTINUATION_LIMIT/);
   // Recreate a real v13 layout, then run the normal migration. No old receipt,
   // cursor, native start, failure, schedule or legacy JSON is overwritten.
   f.database.exec('DROP TABLE assistant_pass_continuations; UPDATE assistant_inbox_meta SET version=13');
@@ -1506,10 +1506,10 @@ test('same journal preserves twenty legacy starts and bounds each actual prerequ
   assert.deepEqual({...f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get()},before);
   const a='a'.repeat(64),b='b'.repeat(64);
   for(let i=0;i<20;i++)next(a);
-  assert.throws(()=>next(a),/CONFLICT/);assert.throws(()=>next(),/CONFLICT/);
+  assert.throws(()=>next(a),/CONTINUATION_LIMIT/);assert.throws(()=>next(),/CONFLICT/);
   const last=next(b);inbox=createAssistantInbox({database:f.database,now:()=>1000000});
   assert.equal(inbox.readPassContinuation(job.deliveryId).clientRequestId,last.clientRequestId);
-  assert.throws(()=>next(a),/CONFLICT/,'switching back cannot reset a spent definition budget');
+  assert.throws(()=>next(a),/CONTINUATION_LIMIT/,'switching back cannot reset a spent definition budget');
   const row=f.database.prepare('SELECT pass_continuation_json,native_started,state FROM assistant_inbox_deliveries').get();
   assert.equal(row.pass_continuation_json,legacy);assert.equal(row.native_started,1);assert.equal(row.state,'started');
   assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_pass_continuations').get().n,21);

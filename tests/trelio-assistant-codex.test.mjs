@@ -485,11 +485,14 @@ for(const stopped of [false,true])test(`writer remains owned until the host auth
 });
 
 
-for(const change of ['none','wrong_turn','missing','duplicate','running','completed','incomplete','queued'])
-test(`routed writer observes the original interrupted marker under the exclusive claim (${change})`,async()=>{
+for(const [status,change] of [
+  ...['none','wrong_turn','missing','duplicate','running','completed','incomplete','queued'].map(change=>['original',change]),
+  ['interrupted','none'],['failed','none'],['failed','running'],['completed','none'],['completed','wrong_turn'],
+])
+test(`writer observes the exact stored marker under the exclusive claim (${status}, ${change})`,async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),cwd=await fs.realpath(process.cwd());
   const item={type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\noriginal'}]};
-  const original={id:turnId,status:'interrupted',items:[item]};
+  const original={id:turnId,status:status==='original'?'interrupted':status,items:[item]};
   let acquired=false,calls=0;
   const rpc=nativeRpc(request=>{
     switch(request.method){
@@ -502,7 +505,7 @@ test(`routed writer observes the original interrupted marker under the exclusive
         assert.equal(request.params.threadId,threadId);
         if(!request.params.cursor)return {result:{data:[{id:randomUUID(),status:'completed',items:[]}],nextCursor:'earlier'}};
         const observed={...original,id:change==='wrong_turn'?randomUUID():turnId,
-          status:['running','completed'].includes(change)?change:'interrupted'};
+          status:['running','completed'].includes(change)?change:original.status};
         const data=change==='missing'?[]:change==='duplicate'?[observed,{...original,id:randomUUID()}]:[observed];
         return {result:{data,nextCursor:change==='incomplete'?'earlier':null}};
       }
@@ -510,7 +513,7 @@ test(`routed writer observes the original interrupted marker under the exclusive
     }
   });
   const read=withAssistantCodexWriter(threadId,cwd,async()=>{calls++;return true;},{
-    executable:process.execPath,environment:{},interruptedDelivery:{turnId,deliveryId},
+    executable:process.execPath,environment:{},...(status==='original'?{interruptedDelivery:{turnId,deliveryId}}:{stoppedContinuation:{turnId,deliveryId,status}}),
     spawnProcess:(...args)=>{
       const child=rpc(...args),kill=child.kill.bind(child);
       child.kill=(...params)=>{kill(...params);queueMicrotask(()=>child.emit('close',null,'SIGKILL'));};

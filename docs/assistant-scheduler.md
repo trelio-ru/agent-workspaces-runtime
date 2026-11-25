@@ -206,6 +206,12 @@ Latest-intent and per-prerequisite count reads are bounded, without deleting
 old starts or adding another pass/chat. Twenty remains the attempt limit for
 one actual prerequisite fingerprint: the native trusted hook definition hashes
 and the exact immutable signed worker version selected by the existing loader.
+After a started continuation stops without a business receipt, the host can
+retire its expired writer and admit another task. It binds the latest persisted
+resume and start to their exact turn ID, marker and status under exclusive native
+ownership, with an empty queue and the current server retirement receipt. The same
+check applies when a completed continuation has spent this prerequisite's budget.
+The pending task outcome and every old start remain in the journal.
 Switching back to a spent fingerprint does not reset its count. A newly repaired
 definition/runtime may therefore continue the retained pass automatically; a
 new model-supplied epoch, history reset or cap increase is not accepted.
