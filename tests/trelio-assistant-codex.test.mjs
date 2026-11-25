@@ -3961,3 +3961,35 @@ test('a reconciliation turn verifies the live tool surface and the original chat
     assert.equal(starts,extra?0:1);assert.equal(turns,starts);
   }
 });
+
+test('a continued scheduled check reopens its own draft and preserves later WORK edits',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),priorTurnId=randomUUID(),turnId=randomUUID();
+  const {ASSISTANT_RECONCILE_TASK_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-hook.mjs');
+  let reads=0,starts=0,turns=0;
+  const options={
+    retiredReconcile:{passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:2},
+    scheduledMaterial:'carry',continuationReview:{priorTurnId,reviewId:deliveryId},requireAbsentMarker:true,
+    executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},beforeInvocation:async()=>{},
+    readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
+    openDesktop:async()=>{},startInvocation:()=>{starts++;},
+    spawnProcess:ownedRpc({threadId,onTurn(request){
+      turns++;
+      const text=request.params.input[0].text;
+      const instructions=request.params.collaborationMode.settings.developer_instructions;
+      assert.ok(text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
+      assert.ok(text.includes(priorTurnId));
+      assert.match(text,/reopen that exact Run/);
+      assert.match(text,/If already accepted, verify and reuse that revision/);
+      assert.match(instructions,/Preserve subsequent edits/);
+      assert.doesNotMatch(instructions,/open a NEW canonical Run/);
+      assert.match(text,/Keep that effect on hold/);
+    },executionPolicy(request,response){
+      if(request.method==='mcpServerStatus/list')
+        response.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(tool=>[tool,{name:tool}]));
+      return response;
+    }})
+  };
+  const result=await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext:{...taskContext,scheduled:true},execution},options);
+  assert.equal(result.state,'completed');assert.deepEqual([starts,turns,reads],[1,1,2]);
+});
