@@ -88,6 +88,36 @@ legacy classifiers for existing unsettled passes without that evidence.
 Missing records never prove an operation was not attempted. A native reader
 reporting an interrupted status is insufficient evidence of writer release.
 
+### New work with a retained external effect
+
+After native retirement and release of the previous writer, an overdue task or an
+authenticated owner-answer notification may start a new pass in its original
+chat. The device and server check the same task, device, binding generation,
+retirement receipt and lease revision. Both check for competing work, outstanding
+owner decisions and recoverable material. A retained local checkout must match
+its accepted base and pass the existing clean-checkout observation. For an owner
+answer both sides match the exact question and existing unread notification.
+The task worker reads and interprets that answer through the normal task tool.
+
+The host journals the new delivery and its immutable original pass reference
+before contacting the server. Repeating the same begin observes its one start.
+The device and native signer retain the restriction across process restarts.
+The worker may read its task, its directly related parent under ordinary task
+ACL, its own accepted material and existing accounts. Provider calls require
+live platform verification and read-only arguments declared by that exact signed
+package. Immutable guide pages use the ordinary signed guide reader. Ordinary
+task or browser mutations, credential setup, sending and source acknowledgements
+have no admission in this profile.
+
+The worker uses the observations already in its chat and records newly verified
+facts, partial results and remaining limitations in a new canonical task Run.
+Only a confirmed business receipt for that Run can advance the schedule and
+consume the new owner-answer event. Future cycles keep the same original
+restriction and must name the preceding accepted receipt. A further interrupted
+pass may release its own writer while both attempts keep their fences. Other
+tasks on the device continue. Only authoritative settlement of the original
+operation can remove its fence.
+
 ### Pre-native reservation recovery
 
 An expired reservation remains review-only unless the SAME trusted coordinator

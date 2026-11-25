@@ -794,7 +794,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const pass=separateRead?null:await host.readActivePass();
     // A retired session uses the common exact task and Run readers without
     // composing the provider/inbox adapter, which its profile rejects.
-    const sourceReads=separateRead||pass?.kind==='source_intake'||pass?.retiredPass?null
+    const sourceReads=separateRead||pass?.kind==='source_intake'||pass?.retiredPass||pass?.retiredReconcile?null
       :await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
     const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
@@ -3086,7 +3086,12 @@ const readProductionWorkspaceDraftRecovery=async(identity,host,active=undefined)
   // Never create/migrate the inbox from a business tool. Authority and the
   // model surface remain tied to the SAME protected pass and journal.
   const opened=await openAssistantDatabase(directory,{readOnly:true});
-  try{return readAssistantWorkspaceDraftRecovery(opened.database,pass);}
+  try{
+    const draft=readAssistantWorkspaceDraftRecovery(opened.database,pass);
+    // A new reconciliation pass can itself be interrupted. Keep both fences:
+    // the immutable provider-read ceiling and any already pinned own draft.
+    return pass.retiredReconcile?{...draft,retiredReconcile:pass.retiredReconcile}:draft;
+  }
   finally{await opened.close();}
 };
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
@@ -3194,7 +3199,11 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   return context(async (client,host,store)=>{
     if(request.operation==='call'){
       const draft=await readDraftRecovery(client.identity,host);
-      if(draft?.retiredPass){
+      if(draft?.retiredReconcile){
+        const {assertAssistantReconcileTool}=await import('./trelio-assistant-hook.mjs');
+        assertAssistantReconcileTool(request.name,request.arguments);
+        if(draft.workspaceId)await assertWorkspaceDraftRecoveryCall(request,draft);
+      }else if(draft?.retiredPass){
         const {assertAssistantRetiredPassTool}=await import('./trelio-assistant-hook.mjs');
         assertAssistantRetiredPassTool(draft.retiredPass,request.name,request.arguments);
       }else if(draft)await assertWorkspaceDraftRecoveryCall(request,draft);
@@ -3302,8 +3311,13 @@ const assistantSkillGuidePart = parameters => {
 };
 export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https://trelio.ru'}={}) => {
   if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection','encryptedLifecycle'].includes(key))
-    || raw.prepared!==true || !raw.scope || Object.keys(raw.scope).sort().join(',')!=='assistantUserId,companyId,deviceId,passId,taskId'
-    || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    || raw.prepared!==true || !raw.scope || !['assistantUserId,companyId,deviceId,passId,taskId',
+      'assistantUserId,companyId,deviceId,passId,retiredReconcile,taskId'].includes(Object.keys(raw.scope).sort().join(','))
+    || ['assistantUserId','companyId','deviceId','passId','taskId'].some(key=>typeof raw.scope[key]!=='string' || !new RegExp(UUID,'u').test(raw.scope[key])))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  if(raw.scope.retiredReconcile!==undefined){
+    const {validateAssistantRetiredReconcile}=await import('./trelio-assistant-hook.mjs');
+    validateAssistantRetiredReconcile(raw.scope.retiredReconcile);
+  }
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
   if(Object.hasOwn(snapshot,'encryptedLifecycle')){
@@ -3781,6 +3795,7 @@ export const withAssistantEncryptedMaterial = async ({args,signal},send,
     // adapter as well. Even a correctly selected Workspace cannot confirm
     // another revision or use this read profile to assume a writer.
     if(pass.retiredPass)assertAssistantRetiredPassTool(pass.retiredPass,'complete_assistant_pass',args);
+    if(pass.retiredReconcile)(await import('./trelio-assistant-hook.mjs')).assertAssistantReconcileTool('complete_assistant_pass',args);
     if(!await prepareWorkspaceMaterial())return send(args);
     const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
     const basis=args.noChange?await client.readTaskMaterialBasis(locator,signal):null;
@@ -4494,12 +4509,20 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
     const active=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(active.retiredReconcile){
+      const {assertAssistantReconcileTool}=await import('./trelio-assistant-hook.mjs');
+      assertAssistantReconcileTool('continue_assistant_workspace_action',plan.localAction);
+    }
     if(active.retiredPass){
       const { assertAssistantRetiredPassTool }=await import('./trelio-assistant-hook.mjs');
       const { operation,parameters }=plan.localAction;
       assertAssistantRetiredPassTool(active.retiredPass,'continue_assistant_workspace_action',{
         operation,runIdentity:plan.runIdentity,parameters:operation==='open'?plan.runIdentity:parameters,
       });
+    }
+    if(plan.localAction.operation==='skill_run'){
+      const {sameAssistantReconcile}=await import('./trelio-assistant-hook.mjs');
+      if(!sameAssistantReconcile(active.retiredReconcile,plan.scope.retiredReconcile))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     }
     if(identity.origin!==expectedOrigin || identity.assistantId!==plan.scope.assistantUserId || identity.deviceId!==plan.scope.deviceId
       || ['companyId','taskId','passId'].some(key=>active[key]!==plan.scope[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -4614,7 +4637,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         const overview=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
           :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant handoff Workspace')).toString('utf8'));
         const target=overview.workspace;
-        if(target?.id!==plan.runIdentity.workspaceId || !(target.scopeType==='task'
+        if(target?.id!==plan.runIdentity.workspaceId || active.retiredReconcile&&target.scopeType!=='task' || !(target.scopeType==='task'
           ?target.scopeKey===`task:${plan.scope.taskId}`
           :['project','company'].includes(target.scopeType)&&target.scopeKey===`workspace:${plan.runIdentity.workspaceId}`)
           || overview.company?.id!==plan.scope.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -4754,7 +4777,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           // These are closed local policy outcomes, not provider stderr or an
           // HTTP diagnosis. Preserve them across the common CLI wrapper so a
           // missing provider opt-in is not reported as a transport outage.
-          if(['ASSISTANT_SKILL_COMMAND_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_POLICY_INVALID',
+          if(['ASSISTANT_CAPABILITY_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_POLICY_INVALID',
             'ASSISTANT_SKILL_COMMAND_DENIED','ASSISTANT_SKILL_GUIDE_INPUT_INVALID',
             'ASSISTANT_SKILL_GUIDE_RESULT_INVALID'].includes(error?.code))nativeCommandPolicyCause=error.code;
           if(interruptedFinish&&['ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED',

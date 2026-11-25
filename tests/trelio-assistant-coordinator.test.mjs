@@ -5111,3 +5111,90 @@ test(`one scoped owner-answer refusal permits another independently verified ans
   }
   await f.coordinator.close();
 });
+
+for (const withAnswer of [false,true]) test(`retired scheduled work resumes independent reads and preserves its held effect (answer=${withAnswer})`,async t=>{
+  const f=fixture(t);f.authority.workMode='task';
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const plan=f.coordinator.status()[0];f.advance(plan.nextRunAt-f.options.now());
+  f.failNative(true);
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  const old=f.activePass(),live=f.passes.get(old.deliveryId),inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  f.advance(21*60_000);live.state='closed';const receipt={...old,receiptId:randomUUID(),state:'retired',leaseRevision:live.leaseRevision};
+  inbox.recordRetiredTaskWriter(old,receipt);inbox.releaseRetiredTaskWriter(old.deliveryId,receipt);
+  await f.options.passHost.releasePass(receipt);
+  f.options.passHost.releaseRetiredTaskPass=async()=>assert.fail('old writer already released');
+  const wake={notificationId:randomUUID(),questionId:randomUUID()};
+  if(withAnswer){f.events.push({id:wake.notificationId,revision:'1',taskId:f.taskId,wake:true,ownerQuestionId:wake.questionId});
+    f.advance(300001);await f.coordinator.pollOnce();}
+  f.failNative(false);f.options.native.readWriterReleased=async thread=>thread===old.threadId;
+  const prior=f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(old.deliveryId);
+  const begin=f.options.client.beginTaskPass,run=f.options.native.run,readOutcome=f.options.client.readBusinessOutcome;
+  const selected=[],begins=[],accepted=new Map();
+  let rejectFirst=true;
+  f.options.client.readTaskRecoveryContext=async args=>{
+    assert.deepEqual(args.writerRetirement,receipt);
+    if(!args.reconcile)return null;
+    const expectedAnswer=withAnswer&&!accepted.size;
+    assert.equal(args.notificationId,expectedAnswer?wake.notificationId:undefined);
+    return {draftEvidence:null,reconcile:{eligible:true,
+      ...(accepted.size?{previousReceiptId:[...accepted.values()].at(-1)}:{}),
+      ...(expectedAnswer?{notificationId:wake.notificationId,ownerQuestionId:wake.questionId}:{})}};
+  };
+  f.options.client.beginTaskPass=async args=>{
+    assert.deepEqual(args.retiredReconcile,{passId:old.passId,writerRetirementReceiptId:receipt.receiptId,expectedLeaseRevision:live.leaseRevision});
+    assert.equal(args.previousReceiptId,[...accepted.values()].at(-1));
+    assert.notEqual(args.deliveryId,old.deliveryId);
+    begins.push(args.deliveryId);
+    if(rejectFirst){rejectFirst=false;throw Object.assign(new Error('native revision conflict before creation'),{status:409});}
+    return {...await begin(args),startState:'created'};
+  };
+  f.options.native.run=async(args,options)=>{
+    assert.equal(args.threadId,old.threadId);assert.equal(args.taskContext.scheduled,true);
+    assert.deepEqual(args.taskContext.ownerQuestionIds,withAnswer&&!selected.length?[wake.questionId]:undefined);
+    assert.deepEqual(options.retiredReconcile,f.activePass().retiredReconcile);
+    assert.equal(args.taskContext.sourceReferences,undefined);
+    selected.push(args.deliveryId);return run(args,options);
+  };
+  f.options.client.readBusinessOutcome=async args=>{
+    if(args.deliveryId===old.deliveryId)return {schemaVersion:1,state:'pending'};
+    assert.ok(selected.includes(args.deliveryId));
+    const outcome=await readOutcome(args);accepted.set(args.deliveryId,outcome.receiptId);
+    return outcome;
+  };
+  await f.coordinator.close();
+  const coordinator=createAssistantCoordinator(f.options);
+  await coordinator.workOnce();
+  assert.deepEqual(selected,[]);
+  assert.deepEqual(inbox.incompleteDeliveries(),[]);
+  assert.equal(begins.length,1);
+  for(let cycle=0;cycle<2;cycle++){
+    assert.equal((await coordinator.workOnce())?.state,'completed');
+    assert.equal(accepted.size,cycle+1);
+    assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(old.deliveryId),prior);
+    assert.deepEqual(inbox.retiredTaskIds(),[f.taskId]);
+    assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,37);
+    if(withAnswer)assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(wake.notificationId).processed,1);
+    const next=coordinator.status()[0].nextRunAt;
+    assert.ok(next>f.options.now());f.advance(next-f.options.now());
+  }
+  assert.deepEqual(begins,[selected[0],selected[0],selected[1]]);
+  assert.equal(new Set(selected).size,2);
+  // Even a second interrupted writer can release the device. Neither source
+  // attempt can be retried or replaced without its own verified outcome.
+  const next=inbox.claimReconciliation(old.deliveryId,receipt.receiptId,[...accepted.values()].at(-1));
+  assert.ok(next);
+  inbox.prepareTaskPass(next.deliveryId);inbox.startDelivery(next.deliveryId);
+  inbox.markDeliveryUncertain(next.deliveryId);
+  f.advance(21*60_000);
+  const interrupted={...old,passId:randomUUID(),deliveryId:next.deliveryId,
+    retiredReconcile:inbox.readReconciliation(next.deliveryId).retiredReconcile};
+  const {retiredReconcile,...coordinates}=interrupted;
+  const second={...coordinates,receiptId:randomUUID(),state:'retired',leaseRevision:0};
+  assert.throws(()=>inbox.recordRetiredTaskWriter({...interrupted,retiredReconcile:{...retiredReconcile,passId:randomUUID()}},second));
+  inbox.recordRetiredTaskWriter(interrupted,second);inbox.releaseRetiredTaskWriter(next.deliveryId,second);
+  assert.deepEqual(inbox.incompleteDeliveries(),[]);
+  assert.equal(inbox.claimReconciliation(old.deliveryId,receipt.receiptId,[...accepted.values()].at(-1)),null);
+  assert.deepEqual(inbox.readRetiredTaskWriter(old.deliveryId),{receipt,released:true});
+  assert.deepEqual(inbox.readRetiredTaskWriter(next.deliveryId),{receipt:second,released:true});
+  await coordinator.close();
+});

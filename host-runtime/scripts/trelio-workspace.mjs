@@ -9630,6 +9630,13 @@ const runMaterializedAgentSkillUnqueued = async ({
   const accountRemovalCapture = captureMode === 'account_removal';
   const profile = currentWorkspaceExecutionProfile();
   const privateSetup = privateSecretSetup !== null;
+  // This flag comes only from the verified current pass. Recheck at the last
+  // shared executor so a differently composed caller cannot switch capture
+  // modes, supply setup grants or turn an ordinary command into a read.
+  if (profile?.retiredReconcile && (!taskCapture || !captureOutput || privateSetup || prepareSetupEnvironment
+    || Object.keys(grantedEnvironment).length || grantedStdin !== null
+    || assertAssistantTaskSkillCommand(artifact.parsedPackage,runtimeArguments) !== 'read_only'))
+    throw Object.assign(new Error('ASSISTANT_CAPABILITY_UNAVAILABLE'),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
   if(privateSetup && (!taskCapture || profile?.kind!=='digital_assistant'
     || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
     || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
@@ -10448,11 +10455,11 @@ const skillCommand = async (
       // window or posts its device-consent endpoint. The managed owner action
       // writes the SAME native grant; only a fresh resolve can observe it.
       collectConsentFn: value => {
-        if(typeof profile.collectSkillRuntimeConsent!=="function")denyWorkspaceExecutionProfile();
+        if(profile.retiredReconcile||typeof profile.collectSkillRuntimeConsent!=="function")denyWorkspaceExecutionProfile();
         return profile.collectSkillRuntimeConsent(value);
       },
       prepareEncryptedConsentFn: value => {
-        if(typeof profile.prepareSkillRuntimeConsent!=="function")denyWorkspaceExecutionProfile();
+        if(profile.retiredReconcile||typeof profile.prepareSkillRuntimeConsent!=="function")denyWorkspaceExecutionProfile();
         return profile.prepareSkillRuntimeConsent(value);
       },
     } : undefined);
@@ -10530,6 +10537,20 @@ const skillCommand = async (
     || Object.keys(grantedEnvironment).length || grantedStdin !== null)) {
     throw Object.assign(new Error('BROWSER_CONTROLLER_COMMAND_DENIED'), { code: 'BROWSER_CONTROLLER_COMMAND_DENIED' });
   }
+  if (profile?.retiredReconcile) {
+    // Immutable guide pages and inventory below are host reads. All other
+    // calls must have an affirmative declaration in this exact signed package
+    // before touching an account or letting the provider see the arguments.
+    const parsed=artifactForCache.parsedPackage;
+    const accountCommand=parseAccountCommand(providerArguments);
+    const args=parsed.capabilities.includes(ACCOUNT_CAPABILITY)?splitAccountArguments(providerArguments).providerArguments:providerArguments;
+    const inventory=parsed.capabilities.includes(ACCOUNT_CAPABILITY)&&accountCommand?.operation==='list'&&!accountCommand.help;
+    if (resolution.artifact.contentProtection!=='plain'||resolution.trust.level!=='platform_verified'
+      ||resolution.trust.artifactLevel!=='platform_verified'||resolution.trust.requiresDeviceConsent
+      ||setupCommand||privateSecretSetup||humanInputSetup||controllerCommand||Object.keys(grantedEnvironment).length||grantedStdin!==null
+      ||accountCommand&&!inventory||(!inventory&&!readsSignedGuide&&assertAssistantTaskSkillCommand(parsed,args)!=='read_only'))
+      throw Object.assign(new Error('ASSISTANT_CAPABILITY_UNAVAILABLE'),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  }
   const humanInputCommand = humanInputSetup === null ? null : readSkillHumanInputSetupCommand(artifactForCache.parsedPackage, humanInputSetup.commandId);
   if(humanInputSetup !== null && (!assistant || privateSecretSetup || !humanInputCommand
     || !artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
@@ -10588,6 +10609,9 @@ const skillCommand = async (
     const live = normalizeResolvedSkillRuntimeArtifact(liveHydrated.rawResolution);
     // A changed selected connection or local member scope cannot execute the
     // old decrypted config after materialization. Refuse; never rerun provider.
+    if(profile.retiredReconcile&&(live.artifact.contentProtection!=='plain'||live.trust.level!=='platform_verified'
+      ||live.trust.artifactLevel!=='platform_verified'||live.trust.requiresDeviceConsent))
+      throw Object.assign(new Error("ASSISTANT_CAPABILITY_UNAVAILABLE"),{code:"ASSISTANT_CAPABILITY_UNAVAILABLE"});
     if(JSON.stringify(live.companyConnection)!==JSON.stringify(resolution.companyConnection)
       ||JSON.stringify(live.localIdentity)!==JSON.stringify(resolution.localIdentity))
       throw Object.assign(new Error("ASSISTANT_SKILL_SCOPE_DENIED"),{code:"ASSISTANT_SKILL_SCOPE_DENIED"});
@@ -10650,10 +10674,16 @@ const skillCommand = async (
       runtimeDirectory, executionContext, runtimeArguments,
       ...(inventory ? { existingInventoryOnly: true, output: result => {
         inventoryOutput = `${JSON.stringify(result)}\n`;
-        process.stdout.write(inventoryOutput);
+        if (!profile.retiredReconcile) process.stdout.write(inventoryOutput);
       } } : {}),
     });
-    if (accountResult.handled) return inventory ? taskEffectReceipt(inventoryOutput) : undefined;
+    if (accountResult.handled) {
+      if (profile?.retiredReconcile) {
+        await verifyCurrentAssistantSkill();
+        process.stdout.write(inventoryOutput);
+      }
+      return inventory ? taskEffectReceipt(inventoryOutput) : undefined;
+    }
     executionContext.account = accountResult.account;
     executionContext.visualGuestProfile = accountResult.visualGuestProfile === true;
     runtimeArguments = accountResult.runtimeArguments;
@@ -10670,9 +10700,9 @@ const skillCommand = async (
   // engine. The private profile validates native source/task routing before
   // launch and after complete successful pipes; no provider output is saved
   // or promoted to processing merely because the command returned zero.
-  const bodyRead = assistant && !privateSecretSetup && !humanInputSetup && typeof profile.prepareSkillBodyRead === 'function'
+  const bodyRead = assistant && !profile.retiredReconcile && !privateSecretSetup && !humanInputSetup && typeof profile.prepareSkillBodyRead === 'function'
     ? await profile.prepareSkillBodyRead({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
-  const outgoing = assistant && !privateSecretSetup && typeof profile.prepareOutgoingConversation === 'function'
+  const outgoing = assistant && !profile.retiredReconcile && !privateSecretSetup && typeof profile.prepareOutgoingConversation === 'function'
     ? await profile.prepareOutgoingConversation({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
   const executed = await runMaterializedAgentSkill({
     artifact: artifactForCache,
@@ -10697,6 +10727,9 @@ const skillCommand = async (
     // output is discarded independently and never enters this projection.
     const projected = outgoing !== null && typeof profile.projectOutgoingConversation === 'function'
       ? await profile.projectOutgoingConversation(outgoing, executed) : executed;
+    // Discard a completed read if membership, binding or release changed
+    // during the child process. A discarded result never reruns the provider.
+    if (profile.retiredReconcile) await verifyCurrentAssistantSkill();
     let stdout=projected.stdout;
     if (assistantGuidePart !== undefined) {
       const page = assistantSkillGuidePage({ stdout: projected.stdout, runtimeDirectory,
@@ -10810,6 +10843,8 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   // Treating a source as an ordinary human here would import that OS user's
   // legacy sessions before any explicit assistant/company account binding.
   const assistant = ["digital_assistant", "digital_assistant_source"].includes(profile?.kind);
+  if (profile?.retiredReconcile && command && (command.operation !== 'list' || command.help))
+    throw Object.assign(new Error('ASSISTANT_CAPABILITY_UNAVAILABLE'), {code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
   let accountCreation = null;
   if (assistant && command?.operation && command.operation !== "list") {
     // A task/read profile cannot authorize setup. The native source-owner
@@ -10858,9 +10893,9 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   // users retain the existing migration, catalogue and storage implementation.
   // Protected setup also calls this helper for the revision that precedes its
   // authorized account CAS. Keep that path on its original migration logic.
-  const taskInventory = existingInventoryOnly && profile?.kind === 'digital_assistant'
+  const taskInventory = (existingInventoryOnly || profile?.retiredReconcile) && profile?.kind === 'digital_assistant'
     && profile.interactiveLocal !== true && command?.operation === 'list';
-  if (!taskInventory)
+  if (!taskInventory && !profile?.retiredReconcile)
     await catalogue.importOnce(assistant ? async () => [] : () => discover({ artifact, runtimeDirectory, executionContext }));
   if (command?.operation === 'list') {
     const listed = await catalogue.list({ existingOnly: taskInventory });
@@ -10868,7 +10903,7 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     // A scoped native Telegram source can identify an account even when the
     // locally installed entries share a display name. Keep the real list
     // intact. Failure to read current native configuration gives no hint.
-    const configuredTelegramSource = assistant && artifact.skillId === 'telegram-mtproto'
+    const configuredTelegramSource = assistant && !profile.retiredReconcile && artifact.skillId === 'telegram-mtproto'
       && typeof profile.describeTelegramTaskAccount === 'function'
       ? await profile.describeTelegramTaskAccount({ companyId: executionContext.companyId,
         projectId: executionContext.projectId ?? null, accounts }).catch(() => null)
@@ -10896,7 +10931,7 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   }
   const allowUnboundGuest = !profile && !executionContext.companyConnection
     && supportsSkillVisualGuestProfile(artifact);
-  const account = await catalogue.select(parsed.accountId, { allowUnboundGuest });
+  const account = await catalogue.select(parsed.accountId, { allowUnboundGuest, existingOnly:Boolean(profile?.retiredReconcile) });
   return { handled: false, account, runtimeArguments: parsed.providerArguments,
     ...(account === null ? { visualGuestProfile: true } : {}) };
 };

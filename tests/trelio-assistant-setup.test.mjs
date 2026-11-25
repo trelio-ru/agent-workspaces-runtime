@@ -1265,6 +1265,27 @@ test('assistant Workspace plan rejects unreviewed paths/operations before privat
   assert.notEqual(valid.runIdentity.runId,raw.localAction.parameters.runId,'plan is snapshotted before async I/O');
 });
 
+test('a scoped skill plan must match the active reconciliation signer before any account or package access',async()=>{
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const base=workspacePlan(),{scope}=base,reconcile={passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:1};
+  const identity={origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId};
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:scope.companyId,
+    taskId:scope.taskId,passId:scope.passId,bindingRevision:1,bindingId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID()};
+  const parameters={companyId:scope.companyId,skillId:'signed-task-read',releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['read']};
+  const plan={...base,scope:{...scope,retiredReconcile:reconcile},localAction:{schemaVersion:1,operation:'skill_run',parameters}};
+  let active=pass,admissions=0;
+  const invoke=plan=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,host:{readActivePass:async()=>active}}),
+    loadCommon:async()=>({requireToken:()=>{admissions++;throw new Error('reached exact protected admission');}})});
+  await assert.rejects(invoke(plan),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  active={...pass,retiredReconcile:reconcile};
+  await assert.rejects(invoke({...plan,scope}),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  await assert.rejects(invoke({...plan,scope:{...scope,retiredReconcile:{...reconcile,passId:randomUUID()}}}),
+    {code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  assert.equal(admissions,0);
+  await assert.rejects(invoke(plan),/reached exact protected admission/);
+  assert.equal(admissions,1);
+});
+
 test('assistant Workspace continuation uses fixed signed child and stdin; unknown outcome never retries',async()=>{
   const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const plan=workspacePlan();let launches=0;

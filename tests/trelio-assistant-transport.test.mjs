@@ -1559,6 +1559,20 @@ test('recovery context selects the original expired or retired pass without infe
   await assert.rejects(client.readTaskRecoveryContext({...readRetired,review}),/INVALID_INPUT/);
   expectedSelector={expectedLeaseRevision:2,writerRetirementReceiptId:writerRetirement.receiptId};
   value={...value,recoveryContext:context};
+  const questionId=randomUUID(),previousReceiptId=randomUUID();
+  const baseSelector=expectedSelector,baseResponse=value;
+  for(const wake of [false,true]){
+    const selection={...readRetired,reconcile:true,...(wake?{notificationId}:{})};
+    expectedSelector={...baseSelector,reconcile:true,...(wake?{notificationId}:{})};
+    const admitted={eligible:true,previousReceiptId,...(wake?{notificationId,ownerQuestionId:questionId}:{})};
+    value={...baseResponse,recoveryContext:{...context,reconcile:admitted}};
+    assert.deepEqual((await client.readTaskRecoveryContext(selection)).reconcile,admitted);
+    value={...baseResponse,recoveryContext:{...context,reconcile:{...admitted,notificationId:randomUUID()}}};
+    await assert.rejects(client.readTaskRecoveryContext(selection),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+    value=baseResponse;
+    await assert.rejects(client.readTaskRecoveryContext(selection),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  }
+  value=baseResponse;expectedSelector=baseSelector;
   for(const corrupt of [{...value,state:'review_required'},{...value,businessReady:true},
     {...value,recoveryContext:null},{...value,leaseRevision:3}]){
     value=corrupt;

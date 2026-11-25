@@ -2317,7 +2317,48 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         throw error;
       }
       if(next){
-        const result=await perform(next,signal,null,null,true);
+        const result=await perform(next,signal,null,null,'answer');
+        if(result.state!=='not_admitted')return result;
+      }
+    }
+    return null;
+  };
+  const reconcileRetiredTask = async signal => {
+    if(!passHost||typeof native.readWriterReleased!=='function'||typeof client.readTaskRecoveryContext!=='function')return null;
+    for(const candidate of inbox.pendingReconciliationTasks()){
+      signal.throwIfAborted();lease();
+      const {scope,taskId,deliveryId}=candidate,plan=findSchedule(scope,taskId);
+      const wake=inbox.reconciliationWake(deliveryId);
+      if(blockedCompanies.has(scope.companyId)||!plan||!wake&&(plan.state!=='active'||!Number.isSafeInteger(plan.nextRunAt)||plan.nextRunAt>now()))continue;
+      const {receipt}=inbox.readRetiredTaskWriter(deliveryId);
+      if(plan.threadId!==receipt.threadId)continue;
+      let job;
+      try {
+        const current=await client.readTaskRecoveryContext({...receipt,expectedLeaseRevision:receipt.leaseRevision,
+          writerRetirement:receipt,reconcile:true,...(wake?{notificationId:wake.notificationId}:{})},signal);
+        // An applicable owner decision, missing authority, or an unfinished
+        // Workspace stays on its existing path. Never classify old provider
+        // effects by parsing model prose or infer undo from the new read.
+        if(current?.reconcile?.eligible!==true||current.reconcile.notificationId!==wake?.notificationId
+          ||current.reconcile.ownerQuestionId!==wake?.questionId||current.draftEvidence?.intermediateDraft
+          ||current.draftEvidence?.portableFinish)continue;
+        const cwd=await workspaceForTask(scopeFor(scope,taskId));
+        if(!await authorize({scope,taskId},signal)||await native.readWriterReleased(receipt.threadId,cwd,{signal})!==true
+          ||await passHost.readActivePass()!==null)continue;
+        lease();signal.throwIfAborted();
+        const draft=current.draftEvidence?.localDraft;
+        if(draft&&(draft.checkpointId!==null||draft.anchorHead!==draft.baseHead||draft.baseHead!==current.materialBasis?.workspaceHead
+          ||draft.workspaceId!==current.materialBasis?.workspaceId||await verifyReadOnlyPrelude?.(receipt,draft,signal)!==true))continue;
+        lease();signal.throwIfAborted();
+        job=inbox.claimReconciliation(deliveryId,receipt.receiptId,current.reconcile.previousReceiptId??null,wake);
+      } catch(error){
+        signal.throwIfAborted();lease();
+        if([403,404,409].includes(error?.status)||['ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_THREAD_NOT_LOADED',
+          'ASSISTANT_CODEX_THREAD_BUSY','ASSISTANT_TRANSPORT_INVALID_RESPONSE'].includes(error?.code))continue;
+        throw error;
+      }
+      if(job){
+        const result=await perform(job,signal,null,null,'reconcile');
         if(result.state!=='not_admitted')return result;
       }
     }
@@ -2694,14 +2735,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };
-  const perform = async (job,signal,continuation=null,resumeOwnedPass=null,freshRetiredAnswer=false) => {
+  const perform = async (job,signal,continuation=null,resumeOwnedPass=null,freshRetiredSelection=null) => {
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     let checking=false,started=false,taskPass=null,observationTimer=null,failureStage='native_claim';
     let ordinaryObservation=null;
     // Only this first attempt follows the successful transactional claim.
     // A replay after network loss has no authority to declare the pass absent.
-    let beforeBegin=freshRetiredAnswer,beginRejected=false;
+    let beforeBegin=freshRetiredSelection!==null,beginRejected=false;
     const maxObservationMs=30*60_000;
     const armObservation=deadline=>{
       const remaining=deadline-now();
@@ -2716,7 +2757,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Move it only for a positively observed live renewal of the SAME
       // native pass. A late response cannot revive an already expired window.
       const observed=Date.parse(live?.leaseExpiresAt);
-      if(!ordinaryObservation||!taskPass||live?.state!=='leased'||live.workMode!=='task'
+      if(!ordinaryObservation||!taskPass||!isDeepStrictEqual(taskPass.retiredReconcile,live?.retiredReconcile)||taskPass.retiredReconcile&&taskPass.notificationId!==live?.notificationId||live?.state!=='leased'||live.workMode!=='task'
         ||['passId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>live[key]!==taskPass[key])
         ||!Number.isSafeInteger(live.leaseRevision)||live.leaseRevision<ordinaryObservation.revision
         ||!Number.isFinite(observed)||observed<=now()||ordinaryObservation.deadline<=now())
@@ -2814,27 +2855,34 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const authority=continuation&&taskState.state==='done'
           ?{bindingId:savedContinuation.bindingId,revision:savedContinuation.bindingRevision}:taskState.authority;
         const handed=inbox.readRetiredAnswer(job.deliveryId),retiredAnswer=handed?.request;
+        const reconciliation=inbox.readReconciliation(job.deliveryId);
+        if(retiredAnswer&&reconciliation)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         let admitted;
         beforeBegin=false;
         try {
           admitted=continuation?await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},combined)
           :await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
-            bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId,...(retiredAnswer?{retiredAnswer}:{})},combined);
+            bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId,...(retiredAnswer?{retiredAnswer}:{}),...reconciliation},combined);
         }catch(error){
           // These are definitive native ACL/ownership/CAS refusals of the first
           // request. A timeout, malformed reply or an uncertain retry stays held.
-          beginRejected=freshRetiredAnswer&&[403,404,409].includes(error?.status);
+          beginRejected=freshRetiredSelection!==null&&[403,404,409].includes(error?.status);
           throw error;
         }
         lease();
         if(!isDeepStrictEqual(admitted.retiredAnswer,retiredAnswer?{writerRetirementReceiptId:retiredAnswer.writerRetirementReceiptId,
           notificationId:retiredAnswer.notificationId}:undefined))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        if(reconciliation?.notificationId!==admitted.notificationId||!isDeepStrictEqual(reconciliation?.retiredReconcile,admitted.retiredReconcile)
+          ||reconciliation&&(!continuation&&!admitted.startState||admitted.workMode!=='task'))
+          fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         if(admitted.bindingId!==authority.bindingId||admitted.bindingRevision!==authority.revision
           ||admitted.deliveryId!==job.deliveryId||admitted.threadId!==plan.threadId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
-          passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);
-        const samePass=value=>value&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key])
-          &&Object.keys(value).length===Object.keys(expectedPass).length;
+          passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision,
+          ...(reconciliation?{retiredReconcile:reconciliation.retiredReconcile,
+            ...(reconciliation.notificationId?{notificationId:reconciliation.notificationId}:{})}:{})},identity);
+        if(reconciliation)options.retiredReconcile=reconciliation.retiredReconcile;
+        const samePass=value=>isDeepStrictEqual(value,expectedPass);
         if(!continuation&&admitted.state==='closed'){
           // A restored zero-start row cannot reopen a closed grant. Only the
           // retained signer identity, matching business receipt and exclusive
@@ -3050,12 +3098,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               inbox.observeModelCapacity(job.deliveryId,{turnId:result.turnId,markerId:marker});}
         }catch{/* Incomplete native evidence retains the ordinary no-replay fence. */}
       }
-      if(freshRetiredAnswer&&(beginRejected||beforeBegin&&(error?.code==='ASSISTANT_COORDINATOR_TASK_STOPPED'||[403,404,409].includes(error?.status)))){
+      if(freshRetiredSelection!==null&&(beginRejected||beforeBegin&&(error?.code==='ASSISTANT_COORDINATOR_TASK_STOPPED'||[403,404,409].includes(error?.status)))){
         lease();combined.throwIfAborted();
-        inbox.deferRetiredAnswer(job.deliveryId);
+        if(freshRetiredSelection==='answer')inbox.deferRetiredAnswer(job.deliveryId);
+        else inbox.deferReconciliation(job.deliveryId);
         return {state:'not_admitted',kind:'task'};
       }
-      if(started||continuation||inbox.readRetiredAnswer(job.deliveryId)) {
+      if(started||continuation||inbox.readRetiredAnswer(job.deliveryId)||inbox.readReconciliation(job.deliveryId)) {
         if(inbox.readDelivery(job.deliveryId).state!=='complete') inbox.markDeliveryUncertain(job.deliveryId,assistantDeliveryFailure(error?.code,failureStage));
       } else inbox.abandonUnstartedDelivery(job.deliveryId);
       const code=started?'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN':errorCode(error);
@@ -3121,7 +3170,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(job) return perform(job,signal);
         if(job===null) break;
       }
-      return await takeRetiredAnswer(signal)??await resolveRetiredAcceptedTask(signal)??inspectRetiredTask(signal);
+      return await takeRetiredAnswer(signal)??await resolveRetiredAcceptedTask(signal)??await reconcileRetiredTask(signal)??inspectRetiredTask(signal);
     })();
     try { return await active; } catch(error) { throw safeError(error); } finally { active=null; }
   };

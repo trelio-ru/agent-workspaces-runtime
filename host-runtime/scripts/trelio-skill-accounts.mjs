@@ -502,9 +502,11 @@ export function createAccountCatalogue({ directory, scope, io, boundMutationsOnl
         return { id, ...(creation||bindingIntent?{replayed:false}:{}) };
       });
     },
-    async select(id = null, { allowUnboundGuest = false } = {}) {
-      await io.ensureDirectory(root);
-      const state = await read(), current = binding(state);
+    async select(id = null, { allowUnboundGuest = false, existingOnly = false } = {}) {
+      // A restricted task may use existing account bindings without creating
+      // account storage or running an import when the binding is missing.
+      if (!existingOnly) await io.ensureDirectory(root);
+      const state = existingOnly ? await readExisting() ?? emptyState() : await read(), current = binding(state);
       const selected = id || current.defaultAccountId || (current.accountIds.length === 1 ? current.accountIds[0] : null);
       // An opted-in browser can run without a binding. An explicit account
       // selection or ambiguity among bound accounts still gets its usual error.

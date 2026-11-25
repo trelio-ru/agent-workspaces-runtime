@@ -256,3 +256,31 @@ test('protected taskless pass releases only an exact negative native receipt, ne
  assert.deepEqual(await host.readActivePass(),pass);
  await host.releasePass(receipt);assert.equal(await host.readActivePass(),null);
 });
+
+test('a new restricted pass repeats native identity and refuses unbound or effectful tools before signing',async()=>{
+  const f=fixture(),retiredReconcile={passId:crypto.randomUUID(),writerRetirementReceiptId:crypto.randomUUID(),expectedLeaseRevision:2};
+  f.setActive({...f.pass,retiredReconcile});
+  const read=f.client.readTaskPass,register=f.client.registerRuntime;
+  let nativeRestriction=retiredReconcile;
+  f.client.readTaskPass=async input=>({...await read(input),retiredReconcile:nativeRestriction});
+  f.client.registerRuntime=async input=>{
+    assert.deepEqual(input.retiredReconcile,retiredReconcile);
+    return {...await register(input),retiredReconcile};
+  };
+  const event=args=>({...f.event(),tool_input:args});
+  for(const [tool,args] of [['use_assistant_browser',{}],['execute_assistant_operation',{}],
+    ['continue_assistant_workspace_action',{operation:'secret_browser_fill'}],
+    ['get_assistant_status',{view:'company_context'}],['complete_assistant_pass',{noChange:true}]]){
+    await assert.rejects(f.hook(event(args),tool),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  }
+  assert.equal(f.calls(),0);
+  for(const [tool,args] of [['get_task',{}],['get_agent_skill',{}],['continue_assistant_workspace_action',{operation:'skill_run'}]]){
+    const actual=await f.hook(event(args),tool);
+    assert.equal(actual.hookSpecificOutput.updatedInput.taskPass.passId,f.pass.passId);
+  }
+  assert.equal(f.calls(),1);
+  nativeRestriction={...retiredReconcile,writerRetirementReceiptId:crypto.randomUUID()};
+  await assert.rejects(f.hook(event({}), 'get_task'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  nativeRestriction=undefined;
+  await assert.rejects(f.hook(event({}), 'get_task'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+});

@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { setTimeout as waitForTimer } from 'node:timers/promises';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
-import { matchesAssistantRetiredPass, validateAssistantRetiredPass, validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
+import { validateAssistantRetiredReconcile, sameAssistantReconcile, matchesAssistantRetiredPass, validateAssistantRetiredPass, validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
@@ -285,6 +285,13 @@ const state = value => {
 };
 // Legacy native services keep the ordinary material contract. Only an explicit
 // closed native value selects the restricted discussion prompt/timer display.
+const reconcileField = value => {
+  if(!Object.hasOwn(value,'retiredReconcile'))return {};
+  if(Object.hasOwn(value,'retiredAnswer'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  try{return {retiredReconcile:validateAssistantRetiredReconcile(value.retiredReconcile),
+    ...(value.notificationId===undefined?{}:{notificationId:id(value.notificationId)})};}
+  catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+};
 const workMode = value => {
   if (value === undefined) return {};
   if (!['task','discussion'].includes(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -595,7 +602,7 @@ export const readAssistantCompanyContentMode=async({identity,host,client,signal}
       || JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))
       fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     const live=intake?await client.readSourceIntake(locator,signal):await client.readTaskPass(locator,signal);
-    if((pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=Date.now())
+    if(!sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || (pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=Date.now())
       ||live.threadId!==pass.threadId||!Number.isFinite(Date.parse(live.leaseExpiresAt))
       || (intake ? live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
@@ -1383,6 +1390,8 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   // Draft/read-only retirement and arbitrary caller IDs remain denied here.
   const retiredMaterial=pass.retiredPass?.outcome?.workspaceId===materialWorkspaceId
     ?pass.retiredPass.outcome:null;
+  if(pass.retiredReconcile && [sourceReads,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,
+    secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup].some(Boolean))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   if(pass.retiredPass && ([sourceReads,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,
     encryptedInspection,encryptedSkillRead,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup]
     .some(Boolean) || materialWorkspaceId!==null&&!retiredMaterial
@@ -1477,7 +1486,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     await assertIdentity();
     const live=ownerReadOrigin?await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal)
       :await client.readTaskPass(locator,signal);
-    if((pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=now())
+    if(!sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || (pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased'||Date.parse(live.leaseExpiresAt)<=now())
       ||live.threadId!==pass.threadId
       ||(ownerReadOrigin?live.kind==='route_existing'||live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
         ||(companyRead||plainSourceFile)&&(!live.ownerPrivateRead||!live.readConfirmed)
@@ -1524,6 +1533,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   };
   return Object.freeze({
     kind:'digital_assistant',
+    ...(pass.retiredReconcile?{retiredReconcile:pass.retiredReconcile}:{}),
     async prepareAttachmentRead(value){
       if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId,skillRead].some(Boolean))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       const selected=await validateAssistantEncryptedAttachment(value,identity.origin);
@@ -3042,6 +3052,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
 
   const registerObservedRuntime=async(input,signal,intake=false)=>{
       const retiredPass=input.retiredPass===undefined?null:validateAssistantRetiredPass(input.retiredPass);
+      const reconcile=input.retiredReconcile===undefined?null:validateAssistantRetiredReconcile(input.retiredReconcile);
+      if(reconcile&&(intake||retiredPass||reconcile.passId===input.passId))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(retiredPass&&(intake||input.previousRuntimeSessionId!==undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
         || input.observation.source!=='codex_hook' || input.observation.evidenceLevel!=='local_observed'
@@ -3051,17 +3063,18 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call(intake?'intakeRegister':'registerRuntime',{companyId:id(input.companyId),...(intake?{sourceId:id(input.sourceId),intakeId:id(input.intakeId)}:{taskId:id(input.taskId),passId:id(input.passId)}),
         clientSessionId:id(input.clientSessionId),observation:input.observation,publicKeySpki:input.publicKeySpki,
         ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{}),
-        ...(retiredPass?{retiredPass}:{})},signal);
+        ...(retiredPass?{retiredPass}:{}),...(reconcile?{retiredReconcile:reconcile}:{})},signal);
       if(value.schemaVersion!==1 || value.passId!==(intake?input.intakeId:input.passId) || value.conversation?.conversationId!==input.clientSessionId
         || value.conversation?.provider!=='codex' || value.conversation?.openProtocol!=='codex-thread-v1'
         || !Number.isFinite(Date.parse(value.expiresAt)) || value.runtimeRefreshSupported!==true
         || !object(value.observation) || Boolean(retiredPass)!==(value.retiredInspection===true)
+        ||!sameAssistantReconcile(input.retiredReconcile,reconcileField(value).retiredReconcile)
         ||retiredPass&&value.businessReady!==false) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       for(const key of ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'])
         if(value.observation[key]!==input.observation[key]) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {schemaVersion:1,passId:id(value.passId),runtimeSessionId:id(value.runtimeSessionId),expiresAt:isoTimestamp(value.expiresAt),
         observation:Object.fromEntries(['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source','observedAt'].map(key=>[key,key==='observedAt'?isoTimestamp(value.observation[key]):value.observation[key]])),
-        runtimeRefreshSupported:true,...(retiredPass?{retiredInspection:true}:{})};
+        runtimeRefreshSupported:true,...reconcileField(value),...(retiredPass?{retiredInspection:true}:{})};
   };
   return {
     identity: Object.freeze({ origin, assistantId, deviceId }),
@@ -3241,9 +3254,16 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
           review:validateAssistantRetiredOwnerReview(r.review),notificationId:id(r.notificationId)};
         if(answer.review.pendingOwnerCheck.sourceMarkerId===input.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       }
+      const reconcile=input.retiredReconcile===undefined?null:validateAssistantRetiredReconcile(input.retiredReconcile);
+      if((input.previousReceiptId!==undefined||input.notificationId!==undefined)&&!reconcile)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      if(answer&&reconcile)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('passBegin',{companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
         bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId),
-        ...(answer?{retiredAnswer:answer}:{})},signal);
+        ...(answer?{retiredAnswer:answer}:{}),...(reconcile?{retiredReconcile:reconcile}:{}),
+        ...(input.previousReceiptId===undefined?{}:{previousReceiptId:id(input.previousReceiptId)}),
+        ...(input.notificationId===undefined?{}:{notificationId:id(input.notificationId)})},signal);
+      if(!sameAssistantReconcile(input.retiredReconcile,reconcileField(value).retiredReconcile)
+        ||reconcile&&input.notificationId!==value.notificationId||reconcile&&(value.passId===reconcile.passId||value.workMode!=='task'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const link=retiredAnswerLink(value);
       if(answer&&(!['created','observe'].includes(value.startState)||value.passId===answer.passId
         ||link.retiredAnswer?.writerRetirementReceiptId!==answer.writerRetirementReceiptId||link.retiredAnswer.notificationId!==answer.notificationId)
@@ -3257,14 +3277,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {...(Object.hasOwn(value,'startState') ? {startState:value.startState} : {}),...link,passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode),...reconcileField(value)};
     },
     async readTaskPass(input,signal) {
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId)},signal);
       if(value.passId!==input.passId || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {...retiredAnswerLink(value),passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode),...reconcileField(value)};
     },
     async readTaskMaterialBasis(input,signal){
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),includeMaterialBasis:true},signal);
@@ -3309,7 +3329,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const expected={passId:body.passId,bindingId:id(input.bindingId),bindingRevision:revision(input.bindingRevision),
         deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
       let expectedState='review_required', review;
-      if(input.notificationId!==undefined&&input.review===undefined)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      if(input.review!==undefined&&input.reconcile!==undefined||input.notificationId!==undefined&&input.review===undefined&&input.reconcile!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       if(input.review!==undefined){
         try{review=validateAssistantRetiredOwnerReview(input.review);}catch{fail('ASSISTANT_TRANSPORT_INVALID_INPUT');}
         if(!input.writerRetirement||review.pendingOwnerCheck.sourceMarkerId!==expected.deliveryId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
@@ -3329,8 +3349,13 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
           ||Object.entries(expected).some(([key,field])=>receipt[key]!==field))
           fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
         body.recoveryContext.writerRetirementReceiptId=receipt.receiptId;
+        if(input.reconcile===true){
+          body.recoveryContext.reconcile=true;
+          if(input.notificationId!==undefined)body.recoveryContext.notificationId=id(input.notificationId);
+        }
         expectedState='closed';
       }
+      if(input.reconcile!==undefined&&(input.reconcile!==true||expectedState!=='closed'))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       let value;
       try{value=await call('passRead',body,signal);}
       catch(error){
@@ -3342,8 +3367,18 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const context=value.recoveryContext;
       if(context===null&&expectedState==='review_required')return null;
       if(value.state!==expectedState||value.leaseRevision!==expectedLeaseRevision||value.workMode!=='task'||value.businessReady!==false
-        ||!object(context)||Object.keys(context).sort().join(',')!==(review?'draftEvidence,materialBasis,operations,review,schemaVersion':'draftEvidence,materialBasis,operations,schemaVersion')
+        ||!object(context)||Object.keys(context).sort().join(',')!==(input.reconcile?'draftEvidence,materialBasis,operations,reconcile,schemaVersion':review?'draftEvidence,materialBasis,operations,review,schemaVersion':'draftEvidence,materialBasis,operations,schemaVersion')
         ||context.schemaVersion!==1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      let reconcile;
+      if(input.reconcile){
+        reconcile=context.reconcile;
+        if(reconcile!==null&&(!object(reconcile)||reconcile.eligible!==true
+          ||Object.keys(reconcile).some(key=>!['eligible','previousReceiptId','notificationId','ownerQuestionId'].includes(key))
+          ||reconcile.notificationId!==input.notificationId||Boolean(reconcile.notificationId)!==Boolean(reconcile.ownerQuestionId)))
+          fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        if(reconcile?.previousReceiptId!==undefined)id(reconcile.previousReceiptId);
+        if(reconcile?.ownerQuestionId!==undefined)id(reconcile.ownerQuestionId);
+      }
       let draftEvidence=null;
       if(context.draftEvidence!==null){
         const draft=context.draftEvidence;
@@ -3381,6 +3416,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         ||basis.workspaceId!==review.workspaceId||basis.workspaceHead!==review.acceptedHead
         ||basis.receiptId!==review.pendingOwnerCheck.priorReceiptId))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return Object.freeze({schemaVersion:1,draftEvidence,materialBasis:basis,...(review?{review:context.review}:{}),
+        ...(input.reconcile?{reconcile}:{}),
         operations:Object.freeze({coverage:'partial',receipts:Object.freeze(receipts),hasMore:operations.hasMore})});
     },
     async readTaskRetainedFinishEvidence(input,signal){
@@ -3436,7 +3472,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // as in readTaskPass; the request itself cannot attest that binding.
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode),...reconcileField(value)};
     },
     async continueTaskPass(input,signal) {
       if(!object(input)||!['review','read','resume'].includes(input.continuation)

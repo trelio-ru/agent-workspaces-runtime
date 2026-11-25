@@ -900,3 +900,34 @@ test('hydrated company authority retains account selectors and invalidates only 
   assert.equal(fresh.layers[0].sha256,cold.layers[0].sha256,'original authority text remains unchanged');
   assert.deepEqual(fresh.reusedLayerKeys,[]);
 });
+
+test('a restricted task starts only declared read commands and performs no account import',async t=>{
+  const {withWorkspaceExecutionProfile}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const f=await monitorFixture(t,`import fs from 'node:fs'; fs.appendFileSync(new URL('./calls',import.meta.url),process.argv.slice(2).join(' ')+'\\n');process.stdout.write('known-result');`);
+  const policy={schemaVersion:3,taskCommands:[['read'],['send']],readOnlyCommands:[['read']],deniedOptions:['--confirm']};
+  const parsed=f.input.artifact.parsedPackage;
+  parsed.files=[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(policy))}];
+  const catalogue=path.join(f.input.runtimeDirectory,'previously-unconfigured');
+  const profile={resolveSkillCatalogueDirectory:async()=>catalogue,kind:'digital_assistant',retiredReconcile:{passId:crypto.randomUUID(),writerRetirementReceiptId:crypto.randomUUID(),expectedLeaseRevision:0},
+    requireToken:async()=>assert.fail(),prepareRequest:async()=>assert.fail(),resolveSkillRuntimeChat:async()=>null};
+  await withWorkspaceExecutionProfile(profile,async()=>{
+    const accountParameters={...f.input,origin:identity.origin,discover:()=>assert.fail('no account import'),
+      output:value=>assert.deepEqual(value.accounts,[])};
+    await prepareSkillAccount({...accountParameters,runtimeArguments:['account','list']});
+    await assert.rejects(prepareSkillAccount({...accountParameters,runtimeArguments:['account','create','--name','Unused','--expected-revision','0']}),
+      {code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+    await assert.rejects(prepareSkillAccount({...accountParameters,runtimeArguments:['read']}),{code:'ACCOUNT_SETUP_REQUIRED'});
+    await assert.rejects(fs.stat(catalogue),{code:'ENOENT'});
+    for(const args of [['send'],['read','--confirm'],['account','create']]){
+      await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:args}),e=>
+        ['ASSISTANT_CAPABILITY_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_DENIED'].includes(e.code));
+    }
+    await assert.rejects(f.run({runtimeArguments:['monitor']}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+    const res=await f.run({captureMode:'assistant_task',runtimeArguments:['read','--target','example']});
+    assert.equal(res.stdout,'known-result');assert.equal(res.taskReadOnly,true);
+    const file=path.join(f.input.runtimeDirectory,'calls');
+    assert.equal(await fs.readFile(file,'utf8'),'read --target example\n');
+    parsed.files=[];await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:['read']}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+    assert.equal(await fs.readFile(file,'utf8'),'read --target example\n');
+  });
+});

@@ -54,6 +54,34 @@ export const ASSISTANT_RETIRED_TASK_TOOLS = Object.freeze([
   'continue_assistant_workspace_action', 'use_assistant_workspace_files',
 ]);
 export const ASSISTANT_RETIRED_OUTCOME_TOOLS = Object.freeze(['complete_assistant_pass']);
+// A new canonical Run can record actual work performed after retirement.
+// Only this positive vocabulary reaches the model and each invocation repeats
+// the check: profile discovery and a past installation are not capabilities.
+export const ASSISTANT_RECONCILE_TASK_TOOLS = Object.freeze([
+  ...ASSISTANT_RETIRED_TASK_TOOLS, 'get_assistant_status', 'get_assistant_operation_contract', 'get_agent_skill',
+  'prepare_assistant_workspace_read', 'get_assistant_owner_question', 'complete_assistant_pass',
+]);
+export const validateAssistantRetiredReconcile=value=>{
+  if(!exactObject(value,['passId','writerRetirementReceiptId','expectedLeaseRevision'])
+    || !uuid.test(value.passId??'') || !uuid.test(value.writerRetirementReceiptId??'')
+    || !Number.isSafeInteger(value.expectedLeaseRevision)||value.expectedLeaseRevision<0
+    ||value.expectedLeaseRevision>2_147_483_647)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+  return Object.freeze({passId:value.passId,writerRetirementReceiptId:value.writerRetirementReceiptId,
+    expectedLeaseRevision:value.expectedLeaseRevision});
+};
+export const sameAssistantReconcile=(left,right)=>left===undefined&&right===undefined
+  ||Boolean(left&&right&&['passId','writerRetirementReceiptId','expectedLeaseRevision'].every(key=>left[key]===right[key]));
+export const assertAssistantReconcileTool=(name,args)=>{
+  if(!ASSISTANT_RECONCILE_TASK_TOOLS.includes(name)
+    ||name==='get_assistant_status'&&args.view!==undefined&&args.view!=='task'
+    ||['prepare_assistant_workspace_read','prepare_assistant_workspace_run'].includes(name)&&
+      (args.relatedWorkspaceIds?.length||args.startNewRun===true)
+    ||['continue_assistant_workspace_action','get_assistant_operation_contract'].includes(name)&&
+      !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run'].includes(args.operation)
+    ||name==='complete_assistant_pass'&&(args.noChange!==false||!uuid.test(args.acceptedRunId??'')
+      ||args.processedSourceReferences?.length||args.replyCommentId!==undefined||args.ownerDecisionId!==undefined))
+    fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+};
 export const validateAssistantRetiredPass = value => {
   const keys=['writerRetirementReceiptId','expectedLeaseRevision'];
   if (value?.run!==undefined) keys.push('run');
@@ -99,7 +127,7 @@ export const matchesAssistantRetiredPass = (pass,live) => Boolean(pass.retiredPa
 const intakeKeys=['schemaVersion','kind','assistantId','deviceId','companyId','sourceId','sourceRevision','passId','deliveryId','eventId','threadId'];
 export const validateAssistantActivePass=(value,identity)=>{
   const intake=value?.kind==='source_intake',routing=intake&&value.intakeKind==='route_existing',keys=intake?[...intakeKeys,...(routing?['intakeKind','eventIds']:[])]:
-    value?.retiredPass!==undefined?[...passKeys,'retiredPass']:passKeys;
+    value?.retiredPass!==undefined?[...passKeys,'retiredPass']:value?.retiredReconcile!==undefined?[...passKeys,'retiredReconcile',...(value.notificationId===undefined?[]:['notificationId'])]:passKeys;
   if(!exactObject(value,keys) || value.schemaVersion!==1 || value.assistantId!==identity.assistantId || value.deviceId!==identity.deviceId
     || keys.filter(key=>key.endsWith('Id')).some(key=>!uuid.test(value[key]??''))
     || !Number.isSafeInteger(intake?value.sourceRevision:value.bindingRevision) || (intake?value.sourceRevision:value.bindingRevision)<0
@@ -107,7 +135,7 @@ export const validateAssistantActivePass=(value,identity)=>{
       ||new Set(value.eventIds).size!==value.eventIds.length||value.eventIds.some(id=>!uuid.test(id??''))))
     fail('ASSISTANT_ACTIVE_PASS_REQUIRED');
   return Object.freeze(Object.fromEntries(keys.map(key=>[key,key==='eventIds'?Object.freeze([...value[key]]):
-    key==='retiredPass'?validateAssistantRetiredPass(value[key]):value[key]])));
+    key==='retiredPass'?validateAssistantRetiredPass(value[key]):key==='retiredReconcile'?validateAssistantRetiredReconcile(value[key]):value[key]])));
 };
 
 export const createAssistantTaskHook=({identity,client,store,readActivePass,lockDirectory,
@@ -132,7 +160,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       const live=await client[intake?'readSourceIntake':'readTaskPass'](locator,runtimeHookSignal());
       const ending=event.hook_event_name==='SessionEnd';
       if((pass.retiredPass?!matchesAssistantRetiredPass(pass,live):live.state!=='leased' && !(ending && (intake?['ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied'].includes(live.state):live.state==='closed')))
-        || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
+        || !sameAssistantReconcile(pass.retiredReconcile,live.retiredReconcile) || pass.retiredReconcile&&pass.notificationId!==live.notificationId || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
           :live.deliveryId!==pass.deliveryId || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision)
         || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || live.state==='leased' && Date.parse(live.leaseExpiresAt)<=now())
@@ -155,6 +183,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
         ? {hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:TRELIO_COMPACTION_RECOVERY_CONTEXT}} : {};
       if(event.hook_event_name!=='PreToolUse' || !/^[a-z][a-z0-9_]{0,159}$/u.test(toolName??'')) fail('ASSISTANT_HOOK_INVALID_INPUT');
       if(!event.tool_input || Object.getPrototypeOf(event.tool_input)!==Object.prototype) fail('ASSISTANT_HOOK_INVALID_INPUT');
+      if(pass.retiredReconcile)assertAssistantReconcileTool(toolName,event.tool_input);
       if(pass.retiredPass) {
         assertAssistantRetiredPassTool(pass.retiredPass,toolName,event.tool_input);
         if(record?.ended||record?.state&&Date.parse(record.state.expiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
@@ -181,8 +210,9 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       const state=await ensureObservedAssistantSession({record,slot,store,observation,now,
         binding:{schemaVersion:1,passId:pass.passId,threadId:pass.threadId},
         register:fields=>client[intake?'registerIntakeRuntime':'registerRuntime']({...locator,clientSessionId:pass.threadId,...fields,
-          ...(pass.retiredPass?{retiredPass:pass.retiredPass}:{})},runtimeHookSignal()),
+          ...(pass.retiredPass?{retiredPass:pass.retiredPass}:{}),...(pass.retiredReconcile?{retiredReconcile:pass.retiredReconcile}:{})},runtimeHookSignal()),
         validateRegistered:registered=>registered.passId===pass.passId
+          &&sameAssistantReconcile(pass.retiredReconcile,registered.retiredReconcile)
           &&Boolean(registered.retiredInspection)===Boolean(pass.retiredPass)});
       // Every call gets a fresh ordinary v1 nonce. Replace any model-authored
       // pass/proof; private signing keys never appear in the updated input.

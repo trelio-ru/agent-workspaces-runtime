@@ -636,7 +636,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // dispatch diagnostics unavailable and prevents its health recovery. This
     // does not admit old schedule executors, interpret clocks or migrate state;
     // unknown/multiple versions and all retained uncertainty still fail closed.
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -743,7 +743,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -1023,6 +1023,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       delivery_id TEXT PRIMARY KEY REFERENCES assistant_inbox_deliveries(delivery_id) ON DELETE RESTRICT,
       pass_id TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE, lease_revision INTEGER NOT NULL CHECK(lease_revision>=0)
     )`);
+    if(versions[0]?.version>=37&&!get("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assistant_reconciliation_deliveries'"))
+      fail('ASSISTANT_INBOX_CONFLICT');
+    // Link new work to the original retired pass permanently. An older host
+    // cannot open this inbox once the first restricted delivery is claimed.
+    db.exec(`CREATE TABLE IF NOT EXISTS assistant_reconciliation_deliveries (
+      delivery_id TEXT PRIMARY KEY REFERENCES assistant_inbox_deliveries(delivery_id),
+      original_id TEXT NOT NULL REFERENCES assistant_retired_task_writers(delivery_id),
+      previous_receipt_id TEXT NOT NULL,
+      notification_id TEXT UNIQUE,
+      UNIQUE(original_id,previous_receipt_id)
+    )`);
     const retiredColumns=all('PRAGMA table_info(assistant_retired_task_writers)').map(column=>column.name);
     if(versions[0]?.version>=33&&!retiredColumns.includes('inspection_started')) fail('ASSISTANT_INBOX_CONFLICT');
     if(!retiredColumns.includes('inspection_started'))db.exec(`ALTER TABLE assistant_retired_task_writers
@@ -1192,8 +1203,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   // schedule remains visibly interrupted, without blocking later work after
   // its exact successor has acknowledged the real event.
   const unresolvedRetirement=`d.state<>'complete' AND ${ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR}`;
-  const isTaskWriterRetired = taskId => Boolean(get(`SELECT 1 FROM assistant_retired_task_writers w
-    JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id WHERE d.task_id=? AND ${unresolvedRetirement} LIMIT 1`,taskId));
+  const isTaskWriterRetired = (taskId,exceptDelivery=null) => Boolean(get(`SELECT 1 FROM assistant_retired_task_writers w
+    JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id WHERE d.task_id=? AND ${unresolvedRetirement}
+      AND (? IS NULL OR w.delivery_id<>?) LIMIT 1`,taskId,exceptDelivery,exceptDelivery));
   const deferredAnswer="n.state='not_accepted' AND n.native_started=0 AND n.external_receipt='host:retired-answer-not-admitted'";
   const answerEvent=(row,questionId)=>all(`SELECT e.* FROM assistant_inbox_events e
     JOIN assistant_inbox_sources s ON s.source_key=e.source_key
@@ -1202,8 +1214,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       AND (? IS NULL OR e.owner_question_id=?) AND e.wake=1 AND e.dispatched=0 AND e.processed=0 AND e.acked=1
       AND NOT EXISTS (SELECT 1 FROM assistant_inbox_delivery_events de WHERE de.event_key=e.event_key
         AND NOT EXISTS (SELECT 1 FROM assistant_retired_answer_deliveries h JOIN assistant_inbox_deliveries n ON n.delivery_id=h.delivery_id
-          WHERE h.original_id=? AND n.delivery_id=de.delivery_id AND ${deferredAnswer}))
-      ORDER BY e.rowid LIMIT 2`,row.source_key,row.task_id,questionId,questionId,row.delivery_id);
+          WHERE h.original_id=? AND n.delivery_id=de.delivery_id AND ${deferredAnswer})
+        AND NOT EXISTS (SELECT 1 FROM assistant_reconciliation_deliveries h JOIN assistant_inbox_deliveries n ON n.delivery_id=h.delivery_id
+          WHERE h.original_id=? AND n.delivery_id=de.delivery_id AND n.state='not_accepted' AND n.native_started=0
+            AND n.external_receipt='host:reconcile-not-admitted'))
+      ORDER BY e.rowid LIMIT 2`,row.source_key,row.task_id,questionId,questionId,row.delivery_id,row.delivery_id);
+  // Once a complete ordinary answer has a successor, both ledgers retain the
+  // old attempt as history. Only a definitively refused first begin can make
+  // the same still-pending answer available to the restricted path.
+  const establishedAnswer=`EXISTS(SELECT 1 FROM assistant_retired_answer_deliveries a JOIN assistant_inbox_deliveries n
+    ON n.delivery_id=a.delivery_id WHERE a.original_id=d.delivery_id AND NOT (${deferredAnswer}))`;
   const hasActiveDelivery=()=>get(`SELECT 1 FROM assistant_inbox_deliveries d WHERE d.state IN ('leased','started','uncertain')
     AND NOT EXISTS (SELECT 1 FROM assistant_retired_task_writers w WHERE w.delivery_id=d.delivery_id AND w.released=1) LIMIT 1`);
   const taskProvisionRecovery = row => {
@@ -2821,9 +2841,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         }
         const task=get('SELECT authority_binding_id,authority_revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',row.source_key,row.task_id);
         const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
+        // A second interruption in genuinely new restricted work must release
+        // the device without settling either task attempt. Exclude only the
+        // original ledger entry authenticated by this successor's fixed link.
+        const link=get('SELECT original_id FROM assistant_reconciliation_deliveries WHERE delivery_id=?',row.delivery_id);
+        if(link){
+          const selected=this.readReconciliation(row.delivery_id);
+          if(!pass.retiredReconcile||!Object.entries(selected.retiredReconcile).every(([key,value])=>pass.retiredReconcile[key]===value)
+            ||selected.notificationId!==pass.notificationId)fail('ASSISTANT_INBOX_CONFLICT');
+        }else if(pass.retiredReconcile)fail('ASSISTANT_INBOX_CONFLICT');
         if(row.expires_at>time()||receipt.taskId!==row.task_id||scope.provider!=='trelio'
           ||task?.authority_binding_id!==receipt.bindingId||task?.authority_revision!==receipt.bindingRevision
-          ||row.native_thread_id!==null&&row.native_thread_id!==receipt.threadId||isTaskWriterRetired(receipt.taskId))
+          ||row.native_thread_id!==null&&row.native_thread_id!==receipt.threadId||isTaskWriterRetired(receipt.taskId,link?.original_id??null))
           fail('ASSISTANT_INBOX_STALE_DELIVERY');
         run('INSERT INTO assistant_retired_task_writers(delivery_id,receipt_id,receipt_json) VALUES(?,?,?)',
           row.delivery_id,receipt.receiptId,JSON.stringify(receipt));
@@ -2842,6 +2871,79 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(!retired.released)run('UPDATE assistant_retired_task_writers SET released=1 WHERE delivery_id=?',id);
       });
     },
+    // Choose independently of transcript availability or shape. Native
+    // admission separately checks the old writer, outstanding owner decisions
+    // and current task authority. A successor never carries old inbox events.
+    pendingReconciliationTasks(){
+      return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
+        JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
+        WHERE w.released=1 AND d.state='uncertain' AND d.scheduled=1
+          AND NOT ${establishedAnswer} AND NOT EXISTS(SELECT 1 FROM assistant_reconciliation_deliveries h WHERE h.delivery_id=d.delivery_id)
+        ORDER BY d.expires_at,w.delivery_id`).map(row=>this.readDelivery(row.delivery_id));
+    },
+    reconciliationWake(id){
+      const row=delivery(id);
+      // Owner answers originate in the native task notifier. Reading a
+      // message, guessing its sender, or having a matching task id does not
+      // supply this authenticated notification or process it.
+      const events=answerEvent(row,null);
+      return events.length?{questionId:uuid(events[0].owner_question_id),notificationId:uuid(events[0].event_id),
+        eventKey:events[0].event_key}:null;
+    },
+    readReconciliation(id){
+      const link=get('SELECT original_id,previous_receipt_id,notification_id FROM assistant_reconciliation_deliveries WHERE delivery_id=?',uuid(id));
+      if(!link)return null;
+      const original=delivery(link.original_id), {receipt,released}=readRetiredWriter(original)??{};
+      const successor=delivery(id);
+      const [event,...others]=deliveryEvents(id);
+      if(!released||successor.kind!=='task'||!successor.scheduled||successor.task_id!==original.task_id
+        ||successor.source_key!==original.source_key||others.length||(link.notification_id===null?event:
+          event?.event_id!==link.notification_id||!UUID.test(event?.owner_question_id??'')||event.conversation_key))fail('ASSISTANT_INBOX_CONFLICT');
+      return {retiredReconcile:{passId:receipt.passId,writerRetirementReceiptId:receipt.receiptId,
+        expectedLeaseRevision:receipt.leaseRevision},...(event?{notificationId:uuid(link.notification_id)}:{}),...(link.previous_receipt_id?{previousReceiptId:uuid(link.previous_receipt_id)}:{})};
+    },
+    claimReconciliation(id,retirementId,previousReceiptId=null,ownerWake=null){
+      return transaction(()=>{
+        const original=delivery(id), retired=readRetiredWriter(original);
+        if(!retired?.released||retired.receipt.receiptId!==uuid(retirementId)||original.state!=='uncertain'
+          ||!original.scheduled||hasActiveDelivery()
+          ||get(`SELECT 1 FROM assistant_inbox_deliveries d WHERE d.delivery_id=? AND ${establishedAnswer}`,id))return null;
+        const last=get(`SELECT d.delivery_id,d.state,d.external_receipt,h.previous_receipt_id,h.notification_id FROM assistant_reconciliation_deliveries h
+          JOIN assistant_inbox_deliveries d ON d.delivery_id=h.delivery_id WHERE h.original_id=? ORDER BY h.rowid DESC LIMIT 1`,id);
+        const previous=previousReceiptId===null?'':uuid(previousReceiptId);
+        // Both ledgers must name the same confirmed immediately preceding
+        // outcome. A missing response cannot allocate another successor.
+        const deferred=last?.state==='not_accepted'&&last.external_receipt==='host:reconcile-not-admitted';
+        if(deferred?(last.previous_receipt_id!==previous||last.notification_id!==(ownerWake?.notificationId??null))
+          :last?(last.state!=='complete'||!previous||last.external_receipt?.split(':')[1]!==previous):Boolean(previous))return null;
+        const task=get("SELECT revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=? AND state='accepted'",original.source_key,original.task_id);
+        if(!task||!get("SELECT 1 FROM assistant_inbox_sources WHERE source_key=? AND state='active'",original.source_key))return null;
+        const wake=this.reconciliationWake(id);
+        if(wake?.questionId!==ownerWake?.questionId||wake?.notificationId!==ownerWake?.notificationId)return null;
+        if(get('SELECT count(*) AS total FROM assistant_inbox_deliveries').total>=MAX_EVENTS)fail('ASSISTANT_INBOX_FULL');
+        if(deferred){
+          run("UPDATE assistant_inbox_deliveries SET state='started',external_receipt=NULL,expires_at=? WHERE delivery_id=?",
+            time()+LEASE_MS,last.delivery_id);
+          return {...this.readDelivery(last.delivery_id),events:deliveryEvents(last.delivery_id)};
+        }
+        const newId=randomUUID();
+        run("INSERT INTO assistant_inbox_deliveries(delivery_id,source_key,task_id,task_revision,state,expires_at,scheduled,kind) VALUES (?,?,?,?,'started',?,1,'task')",
+          newId,original.source_key,original.task_id,task.revision,time()+LEASE_MS);
+        if(wake)run('INSERT INTO assistant_inbox_delivery_events(delivery_id,event_key,event_ordinal) VALUES(?,?,0)',newId,wake.eventKey);
+        run('INSERT INTO assistant_reconciliation_deliveries(delivery_id,original_id,previous_receipt_id,notification_id) VALUES(?,?,?,?)',
+          newId,id,previous,wake?.notificationId??null);
+        run('UPDATE assistant_inbox_meta SET version=37 WHERE version<37');
+        return {...this.readDelivery(newId),events:deliveryEvents(newId)};
+      });
+    },
+    deferReconciliation(id){
+      return transaction(()=>{
+        if(!this.readReconciliation(id))fail('ASSISTANT_INBOX_CONFLICT');
+        const changed=run(`UPDATE assistant_inbox_deliveries SET state='not_accepted',external_receipt='host:reconcile-not-admitted'
+          WHERE delivery_id=? AND native_started=0 AND state='started'`,id);
+        if(Number(changed.changes)!==1)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+      });
+    },
     pendingRetiredTaskInspections() {
       return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
         JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
@@ -2855,7 +2957,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // reconciliation. No source ACK, event change or retry can use it.
       return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
         JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
-        WHERE w.released=1 AND d.state='uncertain' AND d.scheduled=1 AND NOT EXISTS
+        WHERE w.released=1 AND d.state='uncertain' AND d.scheduled=1
+          AND NOT EXISTS(SELECT 1 FROM assistant_reconciliation_deliveries r WHERE r.original_id=d.delivery_id OR r.delivery_id=d.delivery_id) AND NOT EXISTS
           (SELECT 1 FROM assistant_retired_answer_deliveries h JOIN assistant_inbox_deliveries n ON n.delivery_id=h.delivery_id
             WHERE h.original_id=w.delivery_id ${ownerAnswersOnly?`AND NOT (${deferredAnswer})`:''}) AND NOT EXISTS
           (SELECT 1 FROM assistant_inbox_delivery_events e WHERE e.delivery_id=d.delivery_id)
@@ -2867,6 +2970,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     pendingRetiredAnswer(id,questionId=null) {
       const row=delivery(uuid(id)), record=readRetiredWriter(row);
       if(!record?.released||record.outcomeMarker||row.state!=='uncertain'||!row.scheduled||deliveryEvents(id).length
+        ||get('SELECT 1 FROM assistant_reconciliation_deliveries WHERE original_id=?',id)
         ||get(`SELECT 1 FROM assistant_retired_answer_deliveries h JOIN assistant_inbox_deliveries n ON n.delivery_id=h.delivery_id
           WHERE h.original_id=? AND NOT (${deferredAnswer})`,id)
         ||get(`SELECT 1 FROM assistant_retired_task_writers w JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
@@ -2965,7 +3069,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       });
     },
     retiredTaskIds() {
-      return all(`SELECT d.task_id FROM assistant_retired_task_writers w
+      return all(`SELECT DISTINCT d.task_id FROM assistant_retired_task_writers w
         JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
         WHERE w.released=1 AND ${unresolvedRetirement} ORDER BY d.task_id`).map(row=>uuid(row.task_id));
     },

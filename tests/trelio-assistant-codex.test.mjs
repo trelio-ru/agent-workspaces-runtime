@@ -3988,3 +3988,32 @@ test('native history selects only the exact interrupted scheduled review that ob
   }
   assert.deepEqual(await read(full,{...localDraft,runId:randomUUID()}),{state:'uncertain'});
 });
+
+test('a reconciliation turn verifies the live tool surface and the original chat before delivering one new task',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const {ASSISTANT_RECONCILE_TASK_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-hook.mjs');
+  const input={threadId,deliveryId,cwd,execution,taskContext:{...taskContext,scheduled:true,ownerQuestionIds:[randomUUID()]}};
+  const retiredReconcile={passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:2};
+  for(const extra of [true,false]){
+    let starts=0,turns=0;
+    const options={retiredReconcile,startState:'created',executable:process.execPath,environment:{},
+      readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},readWorkflow:async()=>'installed task role',
+      startInvocation:()=>{starts++;},
+      spawnProcess:ownedRpc({threadId,cwd,onRequest:r=>{
+        if(r.method==='thread/resume')assert.deepEqual(
+          r.params.config.plugins['trelio-digital-assistant@trelio-digital-assistants'].mcp_servers['trelio-assistant'].enabled_tools,
+          ASSISTANT_RECONCILE_TASK_TOOLS);
+      },onInput:text=>{
+        turns++;assert.match(text,/earlier writer stopped/u);assert.match(text,/only|one listed owner answer/u);
+        assert.ok(text.includes(input.taskContext.ownerQuestionIds[0]));assert.ok(text.includes(deliveryId));
+        assert.ok(!text.includes(retiredReconcile.passId));assert.ok(!text.includes(retiredReconcile.writerRetirementReceiptId));
+      },executionPolicy:(r,base)=>{
+        if(r.method==='mcpServerStatus/list')base.result.data[0].tools=Object.fromEntries([
+          ...ASSISTANT_RECONCILE_TASK_TOOLS,...(extra?['send_message']:[])].map(name=>[name,{name}]));
+        return base;
+      }})};
+    if(extra)await assert.rejects(runAssistantTurn(input,options),{code:'ASSISTANT_CODEX_EXECUTION_POLICY_UNAVAILABLE'});
+    else assert.equal((await runAssistantTurn(input,options)).state,'completed');
+    assert.equal(starts,extra?0:1);assert.equal(turns,starts);
+  }
+});

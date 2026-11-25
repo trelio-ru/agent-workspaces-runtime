@@ -16,7 +16,7 @@ import { ASSISTANT_WORKSPACE_DRAFT_TOOLS, ASSISTANT_WORKSPACE_ACCEPTED_TOOLS, AS
   validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft, validateAssistantRecoveredOutcomeEvidence,
   assistantWorkspaceCheckpointLocator, assistantRecoveredOutcomeCompletion,
   validateAssistantRetiredOutcomeEvidence, assistantRetiredOutcomeCompletion } from './trelio-assistant-inbox.mjs';
-import { ASSISTANT_RETIRED_TASK_READ_TOOLS, ASSISTANT_RETIRED_TASK_TOOLS, ASSISTANT_RETIRED_OUTCOME_TOOLS, validateAssistantRetiredPass } from './trelio-assistant-hook.mjs';
+import { ASSISTANT_RECONCILE_TASK_TOOLS, validateAssistantRetiredReconcile, ASSISTANT_RETIRED_TASK_READ_TOOLS, ASSISTANT_RETIRED_TASK_TOOLS, ASSISTANT_RETIRED_OUTCOME_TOOLS, validateAssistantRetiredPass } from './trelio-assistant-hook.mjs';
 import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validateWorkspaceFileLocator } from './trelio-workspace-files.mjs';
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
@@ -57,11 +57,11 @@ export const assistantCodexExecutionArguments = () => ['app-server','--listen','
  * disabled; the sole permitted server must come from the verified assistant
  * plugin. A user server with the same name must never impersonate that plugin.
  * No config file, enabled setting or native hook trust is changed on disk. */
-const workspaceRecoveryTools=mode=>mode==='retired_draft'?ASSISTANT_RETIRED_TASK_TOOLS:mode==='retired_read'?ASSISTANT_RETIRED_TASK_READ_TOOLS
+const workspaceRecoveryTools=mode=>mode==='retired_reconcile'?ASSISTANT_RECONCILE_TASK_TOOLS:mode==='retired_draft'?ASSISTANT_RETIRED_TASK_TOOLS:mode==='retired_read'?ASSISTANT_RETIRED_TASK_READ_TOOLS
   :mode==='retired_outcome'?ASSISTANT_RETIRED_OUTCOME_TOOLS
   :mode==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS:mode==='accepted'?ASSISTANT_WORKSPACE_ACCEPTED_TOOLS
   :mode==='named_archive'?ASSISTANT_NAMED_ARCHIVE_RECOVERY_TOOLS:ASSISTANT_WORKSPACE_DRAFT_TOOLS;
-const workspaceRecoveryModeFor=options=>options.retiredPass?options.retiredPass.outcome?'retired_outcome':options.retiredPass.run?'retired_draft':'retired_read'
+const workspaceRecoveryModeFor=options=>options.retiredReconcile?'retired_reconcile':options.retiredPass?options.retiredPass.outcome?'retired_outcome':options.retiredPass.run?'retired_draft':'retired_read'
   :options.workspaceDraftRecovery?.workspaceDraft?.recoveredOutcome!==undefined?'recovered_outcome'
   :options.workspaceDraftRecovery?.workspaceDraft?.namedArchive===true
   ||options.workspaceDraftRecovery?.workspaceDraft?.portableFinish!==undefined
@@ -149,7 +149,7 @@ const readAssistantExecutionServer = async (request,threadId,workspaceDraftRecov
   // positive readiness; verify required tools after the live connection.
   if([null,'notStarted','starting'].includes(server.runtimeStatus))return false;
   if(server.runtimeStatus!=='connected'
-    ||(['retired_draft','retired_read','retired_outcome'].includes(workspaceDraftRecovery)?workspaceRecoveryTools(workspaceDraftRecovery)
+    ||(['retired_draft','retired_read','retired_outcome','retired_reconcile'].includes(workspaceDraftRecovery)?workspaceRecoveryTools(workspaceDraftRecovery)
       :workspaceDraftRecovery==='recovered_outcome'?ASSISTANT_RECOVERED_OUTCOME_TOOLS
       :workspaceDraftRecovery==='accepted'?['get_assistant_status','complete_assistant_pass']:
       workspaceDraftRecovery?['get_assistant_status','prepare_assistant_workspace_run','continue_assistant_workspace_action',
@@ -3668,6 +3668,11 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   const workStateContext = intakeContext===undefined?assistantWorkStateContext(taskContext):assistantIntakeContext(intakeContext);
   execution = assistantExecutionConfiguration(execution);
   const workspaceRecoveryMode=workspaceRecoveryModeFor(options);
+  if(options.retiredReconcile!==undefined){
+    validateAssistantRetiredReconcile(options.retiredReconcile);
+    if(options.retiredPass||intakeContext!==undefined||workStateContext.workMode==='discussion'
+      ||!workStateContext.scheduled||workStateContext.ownerQuestionIds?.length>1||workStateContext.sourceReferences)fail('ASSISTANT_CODEX_INVALID_INPUT');
+  }
   if(options.retiredPass!==undefined) {
     const profile=validateAssistantRetiredPass(options.retiredPass);
     const selected=options.retiredOutcome;
@@ -4045,7 +4050,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
   const scope=intakeContext===undefined?assistantWorkStateContext(taskContext):assistantIntakeContext(intakeContext);
   // A restricted or uncertain pass has different authority. Reject a caller
   // that supplies any of its options instead of silently running a fresh turn.
-  const allowed=['startState','signal','passTimeoutMs','beforeInvocation','startInvocation','onAuthenticationConfirmed',
+  const allowed=['startState','retiredReconcile','signal','passTimeoutMs','beforeInvocation','startInvocation','onAuthenticationConfirmed',
     'executable','environment','spawnProcess','readExecutionAvailability','readHookReadiness','readWorkflow'];
   const timeout=options.passTimeoutMs??15*60_000;
   if(Object.keys(other).length||Object.keys(options).some(key=>!allowed.includes(key))
@@ -4065,7 +4070,11 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
   await(options.readHookReadiness??readAssistantCodexHookReadiness)(cwd,preflight);
   const workflow=await(options.readWorkflow??readAssistantWorkflow)(options.environment??process.env);
   const developerInstructions=options.retiredAnswerCheck?answeredTaskInstructions(workflow):workflow;
-  const text=assistantFreshPrompt(deliveryId,scope);
+  const reconcile=options.retiredReconcile===undefined?null:validateAssistantRetiredReconcile(options.retiredReconcile);
+  if(reconcile&&(options.retiredAnswerCheck||intakeContext!==undefined||!scope.scheduled||scope.workMode==='discussion'||scope.ownerQuestionIds?.length>1
+    ||scope.sourceReferences||!options.startState))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  const text=reconcile?assistantReconciliationPrompt(deliveryId,scope):assistantFreshPrompt(deliveryId,scope);
+  const confinement=reconcile?'retired_reconcile':false;
   let admissionError;
   let observedFresh=false;
   let completed;
@@ -4073,7 +4082,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
     completed=await readNative(null,async(_thread,request,watchTerminal,ownedSignal)=>{
       await verifyAssistantExecutionFeatures(request);
       const {config}=await request('config/read',{includeLayers:false,cwd});
-      await acquireAssistantThreadWriter(request,{threadId,cwd,config:assistantCodexExecutionOverrides(config),execution});
+      await acquireAssistantThreadWriter(request,{threadId,cwd,config:assistantCodexExecutionOverrides(config,confinement),execution});
       // Only the transaction that INSERTED the native pass can certify the
       // first attempt. An idempotent begin and an absent legacy field both
       // require the same independent read after acquiring this thread.
@@ -4086,7 +4095,7 @@ export const runAssistantTurn = async ({threadId,deliveryId,cwd,execution,taskCo
         // on expiry before it can authorize a missing marker.
         if(options.startState==='observe')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       }
-      await verifyAssistantExecutionServer(request,threadId,{signal:ownedSignal});
+      await verifyAssistantExecutionServer(request,threadId,{workspaceDraftRecovery:confinement,signal:ownedSignal});
       await verifyRetiredAnswerSource(request,threadId,deliveryId,scope,options.retiredAnswerCheck);
       // Hold this exact native writer through device/lease recheck and the
       // SQLite start CAS. A denied or disconnected preflight cannot send input.
@@ -4280,6 +4289,16 @@ const telegramTriageSenderGuidance = 'For each Telegram original, use telegram.s
 /** The verified role and work-state manual are already in this turn's developer
  * instructions. Supply the wake reason and the operations specific to its native
  * scope. Keep the two structural header lines stable for persisted chat readers. */
+// This is a new observed pass. The same chat may retain relevant prior
+// observations; neither their completeness nor the shape of an old turn
+// changes which reads this new native capability can actually execute.
+export const assistantReconciliationPrompt=(deliveryId,scope)=>[
+  assistantDeliveryMarker(deliveryId),'TRELIO_ASSISTANT_SCOPE '+JSON.stringify(scope),
+  'Continue the scheduled goal in this chat using the verified task, existing observations and independently permitted reads. An earlier writer stopped with an unresolved external effect. Keep that effect on hold. Never repeat the earlier input or assume a click, send, save or search succeeded.',
+  ...(scope.ownerQuestionIds?.length?['Read the one listed owner answer through get_assistant_owner_question. Its text guides this new task result. Keep earlier unverified external effects on hold.']:[]),
+  'Use already found references and signed read-only skill commands with an existing bound account. Reconcile prior observations, the intended destination and the canonical task files. Identify the specific missing access or evidence when a check cannot run. Record the verified result and remaining work in a new canonical task Workspace Run, preserving prior evidence. Confirm its accepted head and report the actual goal state through complete_assistant_pass. A partial result keeps the goal open.',
+].join('\n')+'\n';
+
 export const assistantFreshPrompt = (deliveryId,scope) => {
   const intake=scope.kind==='source_intake';
   const lines=[assistantDeliveryMarker(deliveryId),
@@ -4317,6 +4336,7 @@ const matchesTaskStartPrompt = (text,deliveryId,scope) =>
   text===assistantFreshPrompt(deliveryId,scope)||text===assistantNativePrompt(deliveryId,scope,{});
 
 export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
+      if(options.retiredReconcile)return assistantReconciliationPrompt(deliveryId,workStateContext);
       if(options.retiredPass) {
         if(options.retiredPass.outcome){
           const {schedule,goalState}=options.retiredOutcome;
