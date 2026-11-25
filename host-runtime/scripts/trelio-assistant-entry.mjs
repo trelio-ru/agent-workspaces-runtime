@@ -23,7 +23,7 @@ import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { bindAssistantTaskSkillArtifact, bindAssistantTaskSkillRead, matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead } from './trelio-skill-secret-setup.mjs';
 import { validateAssistantWorkspaceCheckpoint, validateAssistantIntermediateDraft,
   validateAssistantLocalDraftFiles } from './trelio-assistant-inbox.mjs';
-import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
+import { workspaceParallelDirectory, workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
 import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from './trelio-skill-accounts.mjs';
@@ -3905,6 +3905,12 @@ const isAssistantWorkspaceRoot=(candidate,base)=>{
 export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='https://trelio.ru')=>{
   const common=await import('./trelio-workspace.mjs'),context=await import('./trelio-local-context.mjs');
   const base=assistantWorkspaceRoot(config,plan,expectedOrigin);
+  const {workspaceId,runId}=plan.runIdentity;
+  // An independently admitted scheduled successor needs its own checkout even
+  // when the source lease has expired. All later file/status calls must find
+  // that exact sibling again without relying on extra fields in their scope.
+  const parallel=workspaceParallelDirectory(base,workspaceId,runId);
+  const matches=candidate=>isAssistantWorkspaceRoot(candidate,base)||sameLocalPath(candidate,parallel);
   // The assistant already owns a deterministic task/Workspace namespace. An
   // older accepted recovery copy is not a candidate for a NEW Run: asking the
   // model to choose among those copies is impossible (model directories are
@@ -3912,13 +3918,14 @@ export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='htt
   // common opener validate the canonical base and any retained local work.
   // Use the parent as discovery cwd: the computed base is not an explicit
   // human selection and must not break a tie between duplicate current Runs.
-  const root=await common.resolveRegisteredWorkspaceRootDirectory({workspaceId:plan.runIdentity.workspaceId,
-    runId:plan.runIdentity.runId,origin:expectedOrigin,startDirectory:path.dirname(base),exactRunOnly:true},{readRegistry:async()=>
-    (await common.readRunRegistry({configurationDirectory:config})).filter(candidate=>isAssistantWorkspaceRoot(candidate,base))});
-  if(!root)return base;
-  if(!isAssistantWorkspaceRoot(root,base))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  const root=await common.resolveRegisteredWorkspaceRootDirectory({workspaceId,runId,
+    origin:expectedOrigin,startDirectory:path.dirname(base),exactRunOnly:true},{readRegistry:async()=>
+    (await common.readRunRegistry({configurationDirectory:config})).filter(matches)});
+  if(!root)return plan.localAction?.operation==='open'&&plan.scope.retiredScheduled&&plan.scope.retiredReconcile?parallel:base;
+  if(!matches(root))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   const identity=await context.readOpenedWorkspaceRunIdentity(path.join(root,'workspace'),expectedOrigin);
-  return identity.workspaceId===plan.runIdentity.workspaceId&&identity.runId===plan.runIdentity.runId?root:base;
+  if(identity.workspaceId!==workspaceId||identity.runId!==runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  return root;
 };
 
 /** Carry one already-written work record into the fresh scheduled Run. The

@@ -3497,7 +3497,7 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
   }
 });
 
-for(const fixture of ['task','named','retained-task','portable-task','local-draft','local-base'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
+for(const fixture of ['task','named','retained-task','portable-task','local-draft','local-base','scheduled-sibling'])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${fixture})`,{timeout:150000},async()=>{
   const named=fixture==='named',retainedTask=fixture==='retained-task',portableTask=fixture==='portable-task';
   const localBase=fixture==='local-base',localTask=fixture==='local-draft'||localBase;
   let loseFinalHandoffResponse=false;
@@ -3883,6 +3883,43 @@ for(const fixture of ['task','named','retained-task','portable-task','local-draf
     }
     await common.writePrivateJsonFile(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'runs.json'),{
       roots:[...await common.readRunRegistry(),...oldRoots]});
+    if(fixture==='scheduled-sibling'){
+      const {resolveAssistantWorkspaceRoot}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+      const {workspaceParallelDirectory}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+      const config=common.resolveWorkspaceBridgeConfigDirectory(),oldId=randomUUID(),oldFile=path.join(canonicalRoot,'workspace','retained.md');
+      await common.ensurePrivateDirectory(path.dirname(oldFile));
+      const metadataPath=path.join(canonicalRoot,'.trelio-run.json');
+      await common.writePrivateJsonFile(metadataPath,{schemaVersion:3,origin:f.identity.origin,scopeType:'task',company,
+        workspaceId:runIdentity.workspaceId,runId:oldId,workspaceDirectory:path.dirname(oldFile),baseHead:head,
+        draftHead:relatedHead,materializedHead:relatedHead,latestDraftCheckpointId:randomUUID(),
+        leaseId:randomUUID(),fencingToken:1,leaseExpiresAt:new Date(0).toISOString()});
+      await fs.writeFile(oldFile,'Historical work after the expired lease');
+      const original=await fs.readFile(metadataPath);
+      await common.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[...await common.readRunRegistry(),canonicalRoot]});
+      const oldReceipt=randomUUID(),scheduled={...writerPlan,runIdentity,scope:{...plan.scope,
+        retiredReconcile:{passId:randomUUID(),writerRetirementReceiptId:oldReceipt,expectedLeaseRevision:1},
+        retiredScheduled:{writerRetirementReceiptId:oldReceipt,dueAt:Date.now()-1000}}};
+      const target=await resolveAssistantWorkspaceRoot(config,scheduled,f.identity.origin);
+      assert.equal(target,workspaceParallelDirectory(canonicalRoot,runIdentity.workspaceId,runId));
+      // Use the actual managed profile, recipient, Git bundle and native claim
+      // for the destination. The fixture has no read/claim route for oldId.
+      await common.withWorkspaceExecutionProfile(writerProfile,async()=>{
+        await writerProfile.prepareWorkspaceRun();
+        await common.runWorkspaceCommand([
+          'open','--origin',f.identity.origin,'--workspace',runIdentity.workspaceId,'--run',runId,
+          '--runtime-session',f.runtime.state.runtimeSessionId,'--dir',target,
+        ]);
+      });
+      assert.equal(claims,1);
+      assert.equal((await common.readAssistantWorkspaceRunMetadata(target)).runId,runId);
+      // The native file command only returns the five structural scope fields.
+      // It must locate this exact registered Run without the scheduled selector.
+      assert.equal(await resolveAssistantWorkspaceRoot(config,{scope:plan.scope,runIdentity},f.identity.origin),target);
+      assert.deepEqual(await fs.readFile(metadataPath),original);
+      assert.equal(await fs.readFile(oldFile,'utf8'),'Historical work after the expired lease');
+      assert.ok((await common.readRunRegistry()).includes(canonicalRoot));
+      stage('done');console.log('ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED');return;
+    }
     stage('open');
     const open=()=>common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
