@@ -3965,6 +3965,34 @@ test('a reconciliation turn verifies the live tool surface and the original chat
   }
 });
 
+test('a fresh calendar carry prepares its own Run before reading pinned authority',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const {ASSISTANT_RECONCILE_TASK_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-hook.mjs');
+  const retiredReconcile={passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:2};
+  let starts=0,turns=0;
+  const result=await runAssistantTurn({threadId,deliveryId,cwd,execution,taskContext:{...taskContext,scheduled:true}},{
+    retiredReconcile,scheduledMaterial:'carry',startState:'created',executable:process.execPath,environment:{},
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{},readWorkflow:async()=>'installed task role',
+    startInvocation:()=>{starts++;},
+    spawnProcess:ownedRpc({threadId,cwd,onTurn(request){
+      turns++;
+      const text=request.params.input[0].text;
+      const instructions=request.params.collaborationMode.settings.developer_instructions;
+      assert.ok(text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
+      assert.match(instructions,/retired Run is only the source of the checkpoint/);
+      assert.match(instructions,/prepare_assistant_workspace_run without runId.+returned open, then read both pinned authority files.+authorityReads.+carry_forward.+complete_assistant_pass/);
+      assert.ok(!instructions.includes(retiredReconcile.passId));
+      assert.ok(!instructions.includes(retiredReconcile.writerRetirementReceiptId));
+    },executionPolicy(request,response){
+      if(request.method==='mcpServerStatus/list')
+        response.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(tool=>[tool,{name:tool}]));
+      return response;
+    }})
+  });
+  assert.equal(result.state,'completed');
+  assert.deepEqual([starts,turns],[1,1]);
+});
+
 test('a continued scheduled check reopens its own draft and preserves later WORK edits',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),priorTurnId=randomUUID(),turnId=randomUUID();
   const {ASSISTANT_RECONCILE_TASK_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-hook.mjs');
@@ -3985,7 +4013,7 @@ test('a continued scheduled check reopens its own draft and preserves later WORK
       assert.match(text,/reopen that exact Run/);
       assert.match(text,/If already accepted, verify and reuse that revision/);
       assert.match(instructions,/Preserve subsequent edits/);
-      assert.doesNotMatch(instructions,/open a NEW canonical Run/);
+      assert.match(instructions,/Reuse its Run if it exists.+If this pass has no Run yet: Call prepare_assistant_workspace_run without runId/);
       assert.match(text,/Keep that effect on hold/);
     },executionPolicy(request,response){
       if(request.method==='mcpServerStatus/list')

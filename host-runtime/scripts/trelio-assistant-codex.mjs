@@ -2705,16 +2705,20 @@ const readRetiredOwnerQuestion=async(request,threadId,deliveryId,options)=>{
   return {state:'owner_question_observed',questionId:options.questionId,turnId:selected.original.id};
 };
 
-// The new turn reads the owner's current answer in the ordinary task scope.
-// Historical navigation or a refused Secret preflight cannot establish login.
+// The checkpoint belongs to the retired pass. Only the current calendar
+// pass can prepare the destination Run, and its pinned files become readable
+// after opening it. Keep this ordering explicit in the native turn.
+const prepareCalendarCarry=' Call prepare_assistant_workspace_run without runId to prepare this check’s own canonical Run.'+
+  ' Follow its returned open, then read both pinned authority files through the returned authorityReads.'+
+  ' Use use_assistant_workspace_files with command {action:"carry_forward"} and that Run’s identity. Read the copied WORK before continuing.';
 const calendarTaskInstructions=(workflow,mode,resuming=false)=>mode===undefined?workflow:workflow+
   (resuming?'\n\nContinue the existing calendar check.':'\n\nThis is a new due calendar check.')+
   ' The previous owner answer was delivered. Its external action is still on hold. Use your own task, local account inventory, signed guide pages and the currently authorised canonical material. No provider process, site navigation, login or message is available in this pass.'+
   (mode==='carry'?(resuming
-    ?' Check this pass’s existing Run and WORK first. Use carry_forward only if the original copy is still needed and the destination is unchanged. Preserve subsequent edits.'
-    :' After reading the pinned instructions/profile, open a NEW canonical Run. In that Run call use_assistant_workspace_files with command {action:"carry_forward"}. Read and check your saved WORK, then continue from the verified state.')
+    ?' Check this pass’s own Run and WORK first. Reuse its Run if it exists. Use carry_forward only if the copy is still needed and the destination is unchanged. Preserve subsequent edits. If this pass has no Run yet:' + prepareCalendarCarry
+    :' The retired Run is only the source of the checkpoint.' + prepareCalendarCarry)
     :' Use the current accepted WORK and the ordinary scheduled noChange rules.')+
-  ' Save the results you actually obtained and any remaining unmet criteria.';
+  ' Save the results you actually obtained and any remaining unmet criteria. After accepting the result, confirm the actual goal state and cadence through complete_assistant_pass.';
 const answeredTaskInstructions=workflow=>workflow+'\n\nProcess the newly delivered owner answer and the current accepted WORK. Reconcile any previous external or browser action from its existing state before further input. The interrupted turn and its observations do not authorize repeating an earlier operation.';
 const verifyRetiredAnswerSource=async(request,threadId,deliveryId,scope,check)=>{
   if(!check)return;

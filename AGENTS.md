@@ -325,6 +325,7 @@ publication tooling также остаются вне этого публичн
   the newly owned writer and limit the session to ordinary confirmation.
   A genuine answered owner question can wake its task after a fully verified interrupted scheduled review. Match the existing notification, retired writer, entire native turn and clean accepted base in the [inbox contract](docs/assistant-inbox.md#owner-answer-after-a-retired-scheduled-pass-schema-v36).
   A separately admitted scheduled review may carry the checkpointed own WORK into its own fresh Run through the [fixed file command](docs/assistant-inbox.md#carry-forward-work). Verify both immutable blobs and preserve divergent destination edits.
+  Prepare its own Run without any historical Run ID, then open and read its pinned authority before copying. A same-pass continuation reuses its destination Run when present.
   Open this successor in its deterministic parallel checkout, including beside an expired source. Keep the original checkout and its registry entry.
   SQLite v34 records one start marker before dispatch and settles the same
   schedule only from matching backend read-back. Unknown effects stay held.
