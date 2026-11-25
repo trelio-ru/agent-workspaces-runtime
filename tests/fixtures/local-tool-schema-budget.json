@@ -212,12 +212,19 @@
       "baselineTokens": 155,
       "maxTokens": 160
     },
+    "check_codex_connection_presentation": {
+      "modelVisible": true,
+      "baselineBytes": 373,
+      "maxBytes": 400,
+      "baselineTokens": 83,
+      "maxTokens": 92
+    },
     "codex_connection_app_action": {
       "modelVisible": false,
       "baselineBytes": 570,
-      "maxBytes": 576,
+      "maxBytes": 592,
       "baselineTokens": 131,
-      "maxTokens": 132
+      "maxTokens": 136
     },
     "use_private_agent_skill_drafts": {
       "modelVisible": true,

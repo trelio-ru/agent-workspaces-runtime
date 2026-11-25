@@ -210,7 +210,7 @@ test("encryption failure never uploads plaintext or starts a different transport
 
 // These cases exercise the actual planner/apply and navigation writer together.
 // Only the remote server, private state store and human native dialog are fakes.
-import { openCodexConnectionWizard, handleCodexConnectionAction, chooseCodexConnectionFolder,
+import { openCodexConnectionWizard, checkCodexConnectionPresentation, handleCodexConnectionAction, chooseCodexConnectionFolder,
   registerAndVerifyCodexLaunchFolder, codexConnectionAppResource, runCodexFolderPickerProcess } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import vm from "node:vm";
 
@@ -498,7 +498,7 @@ test("wizard preparation gives a text-only client the same-chat recovery without
   const fixture = await wizardFixture(t, true);
   const opened = await fixture.open();
   const text = opened.content[0].text;
-  assert.match(text, /wizard prepared.*missing or unusable/u);
+  assert.match(text, /wizard prepared.*Execute presentationCheck immediately if returned/u);
   assert.match(text, /continue in this chat with the same company, OAuth and pairing/u);
   assert.match(text, /selected permanent folder or ask the user to choose one/u);
   assert.match(text, /trelio-project-onboarding.*diagnose_trelio_installation.*folderOnboarding=\{companySlug,folderPath,confirmBrowser:true\}/u);
@@ -506,6 +506,42 @@ test("wizard preparation gives a text-only client the same-chat recovery without
   assert.equal(opened._meta.ui.resourceUri, codexConnectionAppResource().uri);
   assert.ok(!text.includes(opened._meta["trelio/codexConnection"].folderPath));
   assert.ok(!text.includes(opened._meta["trelio/codexConnection"].capabilityToken));
+  assert.equal(fixture.puts, 0);
+  assert.equal(fixture.files.size, 0);
+});
+
+test("the presentation check accepts only the App receipt from this wizard and native chat", async t => {
+  const fixture = await wizardFixture(t, true);
+  const threadId = "33333333-3333-7333-8333-333333333333";
+  const opened = await fixture.open({ trackPresentation: true, codexThreadId: threadId, readProjectFolder: async () => null });
+  const { checkId } = opened.structuredContent.presentationCheck.arguments;
+  const { capabilityToken } = opened._meta["trelio/codexConnection"];
+  const appAction = (action) => handleCodexConnectionAction(fixture.origin, { capabilityToken, action }, { bridge: fixture.bridge });
+  assert.notEqual(checkId, capabilityToken);
+  await assert.rejects(checkCodexConnectionPresentation(fixture.origin, checkId, {
+    codexThreadId: "44444444-4444-7444-8444-444444444444", waitMs: 0,
+  }), /CODEX_CONNECTION_PRESENTATION_UNAVAILABLE/u);
+  await assert.rejects(appAction("connect"), /CODEX_CONNECTION_CONTINUE_IN_CHAT/u);
+  const pending = checkCodexConnectionPresentation(fixture.origin, checkId, { codexThreadId: threadId, waitMs: 1000 });
+  assert.deepEqual((await appAction("presented")).structuredContent, { presentation: "presented" });
+  assert.deepEqual(await pending, { presentation: "presented" });
+  assert.equal(fixture.puts, 0);
+});
+
+test("a missing or late App receipt switches to chat without an actionable duplicate card", async t => {
+  const fixture = await wizardFixture(t, true);
+  const detached = await fixture.open({ trackPresentation: true });
+  assert.equal(detached.structuredContent.presentation, "unconfirmed");
+  assert.equal(detached._meta, undefined);
+  const threadId = "33333333-3333-7333-8333-333333333333";
+  const opened = await fixture.open({ trackPresentation: true, codexThreadId: threadId, readProjectFolder: async () => null });
+  const { checkId } = opened.structuredContent.presentationCheck.arguments;
+  const { capabilityToken } = opened._meta["trelio/codexConnection"];
+  const appAction = (action) => handleCodexConnectionAction(fixture.origin, { capabilityToken, action }, { bridge: fixture.bridge });
+  assert.deepEqual(await checkCodexConnectionPresentation(fixture.origin, checkId, { codexThreadId: threadId, waitMs: 0 }),
+    { presentation: "unconfirmed" });
+  assert.deepEqual((await appAction("presented")).structuredContent, { presentation: "unconfirmed" });
+  await assert.rejects(appAction("connect"), /CODEX_CONNECTION_CONTINUE_IN_CHAT/u);
   assert.equal(fixture.puts, 0);
   assert.equal(fixture.files.size, 0);
 });
@@ -732,16 +768,30 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   const window = { parent, addEventListener: (name, callback) => { listeners[name] = callback; } };
   const document = { getElementById: id => elements.get(id), documentElement: { scrollHeight: 700 },
     querySelector: () => elements.get("main"), querySelectorAll: () => [...elements.values()] };
-  const context = vm.createContext({ window, document, Map, Error, setTimeout, clearTimeout });
+  let show;
+  const IntersectionObserver = class {
+    constructor(callback) { show = callback; }
+    observe(target) { assert.equal(target, elements.get("setup")); }
+    disconnect() {}
+  };
+  const context = vm.createContext({ window, document, Map, Error, setTimeout, clearTimeout, IntersectionObserver });
   const html = codexConnectionAppResource().text;
   assert.match(html, /id="browser-actions"><button[^>]*id="confirm-browser"[^>]*>Привязать к браузеру<\/button><\/div>/u);
   vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/u)[1], context);
   const receive = data => listeners.message({ source: parent, data });
   receive({ jsonrpc: "2.0", id: messages[0].id, result: { hostCapabilities: { openLinks: {} } } });
   await new Promise(resolve => setImmediate(resolve));
-  const opened = await fixture.open();
+  const opened = await fixture.open({ trackPresentation: true,
+    codexThreadId: "33333333-3333-7333-8333-333333333333", readProjectFolder: async () => null });
   receive({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: opened });
   assert.equal(elements.get("setup").hidden, false);
+  show([{ isIntersecting: true, intersectionRect: { width: 0, height: 120 } }]);
+  assert.equal(messages.some(message => message.method === "tools/call"), false, "Hidden or zero-width controls cannot acknowledge");
+  show([{ isIntersecting: true, intersectionRect: { width: 200, height: 120 } }]);
+  const presentation = messages.filter(message => message.method === "tools/call").at(-1);
+  assert.equal(presentation.params.arguments.action, "presented", "Visible controls acknowledge the opener to the local runtime");
+  const prompted = await handleCodexConnectionAction(fixture.origin, structuredClone(presentation.params.arguments), { bridge: fixture.bridge });
+  receive({ jsonrpc: "2.0", id: presentation.id, result: prompted });
   const existing = path.join(fixture.root, "existing-git-folder");
   await fs.mkdir(existing);
   const git = (...args) => execFileAsync("git", args, { cwd: existing, encoding: "utf8" });
@@ -762,7 +812,7 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   elements.get("display-name").value = "App fixture"; elements.get("create").checked = true;
   const clicked = elements.get("connect").onclick();
   await elements.get("connect").onclick();
-  const calls = messages.filter(message => message.method === "tools/call");
+  const calls = messages.filter(message => message.method === "tools/call" && message.params.arguments.action !== "presented");
   assert.equal(calls.length, 1);
   assert.equal(elements.get("connect").disabled, true);
   const [connect] = calls;

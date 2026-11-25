@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_PRESENTATION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, checkCodexConnectionPresentation, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -4288,16 +4288,20 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
-  { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action. The App shows the folder to connect.",
+  { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action, then its presentationCheck if returned.",
     inputSchema: { type: "object", additionalProperties: false, required: ["companySlug"],
       properties: { companySlug: { type: "string", minLength: 1, maxLength: 120 },
         memberId: { type: "string", format: "uuid" }, runtimeSessionId: { type: "string", format: "uuid" } } },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } },
+  { name: CODEX_CONNECTION_PRESENTATION, description: "Check the wizard's App receipt in this chat. On unconfirmed, continue setup in chat.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["checkId"],
+      properties: { checkId: { type: "string", format: "uuid" } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
   { name: CODEX_CONNECTION_ACTION, description: "Local Codex connection wizard action.",
     inputSchema: { type: "object", additionalProperties: false, required: ["capabilityToken", "action"],
       properties: { capabilityToken: { type: "string", minLength: 40, maxLength: 100 },
-        action: { type: "string", enum: ["state", "pick", "save", "connect", "confirm_browser"] }, settings: { type: "object" } } },
+        action: { type: "string", enum: ["state", "pick", "save", "connect", "confirm_browser", "presented"] }, settings: { type: "object" } } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: { ui: { visibility: ["app"] }, "openai/visibility": "private", "trelio/sensitiveInput": true } },
   TRELIO_LOCAL_ACTION_TOOL,
@@ -6271,6 +6275,18 @@ const handleToolCallWithoutSkillHints = async (
     );
   }
   if (name === CODEX_CONNECTION_ACTION) return handleCodexConnectionAction(origin, rawArguments, { signal });
+  if (name === CODEX_CONNECTION_PRESENTATION) {
+    if (!rawArguments || typeof rawArguments !== "object" || Array.isArray(rawArguments)
+      || Object.keys(rawArguments).some(key => key !== "checkId")) {
+      throw new RemoteMcpHostError("CODEX_CONNECTION_INVALID_INPUT", "Use the exact returned presentationCheck.");
+    }
+    try {
+      return buildTextResult(await checkCodexConnectionPresentation(origin, rawArguments.checkId, { signal, codexThreadId }));
+    } catch (error) {
+      if (error?.code !== "CODEX_CONNECTION_PRESENTATION_UNAVAILABLE") throw error;
+      throw new RemoteMcpHostError(error.code, "Use the local route and chat that prepared this wizard.");
+    }
+  }
   if (name === "open_codex_connection_wizard") {
     // The shared OAuth profile cannot identify the desktop app. Require the
     // local Codex MCP connection for the paired-device action; legacy actions
@@ -6280,7 +6296,7 @@ const handleToolCallWithoutSkillHints = async (
     }
     try {
       return await openCodexConnectionWizard(origin, { schemaVersion: 1, operation: "codex_connection_open", parameters: rawArguments },
-        { signal, codexThreadId });
+        { signal, codexThreadId, trackPresentation: codexFolderSetupClient });
     } catch (error) {
       // The ordinary pairing error already carries the exact approval request.
       // Preserve its public instructions without serializing the local verifier.
@@ -7082,6 +7098,7 @@ export const handleLocalMcpMessage = async (
       // ID supplied in tool arguments to identify the current chat.
       const nativeCodex = clientInfo?.name === "codex-mcp-client";
       const codexThreadId = nativeCodex && (message.params?.name === "open_codex_connection_wizard"
+        || message.params?.name === CODEX_CONNECTION_PRESENTATION
         || (message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name && message.params?.arguments?.operation === "open"))
         ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId)
         : null;

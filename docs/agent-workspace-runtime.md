@@ -4490,10 +4490,21 @@ Draft path/name/create choice живут в bounded owner-private local file п�
 company/member/device key. При повторном открытии они восстанавливаются, но старый
 успех не восстанавливается без проверки. Явный Save настроек имеет local dirty
 flag/beforeunload; busy отключает native controls. App actions не создают новые App
-карточки. Ответ opener подтверждает только подготовку App. Его обычный
-TextContent содержит переход к ручному onboarding в том же чате, даже если
-клиент не обработал App metadata. Используется выбранная пользователем папка
-и действующее подключение. Незавершённая регистрация не даёт «Готово».
+карточки. Ответ opener подтверждает только подготовку App. Для native-чата
+он отдаёт отдельный неприватный `presentationCheck`. Получив исходный результат
+и заполнив элементы, App ждёт их пересечения с viewport хоста и отправляет
+`presented` с приватной capability через App-only action.
+`check_codex_connection_presentation` ждёт до восьми секунд
+в том же локальном MCP и сверяет native ID чата, origin и время жизни мастера.
+Сетевой результат tools/call и чтение ресурса сами по себе не являются
+подтверждением. Отмена проверки сохраняет pending. При `unconfirmed` этот
+экземпляр App больше не может менять папку или регистрацию. Запоздавшая
+карточка показывает продолжение в чате. Без native ID opener не выдаёт
+управляющую capability. Старая версия без инструмента проверки начинает
+настройку в чате по запросу из браузера.
+
+В запасном сценарии используется явно выбранная папка и действующее
+подключение. Незавершённая регистрация не даёт «Готово».
 Backend/source интеграция не означает публикацию runtime;
 активация подписанной версии и backend deploy идут отдельным release flow.
 
@@ -4504,10 +4515,10 @@ picker vectors и App RPC lifecycle.
 
 
 Контекст мастера загружается только по setup intent. Новый model-visible opener
-имеет отдельный schema ceiling 672 bytes / 160 o200k tokens; App-only action –
-560 bytes / 128 tokens. Общий catalog allowance добавляет ровно этот opener и
-один прежний bounded initialize prefix (650 tokens), не повышая budgets прежних
-методов или обычного task Run. Полный HTML и private draft туда не входят.
+имеет отдельный schema ceiling 672 bytes / 160 o200k tokens; проверка показа –
+400 bytes / 92 tokens; App-only action – 592 bytes / 136 tokens. Для проверки
+добавляется один client initialize prefix. Лимиты обычного task Run прежние.
+Полный HTML, приватная capability и draft туда не входят.
 
 ## Xiaomi MiMo Desktop
 

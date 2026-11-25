@@ -499,6 +499,7 @@
     "call_remote_agent_skill_tool",
     "forget_remote_agent_skill_credential",
     "open_codex_connection_wizard",
+    "check_codex_connection_presentation",
     "codex_connection_app_action",
     "use_private_agent_skill_drafts"
   ],

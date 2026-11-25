@@ -3091,6 +3091,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
 
   assert.deepEqual(response.result.tools.map(({ name }) => name), [
     "open_codex_connection_wizard",
+    "check_codex_connection_presentation",
     "codex_connection_app_action",
     "continue_trelio_local_action",
     "render_trelio_local_proposal",
@@ -3138,8 +3139,9 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.match(tool.description, /exact Trelio settings URL/u);
   }
-  const providerTools = response.result.tools.slice(2, 5);
-  const appOnlyProposalTools = response.result.tools.slice(5, 19);
+  const findTool = (name) => response.result.tools.findIndex(tool => tool.name === name);
+  const providerTools = response.result.tools.slice(findTool("continue_trelio_local_action"), findTool("get_task_proposal_app_state"));
+  const appOnlyProposalTools = response.result.tools.slice(findTool("get_task_proposal_app_state"), findTool("diagnose_trelio_installation"));
   const actionTool = providerTools.find(({ name }) => name === "continue_trelio_local_action");
   const workspaceActionTool = providerTools.find(({ name }) => (
     name === "continue_trelio_workspace_action"

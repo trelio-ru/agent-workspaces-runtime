@@ -99,11 +99,12 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // additive. Existing method limits and normal task-Run ceilings stay fixed.
   // One unified author/reviewer operation adds its independently measured
   // 3,200-byte schema; existing per-method and historical baselines stay fixed.
-  modelVisibleLocalToolSchemasBytes: 15_500 + 672 + 329 + 3_200,
+  // The wizard receipt check adds one setup-only schema and one client prefix.
+  modelVisibleLocalToolSchemasBytes: 15_500 + 672 + 329 + 3_200 + 400,
   // +schemaToolName lets doctor load one exact schema instead of every schema;
   // skill section routing adds one bounded initialize prefix, not response data.
   // The new method also receives the client initialize prefix once.
-  clientPrefixedLocalToolSchemasBytes: 75_000 + 3_200 + 4_200,
+  clientPrefixedLocalToolSchemasBytes: 75_000 + 3_200 + 4_200 + 400 + 4_200,
   clientPrefixedTaskRunLocalToolSchemasBytes: 4_700,
   representativeLocalProposalResultBytes: 14_500,
   representativeLocalAttachmentResultBytes: 1_400,
@@ -123,8 +124,8 @@ export const PLUGIN_CONTEXT_TOKEN_LIMITS = Object.freeze({
   encryptedCompanyTaskRunPluginLayer: 17_600,
   localProviderToolSchemas: 600,
   localMcpInstructions: 650,
-  modelVisibleLocalToolSchemas: 3_500 + 160 + 768,
-  clientPrefixedLocalToolSchemas: 13_000 + 160 + 650 + 768 + 650,
+  modelVisibleLocalToolSchemas: 3_500 + 160 + 768 + 92,
+  clientPrefixedLocalToolSchemas: 13_000 + 160 + 650 + 768 + 650 + 92 + 650,
   clientPrefixedTaskRunLocalToolSchemas: 750 + 82,
   representativeLocalProposalResult: 1_650,
   representativeLocalAttachmentResult: 200,

@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from 'node:crypto';
 import http from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import { projectFolderGitHistoryBlocker } from "./trelio-folder-onboarding.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -488,6 +489,7 @@ const wizardError = code => Object.assign(new Error(code), { code });
 // navigation. It neither changes the stable plugin shell nor uses a business Run.
 export const CODEX_CONNECTION_RESOURCE = "ui://trelio/codex-connection-v1.html";
 export const CODEX_CONNECTION_ACTION = "codex_connection_app_action";
+export const CODEX_CONNECTION_PRESENTATION = "check_codex_connection_presentation";
 
 // Short-lived loopback server. Only the browser that reaches this machine
 // after the authenticated approval can deliver the server's one-use receipt.
@@ -570,6 +572,7 @@ export const confirmDesktopBrowser = async (origin, { companySlug, provider, run
 const wizardCapabilities = new Map();
 const wizardBusy = new Set();
 const WIZARD_LIFETIME_MS = 30 * 60 * 1000;
+const WIZARD_PRESENTATION_WAIT_MS = 8_000;
 const object = value => value && typeof value === "object" && !Array.isArray(value);
 const safeFolderPath = value => typeof value === "string" && value.length <= 4096
   && path.isAbsolute(value) && !/[\u0000-\u001f\u007f]/u.test(value)
@@ -761,19 +764,53 @@ export const confirmManualCodexBrowser = async (origin, { companySlug, folderPat
 // it. Keep the chat continuation in the ordinary result so a client that drops
 // App metadata can still complete the same setup on a user-selected folder.
 const wizardPreparedText = [
-  "Codex connection wizard prepared. Ask the user to choose a folder in the card or tell you if it is missing or unusable.",
-  "If the card is unavailable, continue in this chat with the same company, OAuth and pairing. Use the selected permanent folder or ask the user to choose one.",
+  "Codex connection wizard prepared. Execute presentationCheck immediately if returned. If the card is unconfirmed, continue in this chat with the same company, OAuth and pairing. Use the selected permanent folder or ask the user to choose one.",
   "Follow trelio-project-onboarding, preserving a valid existing binding. Finish with local diagnose_trelio_installation (clientKind=codex, intent=onboarding, folderOnboarding={companySlug,folderPath,confirmBrowser:true}).",
   "Folder registration requires server read-back. If folderRegistered=true and connected=false, keep the folder and retry only browser confirmation on request.",
 ].join(" ");
+
+const settleWizardPresentation = (presentation, state) => {
+  if (presentation.state !== "pending") return;
+  presentation.state = state;
+  presentation.settled.abort();
+};
+
+// The host's tool result and resources/read can both succeed while the chat
+// never initializes the card. Accept only the App's private capability reply.
+// A timeout is uncertainty, so retire this card before offering chat setup.
+export const checkCodexConnectionPresentation = async (origin, checkId, {
+  codexThreadId, signal, waitMs = WIZARD_PRESENTATION_WAIT_MS,
+} = {}) => {
+  const threadId = normalizeCodexNavigationThreadId(codexThreadId);
+  const cap = threadId && UUID.test(checkId ?? "") && [...wizardCapabilities.values()].find(candidate =>
+    candidate.origin === origin && candidate.expiresAt > Date.now()
+    && candidate.presentation?.id === checkId && candidate.presentation.threadId === threadId);
+  if (!cap) throw wizardError("CODEX_CONNECTION_PRESENTATION_UNAVAILABLE");
+  signal?.throwIfAborted();
+  const presentation = cap.presentation;
+  if (presentation.state === "pending") {
+    const waitSignal = signal ? AbortSignal.any([signal, presentation.settled.signal]) : presentation.settled.signal;
+    try { await delay(waitMs, undefined, { signal: waitSignal }); }
+    catch (error) { if (error?.name !== "AbortError") throw error; }
+    // Transport cancellation must not retire a card that is still in use.
+    signal?.throwIfAborted();
+    settleWizardPresentation(presentation, "unconfirmed");
+  }
+  return { presentation: presentation.state };
+};
 
 const wizardResult = (capabilityToken, capability, state, mount = false) => ({
   content: [{ type: "text", text: state.stage === "ready"
     ? "Codex connection verified: the selected folder was registered in Trelio and read back."
     : mount ? wizardPreparedText : "Codex folder setup is awaiting confirmation." }],
-  structuredContent: { stage: state.stage, verified: state.stage === "ready" },
+  structuredContent: { stage: state.stage, verified: state.stage === "ready",
+    ...(mount && capability.presentation ? {
+      presentationCheck: { server: "trelio-remote-skills", tool: CODEX_CONNECTION_PRESENTATION,
+        arguments: { checkId: capability.presentation.id } },
+    } : {}) },
   _meta: { ...(mount ? { ui: { resourceUri: CODEX_CONNECTION_RESOURCE }, "openai/outputTemplate": CODEX_CONNECTION_RESOURCE } : {}),
-    "trelio/codexConnection": { capabilityToken, companyName: capability.company.name, ...state } },
+    "trelio/codexConnection": { capabilityToken, companyName: capability.company.name, ...state,
+      ...(mount && capability.presentation ? { confirmPresentation: true } : {}) } },
 });
 
 export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) => {
@@ -795,6 +832,14 @@ export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) 
   // The opener is read-only. Resolve the native project before displaying a
   // target, then pin it to this App capability until the human clicks Connect.
   const threadId = normalizeCodexNavigationThreadId(dependencies.codexThreadId);
+  // A detached or older host may omit the thread identity. A card on such a
+  // route cannot be correlated safely, so do not issue an actionable token.
+  if (dependencies.trackPresentation && !threadId) {
+    return {
+      content: [{ type: "text", text: wizardPreparedText }],
+      structuredContent: { stage: "folder", verified: false, presentation: "unconfirmed" },
+    };
+  }
   const project = threadId ? await (dependencies.readProjectFolder ?? readCodexProjectFolder)(threadId, {
     signal: dependencies.signal,
   }) : null;
@@ -808,7 +853,10 @@ export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) 
   if (wizardCapabilities.size >= 32) throw wizardError("CODEX_CONNECTION_LIMIT");
   const capabilityToken = crypto.randomBytes(32).toString("base64url");
   const capability = { origin, parameters: raw.parameters, company: context.company, memberId: context.memberId, stateFile, state,
-    project: project ? { ...project, threadId } : null, busyKey: key, expiresAt: now + WIZARD_LIFETIME_MS };
+    project: project ? { ...project, threadId } : null, busyKey: key, expiresAt: now + WIZARD_LIFETIME_MS,
+    ...(dependencies.trackPresentation ? {
+      presentation: { id: crypto.randomUUID(), threadId, state: "pending", settled: new AbortController() },
+    } : {}) };
   wizardCapabilities.set(capabilityToken, capability);
   return wizardResult(capabilityToken, capability, state, true);
 };
@@ -870,9 +918,19 @@ const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, on
 
 export const handleCodexConnectionAction = async (origin, input, dependencies = {}) => {
   if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
-    || !["state", "pick", "save", "connect", "confirm_browser"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+    || !["state", "pick", "save", "connect", "confirm_browser", "presented"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
   const cap = wizardCapabilities.get(input.capabilityToken);
   if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw wizardError("CODEX_CONNECTION_EXPIRED");
+  if (input.action === "presented") {
+    // This is only evidence that the host reached the App. User actions
+    // still recheck live device, company, folder and registration permissions.
+    if (!cap.presentation || input.settings !== undefined) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+    settleWizardPresentation(cap.presentation, "presented");
+    return { content: [], structuredContent: { presentation: cap.presentation.state } };
+  }
+  if (cap.presentation && cap.presentation.state !== "presented") {
+    throw wizardError("CODEX_CONNECTION_CONTINUE_IN_CHAT");
+  }
   if (wizardBusy.has(cap.busyKey)) throw wizardError("CODEX_CONNECTION_BUSY");
   wizardBusy.add(cap.busyKey);
   let preserveVerifiedFolder = false;
@@ -1038,6 +1096,7 @@ export const codexConnectionAppResource = () => ({
 </main><script>
 (function(){'use strict';
 var cap = '', state = null, busy = false, dirty = false, rpcId = 0, pending = new Map();
+var pendingPresentation = '', presentationObserver = null;
 var $ = function(id) { return document.getElementById(id) };
 
 // Only the parent host transports tool calls. No network API is available in
@@ -1099,6 +1158,44 @@ function render(result) {
     notice((meta.gitBlockerMessage || messages[meta.errorCode] || 'Настройка не завершена. Проверьте папку, повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
   } else notice(done ? 'Подключение проверено' : '', false);
   resize();
+}
+function continueInChat() {
+  if (presentationObserver) presentationObserver.disconnect();
+  presentationObserver = null;
+  cap = '';
+  $('company').textContent = '';
+  $('setup').hidden = true; $('done').hidden = true;
+  notice('Подключение продолжится в чате Codex', false);
+  resize();
+}
+function receiveOpeningResult(result) {
+  if (result?.structuredContent?.presentation === 'unconfirmed') return continueInChat();
+  var meta = result?._meta?.['trelio/codexConnection'];
+  if (!meta?.confirmPresentation) return render(result);
+  var selected = meta.capabilityToken;
+  if (selected === pendingPresentation || selected === cap) return;
+  pendingPresentation = selected;
+  render(result);
+  // A preloaded but hidden iframe is not a usable card. Report readiness only
+  // when the host viewport intersects the rendered controls.
+  if (typeof IntersectionObserver !== 'function') return continueInChat();
+  if (presentationObserver) presentationObserver.disconnect();
+  var observer = new IntersectionObserver(function(entries) {
+    if (pendingPresentation !== selected || presentationObserver !== observer) return;
+    if (!entries.some(function(entry) {
+      return entry.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0;
+    })) return;
+    observer.disconnect();
+    presentationObserver = null;
+    rpc('tools/call', {name:'codex_connection_app_action',
+      arguments:{capabilityToken:selected, action:'presented'}}).then(function(reply) {
+      if (pendingPresentation === selected && reply?.structuredContent?.presentation === 'unconfirmed') continueInChat();
+    }).catch(function() {
+      if (pendingPresentation === selected) notice('Не удалось подтвердить готовность мастера', true);
+    });
+  });
+  presentationObserver = observer;
+  observer.observe($('setup'));
 }
 function setBusy(value) {
   busy = value;
@@ -1169,7 +1266,7 @@ window.addEventListener('message', function(event) {
     if (m.error) p.reject(new Error('HOST_ERROR')); else p.resolve(m.result);
     return;
   }
-  if (m.method === 'ui/notifications/tool-result') render(m.params);
+  if (m.method === 'ui/notifications/tool-result') receiveOpeningResult(m.params);
 });
 rpc('ui/initialize', {appInfo:{name:'trelio-codex-connection', version:'1.0.0'},
   appCapabilities:{tools:{}}, protocolVersion:'2026-01-26'}).then(function() {
