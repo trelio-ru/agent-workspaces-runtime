@@ -2983,7 +2983,7 @@ test('expired pre-native pass recovery retains SAME SQLite intent across lost re
   }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
-for(const changed of ['native_started','coordinator_lease','protected_pass','model_revision'])
+for(const changed of ['native_started','coordinator_lease','protected_pass','model_revision','server_mode','server_reconciliation'])
 test(`pre-native recovery refuses ${changed} changing while native renew is in flight`,async t=>{
   const f=fixture(t),originalRun=f.options.native.run;let preflights=0,renewals=0;
   f.options.native.run=async(input,options)=>{
@@ -2997,6 +2997,9 @@ test(`pre-native recovery refuses ${changed} changing while native renew is in f
     if(changed==='coordinator_lease')f.database.prepare('UPDATE assistant_coordinator_lease SET token=?,expires_at=?').run(randomUUID(),Date.parse('2026-01-01T10:00:00Z'));
     if(changed==='protected_pass')f.options.passHost.readActivePass=async()=>({...expected,passId:randomUUID()});
     if(changed==='model_revision')f.execution.configuration={...f.execution.configuration,revision:2};
+    if(changed==='server_mode')f.options.client.readTaskPass=async()=>({...pass,workMode:'discussion'});
+    if(changed==='server_reconciliation')f.options.client.readTaskPass=async()=>({...pass,retiredReconcile:{
+      passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:0}});
     return {...pass};
   };
   try{
@@ -4943,6 +4946,7 @@ for(const repaired of [false,true])test(`retained named archive settles once, th
 for(const mode of ['no_run','clean_run','after_begin','preflight_refusal','after_start','dirty_run','unknown_effect','missing_answer','wrong_receipt','revoked_begin'])
 test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,async t=>{
   const f=fixture(t);f.authority.workMode='task';
+  const heldTerminal=Promise.withResolvers();
   const originalReadOutcome=f.options.client.readBusinessOutcome;
   f.options.client.readBusinessOutcome=async()=>({schemaVersion:1,state:'pending'});
   await f.coordinator.pollOnce();await f.coordinator.workOnce();
@@ -5033,12 +5037,22 @@ test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,a
         assistantWorkStateContext({assistantId:f.identity.assistantId,companyId:pass.companyId,taskId:pass.taskId,scheduled:true}))}]},
       {type:'mcpToolCall',server:'trelio-assistant',tool:'get_assistant_owner_question',status:'completed',
         arguments:{taskPass,questionId},result:{structuredContent:{id:questionId,state:'pending',taskId:pass.taskId,assistantUserId:f.identity.assistantId}}}]};
-    const spawnProcess=ownedRpc({threadId:pass.threadId,onHistoryRead:()=>({result:{data:[original],nextCursor:null}}),
+    const rpc=ownedRpc({threadId:pass.threadId,onHistoryRead:()=>({result:{data:[original],nextCursor:null}}),
       onInput:text=>{
         nativeStarts++;assert.equal(nativeStarts,1);
         assert.ok(text.startsWith(assistantDeliveryMarker(newDelivery)+'\n'));
         assert.ok(text.includes(questionId));assert.ok(!text.includes(sourceTurnId));
       }});
+    const spawnProcess=(...args)=>{
+      const child=rpc(...args);
+      if(mode!=='preflight_refusal')return child;
+      const write=child.stdout.write.bind(child.stdout);
+      child.stdout.write=(line,...rest)=>{
+        if(JSON.parse(line).method!=='turn/completed')return write(line,...rest);
+        heldTerminal.resolve(()=>write(line,...rest));return true;
+      };
+      return child;
+    };
     const adapters={executable:process.execPath,environment:{},spawnProcess,readExecutionAvailability:async()=>true,
       readHookReadiness:async()=>{},readWorkflow:async()=>'Installed task workflow'};
     const invoke=async(runner,input,options)=>{
@@ -5085,7 +5099,38 @@ test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,a
         assert.equal(coordinator.status()[0].nextRunAt,plan.nextRunAt);
         f.advance(21*60_000);f.passes.get(newDelivery).state='review_required';
       }
-      await work();
+      if(mode==='preflight_refusal'){
+        // Keep the actual recovered App Server turn open across its first
+        // native lease. Drive the real heartbeat and deadlines on a local
+        // clock; the only model start and terminal stay on the original pipe.
+        const timers=[],watchers=[];
+        const setTimeoutNative=globalThis.setTimeout,clearTimeoutNative=globalThis.clearTimeout,setIntervalNative=globalThis.setInterval;
+        const cleared=new Set();
+        t.mock.method(globalThis,'clearTimeout',timer=>{cleared.add(timer);return clearTimeoutNative(timer);});
+        t.mock.method(globalThis,'setTimeout',(fn,ms,...args)=>{
+          const timer=setTimeoutNative(fn,ms,...args);
+          if(ms>=60_000)timers.push({fn,at:f.options.now()+ms,timer});
+          return timer;
+        });
+        t.mock.method(globalThis,'setInterval',(fn,ms,...args)=>{
+          const timer=setIntervalNative(fn,ms,...args);if(ms===30_000)watchers.push(fn);return timer;
+        });
+        const finished=work();finished.catch(()=>{});
+        const release=await Promise.race([heldTerminal.promise,finished.then(()=>assert.fail('missing native turn'))]);
+        const live=f.passes.get(newDelivery),revision=live.leaseRevision;
+        let fired=0;
+        for(let tick=0;tick<42;tick++){
+          f.advance(30_000);
+          for(const timer of timers){if(!timer.fired&&!cleared.has(timer.timer)&&timer.at<=f.options.now()){
+            timer.fired=true;fired++;timer.fn();
+          }}
+          for(const watch of watchers)watch();
+          await new Promise(resolve=>setImmediate(resolve));
+        }
+        release();await finished;
+        assert.equal(fired,0,'a verified live renewal moves the lease deadline of this turn');
+        assert.equal(live.leaseRevision,revision+1);assert.equal(nativeStarts,1);
+      }else await work();
     }
     if(mode==='revoked_begin'){
       assert.equal(nativeStarts,0);assert.equal(f.activePass(),null);

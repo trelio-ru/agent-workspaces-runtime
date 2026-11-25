@@ -2921,30 +2921,31 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(!['leased','review_required'].includes(admitted.state)||!Number.isFinite(Date.parse(admitted.leaseExpiresAt))
           ||!recovering&&Date.parse(admitted.leaseExpiresAt)<=now())fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         execution=assistantExecutionConfiguration(admitted.execution);
+        // Keep the outer observation ceiling fixed across preflight and the
+        // guarded renewal. Only a live lease for this same task may move its
+        // shorter cutoff. An expired reservation cannot start either timer.
+        const limit=now()+maxObservationMs;
         const observePassUntil=leaseExpiresAt=>{
-          // Restricted and discussion turns still sample the negotiated
-          // boundary once. They have no ordinary task extension budget.
           if(observationTimer!==null)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-          return armObservation(Math.min(now()+maxObservationMs,Date.parse(leaseExpiresAt)));
+          return armObservation(Math.min(limit,Date.parse(leaseExpiresAt)));
         };
-        if(continuation){
-          // Bound the whole App Server including preflight. The shorter live
-          // lease is sampled once after renewal, while it owns the writer.
+        const observeTaskLease=live=>{
+          const leaseExpiry=Date.parse(live.leaseExpiresAt);
+          if(observationTimer!==null||!Number.isSafeInteger(live.leaseRevision)||live.leaseRevision<0)
+            fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          const deadline=Math.min(limit,leaseExpiry);
+          armObservation(deadline);
+          ordinaryObservation={limit,leaseExpiry,deadline,revision:live.leaseRevision};
+        };
+        if(continuation||recovering){
+          // These paths have no usable lease at native entry. Preflight is
+          // bounded now. The corresponding callback arms the actual lease
+          // only after the server has confirmed its recovery.
           options.passTimeoutMs=maxObservationMs;
-        }else if(!recovering){
-          if(admitted.workMode==='task'){
-            // Preflight counts against both boundaries. The adapter's fixed
-            // upper limit never slides, even if the backend renews its lease.
-            // This lets one owned turn finish after a routine renewal without
-            // waiting on a new invocation or over-running current authority.
-            const limit=now()+maxObservationMs,leaseExpiry=Date.parse(admitted.leaseExpiresAt);
-            const deadline=Math.min(limit,leaseExpiry);
-            if(!Number.isSafeInteger(admitted.leaseRevision)||admitted.leaseRevision<0)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-            ordinaryObservation={limit,leaseExpiry,deadline,revision:admitted.leaseRevision};
-            armObservation(deadline);
-            options.passTimeoutMs=maxObservationMs;
-          }else options.passTimeoutMs=observePassUntil(admitted.leaseExpiresAt);
-        }
+        }else if(admitted.workMode==='task'){
+          observeTaskLease(admitted);
+          options.passTimeoutMs=maxObservationMs;
+        }else options.passTimeoutMs=observePassUntil(admitted.leaseExpiresAt);
         if(continuation){
           options.requireAbsentMarker=true;
           options.continuationReview={priorTurnId:continuation.terminalTurnId,reviewId:continuation.reviewId};
@@ -3030,6 +3031,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               ||live.deliveryId!==expectedPass.deliveryId||live.threadId!==expectedPass.threadId
               ||Date.parse(live.leaseExpiresAt)<=now()||JSON.stringify(live.execution)!==JSON.stringify(execution))
               fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            if(live.workMode!==admitted.workMode||!isDeepStrictEqual(live.retiredReconcile,expectedPass.retiredReconcile)
+              ||expectedPass.retiredReconcile&&live.notificationId!==expectedPass.notificationId)
+              fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            if(live.workMode==='task')observeTaskLease(live);
+            else observePassUntil(live.leaseExpiresAt);
             taskPass=expectedPass;
           };
         }else{

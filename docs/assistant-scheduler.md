@@ -860,7 +860,10 @@ or unverifiable evidence retains the existing fence and requires review.
 Timeout does not free a server pass.
 
 Long work renews the same live backend lease by CAS near expiry, independently
-from the local delivery heartbeat. Closed receipts do not renew or acquire new
+from the local delivery heartbeat. This applies from the first verified lease of a
+fresh task or the exact renewal of an unstarted reservation. Preflight counts
+against the same overall 30-minute limit. Expiry, changed identity or a lost
+renewal still stops observation of that writer. Closed receipts do not renew or acquire new
 signing authority. These tests use real SQLite plus synthetic trusted adapters;
 they do not substitute for a supported Windows end-to-end activation test.
 
