@@ -1932,6 +1932,7 @@ Exact legacy template bytes для распознавания при мигра�
   checkout – setup failure, не повод копировать plugin source.
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
   New host test files must enter both generic and applicable Windows direct CI lanes; the suite-inventory guard must remain strict.
+  Scheduled recovery exercises both the signed transport and checkpoint carry on Linux, macOS and Windows. Run both suites when changing either side of this handoff.
   Journal schema bumps must check both inbox and scheduler legacy-upgrade fixtures, then the complete assistant direct-test intersection before enqueue.
 
 - Windows retention claim: bounded sharing retries before acquisition, during an unacquired atomic directory scan, and for removal of the same empty atomic claim. Private validation and protected operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
