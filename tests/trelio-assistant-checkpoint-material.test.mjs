@@ -74,3 +74,164 @@ test('missing authority, ambiguous material or later changes cannot attest the s
     assert.equal(assistantRetiredCheckpointMaterial(turn, deliveryId, scope), null, invalidate.toString());
   }
 });
+
+test('first scheduled file command carries the checkpoint through the signed worker and the read-only inbox', async t => {
+  const fs = await import('node:fs/promises'), path = await import('node:path'), os = await import('node:os');
+  // The common finish lock resolves the user's bridge directory at import time.
+  // A separate process keeps even its synthetic lock inside the disposable home.
+  if (!process.env.TRELIO_TEST_SCHEDULED_FILE_HOME) {
+    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-test-carry-')));
+    t.after(() => fs.rm(home, { recursive: true, force: true }));
+    const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+    const { fileURLToPath } = await import('node:url');
+    const env = { ...process.env, HOME: home, USERPROFILE: home, LOCALAPPDATA: home, TRELIO_TEST_SCHEDULED_FILE_HOME: home };
+    delete env.NODE_TEST_CONTEXT;
+    const { stdout } = await promisify(execFile)(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^first scheduled file command', fileURLToPath(import.meta.url)], {
+      env,
+    });
+    assert.match(stdout, /scheduled carry checked/);
+    return;
+  }
+  const common = await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const { createAssistantWorkspaceProfile, assistantTaskStorageDirectory } = await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const { workspaceParallelDirectory } = await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+  const { materializeAssistantWorkspaceFiles } = await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const { createAssistantInbox } = await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+  const { openAssistantDatabase } = await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const config = common.resolveWorkspaceBridgeConfigDirectory();
+  const identity = { schemaVersion: 1, origin: 'https://assistant.test', assistantId: randomUUID(), deviceId: randomUUID() };
+  const taskId = randomUUID(), companyId = randomUUID(), bindingId = randomUUID(), threadId = randomUUID();
+  const nativeScope = { assistantUserId: identity.assistantId, deviceId: identity.deviceId, companyId, taskId };
+  const workspaceId = randomUUID(), oldRunId = randomUUID(), runIdentity = { workspaceId, runId: randomUUID() };
+  const taskRoot = assistantTaskStorageDirectory(config, { ...identity, taskId, companyId });
+  const oldRoot = path.join(taskRoot, 'workspaces', workspaceId);
+  const newRoot = workspaceParallelDirectory(oldRoot, workspaceId, runIdentity.runId);
+  const previous = path.join(oldRoot, 'workspace'), next = path.join(newRoot, 'workspace');
+  const relative = `assistants/${identity.assistantId}/WORK.md`, before = 'Accepted work\n', after = 'Verified draft\n';
+  const checkpointId = randomUUID(), leaseId = randomUUID(), fencingToken = 2;
+  const git = (cwd, ...args) => common.runGit(args, { cwd });
+  await common.ensurePrivateDirectory(previous);
+  await git(previous, 'init');
+  const commit = async () => {
+    await git(previous, 'add', '--all');
+    await git(previous, '-c', 'user.name=Synthetic', '-c', 'user.email=tests@assistant.invalid',
+      '-c', 'commit.gpgsign=false', 'commit', '-m', 'Synthetic checkpoint');
+    return (await git(previous, 'rev-parse', 'HEAD')).stdout.trim();
+  };
+  const write = async (directory, value) => {
+    const file = path.join(directory, relative);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, value);
+  };
+  // These synthetic Git blobs and the working file deliberately have the same
+  // LF bytes even when the runner's system Git enables Windows autocrlf.
+  await fs.writeFile(path.join(previous, '.gitattributes'), 'WORK.md text eol=lf\n');
+  await write(previous, before);
+  const baseHead = await commit();
+  await common.ensurePrivateDirectory(newRoot);
+  await git(newRoot, 'clone', '--no-hardlinks', previous, next);
+  await write(previous, after);
+  const draftHead = await commit();
+  await write(previous, 'Later unverified change');
+  for (const [root, runId, extra] of [
+    [oldRoot, oldRunId, { draftHead, materializedHead: draftHead, latestDraftCheckpointId: checkpointId }],
+    [newRoot, runIdentity.runId, { materializedHead: baseHead, leaseId, fencingToken }],
+  ]) {
+    await common.ensurePrivateDirectory(root);
+    if (process.platform !== 'win32') await fs.chmod(path.join(root, 'workspace'), 0o700);
+    await common.ensurePrivateDirectory(path.join(root, 'workspace'));
+    await common.writePrivateJsonFile(path.join(root, '.trelio-run.json'), {
+      schemaVersion: 3, scopeType: 'task', company: { id: companyId }, origin: identity.origin, workspaceId, runId,
+      workspaceDirectory: path.join(root, 'workspace'), encryption: { enabled: false }, baseHead, ...extra,
+    });
+  }
+  await common.writePrivateJsonFile(path.join(config, 'runs.json'), { roots: [oldRoot, newRoot] });
+
+  // Construct the actual three deliveries through the inbox. The file worker opens
+  // this same database independently, read-only, and receives no material in its args.
+  const db = await openAssistantDatabase(path.join(config, 'digital-assistants', 'runtime', identity.assistantId, identity.deviceId));
+  t.after(() => db.close());
+  let clock = Date.now();
+  const inbox = createAssistantInbox({ database: db.database, now: () => clock });
+  const source = { origin: identity.origin, assistantId: identity.assistantId, companyId,
+    provider: 'trelio', accountId: randomUUID(), bindingId: identity.deviceId };
+  inbox.register(source);
+  inbox.applyTaskState(source, { taskId, state: 'accepted', expectedRevision: 0, authority: { bindingId, revision: 0 } });
+  const first = await inbox.claimDelivery({ authorize: async () => true, scheduledTask: { scope: source, taskId } });
+  const makePass = deliveryId => ({ schemaVersion: 1, assistantId: identity.assistantId, deviceId: identity.deviceId,
+    companyId, taskId, bindingId, bindingRevision: 0, threadId, deliveryId, passId: randomUUID() });
+  const retire = (pass, nativeAnswer) => {
+    inbox.prepareTaskPass(pass.deliveryId);
+    inbox.startDelivery(pass.deliveryId);
+    inbox.markDeliveryUncertain(pass.deliveryId);
+    clock += 60 * 60000;
+    const receipt = { ...pass, state: 'retired', receiptId: randomUUID(), leaseRevision: 1 };
+    inbox.recordRetiredTaskWriter(pass, receipt, nativeAnswer);
+    inbox.releaseRetiredTaskWriter(pass.deliveryId, receipt);
+    return receipt;
+  };
+  const parent = retire(makePass(first.deliveryId));
+  const previousReceiptId = randomUUID(), questionId = randomUUID(), notificationId = randomUUID();
+  inbox.commitPage(source, { ...inbox.claimPoll(source), nextCursor: 'next', hasMore: false,
+    events: [{ id: notificationId, revision: '1', taskId, wake: true, ownerQuestionId: questionId }] });
+  inbox.completeAcknowledgements(source, inbox.claimAcknowledgements(source).token);
+  const answer = inbox.claimRetiredAnswer(first.deliveryId, parent.receiptId, {
+    workspaceId, acceptedHead: baseHead, pendingOwnerCheck: {
+      questionId, priorReceiptId: previousReceiptId, sourceMarkerId: first.deliveryId, sourceTurnId: randomUUID(),
+    },
+  }, notificationId, { workspaceId, runId: oldRunId, baseHead, anchorHead: baseHead, checkpointId: null });
+  const closed = retire(makePass(answer.deliveryId), { writerRetirementReceiptId: parent.receiptId, notificationId });
+  const review = { workspaceId, runId: oldRunId, checkpointId, draftHead, dueAt: clock, previousReceiptId,
+    sourceMarkerId: answer.deliveryId, sourceTurnId: randomUUID() };
+  const job = inbox.claimReconciliation(answer.deliveryId, closed.receiptId, null, null, {
+    baseHead, review, path: relative, beforeSha256: digest(before), afterSha256: digest(after),
+  });
+  inbox.prepareTaskPass(job.deliveryId);
+  inbox.startDelivery(job.deliveryId);
+  const pass = { ...makePass(job.deliveryId),
+    retiredReconcile: { passId: closed.passId, writerRetirementReceiptId: closed.receiptId, expectedLeaseRevision: closed.leaseRevision },
+    retiredScheduled: { writerRetirementReceiptId: closed.receiptId, dueAt: clock } };
+  const runtimeSessionId = randomUUID(), expiresAt = new Date(Date.now() + 300000).toISOString();
+  const { generateKeyPairSync, randomBytes } = await import('node:crypto');
+  const device = { assistantId: identity.assistantId, deviceId: identity.deviceId,
+    credential: 'tda_' + randomBytes(32).toString('base64url'), expiresAt: 1 };
+  const runtime = { schemaVersion: 1, threadId, passId: pass.passId, state: { runtimeSessionId, expiresAt,
+    privateKeyPkcs8: generateKeyPairSync('ed25519').privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64url'),
+    observation: { schemaVersion: 1, clientFamily: 'codex', modelId: 'gpt-6.1-sol', effortLevel: 'high',
+      evidenceLevel: 'local_observed', source: 'codex_hook' } } };
+  const host = { configurationDirectory: config, readIdentity: async () => identity, readActivePass: async () => pass };
+  const client = { readTaskPass: async () => ({ ...pass, state: 'leased', leaseExpiresAt: expiresAt }) };
+  const store = { get: async ({ kind, id }) => kind === 'runtime' && id === pass.passId ? runtime
+    : kind === 'device' && id === identity.assistantId ? device : null };
+  const profile = await createAssistantWorkspaceProfile({ identity, host, store, client, workspaceRun: runIdentity,
+    lockDirectory: path.join(config, 'locks') });
+  let reads = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    url = new URL(url);
+    assert.equal(url.origin, identity.origin);
+    assert.equal(options.method ?? 'GET', 'GET');
+    assert.equal(options.headers.get('authorization'), 'Bearer ' + device.credential);
+    const prefix = '/api/digital-assistants/runtime/workspace';
+    if (url.pathname === prefix + '/bridge-routing') {
+      assert.equal(url.searchParams.get('workspaceId'), workspaceId);
+      return Response.json({ schemaVersion: 1, company: { id: companyId, slug: 'synthetic' }, encryptionState: 'plain' });
+    }
+    assert.equal(url.pathname, prefix + '/workspaces/' + workspaceId + '/runs/' + runIdentity.runId);
+    reads++;
+    return Response.json({ run: { id: runIdentity.runId, workspaceId, status: 'running', leaseId,
+      leaseExpiresAt: expiresAt, fencingToken } });
+  });
+  const carry = () => common.withWorkspaceExecutionProfile(profile, () => materializeAssistantWorkspaceFiles({
+    result: { structuredContent: { schemaVersion: 1, kind: 'assistant_workspace_files', runIdentity,
+      scope: { ...nativeScope, passId: pass.passId }, runtimeSessionId } },
+    arguments: { taskPass: { companyId, taskId, passId: pass.passId }, runIdentity, runtimeSessionProof: { runtimeSessionId },
+      command: { action: 'carry_forward' } },
+  }, { withProfile: action => action({ identity, host, store, prepareWorkspaceRun: profile.prepareWorkspaceRun }) }));
+  const result = await carry();
+  assert.deepEqual(result.structuredContent, { state: 'carried_forward', sha256: digest(after) });
+  assert.ok(reads > 1);
+  assert.equal(await fs.readFile(path.join(next, relative), 'utf8'), after);
+  assert.equal(await fs.readFile(path.join(previous, relative), 'utf8'), 'Later unverified change');
+  assert.equal(inbox.readDelivery(job.deliveryId).state, 'started');
+  t.diagnostic('scheduled carry checked');
+});
