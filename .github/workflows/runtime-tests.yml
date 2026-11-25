@@ -375,6 +375,8 @@ jobs:
           node tests/trelio-skill-accounts.test.mjs
           node tests/trelio-assistant-inbox.test.mjs
           node tests/trelio-assistant-scheduler.test.mjs
+          node tests/trelio-assistant-scheduled-transport.test.mjs
+          node tests/trelio-assistant-checkpoint-material.test.mjs
           node tests/trelio-assistant-codex.test.mjs
           node tests/trelio-assistant-private.test.mjs
           node tests/trelio-assistant-transport.test.mjs
@@ -557,6 +559,10 @@ jobs:
           node tests/trelio-assistant-inbox.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-scheduler.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-scheduled-transport.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-checkpoint-material.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-codex.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
