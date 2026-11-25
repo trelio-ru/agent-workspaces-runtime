@@ -105,7 +105,8 @@ The device and native signer retain the restriction across process restarts.
 The worker may read its task, its directly related parent under ordinary task
 ACL, its own accepted material and existing accounts. Provider calls require
 live platform verification and read-only arguments declared by that exact signed
-package. Immutable guide pages use the ordinary signed guide reader. Ordinary
+package. The host also rechecks the selected local account after a read and
+discards output if its binding was revoked. Immutable guide pages use the ordinary signed guide reader. Ordinary
 task or browser mutations, credential setup, sending and source acknowledgements
 have no admission in this profile.
 

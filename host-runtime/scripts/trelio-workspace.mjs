@@ -10594,6 +10594,7 @@ const skillCommand = async (
     localIdentity: resolution.localIdentity,
     companyConnection: resolution.companyConnection,
   };
+  let verifyLocalAccount;
   const verifyCurrentAssistantSkill = async () => {
     // Materialization/account discovery may cross I/O. Repeat only the native
     // read admission immediately before launch; never replay the provider.
@@ -10621,6 +10622,10 @@ const skillCommand = async (
     // against the local cache digest (which would reject every private run).
     if (live.artifact.id !== resolution.artifact.id || live.artifact.packageSha256 !== resolution.artifact.packageSha256)
       throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
+    // The native resolver checks membership and the service connection. The
+    // selected account belongs to the local catalogue and can be unbound
+    // independently while the provider reads. Check both before disclosure.
+    if (verifyLocalAccount) await verifyLocalAccount();
   };
   const taskEffectReceipt = (stdout,artifact) => {
     if(resolution.artifact.contentProtection!=='plain'||resolution.trust.level!=='platform_verified'
@@ -10677,6 +10682,7 @@ const skillCommand = async (
         if (!profile.retiredReconcile) process.stdout.write(inventoryOutput);
       } } : {}),
     });
+    verifyLocalAccount = accountResult.verifyLocalAccount;
     if (accountResult.handled) {
       if (profile?.retiredReconcile) {
         await verifyCurrentAssistantSkill();
@@ -10909,6 +10915,10 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
         projectId: executionContext.projectId ?? null, accounts }).catch(() => null)
       : null;
     output({ ok: true, ...listed, accounts, ...(configuredTelegramSource ? { configuredTelegramSource } : {}) });
+    if (profile?.retiredReconcile) return { handled: true, verifyLocalAccount: async () => {
+      if ((await catalogue.list({existingOnly:true})).revision !== listed.revision)
+        throw Object.assign(new Error('ACCOUNT_CATALOGUE_CONFLICT'), {code:'ACCOUNT_CATALOGUE_CONFLICT'});
+    } };
     return { handled: true };
   }
   if (command) {
@@ -10933,6 +10943,11 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     && supportsSkillVisualGuestProfile(artifact);
   const account = await catalogue.select(parsed.accountId, { allowUnboundGuest, existingOnly:Boolean(profile?.retiredReconcile) });
   return { handled: false, account, runtimeArguments: parsed.providerArguments,
+    ...(profile?.retiredReconcile ? { verifyLocalAccount: async () => {
+      const current = await catalogue.select(parsed.accountId, {existingOnly:true});
+      if (current.id !== account.id || current.providerRef !== account.providerRef)
+        throw Object.assign(new Error('ACCOUNT_CATALOGUE_CONFLICT'), {code:'ACCOUNT_CATALOGUE_CONFLICT'});
+    } } : {}),
     ...(account === null ? { visualGuestProfile: true } : {}) };
 };
 

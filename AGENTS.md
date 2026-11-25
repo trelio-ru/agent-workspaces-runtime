@@ -326,7 +326,8 @@ publication tooling также остаются вне этого публичн
   [Contract](docs/assistant-scheduler.md#interrupted-workspace-draft-settlement).
 - A retired task may claim new work in the same chat with its original effect
   still fenced. Keep the restricted signer across renew/restart, select provider
-  reads from the actual signed arguments and confirm only the new canonical Run.
+  reads from the actual signed arguments, recheck the local account before
+  disclosing output and confirm only the new canonical Run.
   [Contract](docs/assistant-scheduler.md#new-work-with-a-retained-external-effect).
 - Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Outgoing self-check: optional native intake metadata in task/owner intake.

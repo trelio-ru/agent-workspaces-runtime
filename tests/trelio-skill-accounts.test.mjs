@@ -931,3 +931,23 @@ test('a restricted task starts only declared read commands and performs no accou
     assert.equal(await fs.readFile(file,'utf8'),'read --target example\n');
   });
 });
+
+test('a completed restricted read retains only its current local account binding',async t=>{
+  const {directory,make}=await fixture(t),catalogue=make(),id=crypto.randomUUID();
+  await catalogue.change({operation:'create',id,name:'One',expectedRevision:0});
+  const {withWorkspaceExecutionProfile}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const profile={kind:'digital_assistant',retiredReconcile:{passId:crypto.randomUUID(),
+    writerRetirementReceiptId:crypto.randomUUID(),expectedLeaseRevision:1},resolveSkillCatalogueDirectory:async()=>directory,
+    requireToken:async()=>assert.fail(),prepareRequest:async()=>assert.fail(),resolveSkillRuntimeChat:async()=>null};
+  await withWorkspaceExecutionProfile(profile,async()=>{
+    const base={origin:identity.origin,artifact:{skillId:identity.skillId},runtimeDirectory:directory,
+      executionContext:{companyId:company,localIdentity:{memberId:member,connectionId:connection}},
+      discover:()=>assert.fail('no account import'),output:()=>{}};
+    const inventory=await prepareSkillAccount({...base,runtimeArguments:['account','list']});
+    const read=await prepareSkillAccount({...base,runtimeArguments:['read','--local-account',id]});
+    await inventory.verifyLocalAccount();await read.verifyLocalAccount();
+    await catalogue.change({operation:'unbind',id,expectedRevision:1});
+    await assert.rejects(inventory.verifyLocalAccount(),{code:'ACCOUNT_CATALOGUE_CONFLICT'});
+    await assert.rejects(read.verifyLocalAccount(),{code:'ACCOUNT_NOT_BOUND'});
+  });
+});
