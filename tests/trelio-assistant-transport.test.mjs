@@ -6253,11 +6253,19 @@ test('an owner answer begin preserves the exact historical selector and accepts 
     retiredAnswer:receipt,leaseExpiresAt:new Date().toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
   let value=response;
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
-    assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/begin');assert.deepEqual(JSON.parse(options.body),{...input,retiredAnswer});
+    if(url===origin+'/api/digital-assistants/runtime/task-pass/read')
+      assert.deepEqual(JSON.parse(options.body),{companyId:input.companyId,taskId:input.taskId,passId:response.passId});
+    else {assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/begin');assert.deepEqual(JSON.parse(options.body),{...input,retiredAnswer});}
     return Response.json(value);
   }})});
   for(const startState of ['created','observe']){
     value={...response,startState};assert.deepEqual((await client.beginTaskPass({...input,retiredAnswer})).retiredAnswer,receipt);
+  }
+  const lookup={companyId:input.companyId,taskId:input.taskId,passId:response.passId};
+  assert.deepEqual((await client.readTaskPass(lookup)).retiredAnswer,receipt);
+  for(const invalid of [null,{...receipt,notificationId:'wrong'},{...receipt,notificationId:[receipt.notificationId]},
+    {...receipt,writerRetirementReceiptId:[receipt.writerRetirementReceiptId]},{...receipt,alternateId:randomUUID()}]){
+    value={...response,retiredAnswer:invalid};await assert.rejects(client.readTaskPass(lookup),/INVALID_RESPONSE/);
   }
   for(const incorrect of [{retiredAnswer:null},{retiredAnswer:{...receipt,notificationId:randomUUID()}},{passId:retiredAnswer.passId},
     {deliveryId:retiredAnswer.review.pendingOwnerCheck.sourceMarkerId},{workMode:'discussion'},{startState:undefined}]){

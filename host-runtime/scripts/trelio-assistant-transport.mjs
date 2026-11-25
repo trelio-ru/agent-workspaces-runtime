@@ -308,6 +308,17 @@ const executionState = value => {
   return {state:value.state,configuration:value.state==='unconfigured'?null:executionConfiguration(value.configuration),
     policyRevisionId:value.policyRevisionId===null?null:id(value.policyRevisionId)};
 };
+// Native begin and subsequent exact pass reads return the same link. It
+// identifies the NEW delivery during any ordinary guarded continuation.
+const retiredAnswerLink=value=>{
+  if(!object(value))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if(!Object.hasOwn(value,'retiredAnswer'))return {};
+  const link=value.retiredAnswer;
+  if(value.workMode!=='task'||!object(link)||Object.keys(link).sort().join(',')!=='notificationId,writerRetirementReceiptId'
+    ||typeof link.notificationId!=='string'||!UUID.test(link.notificationId)
+    ||typeof link.writerRetirementReceiptId!=='string'||!UUID.test(link.writerRetirementReceiptId))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {retiredAnswer:{notificationId:link.notificationId,writerRetirementReceiptId:link.writerRetirementReceiptId}};
+};
 const passExecution = value => value.state==='leased' ? executionConfiguration(value.execution)
   : value.execution == null ? null : executionConfiguration(value.execution);
 
@@ -3233,10 +3244,10 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call('passBegin',{companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
         bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId),
         ...(answer?{retiredAnswer:answer}:{})},signal);
-      if(answer&&(!['created','observe'].includes(value.startState)||value.passId===answer.passId||value.workMode!=='task'
-        ||!object(value.retiredAnswer)||Object.keys(value.retiredAnswer).sort().join(',')!=='notificationId,writerRetirementReceiptId'
-        ||value.retiredAnswer.writerRetirementReceiptId!==answer.writerRetirementReceiptId||value.retiredAnswer.notificationId!==answer.notificationId)
-        ||!answer&&value.retiredAnswer!==undefined)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const link=retiredAnswerLink(value);
+      if(answer&&(!['created','observe'].includes(value.startState)||value.passId===answer.passId
+        ||link.retiredAnswer?.writerRetirementReceiptId!==answer.writerRetirementReceiptId||link.retiredAnswer.notificationId!==answer.notificationId)
+        ||!answer&&link.retiredAnswer!==undefined)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       if(value.bindingId!==input.bindingId || value.deliveryId!==input.deliveryId || value.threadId!==input.threadId
         || value.bindingRevision!==input.bindingRevision || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       // Only the INSERT transaction can identify a first delivery. A cached
@@ -3244,14 +3255,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if (Object.hasOwn(value,'startState') && (!['created','observe'].includes(value.startState)
         || value.startState==='created' && (value.leaseRevision !== 0 || value.state !== 'leased')))
         fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {...(Object.hasOwn(value,'startState') ? {startState:value.startState} : {}),...(answer?{retiredAnswer:value.retiredAnswer}:{}),passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+      return {...(Object.hasOwn(value,'startState') ? {startState:value.startState} : {}),...link,passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },
     async readTaskPass(input,signal) {
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId)},signal);
       if(value.passId!==input.passId || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+      return {...retiredAnswerLink(value),passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },

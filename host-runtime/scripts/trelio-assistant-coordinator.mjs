@@ -2827,8 +2827,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           throw error;
         }
         lease();
-        if(retiredAnswer&&!isDeepStrictEqual(admitted.retiredAnswer,{writerRetirementReceiptId:retiredAnswer.writerRetirementReceiptId,
-          notificationId:retiredAnswer.notificationId}))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        if(!isDeepStrictEqual(admitted.retiredAnswer,retiredAnswer?{writerRetirementReceiptId:retiredAnswer.writerRetirementReceiptId,
+          notificationId:retiredAnswer.notificationId}:undefined))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         if(admitted.bindingId!==authority.bindingId||admitted.bindingRevision!==authority.revision
           ||admitted.deliveryId!==job.deliveryId||admitted.threadId!==plan.threadId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
         const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
