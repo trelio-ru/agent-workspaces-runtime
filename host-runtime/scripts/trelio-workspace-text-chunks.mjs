@@ -63,13 +63,19 @@ const compileWorkspaceChunkQuery = (rawQuery) => {
     return { query, roots, expressions, normalizedQuery, phraseExpressions, tokens, tokenExpressions,
         buildPreview: createContextSearchPreviewBuilder(query) };
 };
+// Capture only the contributing raw excerpts, not the file, prepared chunks,
+// or witnesses that were used to reject other formulations.
+const deferWorkspaceChunkPreview = (lexicalQuality, parts, buildPreview) => ({
+    lexicalQuality,
+    renderPreview: () => buildPreview(parts.map(part => buildPreview(part, 600)).join(" … ")),
+});
 /** Prepare bounded witnesses once for every formulation of the same file.
  * The streaming caller holds at most one chunk per query pattern. Cache lives
  * only for that file; it never retains a company corpus or a plaintext index.
  * The ordinary single-query API below deliberately does not cache normalized
  * parts, since its callers may supply an arbitrarily large complete file.
  */
-const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePreparedParts, cachePreviews = cachePreparedParts) => {
+const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePreparedParts, cachePreviews = cachePreparedParts, deferPreview = false) => {
     const parts = [{ index: 0, text: metadata + (hasContent ? "\n" : ""), isLast: !hasContent }, ...chunks.map(chunk => ({
             ...chunk, text: chunk.index === 0 ? metadata + "\n" + chunk.text : chunk.text,
         }))];
@@ -141,7 +147,10 @@ const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePrepared
                     }
                 }
             }
-            if (useful) {
+            if (useful && deferPreview) {
+                evidence.push(part.text);
+            }
+            else if (useful) {
                 if (!part.preview && cachePreviews && prepared?.get(position) === part) {
                     // Display compaction cannot grow UTF-16 length. Reserve space for
                     // the compact original plus both case-folded representations.
@@ -161,6 +170,8 @@ const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePrepared
         if (matched.size !== expressions.length)
             return null;
         lexicalQuality = Math.max(lexicalQuality, tokens.length ? Math.round(exactTokens.size / tokens.length * 100) : 0);
+        if (deferPreview)
+            return deferWorkspaceChunkPreview(lexicalQuality, evidence, buildPreview);
         return { lexicalQuality, previewText: buildPreview(evidence.join(" … ")) };
     };
 };
@@ -168,13 +179,19 @@ const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePrepared
  * individual file matcher. Edge expressions are non-global and non-sticky. */
 export const createWorkspaceTextChunkSearchPlan = (rawQueries) => {
     const queries = new Map(rawQueries.map(query => [query, compileWorkspaceChunkQuery(query)]));
+    const createMatcher = (metadata, chunks, hasContent, deferPreview) => {
+        const match = createWorkspaceChunkMatcher(metadata, chunks, hasContent, true, queries.size > 1, deferPreview);
+        return (rawQuery) => {
+            const query = queries.get(rawQuery);
+            return query ? match(query) : null;
+        };
+    };
     return {
         createMatcher(metadata, chunks, hasContent = chunks.length > 0) {
-            const match = createWorkspaceChunkMatcher(metadata, chunks, hasContent, true, queries.size > 1);
-            return (rawQuery) => {
-                const query = queries.get(rawQuery);
-                return query ? match(query) : null;
-            };
+            return createMatcher(metadata, chunks, hasContent, false);
+        },
+        createDeferredMatcher(metadata, chunks, hasContent = chunks.length > 0) {
+            return createMatcher(metadata, chunks, hasContent, true);
         },
     };
 };
