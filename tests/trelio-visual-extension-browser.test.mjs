@@ -361,7 +361,7 @@ test('a linked HTML office viewer exposes safe menus and downloads the complete 
     return view;
   };
   try {
-    for (mode of ['iframe', 'main']) {
+    for (mode of ['iframe', 'main', 'inline-dialog']) {
       let view = await call('article', 'navigate', { url: origin + '/?mode=' + mode });
       assert.equal(view.state, 'ready', view.reason);
       const before = focus();
@@ -370,17 +370,27 @@ test('a linked HTML office viewer exposes safe menus and downloads the complete 
       assert.match(view.title, /\.docx/); assert.equal(view.controls.some(c => c.label === 'DISABLED_MENU'), false);
       view = await call('file_menu', 'click', control(view, 'File'));
       view = await call('download_menu', 'click', control(view, 'Download'));
-      const confirmation = await call('original', 'download-attachment', control(view, 'Microsoft Word (.docx)'));
+      const selected = control(view, 'Microsoft Word (.docx)');
+      const privateRead = mode === 'inline-dialog';
+      const confirmation = await call('original', 'download-attachment',
+        privateRead ? { ...selected, inlineMimeType: 'text/csv' } : selected);
       assert.match(confirmation.text, /Download the selected original/);
       const file = await call('confirm_original', 'key', { frameId: confirmation.frameId, key: 'Enter' });
       assert.equal(file.state, 'ready', JSON.stringify({ mode, reason: file.reason, requestCount: hits.length }));
+      if (privateRead) {
+        // The dialog answer is a different invocation. Even if it unblocks
+        // the original GET, it may not deliver the bytes or create a file.
+        assert.equal(file.kind, 'trelio.browser-text/v1');
+        assert.equal((await fs.readdir(path.join(directory, 'attachments'))).length, 2);
+        continue;
+      }
       assert.equal(file.kind, 'trelio.browser-file/v1'); assert.equal(path.extname(file.filePath), '.docx');
       assert.deepEqual(await fs.readFile(file.filePath), docx); assert.equal(file.sha256, createHash('sha256').update(docx).digest('hex'));
       assert.doesNotMatch(JSON.stringify(file), /untrusted-original|Content-Disposition|\/original|dataBase64/);
       view = await call('retained_viewer', 'read-text'); assert.match(view.text, /SYNTHETIC_VIEWER_REMAINS/);
       if (before) assert.equal(focus(), before, 'viewer download never opens Save As or changes foreground');
     }
-    assert.deepEqual(hits, ['GET', 'GET'], 'each UI download performs one actual GET; paused originals are not replayed');
+    assert.deepEqual(hits, ['GET', 'GET', 'GET'], 'each UI download performs one actual GET; paused originals are not replayed');
     phase = 'close'; await browser.close();
   } catch (error) { t.diagnostic(JSON.stringify({ phase, mode, observations, requestCount: hits.length, native: evidence })); throw error; } finally {
     await listener.stop();
@@ -1109,11 +1119,12 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
     received.push(request.url);
     if (request.url === '/redirect') { response.writeHead(302, { Location: '/file' }); response.end(); return; }
     if (request.url === '/file') { response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename=untrusted-name.pdf', 'Content-Length': pdf.length }); response.end(pdf); return; }
+    if (request.url === '/csv') { response.writeHead(200, { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment' }); response.end('id,city\r\n1,Test'); return; }
     if (request.url === '/text') { response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': 'attachment', 'Content-Length': text.length }); response.end(text); return; }
     if (request.url === '/html') { response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Disposition': 'attachment; filename=pretend.pdf' }); response.end('<html>SYNTHETIC_SOURCE_MUST_NOT_EXPORT</html>'); return; }
     if (request.url === '/fake') { response.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment' }); response.end('SYNTHETIC_NOT_PDF'); return; }
     if (request.url === '/large') { response.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment', 'Content-Length': 30 * 1024 * 1024 }); response.end(); return; }
-    response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body style="font:25px sans-serif">Original synthetic chat<a target="_blank" download href="/redirect" style="position:absolute;left:30px;top:60px">PDF</a><a href="/text" style="position:absolute;left:30px;top:120px">Text</a><a href="/html" style="position:absolute;left:30px;top:180px">HTML</a><a href="/fake" style="position:absolute;left:30px;top:240px">Invalid PDF</a><a href="/large" style="position:absolute;left:30px;top:300px">Large</a><button style="position:absolute;left:200px;top:60px" onclick="setTimeout(() =&gt; window.open(&quot;/file&quot;, &quot;_blank&quot;), 20)">Button file</button>');
+    response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body style="font:25px sans-serif">Original synthetic chat<a target="_blank" download href="/redirect" style="position:absolute;left:30px;top:60px">PDF</a><a href="/csv" style="position:absolute;left:210px;top:120px">CSV</a><a href="/text" style="position:absolute;left:30px;top:120px">Text</a><a href="/html" style="position:absolute;left:30px;top:180px">HTML</a><a href="/fake" style="position:absolute;left:30px;top:240px">Invalid PDF</a><a href="/large" style="position:absolute;left:30px;top:300px">Large</a><button style="position:absolute;left:200px;top:60px" onclick="setTimeout(() =&gt; window.open(&quot;/file&quot;, &quot;_blank&quot;), 20)">Button file</button>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -1123,6 +1134,12 @@ test('explicit incoming attachment uses browser transport, preserves the chat an
   try {
     let f = await browser.call('navigate', { url: origin + '/' }); assert.equal(f.state, 'ready');
     await new Promise(resolve => setTimeout(resolve, 1200)); const before = focus();
+    const csv = await browser.call('download-attachment', { frameId: f.frameId, x: 230, y: 135, inlineMimeType: 'text/csv' });
+    assert.equal(csv.kind, 'trelio.browser-inline-text/v1', JSON.stringify({ state: csv.state, reason: csv.reason }));
+    assert.equal(csv.text, 'id,city\r\n1,Test');
+    assert.equal(received.filter(url => url === '/csv').length, 1);
+    await assert.rejects(fs.stat(path.join(directory, 'attachments')), { code: 'ENOENT' });
+    f = await browser.call('read-text');
     const file = await browser.call('download-attachment', { frameId: f.frameId, x: 50, y: 75 });
     assert.equal(file.state, 'ready', JSON.stringify({ reason: file.reason })); assert.equal(file.kind, 'trelio.browser-file/v1');
     assert.deepEqual(await fs.readFile(file.filePath), pdf); assert.equal(file.sha256, createHash('sha256').update(pdf).digest('hex')); assert.equal(file.mimeType, 'application/pdf');

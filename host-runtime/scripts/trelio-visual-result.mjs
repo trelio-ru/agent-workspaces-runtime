@@ -22,6 +22,8 @@ export function validVisualUploadFiles(files) {
 // paths, HTML, URLs, headers, selectors or arbitrary structured payloads.
 export const VISUAL_RESULT_KIND = 'trelio.visual-browser/v1';
 export const BROWSER_FILE_KIND = 'trelio.browser-file/v1';
+export const INLINE_TEXT_KIND = 'trelio.browser-inline-text/v1';
+export const MAX_VISUAL_INLINE_TEXT_BYTES = 2 * 1024 * 1024;
 export const MAX_VISUAL_PNG_BYTES = 2 * 1024 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const states = new Set(['not_configured', 'preparing', 'manual_input_required', 'saved_unverified', 'ready', 'closed', 'error']);
@@ -233,6 +235,22 @@ function validateResult(value, discardBrowserColorProfile) {
   return value;
 }
 
+// The authenticated worker and its requesting skill may exchange the original
+// CSV in memory. The public MCP validator never accepts this private envelope.
+export function validateVisualCommandResult(value, operation, args) {
+  const inline = operation === 'download-attachment' && args?.inlineMimeType === 'text/csv';
+  if (value?.kind !== INLINE_TEXT_KIND) {
+    if (inline && value?.kind === BROWSER_FILE_KIND) fail();
+    return validateVisualResult(value);
+  }
+  if (!inline || !exact(value, ['kind', 'state', 'reason', 'sessionId', 'mimeType', 'text'])
+    || value.state !== 'ready' || value.reason !== 'none' || !uuid.test(value.sessionId)
+    || value.mimeType !== 'text/csv' || typeof value.text !== 'string'
+    || Buffer.byteLength(value.text) > MAX_VISUAL_INLINE_TEXT_BYTES
+    || Buffer.byteLength(JSON.stringify(value)) > 3 * 1024 * 1024) fail();
+  return value;
+}
+
 export function validateVisualResult(value) {
   if (value?.kind === BROWSER_MAIL_REQUEST_KIND) {
     if (!exact(value, ['kind', 'state', 'handle', 'expiresAt', 'authenticated', 'acknowledgement'])
@@ -286,10 +304,13 @@ export function visualMcpResult(value) {
 // Only the skill-run transport may interpret this marker. A malformed visual
 // attempt fails closed instead of falling back to echoing its original stdout.
 export function parseVisualSkillOutput(stdout) {
-  if (typeof stdout !== 'string' || (!stdout.includes(VISUAL_RESULT_KIND) && !stdout.includes(TEXT_KIND) && !stdout.includes(BROWSER_FILE_KIND) && !stdout.includes(BROWSER_MAIL_REQUEST_KIND))) return null;
+  if (typeof stdout !== 'string' || (!stdout.includes(VISUAL_RESULT_KIND) && !stdout.includes(TEXT_KIND) && !stdout.includes(BROWSER_FILE_KIND) && !stdout.includes(BROWSER_MAIL_REQUEST_KIND) && !stdout.includes(INLINE_TEXT_KIND))) return null;
   if (Buffer.byteLength(stdout) > 3 * 1024 * 1024) fail();
   let value;
   try { value = JSON.parse(stdout); } catch { fail(); }
+  // A provider may return selected business fields, never the private
+  // attachment transfer itself as a generic stdout or visual response.
+  if (value?.kind === INLINE_TEXT_KIND) fail();
   // Ordinary provider data may mention the protocol in prose. Only its exact
   // top-level marker opts into closed browser projection; legacy JSON stays unchanged.
   if (value?.kind !== VISUAL_RESULT_KIND && value?.kind !== TEXT_KIND && value?.kind !== BROWSER_FILE_KIND && value?.kind !== BROWSER_MAIL_REQUEST_KIND) return null;
@@ -298,11 +319,13 @@ export function parseVisualSkillOutput(stdout) {
 
 // Value-free command schemas shared by the public controller and browser.
 // Reject unknown fields BEFORE private owner state or worker creation.
-const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls', 'controlQuery', 'controlOffset', 'checks', 'expectedDocumentUrl'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url', 'expectedDocumentUrl'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], 'download-audio': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
+const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls', 'controlQuery', 'controlOffset', 'checks', 'expectedDocumentUrl'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url', 'expectedDocumentUrl'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y', 'inlineMimeType'], 'download-audio': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
 fields['upload-files'] = ['frameId', 'x', 'y', 'files'];
 export const validVisualArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768
   && (operation !== 'read-text' || (!Object.hasOwn(args, 'controlQuery') || typeof args.controlQuery === 'string' && args.controlQuery.length <= 120)
     && (!Object.hasOwn(args, 'controlOffset') || Number.isInteger(args.controlOffset) && args.controlOffset >= 0 && args.controlOffset <= 1200))
+  && (!Object.hasOwn(args, 'inlineMimeType') || args.inlineMimeType === 'text/csv'
+    && typeof args.frameId === 'string' && Number.isInteger(args.x) && Number.isInteger(args.y))
   && (operation !== 'download-audio' || typeof args.frameId === 'string' && args.frameId.length > 0 && Number.isInteger(args.x) && args.x >= 0 && Number.isInteger(args.y) && args.y >= 0)
   && (operation !== 'authenticate-mail' || Object.keys(args).length === 1 && typeof args.mailAccountId === 'string' && uuid.test(args.mailAccountId))
   && (operation !== 'upload-files' || validVisualUploadFiles(args.files) && typeof args.frameId === 'string' && Number.isInteger(args.x) && Number.isInteger(args.y));

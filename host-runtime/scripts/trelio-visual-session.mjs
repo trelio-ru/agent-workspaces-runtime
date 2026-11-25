@@ -11,7 +11,7 @@ import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivat
 import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { visualGuestStorageScope, visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths } from './trelio-visual-browser.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualCommandResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding, browserExecutionOwner, browserExecutionDirectory, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { nodeChildEnvironment } from './trelio-local-path.mjs';
@@ -157,7 +157,7 @@ async function request(owner, operation, args, signal) {
   if (response.status !== 200 || Number(response.headers.get('content-length') || 0) > 3 * 1024 * 1024) throw new Error('VISUAL_WORKER_UNAVAILABLE');
   const text = await response.text();
   if (Buffer.byteLength(text) > 3 * 1024 * 1024) throw new Error('VISUAL_RESULT_INVALID');
-  return validateVisualResult(JSON.parse(text));
+  return validateVisualCommandResult(JSON.parse(text), operation, args);
 }
 
 async function requestVisualSecret(owner, body, signal) {
@@ -344,6 +344,7 @@ export async function closeVisualExecutionSessions({ companyId, runtimeSessionId
 
 export const VISUAL_AUDIO_DOWNLOAD_API = 'trelio.visual-audio-download/v1';
 export const VISUAL_ATTACHMENT_FILE_API = 'trelio.visual-attachment-file/v1';
+export { INLINE_TEXT_KIND as VISUAL_INLINE_TEXT_API } from './trelio-visual-result.mjs';
 export const VISUAL_ATTACHMENT_REDIRECT_API = 'trelio.visual-attachment-redirect/v1';
 export const VISUAL_DOCUMENT_REFERENCE_API = 'trelio.visual-document-reference/v1';
 // Signed provider opt-in; ordinary CLI/MCP arguments never select this policy.
@@ -632,7 +633,7 @@ export function createVisualControlServer({ token, dispatch, mailDispatch, secre
         res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body); return;
       }
       if (!value || Object.keys(value).sort().join() !== 'args,operation' || typeof value.operation !== 'string') throw new Error('invalid_input');
-      const result = validateVisualResult(await dispatch(value.operation, value.args));
+      const result = validateVisualCommandResult(await dispatch(value.operation, value.args), value.operation, value.args);
       const body = JSON.stringify(result);
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body);
     } catch (error) {

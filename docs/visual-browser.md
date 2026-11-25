@@ -791,8 +791,15 @@ native output, PID, profile paths and auth content are never reported.
 `runVisualSession({ attachmentDownloads: true })` – отдельный signed opt-in,
 по умолчанию выключен. Он закреплён в live owner вместе с observation mode;
 смена требует обычного close, без сброса auth. Команда `download-attachment`
-принимает только свежий frameId и x/y. URL, headers, имя файла, executable,
+принимает свежий frameId и x/y. URL, headers, имя файла, executable,
 script, selector и output path не принимаются.
+
+Для чтения CSV навык может передать `inlineMimeType: "text/csv"` после
+проверки `VISUAL_INLINE_TEXT_API`. Тот же браузер скачивает выбранный файл
+один раз и проверяет формат. До 2 МиБ UTF-8 передаются в памяти только
+вызвавшему навыку. Навык возвращает запрошенные значения. Пустой CSV допустим.
+Несовместимый worker завершает операцию с ошибкой. Ответ на последующий диалог
+не получает CSV. При обычном скачивании по-прежнему создаётся файл.
 
 Fixed isolated adapter локально разрешает href exact hit-tested anchor.
 Для карточки-кнопки fixed MAIN router на один trusted click тех же координат

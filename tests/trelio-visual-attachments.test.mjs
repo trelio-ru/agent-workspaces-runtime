@@ -7,7 +7,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import { normalizeVisualAttachmentFilePolicy, visualAttachmentFormat, visualAudioFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { saveVisualAttachment, freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
-import { validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { validateVisualCommandResult, validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { validVisualArguments, visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 
 test('file-only destinations and diagnostic stages have a closed signed contract', () => {
@@ -59,6 +59,37 @@ test('explicit unknown formats are stored as inert originals and legacy scopes c
     dataBase64: Buffer.from('Полный оригинал').toString('base64') }, session, { allowOpaque: true });
   assert.equal(typed.mimeType, 'text/plain');
   assert.equal(path.dirname(typed.filePath), path.join(directory, 'attachments'));
+});
+
+test('inline CSV uses the private reply only and never creates or sweeps the attachment cache', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-inline-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const sessionId = randomUUID();
+  const operation = 'download-attachment', args = { frameId: randomUUID(), x: 4, y: 5, inlineMimeType: 'text/csv' };
+  const inline = (bytes, mimeType = 'text/csv') => saveVisualAttachment(directory, {
+    mimeType, dataBase64: bytes.toString('base64'),
+  }, sessionId, { inlineMimeType: args.inlineMimeType });
+  const value = await inline(Buffer.from('A,B\r\n1,«Тест»'));
+  assert.deepEqual(value, { kind: 'trelio.browser-inline-text/v1', state: 'ready', reason: 'none',
+    sessionId, mimeType: 'text/csv', text: 'A,B\r\n1,«Тест»' });
+  assert.equal((await inline(Buffer.alloc(0))).text, '');
+  assert.equal(validateVisualCommandResult(value, operation, args), value);
+  for (const check of [() => validateVisualCommandResult(value, 'click', args),
+    () => validateVisualCommandResult(value, operation, {}), () => validateVisualResult(value),
+    () => parseVisualSkillOutput(JSON.stringify(value)), () => visualMcpResult(value)]) {
+    assert.throws(check, { code: 'VISUAL_RESULT_INVALID' });
+  }
+  for (const [bytes, type] of [[Buffer.from([0xff]), 'text/csv'], [Buffer.from('<html>private'), 'text/csv'],
+    [Buffer.from('plain text'), 'text/plain'], [Buffer.alloc(2 * 1024 * 1024 + 1, 65), 'text/csv']]) {
+    await assert.rejects(inline(bytes, type));
+  }
+  assert.deepEqual(await fs.readdir(directory), []);
+  assert.equal(validVisualArguments(operation, args), true);
+  assert.equal(validVisualArguments(operation, { ...args, inlineMimeType: 'text/html' }), false);
+  assert.equal(validVisualArguments('click', args), false);
+  const ordinary = await saveVisualAttachment(directory, { mimeType: 'text/csv', dataBase64: '' }, sessionId);
+  assert.equal(ordinary.kind, 'trelio.browser-file/v1');
+  assert.throws(() => validateVisualCommandResult(ordinary, operation, args), { code: 'VISUAL_RESULT_INVALID' });
 });
 
 test('audio refusal diagnostics survive MCP with closed evidence only and never authorize a receipt', () => {

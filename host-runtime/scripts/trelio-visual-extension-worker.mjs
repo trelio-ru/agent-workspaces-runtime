@@ -915,7 +915,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         const original = pendingExecution;
         const resumed = await awaitExecution(original);
         if (currentDialog()) return resumed;
-        if (resumed?.file) return { ...resumed, completedOperation: original.operation };
+        // A later dialog answer has its own result. It may neither save the
+        // private inline read as an attachment nor receive its original bytes.
+        if (resumed?.file && original.operation !== 'read-inline-attachment') return { ...resumed, completedOperation: original.operation };
       }
       // The original command may already have settled with the earlier dialog
       // observation. Never return that spent frame after answering: observe the
@@ -1053,6 +1055,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       ...(reference ? { documentReference: reference } : {}), ...(expectedDocumentUrl ? { verifiedDocumentUrl: expectedDocumentUrl } : {}) };
   }
   async function execute(op, args, navigationStage) {
+    // Retain the original operation on pendingExecution; use precisely the
+    // normal native download, origin checks and one reviewed click below.
+    if (op === 'read-inline-attachment') op = 'download-attachment';
     // Cleanup remains available after the lease; it can only close this owned
     // profile's windows, never send new input or navigate an external page.
     if (Date.now() >= config.deadlineAt && !['close-windows', 'snapshot-session-auth', 'secret-browser-release'].includes(op)) throw Error('lease_expired');
@@ -1576,7 +1581,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
           send({ kind: 'result', id: message.id, result: { state: 'error', reason,
             ...(reason === 'document_blocked' && error.documentDiagnostic
               ? { documentDiagnostic: error.documentDiagnostic } : {}),
-            ...(message.operation === 'download-attachment' && reason === 'navigation_blocked' && error.attachmentDiagnostic
+            ...(['download-attachment', 'read-inline-attachment'].includes(message.operation) && reason === 'navigation_blocked' && error.attachmentDiagnostic
               ? { attachmentDiagnostic: error.attachmentDiagnostic } : {}),
             ...(message.operation === 'download-audio' && reason === 'attachment_unsupported' && error.audioDiagnostic
               ? { audioDiagnostic: error.audioDiagnostic } : {}) } });

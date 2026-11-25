@@ -293,6 +293,33 @@ test('two chats on one visual account address different workers and close only t
   assert.deepEqual(hits, [['close', 'close'], ['status', 'download-attachment', 'download-attachment']]);
 });
 
+test('the visual session transports a transient CSV only for the original inline download', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-inline-session-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const start = Date.now(), token = 'b'.repeat(64), sessionId = randomUUID();
+  const env = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-sheet',
+    TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: randomUUID() }), TRELIO_SKILL_COMPANY_ID: randomUUID(),
+    TRELIO_SKILL_MEMBER_ID: randomUUID(), TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({
+      apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 120000 }),
+    TRELIO_BROWSER_SESSION_STARTED_AT: String(start), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(start + 120000) };
+  const reply = { kind: 'trelio.browser-inline-text/v1', state: 'ready', reason: 'none', sessionId,
+    mimeType: 'text/csv', text: 'sku,stock\n001,30' };
+  const server = createVisualControlServer({ token, dispatch: async () => reply });
+  const port = (await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address())))).port;
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const binding = visualSessionBinding(env);
+  const active = path.join(directory, 'visual-browser', binding.scope, 'active');
+  await fs.mkdir(active, { recursive: true, mode: 0o700 });
+  await writePrivateJsonFile(path.join(active, 'owner.json'), { schemaVersion: 1, scope: binding.scope,
+    bindingHash: binding.bindingHash, token, pid: process.pid, port, deadlineAt: binding.deadlineAt, attachmentDownloads: true });
+  const read = extra => runVisualSession({ origins: [`http://127.0.0.1:${port}`], operation: 'download-attachment',
+    args: { frameId: randomUUID(), x: 3, y: 5, ...extra }, env, attachmentDownloads: true, fixture: { directory } });
+  assert.deepEqual(await read({ inlineMimeType: 'text/csv' }), reply);
+  const refused = await read({});
+  assert.equal(refused.state, 'error');
+  assert.doesNotMatch(JSON.stringify(refused), /sku|inline-text/);
+});
+
 test('an unsafe owner mutex root refuses before its operation without replacing the existing entry', async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-owner-unsafe-test-')));
   const file = path.join(directory, 'active', 'owner.json'), root = path.join(directory, 'owner-control');

@@ -954,6 +954,9 @@ publication tooling также остаются вне этого публичн
   stream, 20 МиБ/30с, exact main-frame DNR exception и отзыв. Не raw HTTP и не
   body/URL в MCP; проверенный original выдаётся private local receipt на 24ч,
   с quota/unsafe-path guards, без исполнения, извлечения архива или auth reset.
+  При inline-чтении CSV возвращай текст только в исходный private вызов навыка,
+  минуя файловый кэш. Сохраняй проверку типа и размера исходных bytes. Проверяй,
+  что продолжение диалога и публичный MCP не получают приватный результат.
   Обычные non-HTML navigate остаются запрещены; native fixtures проверяют
   anchor/button, bytes, сохранение чата и отсутствие focus на всех OS.
   HTML viewer возвращает обычную observation, никогда file receipt. Внешний

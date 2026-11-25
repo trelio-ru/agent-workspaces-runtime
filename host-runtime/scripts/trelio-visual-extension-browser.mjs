@@ -13,7 +13,7 @@ import { visualLinkRouter, visualAttachmentRouter, visualAudioReceiver, visualAu
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { installVisualAuthentication, normalizeVisualAuthentication, normalizeVisualManualCompletion, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validateVisualAttachmentDiagnostic, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validateVisualAttachmentDiagnostic, validateVisualAudioDiagnostic, validateVisualDocumentDiagnostic, validVisualArguments, validVisualUploadFiles, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND, INLINE_TEXT_KIND, MAX_VISUAL_INLINE_TEXT_BYTES, validateVisualCommandResult } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, visualAudioFormat, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
@@ -196,7 +196,7 @@ export function visualNativeStartupEvidence(text) {
  * files last 24h, at most 32/200 MiB per personal account; cleanup never follows
  * links, deletes unknown entries, or evicts a fresh file another tool may read.
  */
-export async function saveVisualAttachment(directory, file, sessionId, { audioOnly = false, allowOpaque = false } = {}) {
+export async function saveVisualAttachment(directory, file, sessionId, { audioOnly = false, allowOpaque = false, inlineMimeType } = {}) {
   const opaque = allowOpaque && !audioOnly && file?.explicitFile === true;
   const expectedFields = opaque ? 'dataBase64,explicitFile,mimeType' : 'dataBase64,mimeType';
   if (!file || Object.keys(file).sort().join() !== expectedFields || typeof file.dataBase64 !== 'string' || file.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 || file.dataBase64.length % 4) throw fault('attachment_unsupported');
@@ -213,6 +213,15 @@ export async function saveVisualAttachment(directory, file, sessionId, { audioOn
       // An explicitly downloaded original of unknown type is inert data.
       // Keep the server MIME and filename out of the receipt and filesystem.
       format = { extension: 'bin', mimeType: 'application/octet-stream' };
+    }
+    if (inlineMimeType !== undefined) {
+      // Reuse native MIME, container, UTF-8 and byte checks above. No owner
+      // directory, quota sweep or file is touched for a range observation.
+      if (audioOnly || inlineMimeType !== 'text/csv' || format.mimeType !== inlineMimeType)
+        throw fault('attachment_unsupported');
+      if (bytes.length > MAX_VISUAL_INLINE_TEXT_BYTES) throw fault('attachment_too_large');
+      return validateVisualCommandResult({ kind: INLINE_TEXT_KIND, state: 'ready', reason: 'none', sessionId,
+        mimeType: inlineMimeType, text: bytes.toString('utf8') }, 'download-attachment', { inlineMimeType });
     }
     const typedRoot = path.join(directory, 'attachments');
     const opaqueRoot = path.join(directory, 'opaque-attachments');
@@ -1188,7 +1197,12 @@ export class ExtensionVisualBrowser {
         args = { ...args, files: frozen.files.map(file => file.filePath) };
       }
       if (fresh) await sleep(500);
-      const value = await this.#send(fresh && operation === 'navigate' ? (this.observationMode === 'text' ? 'read-text' : 'screenshot') : operation, args);
+      // A distinct wire operation keeps an older extension from interpreting
+      // a private read as a normal file download if the owner spans an upgrade.
+      let wireOperation = operation;
+      if (args.inlineMimeType) wireOperation = 'read-inline-attachment';
+      if (fresh && operation === 'navigate') wireOperation = this.observationMode === 'text' ? 'read-text' : 'screenshot';
+      const value = await this.#send(wireOperation, args);
       if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId,
         ...(operation === 'download-attachment' && value.reason === 'navigation_blocked' && value.attachmentDiagnostic
           ? { attachmentDiagnostic: validateVisualAttachmentDiagnostic(value.attachmentDiagnostic) } : {}),
@@ -1227,7 +1241,7 @@ export class ExtensionVisualBrowser {
         if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
         if (Object.keys(value).sort().join() !== 'file,state') throw fault('attachment_unsupported');
         return await saveVisualAttachment(this.store.directory, value.file, this.sessionId, { audioOnly: (completedOperation || operation) === 'download-audio',
-          allowOpaque: this.attachmentFilePolicy !== null });
+          allowOpaque: this.attachmentFilePolicy !== null, inlineMimeType: args.inlineMimeType });
       }
       const response = { kind: value.kind || VISUAL_RESULT_KIND, sessionId: this.sessionId, reason: 'none', ...value };
       return value.kind === TEXT_KIND ? validateTextResult(response) : normalizeBrowserVisualResult(response);
