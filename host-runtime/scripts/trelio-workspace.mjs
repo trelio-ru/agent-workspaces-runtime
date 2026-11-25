@@ -99,7 +99,7 @@ import {
   GitPrerequisiteError,
   verifyGitRuntime,
 } from "./trelio-git.mjs";
-import { needsExternalWorkspaceStorage } from "./trelio-folder-onboarding.mjs";
+import { ensureWorkingFolderGitIgnore, readManagedBinding } from "./trelio-folder-onboarding.mjs";
 import { SecretBrowserFillError } from "./trelio-secret-browser.mjs";
 import {
   assertBrowserFillBindingUnchanged,
@@ -577,8 +577,6 @@ const CODEX_RETAINED_PLUGIN_MAX_BYTES = 32 * 1024 * 1024;
 // привязанной папки получают локальный `workspaces/` рядом с её AGENTS.md.
 const LEGACY_DEFAULT_WORKSPACES_DIRECTORY = path.join(os.homedir(), "Trelio Workspaces");
 export const WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME = "workspaces";
-const WORKING_FOLDER_BINDING_MARKER_START = "<!-- trelio-agent-workspaces:start -->";
-const WORKING_FOLDER_BINDING_MARKER_END = "<!-- trelio-agent-workspaces:end -->";
 const WORKING_FOLDER_INSTRUCTIONS_MAX_BYTES = 256 * 1024;
 const CACHE_ROOT_DIRECTORY = process.platform === "win32"
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Trelio", "workspace-bridge", "cache")
@@ -13505,41 +13503,16 @@ const readBoundedLocalTextFile = async (filePath, maximumBytes) => {
 export const readWorkingFolderInstructionFile = (filePath) =>
   readBoundedLocalTextFile(filePath, WORKING_FOLDER_INSTRUCTIONS_MAX_BYTES);
 
-const containsManagedWorkingFolderBinding = (markdown) => {
-  if (typeof markdown !== "string") return false;
-  const startIndex = markdown.indexOf(WORKING_FOLDER_BINDING_MARKER_START);
-  const endIndex = markdown.indexOf(
-    WORKING_FOLDER_BINDING_MARKER_END,
-    startIndex + WORKING_FOLDER_BINDING_MARKER_START.length,
-  );
-
-  if (startIndex < 0 || endIndex < 0) return false;
-  const managedBlock = markdown.slice(startIndex, endIndex);
-
-  // Оба комментария могут встретиться в документации, поэтому требуем ещё и
-  // известный заголовок самого binding-блока. `## Контекст Trelio` остаётся
-  // совместимым с уже настроенными ранними папками, а новый onboarding пишет
-  // краткий `## Trelio`. Это не разбирает company slug и не переносит server
-  // authority в filesystem: маркер отвечает только за выбор одобренной папки.
-  return /(?:^|\n)## (?:Контекст )?Trelio(?:\r?\n|$)/u.test(managedBlock);
-};
-
 export const findTrelioWorkingFolderRoot = async (startDirectory = process.cwd()) => {
   let currentDirectory = path.resolve(startDirectory);
 
   while (true) {
-    // AGENTS.override.md и AGENTS.md проверяются оба: onboarding выбирает
-    // effective target по правилам клиента, а bridge не должен зависеть от
-    // того, какой из двух файлов Codex сейчас считает приоритетным.
-    for (const fileName of ["AGENTS.override.md", "AGENTS.md"]) {
-      const markdown = await readWorkingFolderInstructionFile(
-        path.join(currentDirectory, fileName),
-      );
-
-      if (containsManagedWorkingFolderBinding(markdown)) {
-        return currentDirectory;
-      }
-    }
+    // Use the same active file and exact binding parser as onboarding. A
+    // note, heading or inactive base file cannot pick a write destination.
+    const override = path.join(currentDirectory, "AGENTS.override.md");
+    const activeFile = await pathEntryExists(override) ? override : path.join(currentDirectory, "AGENTS.md");
+    const markdown = await readWorkingFolderInstructionFile(activeFile);
+    if (markdown !== null && readManagedBinding(markdown)) return currentDirectory;
 
     const parentDirectory = path.dirname(currentDirectory);
     if (parentDirectory === currentDirectory) return null;
@@ -13775,15 +13748,8 @@ const resolveWorkspaceRootDirectory = async ({
 
   const workingFolderRoot = await findTrelioWorkingFolderRoot(startDirectory);
   if (workingFolderRoot) {
-    const folderLocalRoot = path.join(workingFolderRoot, WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME, workspaceId);
-    // Preserve even an unregistered folder-local copy for the normal recovery
-    // checks. A verified external-storage fallback only changes where a new
-    // copy is created and never migrates or duplicates a surviving local one.
-    if (!await pathEntryExists(folderLocalRoot) && await needsExternalWorkspaceStorage(workingFolderRoot)) {
-      return { rootDirectory: legacyPersistentRoot, layout: "external-storage", workingFolderRoot };
-    }
     return {
-      rootDirectory: folderLocalRoot,
+      rootDirectory: path.join(workingFolderRoot, WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME, workspaceId),
       layout: "working-folder",
       workingFolderRoot,
     };
@@ -13799,30 +13765,12 @@ const resolveWorkspaceRootDirectory = async ({
   };
 };
 
-const ensureExternalWorkspaceStorageDirectory = async (workingFolderRoot) => {
-  const folderRoot = await fs.realpath(workingFolderRoot);
-  const homeRoot = await fs.realpath(path.dirname(LEGACY_DEFAULT_WORKSPACES_DIRECTORY));
-  const storageDirectory = path.join(homeRoot, path.basename(LEGACY_DEFAULT_WORKSPACES_DIRECTORY));
-  if (sameLocalPath(folderRoot, storageDirectory) || isLocalPathInside(folderRoot, storageDirectory)) {
-    throw new Error("Каталог для рабочих копий Трелио находится внутри привязанной Git-папки.");
-  }
-  // Check the physical home path as well as the destination. The default can
-  // itself be inside another repo or be a symlink back to the Codex folder.
-  for (let directory = storageDirectory;; directory = path.dirname(directory)) {
-    if (await pathEntryExists(path.join(directory, ".git"))) {
-      throw new Error("Каталог для рабочих копий Трелио находится внутри Git-репозитория.");
-    }
-    if (path.dirname(directory) === directory) break;
-  }
-  await ensurePrivateDirectory(storageDirectory);
-  return storageDirectory;
-};
-
 const ensureWorkingFolderWorkspacesDirectory = async (workingFolderRoot) => {
   const workingFolderStat = await fs.lstat(workingFolderRoot);
   if (!workingFolderStat.isDirectory() || workingFolderStat.isSymbolicLink()) {
     throw new Error("Привязанная рабочая папка Trelio больше не является безопасным каталогом.");
   }
+  await ensureWorkingFolderGitIgnore(workingFolderRoot);
 
   const workspacesDirectory = path.join(
     workingFolderRoot,
@@ -14487,8 +14435,13 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   // до появления Run, который bridge затем не сможет материализовать.
   if (rootResolution.layout === "working-folder") {
     await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
-  } else if (rootResolution.layout === "external-storage") {
-    await ensureExternalWorkspaceStorageDirectory(rootResolution.workingFolderRoot);
+  } else if (path.basename(path.dirname(rootDirectory)) === WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME) {
+    const possibleBinding = path.dirname(path.dirname(rootDirectory));
+    // Registered or explicit copies still use the same ignore rule when
+    // they already sit beneath the active binding. No repair of other roots.
+    if (await findTrelioWorkingFolderRoot(possibleBinding) === possibleBinding) {
+      await ensureWorkingFolderGitIgnore(possibleBinding);
+    }
   }
   let rootDirectoryExists = false;
 
@@ -15134,21 +15087,12 @@ const openWorkspaceLocked = async (origin, options, workspaceId, retainedAssista
   }
 
   if (!rootDirectoryExists) {
-    const externalStorage = rootResolution.layout === "external-storage";
-    if (externalStorage) {
-      const storageDirectory = await ensureExternalWorkspaceStorageDirectory(rootResolution.workingFolderRoot);
-      // Preserve the usual default path spelling for metadata and later
-      // lookup (for example /var vs /private/var). Check its physical parent
-      // before writing so an alias cannot redirect the new root into Git.
-      if (!sameLocalPath(storageDirectory, await fs.realpath(path.dirname(rootDirectory)))) {
-        throw new Error("Каталог для рабочих копий Трелио изменился во время открытия папки.");
-      }
-    } else if (rootResolution.layout === "working-folder" && !parallelOpen) {
+    if (rootResolution.layout === "working-folder" && !parallelOpen) {
       // Повторная проверка непосредственно перед mkdir закрывает обычную гонку
       // между network preflight и локальной материализацией.
       await ensureWorkingFolderWorkspacesDirectory(rootResolution.workingFolderRoot);
     }
-    if (externalStorage || rootResolution.layout === "working-folder" || parallelOpen) {
+    if (rootResolution.layout === "working-folder" || parallelOpen) {
       // Parent уже проверен, поэтому exact non-recursive mkdir не последует по
       // внезапно появившемуся root-symlink и не присвоит существующий каталог.
       await fs.mkdir(rootDirectory, { mode: 0o700 });

@@ -808,6 +808,9 @@ const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, on
     if (result.folder?.path !== folderPath || result.scope?.companySlug !== company.slug || result.scope?.projectSlug) {
       throw wizardError("CODEX_CONNECTION_BINDING_UNCONFIRMED");
     }
+    if (result.refresh?.changes.some(change => change.path === ".gitignore")) {
+      throw wizardError("TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED");
+    }
   };
   try {
     await verify();
@@ -817,7 +820,7 @@ const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, on
     // Codex can create service Git while registration or browser confirmation
     // is in flight. The original setup covers the isolation rule on this exact
     // bound root, so limit recovery to the one file that establishes it. The
-    // ordinary planner/apply still owns Git classification, file CAS and rollback.
+    // ordinary planner/apply still owns the ignore proof, file CAS and rollback.
     signal?.throwIfAborted();
     const { plan } = await folderModule.prepareTrelioFolderOnboarding({ folderPath, company }, { filesystem });
     if (plan?.folderPath !== folderPath || plan.folderKind !== "service_git"

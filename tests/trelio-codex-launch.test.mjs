@@ -63,7 +63,7 @@ test("actual folder discovery uses the managed company, legacy templates and the
   await fs.writeFile(path.join(root, "AGENTS.md"), managed("Эта рабочая папка связана с компанией Trelio «Company A» (`company-a`)."));
   assert.equal((await inspectCodexLaunchFolder(root, { bridge: localBridge })).company.slug, "company-a");
   await fs.writeFile(path.join(root, "AGENTS.override.md"), "# Unrelated override\n");
-  assert.equal(await inspectCodexLaunchFolder(root, { bridge: localBridge }), null);
+  assert.deepEqual(await inspectCodexLaunchFolder(root, { bridge: localBridge }), { state: "unbound", folderPath: root });
   assert.equal(await inspectCodexLaunchFolder("relative", { bridge: localBridge }), null);
 });
 
@@ -593,7 +593,7 @@ test("browser success cannot retain readiness after its account changes", async 
   assert.equal(fixture.puts, 1);
 });
 
-test("wizard refuses another company's binding and a repository; denied setup writes no instructions", async t => {
+test("wizard refuses another company's binding and can then bind the ordinary Git folder", async t => {
   const fixture = await wizardFixture(t);
   const chosen = path.join(fixture.root, "existing"); await fs.mkdir(chosen);
   const original = managed("Папка привязана к компании «Other» (`other-company`). Это контекст работы, а не привязка Git-репозитория.");
@@ -604,10 +604,12 @@ test("wizard refuses another company's binding and a repository; denied setup wr
   await fs.rm(path.join(chosen, "AGENTS.md"));
   await execFileAsync("git", ["init", "--quiet", chosen]);
   await fs.writeFile(path.join(chosen, "source.js"), "real project");
-  const refused = await fixture.action("connect", settings);
-  assert.equal(refused.isError, true);
-  await assert.rejects(fs.access(path.join(chosen, "AGENTS.md")));
-  assert.equal(fixture.puts, 0);
+  const connected = await fixture.action("connect", settings);
+  assert.equal(connected.structuredContent.verified, true);
+  assert.match(await fs.readFile(path.join(chosen, "AGENTS.md"), "utf8"), /company-a/u);
+  assert.match(await fs.readFile(path.join(chosen, ".gitignore"), "utf8"), /^\/workspaces\/$/mu);
+  assert.equal(await fs.readFile(path.join(chosen, "source.js"), "utf8"), "real project");
+  assert.equal(fixture.puts, 1);
   await assert.rejects(handleCodexConnectionAction("https://other.example", { capabilityToken: fixture.token, action: "state" }, { bridge: fixture.bridge }), /EXPIRED/u);
   await assert.rejects(handleCodexConnectionAction(fixture.origin, { capabilityToken: "unknown", action: "connect" }, { bridge: fixture.bridge }), /EXPIRED/u);
 });
@@ -679,8 +681,8 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   await fs.mkdir(existing);
   const git = (...args) => execFileAsync("git", args, { cwd: existing, encoding: "utf8" });
   await git("init", "--quiet");
-  // An empty tree has no user data. Exercise the refusal using a
-  // nonempty orphan tree, without commits, refs or staged user changes.
+  // Keep a real orphan tree and an ordinary file at the selected root. The
+  // wizard should keep this directory and repair its ignore rule in place.
   const retainedNote = path.join(existing, "retained-note.txt");
   const noteBytes = "Synthetic original folder contents\n";
   const index = path.join(existing, ".git", "wizard-fixture-index");
@@ -693,34 +695,18 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   const treeId = stdout.trim();
   elements.get("folder-path").value = existing;
   elements.get("display-name").value = "App fixture"; elements.get("create").checked = true;
-  const blocked = elements.get("connect").onclick();
+  const clicked = elements.get("connect").onclick();
   await elements.get("connect").onclick();
   const calls = messages.filter(message => message.method === "tools/call");
   assert.equal(calls.length, 1);
   assert.equal(elements.get("connect").disabled, true);
-  const refusedGit = await handleCodexConnectionAction(fixture.origin, structuredClone(calls[0].params.arguments), { bridge: fixture.bridge });
-  receive({ jsonrpc: "2.0", id: calls[0].id, result: refusedGit });
-  await blocked;
-  assert.equal(refusedGit.structuredContent.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
-  assert.deepEqual(refusedGit.structuredContent.details.gitBlocker,
-    { reason: "orphan_tree", object: { type: "tree", id: treeId } });
-  assert.ok(!JSON.stringify(refusedGit.structuredContent).includes(existing));
-  assert.equal(elements.get("done").hidden, true);
-  assert.equal(elements.get("setup").hidden, false);
-  assert.ok(elements.get("status").textContent.includes(treeId));
-  assert.match(elements.get("status").textContent, /Автоматического восстановления.*отдельной папке/u);
-  assert.equal(fixture.puts, 0);
-  await assert.rejects(fs.access(path.join(existing, "AGENTS.md")), { code: "ENOENT" });
-  assert.equal(await fs.readFile(retainedNote, "utf8"), noteBytes);
-  assert.equal((await git("cat-file", "-t", treeId)).stdout.trim(), "tree");
-
-  // Follow the recovery shown by the App. The original folder is still open
-  // for normal Codex work, and the separate folder goes through normal setup.
-  elements.get("folder-path").value = path.join(fixture.root, "app-folder");
-  const clicked = elements.get("connect").onclick();
-  const connect = messages.filter(message => message.method === "tools/call").at(-1);
+  const [connect] = calls;
   const submitted = await handleCodexConnectionAction(fixture.origin, structuredClone(connect.params.arguments), { bridge: fixture.bridge });
   receive({ jsonrpc: "2.0", id: connect.id, result: submitted });
+  assert.match(await fs.readFile(path.join(existing, "AGENTS.md"), "utf8"), /trelio-agent-workspaces:start/u);
+  assert.match(await fs.readFile(path.join(existing, ".gitignore"), "utf8"), /^\/workspaces\/$/mu);
+  assert.equal(await fs.readFile(retainedNote, "utf8"), noteBytes);
+  assert.equal((await git("cat-file", "-t", treeId)).stdout.trim(), "tree");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(elements.get("done").hidden, false);
   assert.match(elements.get("status").textContent, /Подтвердите привязку/u);

@@ -438,7 +438,7 @@ test("directory recovery selects the canonical root of an exact managed working-
     "<!-- trelio-agent-workspaces:start -->",
     "## Trelio",
     "",
-    "Папка привязана к тестовой компании.",
+    "Папка привязана к компании «Bridge test company» (`bridge-test-company`). Это контекст работы, а не привязка Git-репозитория.",
     "<!-- trelio-agent-workspaces:end -->",
     "",
   ].join("\n"));

@@ -245,6 +245,7 @@ test("working-folder binding lookup walks ancestors and rejects lookalike instru
       [
         "<!-- trelio-agent-workspaces:start -->",
         "## Trelio",
+        "Папка привязана к компании «Bridge test company» (`bridge-test-company`). Это контекст работы, а не привязка Git-репозитория.",
         "<!-- trelio-agent-workspaces:end -->",
         "",
       ].join("\n"),
@@ -256,9 +257,15 @@ test("working-folder binding lookup walks ancestors and rejects lookalike instru
     );
     assert.equal(WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME, "workspaces");
 
+    const overridePath = path.join(workingFolderDirectory, "AGENTS.override.md");
+    await writeFile(overridePath, "# Personal instruction without a Trelio binding\n");
+    assert.equal(await findTrelioWorkingFolderRoot(nestedDirectory), null,
+      "an active override hides the otherwise valid base binding");
+    await rm(overridePath);
+
     await writeFile(
       instructionsPath,
-      "<!-- trelio-agent-workspaces:start -->\n## Контекст Trelio\n<!-- trelio-agent-workspaces:end -->\n",
+      "<!-- trelio-agent-workspaces:start -->\n## Контекст Trelio\nЭта рабочая папка связана с компанией Trelio «Bridge test company» (`bridge-test-company`).\n<!-- trelio-agent-workspaces:end -->\n",
       "utf8",
     );
     assert.equal(
@@ -277,13 +284,14 @@ test("working-folder binding lookup walks ancestors and rejects lookalike instru
       ].join("\n"),
       "utf8",
     );
-    assert.equal(await findTrelioWorkingFolderRoot(nestedDirectory), null);
+    await assert.rejects(findTrelioWorkingFolderRoot(nestedDirectory),
+      { code: "TRELIO_FOLDER_ONBOARDING_BINDING_AMBIGUOUS" });
 
     if (process.platform !== "win32") {
       const linkedInstructionsPath = path.join(temporaryDirectory, "linked-agents.md");
       await writeFile(
         linkedInstructionsPath,
-        "<!-- trelio-agent-workspaces:start -->\n## Trelio\n<!-- trelio-agent-workspaces:end -->\n",
+        "<!-- trelio-agent-workspaces:start -->\n## Trelio\nПапка привязана к компании «Bridge test company» (`bridge-test-company`). Это контекст работы, а не привязка Git-репозитория.\n<!-- trelio-agent-workspaces:end -->\n",
         "utf8",
       );
       await rm(instructionsPath);
@@ -298,7 +306,8 @@ test("working-folder binding lookup walks ancestors and rejects lookalike instru
 
     await writeFile(
       instructionsPath,
-      `${"x".repeat(256 * 1024)}\n<!-- trelio-agent-workspaces:start -->\n## Trelio\n<!-- trelio-agent-workspaces:end -->\n`,
+      `${"x".repeat(256 * 1024)}\n<!-- trelio-agent-workspaces:start -->\n## Trelio\n`
+        + "Папка привязана к компании «Bridge test company» (`bridge-test-company`). Это контекст работы, а не привязка Git-репозитория.\n<!-- trelio-agent-workspaces:end -->\n",
       "utf8",
     );
     assert.equal(
@@ -2583,17 +2592,16 @@ test("context sync retains object-cache references only for current pinned revis
   ], currentContexts), [currentObject]);
 });
 
-const verifyOpenWithLazyParentContext = async ({ snapshotScenario } = {}) => {
-  const externalStorage = snapshotScenario !== undefined;
+const verifyOpenWithLazyParentContext = async ({ codexGit = false } = {}) => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-lazy-open-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
   const environment = workspaceFixtureEnvironment(homeDirectory);
   const writableWorkspaceId = "44444444-4444-4444-8444-444444444444";
   const workingFolderDirectory = path.join(temporaryDirectory, "company-project");
-  const sessionDirectory = externalStorage ? workingFolderDirectory : path.join(workingFolderDirectory, "session");
+  const sessionDirectory = codexGit ? workingFolderDirectory : path.join(workingFolderDirectory, "session");
   const defaultRoot = path.join(homeDirectory, "Trelio Workspaces", writableWorkspaceId);
   const folderLocalRoot = path.join(workingFolderDirectory, "workspaces", writableWorkspaceId);
-  const rootDirectory = externalStorage ? defaultRoot : folderLocalRoot;
+  const rootDirectory = folderLocalRoot;
   const platformRulesRevisionId = "88888888-8888-4888-8888-888888888888";
   const platformRulesMarkdown = [
     "# Платформенные правила Agent Workspaces",
@@ -2781,50 +2789,41 @@ const verifyOpenWithLazyParentContext = async ({ snapshotScenario } = {}) => {
     await mkdir(homeDirectory, { recursive: true });
     await mkdir(sessionDirectory, { recursive: true });
     const instructions = path.join(workingFolderDirectory, "AGENTS.md");
-    const localArtifact = path.join(workingFolderDirectory, "output", "result.txt");
     let gitBefore;
     const readGitFacts = async () => Promise.all([
       runGit(workingFolderDirectory, ["for-each-ref"]).then(result => result.stdout),
       runGit(workingFolderDirectory, ["cat-file", "--batch-all-objects", "--batch-check"]).then(result => result.stdout),
       runGit(workingFolderDirectory, ["ls-files", "--stage", "-z"]).then(result => result.stdout),
     ]);
-    if (externalStorage) {
+    if (codexGit) {
       await runGit(workingFolderDirectory, ["init"]);
       const setup = await prepareTrelioFolderOnboarding({
         folderPath: workingFolderDirectory,
         company: { name: testCompany.name, slug: testCompany.slug },
       });
       await applyTrelioFolderOnboarding(setup.plan.apply.arguments.parameters);
+      // Codex can have historical Workspace paths and unrelated ordinary
+      // outputs. New open repairs only the active ignore rule.
       const index = path.join(workingFolderDirectory, ".git", "fixture-index");
-      const snapshot = async (position, extraPaths = []) => {
-        const options = { env: { ...process.env, GIT_INDEX_FILE: index } };
-        await runGit(workingFolderDirectory, ["add", "--", "AGENTS.md", ".gitignore", "CLAUDE.md", ...extraPaths], options);
-        const { stdout } = await runGit(workingFolderDirectory, ["write-tree"], options);
-        const ref = `refs/codex/turn-diffs/captures/${position}/123e4567-e89b-12d3-a456-426614174000/head`;
-        await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", ref, stdout.trim()]);
-        return ref;
-      };
-      if (snapshotScenario === "pruned") {
-        const oldRef = await snapshot(1);
-        await writeFile(instructions, "# Personal rules\n\n" + await readFile(instructions, "utf8"));
-        await snapshot(2);
-        await runGit(workingFolderDirectory, ["-c", "core.longpaths=true", "update-ref", "-d", oldRef]);
-      } else {
-        // Codex can capture ordinary outputs at the start of a turn after
-        // binding. Keep those files on disk and the ref live during open.
-        await mkdir(path.dirname(localArtifact));
-        await writeFile(localArtifact, "Local-only result\n");
-        await writeFile(path.join(workingFolderDirectory, ".DS_Store"), "Synthetic OS metadata\n");
-        await snapshot(1, [".DS_Store", "output"]);
-      }
+      const options = { env: { ...process.env, GIT_INDEX_FILE: index } };
+      const oldName = "workspaces/old.txt";
+      await mkdir(path.dirname(path.join(workingFolderDirectory, oldName)));
+      await writeFile(path.join(workingFolderDirectory, oldName), "Old synthetic data\n");
+      await writeFile(path.join(workingFolderDirectory, "output.txt"), "Ordinary local file\n");
+      await runGit(workingFolderDirectory, ["add", "--force", "--", oldName, "output.txt"], options);
+      const { stdout } = await runGit(workingFolderDirectory, ["write-tree"], options);
+      await runGit(workingFolderDirectory, ["update-ref",
+        "refs/codex/turn-diffs/captures/1/123e4567-e89b-12d3-a456-426614174000/base", stdout.trim()]);
       await rm(index);
+      await rm(path.join(workingFolderDirectory, oldName));
+      await writeFile(path.join(workingFolderDirectory, ".gitignore"), "# keep this rule\n!important.txt\n");
       gitBefore = await readGitFacts();
     } else {
       await writeFile(instructions, [
         "<!-- trelio-agent-workspaces:start -->",
         "## Trelio",
         "",
-        "Папка привязана к компании «Bridge test company» (`bridge-test-company`).",
+        "Папка привязана к компании «Bridge test company» (`bridge-test-company`). Это контекст работы, а не привязка Git-репозитория.",
         "<!-- trelio-agent-workspaces:end -->",
         "",
       ].join("\n"), "utf8");
@@ -2855,30 +2854,18 @@ const verifyOpenWithLazyParentContext = async ({ snapshotScenario } = {}) => {
         env: environment,
       },
     );
-    if (externalStorage) {
-      // HOME is a sibling of the Codex folder, but may itself be a worktree.
-      // Refuse this destination before claiming a Run or writing the root.
-      await runGit(homeDirectory, ["init"]);
-      await assert.rejects(open(sessionDirectory), /каталог для рабочих копий Трелио находится внутри Git-репозитория/iu);
-      assert.ok(!seenUrls.some(url => url.endsWith("/runs")));
-      await assert.rejects(stat(path.dirname(defaultRoot)), { code: "ENOENT" });
-      await rm(path.join(homeDirectory, ".git"), { recursive: true });
-    }
     const opened = await open(sessionDirectory);
 
     assert.equal(
       await realpath(opened.stdout.trim()),
       await realpath(path.join(rootDirectory, "workspace")),
     );
-    if (externalStorage) {
-      await assert.rejects(stat(path.dirname(folderLocalRoot)), { code: "ENOENT" });
+    await assert.rejects(stat(defaultRoot), { code: "ENOENT" });
+    if (codexGit) {
       assert.deepEqual(await readGitFacts(), gitBefore);
-      if (snapshotScenario === "ordinary-files") {
-        assert.equal(await readFile(localArtifact, "utf8"), "Local-only result\n");
-        await assert.rejects(stat(path.join(rootDirectory, "workspace", "output")), { code: "ENOENT" });
-      }
-    } else {
-      await assert.rejects(stat(defaultRoot), { code: "ENOENT" });
+      assert.match(await readFile(path.join(workingFolderDirectory, ".gitignore"), "utf8"),
+        /^# keep this rule\n!important\.txt\n[\s\S]*^\/workspaces\/$/mu);
+      assert.equal(await readFile(path.join(workingFolderDirectory, "output.txt"), "utf8"), "Ordinary local file\n");
     }
     if (process.platform !== "win32") {
       assert.equal(
@@ -2975,8 +2962,8 @@ const verifyOpenWithLazyParentContext = async ({ snapshotScenario } = {}) => {
     );
     assert.equal(
       compatibilityRequests,
-      externalStorage ? 4 : 3,
-      "fresh compatibility is required for each open, including a rejected local destination",
+      3,
+      "fresh compatibility is required for each open",
     );
     assert.ifError(serverError);
   } finally {
@@ -2992,13 +2979,9 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
   timeout: 15_000,
 }, () => verifyOpenWithLazyParentContext());
 
-test("bridge open materializes a new Workspace outside Codex Git after a snapshot is pruned", {
+test("bridge open repairs the ignore rule in the bound Codex folder despite existing snapshots", {
   timeout: 15_000,
-}, () => verifyOpenWithLazyParentContext({ snapshotScenario: "pruned" }));
-
-test("bridge open materializes a new Workspace outside Codex Git when live snapshots contain ordinary outputs", {
-  timeout: 15_000,
-}, () => verifyOpenWithLazyParentContext({ snapshotScenario: "ordinary-files" }));
+}, () => verifyOpenWithLazyParentContext({ codexGit: true }));
 
 test("open completes after an unrelated retention read stalls, without another claim", {
   timeout: 30_000,
@@ -3600,7 +3583,7 @@ test("open bypasses a terminal legacy locator with no checkout for the existing 
   await mkdir(homeDirectory);
   await mkdir(binding);
   await writeFile(path.join(binding, "AGENTS.md"),
-    "<!-- trelio-agent-workspaces:start -->\n## Trelio\n<!-- trelio-agent-workspaces:end -->\n");
+    "<!-- trelio-agent-workspaces:start -->\n## Trelio\nПапка привязана к компании «Bridge test company» (`bridge-test-company`). Это контекст работы, а не привязка Git-репозитория.\n<!-- trelio-agent-workspaces:end -->\n");
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);

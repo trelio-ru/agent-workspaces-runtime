@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import {
   TrelioFolderOnboardingError,
   applyTrelioFolderOnboarding,
-  needsExternalWorkspaceStorage,
+  ensureWorkingFolderGitIgnore,
   prepareTrelioFolderOnboarding,
   prepareTrelioFolderDiagnostic,
   projectFolderGitHistoryBlocker,
@@ -311,7 +311,7 @@ test("Claude diagnostic adds only its missing import and preserves personal whit
     { code: "TRELIO_FOLDER_ONBOARDING_CLAUDE_IMPORT_CONFLICT" });
 });
 
-test("diagnostic service Git requires existing isolation and does not repair the ignore file", async () => {
+test("Codex diagnosis plans an ignore repair without writing working files", async () => {
   const root = await makeRoot();
   await runGit(root, "init");
   const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
@@ -323,133 +323,49 @@ test("diagnostic service Git requires existing isolation and does not repair the
   assert.deepEqual(await fs.readFile(path.join(root, ".gitignore")), ignoreBefore);
   await fs.writeFile(path.join(root, ".gitignore"), "# Missing isolation\n");
   const agentsBefore = await fs.readFile(path.join(root, "AGENTS.md"));
-  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "codex"),
-    { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
+  const repair = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.deepEqual(repair.refresh.changes.map(change => change.path), [".gitignore"]);
   assert.equal(await fs.readFile(path.join(root, ".gitignore"), "utf8"), "# Missing isolation\n");
+  await applyTrelioFolderOnboarding(repair.refresh.action.arguments.parameters);
+  assert.match(await fs.readFile(path.join(root, ".gitignore"), "utf8"), /^\/workspaces\/$/mu);
   assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), agentsBefore);
 });
 
-test("a pruned Codex snapshot keeps an existing binding usable only with external Workspace storage", async () => {
+test("Codex setup and runtime repair only the ignore rule despite old Git snapshots", async () => {
   const root = await makeRoot();
   await runGit(root, "init");
-  const input = { folderPath: root, ...binding };
-  const prepared = await prepareTrelioFolderOnboarding(input);
+  await fs.mkdir(path.join(root, "workspaces"));
+  const savedPath = "workspaces/old-snapshot.txt";
+  await fs.writeFile(path.join(root, savedPath), "Old synthetic snapshot\n");
+  const tree = await writeTurnDiffTree(root, savedPath);
+  const ref = "refs/codex/turn-diffs/captures/1/123e4567-e89b-12d3-a456-426614174000/head";
+  await runGit(root, "update-ref", ref, tree);
+  await fs.rm(path.join(root, savedPath));
+  await fs.writeFile(path.join(root, "output.txt"), "Unrelated material\n");
+
+  const ignorePath = path.join(root, ".gitignore");
+  await fs.writeFile(ignorePath, "# user rule  \r\n*.log  \r\n!/workspaces/\r\n");
+  const originalIgnore = await fs.readFile(ignorePath, "utf8");
+  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
   await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
-  const snapshot = async (position) => {
-    const ref = `refs/codex/turn-diffs/captures/${position}/123e4567-e89b-12d3-a456-426614174000/head`;
-    const tree = await writeTurnDiffTree(root, ".gitignore", "AGENTS.md", "CLAUDE.md");
-    await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, tree);
-    return ref;
-  };
-  const oldRef = await snapshot(1);
-  await makeTemplateOutdated(root);
-  const personalRule = "\nPersonal rule after managed instructions.\n";
-  const instructionPath = path.join(root, "AGENTS.md");
-  await fs.appendFile(instructionPath, personalRule);
-  await snapshot(2);
-  assert.equal(await needsExternalWorkspaceStorage(root), false);
-  await runGit(root, "-c", "core.longpaths=true", "update-ref", "-d", oldRef);
-  assert.equal(await needsExternalWorkspaceStorage(root), true);
+  assert.ok((await fs.readFile(ignorePath, "utf8")).startsWith(originalIgnore));
+  assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
 
-  const refsBefore = await runGit(root, "for-each-ref");
-  const objectsBefore = await runGit(root, "cat-file", "--batch-all-objects", "--batch-check");
-  const ignorePath = path.join(root, ".gitignore");
-  const ignoreBefore = await fs.readFile(ignorePath);
-  const diagnosed = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
-  assert.equal(diagnosed.status, "refresh_available");
-  assert.equal(diagnosed.folder.workspaceStorage, "external");
-  assert.deepEqual(diagnosed.scope, { companySlug: "test-company", projectSlug: "work-project" });
-  assert.deepEqual(diagnosed.refresh.changes.map(change => change.path), ["AGENTS.md"]);
-  const refresh = diagnosed.refresh.action.arguments.parameters;
-  assert.equal((await applyTrelioFolderOnboarding(refresh)).folder.workspaceStorage, "external");
-  assert.ok((await fs.readFile(instructionPath, "utf8")).endsWith(personalRule));
-  const current = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
-  assert.equal(current.status, "ready");
-  assert.equal(current.folder.workspaceStorage, "external");
-  assert.equal(current.refresh, null);
-  assert.equal((await runGit(root, "for-each-ref")).stdout, refsBefore.stdout);
-  assert.equal((await runGit(root, "cat-file", "--batch-all-objects", "--batch-check")).stdout, objectsBefore.stdout);
-  assert.deepEqual(await fs.readFile(ignorePath), ignoreBefore);
-  const reconnect = await prepareTrelioFolderOnboarding(input);
-  assert.equal(reconnect.plan.status, "already_configured");
-  assert.equal(reconnect.plan.apply, null);
-  await assert.rejects(prepareTrelioFolderOnboarding({
-    folderPath: root, company: { name: "Other company", slug: "other" },
-  }), { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
-  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "claude-code"),
-    { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
+  const instructions = await fs.readFile(path.join(root, "AGENTS.md"));
+  await fs.appendFile(ignorePath, "!/workspaces/\n");
+  await ensureWorkingFolderGitIgnore(root);
+  const repaired = await fs.readFile(ignorePath, "utf8");
+  assert.match(repaired, /!\/workspaces\/\n# trelio-agent-workspaces:ignore:start\n\/workspaces\//u);
+  await ensureWorkingFolderGitIgnore(root);
+  assert.equal(await fs.readFile(ignorePath, "utf8"), repaired);
+  assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), instructions);
+  assert.equal((await runGit(root, "rev-parse", ref)).stdout.trim(), tree);
+  assert.equal(await fs.readFile(path.join(root, "output.txt"), "utf8"), "Unrelated material\n");
 
-  // The exact old ignore block alone is insufficient if a later negation
-  // includes a Workspace. An index entry also retains its independent fence.
-  await fs.appendFile(ignorePath, "\n!/workspaces/\n");
-  await assert.rejects(needsExternalWorkspaceStorage(root), { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
-  await fs.writeFile(ignorePath, ignoreBefore);
-  await runGit(root, "add", "--", "AGENTS.md");
-  await assert.rejects(needsExternalWorkspaceStorage(root), (error) => {
-    assert.equal(projectFolderGitHistoryBlocker(error)?.details.gitBlocker.reason, "remotes_or_index");
-    return true;
-  });
-});
-
-test("ordinary live snapshots preserve only an isolated existing Codex binding", async () => {
-  const root = await makeRoot();
-  await runGit(root, "init");
-  const initial = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
-  await applyTrelioFolderOnboarding(initial.plan.apply.arguments.parameters);
-  const instructionPath = path.join(root, "AGENTS.md");
-  const instructions = await fs.readFile(instructionPath);
-  const ignorePath = path.join(root, ".gitignore");
-  const ignore = await fs.readFile(ignorePath);
-  await fs.writeFile(path.join(root, ".DS_Store"), "Synthetic ordinary data");
-  const refPrefix = "refs/codex/turn-diffs/captures";
-  const refSuffix = "123e4567-e89b-12d3-a456-426614174000/head";
-  const ordinaryRef = `${refPrefix}/1/${refSuffix}`;
-  await runGit(root, "update-ref", ordinaryRef, await writeTurnDiffTree(root, ".DS_Store"));
-
-  assert.equal(await needsExternalWorkspaceStorage(root), true);
-  const diagnosed = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
-  assert.equal(diagnosed.status, "ready");
-  assert.equal(diagnosed.folder.workspaceStorage, "external");
-  assert.deepEqual(diagnosed.scope, { companySlug: "test-company", projectSlug: "work-project" });
-  assert.equal(diagnosed.refresh, null);
-  await assert.rejects(prepareTrelioFolderOnboarding({
-    folderPath: root, company: { name: "Other company", slug: "other" },
-  }), { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
-
-  await fs.writeFile(instructionPath, "# No binding\n");
-  await assert.rejects(needsExternalWorkspaceStorage(root), { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
-  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
-    { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
-  await fs.writeFile(instructionPath, instructions);
-
-  await fs.appendFile(ignorePath, "\n!/workspaces/\n");
-  await assert.rejects(needsExternalWorkspaceStorage(root), { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
-  await fs.writeFile(ignorePath, ignore);
-
-  // A benign ref already forced external storage. It must not hide a later
-  // ref that contains Workspace data or invalid reserved metadata.
-  const forbiddenRef = `${refPrefix}/2/${refSuffix}`;
-  const indexPath = path.join(root, ".git", "onboarding-test-index");
-  const environment = { GIT_INDEX_FILE: indexPath };
-  for (const name of ["workspaces", "WORKSPACES", ".codex"]) {
-    const directory = path.join(root, name);
-    const relative = `${name}/fixture.txt`;
-    await fs.mkdir(directory);
-    await fs.writeFile(path.join(root, relative), "Synthetic forbidden snapshot");
-    // Force a forbidden snapshot entry without altering the real index or
-    // removing the ignore rule that protects the surrounding working folder.
-    await runGitWithEnvironment(root, environment, "add", "--force", "--", ".DS_Store", relative);
-    const forbiddenTree = (await runGitWithEnvironment(root, environment, "write-tree")).stdout.trim();
-    await fs.rm(indexPath);
-    await runGit(root, "update-ref", forbiddenRef, forbiddenTree);
-    await fs.rm(directory, { recursive: true });
-    await assert.rejects(needsExternalWorkspaceStorage(root), (error) => {
-      assert.deepEqual(projectFolderGitHistoryBlocker(error)?.details.gitBlocker,
-        { reason: "unexpected_tree_entry", object: { type: "tree", id: forbiddenTree } });
-      return true;
-    });
-    await runGit(root, "update-ref", "-d", forbiddenRef);
-  }
+  // A working user-authored root rule needs no managed block or rewrite.
+  await fs.writeFile(ignorePath, "/workspaces/\n# personal trailing rule  ");
+  await ensureWorkingFolderGitIgnore(root);
+  assert.equal(await fs.readFile(ignorePath, "utf8"), "/workspaces/\n# personal trailing rule  ");
 });
 
 test("Cursor diagnostics require a real binding and preserve service Git isolation", async () => {
@@ -480,7 +396,8 @@ test("an existing exact binding can refresh beside unrelated root materials with
   assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
   const unbound = await makeRoot();
   await fs.writeFile(path.join(unbound, "user-material.txt"), material);
-  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: unbound }, "codex"),
+  assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: unbound }, "codex")).status, "setup_required");
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: unbound }, "claude-code"),
     { code: "TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED" });
 });
 
@@ -553,11 +470,14 @@ test("an active AGENTS.override.md requires an explicit target decision", async 
   assert.doesNotMatch(managedBlock, /Нет direct schema – сразу read-only trelio-diagnostics/u);
 });
 
+const prepareLegacyGitOnboarding = (input, dependencies) =>
+  prepareTrelioFolderOnboarding({ clientKind: "claude-code", ...input }, dependencies);
+
 test("service Git is preserved and bridge paths are proven ignored", async () => {
   const root = await makeRoot();
   await runGit(root, "init");
 
-  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
   assert.equal(prepared.inspection.folder.kind, "service_git");
   assert.deepEqual(
     prepared.plan.changes.map(({ path: filePath }) => filePath),
@@ -568,7 +488,7 @@ test("service Git is preserved and bridge paths are proven ignored", async () =>
   assert.equal((await runGit(root, "rev-parse", "--git-dir")).stdout.trim(), ".git");
   assert.match(await fs.readFile(path.join(root, ".gitignore"), "utf8"), /^# trelio-agent-workspaces:ignore:start$/mu);
   await fs.mkdir(path.join(root, "workspaces"));
-  const returning = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  const returning = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
   assert.equal(returning.plan.status, "already_configured");
 });
 
@@ -580,7 +500,7 @@ for (const value of ["false", "true"]) {
     // normal repository metadata; onboarding must not rewrite it to proceed.
     await runGit(root, "config", "core.symlinks", value);
     const configBefore = await fs.readFile(path.join(root, ".git", "config"));
-    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
     assert.equal(prepared.inspection.folder.kind, "service_git");
     await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
     assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
@@ -594,7 +514,7 @@ test("allowing core.symlinks still rejects unrelated local config before writing
   await runGit(root, "config", "core.symlinks", "false");
   await runGit(root, "config", "core.autocrlf", "true");
   const configBefore = await fs.readFile(path.join(root, ".git", "config"));
-  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+  await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }),
     { code: "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED" });
   assert.deepEqual(await fs.readdir(root), [".git"]);
   assert.deepEqual(await fs.readFile(path.join(root, ".git", "config")), configBefore);
@@ -610,7 +530,7 @@ test("core.symlinks=false does not admit a physical instruction symlink", {
   await runGit(root, "init");
   await runGit(root, "config", "core.symlinks", "false");
   await fs.symlink(target, path.join(root, "AGENTS.md"));
-  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+  await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }),
     { code: "TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE" });
   assert.deepEqual((await fs.readdir(root)).sort(), [".git", "AGENTS.md"]);
   assert.equal(await fs.readFile(target, "utf8"), "# Keep this external file\n");
@@ -634,7 +554,7 @@ test("core.symlinks=false does not admit symlink modes in Codex trees on any pla
   await fs.rm(indexPath);
   const ref = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/base";
   await runGit(root, "update-ref", ref, tree);
-  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+  await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }),
     { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
   assert.deepEqual(await fs.readdir(root), [".git"]);
   assert.equal((await runGit(root, "rev-parse", ref)).stdout.trim(), tree);
@@ -650,7 +570,7 @@ for (const ref of [
     const healthyRef = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/head";
     const tree = (await runGit(root, "write-tree")).stdout.trim();
     await runGit(root, "update-ref", healthyRef, tree);
-    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
     const headBefore = await fs.readFile(path.join(root, ".git", "HEAD"));
     const configBefore = await fs.readFile(path.join(root, ".git", "config"));
     const refPath = path.join(root, ".git", ref);
@@ -663,7 +583,7 @@ for (const ref of [
     assert.match(enumerated.stdout, new RegExp(healthyRef, "u"));
     assert.ok(enumerated.stderr.trim());
     for (const action of [
-      () => prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+      () => prepareLegacyGitOnboarding({ folderPath: root, ...binding }),
       () => applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters),
     ]) await assert.rejects(action(), { code: "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED" });
     assert.deepEqual(await fs.readdir(root), [".git"]);
@@ -683,7 +603,7 @@ test("all successful metadata reads fail closed on diagnostics regardless of lan
       return argumentsList.includes(command)
         ? { ...result, stderr: "Диагностика неполного чтения\n" } : result;
     };
-    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+    await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
       { code: "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED" }, command);
     assert.deepEqual(await fs.readdir(root), [".git"]);
   }
@@ -697,7 +617,7 @@ test("a successful Git probe with diagnostics cannot fall back to ordinary-folde
     }
     return execFileAsync(executable, argumentsList, options);
   };
-  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+  await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
     { code: "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED" });
   assert.deepEqual(await fs.readdir(root), []);
 });
@@ -712,7 +632,7 @@ for (const name of unusualFolderNames) {
     const root = path.join(parent, name);
     await fs.mkdir(root);
     await runGit(root, "init");
-    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
     assert.equal(prepared.inspection.folder.kind, "service_git");
     await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
     assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
@@ -737,7 +657,7 @@ test("worktree parsing keeps Git 2.28 commands and rejects extra or incomplete r
       assert.deepEqual(argumentsList.slice(-3), ["worktree", "list", "--porcelain"]);
       return { ...result, stdout: transform(result.stdout) };
     };
-    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+    await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
       { code: "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED" });
     assert.deepEqual(await fs.readdir(root), [".git"]);
   }
@@ -760,7 +680,7 @@ for (const segmentLength of [32, 64]) {
     // exceeds MAX_PATH in Windows temp roots; never alter the user's Git config.
     await runGit(root, "-c", "core.longpaths=true", "update-ref", checkpointRef, tree);
 
-    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
     assert.equal(prepared.inspection.folder.kind, "service_git");
     await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
     assert.equal((await runGit(root, "-c", "core.longpaths=true", "rev-parse", checkpointRef)).stdout.trim(), tree);
@@ -787,7 +707,7 @@ for (const segmentLength of [32, 64]) {
     const beforeObjects = (await runGit(root, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype) %(objectsize)")).stdout;
     assert.equal(beforeObjects.trim(), `${tree} tree 0`);
 
-    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
     assert.equal(prepared.inspection.folder.kind, "service_git");
     await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
     const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
@@ -822,7 +742,7 @@ test("onboarding keeps an unreferenced empty Git tree and connects the same fold
   assert.equal(before.inventory.trim(), `${emptyTree} tree 0`);
   assert.equal(before.index, "");
 
-  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
   assert.equal(prepared.inspection.folder.kind, "service_git");
   const result = await handleTrelioWorkspaceActionOperation(
     "https://trelio.example", prepared.plan.apply.arguments,
@@ -856,7 +776,7 @@ test("service Git requires both the canonical ID and a complete zero-byte tree r
         : result;
     };
     await assert.rejects(
-      prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+      prepareLegacyGitOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
       (error) => projectFolderGitHistoryBlocker(error)?.details.gitBlocker.reason === reason,
       record,
     );
@@ -886,7 +806,7 @@ test("service Git rejects unknown checkpoint widths and malformed ref components
     const tree = (await runGit(root, "write-tree")).stdout.trim();
     await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, tree);
     await assert.rejects(
-      prepareTrelioFolderOnboarding({ folderPath: root }),
+      prepareLegacyGitOnboarding({ folderPath: root }),
       (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
       ref,
     );
@@ -922,7 +842,7 @@ test("32-hex checkpoint names do not admit commit, tag or forbidden tree content
     }
     await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, objectId);
     await assert.rejects(
-      prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+      prepareLegacyGitOnboarding({ folderPath: root, ...binding }),
       (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
       objectKind,
     );
@@ -939,13 +859,13 @@ test("reachable snapshots and live Codex metadata still enforce their path allow
     await fs.writeFile(path.join(root, file), "synthetic forbidden content");
     if (!file.startsWith("workspaces/")) {
       // The check also covers cache files Codex has not snapshotted yet.
-      await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+      await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }),
         { code: "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED" });
     }
     const tree = await writeTurnDiffTree(root, file);
     await runGit(root, "update-ref", ref, tree);
     await fs.rm(path.join(root, file.split("/")[0]), { recursive: true });
-    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }), (error) => {
+    await assert.rejects(prepareLegacyGitOnboarding({ folderPath: root, ...binding }), (error) => {
       assert.deepEqual(projectFolderGitHistoryBlocker(error)?.details.gitBlocker,
         { reason: "unexpected_tree_entry", object: { type: "tree", id: tree } });
       return true;
@@ -966,7 +886,7 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
     "commit-tree", tree, "-m", "detached history",
   );
   await assert.rejects(
-    prepareTrelioFolderOnboarding({ folderPath: commitRoot }),
+    prepareLegacyGitOnboarding({ folderPath: commitRoot }),
     (error) => {
       assert.equal(error.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
       assert.deepEqual(projectFolderGitHistoryBlocker(error).details.gitBlocker,
@@ -981,7 +901,7 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
   await fs.writeFile(path.join(orphanTreeRoot, "AGENTS.md"), "# Orphan tree\n", "utf8");
   const orphanTreeId = await writeTurnDiffTree(orphanTreeRoot);
   await assert.rejects(
-    prepareTrelioFolderOnboarding({ folderPath: orphanTreeRoot }),
+    prepareLegacyGitOnboarding({ folderPath: orphanTreeRoot }),
     (error) => {
       assert.equal(error.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
       assert.deepEqual(projectFolderGitHistoryBlocker(error).details.gitBlocker,
@@ -999,7 +919,7 @@ test("service Git rejects commit objects and orphan objects even without HEAD", 
   const { stdout: orphanBlobId } = await runGit(orphanRoot, "hash-object", "-w", orphanFile);
   await fs.rm(orphanFile);
   await assert.rejects(
-    prepareTrelioFolderOnboarding({ folderPath: orphanRoot }),
+    prepareLegacyGitOnboarding({ folderPath: orphanRoot }),
     (error) => {
       assert.equal(error.code, "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT");
       assert.deepEqual(projectFolderGitHistoryBlocker(error).details.gitBlocker,
@@ -1015,7 +935,7 @@ test("folder setup and both diagnostic intents preserve an orphan Git tree refus
   const instructions = "# Private instruction canary\n";
   const file = path.join(root, "AGENTS.md");
   await fs.writeFile(file, instructions);
-  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
   const treeId = await writeTurnDiffTree(root);
   const historyCode = "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT";
   const details = {
@@ -1041,7 +961,7 @@ test("folder setup and both diagnostic intents preserve an orphan Git tree refus
   });
   const diagnosticParams = intent => ({
     name: "diagnose_trelio_installation",
-    arguments: { clientKind: "codex", intent, folderOnboarding: { folderPath: root } },
+    arguments: { clientKind: "claude-code", intent, folderOnboarding: { folderPath: root } },
   });
   const planned = (await call(diagnosticParams("folder_onboarding"))).result;
   assert.equal(planned.isError, true);
@@ -1089,7 +1009,7 @@ test("service Git rejects history and unmanaged pre-existing Workspace paths", a
     "commit", "-m", "history",
   );
   await assert.rejects(
-    prepareTrelioFolderOnboarding({ folderPath: historyRoot }),
+    prepareLegacyGitOnboarding({ folderPath: historyRoot }),
     (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
   );
 
@@ -1097,7 +1017,7 @@ test("service Git rejects history and unmanaged pre-existing Workspace paths", a
   await runGit(unmanagedRoot, "init");
   await fs.mkdir(path.join(unmanagedRoot, "workspaces"));
   await assert.rejects(
-    prepareTrelioFolderOnboarding({ folderPath: unmanagedRoot }),
+    prepareLegacyGitOnboarding({ folderPath: unmanagedRoot }),
     (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED",
   );
 });
@@ -1105,7 +1025,7 @@ test("service Git rejects history and unmanaged pre-existing Workspace paths", a
 test("failed apply rolls back every runtime-owned write", async () => {
   const root = await makeRoot();
   await runGit(root, "init");
-  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  const prepared = await prepareLegacyGitOnboarding({ folderPath: root, ...binding });
   const failingFilesystem = {
     ...fs,
     rename: async (sourcePath, targetPath) => {

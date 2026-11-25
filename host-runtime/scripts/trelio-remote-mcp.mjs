@@ -6335,8 +6335,9 @@ const handleToolCallWithoutSkillHints = async (
     if (folderOnboardingIntent) {
       const prepared = await folderOnboardingPrepare({
         ...rawArguments.folderOnboarding,
-        // Select native clients' file format without changing legacy plans.
-        ...(["cursor", "antigravity", "deepseek-harness", "kimi-work", "multitool", "mimo-desktop"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
+        // Keep Codex's default plan shape. Every other caller selects its
+        // own onboarding contract, including Claude's service Git checks.
+        ...(rawArguments.clientKind === "codex" ? {} : { clientKind: rawArguments.clientKind }),
       });
       return buildTextResult(prepared);
     }
