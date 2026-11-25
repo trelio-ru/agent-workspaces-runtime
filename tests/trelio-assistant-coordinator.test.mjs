@@ -5230,6 +5230,86 @@ test(`one scoped owner-answer refusal permits another independently verified ans
   await f.coordinator.close();
 });
 
+test('a completed restricted pass resumes on its own marker after rereading the protected slot',async t=>{
+  const f=fixture(t);
+  f.authority.workMode='task';
+  await f.coordinator.pollOnce();
+  await f.coordinator.workOnce();
+  f.advance(f.coordinator.status()[0].nextRunAt-f.options.now());
+  f.failNative(true);
+  await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+  const original=f.activePass(),inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  f.advance(21*60_000);
+  const retired={...original,state:'retired',receiptId:randomUUID(),leaseRevision:0};
+  f.passes.get(original.deliveryId).state='closed';
+  inbox.recordRetiredTaskWriter(original,retired);
+  inbox.releaseRetiredTaskWriter(original.deliveryId,retired);
+  await f.options.passHost.releasePass(retired);
+  const child=inbox.claimReconciliation(original.deliveryId,retired.receiptId);
+  const link=inbox.readReconciliation(child.deliveryId).retiredReconcile;
+  const pass={...original,passId:randomUUID(),deliveryId:child.deliveryId,retiredReconcile:link};
+  await f.options.passHost.activatePass(pass);
+  const live={...pass,state:'review_required',workMode:'task',leaseRevision:0,
+    leaseExpiresAt:new Date(f.options.now()-1).toISOString(),execution:f.execution.configuration};
+  f.passes.set(child.deliveryId,live);
+  inbox.prepareTaskPass(child.deliveryId);
+  inbox.startDelivery(child.deliveryId);
+  inbox.markDeliveryUncertain(child.deliveryId);
+  const marker=randomUUID(),terminal=randomUUID();
+  f.deliveries.set(child.deliveryId,{state:'completed',turnId:terminal,receipt:`codex:${pass.threadId}:${terminal}`});
+  await f.coordinator.close();
+  // Both private-store and backend reads cross serialization boundaries in production.
+  const outcome=f.options.client.readBusinessOutcome;
+  let finished=false,changedAt='live';
+  const phases=[],started=[];
+  f.options.passHost.readActivePass=async()=>structuredClone(f.activePass());
+  f.options.client.readBusinessOutcome=async input=>finished&&input.deliveryId===child.deliveryId
+    ?outcome(input):{schemaVersion:1,state:'pending'};
+  f.options.client.readTaskPass=async input=>{
+    assert.equal(input.passId,pass.passId);
+    const reply=structuredClone(live);
+    if(changedAt==='live')reply.retiredReconcile.passId=randomUUID();
+    return reply;
+  };
+  f.options.passHost.continuePass=async input=>{
+    phases.push(input.continuation);
+    assert.equal(input.passId,pass.passId);
+    assert.equal(input.terminalTurnId,terminal);
+    const resumed=input.continuation==='resume';
+    if(resumed)Object.assign(live,{state:'leased',leaseRevision:1,leaseExpiresAt:new Date(f.options.now()+1200000).toISOString()});
+    const echoed=structuredClone(live);
+    if(changedAt==='review')delete echoed.retiredReconcile;
+    return {schemaVersion:2,state:resumed?'resumed':'approved',reviewId:marker,invocationId:marker,pass:echoed,
+      resumed:resumed?{leaseRevision:1,leaseExpiresAt:live.leaseExpiresAt}:null};
+  };
+  f.options.native.recover=async(input,options)=>{
+    assert.deepEqual(options.retiredReconcile,link);
+    assert.equal(input.deliveryId,marker);
+    assert.equal(input.threadId,pass.threadId);
+    assert.equal(options.continuationReview.priorTurnId,terminal);
+    await options.beforeInvocation();
+    options.startInvocation();
+    started.push(input.deliveryId);
+    finished=true;
+    return {state:'completed',receipt:`codex:${pass.threadId}:${randomUUID()}`};
+  };
+  const coordinator=createAssistantCoordinator(f.options);
+  try{
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    assert.equal(inbox.readPassContinuation(child.deliveryId),null);
+    changedAt='review';
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    assert.deepEqual(phases,['review']);
+    assert.deepEqual(started,[]);
+    changedAt=null;
+    await coordinator.workOnce();
+    assert.deepEqual(phases,['review','review','resume']);
+    assert.deepEqual(started,[marker]);
+    assert.equal(inbox.readDelivery(child.deliveryId).state,'complete');
+    assert.equal(inbox.readDelivery(original.deliveryId).state,'uncertain');
+  }finally{await coordinator.close();}
+});
+
 for (const [withAnswer,restart] of [[false,false],[true,false],[true,true]])
 test(`retired scheduled work resumes independent reads and preserves its held effect (answer=${withAnswer}, restart=${restart})`,async t=>{
   const f=fixture(t);f.authority.workMode='task';
