@@ -1166,6 +1166,8 @@ publication tooling также остаются вне этого публичн
   до подготовки зеркала по общей границе из generated context matching.
   В пределах поиска повторно используй скомпилированные формулировки для всех
   файлов. Совпадения и bounded нормализация принадлежат одному файлу.
+  Сниппет файла строится только для проверки резерва категории или доставки
+  результата, без повторного матчинга и без выхода deferred witnesses из поиска.
   Rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
   ranking генерируется backend `build-context-search-ranking.mjs`; проверяй `--check`.
   Task list due-state parity uses the [same generated predicates](docs/agent-workspace-runtime.md)

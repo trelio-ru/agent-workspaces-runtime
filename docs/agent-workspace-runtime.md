@@ -3337,7 +3337,8 @@ local provider: регистр, ё/е, границы слов, полное п�
 русских окончаний. Filename/path/hash сохраняют пунктуацию. Сначала сравниваются
 точные references и сильнейшее совпадение поля, затем независимые формулировки.
 Повторные формы одного набора слов не увеличивают вес. Rank строится один раз,
-preview – только для top-N. Reference/field/lexical metrics каждого match живут
+файловый preview строится при проверке резерва категории или доставке результата.
+Reference/field/lexical metrics каждого match живут
 только в текущем candidate evaluation; sort comparators не нормализуют prose.
 Shared ranking генерируется из backend `shared/context-search-ranking.ts` через
 `scripts/build-context-search-ranking.mjs --runtime-root <checkout>`; `--check`
@@ -3395,6 +3396,13 @@ UTF-8 файлы имеют `unsupported` и остаются доступны �
 File-local retained normalization ограничен 8 Mi code units с резервом segments;
 при переполнении весь source evidence обрабатывается без retention. Этот cache
 не сохраняется между документами, query invocations или mirror generations.
+Локальный поиск файлов использует общий deferred matcher. Его исходные
+фрагменты живут только в текущем поиске. Метаданные и первый исходный чанк
+хранятся отдельно и склеиваются для сниппета при выводе. Ранжирование использует
+готовую лексическую оценку и структурные ссылки файла. Резерв категории
+проверяет, что все термы видны в одном фрагменте, когда этого требует общее
+правило. Полученный preview повторно используется при выдаче. Даже при
+запросе деталей совпадения в ответ входят только готовые строки.
 Если свежий ACL-filtered overview явно сообщает `browserProjectionRequired=true`,
 подтверждает exact accepted head, но не содержит проекции, search и выдача одного
 оригинала читают canonical encrypted bundle через общий accepted-inspection

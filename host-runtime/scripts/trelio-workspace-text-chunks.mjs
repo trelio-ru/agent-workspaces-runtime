@@ -63,11 +63,13 @@ const compileWorkspaceChunkQuery = (rawQuery) => {
     return { query, roots, expressions, normalizedQuery, phraseExpressions, tokens, tokenExpressions,
         buildPreview: createContextSearchPreviewBuilder(query) };
 };
-// Capture only the contributing raw excerpts, not the file, prepared chunks,
-// or witnesses that were used to reject other formulations.
-const deferWorkspaceChunkPreview = (lexicalQuality, parts, buildPreview) => ({
+// Keep references to contributing source strings. The combined first chunk
+// may have been flattened during matching; retaining it per result would
+// duplicate file text already held by the local mirror. Rebuild that join
+// only for a rendered witness.
+const deferWorkspaceChunkPreview = (lexicalQuality, metadata, parts, buildPreview) => ({
     lexicalQuality,
-    renderPreview: () => buildPreview(parts.map(part => buildPreview(part, 600)).join(" … ")),
+    renderPreview: () => buildPreview(parts.map(({ text, prefixMetadata }) => (buildPreview(prefixMetadata ? metadata + "\n" + text : text, 600))).join(" … ")),
 });
 /** Prepare bounded witnesses once for every formulation of the same file.
  * The streaming caller holds at most one chunk per query pattern. Cache lives
@@ -92,6 +94,7 @@ const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePrepared
             return null;
         const matched = new Set();
         const evidence = [];
+        const deferredEvidence = deferPreview ? [] : null;
         let lexicalQuality = 0;
         const exactTokens = new Set();
         for (const [position, original] of parts.entries()) {
@@ -147,8 +150,11 @@ const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePrepared
                     }
                 }
             }
-            if (useful && deferPreview) {
-                evidence.push(part.text);
+            if (useful && deferredEvidence) {
+                // Position zero is the metadata witness; all other positions
+                // correspond to the original, unmodified chunks in input order.
+                const chunk = position === 0 ? undefined : chunks[position - 1];
+                deferredEvidence.push({ text: chunk?.text ?? original.text, prefixMetadata: chunk?.index === 0 });
             }
             else if (useful) {
                 if (!part.preview && cachePreviews && prepared?.get(position) === part) {
@@ -170,8 +176,8 @@ const createWorkspaceChunkMatcher = (metadata, chunks, hasContent, cachePrepared
         if (matched.size !== expressions.length)
             return null;
         lexicalQuality = Math.max(lexicalQuality, tokens.length ? Math.round(exactTokens.size / tokens.length * 100) : 0);
-        if (deferPreview)
-            return deferWorkspaceChunkPreview(lexicalQuality, evidence, buildPreview);
+        if (deferredEvidence)
+            return deferWorkspaceChunkPreview(lexicalQuality, metadata, deferredEvidence, buildPreview);
         return { lexicalQuality, previewText: buildPreview(evidence.join(" … ")) };
     };
 };

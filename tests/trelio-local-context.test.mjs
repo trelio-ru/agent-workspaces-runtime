@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { createWorkspaceTextChunkSearchPlan } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
 
 import {
   hydrateNativeReadWithRevisionRefresh, hydrateLocalActionMirror, prepareLocalActionContext, canonicalizeLocalProposalTarget, usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
@@ -1583,6 +1584,46 @@ test("local mixed search gives contacts no implicit type priority", () => {
     .results.filter((result) => result.type === "task" || result.type === "contact");
 
   assert.deepEqual(mixed.map((result) => result.type), ["task", "contact"]);
+});
+
+test("local file previews preserve category reservation and eager matcher output", () => {
+  const query = "поставка срочная";
+  const file = (name, parts) => ({
+    name, path: name, sizeBytes: 100, contentType: "text/plain",
+    chunks: parts.map((text, index) => ({ index, text, isLast: index === parts.length - 1 })),
+  });
+  const documents = [
+    file("a-split.txt", ["Новая поставка будет завтра. ", " Срочная заявка открыта."]),
+    file("z-together.txt", ["Срочная заявка подтверждена, поставка будет завтра."]),
+  ];
+  const source = {
+    ...mirror,
+    workspaces: [{ ...mirror.workspaces[0], documents }],
+    searchDocuments: ["project:a", "project:b"].map(id => ({
+      id, type: "project", title: query, stableKey: id,
+      fields: [{ source: "project", values: [query] }],
+    })),
+  };
+
+  // Both files match and the stable path ranks the split file first. Only the
+  // second file's single excerpt can reserve a file seat in mixed search.
+  const fileOnly = searchCompanyContextMirror(source, [query], 2, {
+    documentTypes: ["workspace_file"], includeMatchDetails: true,
+  });
+  assert.deepEqual(fileOnly.results.map(result => result.path), documents.map(item => item.path));
+  const eager = createWorkspaceTextChunkSearchPlan([query]);
+  for (const [index, result] of fileOnly.results.entries()) {
+    const { name, path, chunks } = documents[index];
+    const expected = eager.createMatcher(`${name}\n${path}`, chunks)(query);
+    assert.deepEqual(result.matches, [{ query, source: "workspace-file", ...expected }]);
+    assert.equal(Object.getOwnPropertyDescriptor(result.matches[0], "previewText").get, undefined);
+  }
+
+  const mixed = searchCompanyContextMirror(source, [query], 2, { categorized: true });
+  assert.deepEqual(mixed.results.map(result => result.id), ["project:a", fileOnly.results[1].id]);
+  assert.deepEqual({ ...mixed.resultCategories }, { project: [0], "workspace-file": [1] });
+  assert.equal(mixed.results[1].preview, fileOnly.results[1].preview);
+  assert.deepEqual(mixed.pagination, { limit: 2, total: 4, returned: 2, hasMore: true });
 });
 
 test("local search uses the folder label when the saved title is empty", () => {

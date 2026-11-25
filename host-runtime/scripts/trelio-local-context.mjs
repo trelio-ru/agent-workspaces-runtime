@@ -4955,7 +4955,7 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery,
     // length; overflowing evidence is still searched without retaining copies.
     let chunkMatcher = field.chunks ? chunkMatchers.get(field) : null;
     if (field.chunks && !chunkMatcher) {
-      chunkMatcher = plan.files.createMatcher(field.text, field.chunks);
+      chunkMatcher = plan.files.createDeferredMatcher(field.text, field.chunks);
       chunkMatchers.set(field, chunkMatcher);
     }
     const chunkMatch = chunkMatcher ? chunkMatcher(originalQuery) : null;
@@ -4963,13 +4963,35 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery,
     const match = {
       query: originalQuery,
       source: field.source,
-      previewText: chunkMatch?.previewText ?? field.previewText,
       // Rank the matched semantic leaf, never its decorated human preview.
       lexicalQuality: chunkMatch?.lexicalQuality ?? calculateLexicalQuality({ query: originalQuery, source: field.source, previewText: field.text }),
       ...(field.publicPath ? { publicPath: field.publicPath } : {}),
     };
-    matches.push(match);
+    if (!chunkMatch) {
+      matches.push({ ...match, previewText: field.previewText });
+      continue;
+    }
+    // File ranks use lexicalQuality and structural references. Category
+    // reservation can still require proof that all terms occur in one preview
+    // fragment. Render on that check or on delivery, reusing the same witnesses
+    // without scanning the file again. Drop those references after rendering.
+    let renderPreview = chunkMatch.renderPreview;
+    let previewText;
+    matches.push({
+      ...match,
+      get previewText() {
+        if (renderPreview) {
+          previewText = renderPreview();
+          renderPreview = null;
+        }
+        return previewText;
+      },
+    });
   }
+
+  // Workspace files have one field. Its evidence cannot lose a comparison,
+  // so leave ranking it to the cross-document pass.
+  if (matches.length <= 1) return matches[0] ?? null;
 
   // Each field gets one rank; comparisons reuse it instead of repeatedly
   // normalizing the best-so-far field. Equal evidence uses the exact locator.
@@ -5090,15 +5112,16 @@ export const searchCompanyContextMirror = (
     matches: _matches,
     ...result
   }) => {
-    // Snippets are display work: only normalize the winning top-N, after
-    // every candidate has received its single precomputed rank.
+    // Apply the final display limit to the selected evidence. A categorized
+    // search may already have rendered the file evidence for its reservation.
     const strongest = rankContextSearchCandidates(_matches,
       (match) => ({ ...result, stableKey: _stableKey, referenceValues: _referenceValues, matches: [match] }))[0];
     return compactLocalSearchResult({
       ...result,
       preview: buildContextSearchPreview(strongest.previewText, [strongest.query]),
       ...(includeMatchDetails ? {
-        matches: _matches,
+        // Return plain data, without closures retaining local file witnesses.
+        matches: _matches.map((match) => ({ ...match })),
         matchCount: _matches.length,
       } : {}),
       ...(strongest.publicPath || result.publicPath
