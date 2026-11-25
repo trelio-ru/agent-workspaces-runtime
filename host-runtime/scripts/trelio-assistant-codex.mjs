@@ -2707,9 +2707,13 @@ const readRetiredOwnerQuestion=async(request,threadId,deliveryId,options)=>{
 
 // The new turn reads the owner's current answer in the ordinary task scope.
 // Historical navigation or a refused Secret preflight cannot establish login.
-const calendarTaskInstructions=(workflow,mode)=>mode===undefined?workflow:workflow+
-  '\n\nThis is a new due calendar check. The previous owner answer was delivered. Its external action is still on hold. Use your own task, local account inventory, signed guide pages and the currently authorised canonical material. No provider process, site navigation, login or message is available in this pass.'+
-  (mode==='carry'?' After reading the pinned instructions/profile, open a NEW canonical Run. In that Run call use_assistant_workspace_files with command {action:"carry_forward"}. Read and check your saved WORK, then continue from the verified state.':' Use the current accepted WORK and the ordinary scheduled noChange rules.')+
+const calendarTaskInstructions=(workflow,mode,resuming=false)=>mode===undefined?workflow:workflow+
+  (resuming?'\n\nContinue the existing calendar check.':'\n\nThis is a new due calendar check.')+
+  ' The previous owner answer was delivered. Its external action is still on hold. Use your own task, local account inventory, signed guide pages and the currently authorised canonical material. No provider process, site navigation, login or message is available in this pass.'+
+  (mode==='carry'?(resuming
+    ?' Check this pass’s existing Run and WORK first. Use carry_forward only if the original copy is still needed and the destination is unchanged. Preserve subsequent edits.'
+    :' After reading the pinned instructions/profile, open a NEW canonical Run. In that Run call use_assistant_workspace_files with command {action:"carry_forward"}. Read and check your saved WORK, then continue from the verified state.')
+    :' Use the current accepted WORK and the ordinary scheduled noChange rules.')+
   ' Save the results you actually obtained and any remaining unmet criteria.';
 const answeredTaskInstructions=workflow=>workflow+'\n\nProcess the newly delivered owner answer and the current accepted WORK. Reconcile any previous external or browser action from its existing state before further input. The interrupted turn and its observations do not authorize repeating an earlier operation.';
 const verifyRetiredAnswerSource=async(request,threadId,deliveryId,scope,check)=>{
@@ -4284,7 +4288,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       ?'Confirm only an already accepted result. The original writer and its signing session have ended. The sole tool verifies the canonical accepted material, recorded effects and the existing cadence.'
       :options.retiredPass
       ? `${workflow}\n\nThe native task writer has been retired. This inspection may read only its original task and checkpoint the pinned draft when one is provided. A draft checkpoint is the save boundary for this turn. The earlier provider effect must remain on hold pending independent evidence.`
-      : options.retiredAnswerCheck?answeredTaskInstructions(workflow):calendarTaskInstructions(workflow,options.scheduledMaterial);
+      : options.retiredAnswerCheck?answeredTaskInstructions(workflow):calendarTaskInstructions(workflow,options.scheduledMaterial,Boolean(options.continuationReview));
     const run=async text=>{
       const completed=await submitAssistantTurn(request,watchTerminal,{threadId,execution,developerInstructions,text});
       if(completed.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');
@@ -4314,11 +4318,18 @@ const telegramTriageSenderGuidance = 'For each Telegram original, use telegram.s
 // This is a new observed pass. The same chat may retain relevant prior
 // observations; neither their completeness nor the shape of an old turn
 // changes which reads this new native capability can actually execute.
-export const assistantReconciliationPrompt=(deliveryId,scope)=>[
+export const assistantReconciliationPrompt=(deliveryId,scope,continuation)=>[
   assistantDeliveryMarker(deliveryId),'TRELIO_ASSISTANT_SCOPE '+JSON.stringify(scope),
   'Continue the scheduled goal in this chat using the verified task, existing observations and independently permitted reads. An earlier writer stopped with an unresolved external effect. Keep that effect on hold. Never repeat the earlier input or assume a click, send, save or search succeeded.',
   ...(scope.ownerQuestionIds?.length?['Read the one listed owner answer through get_assistant_owner_question. Its text guides this new task result. Keep earlier unverified external effects on hold.']:[]),
-  'Use already found references and signed read-only skill commands with an existing bound account. Reconcile prior observations, the intended destination and the canonical task files. Identify the specific missing access or evidence when a check cannot run. Record the first reconciliation result and remaining work in a new accepted canonical task Workspace Run, preserving prior evidence. In a later period, use noChange when the goal state, schedule and accepted material are unchanged. Confirm the accepted head and report the actual goal state through complete_assistant_pass. A partial result keeps the goal open.',
+  'Use already found references and signed read-only skill commands with an existing bound account. Reconcile prior observations, the intended destination and the canonical task files. Identify the specific missing access or evidence when a check cannot run. '+
+    // A new calendar pass owns a distinct Run. A continuation of that same
+    // pass can already have a local draft or a successful finish with a lost
+    // reply. The fresh prompt remains byte-for-byte readable in old chats.
+    (continuation
+      ?`Resume this same scheduled check after terminal turn ${continuation.priorTurnId}. Inspect its original receipts and accepted state. If its own Run is still open, reopen that exact Run, read its pinned instructions and profile, preserve its draft files and continue at the first unfinished step. If already accepted, verify and reuse that revision. Start a Run only when the check needs material and has none. `
+      :'Record the first reconciliation result and remaining work in a new accepted canonical task Workspace Run, preserving prior evidence. ')+
+    'In a later period, use noChange when the goal state, schedule and accepted material are unchanged. Confirm the accepted head and report the actual goal state through complete_assistant_pass. A partial result keeps the goal open.',
 ].join('\n')+'\n';
 
 export const assistantFreshPrompt = (deliveryId,scope) => {
@@ -4358,7 +4369,7 @@ const matchesTaskStartPrompt = (text,deliveryId,scope) =>
   text===assistantFreshPrompt(deliveryId,scope)||text===assistantNativePrompt(deliveryId,scope,{});
 
 export const assistantNativePrompt = (deliveryId,workStateContext,options) => {
-      if(options.retiredReconcile)return assistantReconciliationPrompt(deliveryId,workStateContext);
+      if(options.retiredReconcile)return assistantReconciliationPrompt(deliveryId,workStateContext,options.continuationReview);
       if(options.retiredPass) {
         if(options.retiredPass.outcome){
           const {schedule,goalState}=options.retiredOutcome;
