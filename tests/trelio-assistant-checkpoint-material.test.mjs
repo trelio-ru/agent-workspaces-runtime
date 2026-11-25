@@ -80,16 +80,27 @@ test('first scheduled file command carries the checkpoint through the signed wor
   // The common finish lock resolves the user's bridge directory at import time.
   // A separate process keeps even its synthetic lock inside the disposable home.
   if (!process.env.TRELIO_TEST_SCHEDULED_FILE_HOME) {
-    const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-test-carry-')));
+    // Keep the Windows profile at a production-like depth. Both Run directories
+    // and the SQLite journal add their full managed identity below this home.
+    const temporaryBase = process.platform === 'win32' && path.isAbsolute(process.env.RUNNER_TEMP ?? '')
+      ? await fs.realpath(process.env.RUNNER_TEMP) : os.tmpdir();
+    const home = await fs.realpath(await fs.mkdtemp(path.join(temporaryBase, 'cw-')));
     t.after(() => fs.rm(home, { recursive: true, force: true }));
     const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
     const { fileURLToPath } = await import('node:url');
     const env = { ...process.env, HOME: home, USERPROFILE: home, LOCALAPPDATA: home, TRELIO_TEST_SCHEDULED_FILE_HOME: home };
     delete env.NODE_TEST_CONTEXT;
-    const { stdout } = await promisify(execFile)(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^first scheduled file command', fileURLToPath(import.meta.url)], {
-      env,
-    });
-    assert.match(stdout, /scheduled carry checked/);
+    try {
+      const { stdout } = await promisify(execFile)(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^first scheduled file command', fileURLToPath(import.meta.url)], { env });
+      assert.match(stdout, /scheduled carry checked/);
+    } catch (error) {
+      // The child writes TAP to stdout. Report a closed error category and
+      // test line without echoing its arguments, absolute paths or fixtures.
+      const tap = String(error.stdout ?? '').slice(-16000);
+      const code = tap.match(/\b(ENAMETOOLONG|ENOENT|EACCES|EPERM|EBUSY|ERR_ASSERTION|ASSISTANT_WORKSPACE_BINDING_CHANGED|ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED|ASSISTANT_PRIVATE_UNAVAILABLE|ASSISTANT_CAPABILITY_UNAVAILABLE)\b/u)?.[1];
+      const frame = tap.match(/at [^\r\n]*trelio-assistant-checkpoint-material\.test\.mjs:(\d{1,4}):(\d{1,4})/u);
+      assert.fail(`Scheduled carry fixture failed (${code ?? 'unclassified'}, test line ${frame ? frame[1] + ':' + frame[2] : 'unknown'})`);
+    }
     return;
   }
   const common = await import('../host-runtime/scripts/trelio-workspace.mjs');
