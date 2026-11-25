@@ -19,6 +19,13 @@ const errorCode = error => typeof error?.code === 'string' && (/^ASSISTANT_[A-Z_
   ? error.code : 'ASSISTANT_COORDINATOR_UNAVAILABLE';
 const safeError = error => new AssistantCoordinatorError(errorCode(error), Number.isInteger(error?.status)?error.status:null);
 const sameSource = (a,b) => ['origin','assistantId','companyId','provider','accountId','bindingId'].every(key => a[key] === b[key]);
+// These are native receipt values. A protected-store read and an HTTP reply
+// each deserialize their own objects. The source, due time and notification
+// must still identify exactly the same restricted work before a new marker.
+const sameReconciliationScope = (left,right) =>
+  isDeepStrictEqual(left.retiredReconcile,right.retiredReconcile)
+  && isDeepStrictEqual(left.retiredScheduled,right.retiredScheduled)
+  && left.notificationId===right.notificationId;
 const scopeFor = (source,taskId) => ({ origin:source.origin,assistantId:source.assistantId,companyId:source.companyId,taskId });
 const sourceFor = (identity,company) => ({ origin:identity.origin,assistantId:identity.assistantId,companyId:company.companyId,
   provider:'trelio',accountId:company.memberId,bindingId:identity.deviceId });
@@ -1780,19 +1787,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(now()<waiting.nextAt)return true;
     }
     const saved=validateAssistantActivePass(await passHost.readActivePass(),identity);
-    const same=value=>value&&Object.keys(value).length===Object.keys(saved).length&&Object.keys(saved).every(key=>value[key]===saved[key]);
     const recheck=async (ownedSignal=signal)=>{
       lease();
       ownedSignal.throwIfAborted();
       if(saved.deliveryId!==job.deliveryId||saved.taskId!==job.taskId||saved.companyId!==job.scope.companyId
-        ||!same(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        ||!isDeepStrictEqual(saved,await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       let execution;
       if(!await authorize({scope:job.scope,taskId:job.taskId},ownedSignal,{job,allowTaskDone:!parentRead&&!workspaceDraft?.namedArchive&&!archive,captureExecution:value=>{execution=value;}}))
         fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       return assistantExecutionConfiguration(execution);
     };
     const execution=await recheck(),live=await client.readTaskPass({companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId},signal);
-    if(live.state==='closed'||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
+    if(live.state==='closed'||!sameReconciliationScope(saved,live)||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
       ||live.bindingRevision!==saved.bindingRevision||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const retained=inbox.readPassContinuation(job.deliveryId);
     const recoveredOutcome=workspaceDraft?.recoveredOutcome;
@@ -1871,18 +1877,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ...(recoveredOutcome?{recoveredOutcome:recoveredOutcome.plan}:{})};
     let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
-    const validateVersion=()=>{
-      if(parentRead?.intermediateDraft&&review.schemaVersion!==6||request.localDraft&&review.schemaVersion!==7
+    const validateReview=()=>{
+      if(!review.pass||!sameReconciliationScope(saved,review.pass)
+        ||saved.retiredReconcile&&review.schemaVersion!==2
+        ||parentRead?.intermediateDraft&&review.schemaVersion!==6||request.localDraft&&review.schemaVersion!==7
         ||recoveredOutcome&&review.schemaVersion!==8)
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     };
-    validateVersion();
+    validateReview();
     // A former runtime may have left a purely technical owner question. Ask
     // the SAME native ledger to migrate only that pending intent; its UUID and
     // original native-start fence survive, including an expired pending prompt.
     // Native migration still refuses an explicit decline/Other decision.
     if(review.schemaVersion===1&&['waiting_owner','expired','approved'].includes(review.state)&&!intent.resumeAttempted){
       review=await passHost.continuePass({...request,automatic:true,continuation:'review'},saved,signal);
+      validateReview();
     }
     lease();await recheck();
     if(!intent.reviewId)intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId:review.reviewId});
@@ -1913,7 +1922,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumeAttempted:true});
         review=await passHost.continuePass({...request,automatic:true,continuation:'resume',reviewId:intent.reviewId},saved,ownedSignal);
         lease();await recheck(ownedSignal);
-        validateVersion();
+        validateReview();
       }
       if(review.state!=='resumed')return null;
       if(!intent.resumeAttempted||review.pass.state!=='leased'||Date.parse(review.pass.leaseExpiresAt)<=now()
@@ -3020,7 +3029,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             ownedSignal.throwIfAborted();
             if(typeof resumeOwnedPass!=='function'||!await resumeOwnedPass(ownedSignal))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
             const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:expectedPass.passId},ownedSignal);
-            if(!isDeepStrictEqual(live.retiredReconcile,expectedPass.retiredReconcile)||!isDeepStrictEqual(live.retiredScheduled,expectedPass.retiredScheduled)
+            if(!sameReconciliationScope(expectedPass,live)
               ||live.state!=='leased'||live.leaseRevision<continuation.expectedLeaseRevision+1||Date.parse(live.leaseExpiresAt)<=now()
               ||live.bindingId!==expectedPass.bindingId||live.bindingRevision!==expectedPass.bindingRevision
               ||live.threadId!==expectedPass.threadId||live.deliveryId!==expectedPass.deliveryId

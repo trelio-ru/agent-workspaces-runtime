@@ -178,6 +178,8 @@ continuing under a reconciliation pass receives its server-bound retirement
 receipt, optional due slot or owner notification in every v2 review, read and
 resume response. The local protected pass supplies the expected values.
 
+A completed reconciliation turn with a pending business outcome uses this same v2 protocol under its original restricted authority. Compare the full protected pass by value after a fresh read. The live pass and every native review, read or resume must retain the exact source-retirement link, scheduled link and notification before a new invocation starts.
+
 The original pass/delivery/chat and all operation history survive. Both ordinary
 and restricted continuations renew that pass once by CAS only inside the
 before-start callback of the exclusive native App Server writer. Review reserves
