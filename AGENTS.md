@@ -585,6 +585,7 @@ publication tooling также остаются вне этого публичн
   подготовку, HTTP/body и 429 waits. HTTP standalone/background bridge также
   ограничен 60 секундами; transport failure не запускает sleep/replay.
   Штатный OAuth/MCP к Trelio использует тот же 60-секундный HTTP-лимит.
+  Exact native `search` получает 140 секунд на весь вызов и его HTTP.
   Лимит сторонних Remote MCP не применяется к этому маршруту.
   Human company search готовит полный снимок и ищет в одном изолированном
   процессе. Подтверждённая обработка файлов или Workspace обновляет 10-минутный

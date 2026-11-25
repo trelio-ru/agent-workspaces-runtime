@@ -397,13 +397,16 @@ const calls = new AsyncLocalStorage();
  * Keep the frame content-free and explicitly refuse automatic mutation replay.
  */
 export class TrelioCallTimeoutError extends Error {
-  constructor() {
-    super("Trelio не завершил вызов за 60 секунд. Результат записи может быть неизвестен; перед повтором проверьте состояние на сервере.");
+  constructor({ timeoutMs = TRELIO_CALL_BUDGET_MS,
+    message = `Trelio не завершил вызов за ${timeoutMs / 1000} секунд. Результат записи может быть неизвестен; перед повтором проверьте состояние на сервере.`,
+  } = {}) {
+    super(message);
     this.code = "TRELIO_CALL_TIMEOUT";
+    this.timeoutMs = timeoutMs;
   }
   toJSON() {
     return { code: this.code, message: this.message,
-      details: { timeoutMs: TRELIO_CALL_BUDGET_MS, automaticRetry: false } };
+      details: { timeoutMs: this.timeoutMs, automaticRetry: false } };
   }
 }
 

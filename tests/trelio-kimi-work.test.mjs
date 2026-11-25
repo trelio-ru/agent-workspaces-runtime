@@ -491,7 +491,7 @@ test("Kimi reads tasks in the first and later chats using a cached startup catal
   } finally { input.end(); await running; }
 });
 
-test("Kimi native HTTP calls survive the provider deadline and share one 60-second call budget", { timeout: 10_000 }, async t => {
+test("Kimi native search survives 120 seconds while unrelated calls keep their prior deadline", { timeout: 10_000 }, async t => {
   const requests = [], selections = [];
   const server = http.createServer(async (request, response) => {
     const chunks = [];
@@ -540,25 +540,29 @@ test("Kimi native HTTP calls survive the provider deadline and share one 60-seco
     vault: { read: async () => ({ accessToken: "synthetic-token", expiresAt: Date.now() + 120_000 }) },
     // Replace DNS/endpoint in the test only. Exercise the real HTTP timer and
     // response parser with the options selected by the production connection.
-    httpRequest: (request, options) => remoteMcpHttpRequest(request, {
-      ...options,
-      resolveEndpoint: async endpoint => {
-        assert.equal(endpoint, `${origin}/mcp`);
-        return { endpoint: new URL(`http://127.0.0.1:${server.address().port}/mcp`), address: "127.0.0.1", family: 4 };
-      },
-    }),
+    httpRequest: (request, options) => {
+      const isSearch = request.payload.method === "tools/call" && request.payload.params?.name === "search";
+      assert.equal(options.timeoutMs, isSearch ? 140_000 : 60_000);
+      return remoteMcpHttpRequest(request, {
+        ...options,
+        resolveEndpoint: async endpoint => {
+          assert.equal(endpoint, `${origin}/mcp`);
+          return { endpoint: new URL(`http://127.0.0.1:${server.address().port}/mcp`), address: "127.0.0.1", family: 4 };
+        },
+      });
+    },
   });
   const handler = createKimiMcpHandler({ connection });
   t.mock.timers.enable({ apis: ["setTimeout"] });
 
-  for (const [message, name] of [
-    [call("search"), "search"],
-    [call("trelio_call_tool", { name: "get_task", arguments: {} }), "get_task"],
+  for (const [message, name, elapsedMs] of [
+    [call("search"), "search", 120_000],
+    [call("trelio_call_tool", { name: "get_task", arguments: {} }), "get_task", 21_000],
   ]) {
     pending = Promise.withResolvers();
     const reply = handler(message);
     const { send } = await pending.promise;
-    t.mock.timers.tick(21_000);
+    t.mock.timers.tick(elapsedMs);
     send(output({ name }));
     assert.deepEqual((await reply).result.structuredContent, { name });
   }

@@ -174,6 +174,19 @@ const MAX_REMOTE_TOOL_COUNT = 64;
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
 const REMOTE_REQUEST_TIMEOUT_MS = 20_000;
 const TRELIO_RESOLVE_TIMEOUT_MS = 20_000;
+const TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS = 140_000;
+
+// Match only the admitted native tool name, never an input field naming
+// another operation. The outer clock includes preparation and recovery and
+// caps the native HTTP call even if it starts late. Leave enough time to
+// receive the backend's 120-second cancellation and release the connection.
+const nativeTrelioToolBudget = name => {
+  if (name !== "search") return {};
+  const timeoutMs = TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS;
+  return { timeoutMs, timeoutError: () => new TrelioCallTimeoutError({
+    timeoutMs, message: `Trelio не завершил поиск за ${timeoutMs / 1000} секунд.`,
+  }) };
+};
 // The stable loader may wait up to ninety seconds for a racing updater and
 // then perform four bounded fifteen-second network attempts. Keep the outer
 // handoff deadline above that complete verified path instead of killing a
@@ -7801,7 +7814,9 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     // before their Trelio budget expires. Forward the enclosing signal so
     // catalogue reads and session recovery still consume the original budget.
     const requestTrelioMcp = (request, signal, onCatalogPhase, onServerRequest) =>
-      httpRequest(request, { signal, timeoutMs: TRELIO_CALL_BUDGET_MS,
+      httpRequest(request, { signal,
+        timeoutMs: nativeTrelioToolBudget(request.payload.method === "tools/call" ? request.payload.params?.name : undefined).timeoutMs
+          ?? TRELIO_CALL_BUDGET_MS,
         ...(request.payload.method === "tools/list" ? { acceptCatalogGzip: true, onCatalogPhase } : {}),
         ...(onServerRequest ? { onServerRequest } : {}) });
     const rpcOnce = async (method, params, signal, token, targetSession = session, onStage, requestClient) => {
@@ -8399,13 +8414,15 @@ export const createKimiMcpHandler = ({
         if (isFind) return findNative(query, callSignal);
         if (!isToolName(name)) throw unavailable();
         return invokeNative(await nativeCatalogue(callSignal, [name]), name, args, callSignal);
-      }, callSignal), { signal });
+      }, callSignal), { signal, ...nativeTrelioToolBudget(isFind ? undefined : name) });
       return reply(result);
     } catch (error) {
       const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code) ? error.code : errorPrefix + "_CONNECTION_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id,
         error: { code: -32000, message: code, data: { code } } };
-      const reason = error instanceof RemoteMcpOAuthError ? error.message : code === authRequired
+      const reason = error instanceof RemoteMcpOAuthError
+        || (error instanceof TrelioCallTimeoutError && error.timeoutMs === TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS)
+        ? error.message : code === authRequired
         ? "Вызовите trelio_connect и продолжите исходный запрос после входа в этом чате."
         : "Проверьте доступ и повторите только безопасное чтение. Неизвестный результат изменения требует read-back.";
       const details = { code, message: reason, ...(error instanceof RemoteMcpOAuthError && error.browser ? { browser: error.browser } : {}) };
@@ -9090,7 +9107,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         // output schema would otherwise make the client reject this result.
         return { ...buildTextResult(details),
           ...(result.structuredContent ? { structuredContent: details } : {}), isError: true };
-      }, callSignal), { signal });
+      }, callSignal), { signal, ...nativeTrelioToolBudget(schemaOnly ? undefined : name) });
       return result === null ? null : reply(result);
     } catch (error) {
       // Capture the typed host outcome before a recovery branch deliberately
@@ -9117,7 +9134,8 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         : authFailure(error) ? (code === authRequired
           ? "Подключите Trelio через trelio_connect и продолжите исходный запрос."
           : "Повторно подтвердите доступ через trelio_connect с reauthorize=true и продолжите исходный запрос.")
-        : error instanceof RemoteMcpHostError || error instanceof RemoteMcpOAuthError ? error.message
+        : error instanceof RemoteMcpHostError || error instanceof RemoteMcpOAuthError
+          || (error instanceof TrelioCallTimeoutError && error.timeoutMs === TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS) ? error.message
         : "Trelio не смог подготовить или завершить вызов. Для записи сначала проверьте состояние.";
       const details = { code, message: reason, ...(pairing
         ? { pairingId: pairing.pairingId, deviceName: pairing.deviceName } : {}),

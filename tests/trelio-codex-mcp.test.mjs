@@ -188,6 +188,42 @@ test("stable Codex read uses a fresh exact definition and the normal guarded dis
   assert.equal(observations.length, 1);
 });
 
+test("Codex uses one 140-second budget for exact native search and its recovery read", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const tools = ["search", "list_projects"].map(name => ({
+    name, inputSchema: { type: "object" },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }));
+  let started;
+  const handler = createCodexMcpHandler({ connect: () => ({
+    listTools: async (_signal, { toolNames } = {}) => toolNames ? tools.filter(tool => toolNames.includes(tool.name)) : tools,
+    call: async (name, _input, signal) => {
+      started.resolve({ name, signal });
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  }), prepare: async ({ input }) => input });
+  await handler(frame("initialize"), { clientInfo });
+  await handler(frame("tools/list"), { clientInfo });
+
+  for (const [params, expectedTool, budget] of [
+    [{ name: "search", arguments: { queries: ["fixture"] } }, "search", 140_000],
+    [{ name: "trelio_read", arguments: { name: "search", arguments: { queries: ["fixture"] } } }, "search", 140_000],
+    [{ name: "list_projects", arguments: { nativeTool: "search" } }, "list_projects", 60_000],
+  ]) {
+    started = Promise.withResolvers();
+    const pending = handler(frame("tools/call", params), { clientInfo });
+    const { name, signal } = await started.promise;
+    assert.equal(name, expectedTool);
+    t.mock.timers.tick(budget - 1);
+    assert.equal(signal.aborted, false);
+    t.mock.timers.tick(1);
+    const result = readResult(await pending);
+    assert.equal(result.code, "TRELIO_CALL_TIMEOUT");
+    if (expectedTool === "search") assert.match(result.message, /140 секунд/u);
+    assert.equal(signal.aborted, true);
+  }
+});
+
 test("explicit catalogue recovery and its subsequent live list both have time beyond startup", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const phases = [Promise.withResolvers(), Promise.withResolvers()];
