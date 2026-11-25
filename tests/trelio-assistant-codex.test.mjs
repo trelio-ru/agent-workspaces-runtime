@@ -3949,6 +3949,20 @@ test('native history selects only the exact interrupted scheduled review that ob
       result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[turn],nextCursor:null}}))});
   const selected=turn=>({state:'owner_question_observed',questionId,turnId:turn.id});
   const plain=makeRoot();assert.deepEqual(await read(plain),selected(plain));
+  const parameters={skillId:'signed-example',companyId:taskPass.companyId,projectId:randomUUID(),
+    releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['read']};
+  const stdout='Observed value',digest=value=>createHash('sha256').update(value).digest('hex');
+  const readResult={schemaVersion:1,operation:'skill_run',stdout,
+    taskSkillRead:bindAssistantTaskSkillRead({schemaVersion:1,releaseId:parameters.releaseId,
+      packageSha256:digest('signed release'),outputSha256:digest(stdout)},{scope:taskPass,parameters,stdout})};
+  const observed=makeRoot();
+  observed.items.push(call('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters},readResult));
+  assert.deepEqual(await read(observed),selected(observed));
+  for(const alter of [item=>{delete item.result.structuredContent.taskSkillRead;},
+    item=>{item.arguments.parameters.arguments=['send'];},item=>{item.result.structuredContent.stdout+=' changed';},
+    item=>{item.result.structuredContent.taskSkillArtifact={};}]){
+    const copy=structuredClone(observed);alter(copy.items.at(-1));assert.deepEqual(await read(copy),{state:'uncertain'});
+  }
   const legacy=makeRoot();
   legacy.items[0].content[0].text=assistantNativePrompt(deliveryId,scope,{}).replace(
     ' If work needs broader company readings, get_assistant_status(view=company_context) displays the ordinary native source catalogue. Use view=task to restore task operations. Select the needed existing view yourself; presentation never changes authority.','');

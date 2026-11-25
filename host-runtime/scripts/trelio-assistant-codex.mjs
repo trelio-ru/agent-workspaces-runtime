@@ -21,7 +21,7 @@ import { ASSISTANT_PINNED_AUTHORITY_FILES, parseAssistantRunFileCommand, validat
 import { readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity, assistantSkillGuideSelection, isAssistantSkillGuidePage, projectAssistantSkillGuideResult } from './trelio-workspace.mjs';
 import { parseAccountCommand, splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { inspectHistoricalTaskDelivery, matchesAssistantTaskSkillArtifact, matchesAssistantTaskSkillRead,
-  reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill, reviewedHistoricalOwnerAnswerSkills } from './trelio-skill-secret-setup.mjs';
+  reviewedAssistantHistoricalSkillRead, reviewedHistoricalCheckpointSkill } from './trelio-skill-secret-setup.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -2666,7 +2666,14 @@ export const assistantRetiredAnswerEvidence=(original,deliveryId,{taskPass,assis
     }
     if(item.tool!=='continue_assistant_workspace_action'||args.schemaVersion!==1)return false;
     const p=args.parameters??{};
-    if(args.operation==='skill_run')continue; // Verified collectively against exact release/arguments below.
+    if(args.operation==='skill_run'){
+      // Only the host-bound read witness settles a provider call for the
+      // unrestricted successor. Without it the same owner answer may still
+      // run under the restricted signer without replaying this operation.
+      if(!success||!Object.hasOwn(v??{},'taskSkillRead')||Object.hasOwn(v,'taskSkillArtifact')
+        ||v.schemaVersion!==1||recoveredOutcomeSkillRead(args,v,taskPass)!==true)return false;
+      continue;
+    }
     if(args.operation==='secret_list'&&success)continue;
     if(args.operation==='secret_browser_prepare'&&!success&&localDraft&&p.runId===localDraft.runId
       &&localDraftRefusal(item,'SECRET_BROWSER_PREFLIGHT_FAILED')
@@ -2688,7 +2695,7 @@ export const assistantRetiredAnswerEvidence=(original,deliveryId,{taskPass,assis
     }
     return false;
   }
-  return found&&!visit.pending&&Boolean(localDraft)===prepared&&(!prepared||opened)&&reviewedHistoricalOwnerAnswerSkills(items,taskPass);
+  return found&&!visit.pending&&Boolean(localDraft)===prepared&&(!prepared||opened);
 };
 
 const readRetiredOwnerQuestion=async(request,threadId,deliveryId,options)=>{

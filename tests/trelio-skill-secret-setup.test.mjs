@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import {randomUUID} from "node:crypto";
-import { reviewedHistoricalOwnerAnswerSkills, readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
 
 const command = { id: "configure", arguments: ["configure"], bindingKey: "service_token",
   fieldKey: "value", environmentVariable: "TRELIO_TEST_SETUP_TOKEN" };
@@ -222,86 +222,4 @@ test("setup delivery rejects changed identity/config/env and never retries or le
     });
   }
   assert.equal(calls, 6);
-});
-
-const courtSkill = {skillId:'gas-pravosudie',releaseId:'d4f7679b-a03d-4e42-9d48-37a4688b95e2'};
-const courtPackageSha256 = '32e6733b6e6e948a0fb8e27018a8788121f0e18f72f118d5c18d229fb906ed7e';
-
-// All session, task, device and case locators in this fixture are generated.
-// Exercise a complete authenticated native history without opening a browser.
-const courtVisitFixture = () => {
-  const pass = {companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
-  const projectId = randomUUID(), runtimeSessionId = randomUUID(), sessionId = randomUUID();
-  const seed = {companyId:pass.companyId,projectId,runtimeSessionId,...courtSkill,arguments:[]};
-  const scope = {taskPass:pass,runtimeSessionProof:{runtimeSessionId}};
-  const item = (tool,args,value,status='completed') => ({type:'mcpToolCall',server:'trelio-assistant',tool,
-    arguments:{...args,...scope},status,result:{structuredContent:value,
-      content:status==='failed'?[{type:'text',text:value.code}]:[]}});
-  const select = item('get_agent_skill',{skillId:courtSkill.skillId},{skill:{id:courtSkill.skillId,version:'4.1.11',
-    runtimeRelease:{releaseId:courtSkill.releaseId,runtimeVersion:'1.0.16',trustLevel:'platform_verified',packageSha256:courtPackageSha256}},
-    runtimeExecution:{releaseId:courtSkill.releaseId,localAction:{arguments:{parameters:{...seed}}}}});
-  const run = (argv,output) => {
-    const args = {schemaVersion:1,operation:'skill_run',parameters:{...seed,arguments:argv}};
-    return output === null ? item('continue_assistant_workspace_action',args,{code:'TRELIO_WORKSPACE_ACTION_FAILED'},'failed')
-      : item('continue_assistant_workspace_action',args,{schemaVersion:1,operation:'skill_run',stdout:JSON.stringify(output)});
-  };
-  const wait = ['wait','--session',sessionId,'--after-phase','starting','--timeout-seconds','30'];
-  const origin = 'https://court.sudrf.ru';
-  const address = origin+'/modules.php?name=sud_delo&srv_num=1&name_op=case&case_id=1&case_uid='+randomUUID()+'&delo_id=1';
-  const items = [select,run(['doctor'],{osPrompt:false,runtimeReady:true,runtimeVersion:'1.0.16'}),
-    run(['start'],{phase:'starting',sessionId,requiredAction:'Дождитесь ready; браузер откроется без активации окна.',continuation:{arguments:wait}}),
-    run(wait,{phase:'ready',sessionId,requiredAction:null,wait:{changed:true,timedOut:false}}),
-    run(['page','--session',sessionId,'--navigate',address],{ok:true}),
-    run(['snapshot','--session',sessionId],{origin,text:'',controls:[],truncated:true}),
-    run(['page','--help'],null),run(['--help'],null),run(['stop','--session',sessionId],{phase:'closed',sessionId})];
-  return {pass,items,run};
-};
-
-test('retained court visit binds its immutable selection, scoped original and exact closed session', () => {
-  const {items,pass} = courtVisitFixture();
-  assert.equal(reviewedHistoricalOwnerAnswerSkills(items,pass),true);
-  assert.equal(reviewedHistoricalOwnerAnswerSkills([{tool:'unrelated'}],pass),true);
-  assert.equal(reviewedHistoricalOwnerAnswerSkills(items.slice(1),pass),false);
-  assert.equal(reviewedHistoricalOwnerAnswerSkills(items.slice(0,-1),pass),false);
-  assert.equal(reviewedHistoricalOwnerAnswerSkills(items,{...pass,passId:randomUUID()}),false);
-  for (const mutate of [
-    r=>{ r[0].result.structuredContent.skill.runtimeRelease.packageSha256 = '0'.repeat(64); },
-    r=>{ r[0].result.structuredContent.skill.runtimeRelease.trustLevel = 'company_unverified'; },
-    r=>{ delete r[0].result.structuredContent.runtimeExecution; },
-    r=>{ r[1].arguments.parameters.releaseId = randomUUID(); },
-    r=>{ r[1].arguments.parameters.projectId = randomUUID(); },
-    r=>{ r[2].arguments.parameters.runtimeSessionId = randomUUID(); },
-    r=>{ r[2].arguments.parameters.stdin = '{}'; },
-    r=>{ r[2].result.structuredContent.stdout = JSON.stringify({phase:'starting',sessionId:randomUUID()}); },
-    r=>{ r[3].arguments.parameters.arguments[2] = randomUUID(); },
-    r=>{ r[3].result.structuredContent.stdout = JSON.stringify({phase:'ready',sessionId:randomUUID()}); },
-    r=>{ r[4].arguments.parameters.guidePart = 1; },
-    r=>{ r[4].arguments.parameters.arguments.push('--confirm'); },
-    r=>{ r[4].result.structuredContent.stdout = ''; },
-    r=>{ r[5].result.structuredContent.stdout = JSON.stringify({origin:'https://other.example',truncated:true,controls:[],text:''}); },
-    r=>{ r[6].arguments.parameters.arguments = ['stop','--help']; },
-    r=>{ r[7].result.content = [{type:'text',text:'different_failure'}]; },
-    r=>{ r[7].result.structuredContent.extra = true; },
-    r=>{ r[8].result.structuredContent.stdout = JSON.stringify({phase:'closed',sessionId:randomUUID()}); },
-  ]) {
-    const altered = structuredClone(items);
-    mutate(altered);
-    assert.equal(reviewedHistoricalOwnerAnswerSkills(altered,pass),false);
-  }
-});
-
-test('retained court history rejects arbitrary navigation, malformed guide pages and any extra provider effect', () => {
-  const {items,pass,run} = courtVisitFixture();
-  const url = items[4].arguments.parameters.arguments[4];
-  for (const unsafe of [url.replace('court.sudrf.ru','unknown.example'),url.replace('case_id=1','case_id=1&confirm=1'),
-    url.replace('name_op=case','name_op=submit'),url.replace('case_id=1','case_id=1&case_id=2'),
-    url.replace('modules.php','modules.php/other'),url+'#unexpected',url.replace('//court.','//user@court.')]) {
-    const altered = structuredClone(items);
-    altered[4].arguments.parameters.arguments[4] = unsafe;
-    assert.equal(reviewedHistoricalOwnerAnswerSkills(altered,pass),false);
-  }
-  const guide = run(['guides'],{schemaVersion:1,part:0,count:4,text:'not signed',nextGuidePart:1});
-  for (const extra of [guide,run(['script','--help'],null),run(['page','--help','--confirm'],null),
-    run(['prepare-sign-in'],{ok:true}),run(['account','list'],{ok:true})])
-    assert.equal(reviewedHistoricalOwnerAnswerSkills([...items,extra],pass),false);
 });

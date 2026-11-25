@@ -5039,6 +5039,8 @@ test(`the genuine owner answer belongs to exactly one new task pass (${mode})`,a
       assert.equal(dispatch.uncertainDeliveries,0);assert.equal(dispatch.failure,null);
       assert.equal(coordinator.modelCapacityRetryDelay(),null);
       assert.equal(inbox.readDelivery(newDelivery).state,'complete');assert.deepEqual(inbox.retiredTaskIds(),[]);
+      assert.deepEqual(inbox.pendingReconciliationTasks(),[]);
+      assert.equal(inbox.claimReconciliation(pass.deliveryId,receipt.receiptId),null);
       assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_delivery_events WHERE delivery_id=?').get(newDelivery).n,1);
     }else assert.deepEqual(inbox.retiredTaskIds(),[pass.taskId]);
     assert.deepEqual(snapshot(),frozen);
@@ -5122,6 +5124,7 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
   f.advance(21*60_000);live.state='closed';const receipt={...old,receiptId:randomUUID(),state:'retired',leaseRevision:live.leaseRevision};
   inbox.recordRetiredTaskWriter(old,receipt);inbox.releaseRetiredTaskWriter(old.deliveryId,receipt);
   await f.options.passHost.releasePass(receipt);
+  inbox.startRetiredTaskInspection(old.deliveryId,receipt);
   f.options.passHost.releaseRetiredTaskPass=async()=>assert.fail('old writer already released');
   const wake={notificationId:randomUUID(),questionId:randomUUID()};
   if(withAnswer){f.events.push({id:wake.notificationId,revision:'1',taskId:f.taskId,wake:true,ownerQuestionId:wake.questionId});
@@ -5130,10 +5133,21 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
   const prior=f.database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(old.deliveryId);
   const begin=f.options.client.beginTaskPass,run=f.options.native.run,readOutcome=f.options.client.readBusinessOutcome;
   const selected=[],begins=[],accepted=new Map();
-  let rejectFirst=true;
+  let rejectFirst=true, inspectedOriginal=0;
+  f.options.client.readTaskRetiredOutcomeEvidence=async()=>assert.fail('no accepted original');
+  const readDelivery=f.options.native.readDelivery;
+  f.options.native.readDelivery=async(thread,marker,options)=>{
+    if(options?.retiredAcceptedOutcome)throw Object.assign(new Error('old archive not loaded'),{code:'ASSISTANT_CODEX_THREAD_NOT_LOADED'});
+    if(!options?.retiredOwnerQuestion)return readDelivery(thread,marker,options);
+    // The original tool could have had an effect. An actual owner answer
+    // still reaches the restricted worker exactly once.
+    inspectedOriginal++;assert.equal(thread,old.threadId);assert.equal(marker,old.deliveryId);
+    return {state:'uncertain'};
+  };
   f.options.client.readTaskRecoveryContext=async args=>{
     assert.deepEqual(args.writerRetirement,receipt);
-    if(!args.reconcile)return null;
+    if(!args.reconcile)return withAnswer?{draftEvidence:null,materialBasis:{workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),
+      receiptId:randomUUID()},operations:{coverage:'partial',hasMore:false,receipts:[]}}:null;
     const expectedAnswer=withAnswer&&!accepted.size;
     assert.equal(args.notificationId,expectedAnswer?wake.notificationId:undefined);
     return {draftEvidence:null,reconcile:{eligible:true,
@@ -5178,6 +5192,7 @@ for (const withAnswer of [false,true]) test(`retired scheduled work resumes inde
     assert.ok(next>f.options.now());f.advance(next-f.options.now());
   }
   assert.deepEqual(begins,[selected[0],selected[0],selected[1]]);
+  assert.equal(inspectedOriginal,Number(withAnswer));
   assert.equal(new Set(selected).size,2);
   // Even a second interrupted writer can release the device. Neither source
   // attempt can be retried or replaced without its own verified outcome.

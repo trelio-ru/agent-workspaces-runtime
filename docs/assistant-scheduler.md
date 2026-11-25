@@ -98,6 +98,9 @@ owner decisions and recoverable material. A retained local checkout must match
 its accepted base and pass the existing clean-checkout observation. For an owner
 answer both sides match the exact question and existing unread notification.
 The task worker reads and interprets that answer through the normal task tool.
+An independently verified source read may support the existing ordinary
+owner-answer handoff. A missing historical provider receipt leaves its effect
+fenced and the same real answer remains available for restricted work.
 
 The host journals the new delivery and its immutable original pass reference
 before contacting the server. Repeating the same begin observes its one start.

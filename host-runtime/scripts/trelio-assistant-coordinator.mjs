@@ -2203,6 +2203,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     await businessConfirmed();
     return true;
   };
+  // Scoped read failures leave one original unresolved. Losing the device
+  // lease or an ambiguous native mutation always escapes this read-only path.
+  const scopedRetirementReadRefusal=error=>[403,404,409].includes(error?.status)
+    ||['ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_THREAD_NOT_LOADED','ASSISTANT_CODEX_THREAD_BUSY',
+      'ASSISTANT_CODEX_DELIVERY_UNCERTAIN','ASSISTANT_TRANSPORT_INVALID_RESPONSE'].includes(error?.code);
   const resolveRetiredAcceptedTask = async signal => {
     if(!passHost||typeof passHost.releaseRetiredTaskPass!=='function'
       ||typeof native.readWriterReleased!=='function'||typeof client.readTaskRetiredOutcomeEvidence!=='function')return null;
@@ -2217,14 +2222,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(recorded.outcomeRepairMarker)continue;
       }
       const locator={companyId,taskId,passId};
-      const observed=await native.readDelivery(threadId,job.deliveryId,{signal,retiredAcceptedOutcome:{
-        taskPass:locator,assistantId:identity.assistantId,retirementReceiptId:receiptId,
-        ...(failedConfirmationMarker?{failedConfirmationMarker}:{}),
-      }});
-      lease();
-      if(observed.state!=='retired_outcome_observed'||!uuid.test(observed.turnId??'')
-        ||failedConfirmationMarker&&!uuid.test(observed.refusal?.turnId??''))continue;
-      const selected=await client.readTaskRetiredOutcomeEvidence(receipt,observed.evidence,signal);
+      let observed,selected;
+      try{
+        observed=await native.readDelivery(threadId,job.deliveryId,{signal,retiredAcceptedOutcome:{
+          taskPass:locator,assistantId:identity.assistantId,retirementReceiptId:receiptId,
+          ...(failedConfirmationMarker?{failedConfirmationMarker}:{}),
+        }});
+        lease();
+        if(observed.state!=='retired_outcome_observed'||!uuid.test(observed.turnId??'')
+          ||failedConfirmationMarker&&!uuid.test(observed.refusal?.turnId??''))continue;
+        selected=await client.readTaskRetiredOutcomeEvidence(receipt,observed.evidence,signal);
+      }catch(error){
+        signal.throwIfAborted();lease();
+        if(scopedRetirementReadRefusal(error))continue;
+        throw error;
+      }
       if(!selected)continue;
       // A mere missing receipt or a model error is ambiguous. A historical
       // local refusal still needs the current native accepted evidence,
@@ -2312,8 +2324,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // A denial scoped to one old task or native chat cannot suppress
         // another valid notification. Device/lease/transport errors propagate.
         signal.throwIfAborted();lease();
-        if([403,404,409].includes(error?.status)||['ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_THREAD_NOT_LOADED',
-          'ASSISTANT_CODEX_THREAD_BUSY','ASSISTANT_CODEX_DELIVERY_UNCERTAIN','ASSISTANT_TRANSPORT_INVALID_RESPONSE'].includes(error?.code))continue;
+        if(scopedRetirementReadRefusal(error))continue;
         throw error;
       }
       if(next){
@@ -2353,8 +2364,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         job=inbox.claimReconciliation(deliveryId,receipt.receiptId,current.reconcile.previousReceiptId??null,wake);
       } catch(error){
         signal.throwIfAborted();lease();
-        if([403,404,409].includes(error?.status)||['ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_THREAD_NOT_LOADED',
-          'ASSISTANT_CODEX_THREAD_BUSY','ASSISTANT_TRANSPORT_INVALID_RESPONSE'].includes(error?.code))continue;
+        if(scopedRetirementReadRefusal(error))continue;
         throw error;
       }
       if(job){
