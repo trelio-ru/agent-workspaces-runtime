@@ -783,7 +783,9 @@ publication tooling также остаются вне этого публичн
   после нормальной остановки, native OS keyring, company/member claim и
   непродлеваемая lease. Собственный capture удаляет bounded ancillary iCCP без
   распаковки/выдачи профиля; CRC и весь PNG проверяются, обычный MCP validator
-  остаётся строгим. Late bootstrap отменяется до browser launch; main-frame
+  остаётся строгим. На границе CLI/MCP проверяй PNG с метаданными рабочего
+  браузера: ID сеанса и кадра совпадают со снимком, сайт совпадает с запросом,
+  адрес после редиректа передаётся только как HTTPS origin. Late bootstrap отменяется до browser launch; main-frame
   navigation отзывает старый frame token; browser load metadata ожидается bounded
   без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
   Windows/Linux startup использует внутреннюю new-tab вкладку без URL в argv;

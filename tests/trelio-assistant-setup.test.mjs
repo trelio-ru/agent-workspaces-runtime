@@ -502,6 +502,24 @@ test('request transport preserves closed failure boundaries through real native 
     const request={operation:'call',name:'use_assistant_browser',arguments:{siteOrigin:'https://example.test',command:{operation:'screenshot',args:{}}}};
     const response=await invoke(source+`process.stdout.write(JSON.stringify({value:result}));`,{request});
     assert.equal(response.content[1].mimeType,'image/png');assert.ok(response.content[1].data.length>768*1024);
+    // Working-task screenshots also carry the address of the exact frame. A
+    // legitimate login redirect may have a different origin than the site.
+    const observed=`const observation={sessionId:metadata.sessionId,frameId:metadata.frameId,siteOrigin:'https://example.test',observedOrigin:'https://login.example.test'};
+      result.structuredContent={browserObservation:observation};`;
+    const write=`process.stdout.write(JSON.stringify({value:result}));`;
+    for(const fixture of [source,source.replace('const width=640,height=480','const width=320,height=240')]){
+      const picture=await invoke(fixture+observed+write,{request});
+      const meta=JSON.parse(picture.content[0].text);
+      assert.deepEqual(picture.structuredContent.browserObservation,{sessionId:meta.sessionId,frameId:meta.frameId,
+        siteOrigin:request.arguments.siteOrigin,observedOrigin:'https://login.example.test'});
+      assert.equal(picture.content[1].mimeType,'image/png');
+    }
+    for(const edit of ["observation.frameId=randomUUID()", "observation.sessionId=randomUUID()",
+      "observation.siteOrigin='https://other.test'", "observation.observedOrigin='https://login.example.test/path?private'",
+      "observation.observedOrigin='http://login.example.test'", "observation.observedOrigin='https://name:pw@login.example.test'",
+      "observation.additional='PRIVATE_PIPE_CANARY'", "result.structuredContent.extra='PRIVATE_PIPE_CANARY'"]){
+      await refuses(source+observed+edit+';'+write,'INVALID_VALUE_FRAME',{request});
+    }
     await refuses(source+`process.stdout.write(JSON.stringify({value:result}));`,'OUTPUT_TOO_LARGE');
     await refuses(source+`result.content[1].mimeType='text/plain';process.stdout.write(JSON.stringify({value:result}));`,'INVALID_VALUE_FRAME',{request});
     await refuses(`process.stdout.write(JSON.stringify({value:{content:[{type:'text',text:'PRIVATE_PIPE_CANARY'.repeat(60000)}]}}));`,'INVALID_VALUE_FRAME',{request});

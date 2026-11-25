@@ -662,7 +662,9 @@ the combined task/intake/discovery catalogue retains its 64-KiB ceiling.
 The fresh-worker reply pipe retains 768 KiB for ordinary content/metadata. Only
 `use_assistant_browser` permits a 3-MiB envelope for the existing 2-MiB PNG plus
 base64/framing. A larger-than-ordinary reply must reconstruct exactly through
-the SAME visual PNG/MCP validator; another MIME, arbitrary large JSON/prose,
+the SAME visual PNG/MCP validator. A working task's optional `browserObservation`
+must match the PNG session/frame and requested site origin. Its observed HTTPS
+origin may differ after a redirect. Another MIME, arbitrary large JSON/prose,
 extra fields or malformed UTF-8 refuse. There is no disk/base64-to-text fallback.
 Owner intake exposes navigate/screenshot/scroll/status/close only. Working tasks
 also expose click/type-text/key; sensitive external actions keep independent

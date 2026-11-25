@@ -1966,7 +1966,22 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
               ||typeof blocks[0].text!=='string'||blocks[0].text.length>4096||blocks[1].type!=='image')throw new Error();
             const metadata=JSON.parse(blocks[0].text);
             const canonical=visualMcpResult({kind:VISUAL_RESULT_KIND,...metadata,image:{mimeType:blocks[1].mimeType,data:blocks[1].data}});
-            if(JSON.stringify(result)!==JSON.stringify(canonical))throw new Error();
+            // The task browser attaches the origin it observed after navigation.
+            // Rebuild the public observation from the validated frame and the
+            // requested site. A redirect can change the observed HTTPS origin.
+            // The browser rechecks the live frame before any protected input.
+            if(Object.hasOwn(result,'structuredContent')){
+              if(typeof metadata.sessionId!=='string'||typeof metadata.frameId!=='string')throw new Error();
+              const siteOrigin=request.arguments.siteOrigin;
+              const observedOrigin=result.structuredContent?.browserObservation?.observedOrigin;
+              for(const origin of [siteOrigin,observedOrigin]){
+                if(typeof origin!=='string'||origin.length>512)throw new Error();
+                const url=new URL(origin);
+                if(url.protocol!=='https:'||url.origin!==origin)throw new Error();
+              }
+              canonical.structuredContent={browserObservation:{sessionId:metadata.sessionId,frameId:metadata.frameId,siteOrigin,observedOrigin}};
+            }
+            if(!isDeepStrictEqual(result,canonical))throw new Error();
           }catch{return refuse('INVALID_VALUE_FRAME');}
         }
         finish(null,value.value);
