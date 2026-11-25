@@ -555,6 +555,43 @@ for(const stopped of [false,true])test(`writer remains owned until the host auth
 });
 
 
+for(const change of ['none','wrong_turn','missing','duplicate','running','completed','incomplete','queued'])
+test(`routed writer observes the original interrupted marker under the exclusive claim (${change})`,async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  const item={type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\noriginal'}]};
+  const original={id:turnId,status:'interrupted',items:[item]};
+  let acquired=false,calls=0;
+  const rpc=nativeRpc(request=>{
+    switch(request.method){
+      case 'thread/read':return {result:{thread:{id:threadId,cwd,status:{type:'notLoaded'},canAcceptDirectInput:null}}};
+      case 'thread/queue/list':return {result:{data:change==='queued'&&calls?[{}]:[],nextCursor:null}};
+      case 'thread/resume':acquired=true;return {result:{thread:{id:threadId}}};
+      case 'thread/turns/list':{
+        assert.equal(acquired,true);
+        assert.equal(request.params.itemsView,'summary');
+        assert.equal(request.params.threadId,threadId);
+        if(!request.params.cursor)return {result:{data:[{id:randomUUID(),status:'completed',items:[]}],nextCursor:'earlier'}};
+        const observed={...original,id:change==='wrong_turn'?randomUUID():turnId,
+          status:['running','completed'].includes(change)?change:'interrupted'};
+        const data=change==='missing'?[]:change==='duplicate'?[observed,{...original,id:randomUUID()}]:[observed];
+        return {result:{data,nextCursor:change==='incomplete'?'earlier':null}};
+      }
+      default:assert.fail('writer observation must not invoke tools or a model');
+    }
+  });
+  const read=withAssistantCodexWriter(threadId,cwd,async()=>{calls++;return true;},{
+    executable:process.execPath,environment:{},interruptedDelivery:{turnId,deliveryId},
+    spawnProcess:(...args)=>{
+      const child=rpc(...args),kill=child.kill.bind(child);
+      child.kill=(...params)=>{kill(...params);queueMicrotask(()=>child.emit('close',null,'SIGKILL'));};
+      return child;
+    },
+  });
+  if(change==='none')assert.equal(await read,true);
+  else await assert.rejects(read,{code:change==='queued'?'ASSISTANT_CODEX_THREAD_BUSY':'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  assert.equal(calls,['none','queued'].includes(change)?1:0);
+});
+
 test('writer release refuses queued input appearing during acquisition',async()=>{
   const threadId=randomUUID(),cwd=await fs.realpath(process.cwd());
   let queues=0;

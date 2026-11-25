@@ -191,8 +191,9 @@ next worker checks the same closed pass before committing the local release.
 A changed or unavailable server pass leaves the device blocked.
 
 Only after both steps can events or a due cycle for a different task start.
-An event for the retired task cannot select another delivery. Its original
-schedule stays due and is skipped when selecting an independent cycle. The
+While its original delivery is unresolved, the retired task keeps its events
+and due cycle. Once the confirmed original outcome has completed the delivery,
+a new event or due cycle for that task can enter ordinary admission. The
 ordinary completion and continuation writers reject the retired delivery.
 Existing uncertain rows receive no synthetic retirement during migration.
 The first native retirement attempt and the v32 marker commit atomically;
@@ -892,13 +893,23 @@ the owned running turn; created/waiting/ignored still await their normal final
 marker. An abort/kill request or resolved/rejected CLI adapter is not a terminal
 marker; started cancellation rereads that original native delivery independently.
 Before the durable native-start CAS, cancellation closes only the never-started
-preparation. After crash/restart, a source pause, expired lease or positive backend
-cancellation cannot replace the exact original Codex completed/failed read-back.
-The protected pass stays held until that native terminal marker. Only an intake
-still reported as leased is cancelled on expiry. Once the server has committed
-a route, the coordinator rereads that receipt and the original turn until it
-can settle them together. A closed created
-receipt whose fresh task binding/ACL/transport read fails retains its receipt and
+preparation. After a crash, a source pause, expired lease or positive
+cancellation cannot attest to the original Codex turn. An intake still leased
+at expiry uses ordinary cancellation. A closed intake waits for its exact
+completed/failed native turn, with one exception for a verified owner command.
+A native `routed` receipt binds its one original to one accepted task. If the
+stored turn is interrupted, the host can claim the original Codex thread's
+exclusive writer without tools, check its empty queue, and verify that unique
+original marker and turn UUID in the native summaries. While holding the writer
+it rereads the closed route receipt. After the observer exits, it rechecks the
+protected pass and local record. The existing journal commits the business
+receipt and the device can dispatch independent work. The Codex turn keeps its
+original status. A stored reply attempt, abandonment, prepared reply, recovery
+or capacity incident prevents this path. A crash between recording the receipt
+and removing the private slot repeats the same read-only checks. Business
+processing and provider ACK retain their separate proofs for each original.
+A closed created receipt whose fresh task binding/ACL/transport read fails
+retains its receipt and
 typed cause, backs off new company work and never recreates, routes or ACKs the
 original event. An unknown active pass keeps its global fence.
 

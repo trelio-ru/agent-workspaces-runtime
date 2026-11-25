@@ -1912,10 +1912,12 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
   }finally{await f.coordinator.close();}
 });
 
-for(const {name,reuseExisting=false,interrupted=false} of [
+for(const {name,reuseExisting=false,interrupted=false,recoverWriter=false} of [
   {name:'creates a new goal'},
   {name:'reuses the existing task',reuseExisting:true},
   {name:'waits for an interrupted routed turn',reuseExisting:true,interrupted:true},
+  {name:'releases the stopped writer on its original routed receipt',reuseExisting:true,interrupted:true,recoverWriter:true},
+  {name:'preserves a separately fenced provider attempt',reuseExisting:true,interrupted:true,recoverWriter:'attempted'},
 ])test(`owner command intake ${name} with SAME SQLite/native routing and restart dedup`,async t=>{
   const database=new DatabaseSync(':memory:');
   let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0,intakeReads=0,releases=0;
@@ -1960,7 +1962,7 @@ for(const {name,reuseExisting=false,interrupted=false} of [
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
     releasePass:async outcome=>{assert.equal(outcome.id,active.passId);releases++;active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
     timeZone:'Europe/Moscow',now:()=>clock,readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
-      events:poll===1?[]:[{id:`message:123:${poll}`,revision:String(poll).repeat(64),conversationKey:key,kind:'new',outgoing:false,attention:'direct',
+      events:poll===1||poll>3?[]:[{id:`message:123:${poll}`,revision:String(poll).repeat(64),conversationKey:key,kind:'new',outgoing:false,attention:'direct',
         forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
   let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();database.close();});
   await coordinator.pollOnce();clock+=300000;await coordinator.pollOnce();
@@ -1991,11 +1993,65 @@ for(const {name,reuseExisting=false,interrupted=false} of [
     assert.equal((await coordinator.workOnce()).state,'blocked');
     assert.deepEqual(active,pass);assert.equal(local().state,'uncertain');assert.equal(local().outcome_receipt,null);
     assert.equal(cancellations,0);assert.equal(releases,1);assert.equal(intakeTurns,2);
-    // Only the same original turn finishing releases this pass. The route was
-    // already committed before restart and its event still has no read ACK.
     const {turnId}=turns.get(pass.deliveryId);
-    turns.set(pass.deliveryId,{state:'completed',turnId,receipt:`codex:${pass.threadId}:${turnId}`});
-    await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u));
+    if(recoverWriter){
+      // Keep the real original in interrupted state throughout. A busy
+      // writer or an immutable receipt changed between the two reads must
+      // leave the same slot and start bit intact.
+      let mode='busy',held=false;
+      const read=client.readSourceIntake;
+      client.readSourceIntake=async(...args)=>{
+        const value=await read(...args);
+        return held&&mode==='changed'?{...value,receiptId:randomUUID()}:value;
+      };
+      native.withWriter=async(thread,cwd,check,options)=>{
+        assert.equal(thread,pass.threadId);assert.equal(cwd,process.cwd());
+        assert.deepEqual(options.interruptedDelivery,{deliveryId:pass.deliveryId,turnId});
+        if(mode==='busy')throw Object.assign(new Error('busy'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
+        held=true;try{return await check(options.signal);}finally{held=false;}
+      };
+      for(mode of ['busy','changed']){
+        assert.equal((await coordinator.workOnce()).state,'blocked');
+        assert.deepEqual(active,pass);assert.equal(local().state,'uncertain');assert.equal(releases,1);
+      }
+      if(recoverWriter==='attempted'){
+        // A historical provider-attempt fence is an independent unresolved
+        // effect. Leave the synthetic inconsistent row intact for inspection.
+        const attemptedReply=randomUUID();
+        database.prepare('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?').run(attemptedReply,pass.passId);
+        mode='released';
+        assert.equal((await coordinator.workOnce()).state,'blocked');
+        assert.deepEqual(active,pass);assert.equal(releases,1);
+        assert.equal(database.prepare('SELECT reply_receipt_id FROM assistant_owner_intakes WHERE id=?').get(pass.passId).reply_receipt_id,attemptedReply);
+        return;
+      }
+      const release=options.passHost.releasePass;
+      options.passHost.releasePass=async outcome=>{
+        assert.equal(held,false,'native observer must have exited before slot release');
+        assert.equal(local().outcome_receipt,receipt.receiptId);
+        if(mode==='crash')throw Object.assign(new Error('before private slot removal'),{code:'ASSISTANT_PRIVATE_UNAVAILABLE'});
+        return release(outcome);
+      };
+      mode='crash';
+      await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_PRIVATE_UNAVAILABLE'});
+      assert.deepEqual({...local()},{state:'complete',settled:0,outcome_receipt:receipt.receiptId});
+      assert.deepEqual(active,pass);assert.equal(releases,1);
+      await coordinator.close();coordinator=createAssistantCoordinator(options);
+      mode='busy';
+      assert.equal((await coordinator.workOnce()).state,'blocked','a restarted writer must obtain a fresh exclusive claim');
+      const independent=randomUUID();
+      tasks.set(independent,{id:randomUUID(),taskId:independent,state:'accepted',revision:0});
+      clock+=300000;await coordinator.pollOnce();
+      mode='released';
+      assert.equal((await coordinator.workOnce()).kind,'provision','an independent accepted assignment gets this tick');
+      assert.deepEqual(turns.get(pass.deliveryId),{state:'uncertain',turnId});
+      assert.equal(database.prepare('SELECT native_started FROM assistant_owner_intakes WHERE id=?').get(pass.passId).native_started,1);
+    }else{
+      // Without writer ownership only a terminal read of the original can
+      // release the device. The server route is already committed.
+      turns.set(pass.deliveryId,{state:'completed',turnId,receipt:`codex:${pass.threadId}:${turnId}`});
+      await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u));
+    }
     assert.deepEqual({...local()},{state:'complete',settled:1,outcome_receipt:receipt.receiptId});
     assert.equal(active,null);assert.equal(releases,2);assert.equal(cancellations,0);
     const routedEvent=database.prepare(`SELECT e.route_id,e.processed,e.acked FROM assistant_inbox_events e
@@ -2004,7 +2060,7 @@ for(const {name,reuseExisting=false,interrupted=false} of [
     await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u));
     assert.equal(releases,2);assert.equal(cancellations,0);
   }else await coordinator.workOnce();
-  assert.equal(created,reuseExisting?1:2);assert.equal(intakeTurns,2);assert.equal(provisions,2,'one intake chat plus first permanent task chat');
+  assert.equal(created,reuseExisting?1:2);assert.equal(intakeTurns,2);assert.equal(provisions,recoverWriter?3:2,'one intake chat plus the expected independent task chats');
   assert.equal(new Set([...intakes.values()].map(value=>value.threadId)).size,1);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'created\'').get().n,reuseExisting?1:2);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'routed\'').get().n,reuseExisting?1:0);

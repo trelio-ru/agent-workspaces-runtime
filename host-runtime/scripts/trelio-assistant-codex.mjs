@@ -3793,8 +3793,8 @@ const acquireAssistantThreadWriter = async (request,{threadId,cwd,config,executi
 };
 
 /** Hold the exact tool-free native writer across a host-side authority check.
- * Only the owning worker can supply the callback. No turn, history, plugin or
- * task tool is opened here. Losing this process aborts the callback's signal.
+ * Only the owning worker can supply the callback. Its optional marker check
+ * reads native summaries; no model or task tools run. Writer loss aborts it.
  * Only exact backend read-back can settle a possibly committed request. */
 export const withAssistantCodexWriter = async (threadId,cwd,action,options={}) => {
   threadId=id(threadId);
@@ -3814,9 +3814,20 @@ export const withAssistantCodexWriter = async (threadId,cwd,action,options={}) =
     for(const plugin of Object.values(config.plugins))plugin.enabled=false;
     await acquireAssistantThreadWriter(request,{threadId,cwd:actual,config});
     await requireEmptyThreadQueue(request,threadId);
+    if(options.interruptedDelivery){
+      // Reuse the owning connection to match the same single delivery/turn
+      // over the bounded native pipe. A busy thread, duplicate marker or
+      // changed status cannot turn a previously interrupted read into proof.
+      const {deliveryId,turnId}=options.interruptedDelivery;
+      if(!await findReservedTurn(request,threadId,id(deliveryId),id(turnId)))
+        fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+    }
     writerSignal.throwIfAborted();
     const value=await action(writerSignal);
     writerSignal.throwIfAborted();
+    // A GUI can enqueue while the owner receipt is being read. Its inputs
+    // must not be hidden by releasing the slot on the earlier empty page.
+    if(options.interruptedDelivery)await requireEmptyThreadQueue(request,threadId);
     return value;
   },{...options,signal,readTimeoutMs:15_000,nativeCwd:actual,controlledExecution:true,desktopOperation:true,
     spawnProcess:(...args)=>{
@@ -3861,7 +3872,7 @@ const nativeTurnReceipt = (threadId,turn) => ({
  * signal) could have started before a local SQLite restore. Under exclusive
  * native ownership, look only for this delivery's user marker. Missing or
  * malformed pagination cannot prove absence and never permits another send. */
-const findReservedTurn = async (request,threadId,deliveryId) => {
+const findReservedTurn = async (request,threadId,deliveryId,interruptedTurnId=null) => {
   const marker=assistantDeliveryMarker(deliveryId)+'\n';
   const seenCursors=new Set(),seenTurns=new Set();
   let cursor=null,observed=null;
@@ -3881,7 +3892,12 @@ const findReservedTurn = async (request,threadId,deliveryId) => {
         if(!Array.isArray(item.content)||item.content.some(input=>typeof input?.type!=='string'
           ||input.type==='text'&&typeof input.text!=='string'))fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
         if(!item.content.some(input=>input.type==='text'&&input.text.startsWith(marker)))continue;
-        if(observed||!['completed','failed'].includes(turn.status))fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+        if(observed)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+        // Ordinary invocation recovery may consume only a terminal receipt.
+        // The writer-only probe observes one specifically interrupted UUID;
+        // its caller never returns this observation as a terminal receipt.
+        if(interruptedTurnId!==null?(turn.id!==interruptedTurnId||turn.status!=='interrupted')
+          :!['completed','failed'].includes(turn.status))fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
         observed={status:turn.status,turnId:turn.id,...(capacityFailure(turn)?{failure:'model_capacity'}:{})};
       }
     }

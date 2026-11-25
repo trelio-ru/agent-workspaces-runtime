@@ -164,7 +164,10 @@ publication tooling также остаются вне этого публичн
   execution/SELECT-only inbox aggregate: missing model blocks even an empty
   queue, denied/incomplete reads stay unknown/null. Receipt-bound waiting_owner
   intakes are known outcomes, never uncertain deliveries; missing/damaged receipts
-  and started/uncertain rows keep their global fence. Cancel on expiry only
+  and started/uncertain rows keep their fence. A closed single-owner route can
+  release the device after the original interrupted marker, exclusive native
+  writer and immutable receipt are verified. See the inbox contract. A confirmed
+  retired task outcome admits its next new delivery. Cancel on expiry only
   while the source intake is leased. Diagnostics never settle
   questions or recover health without a real business completion. No diagnostic
   poll, claim,
