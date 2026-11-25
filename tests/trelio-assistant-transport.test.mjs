@@ -2220,10 +2220,10 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile, assistantTas
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,lock=(_file,action)=>action()}={}) => {
+const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,passLinks={},lock=(_file,action)=>action()}={}) => {
   const identity={schemaVersion:1,origin:encryptedTool||encryptedInspection||workspaceRun||encryptedAttachment?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
-    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1,...passLinks};
   const keys=generateKeyPairSync('ed25519'), store=memoryStore(), credential='tda_'+randomBytes(32).toString('base64url');
   const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
     expiresAt:new Date(Date.now()+300_000).toISOString(),privateKeyPkcs8:keys.privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
@@ -4475,10 +4475,13 @@ test('encrypted local Workspace arguments reuse the SAME payload signature and H
   await assert.rejects(sealAssistantWorkspaceArguments({binding,parameters:{summary:'x'.repeat(1024*1024+1)},companyEncryption}));
 });
 
-test('ordinary continuation protects prose before MCP and restores it only inside the SAME managed pass',async()=>{
+for(const profileKind of ['ordinary','retiredReconcile','retiredScheduled']) test(`encrypted lifecycle restores prose only inside the same ${profileKind} pass`,async()=>{
   const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {canonicalJson}=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
-  const f=await workspaceProfileFixture({workspaceRun:true});
+  const retiredReconcile={passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:2};
+  const retiredScheduled={writerRetirementReceiptId:retiredReconcile.writerRetirementReceiptId,dueAt:Date.now()};
+  const passLinks=profileKind==='ordinary'?{}:profileKind==='retiredReconcile'?{retiredReconcile}:{retiredReconcile,retiredScheduled};
+  const f=await workspaceProfileFixture({workspaceRun:true,passLinks});
   const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
   const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
   const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
@@ -4501,7 +4504,8 @@ test('ordinary continuation protects prose before MCP and restores it only insid
     assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/workspaces/${f.runIdentity.workspaceId}/runs/${f.runIdentity.runId}`);
     return json({schemaVersion:1,context:{run:{id:f.runIdentity.runId,workspaceId:f.runIdentity.workspaceId,status:'running',fencingToken:3}},encryptedPayloads:[]});
   };
-  const scope={companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId};
+  const scope={companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,...passLinks};
+  let echoedScope=scope;
   const args={schemaVersion:1,operation:'checkpoint',runIdentity:f.runIdentity,parameters:{type:'draft',summary:'SYNTHETIC_PRIVATE_SUMMARY'}};
   const options={withProfile:action=>withWorkspaceExecutionProfile(f.profile,()=>action({...f,prepareWorkspaceRun:f.profile.prepareWorkspaceRun}))};
   const send=async wire=>{
@@ -4513,19 +4517,39 @@ test('ordinary continuation protects prose before MCP and restores it only insid
     assert.notEqual(JSON.stringify(parameters),JSON.stringify(wire.parameters));
     if(mode==='tamper')parameters.encryptedArguments.payload.signature='invalid';
     if(mode==='extra')parameters.extra='SYNTHETIC_UNEXPECTED_FIELD';
-    return {content:[{type:'text',text:'opaque native plan'}],structuredContent:{prepared:true,scope,
+    return {content:[{type:'text',text:'opaque native plan'}],structuredContent:{prepared:true,scope:JSON.parse(canonicalJson(echoedScope)),
       encryptedLifecycle:{schemaVersion:1,companyId:company.id,companySlug:company.slug,requestOrigin:'https://e2ee.trelio.ru',workspaceId:f.runIdentity.workspaceId},
       localAction:{schemaVersion:1,operation:wire.operation,runIdentity:wire.runIdentity,parameters}}};
   };
   try{
-    const result=await withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options);
+    const call=(input=args)=>withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args:input},send,options);
+    const result=await call();
     assert.deepEqual(result.structuredContent.localAction.parameters,args.parameters);
+    for(const operation of ['pause','finish']){
+      const parameters={summary:args.parameters.summary,evidence:['Synthetic evidence'],nextAction:'Continue the existing task',
+        ...(operation==='pause'?{questions:['Synthetic question']}:{taskOutcome:'no_status_change'})};
+      const restored=await call({...args,operation,parameters});
+      assert.deepEqual(restored.structuredContent.localAction.parameters,parameters);
+      assert.deepEqual(restored.structuredContent.scope,scope);
+    }
+    const refused=[{...scope,taskId:randomUUID()},{...scope,foreign:true}];
+    if(scope.retiredReconcile){
+      const {retiredReconcile:removed,...missing}=scope;
+      refused.push(missing,{...scope,retiredReconcile:{...removed,writerRetirementReceiptId:randomUUID()}});
+    }else refused.push({...scope,retiredReconcile});
+    if(scope.retiredScheduled){
+      const {retiredScheduled:removed,...missing}=scope;
+      refused.push(missing,{...scope,retiredScheduled:{...removed,dueAt:removed.dueAt+1}});
+    }else refused.push({...scope,retiredScheduled});
+    for(echoedScope of refused)await assert.rejects(call(),{code:'ASSISTANT_WORKSPACE_PLAN_INVALID'});
+    echoedScope=scope;
+    const beforeTampering=remoteCalls;
     mode='tamper';await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options));
-    assert.equal(remoteCalls,2,'one remote call per explicit request, no mutation retry');
+    assert.equal(remoteCalls,beforeTampering+1,'one remote call per explicit request, no mutation retry');
     mode='extra';await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options));
-    assert.equal(remoteCalls,3,'ignoring object order never admits additional fields');
+    assert.equal(remoteCalls,beforeTampering+2,'ignoring object order never admits additional fields');
     f.close();await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options));
-    assert.equal(remoteCalls,3,'a closed pass refuses before remote company content I/O');
+    assert.equal(remoteCalls,beforeTampering+2,'a closed pass refuses before remote company content I/O');
   }finally{globalThis.fetch=previous;}
 });
 
@@ -5817,6 +5841,34 @@ test('device-only terminal continuation uses SAME renew route, exact owner recei
   assert.equal(automatic.schemaVersion,2);assert.equal(automatic.questionPath,null);
   assert.equal(calls.at(-1).automatic,true);assert.equal(automatic.invocationId,reviewId);
   await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:false}),/INVALID_INPUT/);
+
+  // Every native review/read/resume returns a fresh JSON object. The host
+  // compares these server-issued links to the protected pass before starting
+  // another marker. No client-supplied link is sent as renewal authority.
+  const retiredReconcile={passId:randomUUID(),writerRetirementReceiptId:randomUUID(),expectedLeaseRevision:2};
+  const retiredScheduled={writerRetirementReceiptId:retiredReconcile.writerRetirementReceiptId,dueAt:Date.now()};
+  for(const links of [{retiredReconcile},{retiredReconcile,notificationId:randomUUID()},{retiredReconcile,retiredScheduled}]){
+    corrupt=v=>({...v,schemaVersion:2,questionPath:null,pass:{...v.pass,workMode:'task',...structuredClone(links)}});
+    for(const continuation of ['review','read','resume']){
+      state=continuation==='resume'?'resumed':'approved';
+      const result=await client.continueTaskPass({...base,continuation,automatic:true,...(continuation==='review'?{}:{reviewId})});
+      for(const [key,value] of Object.entries(links)){
+        assert.deepEqual(result.pass[key],value);
+        assert.equal(Object.hasOwn(calls.at(-1),key),false);
+      }
+    }
+  }
+  for(const malformed of [{retiredScheduled},{retiredReconcile:{...retiredReconcile,extra:true}},
+    {retiredReconcile,retiredScheduled:{...retiredScheduled,writerRetirementReceiptId:randomUUID()}},
+    {retiredReconcile,retiredScheduled,notificationId:randomUUID()}]){
+    corrupt=v=>({...v,schemaVersion:2,questionPath:null,pass:{...v.pass,workMode:'task',...malformed}});
+    await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:true}),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  }
+  corrupt=v=>({...v,schemaVersion:2,questionPath:null,pass:{...v.pass,workMode:'discussion',retiredReconcile}});
+  await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:true}),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  corrupt=v=>({...v,pass:{...v.pass,workMode:'task',retiredReconcile}});
+  await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read'}),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  corrupt=v=>({...v,schemaVersion:2,questionPath:null});
 
   const technicalPrelude={kind:'local_skill_diagnostics_v1',workspaceId:randomUUID(),runId:randomUUID(),
     skillId:'telegram-mtproto',releaseId:randomUUID(),projectId:randomUUID()};

@@ -173,7 +173,10 @@ bit-zero reservation. The SAME trusted coordinator uses `task-pass/renew` with
 `continuation=review|read|resume, automatic:true` under the original task authority.
 Native ledger v2 freezes the original terminal turn, protected pass, binding,
 model pair and SQLite lease; it returns a NEW independent invocation marker,
-without a human question or notification for this technical recovery.
+without a human question or notification for this technical recovery. A task
+continuing under a reconciliation pass receives its server-bound retirement
+receipt, optional due slot or owner notification in every v2 review, read and
+resume response. The local protected pass supplies the expected values.
 
 The original pass/delivery/chat and all operation history survive. Both ordinary
 and restricted continuations renew that pass once by CAS only inside the
@@ -3958,8 +3961,10 @@ supply `no_status_change`, named project/company targets omit `taskOutcome`, eve
 when their enclosing assistant pass belongs to a task. Model/local scope hints
 cannot select this translation. The common handoff validator remains authoritative;
 partial files stay durably saveable without changing the task status.
-Echo equality uses the SAME crypto canonical JSON: native schema property
-reordering is harmless, but extra fields, array order, types, AAD, signatures
+For a reconciliation pass the echoed scope includes its validated retirement
+receipt and, when present, its due slot. The device/Run payload binding stays
+identical for each pass profile. Echo equality uses the same canonical JSON.
+Native property reordering is harmless, but extra fields, array order, types, AAD, signatures
 and ciphertext bytes remain exact. No re-encryption or mutation replay follows.
 Closed local Workspace/Run/lease/hook failure codes survive the MCP wrapper
 even when the shared adapter throws ordinary Error+code. Raw messages, stacks,

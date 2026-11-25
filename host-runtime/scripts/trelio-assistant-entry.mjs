@@ -3538,7 +3538,13 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     const pass=validateAssistantActivePass(await host.readActivePass(),identity);
     const scope={assistantUserId:identity.assistantId,deviceId:identity.deviceId,
       companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
-    const plan=await validateAssistantWorkspacePlan({prepared:true,scope,localAction:{
+    // The native plan echoes the complete authority of the current pass. A
+    // reconciliation receipt and its optional calendar slot belong to that
+    // authority. The encrypted payload keeps its existing device/Run binding.
+    const planScope={...scope,
+      ...(pass.retiredReconcile?{retiredReconcile:pass.retiredReconcile}:{}),
+      ...(pass.retiredScheduled?{retiredScheduled:pass.retiredScheduled}:{})};
+    const plan=await validateAssistantWorkspacePlan({prepared:true,scope:planScope,localAction:{
       schemaVersion:args.schemaVersion,operation:args.operation,parameters:args.parameters,runIdentity:args.runIdentity}});
     const encryption=await prepareWorkspaceRun();
     if(!encryption)return send(args);
@@ -3560,11 +3566,11 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     // byte remain significant; an invalid/absent echo still refuses closed.
     const {canonicalJson}=await import('./trelio-company-encryption.mjs');
     let exactEcho=false;
-    try{exactEcho=canonicalJson(result?.structuredContent?.localAction?.parameters)===canonicalJson({encryptedArguments:sealed});}catch{}
-    if(!result?.structuredContent?.encryptedLifecycle
-      || !exactEcho
-      || Object.keys(result.structuredContent.scope??{}).sort().join(',')!==Object.keys(scope).sort().join(',')
-      || Object.entries(scope).some(([key,value])=>result.structuredContent.scope[key]!==value))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    try{
+      exactEcho=canonicalJson(result?.structuredContent?.scope)===canonicalJson(plan.scope)
+        && canonicalJson(result?.structuredContent?.localAction?.parameters)===canonicalJson({encryptedArguments:sealed});
+    }catch{}
+    if(!result?.structuredContent?.encryptedLifecycle || !exactEcho)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
     const opened=await transport.openAssistantWorkspaceArguments({binding,sealed,companyEncryption:encryption});
     return {...result,structuredContent:{...result.structuredContent,localAction:{
       ...result.structuredContent.localAction,parameters:opened}}};
