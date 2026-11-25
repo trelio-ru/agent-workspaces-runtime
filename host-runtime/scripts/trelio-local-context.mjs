@@ -9,7 +9,7 @@ import {
   withMirrorRetentionLock as withLegacyMirrorRetentionLock, withCompanyMirrorWriterLock,
 } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
-import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
+import { createWorkspaceTextChunkSearchPlan } from "./trelio-workspace-text-chunks.mjs";
 import { buildLocalTaskReadToolResult, buildMcpTaskBatchContinuation, buildMcpWorkspaceFilePage,
   fitsMcpTaskReadResult, isMcpWorkspaceFilesPage, selectMcpTaskReadBatch } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
@@ -121,6 +121,7 @@ import {
 import {
   CONTEXT_SEARCH_RANKING_POLICY_VERSION,
   calculateLexicalQuality,
+  createContextSearchRanker,
   getCategorizedContextSearchLimit,
   rankContextSearchCandidates,
   normalizeContextSearchText,
@@ -4945,7 +4946,7 @@ const buildLocalRankingCandidate = (document, matches) => ({
   matches,
 });
 
-const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery, chunkMatchers) => {
+const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery, plan, chunkMatchers) => {
   const matches = [];
 
   for (const field of document.fields) {
@@ -4954,7 +4955,7 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery,
     // length; overflowing evidence is still searched without retaining copies.
     let chunkMatcher = field.chunks ? chunkMatchers.get(field) : null;
     if (field.chunks && !chunkMatcher) {
-      chunkMatcher = createWorkspaceTextChunkMatcher(field.text, field.chunks);
+      chunkMatcher = plan.files.createMatcher(field.text, field.chunks);
       chunkMatchers.set(field, chunkMatcher);
     }
     const chunkMatch = chunkMatcher ? chunkMatcher(originalQuery) : null;
@@ -4973,13 +4974,14 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery,
   // Each field gets one rank; comparisons reuse it instead of repeatedly
   // normalizing the best-so-far field. Equal evidence uses the exact locator.
   return rankContextSearchCandidates(matches,
-    (match) => ({ ...buildLocalRankingCandidate(document, [match]), stableKey: `${document.stableKey}/${match.publicPath ?? ""}` }))[0] ?? null;
+    (match) => ({ ...buildLocalRankingCandidate(document, [match]), stableKey: `${document.stableKey}/${match.publicPath ?? ""}` }),
+    plan.rank)[0] ?? null;
 };
 
-const findLocalSearchMatches = (document, queries) => {
+const findLocalSearchMatches = (document, queries, plan) => {
   const chunkMatchers = new Map();
   return queries.flatMap(([normalized, original]) => {
-    const match = findStrongestLocalSearchMatch(document, normalized, original, chunkMatchers);
+    const match = findStrongestLocalSearchMatch(document, normalized, original, plan, chunkMatchers);
     return match ? [match] : [];
   });
 };
@@ -5033,6 +5035,12 @@ export const searchCompanyContextMirror = (
   const allowedDocumentTypes = Array.isArray(documentTypes)
     ? new Set(documentTypes)
     : null;
+  // Reuse immutable term and boundary expressions across files. Decrypted
+  // chunks and their normalized witnesses remain local to one file matcher.
+  const matchPlan = {
+    files: createWorkspaceTextChunkSearchPlan(queries.map(([, original]) => original)),
+    rank: createContextSearchRanker(),
+  };
   const results = [];
 
   for (const document of getSearchIndex(mirror)) {
@@ -5054,7 +5062,7 @@ export const searchCompanyContextMirror = (
         chunks: document.fields[0].chunks,
       }],
     } : document;
-    const matches = findLocalSearchMatches(searchedDocument, queries);
+    const matches = findLocalSearchMatches(searchedDocument, queries, matchPlan);
     if (matches.length === 0) continue;
     results.push({
       id: document.id,

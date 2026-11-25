@@ -96,10 +96,9 @@ const buildReferenceComparisonValues = (value) => {
     return [...new Set(values.filter(Boolean))];
 };
 const tokenize = (value) => (value.split(" ").filter((token) => token.length > 1));
-export const calculateLexicalQuality = (match) => {
+const calculatePreparedLexicalQuality = (match, normalizedQuery, queryTokens) => {
     if (match.lexicalQuality !== undefined)
         return Math.max(0, Math.min(300, match.lexicalQuality));
-    const normalizedQuery = normalizeContextSearchText(match.query);
     if (!normalizedQuery)
         return 0;
     // Preview text is the provider-neutral projection of the field that really
@@ -110,7 +109,6 @@ export const calculateLexicalQuality = (match) => {
         return 300;
     if (comparableValues.some((value) => ` ${value} `.includes(` ${normalizedQuery} `)))
         return 200;
-    const queryTokens = tokenize(normalizedQuery);
     if (queryTokens.length === 0)
         return 0;
     const bestCoverage = comparableValues.reduce((best, value) => {
@@ -118,6 +116,12 @@ export const calculateLexicalQuality = (match) => {
         return Math.max(best, matchedTokens / queryTokens.length);
     }, 0);
     return Math.round(bestCoverage * 100);
+};
+export const calculateLexicalQuality = (match) => {
+    if (match.lexicalQuality !== undefined)
+        return Math.max(0, Math.min(300, match.lexicalQuality));
+    const normalized = normalizeContextSearchText(match.query);
+    return calculatePreparedLexicalQuality(match, normalized, tokenize(normalized));
 };
 const calculateFieldQuality = (_candidate, match) => {
     if (PRIMARY_FIELD_SOURCES.has(match.source))
@@ -134,15 +138,10 @@ const calculateFieldQuality = (_candidate, match) => {
         return 2;
     return 1;
 };
-const isExactReferenceMatch = (candidate, match) => {
-    const normalizedQueryValues = buildReferenceComparisonValues(match.query);
-    if (normalizedQueryValues.length === 0)
-        return false;
-    if ((candidate.referenceValues ?? []).some((value) => (buildReferenceComparisonValues(value).some((referenceValue) => (normalizedQueryValues.includes(referenceValue)))))) {
-        return true;
-    }
-    return DIRECT_VALUE_SOURCES.has(match.source)
-        && buildDirectPreviewValues(match.previewText).some((previewValue) => (normalizedQueryValues.includes(previewValue)));
+const isExactReferenceMatch = (candidateReferences, queryReferences, match) => {
+    return queryReferences.some(value => candidateReferences.has(value))
+        || DIRECT_VALUE_SOURCES.has(match.source)
+            && buildDirectPreviewValues(match.previewText).some(value => queryReferences.includes(value));
 };
 const calculateAuthority = (candidate) => {
     if (candidate.type === "registry"
@@ -156,18 +155,27 @@ const calculateAuthority = (candidate) => {
         return 0;
     return 2;
 };
-export const buildContextSearchRank = (candidate) => {
+const prepareRankingQuery = (raw) => {
+    const normalized = normalizeContextSearchText(raw);
+    return { key: compileContextSearchQuery(raw).key, normalized,
+        references: buildReferenceComparisonValues(raw), tokens: tokenize(normalized) };
+};
+const buildPreparedContextSearchRank = (candidate, prepareQuery) => {
+    // References belong to this candidate only. Every matching field and
+    // formulation sees the same normalized IDs, paths and URL pathnames.
+    let references;
     const bestMatchByQuery = new Map();
     for (const match of candidate.matches) {
-        const normalizedQuery = compileContextSearchQuery(match.query).key;
-        if (!normalizeContextSearchText(match.query))
+        const query = prepareQuery(match.query);
+        if (!query.normalized)
             continue;
-        const next = { match, reference: isExactReferenceMatch(candidate, match),
+        references ??= new Set((candidate.referenceValues ?? []).flatMap(buildReferenceComparisonValues));
+        const next = { match, reference: isExactReferenceMatch(references, query.references, match),
             direct: DIRECT_VALUE_SOURCES.has(match.source), field: calculateFieldQuality(candidate, match),
-            lexical: calculateLexicalQuality(match) };
-        const previous = bestMatchByQuery.get(normalizedQuery);
+            lexical: calculatePreparedLexicalQuality(match, query.normalized, query.tokens) };
+        const previous = bestMatchByQuery.get(query.key);
         if (!previous) {
-            bestMatchByQuery.set(normalizedQuery, next);
+            bestMatchByQuery.set(query.key, next);
             continue;
         }
         // A provider may discover one formulation in several fields. Ranking must
@@ -178,7 +186,7 @@ export const buildContextSearchRank = (candidate) => {
                 && ((next.direct && !previous.direct)
                     || (next.direct === previous.direct
                         && (next.field > previous.field || (next.field === previous.field && next.lexical > previous.lexical)))))) {
-            bestMatchByQuery.set(normalizedQuery, next);
+            bestMatchByQuery.set(query.key, next);
         }
     }
     const scored = [...bestMatchByQuery.values()];
@@ -195,6 +203,23 @@ export const buildContextSearchRank = (candidate) => {
         stableKey: candidate.stableKey,
     };
 };
+export const buildContextSearchRank = (candidate) => buildPreparedContextSearchRank(candidate, prepareRankingQuery);
+/** Cache only the small request vocabulary, never source text or authority. */
+export const createContextSearchRanker = () => {
+    const queries = new Map();
+    const getQuery = (raw) => {
+        const existing = queries.get(raw);
+        if (existing)
+            return existing;
+        const query = prepareRankingQuery(raw);
+        // Narrow refinements can accept more formulations than unified search.
+        // Continue scoring valid overflow without retaining an unbounded cache.
+        if (queries.size < 32)
+            queries.set(raw, query);
+        return query;
+    };
+    return (candidate) => buildPreparedContextSearchRank(candidate, getQuery);
+};
 export const compareContextSearchRanks = (leftRank, rightRank) => (rightRank.exactReferenceMatches - leftRank.exactReferenceMatches
     || rightRank.strongestEvidence - leftRank.strongestEvidence
     || rightRank.matchedQueryCount - leftRank.matchedQueryCount
@@ -204,7 +229,7 @@ export const compareContextSearchRanks = (leftRank, rightRank) => (rightRank.exa
     || compareStableText(leftRank.stableKey, rightRank.stableKey));
 export const compareContextSearchCandidates = (left, right) => compareContextSearchRanks(buildContextSearchRank(left), buildContextSearchRank(right));
 /** Decorate once: sort comparisons must never normalize full documents again. */
-export const rankContextSearchCandidates = (candidates, toCandidate) => candidates.map((candidate) => ({ candidate, rank: buildContextSearchRank(toCandidate(candidate)) }))
+export const rankContextSearchCandidates = (candidates, toCandidate, rank = createContextSearchRanker()) => candidates.map((candidate) => ({ candidate, rank: rank(toCandidate(candidate)) }))
     .sort((left, right) => compareContextSearchRanks(left.rank, right.rank))
     .map(({ candidate }) => candidate);
 export const CONTEXT_SEARCH_MATERIAL_LIMIT = 10;
@@ -232,9 +257,10 @@ export const getCategorizedContextSearchLimit = (limit) => {
  * candidate order and reuse its scores for both passes. Unknown categories
  * (currently safe Secret metadata) may compete for unreserved places. */
 export const selectCategorizedContextSearchResults = (candidates, toCandidate, limit) => {
+    const calculateRank = createContextSearchRanker();
     const ranked = candidates.map((value) => {
         const candidate = toCandidate(value);
-        return { value, candidate, category: contextSearchCategory(candidate.type), rank: buildContextSearchRank(candidate) };
+        return { value, candidate, category: contextSearchCategory(candidate.type), rank: calculateRank(candidate) };
     }).sort((left, right) => compareContextSearchRanks(left.rank, right.rank));
     const knownLimits = CONTEXT_SEARCH_CATEGORY_LIMITS;
     const selected = new Set();

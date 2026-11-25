@@ -125,17 +125,30 @@ export const compileContextSearchQuery = (value) => {
 export const normalizeContextSearchQueries = (queries) => ([...new Map(queries.map(compileContextSearchQuery).filter((query) => query.normalized)
         .map((query) => [query.key, query])).values()]);
 export const CONTEXT_SEARCH_PREVIEW_MAX_LENGTH = 300;
-const findContextSearchEvidenceSpans = (compactText, rawQueries) => {
-    const referenceText = normalizeContextSearchReference(compactText);
-    // Replace punctuation one code point at a time instead of collapsing it.
-    // That preserves offsets into the human-facing original while giving the
-    // portable word-boundary expressions the same searchable surface as rank.
-    const wordText = referenceText.replace(/[^\p{L}\p{N}]/gu, (separator) => " ".repeat(separator.length));
+const prepareContextSearchPreviewSource = (value) => {
+    // Compact whole whitespace runs and individual non-space separators.
+    // Single ASCII spaces are already in display form.
+    const compactText = String(value ?? "").replace(/\s{2,}|[^\S ]/gu, " ").trim();
+    let referenceText;
+    let wordText;
+    return {
+        compactText,
+        getSearchableText(reference) {
+            referenceText ??= normalizeContextSearchReference(compactText);
+            if (reference)
+                return referenceText;
+            // Replace punctuation without shifting UTF-16 offsets in the preview.
+            // An ordinary space already occupies the correct position.
+            return wordText ??= referenceText.replace(/[^\p{L}\p{N} ]/gu, separator => " ".repeat(separator.length));
+        },
+    };
+};
+const findContextSearchEvidenceSpans = (source, queries) => {
     const spans = [];
-    for (const query of normalizeContextSearchQueries(rawQueries)) {
-        const searchableText = query.reference ? referenceText : wordText;
-        for (const pattern of query.patterns) {
-            const match = new RegExp(pattern, "u").exec(searchableText);
+    for (const query of queries) {
+        const searchableText = source.getSearchableText(query.reference);
+        for (const expression of query.expressions) {
+            const match = expression.exec(searchableText);
             if (!match)
                 continue;
             const leadingBoundaryLength = match[1]?.length ?? 0;
@@ -171,12 +184,12 @@ const sliceContextSearchPreview = (text, evidenceStart, evidenceEnd, limit) => {
  * window; widely separated terms get two short fragments so a subject anchor
  * near the start cannot hide the distinguishing term near the end of a file.
  */
-export const buildContextSearchPreview = (value, rawQueries, maxLength = CONTEXT_SEARCH_PREVIEW_MAX_LENGTH) => {
-    const compactText = String(value ?? "").replace(/\s+/gu, " ").trim();
+const renderContextSearchPreview = (source, getQueries, maxLength) => {
+    const { compactText } = source;
     const limit = Math.max(32, Math.trunc(maxLength));
     if (!compactText || compactText.length <= limit)
         return compactText;
-    const spans = findContextSearchEvidenceSpans(compactText, rawQueries);
+    const spans = findContextSearchEvidenceSpans(source, getQueries());
     if (spans.length === 0)
         return `${sliceUtf16CodePoints(compactText, 0, limit - 1)}…`;
     const first = spans[0];
@@ -189,6 +202,20 @@ export const buildContextSearchPreview = (value, rawQueries, maxLength = CONTEXT
     const lastLimit = limit - separator.length - firstLimit;
     return `${sliceContextSearchPreview(compactText, first.start, first.end, firstLimit)}${separator}`
         + sliceContextSearchPreview(compactText, last.start, last.end, lastLimit);
+};
+export const buildContextSearchPreview = (value, rawQueries, maxLength = CONTEXT_SEARCH_PREVIEW_MAX_LENGTH) => renderContextSearchPreview(prepareContextSearchPreviewSource(value), () => normalizeContextSearchQueries(rawQueries), maxLength);
+/** Batch files already have an immutable query plan. Keep all preview work
+ * inside the same canonical renderer, including safe UTF-16 boundaries. */
+export const createContextSearchPreviewBuilder = (query) => {
+    const queries = [query];
+    const getQueries = () => queries;
+    return (value, maxLength = CONTEXT_SEARCH_PREVIEW_MAX_LENGTH) => renderContextSearchPreview(prepareContextSearchPreviewSource(value), getQueries, maxLength);
+};
+/** Multiple formulations of one file witness share the normalized display
+ * source, while each still selects its own exact evidence windows. */
+export const createContextSearchWitnessPreview = (value) => {
+    const source = prepareContextSearchPreviewSource(value);
+    return (query, maxLength) => renderContextSearchPreview(source, () => [query], maxLength);
 };
 export const matchContextSearchField = (value, query, { allowQueryContainsField = false } = {}) => {
     if (!query.expressions.length)

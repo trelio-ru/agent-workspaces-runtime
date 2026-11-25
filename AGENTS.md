@@ -1137,7 +1137,8 @@ publication tooling также остаются вне этого публичн
   pure module.
   `search` и `search_agent_workspace_files` отклоняют четвёртую формулировку
   до подготовки зеркала по общей границе из generated context matching.
-  Все формулировки документа делят bounded file-local matcher.
+  В пределах поиска повторно используй скомпилированные формулировки для всех
+  файлов. Совпадения и bounded нормализация принадлежат одному файлу.
   Rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
   ranking генерируется backend `build-context-search-ranking.mjs`; проверяй `--check`.
   Task list due-state parity uses the [same generated predicates](docs/agent-workspace-runtime.md)
