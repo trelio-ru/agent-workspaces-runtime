@@ -1016,6 +1016,8 @@ publication tooling также остаются вне этого публичн
   site-specific logic. Optional URLs сохраняют прежний legacy DTO; 2048 chars
   на адрес и 8192 JSON bytes суммарно, whole-target omission с явным
   linkTargetsLimited. Ссылка не передаёт session/credentials или mutation authority.
+  Точный адрес документа при чтении подтверждает браузер до и после извлечения
+  текста по [контракту](docs/visual-browser.md#ссылки-на-открытые-документы).
   Один completion-based pacing controller живёт в browser worker: те же 2–15с
   от готового результата, что в поисковых навыках, с зачётом размышлений.
   Учёт пяти вкладок включает blank/login popups, не сбрасывается tool calls

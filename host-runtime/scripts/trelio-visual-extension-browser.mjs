@@ -1206,6 +1206,9 @@ export class ExtensionVisualBrowser {
         return visualStatus(value.state, 'manual_control_active', { sessionId: this.sessionId });
       }
       if (value.state !== 'ready') throw fault('operation_failed');
+      // A dialog opened during extraction, or an older worker, cannot fulfill
+      // the per-command exact read with an ordinary successful observation.
+      if (args.expectedDocumentUrl && value.verifiedDocumentUrl !== args.expectedDocumentUrl) return visualStatus('error', 'stale_frame', { sessionId: this.sessionId });
       this.#state = 'ready'; this.#setupReason = undefined;
       // A dialog answer may finish the original coordinate-selected download.
       // This label comes only from the authenticated extension's retained

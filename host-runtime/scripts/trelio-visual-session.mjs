@@ -1,4 +1,4 @@
-import { normalizeBusinessFieldPolicy, normalizeVisualReferenceRoutes, validBusinessFieldChecks } from './trelio-browser-text.mjs';
+import { normalizeBusinessFieldPolicy, normalizeVisualReferenceRoutes, validBusinessFieldChecks, validExpectedDocumentUrl } from './trelio-browser-text.mjs';
 import { collectCredentialThroughLoopback } from './trelio-remote-mcp.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -416,6 +416,14 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
   }
   catch { return visualStatus('error', 'invalid_input'); }
   if (['wait', 'close', 'disconnect'].includes(operation) ? !args || Object.keys(args).length : !validVisualArguments(operation, args)) return visualStatus('error', 'invalid_input');
+  // An exact read is scoped to the provider's explicit origin, even when its
+  // ordinary browser session permits following external links. It carries no
+  // new navigation policy and does not split or replace the current worker.
+  if (Object.hasOwn(args, 'expectedDocumentUrl') && (observationMode !== 'text'
+    || !validExpectedDocumentUrl(args.expectedDocumentUrl) || !origins.includes(new URL(args.expectedDocumentUrl).origin)
+    || operation === 'navigate' && args.expectedDocumentUrl !== args.url
+    || operation === 'read-text' && (Object.keys(args).some(key => !['expectedDocumentUrl','offset'].includes(key))
+      || Object.hasOwn(args, 'offset') && (!Number.isInteger(args.offset) || args.offset < 0 || args.offset > 100_000)))) return visualStatus('error', 'invalid_input');
   const binding = visualSessionBinding(env);
   if (typeof assistantBrowserSecrets !== 'boolean'
     || assistantBrowserSecrets && (binding.skillId !== 'assistant-browser' || !binding.executionOwner
@@ -641,6 +649,7 @@ const fail = code => { throw Object.assign(new Error(code), { code }); };
 // Additive marker for signed providers requiring the closed startup result.
 export const VISUAL_STARTUP_DIAGNOSTICS_API = 'trelio.browser-startup-diagnostics/v1';
 export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
+export const VISUAL_EXACT_DOCUMENT_READ_API = 'trelio.visual-exact-document-read/v1';
 // Additive signed opt-in. A provider checks this marker before relying on file
 // chooser delivery; source availability never claims that an old host has it.
 export const VISUAL_FILE_UPLOAD_API = 'trelio.visual-file-upload/v1';

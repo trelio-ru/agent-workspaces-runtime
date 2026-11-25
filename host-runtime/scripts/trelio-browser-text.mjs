@@ -281,6 +281,8 @@ export function readableLinkUrl(value) {
  * schema and byte budget. Site text is untrusted data, never instructions.
  */
 export const TEXT_KIND = 'trelio.browser-text/v1';
+export const validExpectedDocumentUrl = value => typeof value === 'string' && value.length <= 512
+  && value.startsWith('https://') && !/[?#]/u.test(value) && readableLinkUrl(value) === value;
 const fail = () => { throw new Error('VISUAL_RESULT_INVALID'); };
 const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const string = (v, max) => typeof v === 'string' && v.length <= max && v.isWellFormed() && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(v);
@@ -290,7 +292,9 @@ export function validateTextResult(v) {
     ...(Object.hasOwn(v || {}, 'controlStats') ? ['controlStats'] : []),
     ...(Object.hasOwn(v || {}, 'fieldChecks') ? ['fieldChecks'] : []),
     ...(Object.hasOwn(v || {}, 'linkTargetsLimited') ? ['linkTargetsLimited'] : []),
-    ...(Object.hasOwn(v || {}, 'documentReference') ? ['documentReference'] : [])]) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
+    ...(Object.hasOwn(v || {}, 'documentReference') ? ['documentReference'] : []),
+    ...(Object.hasOwn(v || {}, 'verifiedDocumentUrl') ? ['verifiedDocumentUrl'] : [])]) || v.kind !== TEXT_KIND || v.state !== 'ready' || v.reason !== 'none') fail();
+  if (Object.hasOwn(v, 'verifiedDocumentUrl') && !validExpectedDocumentUrl(v.verifiedDocumentUrl)) fail();
   if (Object.hasOwn(v, 'documentReference') && (typeof v.documentReference !== 'string'
     || v.documentReference.length > 512 || readableLinkUrl(v.documentReference) !== v.documentReference)) fail();
   if (Object.hasOwn(v, 'linkTargetsLimited') && v.linkTargetsLimited !== true) fail();

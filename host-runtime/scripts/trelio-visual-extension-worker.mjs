@@ -898,6 +898,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         throw Error('stale_frame');
       return execute(op, args);
     }
+    // A dialog or a pending input can have an observation from another page.
+    // An exact read is independent and must never consume that result.
+    if (args.expectedDocumentUrl && (currentDialog() || pendingExecution && !pendingExecution.settled)) throw Error('stale_frame');
     if (currentDialog()) {
       if (['screenshot', 'read-text'].includes(op)) return captureDialog();
       if (!['key', 'click'].includes(op)) throw Error('stale_frame');
@@ -1003,6 +1006,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     return value;
   }
   async function captureTextValue(args = {}, navigationStage) {
+    const { expectedDocumentUrl, ...readerArgs } = args;
     frame = undefined;
     navigationStage?.('observe_tab');
     let tab = await selected();
@@ -1026,21 +1030,27 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
     navigationStage?.('text_read');
-    const observation = await chrome.tabs.sendMessage(tab.id, { kind: 'read_rendered_text', ...args }, { frameId: 0 });
+    // CDP owns the committed top-frame address (including a split fragment).
+    // Check it before extraction and again across the existing loader fence.
+    // The content adapter needs only the pagination offset for an exact read.
+    if (expectedDocumentUrl && committedBrowserFrameUrl(tree.frameTree.frame) !== expectedDocumentUrl) throw Error('stale_frame');
+    const observation = await chrome.tabs.sendMessage(tab.id, { kind: 'read_rendered_text',
+      ...(expectedDocumentUrl ? { offset: readerArgs.offset ?? 0, includeControls: false } : readerArgs) }, { frameId: 0 });
     if (observation?.error) throw Error(['invalid_input', 'manual_control_active'].includes(observation.error) ? observation.error : 'operation_failed');
     // A navigation during extraction cannot mint a token for the old document.
     navigationStage?.('frame_recheck');
     const after = await command(tab.id, 'Page.getFrameTree');
     if (guardFailed) throw documentBlocked(guardDiagnostic);
     if (generation !== navigationGeneration(tab.id) || after.frameTree.frame.id !== tree.frameTree.frame.id
-      || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
+      || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId
+      || expectedDocumentUrl && committedBrowserFrameUrl(after.frameTree.frame) !== expectedDocumentUrl) throw Error('stale_frame');
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
     dialogGuards.set(tab.id, generation);
     frame = { frameId, tabId: tab.id, generation, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
     const reference = documentReference(after.frameTree.frame.url);
     return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
       scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation,
-      ...(reference ? { documentReference: reference } : {}) };
+      ...(reference ? { documentReference: reference } : {}), ...(expectedDocumentUrl ? { verifiedDocumentUrl: expectedDocumentUrl } : {}) };
   }
   async function execute(op, args, navigationStage) {
     // Cleanup remains available after the lease; it can only close this owned
@@ -1303,7 +1313,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await chrome.tabs.update(target.id, { url });
       navigationStage?.('navigate_settle');
       await pause(1000);
-      return captureDefault(navigationStage);
+      return args.expectedDocumentUrl ? captureText({ expectedDocumentUrl: args.expectedDocumentUrl }, navigationStage) : captureDefault(navigationStage);
     }
     if (op === 'screenshot') return capture(navigationStage);
     if (op === 'click' && followingSecretClick?.observation.frameId === args.frameId) {

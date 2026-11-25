@@ -20,6 +20,21 @@ import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnosti
 import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 
+test('exact text capture validates a canonical signed-origin HTTPS address before session or account I/O', async () => {
+  const url = 'https://example.test/public/item';
+  const env = new Proxy({}, { get() { throw Error('unexpected identity or storage access'); } });
+  for (const [operation, args, observationMode] of [
+    ['navigate', { url, expectedDocumentUrl: url + '/other' }, 'text'],
+    ['read-text', { expectedDocumentUrl: 'https://elsewhere.test/public/item' }, 'text'],
+    ['read-text', { expectedDocumentUrl: url + '?token=synthetic' }, 'text'],
+    ['read-text', { expectedDocumentUrl: url + '#other' }, 'text'],
+    ['read-text', { expectedDocumentUrl: url }, 'image'],
+    ['read-text', { expectedDocumentUrl: url, query: 'ignore' }, 'text'],
+    ['read-text', { expectedDocumentUrl: url, offset: -1 }, 'text'],
+    ['click', { frameId: 'f', x: 0, y: 0, expectedDocumentUrl: url }, 'text'],
+  ]) assert.equal((await runVisualSession({ origins: ['https://example.test'], operation, args, observationMode, env })).reason, 'invalid_input');
+});
+
 test('protected browser selection keeps the original assistant, device, company and observed execution', async t => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-secret-owner-')));
   const identity = { origin: 'https://trelio.test', assistantId: randomUUID(), deviceId: randomUUID(), companyId: randomUUID() };

@@ -31,6 +31,14 @@ const readonlyDocumentFixture = () => `
   <label>Безопасная подпись<input><span contenteditable="false">READONLY_LABEL_SECRET</span></label>
   <div hidden contenteditable="false">READONLY_HIDDEN_SECRET</div>
   <div style="opacity:0" contenteditable="false">READONLY_INVISIBLE_SECRET</div>`;
+test('exact document evidence has a closed HTTPS shape across the text-result boundary', () => {
+  const url = 'https://documents.example/public/item';
+  assert.equal(validateTextResult({ ...sample(), verifiedDocumentUrl: url }).verifiedDocumentUrl, url);
+  for (const invalid of [true, url + '#', url + '?', url + '?code=private', url.replace('https:', 'http:'), url.replace('documents.', 'user@documents.')]) {
+    assert.throws(() => validateTextResult({ ...sample(), verifiedDocumentUrl: invalid }), /VISUAL_RESULT_INVALID/);
+  }
+});
+
 test('text projection rejects extra data, excessive content and invalid coordinates', () => {
   assert.equal(validateTextResult(sample()).kind, TEXT_KIND);
   for (const change of [{ html: '<div>' }, { text: 'a'.repeat(6001) }, { controls: [{ ...sample().controls[0], x: 1440 }] }, { controls: [{ ...sample().controls[0], value: 'SECRET' }] }, { scanLimited: 'false' }, { nextOffset: -1 }, { sessionId: 'invalid' }]) assert.throws(() => validateTextResult({ ...sample(), ...change }), /VISUAL_RESULT_INVALID/);

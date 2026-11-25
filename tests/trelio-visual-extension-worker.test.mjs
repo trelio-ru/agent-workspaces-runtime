@@ -111,7 +111,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
           if (message.kind === 'authentication-guard') { await credentialCheck?.(); return { blocked: false }; }
           if (message.kind === 'arm_link_click') await armLink?.();
           if (authenticationMessage && message.kind.startsWith('authentication-')) return authenticationMessage(message, target);
-          if (message.kind === 'read_rendered_text') await textObservation?.();
+          if (message.kind === 'read_rendered_text') await textObservation?.(message);
           return { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false };
         },
       },
@@ -144,6 +144,7 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
       loaderId = id;
       nativeEvent({ tabId: 1 }, 'Page.frameNavigated', { type: 'BackForwardCacheRestore', frame: { id: 'main', loaderId, url: currentUrl } });
     },
+    replaceCommittedUrl(url) { currentUrl = url; },
     selectTab(tabId) {
       if (!openTabs.has(tabId)) {
         openTabs.add(tabId);
@@ -182,6 +183,33 @@ test('a signed editor route projects only the top document ID and its valid sele
     assert.equal(result.documentReference, expected && 'https://example.test' + expected);
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE/u);
   }
+});
+
+test('exact read binds the canonical main document before and after extraction without a second navigation', async () => {
+  const url = 'https://example.test/public/synthetic123';
+  const other = 'https://example.test/public/other123';
+  const reads = [];
+  let changedDuringRead = false;
+  const worker = await dialogWorker({ textObservation(message) {
+    reads.push(message);
+    if (changedDuringRead) worker.replaceCommittedUrl(other);
+  } });
+  const first = await worker.dispatch('navigate', { url, expectedDocumentUrl: url });
+  assert.equal(first.verifiedDocumentUrl, url);
+  assert.equal(first.text, 'Original site result');
+  const second = await worker.dispatch('read-text', { expectedDocumentUrl: url, offset: 100 });
+  assert.equal(second.verifiedDocumentUrl, url);
+  assert.equal(reads.at(-1).offset, 100);
+  assert.equal(reads.at(-1).includeControls, false);
+  assert.equal(reads.at(-1).expectedDocumentUrl, undefined, 'only the browser compares the committed URL');
+  const n = reads.length;
+  assert.deepEqual(await worker.dispatch('read-text', { expectedDocumentUrl: other }), { state: 'error', reason: 'stale_frame' });
+  assert.equal(reads.length, n, 'a same-origin redirect must not extract another document');
+  changedDuringRead = true;
+  assert.deepEqual(await worker.dispatch('read-text', { expectedDocumentUrl: url }), { state: 'error', reason: 'stale_frame' });
+  assert.equal(worker.navigation.filter(address => address === url).length, 1);
+  assert.equal(worker.counts().clicks + worker.counts().keys, 0);
+  assert.equal((await worker.dispatch('read-text')).verifiedDocumentUrl, undefined, 'ordinary observation remains compatible');
 });
 
 test('only a signed same-origin child picker on the exact top editor can receive a staged file', async () => {
