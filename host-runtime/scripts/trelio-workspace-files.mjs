@@ -12,7 +12,7 @@ import {
   readJsonResponse, currentWorkspaceExecutionProfile, resolveCompanyContextMirrorDirectory,
   resolveBridgeDataPlaneRouting, hydrateAgentCompanyEncryptedJson,
   ensurePrivateDirectory, hardenWindowsPrivatePath, resolveWorkspaceBridgeConfigDirectory,
-  withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob,
+  withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob, readGitTreeEntry,
   isProtectedWorkspaceControlPath,
 } from "./trelio-workspace.mjs";
 import { decryptFileFromCompanyContainer, decryptFileFromCompanyContainerBytes } from "./trelio-company-encryption.mjs";
@@ -42,6 +42,9 @@ export const parseAssistantRunFileCommand = (input) => {
   const invalid = () => fail("ASSISTANT_WORKSPACE_FILE_INPUT_INVALID");
   if (!input || typeof input !== "object" || Object.getPrototypeOf(input) !== Object.prototype) invalid();
   const { action, source = "workspace", path: relative, offset = 0, expectedSha256, text } = input;
+  // Only the private scheduler may select the immutable checkpoint, exact own
+  // WORK file and expected hashes. No source coordinates come from the model.
+  if (action === "carry_forward" && Object.keys(input).length === 1) return { action };
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > RUN_FILE_LIMIT) invalid();
   const allowed = action === "list" ? ["action", "path", "offset"] : action === "read"
     ? ["action", "source", "path", "offset"] : action === "replace"
@@ -111,6 +114,9 @@ const noSplitSurrogate = (text, at) => at <= 0 || at >= text.length || !(/[\uDC0
  * the only way to persist them into the accepted history. */
 export const executeAssistantRunFileCommand = async ({ root, input, assertCurrent }) => {
   const command = parseAssistantRunFileCommand(input);
+  // The ordinary file tool has no retired-pass authority. Only its admitted
+  // scheduled handler may translate this request into a regular CAS replace.
+  if (command.action === "carry_forward") fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
   await assertCurrent();
   const base = path.join(root, command.source === "authority" ? "context" : "workspace");
   const parts = command.path?.split("/") ?? [];
@@ -165,6 +171,27 @@ export const executeAssistantRunFileCommand = async ({ root, input, assertCurren
     }
     return { sha256: createHash("sha256").update(command.text, "utf8").digest("hex"), state: "draft_updated" };
   } finally { await fs.unlink(temporary).catch(error => { if (error.code !== "ENOENT") throw error; }); }
+};
+
+/** Verify actual Git bytes, including newlines, before using an old checkpoint
+ * as material in a different Run. The caller supplies a native-pinned commit
+ * and an independently attested file digest. A symlink, missing file or
+ * checkout filter can never substitute its bytes for a regular Git blob. */
+export const readAssistantWorkfileRevision = async ({ workspaceDirectory, revision, assistantId, sha256, signal, includeText = false }) => {
+  if (!UUID.test(assistantId) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(revision)
+    || !/^[a-f0-9]{64}$/u.test(sha256)) fail("ASSISTANT_WORKSPACE_BINDING_CHANGED");
+  const relative = `assistants/${assistantId}/WORK.md`;
+  const entry = await readGitTreeEntry(workspaceDirectory, revision, relative,
+    { signal, timeout: 10000, env: { GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0" } });
+  if (entry?.mode !== "100644" || entry.objectType !== "blob") fail("ASSISTANT_WORKSPACE_FILE_CHANGED");
+  return readAcceptedWorkspaceBlob({ workspaceDirectory, blobId: entry.objectId, signal }, async stream => {
+    const bytes = await readBoundedBytes({ body: stream }, includeText ? RUN_FILE_WRITE_LIMIT : RUN_FILE_LIMIT, signal);
+    try {
+      if (createHash("sha256").update(bytes).digest("hex") !== sha256 || !isUtf8(bytes) || bytes.includes(0))
+        fail("ASSISTANT_WORKSPACE_FILE_CHANGED");
+      return includeText ? bytes.toString("utf8") : undefined;
+    } finally { bytes.fill(0); }
+  });
 };
 
 export const validateWorkspaceFileLocator = ({ workspaceId, workspaceHead, filePath }) => {

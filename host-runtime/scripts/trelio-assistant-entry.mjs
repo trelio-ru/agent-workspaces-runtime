@@ -3891,6 +3891,78 @@ export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='htt
   return identity.workspaceId===plan.runIdentity.workspaceId&&identity.runId===plan.runIdentity.runId?root:base;
 };
 
+/** Carry one already-written work record into the fresh scheduled Run. The
+ * caller holds that Run's finish lock and supplies ONLY the native-linked
+ * private review. assertCurrent rechecks its scheduled pass, destination Run
+ * owner/lease, current recipient and the historical checkpoint admission.
+ * The old Run is read by immutable Git head. It is never claimed or saved. */
+export const carryAssistantScheduledWorkfile = async ({
+  config, identity, scope, runIdentity, root, material, baseHead, assertCurrent, signal,
+}) => {
+  const id = new RegExp(UUID, 'u');
+  const relative = `assistants/${identity.assistantId}/WORK.md`;
+  if (!material || ![scope.taskId, scope.passId, scope.companyId, identity.assistantId, identity.deviceId,
+    runIdentity.runId, runIdentity.workspaceId, material.runId, material.checkpointId].every(value => id.test(value))
+    || scope.assistantUserId !== identity.assistantId || scope.deviceId !== identity.deviceId
+    || material.workspaceId !== runIdentity.workspaceId || material.runId === runIdentity.runId
+    || material.path !== relative || material.beforeSha256 === material.afterSha256
+    || ![material.beforeSha256, material.afterSha256].every(value => /^[a-f0-9]{64}$/u.test(value))
+    || ![baseHead, material.draftHead].every(head => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head))
+    || baseHead === material.draftHead) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  const common = await import('./trelio-workspace.mjs');
+  const files = await import('./trelio-workspace-files.mjs');
+  await assertCurrent();
+  const original = await resolveAssistantWorkspaceRoot(config, {
+    scope, runIdentity: { workspaceId: material.workspaceId, runId: material.runId },
+  }, identity.origin);
+  if (sameLocalPath(original, root)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  for (const dir of [original, root]) {
+    await common.assertPrivatePathKind(dir, 'directory');
+    await common.assertPrivatePathKind(path.join(dir, 'workspace'), 'directory');
+  }
+  // Git may legitimately create .git with its normal mode inside this private
+  // directory. Verify its real type and ancestry without changing its ACLs.
+  const gitDirectory = path.join(original, 'workspace', '.git');
+  if (!(await fs.lstat(gitDirectory)).isDirectory() || !sameLocalPath(await fs.realpath(gitDirectory), gitDirectory))
+    fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  const validateRoots = async () => {
+    await assertCurrent();
+    const [source, destination] = await Promise.all([original, root].map(common.readAssistantWorkspaceRunMetadata));
+    for (const [record, dir, runId] of [[source, original, material.runId], [destination, root, runIdentity.runId]]) {
+      if (record.schemaVersion !== 3 || record.scopeType !== 'task' || record.origin !== identity.origin
+        || record.company?.id !== scope.companyId || record.workspaceId !== runIdentity.workspaceId
+        || record.runId !== runId || record.baseHead !== baseHead || record.terminalStatus || record.finishRecovery
+        || !sameLocalPath(record.workspaceDirectory ?? '', path.join(dir, 'workspace')))
+        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    }
+    if (source.latestDraftCheckpointId !== material.checkpointId || source.draftHead !== material.draftHead
+      || source.materializedHead !== material.draftHead || source.candidateHead && source.candidateHead !== material.draftHead
+      || typeof destination.encryption?.enabled !== 'boolean' || !isDeepStrictEqual(source.encryption, destination.encryption))
+      fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  };
+  await validateRoots();
+  // Both Runs share an authenticated accepted base. Verify that the signed
+  // replacement actually changed exactly the bytes the old action read. The
+  // destination must still contain that version or the already-carried result.
+  const selected = { workspaceDirectory: path.join(original, 'workspace'), assistantId: identity.assistantId, signal };
+  await files.readAssistantWorkfileRevision({ ...selected, revision: baseHead, sha256: material.beforeSha256 });
+  const text = await files.readAssistantWorkfileRevision({
+    ...selected, revision: material.draftHead, sha256: material.afterSha256, includeText: true,
+  });
+  const read = () => files.executeAssistantRunFileCommand({ root, input: { action: 'read', path: relative }, assertCurrent });
+  const current = await read();
+  if (current.sha256 !== material.afterSha256) {
+    if (current.sha256 !== material.beforeSha256) fail('ASSISTANT_WORKSPACE_FILE_CHANGED');
+    await files.executeAssistantRunFileCommand({ root, input: {
+      action: 'replace', path: relative, text, expectedSha256: material.beforeSha256,
+    }, assertCurrent: validateRoots });
+    if ((await read()).sha256 !== material.afterSha256) fail('ASSISTANT_WORKSPACE_FILE_CHANGED');
+  }
+  // A disconnected caller can ask again. A matching digest is a read-back
+  // only, while any later edit is preserved. No business operation is invoked.
+  return { state: 'carried_forward', sha256: material.afterSha256 };
+};
+
 // Verify the original local checkout without claiming it. The coordinator
 // repeats this under the owned App Server writer before the native renewal.
 // The canonical Run/accepted base and absent server effects are separate CAS
