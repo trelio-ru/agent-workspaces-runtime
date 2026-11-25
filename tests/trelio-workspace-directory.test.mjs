@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -140,6 +140,69 @@ test("checkpoint export evidence binds native file digests to regular changed Gi
       { code: "ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED" });
   }
   await assert.rejects(verifyAssistantCheckpointArtifacts({ ...input, draftHead: source.draftHead, artifacts }));
+});
+
+test("a scheduled successor imports only the checkpointed own WORK and reconciles a lost response without another replace", async t => {
+  const { carryAssistantScheduledWorkfile } = await import("../host-runtime/scripts/trelio-assistant-entry.mjs");
+  const { assistantTaskStorageDirectory } = await import("../host-runtime/scripts/trelio-assistant-transport.mjs");
+  const { parseAssistantRunFileCommand, executeAssistantRunFileCommand } = await import("../host-runtime/scripts/trelio-workspace-files.mjs");
+  assert.deepEqual(parseAssistantRunFileCommand({ action: "carry_forward" }), { action: "carry_forward" });
+  assert.throws(() => parseAssistantRunFileCommand({ action: "carry_forward", path: "selected-by-caller" }));
+  await assert.rejects(executeAssistantRunFileCommand({ input: { action: "carry_forward" } }),
+    { code: "ASSISTANT_CAPABILITY_UNAVAILABLE" });
+
+  const identity = { origin: "https://trelio.invalid", assistantId: randomUUID(), deviceId: randomUUID() };
+  const scope = { assistantUserId: identity.assistantId, deviceId: identity.deviceId, companyId: randomUUID(),
+    taskId: randomUUID(), passId: randomUUID() };
+  const relative = `assistants/${identity.assistantId}/WORK.md`;
+  const before = "Previous accepted entry", after = "Состояние из прерванного хода 🗓";
+  const digest = value => createHash("sha256").update(value).digest("hex");
+  const { source, target } = await mergeFixture(t, { base: { [relative]: before }, theirs: {},
+    ours: { [relative]: after, "other.md": "Checkpoint content outside this review" } });
+  const config = await fs.realpath(path.dirname(path.dirname(source.workspaceDirectory)));
+  const task = assistantTaskStorageDirectory(config, { ...identity, companyId: scope.companyId, taskId: scope.taskId });
+  const old = path.join(task, "workspaces", workspaceId);
+  await fs.mkdir(path.dirname(old), { recursive: true });
+  await fs.rename(path.dirname(target.workspaceDirectory), old);
+  const root = path.join(task, "workspaces", "r-" + "x".repeat(43));
+  await fs.rename(path.dirname(source.workspaceDirectory), root);
+  const runIdentity = { workspaceId, runId: randomUUID() };
+  const material = { workspaceId, runId: randomUUID(), checkpointId: randomUUID(), draftHead: target.draftHead,
+    path: relative, beforeSha256: digest(before), afterSha256: digest(after) };
+  const base = { schemaVersion: 3, scopeType: "task", origin: identity.origin, company: { id: scope.companyId },
+    workspaceId, baseHead: source.baseHead, encryption: { enabled: false } };
+  const snapshots = [[old, { ...base, runId: material.runId, draftHead: material.draftHead,
+    latestDraftCheckpointId: material.checkpointId, materializedHead: material.draftHead }],
+    [root, { ...base, runId: runIdentity.runId, materializedHead: base.baseHead }]];
+  for (const [dir, metadata] of snapshots) {
+    const workspaceDirectory = path.join(dir, "workspace");
+    await fs.chmod(dir, 0o700);
+    await fs.chmod(workspaceDirectory, 0o700);
+    await fs.writeFile(path.join(dir, ".trelio-run.json"), JSON.stringify({ ...metadata, workspaceDirectory }), { mode: 0o600 });
+  }
+  const input = { config, identity, scope, runIdentity, material, root, baseHead: base.baseHead, assertCurrent: async () => {} };
+  const selected = path.join(root, "workspace", relative), oldFile = path.join(old, "workspace", relative);
+  // A newer local edit in the retired checkout is neither a source nor a
+  // destination of this operation. Only the reviewed immutable blob travels.
+  await fs.writeFile(oldFile, "Private later edit");
+  const carry = extra => carryAssistantScheduledWorkfile({ ...input, ...extra });
+  for (const wrong of [{ runId: runIdentity.runId }, { workspaceId: randomUUID() }, { checkpointId: randomUUID() },
+    { afterSha256: digest("different bytes") }, { beforeSha256: digest("different baseline") }, { path: "other.md" }]) {
+    await assert.rejects(carry({ material: { ...material, ...wrong } }));
+    assert.equal(await fs.readFile(selected, "utf8"), before);
+  }
+  const expected = { state: "carried_forward", sha256: material.afterSha256 };
+  assert.deepEqual(await carry(), expected);
+  const copied = await fs.stat(selected, { bigint: true });
+  assert.deepEqual(await carry(), expected);
+  assert.deepEqual(await fs.stat(selected, { bigint: true }).then(value => [value.ino, value.mtimeNs]),
+    [copied.ino, copied.mtimeNs]);
+  assert.equal(await fs.readFile(selected, "utf8"), after);
+  await assert.rejects(fs.stat(path.join(root, "workspace", "other.md")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(oldFile, "utf8"), "Private later edit");
+  await fs.writeFile(selected, "Independent edit in the new Run");
+  await assert.rejects(carry(), { code: "ASSISTANT_WORKSPACE_FILE_CHANGED" });
+  assert.equal(await fs.readFile(selected, "utf8"), "Independent edit in the new Run");
 });
 
 test("three-way merge preserves both branches, literal paths, deletions and disjoint text edits", async t => {

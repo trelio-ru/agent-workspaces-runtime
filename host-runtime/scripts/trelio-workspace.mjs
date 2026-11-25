@@ -11187,7 +11187,7 @@ const isForbiddenWorkspaceSecretPath = (filePath) => {
     || basename.endsWith(".key");
 };
 
-const readGitTreeEntry = async (workspaceDirectory, revision, filePath, options = {}) => {
+export const readGitTreeEntry = async (workspaceDirectory, revision, filePath, options = {}) => {
   const output = (await runGit(
     ["ls-tree", "-r", "-z", revision, "--", filePath],
     { ...options, cwd: workspaceDirectory },

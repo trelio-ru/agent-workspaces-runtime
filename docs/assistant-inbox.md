@@ -229,6 +229,25 @@ new task turn reads the owner's answer. Its confirmed business outcome
 processes the notification and releases subsequent ordinary deliveries. The
 old native marker, business receipt and scheduled slot preserve their history.
 
+<a id="carry-forward-work"></a>
+
+### Carrying a checkpointed work record into the next scheduled review
+
+When an independent scheduled review has a native link to a retired writer
+and a verified local replacement receipt, open its own new canonical Run and
+read both pinned authority files. The existing local file tool accepts the
+explicit command `{"action":"carry_forward"}` under this restricted admission.
+The signed host chooses the original checkpoint and the exact
+`assistants/<assistantUserId>/WORK.md` path. The original and destination Runs
+must share the task, workspace, accepted base and encryption recipient.
+
+The host verifies the before and after SHA-256 against actual Git blobs, then
+uses the ordinary file replacement with the expected starting digest and
+reads back the result. Reconciliation of an already-matching file only reads
+it. Independent destination edits stop the copy. The origin Run retains its
+history and other files. The new Run uses the ordinary checkpoint, finish and
+business outcome checks.
+
 ## External ACK attempts (schema v5)
 
 The same private event journal adds an `ack_started` bit, original attempt
